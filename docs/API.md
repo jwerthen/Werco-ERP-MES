@@ -3741,9 +3741,14 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >   for its card stop reasons/durations and the BLOCKED·DOWN rail rows.
 > - **`jobs[]` / `jobs_total`** — the main work-order grid (the 2026-07-15 job wall, rendered
 >   since 2026-07-22 as the Foundry 4×3 card grid): open
->   (**RELEASED / IN_PROGRESS**) WOs — **ON_HOLD deliberately excluded** (the quality rail counts
->   holds) — priority-sorted server-side (blocked/down → most-late → running → promise date asc),
->   capped at **24**, with `jobs_total` the true uncapped count for `+N more`; **dept-scoped**
+>   (**RELEASED / IN_PROGRESS / ON_HOLD**) WOs — ON_HOLD joined the wall 2026-08-19 (a count is not a
+>   tile; the quality rail keeps its count beside it). Priority-sorted server-side: **active work
+>   first** (blocked/down → most-late → running → promise date asc, `wo_number` breaking every tie),
+>   **held work strictly last**, so the alarm classes stay a contiguous prefix — the TV's pinned
+>   anchor row is a pure `jobs[0:4]` slice and depends on it. A held WO carries the hold on the
+>   existing `status` field (`"on_hold"`); **no hold reason / NCR title / free text rides along**, so
+>   this is a population change, not a disclosure-category one. Capped at **24**, with `jobs_total`
+>   the true uncapped count for `+N more`; **dept-scoped**
 >   via each WO's **current** operation's work-center type when `?dept=` is passed. Each job:
 >   `{wo_number, unit_number` (the WO's Unit # when it tracks one — **ungated**, see "Unit # on operator
 >   and display reads" above)`, part_number, customer_name` (**gated** — see below)`, status, qty_complete, qty_ordered`
@@ -3756,8 +3761,10 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >   is_late, days_late` (the same shared lateness predicate)`, blocked` (any unresolved blocker
 >   on the WO)`, down` (current op's work center has an open downtime event)`, running` (current
 >   op has ≥1 open labor entry)`, ops_completed, ops_total, current_op}`; `current_op` — the
->   lowest-sequence IN_PROGRESS op, else lowest READY, else lowest PENDING; `null` when all ops
->   are complete — is `{sequence, name, work_center_code, work_center_name, status, qty_done,
+>   lowest-sequence IN_PROGRESS op, else lowest READY, else lowest PENDING, else lowest ON_HOLD
+>   (held last so an actually-runnable op always wins, but present so a WO whose only open op is
+>   held still names an op and still resolves a dept); `null` when all ops are complete — is
+>   `{sequence, name, work_center_code, work_center_name, status, qty_done,
 >   qty_target, crew[]` (≤3 "First L.")`, crew_count, elapsed_minutes}`. Job tiles carry WO/part/op
 >   identifiers, dates, quantities, and "First L." crew names only — never dollars or notes.
 >   `customer_name` is the one **gated** field: populated only for an authorized principal (display
@@ -3765,7 +3772,11 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >   `null` on every public board. Absent only from a pre-job-wall backend (the current TV then renders a
 >   `BOARD DATA UNAVAILABLE` state; only pre-redesign TV bundles still render the `work_centers`
 >   machine wall).
-> - `late_wos[]` (worst-first), `blocked_wos[]` (oldest-first) — capped at **12**; `late_wos[].due_date`
+> - `late_wos[]` (worst-first) — capped at **12** (the ticker cap); `blocked_wos[]` (oldest-first) —
+>   capped at **24** (`_BLOCKED_JOIN_LIMIT`, deliberately the job-wall cap since 2026-08-19: the
+>   rotating grid joins each tile's blocked age and stop reason from this list by `wo_number`, and
+>   ranks 13–24 are systematically the rows a 12-row cap dropped). Neither list is a count —
+>   `late_total` / `blocked_total` are. `late_wos[].due_date`
 >   carries the promise date under the original field name. **Dept-scoped** when `?dept=` is passed
 >   (late via any open op routed to a dept work center; blocked via the blocker's operation's work
 >   center — a blocker with no operation appears only on the unfiltered board).

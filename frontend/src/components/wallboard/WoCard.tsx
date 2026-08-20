@@ -4,16 +4,32 @@
  *
  * Five fixed rows — header (WO + status chip) / unit-or-part + qty / customer OR op +
  * time / machine + stop reason / progress — all keyed off classifyJob's strict
- * DOWN > BLOCKED > LATE > RUNNING > WAITING precedence. Stoppage detail is
+ * HELD > DOWN > BLOCKED > LATE > RUNNING > WAITING precedence. Stoppage detail is
  * JOINED client-side by the caller (downtime from work_centers by
  * work-center code, blocked age from blocked_wos by WO number) and degrades
  * to blank cells when a join misses — the design itself has blank cells.
- * Only DOWN chip dots pulse; WAITING cards carry no glow anywhere.
+ * Only DOWN chip dots pulse; WAITING and HELD cards carry no glow anywhere.
+ *
+ * HELD (WorkOrderStatus.ON_HOLD; ON_HOLD joined the wall population 2026-08-19)
+ * renders grey and de-emphasized exactly like WAITING, and leads the precedence
+ * so a held WO that also happens to be blocked, down or late still reads HELD —
+ * it is deliberately stopped and somebody already knows, so it must not spend
+ * the alarm channel. Its stop-reason cell shows the bare words ON HOLD and
+ * NOTHING ELSE: no hold reason, no NCR title, no free text. The Z3 ON HOLD
+ * panel is counts-and-ages only precisely because that text can name customers
+ * and suppliers, and putting a held WO on the grid is a POPULATION change, not
+ * a disclosure-category change.
  */
 
 import React from 'react';
 import type { WallboardBlockedWorkOrder, WallboardDowntime, WallboardJob } from '../../types/wallboard';
-import { blockerLabel, classifyJob, formatAgeHours, formatDownDuration, JobStateClass } from '../../utils/wallboardLayout';
+import {
+  blockerLabel,
+  classifyJob,
+  formatAgeHours,
+  formatDownDuration,
+  JobStateClass,
+} from '../../utils/wallboardLayout';
 import { FD } from './wallboardTokens';
 
 interface StateSpec {
@@ -29,6 +45,19 @@ interface StateSpec {
 
 /** Exact per-state tints from the handoff (chip bg ~12% / edge ~40%). */
 const STATE_SPECS: Record<JobStateClass, StateSpec> = {
+  // Identical to `waiting` on purpose: a known, deliberate stop is not an alarm.
+  // No dot glow, no bar glow, and pulse:false — a held card must NEVER take the
+  // DOWN red wash or the 1.6s fdPulse.
+  held: {
+    edge: FD.faint,
+    chipColor: FD.waiting,
+    chipBg: 'rgba(139,152,165,0.08)',
+    chipEdge: 'rgba(139,152,165,0.28)',
+    dotGlow: null,
+    barFill: FD.waiting,
+    barGlow: null,
+    pulse: false,
+  },
   down: {
     edge: FD.red,
     chipColor: FD.red,
@@ -83,6 +112,8 @@ const STATE_SPECS: Record<JobStateClass, StateSpec> = {
 
 function chipWord(state: JobStateClass, job: WallboardJob): string {
   switch (state) {
+    case 'held':
+      return 'HELD';
     case 'down':
       return 'DOWN';
     case 'blocked':
@@ -112,7 +143,10 @@ export default function WoCard({
 }) {
   const state = classifyJob(job);
   const spec = STATE_SPECS[state];
-  const waiting = state === 'waiting';
+  // HELD is rendered de-emphasized "like WAITING" — same grey text ramp, so the
+  // two known-quiet states read identically at 5m and neither competes with an
+  // actionable alarm for attention.
+  const deemphasized = state === 'waiting' || state === 'held';
 
   // Gated customer name (executive displays only). Blank/absent → fall back to
   // the op line, which is what every public shop-floor board shows.
@@ -151,6 +185,9 @@ export default function WoCard({
     reason = { text: blockerLabel(downtime.category).toUpperCase(), color: FD.red, bold: true };
   } else if (state === 'blocked' && blockedInfo) {
     reason = { text: blockerLabel(blockedInfo.category).toUpperCase(), color: FD.blockedOrange, bold: true };
+  } else if (state === 'held') {
+    // Bare words only. NO hold reason / NCR title / free text — see the header.
+    reason = { text: 'ON HOLD', color: FD.mute, bold: false };
   } else if (state === 'waiting') {
     reason = { text: 'IN QUEUE', color: FD.mute, bold: false };
   }
@@ -202,7 +239,10 @@ export default function WoCard({
               {unit}
             </span>
             {job.part_number ? (
-              <span className="min-w-0 truncate text-[1.0625rem] font-semibold" style={{ color: waiting ? FD.mute : FD.body }}>
+              <span
+                className="min-w-0 truncate text-[1.0625rem] font-semibold"
+                style={{ color: deemphasized ? FD.mute : FD.body }}
+              >
                 {job.part_number}
               </span>
             ) : null}
@@ -210,13 +250,13 @@ export default function WoCard({
         ) : (
           <span
             className="min-w-0 truncate text-[1.9375rem] font-extrabold tracking-[-0.01em]"
-            style={{ color: waiting ? FD.body : FD.ink }}
+            style={{ color: deemphasized ? FD.body : FD.ink }}
           >
             {job.part_number ?? ''}
           </span>
         )}
         <span className="shrink-0 text-[1.1875rem] font-medium" style={{ color: FD.mute }}>
-          <span className="font-bold" style={{ color: waiting ? FD.body : FD.ink }}>
+          <span className="font-bold" style={{ color: deemphasized ? FD.body : FD.ink }}>
             {qtyComplete}
           </span>
           /{qtyOrdered}
@@ -238,7 +278,7 @@ export default function WoCard({
         ) : (
           <span
             className="min-w-0 truncate tracking-[0.05em]"
-            style={{ color: job.current_op ? (waiting ? FD.mute : FD.body) : FD.mute }}
+            style={{ color: job.current_op ? (deemphasized ? FD.mute : FD.body) : FD.mute }}
           >
             {job.current_op
               ? `OP ${(job.ops_completed ?? 0) + 1}/${job.ops_total ?? 0} · ${(job.current_op.name ?? '').toUpperCase()}`
@@ -276,7 +316,10 @@ export default function WoCard({
 
       {/* Row 5 — progress bar + percent */}
       <div className="flex items-center gap-[0.625rem]">
-        <div className="h-[0.375rem] min-w-0 flex-1 overflow-hidden rounded-[0.125rem]" style={{ background: FD.sunken }}>
+        <div
+          className="h-[0.375rem] min-w-0 flex-1 overflow-hidden rounded-[0.125rem]"
+          style={{ background: FD.sunken }}
+        >
           <div
             className="h-full"
             style={{ width: `${pct}%`, background: spec.barFill, boxShadow: spec.barGlow ?? 'none' }}

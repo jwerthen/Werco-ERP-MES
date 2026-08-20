@@ -4,11 +4,13 @@ Read-only, full-screen status board (`/wallboard`) for unattended shop TVs (A0.5
 high-fidelity **"Foundry"** TV design (2026-07-22 redesign — near-black instrument panel,
 JetBrains Mono, tabular numerals, authored at 1920×1080). Four fixed zones: a **HUD command bar**
 (DOWN / BLOCKED / LATE alert chips, sync status, Central wall clock), a fixed **4×3 grid of
-work-order cards** with a `+N MORE WORK ORDERS IN QUEUE` overflow strip, a **430px right rail**
-(SHIP TODAY, LATE — OLDEST FIRST, BLOCKED·DOWN, OPEN NCRS + ON HOLD), and a **TODAY KPI footer**.
-Nothing on the board scrolls, rotates, or requires interaction — every zone has a fixed capacity,
+work-order cards** — row 1 pinned to the four most severe jobs, rows 2–3 cycling through the rest
+on a 22s dwell — over a strip carrying the overflow copy and a segmented page bar, a **430px right
+rail** (SHIP TODAY, LATE — OLDEST FIRST, BLOCKED·DOWN, OPEN NCRS + ON HOLD), and a **TODAY KPI
+footer**. Nothing on the board scrolls or requires interaction — every zone has a fixed capacity,
 a `+N more` overflow, and a designed empty state, and every panel keeps its slot at all data
-values so a habitual glance lands on a memorized coordinate.
+values so a habitual glance lands on a memorized coordinate. The one thing that changes place is
+the *content* of grid rows 2–3, and only there (see "Z2 — Work-order grid").
 
 This is **not** the interactive operator kiosk (`/shop-floor/operations?kiosk=1`, badge login —
 see `docs/onboarding/02-operator-shop-floor.md`). The wallboard takes no input and writes nothing;
@@ -211,27 +213,130 @@ on a wall TV under office lighting; the near-black instrument-panel surfaces are
 
 ### Z2 — Work-order grid
 
-A **fixed 4×3 grid — always 12 card slots** — showing the first 12 of the server-sorted `jobs`
-(the server sends ≤24). Population: every **RELEASED / IN_PROGRESS** WO — **ON_HOLD is
-deliberately excluded** (the NCR/HOLD split row already counts holds); DRAFT and terminal
-statuses are off the board as everywhere else.
+A **fixed 4×3 grid — always 12 card slots** — rendering the server-sorted `jobs` (the server
+sends ≤24). Population: every **RELEASED / IN_PROGRESS / ON_HOLD** WO; DRAFT and terminal
+statuses are off the board as everywhere else. **ON_HOLD joined the wall 2026-08-19** (owner
+decision): a count on the Z3 rail is not a tile — a held WO used to vanish from the only surface
+that says *which* job stopped and where — but it **sorts to the BACK** (below), so it can never
+crowd actionable work off the top of the board.
 
-- **Server-side priority sort** (the client never re-sorts): blocked/down first, then late —
-  worst `days_late` first — then running, then everything else by promise date ascending (no
-  promise sorts last); WO number breaks every tie. Overflow beyond the 12 visible cards goes to
-  the full-width strip under the grid — `+N MORE WORK ORDERS IN QUEUE`, counted against the
-  uncapped `jobs_total` (`ALL OPEN WORK ORDERS ON BOARD` when nothing is hidden). Fewer than 12
-  jobs → trailing cells stay plain background; the grid geometry never changes. There are no
-  density tiers, no tier hysteresis, and no grid math — the 4×3 shape is constant.
-- **Card state** is classified client-side with strict precedence **DOWN > BLOCKED > LATE >
-  RUNNING > WAITING** (`classifyJob`): DOWN = the current op's work center has an open downtime
+- **Server-side priority sort** (the client never re-sorts): **ACTIVE work first** — blocked/down,
+  then late (worst `days_late` first), then running, then everything else by promise date
+  ascending (no promise sorts last), WO number breaking every tie — and **HELD work strictly
+  last**. The alarm classes are therefore a **contiguous prefix** of the order, which is exactly
+  what lets the TV pin `jobs[0:4]` while the rest of the grid rotates. Fewer than 12 jobs →
+  trailing cells stay plain background; the grid geometry never changes. There are no density
+  tiers, no tier hysteresis, and no grid math — the 4×3 shape is constant.
+- **Anchor row + rotating field (2026-08-19)** — the grid is no longer "the first 12". **Row 1
+  (slots 1–4) is the ANCHOR**: `jobs.slice(0, 4)`, re-derived live from the freshest payload every
+  render, never paged. **Rows 2–3 (slots 5–12) are the FIELD**: an 8-wide window over
+  `jobs.slice(4)` that flips on a **22-second dwell**, so every delivered work order reaches the
+  wall instead of only the first twelve. Anchor + field page 0 is exactly `jobs[0..11]` — today's
+  board, card for card — so a job can never be shown twice or silently skipped. The math is pure
+  and unit-tested in `frontend/src/utils/wallboardLayout.ts` (`planFieldPages` / `fieldWindow` /
+  `safeMod` / `stripCopy`); the policy is `components/wallboard/useWoCycle.ts`.
+  - **The flip is a hard swap, not motion**: no fade, slide, transform, CSS transition or new
+    `@keyframes`. It has to be — the global `prefers-reduced-motion` block in
+    `styles/accessibility.css` forces `animation-duration: 0.01ms !important` on `*`, so a
+    CSS-driven carousel would freeze on page 0 forever on any TV reporting reduced motion. Only
+    the 8 field cards unmount/mount; the 4 anchor cards keep their React key and their DOM nodes,
+    so a DOWN card's 1.6s `fdPulse` never resets phase.
+  - **Static band — the board moves if and only if something would otherwise be hidden.**
+    `pages = 1` exactly when the field fits, i.e. for every delivered count ≤ 12, and a one-page
+    board is byte-identical to its pre-cycle self. From **13** delivered jobs up it cycles. An
+    earlier cut held still until 16, refusing to page when a flip would displace 8 cards to reveal
+    fewer than 4; **the owner overruled that on 2026-08-19** — a job the floor cannot see is the
+    failure this feature exists to fix, whatever the motion economics.
+    **The accepted cost lives at 13–15 and is worth saying out loud:** `starts` is flush-clamped so
+    both pages stay FULL (never a row of holes), which at `F = 9..11` leaves the two windows
+    overlapping by 5–7 of their 8 cards — the flip reads as the field **shifting by one to three
+    slots** rather than turning a clean page. That is the least legible flip the board can produce,
+    and it is still the best option at those counts: a short page would blank 4–7 cells for a whole
+    dwell, and disjoint full pages are arithmetically impossible when `F` is barely over 8. From 16
+    delivered jobs the stride is a clean 4 — exactly one grid row.
+  - **Cadence and phase.** `slot = floor(now / 22_000)` is derived from the board's existing 1s
+    clock tick — **no new timer** — so every TV in the building stays in phase and a throttled or
+    occluded tab self-corrects on resume. 22s is chosen against the 30s poll (LCM 330s): a 20s or
+    30s dwell would coincide with the poll once a minute and teach viewers to attribute every data
+    change to the flip. Worst-case wait for a specific job is `(pages − 1) × 22s` — 22s at 16
+    delivered, 44s at the 24 cap.
+  - **Stability.** The page plan freezes `wo_number` **strings** only and resolves them through the
+    freshest payload on every render, so elapsed clocks keep ticking and a card never renders
+    RUNNING while the HUD chip beside it says DOWN. The plan key is the delivered **set**, order-
+    insensitive **within each half of the board** (`anchor|field`): a reorder *inside* the frozen
+    field or *inside* the anchor row — the `running` flag flips across the whole shop at every lunch
+    and shift change — rebuilds **nothing**, cards recolor in place and none move. A reorder that
+    carries a job **across** the anchor/field boundary is a different matter and deliberately does
+    rebuild (at the next boundary, phase preserved): the anchor is live while the field is frozen,
+    so the job lifted *into* row 1 is nulled out of its frozen field slot while the job it
+    *displaced* is in neither half — under a whole-list key that job would be rendered on **no
+    cell at all**, indefinitely, because the delivered set never changed. A set change rebuilds at
+    the **next** dwell boundary, preserving the cycle position — except on a **single-page** plan,
+    which rebuilds immediately (there is no cycle position to protect, and deferring would leave the
+    strip claiming `ALL OPEN WORK ORDERS ON BOARD` for a dwell while the 13th job was on no screen)
+    and when the page currently on screen resolves to **nothing at all** (a page of blanks reads as
+    broken; the cold start and a wholesale population replacement are special cases). A newly
+    **blocked or down** WO rebuilds immediately and snaps the field to page 0 — **edge-triggered**,
+    so a machine down for three hours fires once (LATE is excluded from the snap: `days_late` steps
+    in a batch at Central midnight; **HELD work orders are excluded too** — the server sorts them
+    strictly last, so snapping to page 0 for one would lurch every TV in the plant to show something
+    two pages away). A frozen `wo_number` that has left the payload renders a **plain cell in
+    place** — survivors do not reflow — and heals at the next boundary.
+  - **Degradation.** `nightDim` **freezes** the cycle at page 0 (the board is declaring nobody is
+    looking, and page 0 is the board people already know). **Offline keeps cycling** on last-known-
+    good data: paging is not a freshness claim, the staged `SYNC OK → STALE → LOST` chip is the
+    disclosure, and freezing would hide two-thirds of the population with no visible cause.
+    `?dept=` boards page against **their own** delivered count, so **a department TV under 13 jobs
+    never cycles while the plant TV beside it does**. That is correct — a board with nothing hidden
+    should not move — but two screens behaving differently in one building *will* be reported as a
+    bug, as will the related fact that per-dept `jobs_total` values do **not** sum to the plant
+    total (a WO whose current op is `None` drops off every dept board).
+- **The strip under the grid** keeps its exact height, chrome and slot. Left: walk-up copy. Right:
+  a **segmented page bar** (one segment per page, current filled `FD.ink`, the rest `FD.faint`)
+  rendered **only while the board is cycling** — non-text on purpose, so from 5 m a viewer sees how
+  many pages exist and which is lit without resolving a glyph. The **unlit** segments are
+  `FD.faint`, not the `FD.line` hairline: at 1.48:1 on the panel the track was not resolvable at TV
+  distance, which left a lone lit dash — a change *flash* rather than a page indicator, and no way
+  to count the pages at all; it changes state once per dwell, so it costs the motion budget
+  nothing. There is deliberately **no countdown/progress bar** (a bar whose whole semantic is "the
+  view changes in N seconds" is ambient motion on data). Five copy states:
+  1. no jobs → no strip at all (the `NO OPEN WORK ORDERS` zone owns the space);
+  2. static, nothing hidden → `ALL OPEN WORK ORDERS ON BOARD`;
+  3. static, some hidden → `+N MORE WORK ORDERS IN QUEUE` — and since the board now cycles the
+     moment anything would be off-screen, a single-page board is single-page *because everything
+     fits*, so this `+N` can only ever be the tail the **server** truncated at its 24-job cap;
+  4. cycling, nothing truncated → `TOP 4 PINNED · PAGE i/N · n OPEN WORK ORDERS`;
+  5. cycling, past the 24 cap → `TOP 4 PINNED · PAGE i/N · n OF total OPEN WORK ORDERS · +R NOT ON
+     BOARD`.
+  Two of those are correctness, not taste: **`+N MORE … IN QUEUE` is never emitted while cycling**,
+  so the phrase keeps exactly one meaning across the screen — "permanently hidden and strictly less
+  severe" — and `+R NOT ON BOARD` is deliberately different wording for the genuinely truncated
+  tail; and the word is **`PINNED`, never `HELD`**, now that ON_HOLD work orders are on the wall.
+- **Card state** is classified client-side with strict precedence **HELD > DOWN > BLOCKED > LATE >
+  RUNNING > WAITING** (`classifyJob`): HELD = the WO's `status` is `on_hold` (there is **no `held`
+  boolean on the wire** — the tile carries the hold on the existing `status` field); DOWN = the
+  current op's work center has an open downtime
   event; BLOCKED = any unresolved blocker on the WO, routed or not; RUNNING = the current op has
   open labor. The state drives the card's left status edge, its chip (the LATE chip carries the
   age: `LATE 14D`), its time value, its stop reason, and its progress-bar color. DOWN cards get
-  a red-washed background; WAITING cards de-emphasize (grey edge, muted part number, no glow).
+  a red-washed background; WAITING **and HELD** cards de-emphasize (grey edge, muted part number,
+  no glow). **HELD leads the precedence on purpose**: a held WO that is also down, blocked, late or
+  running still reads `HELD`, greys out, and **never pulses or takes the DOWN red wash** — it is
+  deliberately stopped and somebody already knows, so it must not spend the alarm channel. The
+  cross-zone reading that follows is intended, not a bug: a held-and-blocked WO still counts in the
+  HUD `BLOCKED` chip and still rides the Z3 blocked rail, so a viewer can read `BLOCKED 3` and find
+  two orange cards — the third is the grey `HELD` card at the back of the board, and the rail is the
+  disclosure. **The same holds for LATE, and it is the sharper case**: `_late_wo_filters` excludes
+  only terminal statuses, so a held-and-late WO keeps its `late_total` count and its *dated* row on
+  the Z3 LATE rail (`WO-1120 · 14D`) while its card reads `HELD` with **no age at all** — the rail
+  is the disclosure, the card is the stop, and spending the LATE chip on a known stop is exactly
+  what the precedence refuses.
 - **Current operation** = the WO's lowest-sequence IN_PROGRESS op, else its lowest READY op, else
-  its lowest PENDING op — none when all ops are complete (the card then reads `ALL OPS
-  COMPLETE`).
+  its lowest PENDING op, else its lowest **ON_HOLD** op — none when all ops are complete (the card
+  then reads `ALL OPS COMPLETE`). ON_HOLD is strictly last (an actually-runnable op always wins)
+  but it *is* in the chain: with ON_HOLD work orders on the wall, the common shape is a WO held
+  *because* its operation was held, and leaving that shape with no current op made the tile read
+  `ALL OPS COMPLETE` beside a `HELD` chip **and** dropped the job off every `?dept=` board.
 - **Card anatomy — five fixed rows:**
   1. WO number ←→ status chip (glowing dot + state word; only DOWN dots pulse);
   2. part number ←→ `done/ordered` qty (see **Order totals on a pool WO** below) — on a
@@ -244,7 +349,10 @@ statuses are off the board as everywhere else.
      DOWN, orange blocked age on BLOCKED, green elapsed cycle on RUNNING, muted elapsed on a LATE
      card that is also running (minutes tick client-side between polls);
   4. work center ←→ the **stop reason** — the downtime category on DOWN, the blocker category on
-     BLOCKED, `IN QUEUE` on WAITING;
+     BLOCKED, the bare words `ON HOLD` on HELD (**no hold reason, NCR title or free text — ever**;
+     that text can name customers and suppliers, and keeping it off the tile is what makes ON_HOLD
+     on the wall a *population* change rather than a disclosure-category change), `IN QUEUE` on
+     WAITING;
   5. a thin progress bar (`qty_complete / qty_ordered`) + percent.
 - **Order totals on a pool WO:** rows 2 and 5 normally show the **work-order header**
   (`quantity_complete / quantity_ordered`) — correct for a conventional routing, where every
@@ -353,10 +461,11 @@ the one **gated** exception (`jobs[].customer_name`, below) — populated only f
 principal and redacted on every public board.
 
 - **`jobs[]` / `jobs_total`** — the Z2 work-order grid. Population: open (**RELEASED /
-  IN_PROGRESS**) WOs only — **ON_HOLD is deliberately excluded** (the NCR/HOLD split row counts
-  holds). Server-side
-  priority sort (blocked/down → most-late → running → promise date asc, WO number tiebreak),
-  capped at **24**; `jobs_total` is the true uncapped count for `+N more`. Both are
+  IN_PROGRESS / ON_HOLD**) WOs; DRAFT and terminal statuses are off the wall. Server-side
+  priority sort — **active work first** (blocked/down → most-late → running → promise date asc, WO
+  number tiebreak) and **held work strictly last**, so the alarm classes stay a contiguous prefix
+  the TV's pinned anchor row can rely on — capped at **24**; `jobs_total` is the true uncapped
+  count for `+N more` / `+N NOT ON BOARD`. Both are
   **dept-scoped** when `dept` is passed — a job belongs to a dept via its **current op's**
   work-center type. Each job carries `wo_number`, `unit_number` (the Unit # this WO builds, `null`
   when it tracks none — **ungated**, see "Unit # — ungated"), `part_number`, the **gated**
@@ -386,8 +495,17 @@ principal and redacted on every public board.
   one per time entry: `crew` (up to 3 "First L." names), `crew_count` (true headcount for the
   `+N` suffix), `elapsed_minutes` (from the crew's earliest open clock-in), and server-computed
   `is_late`. `operator_name` is kept as a back-compat alias of `crew[0]`.
-- **`late_wos[]` / `blocked_wos[]`** — server-ranked (late: worst-first; blocked: oldest-first),
-  **capped at 12** (was 25 in the ticker era), and **dept-scoped** when `dept` is passed.
+- **`late_wos[]` / `blocked_wos[]`** — server-ranked (late: worst-first; blocked: oldest-first)
+  and **dept-scoped** when `dept` is passed. The two caps **differ on purpose**: `late_wos` keeps
+  the 12-row ticker cap (was 25 in the ticker era), while `blocked_wos` is capped at the **job-wall
+  limit, 24** (`_BLOCKED_JOIN_LIMIT`) — the Z2 cards join their BLOCKED age and stop reason from it
+  by WO number, and the rotation now exposes ranks 13–24, which (being the least severe) are
+  systematically the ones a 12-row cap dropped, so later field pages would have shown more blank
+  reason cells than page 0. The gap is narrowed, not closed: the rows are one per **blocker**
+  (a WO with three open blockers eats three) and ordered by **report time**, not by wall rank, so a
+  shop carrying more than 24 open blockers can still miss a tile — the blank stop-reason cell above
+  is the designed degrade. Neither list is a **count**: `late_total` / `blocked_total` ride
+  uncapped and are the only correct source for one.
   `late_wos[].due_date` carries the **promise date** (`must_ship_by || due_date`) under the
   original field name for wire back-compat.
 - **`late_total` / `blocked_total` / `down_total`** — true **uncapped** totals for the rail
@@ -429,9 +547,15 @@ principal and redacted on every public board.
   between polls, and the **1.6s opacity pulse on DOWN dots** (the HUD chip's dot while
   `down > 0`, and DOWN card chip dots) — nothing else. The previous board's heartbeat,
   new-event flash, and payload-swap fade are gone (design rule: no ambient motion on data).
-  Steady state never flashes — including offline. No marquees, no tickers, no rotation.
+  Steady state never flashes — including offline. No marquees, no tickers. The **one** exception
+  is Zone 2's field, which advances to the next page of work orders every 22s (see "Z2 — Work-order
+  grid"): a discrete React state swap with no keyframes, transition or transform — paging, not
+  motion — and inert entirely on a board of 12 or fewer delivered work orders (a property of
+  `planFieldPages`, not a threshold: one page exactly when the field fits).
 - **No scrolling, anywhere:** every list is capped server- or client-side worst-first with a
-  `+N more` count, so anything hidden is by definition less severe than everything shown.
+  `+N more` count, so anything hidden is by definition less severe than everything shown. Zone 2 is
+  the one place where "hidden" is now temporary rather than permanent — its field rotates — which is
+  why its cycling copy says `+N NOT ON BOARD` and never borrows the rail's `+N MORE … IN QUEUE`.
 - **No token:** without a valid token (or signed-in session) the page shows guidance instead of
   data — it never redirects to login.
 - **Revoked/expired token:** full-screen notice directing to a fresh setup code + `/tv`
@@ -493,10 +617,13 @@ carries no user identity, and can write nothing. Still:
   `backend/app/services/wallboard_service.py` (payload builder + the shared lateness predicate),
   `frontend/src/pages/Wallboard.tsx`, `frontend/src/pages/TvPair.tsx` (the `/tv` pairing screen),
   `frontend/src/components/wallboard/` (zone components — `HudBar.tsx` (Z1), `WoGrid.tsx` /
-  `WoCard.tsx` (Z2), `ShipTodayPanel.tsx` / `LatePanel.tsx` / `BlockedDownPanel.tsx` /
-  `QualitySplitRow.tsx` (Z3), `TodayKpiBar.tsx` (Z4), and `wallboardTokens.ts` — the
-  board-local Foundry palette, deliberately not the app shell's `--fd-*` variables),
-  `frontend/src/utils/wallboardLayout.ts` (pure classification + formatting helpers only —
-  `classifyJob`'s strict state precedence, duration/age/label formatting, dept title-casing;
-  the grid math, machine-wall sort, and tier hysteresis were deleted with the old layout),
+  `WoCard.tsx` / `useWoCycle.ts` (Z2 — the last is the anchor/field cycle POLICY: plan key,
+  rebuild rules, alarm snap, mid-cycle resolution), `ShipTodayPanel.tsx` / `LatePanel.tsx` /
+  `BlockedDownPanel.tsx` / `QualitySplitRow.tsx` (Z3), `TodayKpiBar.tsx` (Z4), and
+  `wallboardTokens.ts` — the board-local Foundry palette, deliberately not the app shell's
+  `--fd-*` variables),
+  `frontend/src/utils/wallboardLayout.ts` (pure classification, PAGING MATH + formatting helpers —
+  `classifyJob`'s strict state precedence, `planFieldPages` / `fieldWindow` / `safeMod` /
+  `stripCopy`, duration/age/label formatting, dept title-casing; it still **never sorts** — the
+  machine-wall sort and tier hysteresis were deleted with the old layout),
   `frontend/src/services/wallboardClient.ts`.

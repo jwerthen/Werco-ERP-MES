@@ -365,7 +365,7 @@ def test_new_blocks_are_tenant_isolated(client: TestClient, admin_headers: dict,
     # open + completed labor — one of everything the new blocks count.
     late_b = make_wo(db_session, part_b, company_id=b, due_date=central_today - timedelta(days=4))
     ship_today_b = make_wo(db_session, part_b, company_id=b, due_date=central_today)  # ship due today
-    make_wo(db_session, part_b, company_id=b, status_=WorkOrderStatus.ON_HOLD)
+    held_b = make_wo(db_session, part_b, company_id=b, status_=WorkOrderStatus.ON_HOLD)
     make_wo(
         db_session, part_b, company_id=b, status_=WorkOrderStatus.COMPLETE, actual_end=now_utc
     )  # wos_completed today
@@ -409,12 +409,15 @@ def test_new_blocks_are_tenant_isolated(client: TestClient, admin_headers: dict,
     assert payload_b["quality"] == {"open_ncr_count": 1, "newest_ncr_age_days": 0, "wos_on_hold": 1}
     assert payload_b["ship"]["due_today"] >= 1
     assert payload_b["today"]["operators_on_clock"] == 1
-    # ...including its own JOB WALL (the two open WOs; ON_HOLD/COMPLETE are off it).
-    assert payload_b["jobs_total"] == 2
+    # ...including its own JOB WALL (the three open WOs — ON_HOLD joined the
+    # population 2026-08-19 and tiles behind the active work; COMPLETE is off it).
+    assert payload_b["jobs_total"] == 3
     assert {job["wo_number"] for job in payload_b["jobs"]} == {
         late_b.work_order_number,
         ship_today_b.work_order_number,
+        held_b.work_order_number,
     }
+    assert payload_b["jobs"][-1]["wo_number"] == held_b.work_order_number  # held sorts last
 
     # ...and company A's board stays all-zero across every new block.
     token_a = _issue_token(client, admin_headers)["token"]
@@ -1211,6 +1214,77 @@ def test_payload_privacy_no_identities_costs_or_customers(client: TestClient, db
     assert names, "expected at least one crew name on the seeded board"
     for name in names:
         assert name_shape.match(name), f"operator name {name!r} is not 'First L.'-shaped"
+
+
+def test_held_job_reaches_a_public_tv_with_no_hold_reason(client: TestClient, admin_headers: dict, db_session: Session):
+    """ON_HOLD joined the wall as a POPULATION change, NOT a disclosure change.
+
+    The Z3 ON HOLD / OPEN NCRS panel is counts-and-ages only precisely because a
+    blocker title or an NCR narrative can name a customer, a supplier or a defect
+    somebody is negotiating. Tiling held work orders must not become a side door
+    for that text: the tile says ``"on_hold"`` and the card renders the bare
+    words ON HOLD, while the REASON stays server-side.
+
+    This runs over an unflagged DISPLAY TOKEN — the real public shop-floor TV
+    principal, no user session, a screen anybody can photograph — and scans the
+    RAW response body, so a reason leaking through any block (the tile, the
+    blocked rail, the quality panel) fails here regardless of which key carries
+    it.
+    """
+    part = make_part(db_session)
+    wc = make_work_center(db_session)
+    held = make_wo(
+        db_session,
+        part,
+        status_=WorkOrderStatus.ON_HOLD,
+        customer_name="Sensitive Customer Co",
+        quantity_ordered=10,
+    )
+    op = make_op(db_session, held, wc, status_=OperationStatus.READY)
+    db_session.add(
+        WorkOrderBlocker(
+            work_order_id=held.id,
+            operation_id=op.id,
+            category=WorkOrderBlockerCategory.MATERIAL_MISSING.value,
+            status=WorkOrderBlockerStatus.OPEN.value,
+            title="HOLDTEXT-SECRET waiting on Globex certs",
+            note="HOLDTEXT-SECRET supplier will not certify the heat lot",
+            reported_at=datetime.utcnow() - timedelta(hours=2),
+            company_id=1,
+        )
+    )
+    db_session.add(
+        NonConformanceReport(
+            ncr_number="NCR-HOLD",
+            title="HOLDTEXT-SECRET porosity on the weld",
+            description="HOLDTEXT-SECRET rejected by the customer source inspector",
+            source=NCRSource.IN_PROCESS,
+            status=NCRStatus.OPEN,
+            work_order_id=held.id,
+            company_id=1,
+        )
+    )
+    db_session.commit()
+
+    token = _issue_token(client, admin_headers, label="Shop floor TV")["token"]
+    response = client.get(WALLBOARD_URL, headers=_display_headers(token))
+    assert response.status_code == 200, response.text
+    raw = response.text
+    assert "HOLDTEXT-SECRET" not in raw, "a hold reason reached the public TV payload"
+    assert "Sensitive Customer" not in raw  # the customer gate is unaffected by the hold
+
+    payload = response.json()
+    tile = next(job for job in payload["jobs"] if job["wo_number"] == held.work_order_number)
+    assert tile["status"] == "on_hold"  # the tile DID render — the scan above was not vacuous
+    assert tile["blocked"] is True
+    assert tile["customer_name"] is None
+    # What the board is allowed to say about the stop: a closed-vocabulary
+    # category and an age, on the rail — never free text, on either surface.
+    blocked_row = next(row for row in payload["blocked_wos"] if row["wo_number"] == held.work_order_number)
+    assert blocked_row["category"] == WorkOrderBlockerCategory.MATERIAL_MISSING.value
+    assert blocked_row["age_hours"] >= 2.0
+    assert set(blocked_row) == {"wo_number", "category", "age_hours"}
+    assert payload["quality"]["wos_on_hold"] == 1  # the Z3 panel keeps its count, unchanged
 
 
 # ---------------------------------------------------------------------------

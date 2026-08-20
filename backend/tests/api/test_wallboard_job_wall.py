@@ -4,17 +4,23 @@ The main wall renders open work orders with their CURRENT operation instead of
 machine tiles, and the trailing-30d kpi_strip is gone. Locks:
 
   * population — company WOs, is_deleted == False, status in (RELEASED,
-    IN_PROGRESS); ON_HOLD deliberately EXCLUDED (the quality rail counts
-    holds), DRAFT and terminal statuses off the wall,
+    IN_PROGRESS, ON_HOLD); DRAFT and terminal statuses off the wall. ON_HOLD
+    joined the wall 2026-08-19 by owner decision (a count on the quality rail
+    is not a tile: a held WO used to vanish from the only surface that says
+    WHICH job stopped) and sorts to the BACK so it can never take a top slot,
   * current-op precedence — lowest-sequence IN_PROGRESS, else lowest READY,
-    else lowest PENDING, None when all complete,
+    else lowest PENDING, else lowest ON_HOLD (strictly last), None only when
+    all complete,
   * tile facts — order qty (the WO header on a conventional routing; the SUM of
     the per-item operation targets on a POOL WO — see the pool tests at the
     bottom), promise/is_late/days_late via the shared
     promise precedence (must_ship_by || due_date vs Central today), blocked /
     down / running flags, ops_completed "n of N", crew on the current op,
-  * deterministic priority sort — blocked/down first, then late worst-first,
-    then running, then promise asc (nulls last), wo_number tie-break,
+  * deterministic priority sort — ACTIVE work first (blocked/down, then late
+    worst-first, then running, then promise asc (nulls last), wo_number
+    tie-break), HELD work strictly last. The alarm classes are a CONTIGUOUS
+    PREFIX of that order, which is what lets the TV pin jobs[0:4] as an anchor
+    row while the rest of the grid rotates,
   * cap 24 + jobs_total true count,
   * ?dept= scoping via the CURRENT op's work-center type (case-insensitive),
   * kpi_strip is DEPRECATED: the key survives on the wire but is always null,
@@ -80,7 +86,7 @@ def _add_blocker(db: Session, wo: WorkOrder, operation_id: "int | None" = None) 
 
 def test_current_op_selection_precedence(client: TestClient, db_session: Session):
     """current_op = lowest-sequence IN_PROGRESS, else lowest READY, else lowest
-    PENDING; None when everything is complete (or only ON_HOLD ops remain)."""
+    PENDING, else lowest ON_HOLD; None only when everything is complete."""
     viewer = make_user(db_session)
     part = make_part(db_session)
     wc = make_work_center(db_session)
@@ -109,9 +115,20 @@ def test_current_op_selection_precedence(client: TestClient, db_session: Session
     make_op(db_session, wo_done_ops, wc, sequence=10, status_=OperationStatus.COMPLETE)
     make_op(db_session, wo_done_ops, wc, sequence=20, status_=OperationStatus.COMPLETE)
 
-    # Only an ON_HOLD op: not a workable "current" op -> None.
+    # Nothing workable left, only ON_HOLD ops: the HELD op is the current op.
+    # It is strictly last in the chain (an actually-runnable op always wins —
+    # wo_active/wo_ready/wo_pending above all carry no hold), but it IS in the
+    # chain: returning None here made the tile read ALL OPS COMPLETE beside a
+    # HELD chip and a partial progress bar, and dropped the job off every
+    # ?dept= board (dept membership is derived from the current op).
     wo_held_op = make_wo(db_session, part)
-    make_op(db_session, wo_held_op, wc, sequence=10, status_=OperationStatus.ON_HOLD)
+    make_op(db_session, wo_held_op, wc, sequence=20, status_=OperationStatus.ON_HOLD)
+    make_op(db_session, wo_held_op, wc, sequence=10, status_=OperationStatus.COMPLETE)
+
+    # A runnable op still outranks a lower-sequence held one.
+    wo_held_and_ready = make_wo(db_session, part)
+    make_op(db_session, wo_held_and_ready, wc, sequence=10, status_=OperationStatus.ON_HOLD)
+    make_op(db_session, wo_held_and_ready, wc, sequence=20, status_=OperationStatus.PENDING)
 
     payload = _payload(client, headers_for(viewer))
 
@@ -137,7 +154,13 @@ def test_current_op_selection_precedence(client: TestClient, db_session: Session
     assert done_ops["ops_completed"] == 2
     assert done_ops["ops_total"] == 2
 
-    assert _job(payload, wo_held_op)["current_op"] is None
+    held_op = _job(payload, wo_held_op)["current_op"]
+    assert held_op is not None
+    assert held_op["sequence"] == 20
+    assert held_op["status"] == "on_hold"
+    assert held_op["work_center_code"] == wc.code
+
+    assert _job(payload, wo_held_and_ready)["current_op"]["sequence"] == 20
 
 
 def test_current_op_prefers_in_progress_op_with_open_labor(client: TestClient, db_session: Session):
@@ -361,17 +384,26 @@ def test_dept_scoping_via_current_op(client: TestClient, db_session: Session):
     assert welding["jobs_total"] == 1
 
 
-def test_population_excludes_hold_draft_terminal_and_deleted(client: TestClient, db_session: Session):
-    """The wall is RELEASED + IN_PROGRESS only: ON_HOLD (quality rail counts
-    holds), DRAFT, terminal statuses, and soft-deleted WOs never tile."""
+def test_population_includes_hold_and_excludes_draft_terminal_and_deleted(client: TestClient, db_session: Session):
+    """The wall is RELEASED + IN_PROGRESS + ON_HOLD; DRAFT, terminal statuses,
+    and soft-deleted WOs never tile.
+
+    ON_HOLD joined the population 2026-08-19 (owner decision). The tile carries
+    the hold on the EXISTING ``status`` field — no new wire key — and the held
+    job sorts BEHIND every active one even though nothing else distinguishes
+    them here, so a hold can never take a top-of-board slot from actionable
+    work.
+    """
     viewer = make_user(db_session)
     part = make_part(db_session)
 
     on_wall_released = make_wo(db_session, part, status_=WorkOrderStatus.RELEASED)
     on_wall_in_progress = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS)
+    # Sorts first on wo_number alone, so its LAST position proves the held bucket.
+    on_wall_held = make_wo(db_session, part, status_=WorkOrderStatus.ON_HOLD)
+    on_wall_held.work_order_number = "WO-AAA-HELD"
     for status_ in (
         WorkOrderStatus.DRAFT,
-        WorkOrderStatus.ON_HOLD,
         WorkOrderStatus.COMPLETE,
         WorkOrderStatus.CLOSED,
         WorkOrderStatus.CANCELLED,
@@ -385,9 +417,389 @@ def test_population_excludes_hold_draft_terminal_and_deleted(client: TestClient,
     assert {job["wo_number"] for job in payload["jobs"]} == {
         on_wall_released.work_order_number,
         on_wall_in_progress.work_order_number,
+        on_wall_held.work_order_number,
+    }
+    assert payload["jobs_total"] == 3
+    assert {job["status"] for job in payload["jobs"]} == {"released", "in_progress", "on_hold"}
+    # Held to the back: the alarm classes stay a contiguous prefix of the order.
+    assert payload["jobs"][-1]["wo_number"] == on_wall_held.work_order_number
+    assert sorted(job["wo_number"] for job in payload["jobs"][:2]) == sorted(
+        [on_wall_released.work_order_number, on_wall_in_progress.work_order_number]
+    )
+
+
+def test_held_wo_whose_only_open_op_is_held_still_names_an_op_and_stays_dept_attributable(
+    client: TestClient, db_session: Session
+):
+    """The canonical shape of the newly added population, and it used to fail twice.
+
+    The usual route to a WO status of ON_HOLD is a blocker that ALSO held the
+    operation (the kiosk hold verb, ``work_order_blocker_service``,
+    ``laser_nest_service`` all write OperationStatus.ON_HOLD), so "held WO whose
+    only non-complete op is held" is not a corner case here — it is the shape.
+    With ON_HOLD off the current-op chain such a WO reported ``current_op:
+    null``, and the card renders ``ALL OPS COMPLETE`` from exactly that — beside
+    a HELD chip and a partial progress bar, three contradicting statements on
+    the board the floor reads to know what is parked. Worse, dept membership is
+    derived from the CURRENT op's work center, so the job dropped off every
+    ``?dept=`` board and out of that board's ``jobs_total``: precisely the
+    disappearance the population change was made to fix.
+    """
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    weld = make_work_center(db_session, work_center_type="welding")
+
+    held = make_wo(db_session, part, status_=WorkOrderStatus.ON_HOLD)
+    make_op(db_session, held, weld, sequence=10, status_=OperationStatus.COMPLETE)
+    make_op(db_session, held, weld, sequence=20, status_=OperationStatus.ON_HOLD)
+    db_session.commit()
+
+    tile = _job(_payload(client, headers_for(viewer)), held)
+    assert tile["status"] == "on_hold"
+    # A real op, not None -> the card cannot claim ALL OPS COMPLETE at 1 of 2.
+    assert tile["current_op"] is not None
+    assert tile["current_op"]["sequence"] == 20
+    assert tile["current_op"]["status"] == "on_hold"
+    assert tile["current_op"]["work_center_code"] == weld.code
+    assert (tile["ops_completed"], tile["ops_total"]) == (1, 2)
+    # Still no reason text: the hold rides on ``status`` and nothing else.
+    assert not any("reason" in key or "ncr" in key or "blocker" in key for key in tile)
+
+    welding = _payload(client, headers_for(viewer), dept="welding")
+    assert {job["wo_number"] for job in welding["jobs"]} == {held.work_order_number}
+    assert welding["jobs_total"] == 1
+
+
+def test_held_tile_carries_the_hold_on_status_and_nothing_else(client: TestClient, db_session: Session):
+    """A held WO tiles with every fact intact, and says only ``"on_hold"``.
+
+    Two separate locks, both about the 2026-08-19 population change:
+
+    * **The server suppresses nothing.** A held WO that is ALSO blocked, down,
+      running and late still reports every one of those flags, because the rails
+      and HUD chips keep counting it and the three surfaces must agree on the
+      facts. Deciding that HELD *displays* ahead of DOWN/BLOCKED/LATE/RUNNING is
+      the CARD's job (``classifyJob``'s precedence), not the server's — if the
+      server started zeroing flags for held jobs, the tile and the ``BLOCKED``
+      chip beside it would disagree about the same work order.
+    * **The tile's KEY SET is exactly the pre-hold key set.** The hold rides on
+      the EXISTING ``status`` field: no new wire key, so an old TV bundle is
+      unaffected — and, the part that matters, NO hold reason rides along. The Z3
+      ON HOLD panel is counts-and-ages only precisely because a blocker title or
+      an NCR description can name a customer or a supplier, and this payload is
+      served to a scoped DISPLAY TOKEN — no user session — on a screen anybody
+      can photograph. A ``hold_reason``/``blocker_title``/``ncr_*`` field here would
+      turn a POPULATION change into a DISCLOSURE-CATEGORY change. That is the
+      one thing this assertion exists to refuse.
+    """
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    down_wc = make_work_center(db_session)
+    central_today = _central_today()
+
+    held = make_wo(
+        db_session,
+        part,
+        status_=WorkOrderStatus.ON_HOLD,
+        due_date=central_today - timedelta(days=3),
+    )
+    op = make_op(db_session, held, down_wc, sequence=10, status_=OperationStatus.READY)
+    _add_blocker(db_session, held, operation_id=op.id)
+    db_session.add(
+        DowntimeEvent(
+            work_center_id=down_wc.id,
+            start_time=datetime.utcnow() - timedelta(minutes=20),
+            category=DowntimeCategory.MECHANICAL,
+            reported_by=viewer.id,
+            company_id=1,
+        )
+    )
+    operator = make_user(db_session, role=UserRole.OPERATOR, first_name="Hilda", last_name="Holder")
+    make_entry(db_session, operator, held, op, down_wc, open_entry=True)
+    db_session.commit()
+
+    tile = _job(_payload(client, headers_for(viewer)), held)
+
+    assert tile["status"] == "on_hold"  # THE carrier of the hold — see WallboardJob.status
+    # ...and every other fact survives the trip untouched.
+    assert tile["blocked"] is True
+    assert tile["down"] is True
+    assert tile["running"] is True
+    assert tile["is_late"] is True
+    assert tile["days_late"] == 3
+    assert tile["current_op"]["work_center_code"] == down_wc.code
+    assert tile["current_op"]["crew_count"] == 1
+
+    assert set(tile) == {
+        "wo_number",
+        "unit_number",
+        "part_number",
+        "customer_name",
+        "status",
+        "qty_complete",
+        "qty_ordered",
+        "promise_date",
+        "is_late",
+        "days_late",
+        "blocked",
+        "down",
+        "running",
+        "current_op",
+        "ops_completed",
+        "ops_total",
+    }
+    assert set(tile["current_op"]) == {
+        "sequence",
+        "name",
+        "work_center_code",
+        "work_center_name",
+        "status",
+        "qty_done",
+        "qty_target",
+        "crew",
+        "crew_count",
+        "elapsed_minutes",
+    }
+    # Redundant against the exact sets above, and deliberately so: it states the
+    # RULE rather than the current membership, so a reviewer adding a field sees
+    # which categories are refused and why, not just that a set changed.
+    forbidden = ("reason", "blocker", "ncr", "note", "comment", "description")
+    for key in list(tile) + list(tile["current_op"]):
+        assert not any(word in key for word in forbidden), f"free-text disclosure on a public TV tile: {key}"
+
+
+def test_holds_sort_last_and_the_alarm_classes_stay_a_contiguous_prefix(client: TestClient, db_session: Session):
+    """THE property the TV's anchor row is built on, asserted as a property.
+
+    The wallboard pins ``jobs[0:4]`` as a never-rotating anchor row and cycles
+    the rest of the grid. That is only sound if severity is monotonically
+    non-increasing from index 0 — i.e. the alarm classes are a CONTIGUOUS PREFIX
+    of the server's order and the client never re-sorts. The held bucket
+    STRENGTHENS that: held work is pushed strictly behind every active job, so no
+    number of holds can push an actionable alarm out of the anchor row.
+
+    Stated precisely, because the "contiguous prefix" phrase alone is ambiguous
+    once holds exist:
+      * held jobs occupy a contiguous SUFFIX,
+      * within the active prefix, blocked/down jobs occupy positions 0..m-1,
+      * so ``jobs[0:4]`` is the four most severe ACTIVE jobs.
+
+    The corollary is the one thing about this design most likely to be filed as a
+    bug, so it is pinned here on purpose: a HELD-and-BLOCKED WO still counts in
+    ``blocked_total`` (the HUD chip) and still rides the Z3 blocked rail, while
+    its TILE sits at the very back of the board reading HELD. A viewer can read
+    "BLOCKED 2" and find one orange card. That is the intended precedence — a
+    held job is deliberately stopped and someone already knows — and the rail is
+    the disclosure.
+    """
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    wc = make_work_center(db_session)
+    down_wc = make_work_center(db_session)
+    central_today = _central_today()
+
+    def open_wo(status_, promise_days=None, work_center=wc):
+        due = central_today + timedelta(days=promise_days) if promise_days is not None else None
+        wo = make_wo(db_session, part, status_=status_, due_date=due)
+        make_op(db_session, wo, work_center, sequence=10, status_=OperationStatus.READY)
+        return wo
+
+    active_down = open_wo(WorkOrderStatus.IN_PROGRESS, promise_days=2, work_center=down_wc)
+    active_blocked = open_wo(WorkOrderStatus.IN_PROGRESS, promise_days=3)
+    active_late = open_wo(WorkOrderStatus.IN_PROGRESS, promise_days=-4)
+    active_running = open_wo(WorkOrderStatus.IN_PROGRESS, promise_days=5)
+    active_quiet = open_wo(WorkOrderStatus.RELEASED, promise_days=6)
+    # The adversarial case: a held WO that outranks every active job on EVERY
+    # existing sort term (blocked, and later than the latest active job).
+    held_blocked_late = open_wo(WorkOrderStatus.ON_HOLD, promise_days=-9)
+    held_quiet = open_wo(WorkOrderStatus.ON_HOLD, promise_days=1)
+
+    _add_blocker(db_session, active_blocked)
+    _add_blocker(db_session, held_blocked_late)
+    db_session.add(
+        DowntimeEvent(
+            work_center_id=down_wc.id,
+            start_time=datetime.utcnow() - timedelta(minutes=30),
+            category=DowntimeCategory.MECHANICAL,
+            reported_by=viewer.id,
+            company_id=1,
+        )
+    )
+    operator = make_user(db_session, role=UserRole.OPERATOR, first_name="Runa", last_name="Runner")
+    make_entry(db_session, operator, active_running, active_running.operations[0], wc, open_entry=True)
+    db_session.commit()
+
+    payload = _payload(client, headers_for(viewer))
+    jobs = payload["jobs"]
+    assert payload["jobs_total"] == 7
+    assert len(jobs) == 7
+
+    def severity_rank(job: dict) -> int:
+        """The wall's class order, read back off the wire (never a re-sort)."""
+        if job["status"] == "on_hold":
+            return 9
+        if job["blocked"] or job["down"]:
+            return 0
+        if job["is_late"]:
+            return 1
+        if job["running"]:
+            return 2
+        return 3
+
+    ranks = [severity_rank(job) for job in jobs]
+    assert ranks == sorted(ranks), f"severity is not monotonic across the wall: {ranks}"
+
+    held_positions = [i for i, job in enumerate(jobs) if job["status"] == "on_hold"]
+    assert held_positions == [len(jobs) - 2, len(jobs) - 1]  # contiguous suffix, and it IS the tail
+    assert {jobs[i]["wo_number"] for i in held_positions} == {
+        held_blocked_late.work_order_number,
+        held_quiet.work_order_number,
+    }
+
+    active = [job for job in jobs if job["status"] != "on_hold"]
+    alarm_positions = [i for i, job in enumerate(active) if job["blocked"] or job["down"]]
+    assert alarm_positions == list(range(len(alarm_positions)))  # 0..m-1, no calm job wedged in
+    assert alarm_positions == [0, 1]
+
+    # The anchor row: four ACTIVE jobs, no hold, however bad the hold looks.
+    assert {job["wo_number"] for job in jobs[:4]} == {
+        active_down.work_order_number,
+        active_blocked.work_order_number,
+        active_late.work_order_number,
+        active_running.work_order_number,
+    }
+    assert active_quiet.work_order_number == jobs[4]["wo_number"]  # last active, still ahead of both holds
+
+    # The cross-zone reading, pinned rather than discovered: the HUD counts the
+    # held blocker, the card at the back of the board says HELD.
+    assert payload["blocked_total"] == 2
+    assert {row["wo_number"] for row in payload["blocked_wos"]} == {
+        active_blocked.work_order_number,
+        held_blocked_late.work_order_number,
+    }
+    assert jobs[-2]["wo_number"] == held_blocked_late.work_order_number
+    assert jobs[-2]["blocked"] is True
+
+
+def test_late_rail_and_total_are_independent_of_the_wall_population(client: TestClient, db_session: Session):
+    """Adding ON_HOLD to the WALL moved no LATE number — a regression test for a
+    non-change, because the non-change is the surprising part.
+
+    ``_late_wo_filters`` selects on ``status.not_in(_TERMINAL_WO_STATUSES)``, NOT
+    on ``_JOB_WALL_WO_STATUSES``. So ON_HOLD WOs were ALREADY in ``late_total``,
+    the LATE rail and the per-job ``is_late`` flag before they ever tiled — and a
+    DRAFT WO past its promise is counted too while never appearing on the wall.
+    That decoupling is what makes "the population change moves no HUD number" a
+    checked claim: if anyone ever "tidies" the late predicate to reuse the wall's
+    status list, ``late_total`` silently drops the DRAFT row and this fails.
+    """
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    central_today = _central_today()
+
+    def late_wo(status_, days):
+        return make_wo(db_session, part, status_=status_, due_date=central_today - timedelta(days=days))
+
+    released_late = late_wo(WorkOrderStatus.RELEASED, 3)
+    held_late = late_wo(WorkOrderStatus.ON_HOLD, 5)
+    draft_late = late_wo(WorkOrderStatus.DRAFT, 2)  # counted as late, never tiles
+    late_wo(WorkOrderStatus.COMPLETE, 9)  # terminal: off every late surface
+    db_session.commit()
+
+    payload = _payload(client, headers_for(viewer))
+
+    assert payload["late_total"] == 3  # released + HELD + DRAFT; the completed one is terminal
+    assert [row["wo_number"] for row in payload["late_wos"]] == [
+        held_late.work_order_number,  # worst promise first
+        released_late.work_order_number,
+        draft_late.work_order_number,
+    ]
+    assert payload["late_wos"][0]["status"] == "on_hold"  # the rail always carried holds
+    assert payload["late_wos"][0]["days_late"] == 5
+
+    # The WALL is the narrower population: DRAFT never tiles, ON_HOLD now does.
+    assert {job["wo_number"] for job in payload["jobs"]} == {
+        released_late.work_order_number,
+        held_late.work_order_number,
     }
     assert payload["jobs_total"] == 2
-    assert {job["status"] for job in payload["jobs"]} == {"released", "in_progress"}
+
+    held_tile = _job(payload, held_late)
+    assert held_tile["is_late"] is True
+    assert held_tile["days_late"] == 5
+    # ...and it is nonetheless LAST on the board: the LATE rail names the worst
+    # job first while its tile sits at the back. Same deliberate split as the
+    # BLOCKED chip above — the rail is the disclosure, the wall is the queue.
+    assert payload["jobs"][-1]["wo_number"] == held_late.work_order_number
+
+
+def test_blocked_rail_covers_every_blocked_tile_on_the_wall(client: TestClient, db_session: Session):
+    """The blocked rail's SQL limit is the JOB WALL's cap, not the ticker's.
+
+    ``WoCard`` joins a tile's BLOCKED age and stop reason out of ``blocked_wos``
+    by ``wo_number``. Once the grid rotates it shows ranks 13-24 too, and those
+    (being the least severe) are systematically the rows a 12-row cap dropped —
+    so later field pages would render more blank reason cells than page 0, and a
+    page of blanks reads as broken. Unlike the job-wall cap this is a REAL SQL
+    limit, so the fix had to be in the query, not a slice.
+
+    The assertion is the JOIN itself: every blocked tile on the wall must resolve
+    in the rail. Under the old ``_TICKER_LIMIT`` this shop returns 12 rail rows
+    for 20 blocked tiles and the set equality fails.
+    """
+    from app.services import wallboard_service
+
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    wc = make_work_center(db_session)
+
+    blocked_wos = []
+    for i in range(20):
+        wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS)
+        make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.READY)
+        _add_blocker(db_session, wo)
+        blocked_wos.append(wo)
+    db_session.commit()
+
+    payload = _payload(client, headers_for(viewer))
+
+    assert payload["blocked_total"] == 20  # the total was never capped
+    assert len(payload["blocked_wos"]) == 20
+    assert len(payload["blocked_wos"]) > wallboard_service._TICKER_LIMIT  # the old cap truncated at 12
+
+    on_wall = {job["wo_number"] for job in payload["jobs"] if job["blocked"]}
+    assert len(on_wall) == 20
+    assert on_wall == {row["wo_number"] for row in payload["blocked_wos"]}  # THE join, complete
+
+    # Structural lock: the join cap must cover the whole wall, whatever the wall's
+    # cap becomes. Raising _JOB_WALL_LIMIT alone would re-open the blank-cell gap.
+    assert wallboard_service._BLOCKED_JOIN_LIMIT == wallboard_service._JOB_WALL_LIMIT
+
+
+def test_late_rail_keeps_the_twelve_row_ticker_cap(client: TestClient, db_session: Session):
+    """``late_wos`` deliberately did NOT follow the blocked rail up to 24.
+
+    ``WoCard`` reads lateness off ``job.is_late`` on the tile itself and joins
+    nothing from ``late_wos``, so the rotating grid creates no demand for more
+    rows here. The two rails now carry different caps on purpose; this pins the
+    smaller one so "the blocked cap was raised" cannot quietly become "the caps
+    were raised".
+    """
+    from app.services import wallboard_service
+
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    central_today = _central_today()
+
+    for days in range(1, 15):  # 14 late WOs
+        make_wo(db_session, part, status_=WorkOrderStatus.RELEASED, due_date=central_today - timedelta(days=days))
+    db_session.commit()
+
+    payload = _payload(client, headers_for(viewer))
+
+    assert payload["late_total"] == 14  # uncapped
+    assert len(payload["late_wos"]) == wallboard_service._TICKER_LIMIT == 12
+    assert len(payload["jobs"]) == 14  # every one of them still tiles
 
 
 def test_kpi_strip_is_deprecated_and_machinery_deleted(client: TestClient, db_session: Session):
