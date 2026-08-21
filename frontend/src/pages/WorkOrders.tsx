@@ -45,11 +45,12 @@ const priorityConfig: Record<number, { bg: string; text: string; label: string }
 };
 
 const EXCLUDED_PART_TYPES = ['purchased', 'hardware', 'raw_material'];
-// A finished job's due date is its promise date, and OTD reads
-// `must_ship_by || due_date` -- editing one retroactively rewrites a delivery
-// result that has already been recorded. That is a deliberate decision, not a
-// row-level convenience, so the inline editor refuses these statuses and the
-// detail page stays the place to do it. Same list the overdue badge suppresses on.
+// A finished job's due date is its promise date, and OTD scores against
+// `coalesce(must_ship_by, due_date)` -- moving it retroactively rewrites a delivery
+// result that is already recorded. `PUT /work-orders/{id}` REFUSES that change with
+// a 409, so this is the matching client gate, not the enforcement: hiding the pencil
+// here (and on the detail page) keeps the UI from offering an edit the server will
+// reject. Also the list the overdue badge and the overdue stat suppress on.
 const TERMINAL_WO_STATUSES = ['complete', 'closed', 'cancelled'];
 const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
 
@@ -152,13 +153,10 @@ function DueDateCell({ wo, options }: { wo: WorkOrderSummary; options?: DueDateC
   if (editing && edit) {
     return (
       // The row is click-through to the detail page; every control in here has to
-      // stop that, or picking a date navigates away mid-edit.
-      <div
-        className="flex items-center gap-1"
-        role="presentation"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => e.stopPropagation()}
-      >
+      // stop that, or picking a date navigates away mid-edit. Click only — DataTable
+      // rows carry no keyboard handler, so a keydown guard here would assert a hazard
+      // that does not exist.
+      <div className="flex items-center gap-1" role="presentation" onClick={(e) => e.stopPropagation()}>
         <input
           type="date"
           value={edit.draft}
@@ -169,6 +167,11 @@ function DueDateCell({ wo, options }: { wo: WorkOrderSummary; options?: DueDateC
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               e.preventDefault();
+              // A native date input reports '' the moment a complete value is edited
+              // back to an incomplete one — retyping the month empties it in passing.
+              // Enter at that instant would CLEAR a promise date and toast success.
+              // Clearing stays available, deliberately, through the explicit ✓.
+              if (edit.draft === '' && edit.baseline !== '') return;
               onSave?.(wo);
             } else if (e.key === 'Escape') {
               e.preventDefault();
@@ -432,11 +435,13 @@ export default function WorkOrders() {
   // Duplicate is require_role([ADMIN, MANAGER, SUPERVISOR]) on the backend —
   // the trio work_orders:edit maps to. A hidden control and a refused call have
   // to agree, so this mirrors WorkOrderDetail's gate exactly.
-  const canDuplicateWorkOrders = hasPermission(user?.role, 'work_orders:edit') || !!user?.is_superuser;
-  // Inline due-date edit goes through PUT /work-orders/{id}, the same
-  // require_role([ADMIN, MANAGER, SUPERVISOR]) verb Duplicate uses — so it shares
-  // that gate exactly. WorkOrderDetail's `canEditDueDate` is the same tier.
-  const canEditDueDate = canDuplicateWorkOrders;
+  // `work_orders:edit` maps to exactly the trio the backend's
+  // require_role([ADMIN, MANAGER, SUPERVISOR]) admits (plus superuser/platform-admin
+  // via require_role itself), so a hidden control and a refused call agree. Both the
+  // Duplicate action and the inline due-date edit go through that tier.
+  const canEditWorkOrders = hasPermission(user?.role, 'work_orders:edit') || !!user?.is_superuser;
+  const canDuplicateWorkOrders = canEditWorkOrders;
+  const canEditDueDate = canEditWorkOrders;
   const [nestWizardOpen, setNestWizardOpen] = useState(false);
   const [workOrders, setWorkOrders] = useState<WorkOrderSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -711,7 +716,9 @@ export default function WorkOrders() {
             : `Due date cleared on ${wo.work_order_number}`
         );
         setDueDateEdit(null);
-        loadWorkOrders();
+        // Awaited: `savingDueDate` must not clear until the fresh row has landed, or
+        // an immediate retry re-sends the version we just superseded.
+        await loadWorkOrders();
         return true;
       } catch (err: any) {
         const detail = err?.response?.data?.detail;
@@ -721,7 +728,7 @@ export default function WorkOrders() {
           // open holding the draft. The baseline is deliberately left behind — if
           // that concurrent write touched the due date, the retry trips the guard
           // below and asks before overwriting it.
-          loadWorkOrders();
+          await loadWorkOrders();
         }
         return false;
       } finally {
@@ -750,21 +757,20 @@ export default function WorkOrders() {
   const handleDueDateConflictReplace = useCallback(async () => {
     if (!dueDateConflict || savingDueDate || !dueDateEdit) return;
     const { wo, serverStamp } = dueDateConflict;
+    // Write against the LIVE row, not the snapshot taken when the dialog opened —
+    // a poll landing while it is up would otherwise 409 a decision the user just
+    // made, over a field nobody touched. Only adopt the live row if its due date
+    // still matches what we ASKED about; if it moved again, keep the snapshot so
+    // the stale version 409s rather than silently overwriting a change we never
+    // showed them.
+    const live = workOrders.find((row) => row.id === wo.id);
+    const target = live && dueDateStampOf(live) === serverStamp ? live : wo;
     setDueDateEdit((prev) => (prev ? { ...prev, baseline: serverStamp } : prev));
-    await performDueDateSave(wo, dueDateEdit.draft);
+    // Closed up front: `performDueDateSave` clears the editor on success, which
+    // would otherwise leave a frame where the dialog is open and no longer pending.
     setDueDateConflict(null);
-  }, [dueDateConflict, savingDueDate, dueDateEdit, performDueDateSave]);
-
-  // A refetch can drop the row being edited (a filter change, or someone else
-  // completing the job). Leaving the editor state pointing at a row that is gone
-  // would strand the conflict dialog on a work order the user can no longer see.
-  useEffect(() => {
-    if (!dueDateEdit || savingDueDate) return;
-    if (!workOrders.some((wo) => wo.id === dueDateEdit.id)) {
-      setDueDateEdit(null);
-      setDueDateConflict(null);
-    }
-  }, [workOrders, dueDateEdit, savingDueDate]);
+    await performDueDateSave(target, dueDateEdit.draft);
+  }, [dueDateConflict, savingDueDate, dueDateEdit, workOrders, dueDateStampOf, performDueDateSave]);
 
   const dueDateCellOptions: DueDateCellOptions | undefined = useMemo(
     () =>
@@ -828,6 +834,25 @@ export default function WorkOrders() {
     });
   }, [workOrders, customerFilter, hideCOTS]);
 
+  // The row being edited can disappear from the table — a refetch (someone else
+  // completed the job), or one of the CLIENT-side filters (customer, hide-COTS)
+  // excluding it with no refetch at all. Watch `filteredWorkOrders`, i.e. what the
+  // table actually renders: watching `workOrders` missed the filter case entirely,
+  // leaving the conflict dialog up and "Replace with mine" clickable for a row the
+  // list was no longer showing. Derived from `workOrders`, so it is never
+  // transiently empty mid-refetch, and the editor cannot open before the first load.
+  //
+  // A `warning` toast, not silence: the save SUCCEEDED at nothing, and a scheduler
+  // who typed a reschedule and looked away otherwise gets no signal it was dropped.
+  useEffect(() => {
+    if (!dueDateEdit || savingDueDate) return;
+    if (!filteredWorkOrders.some((wo) => wo.id === dueDateEdit.id)) {
+      setDueDateEdit(null);
+      setDueDateConflict(null);
+      showToast('warning', 'The work order you were rescheduling left the list — the date was not saved.');
+    }
+  }, [filteredWorkOrders, dueDateEdit, savingDueDate, showToast]);
+
   const groupedWorkOrders = useMemo(() => {
     if (groupBy === 'none') return null;
     
@@ -857,7 +882,7 @@ export default function WorkOrders() {
   // Stats
   const stats = useMemo(() => {
     const overdue = filteredWorkOrders.filter(wo => 
-      wo.due_date && isDateBeforeTodayInCentral(wo.due_date) && !['complete', 'closed', 'cancelled'].includes(wo.status)
+      wo.due_date && isDateBeforeTodayInCentral(wo.due_date) && !TERMINAL_WO_STATUSES.includes(wo.status)
     ).length;
     const inProgress = filteredWorkOrders.filter(wo => wo.status === 'in_progress').length;
     const dueToday = filteredWorkOrders.filter(wo => Boolean(wo.due_date && isDateTodayInCentral(wo.due_date))).length;
@@ -1214,7 +1239,7 @@ function isWorkOrderOverdue(wo: WorkOrderSummary) {
   return Boolean(
     wo.due_date &&
     isDateBeforeTodayInCentral(wo.due_date) &&
-    !['complete', 'closed', 'cancelled'].includes(wo.status)
+    !TERMINAL_WO_STATUSES.includes(wo.status)
   );
 }
 

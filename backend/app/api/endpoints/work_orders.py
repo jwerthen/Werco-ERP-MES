@@ -3343,6 +3343,31 @@ def update_work_order(
             ),
         )
 
+    # A finished job's due date is its PROMISE date: OTD scores against
+    # `coalesce(must_ship_by, due_date)`, so moving it on a COMPLETE/CLOSED/CANCELLED
+    # work order silently rewrites a delivery result that is already recorded -- and
+    # the rewrite is indistinguishable, after the fact, from the job having always
+    # been due then. Refuse it here rather than in the UI: this used to be hidden on
+    # the work-order list and permitted on the detail page and the API, which made the
+    # audit trail look like a restriction was holding when two other doors were open.
+    #
+    # Deliberately NARROW in three ways. It refuses only the `due_date` component, not
+    # the whole request -- `notes` / `special_instructions` / `unit_number` stay
+    # editable at any status, which is a documented posture (a correction written after
+    # the fact is exactly what those fields are for). It refuses only an actual CHANGE,
+    # so re-sending the value a terminal WO already has stays idempotent. And it runs
+    # before the first setattr, so a refusal leaves the row untouched.
+    if "due_date" in update_data and work_order.status in TERMINAL_WO_STATUSES:
+        if update_data["due_date"] != work_order.due_date:
+            current = work_order.status.value if hasattr(work_order.status, "value") else work_order.status
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"cannot change the due date of a work order in terminal status '{current}': its due date is "
+                    "the promise date its delivery performance was scored against."
+                ),
+            )
+
     # 081: remember which way sequencing moved BEFORE the setattr loop overwrites it.
     # Only pooled -> sequenced needs repair; the other direction heals itself, because
     # promotion is forward-only and the next reconciling read re-promotes the pool.

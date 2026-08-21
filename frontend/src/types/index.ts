@@ -596,8 +596,10 @@ export interface LaserNestPackageImportResult {
 export interface WorkOrderSummary {
   id: number;
   /**
-   * Optimistic-lock counter, echoed back on PUT /work-orders/{id}. Optional for the
-   * same reason it is on `WorkOrder` (older responses, existing list fixtures).
+   * Optimistic-lock counter, echoed back on PUT /work-orders/{id}. The backend now
+   * declares this REQUIRED on the list shape; it stays optional here only because
+   * existing list fixtures omit it (`WorkOrder.version` is required, so "same reason
+   * as WorkOrder" would be wrong).
    *
    * On a list this is a WEAK guard: the page polls every 30s and on every broadcast,
    * so a stale version silently refreshes under an open editor. Anything editing from

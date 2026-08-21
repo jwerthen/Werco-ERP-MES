@@ -690,7 +690,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 | GET | `/work-orders/` | List all work orders (`skip` ≥ 0, `limit` 1–5000 default 100 — the standard list tier, see [Pagination](#pagination)) | Yes |
 | POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) and the optional `unit_number` (≤ 50 chars — see "Unit #" below) | Yes |
 | GET | `/work-orders/{id}` | Get work order by ID | Yes |
-| PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). Non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below) | Admin / Manager / Supervisor |
+| PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below) | Admin / Manager / Supervisor |
 | DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled) | Admin / Manager |
 | POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below | Admin / Manager |
 | POST | `/work-orders/{id}/release` | Release to production | Yes |
@@ -755,6 +755,26 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > with a clean 200. Any inline editor on a refreshing list must therefore ALSO hold its own
 > before/after baseline of the field it edits and confirm before overwriting a changed value — see
 > `frontend/src/pages/WorkOrders.tsx` (inline due-date edit) and the same guard on `WorkOrderDetail`.
+>
+> **Due date on a finished job — 409.** Changing `due_date` on a work order in a terminal status
+> (COMPLETE / CLOSED / CANCELLED) is refused:
+> `{"detail": "cannot change the due date of a work order in terminal status 'complete': its due date is
+> the promise date its delivery performance was scored against."}`. OTD scores against
+> `coalesce(must_ship_by, due_date)`, so moving that date after the fact silently rewrites a delivery
+> result that is already recorded — and afterwards the rewrite is indistinguishable from the job having
+> always been due then.
+>
+> The guard is deliberately narrow in three ways. It refuses only the `due_date` **component**, not the
+> whole request, so `notes` / `special_instructions` / `unit_number` stay editable at any status (a
+> correction written after the fact is what those fields are for). It refuses only an actual **change**,
+> so re-sending the value a terminal WO already carries is idempotent — a client echoing back a whole
+> record does not 409. And it runs **before the first `setattr`**, so a refused request leaves every
+> field untouched.
+>
+> This is the **server-side** enforcement, added because the rule previously lived only in one UI: the
+> work-order list hid the control while the detail page and the API permitted the same edit, which made
+> the audit trail look like a restriction was holding when two other doors were open. Both UI surfaces
+> now hide the due-date pencil on a terminal WO to match, but the 409 is what enforces it.
 >
 > **READY promotion: a sequenced ROUTING or a DISPATCH POOL, chosen per work order.** Which of the two
 > a work order is, is its own setting — `sequential_operations`, added by migration `081` and carried on

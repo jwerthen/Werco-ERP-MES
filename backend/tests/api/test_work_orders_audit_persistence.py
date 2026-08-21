@@ -260,6 +260,49 @@ def test_update_work_order_emits_committed_update_audit(client: TestClient, db_s
     assert rows[0].company_id == COMPANY_A
 
 
+def test_update_work_order_due_date_audit_captures_old_and_new(client: TestClient, db_session: Session):
+    """A due-date edit must record BOTH sides of the change, not just that one happened.
+
+    The work-order list's inline due-date quick edit rests on this: a due date is
+    the promise date OTD scores against (`coalesce(must_ship_by, due_date)`), so
+    "who moved this delivery date, from what, to what" is the question the audit
+    trail exists to answer. The sibling test above asserts only that SOME committed
+    UPDATE row exists, which would still pass if the diff went empty -- and
+    ``AuditService.log`` swallows exceptions inside its savepoint, so a regression
+    here is silent. This pins the payload.
+
+    Also guards a real serialization trap: ``_serialize_value`` has no ``date``
+    branch, so both sides fall through to ``str(value)``. That is only correct
+    because BOTH sides take the same path -- a change that special-cased one of
+    them would produce a diff that is always "different".
+    """
+    admin = _make_user(db_session, role=UserRole.ADMIN)
+    part = _make_part(db_session)
+    work_order = _make_work_order(db_session, part=part)
+
+    old_due = work_order.due_date
+    new_due = date(2099, 3, 11)
+    assert old_due != new_due
+
+    resp = client.put(
+        f"/api/v1/work-orders/{work_order.id}",
+        headers=_headers_for(admin),
+        json={"version": work_order.version, "due_date": new_due.isoformat()},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    rows = _committed_audit_rows(db_session, resource_type="work_order", resource_id=work_order.id, action="UPDATE")
+    assert len(rows) == 1, "expected exactly one COMMITTED UPDATE audit row"
+
+    changes = (rows[0].extra_data or {}).get("changes") or {}
+    assert "due_date" in changes, f"due_date missing from audit changes: {changes}"
+    assert changes["due_date"]["new"] == new_due.isoformat()
+    assert changes["due_date"]["old"] == (old_due.isoformat() if old_due else None)
+    # Attribution survives the field-level detail.
+    assert rows[0].user_id == admin.id
+    assert rows[0].company_id == COMPANY_A
+
+
 # ---------------------------------------------------------------------------
 # delete_work_order -> DELETE (default soft-delete path)
 # ---------------------------------------------------------------------------

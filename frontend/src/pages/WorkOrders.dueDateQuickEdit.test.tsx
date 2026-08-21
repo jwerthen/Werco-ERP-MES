@@ -49,6 +49,12 @@ jest.mock('../context/AuthContext', () => ({
   }),
 }));
 
+const mockNavigate = jest.fn();
+jest.mock('react-router-dom', () => ({
+  ...jest.requireActual('react-router-dom'),
+  useNavigate: () => mockNavigate,
+}));
+
 jest.mock('../hooks/useWebSocket', () => ({ useWebSocket: jest.fn() }));
 jest.mock('../services/realtime', () => ({
   getAccessToken: () => 'test-token',
@@ -81,6 +87,9 @@ const finishedWorkOrder = {
   version: 3,
   status: 'complete' as const,
   due_date: '2099-03-09',
+  // A DIFFERENT customer, so the client-side customer filter can exclude WO-1001
+  // while still rendering a list — that is the scenario the cleanup effect covers.
+  customer_name: 'Beta Defense',
 };
 
 async function getDesktopTable(): Promise<HTMLElement> {
@@ -110,6 +119,7 @@ async function openEditor(): Promise<HTMLElement> {
 describe('WorkOrders inline due-date quick edit', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockNavigate.mockClear();
     mockRole = 'manager';
     mockedApi.getWorkOrders.mockResolvedValue([openWorkOrder, finishedWorkOrder]);
     mockedApi.updateWorkOrder.mockResolvedValue({});
@@ -266,5 +276,105 @@ describe('WorkOrders inline due-date quick edit', () => {
     expect(
       within(table).queryByRole('button', { name: 'Edit due date for WO-1001' })
     ).not.toBeInTheDocument();
+  });
+  // --- Guards that a passing suite would otherwise not cover ----------------
+  // Each of these was verified to FAIL when its guard is removed; without them
+  // the stopPropagation calls and the cleanup effect could be deleted silently.
+
+  it('does not navigate to the detail page while interacting with the editor', async () => {
+    renderWorkOrders();
+    const table = await getDesktopTable();
+
+    // Opening the editor must not trigger the row's click-through.
+    fireEvent.click(within(table).getByRole('button', { name: 'Edit due date for WO-1001' }));
+    expect(mockNavigate).not.toHaveBeenCalled();
+
+    // Nor must picking a date, saving, or cancelling.
+    const input = within(table).getByLabelText('Due date for WO-1001');
+    fireEvent.click(input);
+    fireEvent.change(input, { target: { value: '2099-03-11' } });
+    expect(mockNavigate).not.toHaveBeenCalled();
+
+    fireEvent.click(within(table).getByRole('button', { name: 'Cancel due date edit for WO-1001' }));
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it('closes the editor and warns when a client-side filter drops the edited row', async () => {
+    renderWorkOrders();
+    const table = await openEditor();
+    fireEvent.change(within(table).getByLabelText('Due date for WO-1001'), {
+      target: { value: '2099-03-11' },
+    });
+
+    // The customer filter is CLIENT-side and triggers no refetch — the row simply
+    // stops being rendered. Watching the unfiltered list missed this entirely.
+    fireEvent.change(screen.getByLabelText('Customer filter'), { target: { value: 'Beta Defense' } });
+
+    await waitFor(() =>
+      expect(screen.queryAllByRole('link', { name: 'WO-1001' })).toHaveLength(0)
+    );
+    expect(screen.queryByLabelText('Due date for WO-1001')).not.toBeInTheDocument();
+    expect(await screen.findByText(/left the list/)).toBeInTheDocument();
+    expect(mockedApi.updateWorkOrder).not.toHaveBeenCalled();
+  });
+
+  it('dismisses a standing conflict dialog when the row leaves the list', async () => {
+    renderWorkOrders();
+    const table = await openEditor();
+    fireEvent.change(within(table).getByLabelText('Due date for WO-1001'), {
+      target: { value: '2099-03-11' },
+    });
+
+    mockedApi.getWorkOrders.mockResolvedValue([
+      { ...openWorkOrder, version: 8, due_date: '2099-04-01' },
+      finishedWorkOrder,
+    ]);
+    fireEvent.focus(window);
+    await waitFor(() => expect(mockedApi.getWorkOrders).toHaveBeenCalledTimes(2));
+    fireEvent.click(
+      within(await getDesktopTable()).getByRole('button', { name: 'Save due date for WO-1001' })
+    );
+    expect(await screen.findByText('Due date changed by someone else')).toBeInTheDocument();
+
+    // "Replace with mine" must not stay clickable for a row the list no longer shows.
+    fireEvent.change(screen.getByLabelText('Customer filter'), { target: { value: 'Beta Defense' } });
+
+    await waitFor(() =>
+      expect(screen.queryByText('Due date changed by someone else')).not.toBeInTheDocument()
+    );
+    expect(mockedApi.updateWorkOrder).not.toHaveBeenCalled();
+  });
+
+  it('Enter does not clear a due date emptied mid-retype', async () => {
+    renderWorkOrders();
+    const table = await openEditor();
+
+    // A native date input reports '' while a complete value is being retyped.
+    const input = within(table).getByLabelText('Due date for WO-1001');
+    fireEvent.change(input, { target: { value: '' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    expect(mockedApi.updateWorkOrder).not.toHaveBeenCalled();
+    // The explicit checkmark still clears, deliberately.
+    fireEvent.click(within(table).getByRole('button', { name: 'Save due date for WO-1001' }));
+    await waitFor(() =>
+      expect(mockedApi.updateWorkOrder).toHaveBeenCalledWith(1, { due_date: null, version: 7 })
+    );
+  });
+
+  it('Enter still saves a real date', async () => {
+    renderWorkOrders();
+    const table = await openEditor();
+
+    const input = within(table).getByLabelText('Due date for WO-1001');
+    fireEvent.change(input, { target: { value: '2099-03-11' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    await waitFor(() =>
+      expect(mockedApi.updateWorkOrder).toHaveBeenCalledWith(1, {
+        due_date: '2099-03-11',
+        version: 7,
+      })
+    );
   });
 });

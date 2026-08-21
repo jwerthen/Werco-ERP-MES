@@ -990,14 +990,18 @@ class WorkOrderSummary(UTCModel):
     """Lightweight work order for lists/dashboards"""
 
     id: int
-    version: Optional[int] = Field(
-        0,
+    version: int = Field(
+        ...,
         description="Optimistic-lock version counter; echo this value back in PUT /work-orders/{id}. "
         "Carried on the LIST shape (not just the detail one) so the work-order list's inline due-date "
         "edit can take the lock without a detail round-trip first. Note that a fetched version is a "
         "WEAK guard on a list that auto-refreshes -- it stops a concurrent write landing between this "
         "read and the PUT, but a poll silently refreshes it, so a client editing from a list must ALSO "
-        "carry its own before/after baseline of the field it edits.",
+        "carry its own before/after baseline of the field it edits. REQUIRED, with no default, on "
+        "purpose: this summary is built kwarg-by-kwarg, and a default of 0 would let an omitted "
+        "`version=` ship a value no real row can hold (`work_orders.version` is NOT NULL "
+        "server_default 1), 409-ing every edit from a list forever. Required, the same slip is a loud "
+        "response-validation error instead.",
     )
     work_order_number: str
     # None for standalone laser-cutting nest WOs (no part).
