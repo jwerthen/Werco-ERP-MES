@@ -6,7 +6,12 @@ import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { useAuth } from '../context/AuthContext';
 import { hasPermission } from '../utils/permissions';
-import { formatCentralDate, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../utils/centralTime';
+import {
+  formatCentralDate,
+  getCentralDateStamp,
+  isDateBeforeTodayInCentral,
+  isDateTodayInCentral,
+} from '../utils/centralTime';
 import {
   PlusIcon,
   MagnifyingGlassIcon,
@@ -19,6 +24,9 @@ import {
   CheckCircleIcon,
   ArrowUpTrayIcon,
   DocumentDuplicateIcon,
+  PencilSquareIcon,
+  CheckIcon,
+  XMarkIcon,
 } from '@heroicons/react/24/outline';
 import { SkeletonTable, SkeletonCard } from '../components/ui/Skeleton';
 import { ConfirmDialog, EmptyState, ErrorState, useToast, DataTable, DataTableColumn, StatusBadge, Button, UnitBadge } from '../components/ui';
@@ -37,6 +45,12 @@ const priorityConfig: Record<number, { bg: string; text: string; label: string }
 };
 
 const EXCLUDED_PART_TYPES = ['purchased', 'hardware', 'raw_material'];
+// A finished job's due date is its promise date, and OTD reads
+// `must_ship_by || due_date` -- editing one retroactively rewrites a delivery
+// result that has already been recorded. That is a deliberate decision, not a
+// row-level convenience, so the inline editor refuses these statuses and the
+// detail page stays the place to do it. Same list the overdue badge suppresses on.
+const TERMINAL_WO_STATUSES = ['complete', 'closed', 'cancelled'];
 const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
 
 type GroupBy = 'none' | 'customer' | 'part' | 'status';
@@ -109,15 +123,102 @@ function ProgressCell({ wo }: { wo: WorkOrderSummary }) {
   );
 }
 
-function DueDateCell({ wo }: { wo: WorkOrderSummary }) {
+// Open inline due-date editor: which row, the draft, and the value the row showed
+// when the editor opened. The baseline is the lost-update guard -- see
+// `handleDueDateSave` for why `version` cannot carry it on this page.
+interface DueDateEditState {
+  id: number;
+  draft: string;
+  baseline: string;
+}
+
+interface DueDateCellOptions {
+  edit?: DueDateEditState | null;
+  saving?: boolean;
+  onStartEdit?: (wo: WorkOrderSummary) => void;
+  onChangeDraft?: (value: string) => void;
+  onSave?: (wo: WorkOrderSummary) => void;
+  onCancelEdit?: () => void;
+}
+
+function DueDateCell({ wo, options }: { wo: WorkOrderSummary; options?: DueDateCellOptions }) {
   const overdue = isWorkOrderOverdue(wo);
+  const { edit, saving, onStartEdit, onChangeDraft, onSave, onCancelEdit } = options ?? {};
+  const editing = Boolean(edit && edit.id === wo.id);
+  // The pencil appears only for a caller that passed the handlers (i.e. a user
+  // who holds work_orders:edit) and only on a job that has not finished.
+  const editable = Boolean(onStartEdit) && !TERMINAL_WO_STATUSES.includes(wo.status);
+
+  if (editing && edit) {
+    return (
+      // The row is click-through to the detail page; every control in here has to
+      // stop that, or picking a date navigates away mid-edit.
+      <div
+        className="flex items-center gap-1"
+        role="presentation"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => e.stopPropagation()}
+      >
+        <input
+          type="date"
+          value={edit.draft}
+          autoFocus
+          disabled={saving}
+          aria-label={`Due date for ${wo.work_order_number}`}
+          onChange={(e) => onChangeDraft?.(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              onSave?.(wo);
+            } else if (e.key === 'Escape') {
+              e.preventDefault();
+              onCancelEdit?.();
+            }
+          }}
+          className="input input-sm w-36 disabled:opacity-50"
+        />
+        <button
+          type="button"
+          onClick={() => onSave?.(wo)}
+          disabled={saving}
+          aria-label={`Save due date for ${wo.work_order_number}`}
+          className="p-1 rounded text-emerald-600 hover:bg-emerald-500/10 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <CheckIcon className="h-4 w-4" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          onClick={() => onCancelEdit?.()}
+          disabled={saving}
+          aria-label={`Cancel due date edit for ${wo.work_order_number}`}
+          className="p-1 rounded text-surface-400 hover:text-red-600 hover:bg-red-500/10 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <XMarkIcon className="h-4 w-4" aria-hidden="true" />
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <>
+    <span className="inline-flex items-center gap-1.5">
       <span className={`text-sm font-medium ${overdue ? 'text-red-600' : 'text-surface-700'}`}>
         {wo.due_date ? formatCentralDate(wo.due_date) : '—'}
       </span>
-      {overdue && <span className="ml-2 badge badge-danger text-[10px] py-0.5">OVERDUE</span>}
-    </>
+      {overdue && <span className="badge badge-danger text-[10px] py-0.5">OVERDUE</span>}
+      {editable && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onStartEdit?.(wo);
+          }}
+          aria-label={`Edit due date for ${wo.work_order_number}`}
+          className="p-1 rounded text-surface-400 hover:text-werco-600 hover:bg-werco-50"
+        >
+          <PencilSquareIcon className="h-4 w-4" aria-hidden="true" />
+        </button>
+      )}
+    </span>
   );
 }
 
@@ -194,6 +295,7 @@ interface WorkOrderColumnOptions {
   onRelease?: (wo: WorkOrderSummary) => void;
   releasingIds?: Set<number>;
   deletePending?: boolean;
+  dueDateEdit?: DueDateCellOptions;
 }
 
 function buildWorkOrderColumns({
@@ -203,6 +305,7 @@ function buildWorkOrderColumns({
   onRelease,
   releasingIds,
   deletePending,
+  dueDateEdit,
 }: WorkOrderColumnOptions): Array<DataTableColumn<WorkOrderSummary>> {
   const cols: Array<DataTableColumn<WorkOrderSummary>> = [
     {
@@ -280,7 +383,7 @@ function buildWorkOrderColumns({
       sortable: true,
       accessor: (wo) => wo.due_date ?? '',
       csv: (wo) => (wo.due_date ? formatCentralDate(wo.due_date) : ''),
-      render: (wo) => <DueDateCell wo={wo} />,
+      render: (wo) => <DueDateCell wo={wo} options={dueDateEdit} />,
     },
     {
       key: 'priority',
@@ -330,6 +433,10 @@ export default function WorkOrders() {
   // the trio work_orders:edit maps to. A hidden control and a refused call have
   // to agree, so this mirrors WorkOrderDetail's gate exactly.
   const canDuplicateWorkOrders = hasPermission(user?.role, 'work_orders:edit') || !!user?.is_superuser;
+  // Inline due-date edit goes through PUT /work-orders/{id}, the same
+  // require_role([ADMIN, MANAGER, SUPERVISOR]) verb Duplicate uses — so it shares
+  // that gate exactly. WorkOrderDetail's `canEditDueDate` is the same tier.
+  const canEditDueDate = canDuplicateWorkOrders;
   const [nestWizardOpen, setNestWizardOpen] = useState(false);
   const [workOrders, setWorkOrders] = useState<WorkOrderSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -368,6 +475,9 @@ export default function WorkOrders() {
   const setGroupBy = (value: GroupBy) => setFilterParam('group', value === 'none' ? '' : value);
 
   const [releasingIds, setReleasingIds] = useState<Set<number>>(new Set());
+  const [dueDateEdit, setDueDateEdit] = useState<DueDateEditState | null>(null);
+  const [savingDueDate, setSavingDueDate] = useState(false);
+  const [dueDateConflict, setDueDateConflict] = useState<{ wo: WorkOrderSummary; serverStamp: string } | null>(null);
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const loadRequestRef = useRef(0);
   const realtimeUrl = useMemo(() => {
@@ -553,6 +663,132 @@ export default function WorkOrders() {
     }
   }, [loadWorkOrders, showToast]);
 
+  // --- Inline due-date edit ------------------------------------------------
+  // A due date is a promise date feeding OTD (`must_ship_by || due_date`), so a
+  // silently-lost reschedule is not cosmetic. Two guards, and BOTH are needed:
+  //
+  //  1. `version` — the server-side optimistic lock. Stops a write that landed
+  //     between our last fetch and this PUT (409, nothing written).
+  //  2. a local `baseline` — the value the row showed when the editor opened.
+  //     This list refetches every 30s, on window focus, and on every work-order
+  //     broadcast, so `version` refreshes UNDER an open editor and its 409 would
+  //     never fire. Without the baseline, a concurrent reschedule is overwritten
+  //     with a clean 200. The baseline turns that silent loss into a decision.
+  //
+  // Server-gated ⇒ NON-optimistic (the CLAUDE.md convention): the cell keeps
+  // showing the server's date until the refetch confirms the new one.
+  const dueDateStampOf = useCallback(
+    (wo: WorkOrderSummary) => (wo.due_date ? getCentralDateStamp(wo.due_date) : ''),
+    []
+  );
+
+  const handleStartDueDateEdit = useCallback((wo: WorkOrderSummary) => {
+    // getCentralDateStamp passes date-only strings through verbatim and
+    // normalizes datetimes to the Central calendar date — the `<input type="date">`
+    // value has to be that stamp, never a raw ISO instant.
+    const stamp = wo.due_date ? getCentralDateStamp(wo.due_date) : '';
+    setDueDateEdit({ id: wo.id, draft: stamp, baseline: stamp });
+  }, []);
+
+  const handleCancelDueDateEdit = useCallback(() => {
+    if (savingDueDate) return;
+    setDueDateEdit(null);
+  }, [savingDueDate]);
+
+  const handleChangeDueDateDraft = useCallback((value: string) => {
+    setDueDateEdit((prev) => (prev ? { ...prev, draft: value } : prev));
+  }, []);
+
+  const performDueDateSave = useCallback(
+    async (wo: WorkOrderSummary, draft: string) => {
+      setSavingDueDate(true);
+      try {
+        await api.updateWorkOrder(wo.id, { due_date: draft || null, version: wo.version ?? 0 });
+        showToast(
+          'success',
+          draft
+            ? `${wo.work_order_number} due ${formatCentralDate(draft)}`
+            : `Due date cleared on ${wo.work_order_number}`
+        );
+        setDueDateEdit(null);
+        loadWorkOrders();
+        return true;
+      } catch (err: any) {
+        const detail = err?.response?.data?.detail;
+        showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to update due date');
+        if (err?.response?.status === 409) {
+          // Stale version. Refetch so a retry carries a fresh one; the editor stays
+          // open holding the draft. The baseline is deliberately left behind — if
+          // that concurrent write touched the due date, the retry trips the guard
+          // below and asks before overwriting it.
+          loadWorkOrders();
+        }
+        return false;
+      } finally {
+        setSavingDueDate(false);
+      }
+    },
+    [loadWorkOrders, showToast]
+  );
+
+  const handleDueDateSave = useCallback(
+    async (wo: WorkOrderSummary) => {
+      if (savingDueDate || !dueDateEdit || dueDateEdit.id !== wo.id) return;
+      const serverStamp = dueDateStampOf(wo);
+      if (serverStamp !== dueDateEdit.baseline) {
+        setDueDateConflict({ wo, serverStamp });
+        return;
+      }
+      await performDueDateSave(wo, dueDateEdit.draft);
+    },
+    [savingDueDate, dueDateEdit, dueDateStampOf, performDueDateSave]
+  );
+
+  // Confirmed overwrite. Adopting the server's value as the new baseline is what
+  // makes this confirmation cover exactly the change we showed them, so a retry
+  // after a FAILED write does not re-ask about a change already approved.
+  const handleDueDateConflictReplace = useCallback(async () => {
+    if (!dueDateConflict || savingDueDate || !dueDateEdit) return;
+    const { wo, serverStamp } = dueDateConflict;
+    setDueDateEdit((prev) => (prev ? { ...prev, baseline: serverStamp } : prev));
+    await performDueDateSave(wo, dueDateEdit.draft);
+    setDueDateConflict(null);
+  }, [dueDateConflict, savingDueDate, dueDateEdit, performDueDateSave]);
+
+  // A refetch can drop the row being edited (a filter change, or someone else
+  // completing the job). Leaving the editor state pointing at a row that is gone
+  // would strand the conflict dialog on a work order the user can no longer see.
+  useEffect(() => {
+    if (!dueDateEdit || savingDueDate) return;
+    if (!workOrders.some((wo) => wo.id === dueDateEdit.id)) {
+      setDueDateEdit(null);
+      setDueDateConflict(null);
+    }
+  }, [workOrders, dueDateEdit, savingDueDate]);
+
+  const dueDateCellOptions: DueDateCellOptions | undefined = useMemo(
+    () =>
+      canEditDueDate
+        ? {
+            edit: dueDateEdit,
+            saving: savingDueDate,
+            onStartEdit: handleStartDueDateEdit,
+            onChangeDraft: handleChangeDueDateDraft,
+            onSave: handleDueDateSave,
+            onCancelEdit: handleCancelDueDateEdit,
+          }
+        : undefined,
+    [
+      canEditDueDate,
+      dueDateEdit,
+      savingDueDate,
+      handleStartDueDateEdit,
+      handleChangeDueDateDraft,
+      handleDueDateSave,
+      handleCancelDueDateEdit,
+    ]
+  );
+
   const workOrderColumns = useMemo(
     () =>
       buildWorkOrderColumns({
@@ -561,6 +797,7 @@ export default function WorkOrders() {
         onRelease: handleRelease,
         releasingIds,
         deletePending,
+        dueDateEdit: dueDateCellOptions,
       }),
     [
       canDeleteWorkOrders,
@@ -570,6 +807,7 @@ export default function WorkOrders() {
       handleRelease,
       releasingIds,
       deletePending,
+      dueDateCellOptions,
     ]
   );
 
@@ -823,6 +1061,7 @@ export default function WorkOrders() {
                     onRelease: handleRelease,
                     releasingIds,
                     deletePending,
+                    dueDateEdit: dueDateCellOptions,
                   })}
                   data={orders}
                   rowKey={(wo) => wo.id}
@@ -923,6 +1162,32 @@ export default function WorkOrders() {
         onConfirm={handleConfirmDelete}
         onCancel={() => {
           if (!deletePending) setDeleteTarget(null);
+        }}
+      />
+
+      {/* Lost-update guard for the inline due-date editor. This list refetches on a
+          timer, on focus, and on every broadcast, so the optimistic-lock `version`
+          refreshes under an open editor and its 409 would never fire — this is what
+          turns a silently-overwritten reschedule into a decision. See handleDueDateSave. */}
+      <ConfirmDialog
+        open={dueDateConflict !== null}
+        title="Due date changed by someone else"
+        message={
+          dueDateConflict
+            ? `Someone else changed the due date on ${dueDateConflict.wo.work_order_number} to ` +
+              `${dueDateConflict.serverStamp ? formatCentralDate(dueDateConflict.serverStamp) : 'no date'} ` +
+              'while you were editing.\n\n' +
+              'Saving replaces their date with yours. Your draft is kept either way — cancel ' +
+              'to keep theirs.'
+            : ''
+        }
+        confirmLabel="Replace with mine"
+        cancelLabel="Keep theirs"
+        pending={savingDueDate}
+        variant="warning"
+        onConfirm={handleDueDateConflictReplace}
+        onCancel={() => {
+          if (!savingDueDate) setDueDateConflict(null);
         }}
       />
     </div>

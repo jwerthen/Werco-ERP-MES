@@ -595,6 +595,15 @@ export interface LaserNestPackageImportResult {
 
 export interface WorkOrderSummary {
   id: number;
+  /**
+   * Optimistic-lock counter, echoed back on PUT /work-orders/{id}. Optional for the
+   * same reason it is on `WorkOrder` (older responses, existing list fixtures).
+   *
+   * On a list this is a WEAK guard: the page polls every 30s and on every broadcast,
+   * so a stale version silently refreshes under an open editor. Anything editing from
+   * the list must also hold its own baseline of the field being edited.
+   */
+  version?: number;
   work_order_number: string;
   /** NULL only for standalone laser-cutting (nest package) work orders. */
   part_id: number | null;

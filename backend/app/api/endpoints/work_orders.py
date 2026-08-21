@@ -1582,6 +1582,10 @@ def list_work_orders(
         metrics = work_order_operation_progress(wo)
         summary = WorkOrderSummary(
             id=wo.id,
+            # Carried so the list's inline due-date edit can PUT with the lock held.
+            # Same kwarg-by-kwarg hazard as sequential_operations below: omitted, every
+            # row would ship the schema default (0) and every inline edit would 409.
+            version=wo.version,
             work_order_number=wo.work_order_number,
             part_id=wo.part_id,
             parent_work_order_id=wo.parent_work_order_id,

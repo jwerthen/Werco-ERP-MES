@@ -741,6 +741,21 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > (`{"detail": "This record was modified by someone else. Refresh and try again."}`) via an app-wide
 > `StaleDataError` handler instead of silently losing the write.
 >
+> **`version` is carried on the LIST shape too** (`WorkOrderSummary`, so every `GET /work-orders/` row
+> has it), not only on the detail response. That is what lets a client edit a header field straight
+> from a list row without first round-tripping `GET /work-orders/{id}` — which is **not** a plain read:
+> it runs the operation-quantity reconcile and can COMMIT writes against the work order. The summary is
+> built kwarg-by-kwarg, so the field must be populated explicitly; omitted, every row would ship the
+> schema default `0` and every edit from a list would 409.
+>
+> **A version fetched into a list is a WEAK guard, and a client editing from one needs a second.** The
+> lock stops a write that landed between the read and the `PUT`, but a list that polls (the app's
+> work-order list refreshes every 30s, on window focus, and on every work-order broadcast) silently
+> refreshes `version` under an open editor, so the 409 never fires and a concurrent edit is overwritten
+> with a clean 200. Any inline editor on a refreshing list must therefore ALSO hold its own
+> before/after baseline of the field it edits and confirm before overwriting a changed value — see
+> `frontend/src/pages/WorkOrders.tsx` (inline due-date edit) and the same guard on `WorkOrderDetail`.
+>
 > **READY promotion: a sequenced ROUTING or a DISPATCH POOL, chosen per work order.** Which of the two
 > a work order is, is its own setting — `sequential_operations`, added by migration `081` and carried on
 > the create body, the update body, and every work-order response and summary.

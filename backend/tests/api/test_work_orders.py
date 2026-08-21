@@ -44,6 +44,25 @@ class TestWorkOrdersAPI:
         assert len(data) == 1
         assert data[0]["work_order_number"] == test_work_order.work_order_number
 
+    def test_list_work_orders_carries_optimistic_lock_version(
+        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
+    ):
+        """The LIST shape must carry `version`, not just the detail shape.
+
+        The work-order list's inline due-date edit PUTs straight from a list row,
+        so without this the client has no lock to take -- it would either have to
+        round-trip the detail endpoint first (which is not a plain read: it runs
+        the operation-quantity reconcile and can COMMIT) or send a fabricated
+        version and 409 on every edit. Note the summary is built kwarg-by-kwarg,
+        so an omitted `version=` ships the schema default (0) for every row and
+        this asserts the real value, not merely the key's presence.
+        """
+        response = client.get("/api/v1/work-orders/", headers=auth_headers)
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["version"] == test_work_order.version
+
     def test_work_order_list_reports_operation_progress_for_component_ops(
         self, client: TestClient, auth_headers: dict, db_session
     ):
