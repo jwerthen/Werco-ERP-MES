@@ -105,6 +105,9 @@ def queue_row_load_options() -> Tuple:
     return (
         joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
         joinedload(WorkOrderOperation.laser_nest),
+        # The component part, for the LIVE component_part_number on each card.
+        # Without it, every assembly card costs its own SELECT on every board poll.
+        joinedload(WorkOrderOperation.component_part),
     )
 
 
@@ -483,6 +486,10 @@ def dispatch_queue_row(
         operation_name=operation.name,
         part_number=part.part_number if part else None,
         part_name=part.name if part else None,
+        # Live, never the snapshot baked into operation_name. Costs no query --
+        # component_part is in queue_load_options below.
+        component_part_number=(operation.component_part.part_number if operation.component_part else None),
+        component_part_name=(operation.component_part.name if operation.component_part else None),
         status=status.value if hasattr(status, "value") else str(status),
         priority=work_order.priority if work_order else None,
         due_date=work_order.due_date if work_order else None,

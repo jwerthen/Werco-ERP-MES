@@ -107,6 +107,21 @@ export interface KioskQueueItem extends KioskJobInstructions {
   part_name: string | null;
   operation_number: string | number | null;
   operation_name: string | null;
+  /**
+   * The COMPONENT this operation builds, when it is not the work order's own part.
+   *
+   * On a BOM-exploded assembly job, `part_number` above is the ASSEMBLY's — not
+   * what the operator is holding. The component's number ALSO appears inside
+   * `operation_name` as a baked-in prefix ("ABC-1 - Deburr"), but that is a
+   * SNAPSHOT taken when the work order was raised. A part can be renumbered, and
+   * that deliberately does not rewrite operation names (they are part of the
+   * released quality plan), so the prefix can go stale while this stays live.
+   *
+   * Optional so pre-feature payloads still typecheck; null on the ordinary case,
+   * since most operations carry no component.
+   */
+  component_part_number?: string | null;
+  component_part_name?: string | null;
   work_center_id: number;
   status: string;
   quantity_ordered: number;

@@ -156,6 +156,16 @@ export default function KioskQueueCard({ item, onSelect, active = false, disable
           <span className="font-mono font-semibold text-fd-body-2">{item.part_number || '—'}</span>
           {item.part_name ? ` ${item.part_name}` : ''} · {formatOperationLabel(item.operation_number)}
         </span>
+        {/* The COMPONENT this operation builds, when it is not the work order's own
+            part — on a BOM-exploded assembly the number above is the ASSEMBLY's.
+            Read LIVE, unlike the copy baked into operation_name when the work order
+            was raised, which a renumber deliberately leaves alone. */}
+        {item.component_part_number ? (
+          <span className="min-w-0 truncate">
+            <span className="text-fd-mute">Component </span>
+            <span className="font-mono font-semibold text-fd-body-2">{item.component_part_number}</span>
+          </span>
+        ) : null}
         <div className="flex-1" />
         {item.due_date && (
           <span

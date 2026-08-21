@@ -863,6 +863,27 @@ def _kiosk_job_row(
         "part_revision": work_order.part.revision if work_order.part else None,
         "operation_number": operation.operation_number,
         "operation_name": operation.name,
+        # THE COMPONENT'S OWN NUMBER, read LIVE from the part.
+        #
+        # On an assembly work order the operation builds a COMPONENT, not the work
+        # order's produced part -- so ``part_number`` above is the ASSEMBLY's and is
+        # not what the operator is holding. Until now the only place the component's
+        # number reached the floor was the prefix baked into ``operation_name`` at
+        # mint time ("ABC-1 - Deburr"), which is a snapshot: it keeps saying whatever
+        # the number was on the day the work order was raised.
+        #
+        # That mattered the moment parts became renumberable. The renumber
+        # deliberately does NOT rewrite operation names -- they are part of the
+        # released quality plan -- so without this key the floor would keep building
+        # to an identifier the system no longer recognizes. Deriving it live fixes
+        # that for THIS rename and every future one, with nothing mutated.
+        #
+        # NULL on the ordinary case: most operations carry no component at all.
+        # Costs no query -- ``component_part`` is eager-loaded by the callers' load
+        # options (see ``queue_load_options``), and omitting that load is what would
+        # turn this into an N+1 across every card on every 10-15s station poll.
+        "component_part_number": (operation.component_part.part_number if operation.component_part else None),
+        "component_part_name": (operation.component_part.name if operation.component_part else None),
         "work_center_id": operation.work_center_id,
         # Manager-dictated dispatch rank at THIS work center as the shop should
         # SEE it -- position within the ordered queue (1..N, no gaps), null when
@@ -2517,6 +2538,9 @@ def get_work_center_queue(
         # Eager-load the nest + its reference PDF so _laser_nest_payload below
         # doesn't issue per-row SELECTs (N+1) for each queued laser operation.
         joinedload(WorkOrderOperation.laser_nest).joinedload(LaserNest.document),
+        # The component part, for the LIVE component_part_number on the job card.
+        # Without this every card on every station poll issues its own SELECT.
+        joinedload(WorkOrderOperation.component_part),
     )
     operations = dispatch_service.queued_operations(
         db,

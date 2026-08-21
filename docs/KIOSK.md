@@ -1397,3 +1397,32 @@ same tenant. The crew station itself does not use WebSockets (v1 is poll-only, 1
 
 The public `POST /auth/employee-login` (10/minute — see Badge login above) is not used by the
 crew station at all.
+
+## The component's number on a job card
+
+On a BOM-exploded **assembly** work order, an operation builds a *component*, not
+the work order's produced part. The card's `part_number` is therefore the
+**assembly's** — not what the operator is holding.
+
+Until 2026-08-21 the component's number reached the floor only through the prefix
+baked into `operation_name` when the work order was raised (`"ABC-1 - Deburr"`).
+That prefix is a **snapshot**, and it became a problem the moment parts became
+renumberable: `POST /parts/{id}/renumber` deliberately does **not** rewrite
+operation names, because an operation name on a released work order is part of the
+released quality plan (invariant 5). Left alone, the floor would keep building to
+an identifier the system no longer recognizes.
+
+So the kiosk queue payload and the dispatch board row now carry
+`component_part_number` / `component_part_name`, **derived live from the part** on
+every read. `null` on the ordinary case — most operations carry no component — and
+the cards render nothing for those. The stale prefix inside `operation_name` is
+still displayed exactly as it was released; the live line sits beside it.
+
+This fixes the floor's view for that renumber **and every future one**, with
+nothing mutated anywhere.
+
+**`component_part` must stay in the queue load options.** It is a lazy
+relationship, and the kiosk queue is polled every 10–15 seconds per station,
+shop-wide, so reading it without the eager load costs one extra SELECT per card
+per poll. Measured: 2 part SELECTs for a three-card queue with the eager load, 5
+without. A test pins the bound between those two numbers.

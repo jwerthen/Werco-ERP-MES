@@ -1228,6 +1228,21 @@ function DispatchCard({
               {row.part_name ? <span className="font-sans"> · {row.part_name}</span> : null}
             </p>
           )}
+          {/* The COMPONENT this operation builds, when it is not the work order's own
+              part — on a BOM-exploded assembly the line above is the ASSEMBLY's, which
+              is not what gets made at this station. Read LIVE from the part, unlike the
+              copy baked into operation_name when the work order was raised: a renumber
+              deliberately leaves released operation names alone, so the baked prefix can
+              go stale while this stays correct. */}
+          {row.component_part_number && (
+            <p className="truncate font-mono text-[11px] text-slate-400">
+              <span className="font-sans text-slate-500">Component </span>
+              {row.component_part_number}
+              {row.component_part_name ? (
+                <span className="font-sans"> · {row.component_part_name}</span>
+              ) : null}
+            </p>
+          )}
           {/* One dense line — material and thickness carry the sequencing weight,
               so they read brighter than the sheet size and the sheets left. The
               card must stay short enough that a column still shows a queue. */}
