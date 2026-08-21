@@ -2817,6 +2817,27 @@ mixed**:
 >
 > Certificates of conformance, closed POs, received lots and posted stock movements keep the old
 > number permanently. That is correct: a record must say what it said.
+>
+> **Duplicating a work order refreshes a stale component prefix.** `POST
+> /work-orders/{id}/duplicate` copies an operation's `name` — which for a BOM-exploded operation was
+> minted `"{component.part_number} - {routing_op.name}"`. Copied verbatim from a job raised before a
+> renumber, that puts a **dead identifier onto a brand-new DRAFT** that will be released and run, and
+> every future duplicate carries it forward.
+>
+> So the prefix is re-minted on the way across — **only when it provably names that operation's own
+> component part**, resolved case-insensitively through the part's current number or one of its
+> retired ones. Anything unproven copies verbatim. That guard is the design: `PUT
+> /work-orders/operations/{id}` exposes `name` as free text, so `"Weld - Station 3"` is an ordinary
+> hand-typed instruction that satisfies any naive pattern test, and rewriting it would destroy what a
+> supervisor wrote. A copy that fails to refresh is cosmetic staleness the floor reads past; a copy
+> that rewrites a human's words is lost information.
+>
+> This does **not** contradict the duplicate service's rule that instructions CARRY rather than being
+> recomputed (the reason it refuses to re-derive `component_quantity` from today's BOM). The re-mint
+> touches a *display identifier* for a `component_part_id` that is itself copied unchanged, so it
+> names the same physical article the source named; it consults no BOM and cannot change what the
+> operation is for. The closer precedent is laser-nest descriptors, which the same service already
+> re-canonicalizes on the way across so a duplicate cannot re-inject a legacy spelling.
 
 > **Retired part numbers keep resolving (`part_number_aliases`).** A part can be renumbered in
 > place, which retires its old number rather than deleting it. One immutable row per retired number
