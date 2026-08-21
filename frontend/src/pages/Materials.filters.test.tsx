@@ -28,6 +28,18 @@ import api from '../services/api';
 import Materials from './Materials';
 import { ToastProvider } from '../components/ui/Toast';
 
+// Materials reads the current user to decide whether to offer Renumber (a
+// controlled identity change gated on parts:renumber, ADMIN/MANAGER only). These
+// suites render the page outside an AuthProvider, so the context is stubbed here;
+// the role is irrelevant to what they assert.
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({
+    user: { id: 1, role: 'admin', is_superuser: false },
+    isAuthenticated: true,
+    isLoading: false,
+  }),
+}));
+
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {

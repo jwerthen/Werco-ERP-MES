@@ -16,6 +16,8 @@ import {
   User,
   Company,
   Part,
+  PartRenumberImpact,
+  PartRenumberResult,
   WorkCenter,
   LaserNestManualInput,
   LaserNestManualResponse,
@@ -713,6 +715,37 @@ class ApiService {
 
   async createMaterial(data: PartCreate): Promise<Part> {
     const response = await this.api.post<Part>('/materials/', data);
+    return response.data;
+  }
+
+  /**
+   * What renumbering this part would do. PURE READ — writes nothing server-side.
+   *
+   * `newPartNumber` is optional and deliberately unvalidated client-side: the
+   * endpoint takes a plain string so an operator can ask "what would happen if I
+   * used this?" about a number the write would reject, and see the reason. A
+   * client-side pattern check here would defeat that.
+   */
+  async getPartRenumberImpact(id: number, newPartNumber?: string): Promise<PartRenumberImpact> {
+    const response = await this.api.get<PartRenumberImpact>(`/parts/${id}/renumber-impact`, {
+      params: newPartNumber ? { new_part_number: newPartNumber } : undefined,
+    });
+    return response.data;
+  }
+
+  /**
+   * Change a part's number in place, retiring the old one.
+   *
+   * `expectedPartNumber` is a compare-and-swap precondition, not decoration: a
+   * Part carries no optimistic-lock version, so the old number string is the only
+   * concurrency control there is. Send what the client last READ, and a 409 means
+   * somebody renumbered it in the meantime.
+   */
+  async renumberPart(
+    id: number,
+    payload: { new_part_number: string; expected_part_number: string; reason: string }
+  ): Promise<PartRenumberResult> {
+    const response = await this.api.post<PartRenumberResult>(`/parts/${id}/renumber`, payload);
     return response.data;
   }
 

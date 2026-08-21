@@ -246,6 +246,29 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > the **Correct count** action on the work-order detail page, gated on `work_orders:edit`. See
 > `docs/API.md` → Work Orders → "Over-count correction … (supervisor/office)".
 
+> **Renumber a part — endpoint mapping.** `POST /api/v1/parts/{id}/renumber` (change a part's
+> number in place, retiring the old one) is enforced in code to `require_role([ADMIN, MANAGER])` —
+> **deliberately narrower than the Parts Edit row above**, which reaches Supervisor. Renumbering is a
+> controlled change to an article's identity under AS9100D 8.5.2, so it sits with `POST
+> /parts/{id}/revision` (ADMIN/MANAGER) and `DELETE /parts/{id}` (ADMIN) — its sibling identity verbs
+> on the same router — not with the tier that edits a description. **A Supervisor gets 403.**
+>
+> The client gates the control on the new `parts:renumber` permission, held by `platform_admin`,
+> `admin` and `manager` only, so the hidden control and the refused call agree. Note the companion
+> read, `GET /parts/{id}/renumber-impact`, is open to any authenticated tenant user (like the
+> backflush readiness read): it discloses facts about this company's own catalog, and a screen that
+> could not show them would be asking for a decision nobody could make. It is a **pure read** — no
+> audit row, no event, structurally (the service takes no `AuditService`).
+>
+> Two things are RBAC-relevant beyond the gate. First, the Item Number input on the Materials screen
+> and the Part Number input on Part Edit **stay disabled for every role, including admin** — enabling
+> either would route a rename through the blind-`setattr` `PUT`, where it would carry no reason, no
+> audit identity, no collision check and no repair of the operation links the number stands in for.
+> The dedicated verb is the only door. Second, the write is on the tamper-evident chain as one
+> `resource_type='part'` UPDATE row filed under the **OLD** number, carrying the required reason —
+> so "who renumbered this, from what, and why" is answerable by searching the number someone actually
+> holds on paper. See `docs/API.md` → Parts → "Renumbering a part".
+
 > **Inline due-date edit on the work-order LIST — endpoint mapping.** Rescheduling a job from the
 > Work Orders list (the pencil on the Due Date column) is not a new verb: it is `PUT
 > /api/v1/work-orders/{id}` carrying `due_date` plus the row's optimistic-lock `version`, so it is the

@@ -22,6 +22,11 @@ export type Permission =
   | 'parts:view'
   | 'parts:create'
   | 'parts:edit'
+  // Renumbering a part in place. Deliberately NARROWER than parts:edit, which
+  // reaches supervisor: changing an article's identity is an AS9100D 8.5.2
+  // controlled change, so it sits with revision/delete rather than with editing a
+  // description. Mirrors require_role([ADMIN, MANAGER]) on POST /parts/{id}/renumber.
+  | 'parts:renumber'
   | 'parts:delete'
   // BOMs
   | 'boms:view'
@@ -93,7 +98,7 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   platform_admin: [
     // Platform admin has ALL permissions (cross-company oversight)
     'work_orders:view', 'work_orders:create', 'work_orders:edit', 'work_orders:delete', 'work_orders:release', 'work_orders:complete',
-    'parts:view', 'parts:create', 'parts:edit', 'parts:delete',
+    'parts:view', 'parts:create', 'parts:edit', 'parts:delete', 'parts:renumber',
     'boms:view', 'boms:create', 'boms:edit', 'boms:delete', 'boms:release',
     'routings:view', 'routings:create', 'routings:edit', 'routings:delete', 'routings:release',
     'process_sheets:author', 'process_sheets:release',
@@ -110,7 +115,7 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   admin: [
     // Admin has ALL permissions
     'work_orders:view', 'work_orders:create', 'work_orders:edit', 'work_orders:delete', 'work_orders:release', 'work_orders:complete',
-    'parts:view', 'parts:create', 'parts:edit', 'parts:delete',
+    'parts:view', 'parts:create', 'parts:edit', 'parts:delete', 'parts:renumber',
     'boms:view', 'boms:create', 'boms:edit', 'boms:delete', 'boms:release',
     'routings:view', 'routings:create', 'routings:edit', 'routings:delete', 'routings:release',
     'process_sheets:author', 'process_sheets:release',
@@ -127,7 +132,7 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   
   manager: [
     'work_orders:view', 'work_orders:create', 'work_orders:edit', 'work_orders:delete', 'work_orders:release', 'work_orders:complete',
-    'parts:view', 'parts:create', 'parts:edit',
+    'parts:view', 'parts:create', 'parts:edit', 'parts:renumber',
     'boms:view', 'boms:create', 'boms:edit', 'boms:delete', 'boms:release',
     'routings:view', 'routings:create', 'routings:edit', 'routings:delete', 'routings:release',
     'process_sheets:author', 'process_sheets:release',
