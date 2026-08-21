@@ -246,6 +246,25 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > the **Correct count** action on the work-order detail page, gated on `work_orders:edit`. See
 > `docs/API.md` → Work Orders → "Over-count correction … (supervisor/office)".
 
+> **Inline due-date edit on the work-order LIST — endpoint mapping.** Rescheduling a job from the
+> Work Orders list (the pencil on the Due Date column) is not a new verb: it is `PUT
+> /api/v1/work-orders/{id}` carrying `due_date` plus the row's optimistic-lock `version`, so it is the
+> Work Orders **Edit** row above — `require_role([ADMIN, MANAGER, SUPERVISOR])`, which `require_role`
+> itself also admits superuser and platform-admin to. The client gates the pencil on
+> `work_orders:edit`, whose holders are exactly that set, so the hidden control and the refused call
+> agree; **an Operator, Quality, Shipping or Viewer user gets 403**, and hiding the control is not the
+> enforcement.
+>
+> Two things about it are RBAC-relevant beyond the gate. First, unlike Duplicate above, there **is** a
+> status gate: changing a due date on a COMPLETE/CLOSED/CANCELLED work order is refused **409** by the
+> endpoint, because that date is the promise date the job's delivery performance was scored against —
+> no role can do it, the trio included. Both UI surfaces (the list and the work-order detail page) hide
+> the pencil on a terminal WO to match. Second, the write is on the tamper-evident chain like any other
+> header update: one `work_order` `UPDATE` row whose `extra_data.changes` carries the `due_date` old
+> and new values, attributed to the acting user — editing from a list rather than the detail page
+> changes nothing about what is recorded. See `docs/API.md` → Work Orders → "Due date on a finished
+> job".
+
 > **Duplicate a work order — endpoint mapping.** `POST /api/v1/work-orders/{id}/duplicate` (copy a
 > job's *plan* — operations, laser nests, open material ties, re-snapshotted process-sheet steps —
 > onto a new **DRAFT** work order) is enforced **in code** to `require_role([ADMIN, MANAGER,

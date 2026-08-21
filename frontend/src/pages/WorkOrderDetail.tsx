@@ -330,8 +330,6 @@ export default function WorkOrderDetail() {
   // maps to exactly admin/manager/supervisor. The backend enforces RBAC too —
   // this only keeps the UI honest about what the server will allow.
   const canCorrectCount = hasPermission(user?.role, 'work_orders:edit') || !!user?.is_superuser;
-  // Inline due-date edit shares the same work_orders:edit tier.
-  const canEditDueDate = canCorrectCount;
   // Inline notes / special-instructions edit — same work_orders:edit tier, and
   // the same endpoint (PUT /work-orders/{id}, require_role ADMIN/MANAGER/
   // SUPERVISOR). Named separately so the gate reads at its call site.
@@ -362,6 +360,17 @@ export default function WorkOrderDetail() {
   // that 403s.
   const canEditSequencing = canCorrectCount;
   const [workOrder, setWorkOrder] = useState<WorkOrder | null>(null);
+
+  // Inline due-date edit shares the same work_orders:edit tier, AND is refused on a
+  // finished job: `PUT /work-orders/{id}` returns 409 when a due date would change on
+  // a COMPLETE/CLOSED/CANCELLED work order, because that date is the promise date its
+  // delivery performance was scored against. The server is the enforcement; this keeps
+  // the pencil from offering an edit it will reject. The work-order list gates the
+  // same way. Note this is due-date-specific — `notes` / `special_instructions` /
+  // `unit_number` deliberately stay editable at any status, so their editors are
+  // gated on the permission alone.
+  const canEditDueDate =
+    canCorrectCount && !['complete', 'closed', 'cancelled'].includes(workOrder?.status ?? '');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [deleting, setDeleting] = useState(false);

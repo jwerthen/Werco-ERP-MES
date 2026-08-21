@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 from fastapi import status
@@ -43,6 +43,25 @@ class TestWorkOrdersAPI:
         data = response.json()
         assert len(data) == 1
         assert data[0]["work_order_number"] == test_work_order.work_order_number
+
+    def test_list_work_orders_carries_optimistic_lock_version(
+        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
+    ):
+        """The LIST shape must carry `version`, not just the detail shape.
+
+        The work-order list's inline due-date edit PUTs straight from a list row,
+        so without this the client has no lock to take -- it would either have to
+        round-trip the detail endpoint first (which is not a plain read: it runs
+        the operation-quantity reconcile and can COMMIT) or send a fabricated
+        version and 409 on every edit. Note the summary is built kwarg-by-kwarg,
+        so an omitted `version=` ships the schema default (0) for every row and
+        this asserts the real value, not merely the key's presence.
+        """
+        response = client.get("/api/v1/work-orders/", headers=auth_headers)
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["version"] == test_work_order.version
 
     def test_work_order_list_reports_operation_progress_for_component_ops(
         self, client: TestClient, auth_headers: dict, db_session
@@ -660,6 +679,66 @@ class TestWorkOrdersAPI:
         data = response.json()
         assert data["status"] == "released"
         assert data["priority"] == 1
+
+    def test_update_work_order_refuses_due_date_change_on_terminal_work_order(
+        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder, db_session
+    ):
+        """A finished job's due date is the promise date its OTD was scored against.
+
+        Enforced HERE, not in the UI: it was previously hidden on the work-order
+        list and permitted on the detail page and the API, which made the audit
+        trail look like a restriction was holding while two other doors were open.
+        The refusal must land BEFORE the first setattr, so the row is untouched --
+        asserted by re-reading `priority`, which the same request tried to change.
+        """
+        test_work_order.status = WorkOrderStatus.COMPLETE
+        db_session.commit()
+        original_due = test_work_order.due_date
+        original_priority = test_work_order.priority
+
+        response = client.put(
+            f"/api/v1/work-orders/{test_work_order.id}",
+            headers=auth_headers,
+            json={
+                "version": test_work_order.version,
+                "due_date": str(date.today() + timedelta(days=90)),
+                "priority": 5,
+            },
+        )
+        assert response.status_code == status.HTTP_409_CONFLICT
+        assert "promise date" in response.json()["detail"]
+
+        db_session.refresh(test_work_order)
+        assert test_work_order.due_date == original_due
+        assert test_work_order.priority == original_priority
+
+    def test_terminal_due_date_guard_is_narrow(
+        self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder, db_session
+    ):
+        """The guard refuses a due-date CHANGE only -- not the request, not the status.
+
+        Two properties, both deliberate. Re-sending the value a terminal WO already
+        has is idempotent (a client echoing back a whole record must not 409), and
+        `notes` stays editable at any status -- a correction written after the fact
+        is exactly what that field is for, and CLAUDE.md documents it as carrying no
+        status gate. Pinned because the obvious "simplification" of this guard --
+        refusing any PUT that mentions due_date, or any PUT on a terminal WO -- would
+        break both without failing anything else.
+        """
+        test_work_order.status = WorkOrderStatus.CLOSED
+        db_session.commit()
+
+        response = client.put(
+            f"/api/v1/work-orders/{test_work_order.id}",
+            headers=auth_headers,
+            json={
+                "version": test_work_order.version,
+                "due_date": str(test_work_order.due_date),
+                "notes": "Closed out after customer accepted late delivery.",
+            },
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["notes"] == "Closed out after customer accepted late delivery."
 
     def test_update_work_order_priority_quick(self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder):
         """Priority can be changed quickly without full work order payload."""

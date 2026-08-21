@@ -1582,6 +1582,10 @@ def list_work_orders(
         metrics = work_order_operation_progress(wo)
         summary = WorkOrderSummary(
             id=wo.id,
+            # Carried so the list's inline due-date edit can PUT with the lock held.
+            # Same kwarg-by-kwarg hazard as sequential_operations below: omitted, every
+            # row would ship the schema default (0) and every inline edit would 409.
+            version=wo.version,
             work_order_number=wo.work_order_number,
             part_id=wo.part_id,
             parent_work_order_id=wo.parent_work_order_id,
@@ -3338,6 +3342,31 @@ def update_work_order(
                 f"Use POST /work-orders/{work_order.id}/complete instead."
             ),
         )
+
+    # A finished job's due date is its PROMISE date: OTD scores against
+    # `coalesce(must_ship_by, due_date)`, so moving it on a COMPLETE/CLOSED/CANCELLED
+    # work order silently rewrites a delivery result that is already recorded -- and
+    # the rewrite is indistinguishable, after the fact, from the job having always
+    # been due then. Refuse it here rather than in the UI: this used to be hidden on
+    # the work-order list and permitted on the detail page and the API, which made the
+    # audit trail look like a restriction was holding when two other doors were open.
+    #
+    # Deliberately NARROW in three ways. It refuses only the `due_date` component, not
+    # the whole request -- `notes` / `special_instructions` / `unit_number` stay
+    # editable at any status, which is a documented posture (a correction written after
+    # the fact is exactly what those fields are for). It refuses only an actual CHANGE,
+    # so re-sending the value a terminal WO already has stays idempotent. And it runs
+    # before the first setattr, so a refusal leaves the row untouched.
+    if "due_date" in update_data and work_order.status in TERMINAL_WO_STATUSES:
+        if update_data["due_date"] != work_order.due_date:
+            current = work_order.status.value if hasattr(work_order.status, "value") else work_order.status
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"cannot change the due date of a work order in terminal status '{current}': its due date is "
+                    "the promise date its delivery performance was scored against."
+                ),
+            )
 
     # 081: remember which way sequencing moved BEFORE the setattr loop overwrites it.
     # Only pooled -> sequenced needs repair; the other direction heals itself, because
