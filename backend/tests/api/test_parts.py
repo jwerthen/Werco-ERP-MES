@@ -28,6 +28,63 @@ class TestPartsAPI:
         assert len(data) == 1
         assert data[0]["part_number"] == test_part.part_number
 
+    def test_list_parts_shows_sheet_stock_with_spaces_and_inch_marks(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """A part number the COLUMN accepts must never make the part vanish from a list.
+
+        Regression. ``PartBase.part_number`` is the ``PartNumber`` annotated type
+        (3-50, ``^[A-Za-z0-9\\-_\\.#]+$``), narrower than the ``String(100)`` column on
+        all three axes -- and rows the column accepts but the pattern rejects EXIST in
+        production, because ``bom.py`` and ``po_upload.py`` construct ``Part(...)``
+        directly and bypass the validator. Sheet and plate stock is the usual shape.
+
+        Inherited strict, such a row could not serialize, and ``_part_to_response``'s
+        ``except Exception: return None`` -- whose ``None`` both list endpoints filter
+        out -- turned that into REAL STOCK BEING INVISIBLE in every list, picker and
+        search, with a 200 on the read and nothing in the logs. ``GET /parts/{id}``
+        returned it the whole time, so the two endpoints disagreed about whether the
+        part existed.
+
+        Constructed directly, exactly as the importers do -- going through the create
+        ENDPOINT would be a different test, and would (correctly) be refused.
+        """
+        part = Part(
+            part_number='1/4" PLATE 48 X 96',
+            name="Hot Rolled Plate",
+            part_type="raw_material",
+            unit_of_measure="sheets",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add(part)
+        db_session.commit()
+
+        response = client.get("/api/v1/parts/", headers=auth_headers, params={"item_group": "all"})
+        assert response.status_code == status.HTTP_200_OK
+        numbers = [row["part_number"] for row in response.json()]
+        assert '1/4" PLATE 48 X 96' in numbers, f"sheet stock hidden from the parts list: {numbers}"
+
+        # Same helper backs the Materials list — the screen the shop actually uses for stock.
+        response = client.get("/api/v1/materials/", headers=auth_headers)
+        assert response.status_code == status.HTTP_200_OK
+        assert '1/4" PLATE 48 X 96' in [row["part_number"] for row in response.json()]
+
+    def test_create_part_still_refuses_an_unparseable_part_number(
+        self, client: TestClient, auth_headers: dict, sample_part_data: dict
+    ):
+        """Relaxing the READ contract must not relax the WRITE contract.
+
+        ``PartResponse`` carries a lenient ``part_number`` so existing rows always
+        serialize; ``PartCreate`` stays on the strict ``PartNumber`` so no NEW part can
+        be minted with a number the pattern rejects. A read contract describes the data
+        that exists, a write contract decides what may be added — this pins that they
+        stayed different jobs.
+        """
+        payload = {**sample_part_data, "part_number": '1/4" PLATE 48 X 96'}
+        response = client.post("/api/v1/parts/", headers=auth_headers, json=payload)
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
     def test_create_part(self, client: TestClient, auth_headers: dict, sample_part_data: dict):
         """Test creating a new part."""
         response = client.post("/api/v1/parts/", headers=auth_headers, json=sample_part_data)
