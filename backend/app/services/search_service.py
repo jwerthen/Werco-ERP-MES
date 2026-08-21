@@ -18,7 +18,7 @@ customer name only.
 from typing import List, Optional
 
 from pydantic import BaseModel
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.bom import BOM
@@ -28,6 +28,7 @@ from app.models.purchasing import PurchaseOrder, Vendor
 from app.models.quote import Quote
 from app.models.routing import Routing
 from app.models.user import User, UserRole
+from app.services.part_number_resolver import alias_part_ids_subquery
 
 
 class SearchResult(BaseModel):
@@ -97,6 +98,17 @@ def run_global_search(
 
     # Search Parts
     if should_search("part"):
+        # RETIRED numbers match too. Without this, renumbering a part makes its old
+        # number permanently unfindable in the app the moment the rename lands --
+        # while it stays permanently recorded in the audit log, which is the one
+        # place a person on the floor cannot look. Someone holding a traveler that
+        # says the old number would search it, get nothing, and reasonably conclude
+        # the part was deleted.
+        #
+        # The hit renders as the CURRENT part (this filter widens WHICH parts match;
+        # it does not add rows), so a searcher never sees one part twice and cannot
+        # conclude the catalog forked.
+        alias_ids = alias_part_ids_subquery(db, company_id, q)
         parts = (
             db.query(Part)
             .filter(
@@ -107,6 +119,7 @@ def run_global_search(
                     func.lower(Part.name).like(search_term),
                     func.lower(Part.description).like(search_term),
                     func.lower(Part.customer_part_number).like(search_term),
+                    Part.id.in_(select(alias_ids.c.part_id)),
                 ),
             )
             .limit(limit)
