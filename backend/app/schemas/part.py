@@ -159,6 +159,27 @@ class PartUpdate(BaseModel):
 
 class PartResponse(PartBase):
     id: int
+    # READ-side relaxation, and it is load-bearing. ``PartBase.part_number`` is the
+    # ``PartNumber`` annotated type (3-50 chars, ``^[A-Za-z0-9\-_\.#]+$``), which is
+    # NARROWER than the ``String(100)`` column on all three axes -- and rows that the
+    # column accepts but the pattern rejects EXIST in production, because ``bom.py``
+    # and ``po_upload.py`` construct ``Part(...)`` directly and bypass the schema
+    # validator. Sheet and plate stock is the usual shape: ``1/4" PLATE 48 X 96``.
+    #
+    # Inherited strict, such a row cannot serialize -- and ``_part_to_response``'s
+    # ``except Exception: return None`` turns that into the part VANISHING from
+    # ``GET /parts/`` and ``GET /materials/`` (both filter the ``None``s out) with no
+    # error anywhere. Real stock, invisible in every list and picker.
+    #
+    # The repo already knew: ``SheetPartCandidate.part_number`` (schemas/work_order.py)
+    # is a plain ``str`` for exactly this reason, with a comment saying so. That was a
+    # workaround at one call site; this is the fix at the source.
+    #
+    # CREATES stay strict -- ``PartCreate`` is a bare subclass of ``PartBase``, so it
+    # keeps ``PartNumber`` and no NEW part can be minted with an unparseable number.
+    # A read contract must describe the data that exists; a write contract decides what
+    # may be added. Those are different jobs and this is where they diverge.
+    part_number: str = Field(..., max_length=100)
     version: Optional[int] = 0  # Optional for backwards compatibility
     # Read-only here in the sense that ``PartBase`` (and therefore ``PartCreate``) does
     # NOT carry it: a part is always created with the flag off and can only be switched

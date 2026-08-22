@@ -1,4 +1,5 @@
 import enum
+import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -190,7 +191,23 @@ def _normalize_enum(value, fallback):
     return fallback
 
 
+logger = logging.getLogger(__name__)
+
+
 def _part_to_response(part: Part) -> Optional[PartResponse]:
+    """Serialize a part for a list endpoint, or ``None`` if it cannot be represented.
+
+    The ``None`` is not cosmetic: both list endpoints FILTER it out, so a part that
+    fails here silently disappears from ``GET /parts/`` and ``GET /materials/`` --
+    from every picker and search built on them -- while ``GET /parts/{id}`` still
+    returns it. Real stock went missing this way (sheet/plate rows whose numbers carry
+    spaces and inch marks, refused by an over-strict read contract until
+    ``PartResponse`` relaxed ``part_number``).
+
+    So the swallow stays -- one unrepresentable row must not 500 a whole catalog page
+    -- but it no longer stays QUIET. Anything that lands in this log is a part the shop
+    cannot see, and that is the only signal there will be.
+    """
     try:
         part_type_val = _normalize_enum(part.part_type, PartType.MANUFACTURED.value)
         uom_val = _normalize_enum(part.unit_of_measure, UnitOfMeasure.EACH.value)
@@ -231,6 +248,14 @@ def _part_to_response(part: Part) -> Optional[PartResponse]:
             version=0,
         )
     except Exception:
+        logger.warning(
+            "part_to_response failed; part is HIDDEN from list endpoints "
+            "(part_id=%s, company_id=%s, part_number=%r)",
+            getattr(part, "id", None),
+            getattr(part, "company_id", None),
+            getattr(part, "part_number", None),
+            exc_info=True,
+        )
         return None
 
 
