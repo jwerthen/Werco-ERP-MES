@@ -9,7 +9,7 @@
  * - E2E_OPERATOR_EMAIL, E2E_OPERATOR_SECRET
  */
 
-import { test as base, expect, Page } from '@playwright/test';
+import { test as base, expect, Locator, Page } from '@playwright/test';
 
 // Test user credentials from environment
 export const TEST_USERS = {
@@ -141,6 +141,37 @@ export async function expectToast(page: Page, message: string | RegExp) {
  */
 export async function expectTableRow(page: Page, text: string) {
   await expect(page.locator('table tbody tr').filter({ hasText: text })).toBeVisible();
+}
+
+/**
+ * The first REAL row of a list table, or null when the list genuinely has none.
+ *
+ * `table tbody tr` is NOT a "the list has loaded" signal, and treating it as one
+ * is what made the detail-title test lose a race on essentially every cold CI run.
+ * Every lazy route mounts under `<Suspense fallback={<PageLoader/>}>`
+ * (src/App.tsx), and PageLoader renders SkeletonDashboard, which ends in a REAL
+ * `<table><tbody>` of five inert `<tr class="animate-pulse">`
+ * (src/components/ui/Skeleton.tsx). Those rows are present, visible and
+ * clickable, and they carry no click handler.
+ *
+ * So a test that waits on `table tbody tr` can resolve against a decoration,
+ * click it, schedule no navigation at all, and then wait out its entire budget.
+ * Raising the timeout can never help — nothing was ever going to happen. The
+ * previous "fix" here removed a timeout on exactly that misreading.
+ *
+ * Both skeleton sources carry `animate-pulse` (the Suspense fallback and
+ * DataTable's own loading rows), and DataTable's group headers are excluded by
+ * their testid. What survives is a row that actually came from data.
+ *
+ * The jest suite already learned this: WorkOrders.render.test.tsx waits for real
+ * row CONTENT for the same reason. This is that rule, ported to Playwright.
+ */
+export async function firstDataRow(page: Page, timeout = 15000): Promise<Locator | null> {
+  const row = page
+    .locator('table tbody tr:not(.animate-pulse):not([data-testid="group-header"])')
+    .first();
+  await row.waitFor({ state: 'visible', timeout }).catch(() => null);
+  return (await row.isVisible().catch(() => false)) ? row : null;
 }
 
 // Re-export expect for convenience
