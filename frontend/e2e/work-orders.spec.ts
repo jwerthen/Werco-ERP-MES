@@ -4,7 +4,7 @@
  * Tests for work order lifecycle: create, view, update, release, complete.
  */
 
-import { test, expect, TEST_USERS, loginAs, waitForApi, expectTableRow } from './fixtures';
+import { test, expect, TEST_USERS, loginAs, waitForApi, expectTableRow, firstDataRow } from './fixtures';
 
 test.describe('Work Orders', () => {
   test.beforeEach(async ({ page }) => {
@@ -74,18 +74,21 @@ test.describe('Work Orders', () => {
 
   test('can view work order details', async ({ page }) => {
     await page.goto('/work-orders');
-    
-    // Wait for table to load
-    await page.waitForSelector('table tbody tr', { timeout: 10000 }).catch(() => null);
-    
-    // Click first work order row
-    const firstRow = page.locator('table tbody tr').first();
-    if (await firstRow.isVisible()) {
-      await firstRow.click();
-      
-      // Should navigate to detail page
-      await page.waitForURL(/\/work-orders\/\d+/, { timeout: 5000 }).catch(() => null);
-    }
+
+    // This test OWNS row click-through, so nothing in it may be optional. It used
+    // to wrap the click in `if (isVisible())` and swallow the navigation wait with
+    // `.catch(() => null)`, which made it incapable of failing — and it resolved
+    // against the Suspense skeleton besides (see firstDataRow).
+    const row = await firstDataRow(page);
+    test.skip(row === null, 'no seeded work orders');
+
+    // Deliberately the ROW, not a link inside it: the point is that DataTable's
+    // onRowClick still reaches the detail page. The click is PINNED to the first
+    // cell's padding rather than the bounding-box centre, so it cannot drift onto
+    // an in-row control (the due-date pencil stops propagation by design) as
+    // column widths change with content.
+    await row!.click({ position: { x: 6, y: 6 } });
+    await page.waitForURL(/\/work-orders\/\d+/, { timeout: 15000 });
   });
 });
 

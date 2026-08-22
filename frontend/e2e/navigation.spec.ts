@@ -4,7 +4,7 @@
  * Tests for app navigation, sidebar, and global search.
  */
 
-import { test, expect, TEST_USERS, loginAs } from './fixtures';
+import { test, expect, TEST_USERS, loginAs, firstDataRow } from './fixtures';
 
 test.describe('Sidebar Navigation', () => {
   test.beforeEach(async ({ page }) => {
@@ -261,19 +261,19 @@ test.describe('Browser Tab Titles', () => {
 
   test('a detail route resolves a real title, not the bare app name', async ({ page }) => {
     await page.goto('/work-orders');
-    await page.waitForSelector('table tbody tr', { timeout: 10000 }).catch(() => null);
 
-    // Skip explicitly rather than pass vacuously when the seed has no rows.
-    const firstRow = page.locator('table tbody tr').first();
-    test.skip(
-      !(await firstRow.isVisible().catch(() => false)),
-      'no seeded work orders to open a detail route from'
-    );
+    // Skip explicitly rather than pass vacuously when the seed has no rows. That
+    // guard only means anything against firstDataRow: `table tbody tr` also matches
+    // the Suspense skeleton, so it could previously never fire.
+    const row = await firstDataRow(page);
+    test.skip(row === null, 'no seeded work orders to open a detail route from');
 
-    await firstRow.click();
-    // No explicit timeout: a cold work-order detail load under CI exceeded the
-    // old hard 5000ms (flaked 3/3 retries on CI) — ride the suite's default
-    // navigation timeout instead.
+    // Click the work-order LINK, not the row's bounding-box centre. A centre click
+    // is a layout-dependent point: it drifts as column widths change and can land
+    // on an in-row control that stops propagation by design (the due-date pencil).
+    // This test's subject is the detail route's TITLE; row click-through itself is
+    // owned by work-orders.spec.ts and by the jest suites.
+    await row!.locator('a[href^="/work-orders/"]').first().click();
     await page.waitForURL(/\/work-orders\/\d+/);
     await expect(page).toHaveTitle('Work Order · Werco ERP', { timeout: TITLE_TIMEOUT });
   });

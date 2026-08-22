@@ -315,4 +315,29 @@ describe('WorkOrders row actions: Duplicate is gated on work_orders:edit', () =>
     await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/work-orders/501'));
     expect(mockNavigate).not.toHaveBeenCalledWith('/work-orders/undefined');
   });
+
+  it('a row click opens that work order (list click-through)', async () => {
+    /**
+     * The POSITIVE direction, which no test asserted before.
+     *
+     * DataTable.test.tsx proves the primitive fires onRowClick, and
+     * WorkOrders.dueDateQuickEdit.test.tsx proves the due-date editor does NOT
+     * navigate — but nothing asserted that an ordinary row click on THIS page still
+     * reaches the detail route. Breaking it (dropping onRowClick, or widening an
+     * in-row stopPropagation to a whole cell) would have shipped green.
+     *
+     * That gap mattered: the only thing covering it was a Playwright test that was
+     * itself resolving against a loading skeleton, so it could not have caught a
+     * real break either.
+     */
+    renderWorkOrders();
+    const table = await getDesktopTable();
+
+    // Scoped to the desktop <table> — the mobile card list also mounts in jsdom.
+    const row = within(table).getByText('PN-BBB').closest('tr');
+    expect(row).not.toBeNull();
+
+    fireEvent.click(row!);
+    expect(mockNavigate).toHaveBeenCalledWith('/work-orders/2');
+  });
 });
