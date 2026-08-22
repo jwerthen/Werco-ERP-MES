@@ -2739,6 +2739,64 @@ mixed**:
 | POST | `/parts/{id}/restore` | Restore a soft-deleted part | Admin / Manager |
 | GET | `/parts/{id}/bom` | Get BOM for part | Yes |
 | GET | `/parts/{id}/backflush-readiness` | **PR 4.5** — may this part opt into automatic BOM component backflush, and what refuses it if not. Pure read (writes nothing) | Yes |
+| GET | `/parts/by-number/{part_number}` | Get a part by number, **including a number it used to carry**. Case-insensitive. A hit reached through a retired number sets the `X-Resolved-From-Alias` response header | Yes |
+
+> **Retired part numbers keep resolving (`part_number_aliases`).** A part can be renumbered in
+> place, which retires its old number rather than deleting it. One immutable row per retired number
+> records what it now points at, so a number printed on a traveler, an MTR, a customer PO or a shop
+> spreadsheet still finds the part it always named. Stock, open work orders, BOM lines and POs need
+> no migration — they key on `part_id`, not the string.
+>
+> **Precedence is absolute: a LIVE number always beats a retired one.** `part_number_resolver`
+> checks `parts.part_number` first and only then aliases. This is load-bearing, not a tie-break: if
+> a retired number were ever re-issued to a genuinely different article, resolving it to the old part
+> would send every historical document bearing that number to the WRONG physical part — and because
+> both answers look legitimate, it is undetectable afterwards.
+>
+> **So every door that mints or renames a part refuses a number that is not free**, via the shared
+> `find_part_number_conflict`, which checks **three** holders (each with its own message, because the
+> remedies differ):
+> 1. a **live part** — `400 Part number 'X' already exists — it belongs to <part name>.`;
+> 2. a **soft-deleted part** — `400 Part number 'X' already exists on a deleted part. Restore that
+>    part, or choose a different number.` `uq_parts_company_part_number` carries **no partial
+>    predicate**, so a tombstone still owns its number (invariant 3's named duplicate-probe
+>    exception). Probing live rows only used to pass here and then die on the constraint — and
+>    `main.py` has no `IntegrityError` handler, so that was a **500**;
+> 3. a **retired alias** — `400 Part number 'X' already exists as a retired number for <current
+>    number>. Reusing it would make older paperwork resolve to the wrong part.`
+>
+> All three lead with **"already exists"** — the phrase this app has always used for a taken part
+> number, and one an E2E test asserts an operator sees. What each adds is *which* thing holds it and
+> what to do about it. A unit test pins the phrase beside the code that emits it, because the first
+> version of this change reworded the message and only the Playwright suite noticed.
+>
+> Wired into `POST /parts/` and `POST /materials/` (the same `parts` table under the same
+> constraint, so a check either door lacked was a hole in both).
+>
+> **Which lookups consult aliases, and which must not.** Consulting: `GET
+> /parts/by-number/{part_number}`; global search (a hit renders as the **current** part — the filter
+> widens *which* parts match and never adds a row, so a searcher can never conclude the catalog
+> forked); the go-live spreadsheet loaders, through the single `migration_import_service._find_part`
+> seam behind open-WO, open-PO and routing import; and the BOM importer's `_ensure_part`, which
+> **binds and warns** (`Line 12: 'OLD-123' is a retired number for 'NEW-456' — the line was bound to
+> NEW-456.`). That last one is the highest-severity path in the feature: `create_missing_parts`
+> defaults **true** and the miss path *creates* a part, so without the alias tier a re-import
+> carrying a retired number would mint a **second part** and fork the catalog. The tier deliberately
+> sits **above** the `create_missing` early return — `create_missing_parts=false` means "do not
+> INVENT parts", not "do not FIND parts".
+>
+> **Deliberately NOT consulting** — and both are correctness, not oversight:
+> - **The laser sheet matcher** (`sheet_stock_matcher` / `sheet_stock_spec`). For sheet and plate,
+>   the part number *is* the material spec — thickness, size and alloy are parsed out of the string,
+>   because `Part` carries no such columns. An alias is a **stale spec**, so consulting it would let
+>   one physical part present two different specs at once and become a pre-fill candidate for two
+>   incompatible nests simultaneously.
+> - **The fuzzy matching tier** (`matching_service`'s scored path). It loads up to 1000 live parts
+>   and guesses; feeding retired numbers in produces a high-confidence bind with worse provenance
+>   than the guess. The EXACT tier may consult; the fuzzy tier may not.
+>
+> `resolve_part_by_number(..., include_aliases=False)` is the posture those two take, a parameter
+> rather than a separate function so the choice is visible at the call site.
 
 > **`PUT /parts/{id}` refuses a 409 when it would reclassify a LIVE-TIED material part into a
 > produced one** (2026-08-18). The lookup itself is unchanged — it resolves **any** part in the

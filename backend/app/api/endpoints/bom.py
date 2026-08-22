@@ -53,6 +53,7 @@ from app.services.import_service import (
 )
 from app.services.llm_service import extract_bom_data_with_llm
 from app.services.material_tie_part_gate import part_type_change_refusal
+from app.services.part_number_resolver import resolve_part_by_number
 from app.services.part_number_service import generate_werco_part_number
 from app.services.pdf_service import SUPPORTED_EXTENSIONS, extract_text_from_document, save_uploaded_document
 
@@ -710,6 +711,8 @@ def _ensure_part(
     company_id: int,
     audit: AuditService,
     created_by: Optional[int] = None,
+    warnings: Optional[List[str]] = None,
+    line_label: Optional[str] = None,
 ) -> Tuple[Optional[Part], Optional[str], bool]:
     if part_number:
         existing = db.query(Part).filter(Part.part_number == part_number, Part.company_id == company_id).first()
@@ -717,6 +720,38 @@ def _ensure_part(
             if existing.is_deleted:
                 _reject_deleted_part(db, part_number)
             return existing, None, False
+
+        # RETIRED NUMBER -> BIND AND WARN. This tier is the reason the whole alias
+        # feature ships before the renumber verb does: without it, re-importing a
+        # spreadsheet that still carries a part's OLD number falls through to the
+        # create below and mints a SECOND part under the retired number -- forking
+        # the catalog, splitting the stock, and pointing BOM lines at the duplicate.
+        # ``create_missing_parts`` defaults True, so that is the default path.
+        #
+        # Placed ABOVE the ``create_missing`` early return deliberately:
+        # ``create_missing_parts=False`` means "do not INVENT parts", not "do not
+        # FIND parts". Below the return, a stale line would still take the
+        # ``missing`` marker, which the caller turns into a 400 that rolls back the
+        # ENTIRE import -- so hoisting it converts a dead 200-line import into a
+        # live one.
+        #
+        # Bind-and-warn rather than bind-silently: this is a controlled engineering
+        # document, and "your spreadsheet is out of date" is a signal the importer
+        # should not swallow. Rather than refuse (which would cost a whole import
+        # for one stale line, on the exact path the alias exists to rescue) -- the
+        # refusal posture is right for a DELETED part above, where somebody decided
+        # the part should not be used, and wrong for a merely RENAMED one.
+        resolution = resolve_part_by_number(db, company_id, part_number)
+        if resolution and resolution.matched_alias:
+            if warnings is not None:
+                label = f"{line_label}: " if line_label else ""
+                warnings.append(
+                    f"{label}'{resolution.matched_alias}' is a retired number for "
+                    f"'{resolution.part.part_number}' — the line was bound to "
+                    f"{resolution.part.part_number}."
+                )
+            return resolution.part, None, False
+
     if not create_missing:
         return None, part_number or name, False
 
@@ -1089,6 +1124,8 @@ def _create_from_import_payload(
             company_id=company_id,
             audit=audit,
             created_by=current_user.id,
+            warnings=warnings,
+            line_label=f"Line {item_number}",
         )
         if missing:
             missing_parts.append(missing)
@@ -1437,6 +1474,8 @@ async def import_bom_or_part(
                 company_id=company_id,
                 audit=audit,
                 created_by=current_user.id,
+                warnings=warnings,
+                line_label=f"Line {item_number}",
             )
             if missing:
                 missing_parts.append(missing)

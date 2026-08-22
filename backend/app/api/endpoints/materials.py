@@ -22,6 +22,7 @@ from app.models.user import User, UserRole
 from app.schemas.part import PartCreate, PartResponse, PartUpdate
 from app.services.audit_service import AuditService
 from app.services.import_service import ImportFileError, parse_import_file
+from app.services.part_number_resolver import find_part_number_conflict
 
 router = APIRouter()
 
@@ -94,8 +95,15 @@ def create_material(
     company_id: int = Depends(get_current_company_id),
 ):
     _require_material_type(material_in.part_type)
-    if db.query(Part).filter(Part.part_number == material_in.part_number, Part.company_id == company_id).first():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Material number already exists")
+    # The SAME availability gate POST /parts/ uses -- these two doors mint rows in the
+    # same `parts` table under the same unique constraint, so a check either one lacks
+    # is a hole in both. Covers a live holder, a SOFT-DELETED one (the constraint has no
+    # partial predicate, so a tombstone still owns its number and a live-only probe used
+    # to fall through to a 500), and a RETIRED number from a renumber -- re-issuing one
+    # of those would make old paperwork resolve to the wrong physical article.
+    conflict = find_part_number_conflict(db, company_id, material_in.part_number)
+    if conflict:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=conflict.detail)
 
     data = material_in.model_dump()
     part_type_val = data.get("part_type")

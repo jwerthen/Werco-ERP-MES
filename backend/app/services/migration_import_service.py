@@ -61,6 +61,7 @@ from app.services.audit_service import AuditService
 from app.services.completion_signal_service import emit_operation_completed_event
 from app.services.import_service import ParsedTable, parse_date_field
 from app.services.operational_event_service import OperationalEventService
+from app.services.part_number_resolver import resolve_part_by_number
 from app.services.process_sheet_service import ProcessSheetUnavailableError
 from app.services.work_order_state_service import (
     operation_target_quantity,
@@ -157,15 +158,22 @@ def _rollback_failed_row(db: Session, nested: SessionTransaction, row_instances:
 
 
 def _find_part(db: Session, company_id: int, part_number: str) -> Optional[Part]:
-    """Tenant-scoped, soft-delete-respecting part lookup by part number."""
-    return (
-        tenant_query(db, Part, company_id)
-        .filter(
-            func.upper(Part.part_number) == part_number.upper(),
-            Part.is_deleted == False,  # noqa: E712
-        )
-        .first()
-    )
+    """Tenant-scoped, soft-delete-respecting part lookup by part number.
+
+    Resolves RETIRED numbers too (``part_number_aliases``), and that is the point
+    of doing it here rather than at the three callers. This one function is the
+    resolver behind every go-live spreadsheet loader -- open work orders
+    (``:272``), open POs (``:652``), and routings
+    (``routing_import_service.py:344``) -- and the shop's spreadsheets carry
+    whatever number the part had when they were written. Without the alias tier a
+    single renumber bricks every re-run of the migration kit, per-row, with
+    ``part '...' not found``.
+
+    A reviewer will suggest "just fix the two loaders". Refuse: three callers with
+    two implementations is how the rule drifts.
+    """
+    resolution = resolve_part_by_number(db, company_id, part_number)
+    return resolution.part if resolution else None
 
 
 # ---------------------------------------------------------------------------

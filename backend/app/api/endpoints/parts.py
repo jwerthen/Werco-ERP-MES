@@ -3,7 +3,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, or_
@@ -26,6 +26,7 @@ from app.services.completion_inventory_service import (
 )
 from app.services.import_service import ImportFileError, parse_import_file
 from app.services.material_tie_part_gate import assert_part_type_change_allowed
+from app.services.part_number_resolver import find_part_number_conflict, resolve_part_by_number
 from app.services.part_number_service import generate_werco_part_number, normalize_description
 
 router = APIRouter()
@@ -366,10 +367,24 @@ def create_part(
     **Returns**: The created part with system-generated ID and timestamps.
 
     **Raises**:
-    - 400: Part number already exists
+    - 400: Part number already exists, belongs to a deleted part, or is a RETIRED number
+
+    The availability check covers three holders, not one. The obvious live-part case;
+    a SOFT-DELETED part, which still owns its number because
+    ``uq_parts_company_part_number`` has no partial predicate (probing live rows only
+    passed here and then died on the constraint -- and ``main.py`` has no
+    ``IntegrityError`` handler, so that was a 500); and a RETIRED number from a
+    renumber, which is the dangerous one. Re-issuing a retired number to a different
+    article makes every old traveler and MTR bearing it resolve to the WRONG physical
+    part, and resolution precedence works perfectly against you -- both answers look
+    legitimate, so it is undetectable afterwards.
+
+    It is also case-INSENSITIVE now (it was ``==``), matching the constraint's real
+    reach once ``PartBase.uppercase_part_number`` has normalized the input.
     """
-    if db.query(Part).filter(Part.part_number == part_in.part_number, Part.company_id == company_id).first():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Part number already exists")
+    conflict = find_part_number_conflict(db, company_id, part_in.part_number)
+    if conflict:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=conflict.detail)
 
     data = part_in.model_dump()
     # Normalize enum inputs in case clients send uppercase values or enum objects.
@@ -545,15 +560,34 @@ def generate_part_number(
 @router.get("/by-number/{part_number}", response_model=PartResponse)
 def get_part_by_number(
     part_number: str,
+    response: Response,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get a part by part number"""
-    part = db.query(Part).filter(Part.part_number == part_number, Part.company_id == company_id).first()
-    if not part:
+    """Get a part by part number, including a number the part used to carry.
+
+    This endpoint's NAME is the promise the renumber feature makes -- "the old
+    number still finds the part" -- so it resolves retired numbers
+    (``part_number_aliases``) after live ones. Live always wins; see
+    ``part_number_resolver``.
+
+    A hit reached through a retired number sets the response header
+    ``X-Resolved-From-Alias: <the number you asked for>``. A header rather than a
+    response field so ``PartResponse`` stays exactly the shape every other parts
+    endpoint returns -- an integration reading this endpoint can notice its
+    spreadsheet is stale without any client needing to change to keep working.
+
+    The lookup is now case-insensitive on both tiers (it was ``==``): mixed-case
+    rows exist, because ``bom.py`` and ``po_upload.py`` construct ``Part(...)``
+    directly and bypass ``PartBase.uppercase_part_number``.
+    """
+    resolution = resolve_part_by_number(db, company_id, part_number)
+    if not resolution:
         raise HTTPException(status_code=404, detail="Part not found")
-    return part
+    if resolution.matched_alias:
+        response.headers["X-Resolved-From-Alias"] = resolution.matched_alias
+    return resolution.part
 
 
 @router.get("/{part_id}", response_model=PartResponse)

@@ -82,6 +82,7 @@ from .operator_certification import (
     TrainingRecord,
 )
 from .part import Part, PartType, UnitOfMeasure
+from .part_number_alias import PartNumberAlias, normalize_alias_key
 from .print_profile import CompanyPrintProfile
 from .process_sheet import (
     OperationStepRecord,
@@ -177,6 +178,8 @@ __all__ = [
     "UserRole",
     "WorkCenter",
     "Part",
+    "PartNumberAlias",
+    "normalize_alias_key",
     "PartType",
     "UnitOfMeasure",
     "BOM",
