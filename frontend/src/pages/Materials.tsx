@@ -204,17 +204,38 @@ export default function MaterialsPage() {
     event.preventDefault();
     setSaving(true);
     try {
-      const payload = {
-        ...form,
-        revision: 'A',
-        is_critical: false,
-      };
       if (editingMaterial) {
-        const updated = await api.updateMaterial(editingMaterial.id, payload);
+        // Send ONLY the fields this modal actually edits.
+        //
+        // `revision` and `is_critical` are deliberately ABSENT. They are CREATE
+        // defaults, and `PartUpdate` is a blind setattr over `exclude_unset`, so
+        // shipping them on an edit reset every material's revision to 'A' and cleared
+        // its critical-characteristic flag — on a plain name or description save.
+        // Neither field renders anywhere on this screen, so the loss was invisible
+        // before and after, and both are AS9100D traceability data (invariant 5).
+        // Non-'A' revisions and set critical flags reach material rows legitimately
+        // via the CSV importer, POST /parts/{id}/revision, and PartEdit.
+        //
+        // `part_number` is absent for a different reason: the Item Number input is
+        // disabled while editing, so sending it is meaningless today (the backend
+        // drops it) — and leaving it out keeps this payload from silently becoming a
+        // rename channel the day `part_number` becomes settable on PartUpdate.
+        // Listed explicitly rather than spread-minus-omit: on a blind-setattr endpoint
+        // an allowlist is the safe direction, so a field added to the form later has to
+        // be named here before it can reach the update.
+        const updated = await api.updateMaterial(editingMaterial.id, {
+          version: form.version ?? 0,
+          name: form.name,
+          part_type: form.part_type,
+          unit_of_measure: form.unit_of_measure,
+          description: form.description,
+          standard_cost: form.standard_cost,
+          requires_inspection: form.requires_inspection,
+        });
         setMaterials(prev => prev.map(material => material.id === updated.id ? updated : material));
         showToast('success', `Updated ${updated.part_number}`);
       } else {
-        const created = await api.createMaterial(payload);
+        const created = await api.createMaterial({ ...form, revision: 'A', is_critical: false });
         setMaterials(prev => [created, ...prev].sort((a, b) => a.part_number.localeCompare(b.part_number)));
         showToast('success', `Created ${created.part_number}`);
       }
