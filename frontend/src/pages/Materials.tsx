@@ -8,12 +8,16 @@ import { StatusBadge } from '../components/ui/StatusBadge';
 import { useToast } from '../components/ui/Toast';
 import { Modal } from '../components/ui/Modal';
 import {
+  Button,
   ConfirmDialog,
   DataTable,
   DataTableColumn,
   FormField,
   MobileDataCard,
 } from '../components/ui';
+import RenumberPartDialog from '../components/parts/RenumberPartDialog';
+import { useAuth } from '../context/AuthContext';
+import { hasPermission } from '../utils/permissions';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import {
@@ -106,6 +110,12 @@ export default function MaterialsPage() {
   const [saving, setSaving] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Part | null>(null);
   const [deletePending, setDeletePending] = useState(false);
+  const { user } = useAuth();
+  // Deliberately NARROWER than parts:edit (which reaches supervisor). Mirrors
+  // require_role([ADMIN, MANAGER]) on POST /parts/{id}/renumber, so a hidden
+  // control and a refused call agree.
+  const canRenumber = hasPermission(user?.role, 'parts:renumber') || !!user?.is_superuser;
+  const [renumberTarget, setRenumberTarget] = useState<Part | null>(null);
   const [form, setForm] = useState<MaterialForm>(BLANK_FORM);
   const [initialForm, setInitialForm] = useState<MaterialForm>(BLANK_FORM);
 
@@ -515,16 +525,33 @@ export default function MaterialsPage() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <FormField label="Item Number" required>
                   {field => (
-                    <input
-                      {...field}
-                      type="text"
-                      value={form.part_number}
-                      onChange={event => setForm(prev => ({ ...prev, part_number: event.target.value }))}
-                      className="input"
-                      disabled={Boolean(editingMaterial)}
-                      required
-                      autoFocus
-                    />
+                    <div className="flex items-center gap-2">
+                      <input
+                        {...field}
+                        type="text"
+                        value={form.part_number}
+                        onChange={event => setForm(prev => ({ ...prev, part_number: event.target.value }))}
+                        className="input flex-1"
+                        disabled={Boolean(editingMaterial)}
+                        required
+                        autoFocus
+                      />
+                      {/* The input STAYS disabled. Enabling it would put the number onto
+                          this modal's PartUpdate payload, which the backend applies with a
+                          blind setattr — a rename would then have no reason, no audit
+                          identity, no collision check and no drain of the operation links
+                          that stand in for it. Renumbering is its own audited verb. */}
+                      {editingMaterial && canRenumber && (
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => setRenumberTarget(editingMaterial)}
+                        >
+                          Renumber…
+                        </Button>
+                      )}
+                    </div>
                   )}
                 </FormField>
                 <FormField label="Type">
@@ -637,6 +664,34 @@ export default function MaterialsPage() {
           if (!deletePending) setDeleteTarget(null);
         }}
       />
+
+      {/* Renumbering is its own audited verb, not a field on this form — see the
+          comment on the disabled Item Number input. NON-OPTIMISTIC: the row is
+          replaced from the SERVER's response, never patched locally. */}
+      {canRenumber && (
+        <RenumberPartDialog
+          open={renumberTarget !== null}
+          part={renumberTarget}
+          onClose={() => setRenumberTarget(null)}
+          onRenumbered={result => {
+            setRenumberTarget(null);
+            setMaterials(prev =>
+              prev.map(material =>
+                material.id === result.part_id
+                  ? { ...material, part_number: result.part_number }
+                  : material
+              )
+            );
+            // Keep the open edit form honest about what it is editing: its
+            // part_number field still holds the number the operator opened it with.
+            setForm(prev => ({ ...prev, part_number: result.part_number }));
+            setInitialForm(prev => ({ ...prev, part_number: result.part_number }));
+            setEditingMaterial(prev =>
+              prev && prev.id === result.part_id ? { ...prev, part_number: result.part_number } : prev
+            );
+          }}
+        />
+      )}
     </div>
   );
 }

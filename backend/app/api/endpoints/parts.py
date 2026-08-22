@@ -11,13 +11,20 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_current_active_user, get_current_company_id, get_current_user, require_role
 from app.core.time_utils import to_utc_iso
-from app.db.database import get_db
+from app.db.database import atomic_transaction, get_db
 from app.db.tenant_filter import tenant_query
 from app.models.bom import BOM, BOMItem
 from app.models.part import ENGINEERING_PART_TYPES, Part, PartType, UnitOfMeasure, is_engineering_part_type
 from app.models.user import User, UserRole
 from app.schemas.backflush_preview import BackflushDiagnostic, PartBackflushReadinessResponse
 from app.schemas.part import PartCreate, PartResponse, PartUpdate
+from app.schemas.part_renumber import (
+    PartRenumberImpactResponse,
+    PartRenumberRequest,
+    PartRenumberResponse,
+    RenumberDiagnosticSchema,
+    SheetSpecDeltaSchema,
+)
 from app.services.audit_service import AuditService
 from app.services.completion_inventory_service import (
     BACKFLUSH_BLOCKING,
@@ -28,6 +35,7 @@ from app.services.import_service import ImportFileError, parse_import_file
 from app.services.material_tie_part_gate import assert_part_type_change_allowed
 from app.services.part_number_resolver import find_part_number_conflict, resolve_part_by_number
 from app.services.part_number_service import generate_werco_part_number, normalize_description
+from app.services.part_renumber_service import audit_extra_data, build_renumber_impact, renumber_part
 
 router = APIRouter()
 
@@ -716,6 +724,173 @@ def update_part(
     db.refresh(part)
 
     return part
+
+
+@router.get(
+    "/{part_id}/renumber-impact",
+    response_model=PartRenumberImpactResponse,
+    summary="What would renumbering this part do?",
+)
+def get_part_renumber_impact(
+    part_id: int,
+    new_part_number: Optional[str] = Query(
+        None,
+        max_length=100,
+        description=(
+            "The candidate new number. Optional -- omit it to read the part's current state and its "
+            "retired numbers without proposing a change."
+        ),
+    ),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """The structured form of the refusal (and the disclosures) the write would produce.
+
+    **Pure read -- writes nothing.** No audit row, no ledger row, no event. That is
+    structural, not conventional: the service function takes no ``AuditService`` and no
+    actor, so it could not write one by accident. Same rule the backflush readiness
+    companion follows -- a poll is not an actor and records no reason.
+
+    ``new_part_number`` is a plain ``str`` query param, deliberately NOT the strict
+    ``PartNumber`` type the write body uses. A ``PartNumber``-typed param would 422 before
+    the handler ran, so an operator could not ask "what would happen if I used this?" and
+    the READ would fail earlier and differently than the WRITE -- the screen would then be
+    unable to explain the very refusal it exists to preview.
+
+    ``eligible`` is a snapshot, not authorisation: every input is mutable by other people,
+    so the identical probes re-run server-side on the write.
+
+    **The sheet block is the reason this endpoint exists at all.** For sheet and plate the
+    part number IS the material spec, so a renumber can silently stop the laser-nest
+    matcher recognizing a sheet -- after which it simply stops being suggested, with no
+    error anywhere. ``sheet`` reports what the matcher reads before and after so the
+    confirm screen can say so in the planner's own words.
+    """
+    impact = build_renumber_impact(db, company_id, part_id, new_part_number)
+    return PartRenumberImpactResponse(
+        part_id=part_id,
+        current_part_number=impact.current_part_number,
+        normalized_new_part_number=impact.normalized_new_part_number,
+        eligible=impact.eligible,
+        blockers=[RenumberDiagnosticSchema(code=d.code, detail=d.detail) for d in impact.blockers],
+        advisories=[RenumberDiagnosticSchema(code=d.code, detail=d.detail) for d in impact.advisories],
+        open_work_order_count=impact.open_work_order_count,
+        operations_with_stale_prefix=impact.operations_with_stale_prefix,
+        operations_needing_repair=impact.operations_needing_repair,
+        existing_aliases=impact.existing_aliases,
+        sheet=SheetSpecDeltaSchema(
+            is_sheet_like_before=impact.sheet.is_sheet_like_before,
+            is_sheet_like_after=impact.sheet.is_sheet_like_after,
+            thickness_before=impact.sheet.thickness_before,
+            thickness_after=impact.sheet.thickness_after,
+            sheet_size_before=impact.sheet.sheet_size_before,
+            sheet_size_after=impact.sheet.sheet_size_after,
+            alloy_before=impact.sheet.alloy_before,
+            alloy_after=impact.sheet.alloy_after,
+        ),
+    )
+
+
+@router.post(
+    "/{part_id}/renumber",
+    response_model=PartRenumberResponse,
+    summary="Change a part's number in place, retiring the old one",
+)
+def renumber_part_endpoint(
+    part_id: int,
+    payload: PartRenumberRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Renumber a part in place. The old number is RETIRED, not deleted.
+
+    Everything that points at this part follows automatically -- stock, open work orders,
+    BOM lines, POs, material ties and lots are all FKs on ``part_id``, not copies of the
+    string. The old number keeps resolving through ``part_number_aliases``, so a traveler
+    in the rack, an MTR in the cabinet, a customer PO or a shop spreadsheet still finds
+    the part it always named.
+
+    **Role: ADMIN / MANAGER -- deliberately NOT Supervisor.** Renumbering is a controlled
+    change to article identity under AS9100D 8.5.2, so it sits with ``POST
+    /parts/{id}/revision`` (its sibling identity verb on this router), not with the
+    ``PUT /parts/{id}`` edit tier that reaches Supervisor.
+
+    **Refusals, all raised before any write** so a refused request leaves the row
+    untouched:
+
+    * **404** -- no such part in this company (or it is soft-deleted).
+    * **409** -- ``expected_part_number`` no longer matches: somebody renumbered this part
+      while the dialog was open. ``Part`` maps no optimistic-lock version column, so that
+      string IS the concurrency control, applied as a compare-and-swap.
+    * **409** -- the target number is held by a live part, by a SOFT-DELETED one (the
+      unique constraint has no partial predicate, so a tombstone still owns its number),
+      or is a RETIRED number of a different part. That last one is the dangerous case:
+      re-issuing a retired number would make every historical document bearing it resolve
+      to the wrong physical article, undetectably.
+    * **409** -- the number being retired is already a retired number of another part.
+    * **422** -- the new number is not a valid part number.
+
+    Re-stating the part's current number returns **200** and writes nothing (``no_op``),
+    matching the rule the backflush gate follows: a request that changes nothing must not
+    fail.
+
+    **What it does NOT do, deliberately.** Operation names on assembly work orders carry
+    the component's number baked into their text. Those are NOT rewritten -- an operation
+    name on a released work order is part of the released quality plan. Instead the links
+    those strings stand in for are REPAIRED FIRST, while the old number still matches, so
+    the string stops being load-bearing before it goes stale. ``work_orders_repaired``
+    reports that; ``operations_with_stale_prefix`` reports what still reads the old number
+    as text.
+
+    Certificates of conformance, closed POs, received lots and posted stock movements keep
+    the old number permanently. That is correct -- a record must say what it said.
+    """
+    with atomic_transaction(db):
+        result = renumber_part(
+            db,
+            company_id,
+            part_id,
+            new_part_number=payload.new_part_number,
+            expected_part_number=payload.expected_part_number,
+            reason=payload.reason,
+            actor_user_id=current_user.id,
+        )
+
+        if not result.no_op:
+            audit = AuditService(db, current_user, request)
+            audit.log_update(
+                resource_type="part",
+                resource_id=result.part.id,
+                # Filed under the OLD number, on purpose. ``log_update`` would
+                # otherwise read the attribute AFTER the swap and file the row under
+                # the NEW one -- and searching the OLD number is exactly the search
+                # anyone investigating a renumber performs.
+                resource_identifier=result.previous_part_number,
+                old_values={"part_number": result.previous_part_number},
+                new_values={"part_number": result.part.part_number},
+                description=(
+                    f"Renumbered part {result.previous_part_number} -> {result.part.part_number} "
+                    f"(reason: {payload.reason})"
+                ),
+                extra_data=audit_extra_data(result, payload.reason),
+            )
+
+    db.refresh(result.part)
+    return PartRenumberResponse(
+        part_id=result.part.id,
+        part_number=result.part.part_number,
+        previous_part_number=result.previous_part_number,
+        alias_id=result.alias_id,
+        alias_created=result.alias_created,
+        alias_reclaimed=result.alias_reclaimed,
+        no_op=result.no_op,
+        work_orders_repaired=result.work_orders_repaired,
+        operations_with_stale_prefix=result.operations_with_stale_prefix,
+        sheet_spec_changed=result.sheet_spec_changed,
+    )
 
 
 @router.get(

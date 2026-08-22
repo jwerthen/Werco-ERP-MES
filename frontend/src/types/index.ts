@@ -1882,3 +1882,81 @@ export interface ClearedReceipt {
   requires_inspection: boolean;
   [key: string]: unknown;
 }
+
+// --- Part renumbering (in-place, with retired-number aliases) ----------------
+// Mirrors backend/app/schemas/part_renumber.py.
+//
+// Renumbering a part changes the number ON THE PART. Everything pointing at it
+// follows automatically (stock, open work orders, BOM lines, POs, ties, lots are
+// all FKs on part_id) and the old number keeps resolving through
+// `part_number_aliases`, so a traveler, MTR, customer PO or spreadsheet bearing it
+// still finds the part.
+
+/** One reason a renumber is refused, or one consequence worth disclosing. */
+export interface RenumberDiagnostic {
+  code: string;
+  detail: string;
+}
+
+/**
+ * What the laser-nest matcher reads out of the old number versus the new one.
+ *
+ * For sheet and plate the part number IS the material spec — thickness, size and
+ * alloy are parsed out of the string, because Part carries no such columns. A
+ * renumber therefore changes which physical sheet the matcher believes this part
+ * is, or stops it recognizing it at all — after which the sheet simply stops being
+ * SUGGESTED for nests, with no error anywhere.
+ */
+export interface SheetSpecDelta {
+  is_sheet_like_before: boolean;
+  is_sheet_like_after: boolean;
+  thickness_before?: string | null;
+  thickness_after?: string | null;
+  sheet_size_before?: string | null;
+  sheet_size_after?: string | null;
+  alloy_before?: string | null;
+  alloy_after?: string | null;
+}
+
+export interface PartRenumberImpact {
+  part_id: number;
+  current_part_number: string;
+  normalized_new_part_number?: string | null;
+  /**
+   * `blockers.length === 0`. NOT a durable verdict — every input is mutable by
+   * other people, so the server re-runs the identical probes on the write. Never
+   * treat a stale `true` as authorization.
+   */
+  eligible: boolean;
+  blockers: RenumberDiagnostic[];
+  advisories: RenumberDiagnostic[];
+  open_work_order_count: number;
+  /**
+   * Operations whose name still carries this number as a text prefix. Cosmetic —
+   * those strings are deliberately never rewritten (an operation name on a
+   * released work order is part of the released quality plan).
+   */
+  operations_with_stale_prefix: number;
+  /**
+   * The ACTIONABLE count: of the above, those with no component link yet, where
+   * the prefix is still load-bearing. Reported separately so the screen does not
+   * put a large alarming number in front of an operator for rows already fine.
+   */
+  operations_needing_repair: number;
+  existing_aliases: string[];
+  sheet: SheetSpecDelta;
+}
+
+export interface PartRenumberResult {
+  part_id: number;
+  part_number: string;
+  previous_part_number: string;
+  alias_id?: number | null;
+  alias_created: boolean;
+  /** True when renamed back INTO a number it previously carried (A → B → A). */
+  alias_reclaimed: boolean;
+  no_op: boolean;
+  work_orders_repaired: number;
+  operations_with_stale_prefix: number;
+  sheet_spec_changed: boolean;
+}

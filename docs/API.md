@@ -2740,6 +2740,83 @@ mixed**:
 | GET | `/parts/{id}/bom` | Get BOM for part | Yes |
 | GET | `/parts/{id}/backflush-readiness` | **PR 4.5** — may this part opt into automatic BOM component backflush, and what refuses it if not. Pure read (writes nothing) | Yes |
 | GET | `/parts/by-number/{part_number}` | Get a part by number, **including a number it used to carry**. Case-insensitive. A hit reached through a retired number sets the `X-Resolved-From-Alias` response header | Yes |
+| GET | `/parts/{id}/renumber-impact` | What renumbering this part would do — blockers, advisories, the sheet-spec before/after, and how many open operations still name it. Pure read (writes nothing). Optional `new_part_number` query param | Yes |
+| POST | `/parts/{id}/renumber` | Change a part's number **in place**, retiring the old one into `part_number_aliases` | **Admin / Manager** |
+
+> **Renumbering a part (`POST /parts/{id}/renumber`).** Changes the number ON THE PART. Everything
+> pointing at it follows automatically — stock, open work orders, BOM lines, POs, material ties and
+> lots are all FKs on `part_id`, not copies of the string — and the old number keeps resolving, so a
+> traveler in the rack, an MTR in the cabinet, a customer PO or a shop spreadsheet still finds it.
+>
+> This is deliberately **not** supersession (a new part plus an obsolete old one). For a part the
+> shop has been running, superseding forces BOM rework, a stock transfer, and two permanent
+> identities for one physical article — which AS9100D 8.5.2 wants fewer of, not more.
+>
+> **Role: ADMIN / MANAGER — deliberately NOT Supervisor.** Renumbering is a controlled change to
+> article identity, so it sits with `POST /parts/{id}/revision`, not with the `PUT /parts/{id}` edit
+> tier. The client gates the control on `parts:renumber`, whose holders are exactly that set.
+>
+> Body: `new_part_number` (strict `PartNumber`, upper-cased), `expected_part_number` (plain `str`),
+> `reason` (required, non-blank — every identity-affecting verb here requires one).
+>
+> **The two part-number fields are typed differently on purpose.** `expected_part_number` MUST be a
+> plain `str`, because `PartNumber` rejects `/`, `"` and spaces — typing it strictly would make the
+> verb unable to name the old number of `1/4" PLATE 48 X 96`, which is exactly the flagship case.
+> `new_part_number` keeps the strict type, making the verb a one-way ratchet onto the canonical
+> grammar: you can renumber *off* a legacy string but not *onto* one. Same split as
+> `PartResponse` vs `PartCreate`.
+>
+> **`expected_part_number` is a compare-and-swap precondition, not decoration.** `Part` maps no
+> optimistic-lock `version` column, so the old number string is the only concurrency control there
+> is. Send what the client last read; a mismatch is **409** rather than retiring a number the
+> operator never saw.
+>
+> Refusals, **all raised before any write** so a refused request leaves the row untouched:
+> **404** unknown/soft-deleted part · **409** stale `expected_part_number` · **409** target held by a
+> live part, a soft-deleted one, or is a retired number of a *different* part · **409** the number
+> being retired is already another part's retired number · **422** invalid new number.
+> Re-stating the part's current number returns **200** and writes nothing (`no_op: true`).
+>
+> **What it does NOT do, and why.** Operation names on assembly work orders carry the component's
+> number baked into their text (`"ABC-1 - Deburr"`). Those are **never rewritten**: an operation name
+> on a released work order is part of the released quality plan (invariant 5, the same call
+> CLAUDE.md's `operation_number` convention makes), the rewrite could not distinguish a minted name
+> from a supervisor's hand-typed one, and `WorkOrderOperation` maps `version_id_col` so a bulk
+> rewrite would throw **409 at an operator's Complete button**.
+>
+> Instead the renumber **drains first**: before the swap, while the old number still matches, it
+> re-links every affected open operation to the part by FK, via the existing BOM-gated
+> `_reconcile_operation_component_quantities`. That string is not just a label — the reconcile splits
+> it and uses the prefix as a LOOKUP KEY to repair a NULL `component_part_id` and reconcile
+> `component_quantity`, the operator's quantity target. **Reversing the drain and the swap silently
+> breaks that with no error anywhere**, which is why the ordering is pinned by a test. The response
+> reports `work_orders_repaired` and `operations_with_stale_prefix` (what still reads the old number
+> as text).
+>
+> Delegating to the existing reconcile rather than re-implementing the match is also load-bearing:
+> that function is BOM-membership-gated, and a broader "any operation whose name starts with this
+> number" pass would set `component_part_id` on rows where NULL is a **discriminator** — collapsing a
+> pooled work order's per-line progress to the header number on the shop-floor TV.
+>
+> **Sheet and plate: disclosed, never refused.** For flat stock the part number IS the material spec
+> — thickness, size and alloy are parsed out of the string, because `Part` carries no such columns.
+> Renumbering therefore changes what the laser-nest matcher believes the material is, and a number
+> that stops stating a spec makes the sheet **stop being suggested** for nests silently. The impact
+> read returns `sheet` (before/after) plus a `SHEET_SPEC_LOST` / `SHEET_SPEC_GAINED` /
+> `SHEET_SPEC_CHANGED` advisory so the confirm screen can say so in the planner's own words. It is an
+> **advisory, not a blocker**: if the current string is wrong the matcher is *already* mis-matching,
+> so refusing would block the repair — and the number is free text, so a refusal would only push the
+> operator to a spelling that defeats the check.
+>
+> **Audit.** One `resource_type='part'` UPDATE row, filed under the **OLD** number — `log_update`
+> reads the attribute after the swap, so the natural implementation files it under the new one and an
+> auditor searching the old number finds nothing, which is exactly the search anyone investigating a
+> renumber performs. `extra_data` carries `old_part_number`, `new_part_number`, the `reason`, the
+> alias id, and the drain counts (the gate's verdict is not reconstructable later — a work order
+> raised five minutes afterwards makes the part look as though it always had that history).
+>
+> Certificates of conformance, closed POs, received lots and posted stock movements keep the old
+> number permanently. That is correct: a record must say what it said.
 
 > **Retired part numbers keep resolving (`part_number_aliases`).** A part can be renumbered in
 > place, which retires its old number rather than deleting it. One immutable row per retired number
