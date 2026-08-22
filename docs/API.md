@@ -2854,13 +2854,19 @@ mixed**:
 > **So every door that mints or renames a part refuses a number that is not free**, via the shared
 > `find_part_number_conflict`, which checks **three** holders (each with its own message, because the
 > remedies differ):
-> 1. a **live part** — `400 Part number '...' is already used by ...`;
-> 2. a **soft-deleted part** — `400 ... belongs to a deleted part. Restore that part, or choose a
->    different number.` `uq_parts_company_part_number` carries **no partial predicate**, so a
->    tombstone still owns its number (invariant 3's named duplicate-probe exception). Probing live
->    rows only used to pass here and then die on the constraint — and `main.py` has no
->    `IntegrityError` handler, so that was a **500**;
-> 3. a **retired alias** — `400 ... is a retired number and still points at an existing part.`
+> 1. a **live part** — `400 Part number 'X' already exists — it belongs to <part name>.`;
+> 2. a **soft-deleted part** — `400 Part number 'X' already exists on a deleted part. Restore that
+>    part, or choose a different number.` `uq_parts_company_part_number` carries **no partial
+>    predicate**, so a tombstone still owns its number (invariant 3's named duplicate-probe
+>    exception). Probing live rows only used to pass here and then die on the constraint — and
+>    `main.py` has no `IntegrityError` handler, so that was a **500**;
+> 3. a **retired alias** — `400 Part number 'X' already exists as a retired number for <current
+>    number>. Reusing it would make older paperwork resolve to the wrong part.`
+>
+> All three lead with **"already exists"** — the phrase this app has always used for a taken part
+> number, and one an E2E test asserts an operator sees. What each adds is *which* thing holds it and
+> what to do about it. A unit test pins the phrase beside the code that emits it, because the first
+> version of this change reworded the message and only the Playwright suite noticed.
 >
 > Wired into `POST /parts/` and `POST /materials/` (the same `parts` table under the same
 > constraint, so a check either door lacked was a hole in both).
