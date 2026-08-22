@@ -198,7 +198,13 @@ def find_part_number_conflict(
     if live is not None:
         return PartNumberConflict(
             code="LIVE_PART",
-            detail=f"Part number '{number}' is already used by {live.part_number} ({live.name}).",
+            # "already exists" is deliberate wording, not incidental: it is the phrase
+            # this app has always used for a duplicate part number, and an E2E test
+            # asserts a user sees it. What is NEW is the second half -- naming the part
+            # that holds it, so the operator knows whether they typed the wrong number
+            # or are duplicating something real. Saying "is already used by <the same
+            # number again>" (the first draft) told them nothing.
+            detail=f"Part number '{number}' already exists — it belongs to {live.name}.",
             part_id=live.id,
         )
 
@@ -213,7 +219,8 @@ def find_part_number_conflict(
         return PartNumberConflict(
             code="DELETED_PART",
             detail=(
-                f"Part number '{number}' belongs to a deleted part. Restore that part, or choose a " "different number."
+                f"Part number '{number}' already exists on a deleted part. Restore that part, or "
+                "choose a different number."
             ),
             part_id=deleted.id,
         )
@@ -223,10 +230,20 @@ def find_part_number_conflict(
         alias_q = alias_q.filter(PartNumberAlias.part_id != excluding_part_id)
     alias = alias_q.first()
     if alias is not None:
+        # Name the part it still points at -- "a retired number" alone leaves the
+        # operator with nothing to check. Resolved rather than stored on the alias,
+        # because a second stored copy of a part's current number goes stale on the
+        # NEXT renumber (see the model docstring on why there is no such column).
+        holder = (
+            tenant_query(db, Part, company_id)
+            .filter(Part.id == alias.part_id, Part.is_deleted == False)  # noqa: E712
+            .first()
+        )
+        holder_label = holder.part_number if holder else "another part"
         return PartNumberConflict(
             code="RETIRED_ALIAS",
             detail=(
-                f"Part number '{number}' is a retired number and still points at an existing part. "
+                f"Part number '{number}' already exists as a retired number for {holder_label}. "
                 "Reusing it would make older paperwork resolve to the wrong part."
             ),
             part_id=alias.part_id,
