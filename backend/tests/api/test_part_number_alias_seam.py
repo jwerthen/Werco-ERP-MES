@@ -370,3 +370,60 @@ class TestBomImportDoesNotForkTheCatalog:
         part, missing, was_created = self._ensure(db_session, None, number="GENUINELY-NEW-1")
         assert part is not None and was_created is True and missing is None
         assert db_session.query(Part).filter(Part.company_id == COMPANY_A).count() == before + 1
+
+
+@pytest.mark.api
+@pytest.mark.requires_db
+class TestConflictMessageWording:
+    """The user-visible phrase, pinned where it is produced.
+
+    This class exists because of a real miss: widening the duplicate-part check to
+    cover tombstones and retired numbers also REWORDED the message, from "Part
+    number already exists" to something that did not contain that phrase. Nothing
+    at unit level noticed -- the only guard was a Playwright test asserting what an
+    operator sees, which failed in CI after the fact.
+
+    A backend change should not learn about broken user-facing copy from an E2E
+    suite that needs a seeded database and five minutes. So the phrase is pinned
+    here, next to the code that emits it.
+
+    All three branches say "already exists" because in all three the number is
+    genuinely taken; they differ in what they tell you to do about it.
+    """
+
+    def test_every_conflict_says_already_exists(self, db_session: Session):
+        live = _make_part(db_session, part_number="LIVE-1", name="Live Widget")
+        _make_part(db_session, part_number="DEAD-1", is_deleted=True)
+        renamed = _make_part(db_session, part_number="NEW-1")
+        _retire(db_session, part=renamed, number="RETIRED-1")
+
+        for number in ("LIVE-1", "DEAD-1", "RETIRED-1"):
+            conflict = find_part_number_conflict(db_session, COMPANY_A, number)
+            assert conflict is not None, number
+            assert "already exists" in conflict.detail, f"{number}: {conflict.detail!r}"
+        assert live is not None  # (keeps the fixture meaningful to a reader)
+
+    def test_the_live_message_names_the_part_holding_the_number(self, db_session: Session):
+        """The half that is NEW, and the reason the rewording happened at all.
+
+        Naming the holder is what tells an operator whether they typed the wrong
+        number or are duplicating something real. The first draft said "is already
+        used by <the same number again>", which told them nothing.
+        """
+        _make_part(db_session, part_number="LIVE-1", name="Bracket Assembly")
+        conflict = find_part_number_conflict(db_session, COMPANY_A, "LIVE-1")
+        assert "Bracket Assembly" in conflict.detail
+
+    def test_the_retired_message_names_the_part_it_still_points_at(self, db_session: Session):
+        """ "A retired number" alone leaves the operator nothing to go and check."""
+        renamed = _make_part(db_session, part_number="NEW-456")
+        _retire(db_session, part=renamed, number="OLD-123")
+
+        conflict = find_part_number_conflict(db_session, COMPANY_A, "OLD-123")
+        assert conflict.code == "RETIRED_ALIAS"
+        assert "NEW-456" in conflict.detail
+
+    def test_the_deleted_message_names_the_recovery(self, db_session: Session):
+        _make_part(db_session, part_number="DEAD-1", is_deleted=True)
+        conflict = find_part_number_conflict(db_session, COMPANY_A, "DEAD-1")
+        assert "Restore" in conflict.detail
