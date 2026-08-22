@@ -134,11 +134,12 @@ from datetime import date
 from typing import Optional
 
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.db.tenant_filter import tenant_query
 from app.models.laser_nest import LaserNest, LaserNestPackage
 from app.models.part import Part
+from app.models.part_number_alias import normalize_alias_key
 from app.models.process_sheet import WOOperationStep
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
@@ -154,6 +155,7 @@ from app.services.audit_service import AuditService
 from app.services.laser_nest_service import _recompute_child_quantity_ordered, _uom_value
 from app.services.laser_nest_text import normalize_nest_descriptors
 from app.services.material_tie_part_gate import PART_NOT_TIEABLE_REASON, part_is_tieable_material
+from app.services.part_number_resolver import resolve_part_by_number
 
 # No module logger, deliberately. Every omission this service can produce has a channel
 # that reaches the planner (the two ``skipped_*`` lists) and the audit chain; anything
@@ -698,6 +700,64 @@ def _copy_header(
     return new_work_order
 
 
+def _remint_component_prefix(operation: WorkOrderOperation, company_id: int, db: Session) -> str:
+    """The copied operation's name, with a stale component prefix refreshed.
+
+    A BOM-exploded operation's ``name`` is minted ``f"{component.part_number} -
+    {routing_op.name}"``. That prefix is a SNAPSHOT of the number the component
+    carried when the SOURCE work order was raised, and copying it verbatim into a
+    brand-new DRAFT job -- which will then be released and run -- injects a dead
+    identifier into fresh production. Not a decaying legacy problem: every future
+    duplicate of that work order would carry it.
+
+    So the prefix is re-minted here, and ONLY under a proof:
+
+        the existing prefix must itself resolve to THIS operation's component part
+
+    resolved case-insensitively through the part's current number or one of its
+    RETIRED numbers (``part_number_aliases``). That guard is the whole design. Without
+    it this would rewrite a supervisor's hand-typed ``"Weld - Station 3"`` into
+    ``"BRACKET-9 - Station 3"``, destroying an instruction -- ``PUT
+    /work-orders/operations/{id}`` exposes ``name`` as free text, so any operation can
+    legitimately hold a name that merely LOOKS minted.
+
+    Anything unproven falls through VERBATIM. A copy that fails to refresh is a
+    cosmetic staleness the floor can read past; a copy that rewrites a human's
+    instruction is lost information.
+
+    WHY THIS DOES NOT CONTRADICT THIS MODULE'S OWN RULE. ``_copy_operations``
+    deliberately refuses to re-derive ``component_quantity`` from today's BOM, on the
+    grounds that the instructions CARRY and the plan is reproduced, not recomputed.
+    That objection does not reach here: this re-mints a DISPLAY IDENTIFIER for a
+    ``component_part_id`` that is itself copied unchanged, so it names the same
+    physical article the source named -- it does not consult a BOM, and it cannot
+    change what the operation is for. The closer precedent is laser-nest descriptors,
+    which this same service deliberately re-canonicalizes on the way across so a
+    duplicate cannot re-inject a legacy spelling.
+    """
+    name = operation.name or ""
+    component = operation.component_part
+    if not component or " - " not in name:
+        return name
+
+    prefix, remainder = name.split(" - ", 1)
+    prefix = prefix.strip()
+    if not prefix:
+        return name
+
+    if normalize_alias_key(prefix) == normalize_alias_key(component.part_number):
+        # Already current -- the overwhelmingly common case. Return the original
+        # string rather than a rebuilt one so nothing else about it can drift.
+        return name
+
+    # The prefix is not the component's current number. Re-mint ONLY if it is a
+    # number that component used to carry; otherwise it is somebody's own text.
+    resolution = resolve_part_by_number(db, company_id, prefix)
+    if resolution and resolution.part.id == component.id:
+        return f"{component.part_number} - {remainder}"
+    return name
+
+
 def _copy_operations(
     db: Session,
     *,
@@ -749,6 +809,9 @@ def _copy_operations(
     """
     source_operations = (
         tenant_query(db, WorkOrderOperation, company_id)
+        # component_part is read by _remint_component_prefix on every row; without
+        # this it is one lazy SELECT per operation on a 40-nest package.
+        .options(selectinload(WorkOrderOperation.component_part))
         .filter(WorkOrderOperation.work_order_id == source.id)
         .order_by(WorkOrderOperation.sequence, WorkOrderOperation.id)
         .all()
@@ -781,7 +844,10 @@ def _copy_operations(
             component_quantity=operation.component_quantity,
             sequence=operation.sequence,
             operation_number=operation.operation_number,
-            name=operation.name,
+            # Re-minted when (and only when) the existing prefix provably names this
+            # operation's own component part -- see _remint_component_prefix. Anything
+            # else copies verbatim.
+            name=_remint_component_prefix(operation, company_id, db),
             description=operation.description,
             operation_group=operation.operation_group,
             setup_instructions=operation.setup_instructions,
