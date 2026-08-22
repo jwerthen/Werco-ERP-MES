@@ -29,6 +29,7 @@ import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import WorkOrders from './WorkOrders';
 import { ToastProvider } from '../components/ui/Toast';
+import { formatCentralDate } from '../utils/centralTime';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -376,5 +377,38 @@ describe('WorkOrders inline due-date quick edit', () => {
         version: 7,
       })
     );
+  });
+
+  it('a click in the due-date cell still opens the row; only the pencil is inert', async () => {
+    /**
+     * The INVERSE of the guard above, and the half a passing suite was missing.
+     *
+     * The swallow must be scoped to the PENCIL, not to the cell or the column.
+     * Widening it — a stopPropagation on the wrapper span, or on the column's
+     * render — would leave the editor working perfectly while silently killing
+     * click-through on one of the widest cells in the row. Every existing test
+     * would still pass.
+     */
+    renderWorkOrders();
+    const table = await getDesktopTable();
+
+    const pencil = within(table).getByRole('button', { name: 'Edit due date for WO-1001' });
+    const cell = pencil.closest('td');
+    expect(cell).not.toBeNull();
+
+    // Click the innermost CONTENT — the rendered date — not the <td>. That
+    // distinction is the whole test: a real click lands on the deepest element and
+    // BUBBLES up through the cell's wrapper span to the row. Dispatching straight
+    // at the <td> skips every child, so it cannot observe a stopPropagation added
+    // to one of them — an earlier version of this test did exactly that and passed
+    // against the widened swallow it was written to catch.
+    const dateText = within(cell!).getByText(formatCentralDate('2099-03-04'));
+    fireEvent.click(dateText);
+    expect(mockNavigate).toHaveBeenCalledWith('/work-orders/1');
+
+    // The button itself does not.
+    mockNavigate.mockClear();
+    fireEvent.click(pencil);
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 });
