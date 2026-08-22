@@ -72,6 +72,25 @@ export default function KioskCrewJobCard({ item, nowMs, onSelect, disabled = fal
         <div className="mt-1 truncate text-lg text-fd-mute">
           {formatOperationLabel(item.operation_number)} · {item.operation_name || 'Operation'}
         </div>
+        {/* The COMPONENT this operation builds, when it is not the work order's own
+            part. The number above is the ASSEMBLY's, so on a BOM-exploded job it is
+            not what the operator is holding.
+
+            Read LIVE from the part. The component's number also appears inside
+            `operation_name` as a baked-in prefix, but that is a snapshot from the day
+            the work order was raised — and a part can be renumbered, which
+            deliberately does NOT rewrite operation names (they are part of the
+            released quality plan). This line is what keeps the floor building to an
+            identifier the system still recognizes. */}
+        {item.component_part_number ? (
+          <div className="mt-1 truncate text-lg">
+            <span className="text-fd-mute">Component </span>
+            <span className="font-mono font-semibold text-fd-ink">{item.component_part_number}</span>
+            {item.component_part_name ? (
+              <span className="text-fd-mute"> · {item.component_part_name}</span>
+            ) : null}
+          </div>
+        ) : null}
 
         {/* Live crew roster — one chip per open TimeEntry, with a running timer. */}
         {roster.length > 0 && (

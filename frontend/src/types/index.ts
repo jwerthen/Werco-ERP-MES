@@ -1378,6 +1378,19 @@ export interface DispatchBoardRow {
   operation_name: string | null;
   part_number: string | null;
   part_name: string | null;
+  /**
+   * The COMPONENT this operation builds, when it is not the work order's own part.
+   *
+   * On a BOM-exploded assembly, `part_number` above is the ASSEMBLY's — not what
+   * gets made at this station. The component's number also appears inside
+   * `operation_name` as a baked-in prefix, but that is a SNAPSHOT from when the
+   * work order was raised; a renumber deliberately does not rewrite released
+   * operation names, so the prefix can go stale while this stays live.
+   *
+   * Optional so pre-feature payloads still typecheck; null on the ordinary case.
+   */
+  component_part_number?: string | null;
+  component_part_name?: string | null;
   status: string;
   priority: number | null;
   /** Date-only ISO string (YYYY-MM-DD) — format via centralTime, never `new Date()`. */

@@ -146,6 +146,22 @@ class DispatchQueueRow(UTCModel):
     operation_number: Optional[str] = None
     operation_name: str
     part_number: Optional[str] = None
+    # The COMPONENT's own number, read LIVE from the part.
+    #
+    # On an assembly work order the operation builds a component, not the work
+    # order's produced part -- so ``part_number`` above is the ASSEMBLY's. Until now
+    # the component's number reached this board only through the prefix baked into
+    # ``operation_name`` at mint time, which is a SNAPSHOT of whatever the number was
+    # the day the work order was raised.
+    #
+    # Once parts became renumberable that snapshot could go stale, and the renumber
+    # deliberately does not rewrite operation names (they are part of the released
+    # quality plan). Deriving this live is what keeps the board honest -- for that
+    # rename and every future one -- without mutating a released record.
+    #
+    # NULL on the ordinary case: most operations carry no component.
+    component_part_number: Optional[str] = None
+    component_part_name: Optional[str] = None
     part_name: Optional[str] = None
     status: str
     priority: Optional[int] = None

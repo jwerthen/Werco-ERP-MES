@@ -122,6 +122,16 @@ export default function KioskHeldCard({
         {item.operation_name ? ` ${item.operation_name}` : ''}
       </div>
 
+      {/* The COMPONENT this held operation builds, when it is not the work order's
+          own part. Read LIVE — the copy inside operation_name above is a snapshot
+          from when the work order was raised, which a renumber leaves alone. */}
+      {item.component_part_number ? (
+        <div className={`mt-1 min-w-0 truncate text-fd-body ${crew ? 'text-lg' : 'text-[13px]'}`}>
+          <span className="text-fd-mute">Component </span>
+          <span className="font-mono font-semibold text-fd-body-2">{item.component_part_number}</span>
+        </div>
+      ) : null}
+
       {/* Why it stopped — the whole point of the card. */}
       <div
         data-testid="kiosk-held-reason"
