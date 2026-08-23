@@ -506,7 +506,9 @@ tier, that tier stands — this rule is a floor, never a loosening.
 | Edit | ✓ | ✓ | ✓ | | | | |
 | **Arm automatic BOM backflush** (`backflush_components`) | ✓ | ✓ | ✓ | | | | |
 | View backflush readiness / dry-run preview | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **Deactivate / reactivate** (`POST /parts/{id}/deactivate` · `/activate`) | ✓ | ✓ | | | | | |
 | Delete | ✓ | | | | | | |
+| Restore a deleted part | ✓ | ✓ | | | | | |
 
 > **The backflush row is the ordinary Edit row, and that is a recorded decision, not an omission**
 > (`feat/backflush-exposure`, PR 4.5). `Part.backflush_components` opts a part into **automatic
@@ -552,6 +554,40 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > (any authenticated user in the tenant) and are **pure reads: they write nothing**, not even an audit
 > row. See `docs/API.md` → Parts → Part Schema, and
 > [docs/MATERIAL_CONSUMPTION_PLAN.md](MATERIAL_CONSUMPTION_PLAN.md) → "Exposing the flag (PR 4.5)".
+
+> **Deactivate / reactivate a part — ADMIN / MANAGER, deliberately narrower than the Edit row.**
+> `POST /parts/{id}/deactivate` and `POST /parts/{id}/activate` (shipped with the Combine/Merge SKUs
+> feature, to retire the SKU a combine folded away) are `require_role([ADMIN, MANAGER])` — the same
+> identity tier as `POST /parts/{id}/renumber` and `POST /parts/{id}/revision`, not the
+> `PUT /parts/{id}` tier that reaches Supervisor. **A Supervisor gets 403.** Deactivation removes the
+> part from every picker, search and purchasing signal in the app, so a required `reason` is captured
+> on the deactivate side (the activate side's is optional — the permissive direction is visible the
+> moment it happens); both write a `resource_type="part"` UPDATE row on the tamper-evident chain.
+>
+> **These two verbs are the ONLY non-delete writers of `parts.is_active`, and that is an
+> authorization decision, not a plumbing one.** `is_active` doubles as the **soft-delete mask**
+> (`delete_part` sets `is_deleted` AND `is_active=false` AND `status='obsolete'` together), so adding
+> `is_active` or `status` to `PartUpdate` would hand every **Supervisor** a way to clear a delete mask
+> through an ordinary blind-`setattr` form save on `PUT /parts/{id}` or `PUT /materials/{id}`, neither
+> of which filters `is_deleted` on its lookup. That is the 2026-08-16 `Vendor` trap invariant 3
+> records. Both verbs additionally **404 a soft-deleted part** (*"restore it first"*) for the same
+> reason.
+>
+> **A restore returns the RECORD, not the permission (behaviour change).**
+> `POST /parts/{id}/restore` used to hard-code `is_active = True`. It now returns the part to the
+> `is_active` it had before the delete (`COALESCE(is_active_before_delete, false)`, migration `086`),
+> and an unknowable prior value — NULL, meaning the part was deleted before `086` — resolves
+> **INACTIVE**. The reasoning is invariant 3's, and it is an RBAC argument: putting a retired part
+> number back into use is an engineering decision that must be *made*, by someone holding the
+> activate verb, with an audit row saying so — never inherited as a side effect of undoing a delete.
+> Restoring too restrictively costs one explicit audited re-activation and is visible immediately;
+> restoring too permissively is indistinguishable from a legitimate approval and is never detected.
+> Same control migration `082` established for `Vendor`. Because a restrictive restore obliges shipping
+> the screen that undoes it, **Materials** has an **In Use / Retired** view that reaches a retired part so
+> the audited activate verb can switch it back on — the obligation the Vendors **Active / Inactive /
+> Deleted** switch discharges on that side. ⚠️ The **Parts** page has no equivalent view yet, so an
+> inactive-restored *engineering* part is still only reachable by calling the endpoint directly. See
+> `docs/API.md` → Parts.
 
 ### BOMs
 
@@ -851,6 +887,8 @@ tier, that tier stands — this rule is a floor, never a loosening.
 | Issue | ✓ | ✓ | ✓ | | | | |
 | Receive | ✓ | ✓ | ✓ | | | | |
 | Transfer | ✓ | ✓ | ✓ | | | | |
+| **Preview a SKU combine** | ✓ | ✓ | ✓ | | | | |
+| **Combine two SKUs** (`inventory:combine`) | ✓ | ✓ | | | | | |
 | Create location | ✓ | ✓ | | | | | |
 | Create / complete cycle count | ✓ | ✓ | ✓ | | | | |
 | Start (open) cycle count | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
@@ -882,6 +920,40 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > Admin / Manager / Supervisor (+ Platform Admin, who bypasses `require_role` server-side). Per the
 > [Access enforcement model](#access-enforcement-model) the UI gate remains cosmetic — the server
 > gate is the control.
+
+> **Combine two SKUs — endpoint mapping, and why the write is NARROWER than Adjust.**
+>
+> | Step | Endpoint | Gate |
+> |------|----------|------|
+> | Preview (pure read — writes nothing) | `POST /inventory/combine/preview` | `require_role(STOCK_MUTATOR_ROLES)` = `[ADMIN, MANAGER, SUPERVISOR]` |
+> | Perform the combine | `POST /inventory/combine` | `require_role([ADMIN, MANAGER])` |
+>
+> **A Supervisor can look, and gets 403 on the write.** That split is the whole point. Adjusting one
+> lot corrects a **count**; folding two part numbers together changes which **article** the material
+> *is* — a controlled change to article identity under AS9100D 8.5.2. So the write sits with
+> `POST /parts/{id}/renumber` and `POST /parts/{id}/revision` (both ADMIN/MANAGER), **not** with the
+> stock-mutator tier that `inventory:adjust` / `inventory:transfer` occupy. The preview stays wider
+> because a supervisor investigating *"why do we have this sheet on two numbers?"* needs to be able to
+> look, and it is structurally incapable of writing anything (`build_combine_preview` takes no
+> `AuditService` and no actor id — the same posture as `GET /parts/{id}/renumber-impact` and the
+> backflush-readiness reads).
+>
+> **The client permission key is `inventory:combine`**, held by `platform_admin`, `admin` and
+> `manager` only (`frontend/src/utils/permissions.ts`), so the hidden control and the refused call
+> agree. It is deliberately a **narrower** key than `inventory:adjust`, which reaches Supervisor —
+> a separate key rather than a reuse, because the two authorize genuinely different acts.
+>
+> **It is FRONTEND-ONLY, and that is the `parts:renumber` pattern, not an omission.** The key is
+> deliberately absent from the backend's `role_permission.py` `ALL_PERMISSIONS` /
+> `PERMISSION_CATEGORIES`, exactly as `parts:renumber` is. Per the
+> [Access enforcement model](#access-enforcement-model): **the key gates the button; the backend
+> `require_role` is the enforcement.** Adding it to the backend catalog would imply a second
+> authorization surface that nothing consults.
+>
+> The paired part-activation verbs shipped with this feature — `POST /parts/{id}/deactivate` and
+> `POST /parts/{id}/activate`, used to retire the folded-away SKU — carry the **same**
+> `require_role([ADMIN, MANAGER])` gate, for the same reason. See the Parts section below and
+> `docs/API.md` → Inventory → "Combining two SKUs".
 
 > **Cycle counts — endpoint mapping.** On `app/api/endpoints/inventory.py`:
 >

@@ -1172,11 +1172,31 @@ def combine_inventory_endpoint(
       number strings ARE the concurrency control, applied as a compare-and-swap.
     * **409** ``unit_of_measure_mismatch`` — the two parts are stocked in different units.
     * **409** ``no_available_stock`` — the source has nothing free to move. This is what
-      a SECOND combine of an already-drained SKU gets. (A literal ``quantity: 0`` body is
-      a **422** before this handler runs — the field is ``gt=0``.)
+      a SECOND combine of an already-drained SKU gets. (A ``quantity`` at or below
+      ``MINIMUM_COMBINE_QUANTITY`` is a **422** before this handler runs — the field is
+      ``gt=MINIMUM_COMBINE_QUANTITY``, which is the ledger epsilon, not ``gt=0``. The two
+      have to agree: at ``gt=0`` a request of ``1e-10`` passed validation, moved nothing,
+      and still wrote an immutable header row, an audit row and an event for a combine
+      that never happened.)
+    * **400** ``quantity_below_minimum`` — the service-level backstop for the same thing,
+      ordered AFTER the availability probes so a drained SKU still reports
+      ``no_available_stock`` first, which is the more useful answer.
     * **409** ``quantity_exceeds_available`` — more was requested than is eligible.
     * **409** ``open_work_order_reservation`` — open material ties still expect to draw
-      this material; the refusal names the work orders to untie or re-tie first.
+      this material; the refusal names the work orders to untie or re-tie first. Measured
+      against DRAWABLE stock, not total on-hand: material the engine cannot pull (held,
+      quarantined, on a deactivated row, or withheld for a lot-pinned tie) can never
+      "cover" a tie, so counting it would let a fold strand a job that was satisfiable
+      before it.
+    * **409** ``target_row_not_available`` — the stock would land on a target row that is
+      on hold, quarantined, rejected or deactivated. The refusal names the location, lot
+      and status. Without it the verb quietly turns usable material into unusable
+      material: the fold reports success, and the moved quantity is instantly invisible to
+      the consumption engine and the nest matcher.
+    * **409** ``target_serial_mismatch`` — the source row carries a serial number and the
+      row it would land on carries a different one (checked symmetrically, so a blank on
+      either side while the other is set also refuses). Merging them would leave one stock
+      row claiming two units under one serial.
     * **409** ``flagged_part_not_acknowledged`` — a part whose number or name reads as a
       test/housing part must be confirmed explicitly via ``acknowledge_flagged_part_ids``.
       An acknowledgement gate, not a ban: "housing" is a real manufacturing word.

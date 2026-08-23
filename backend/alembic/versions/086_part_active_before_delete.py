@@ -72,13 +72,15 @@ verbs, not a general-purpose flag, and it is deliberately kept out of
 ``PUT /materials/{id}`` -- both blind ``setattr`` loops -- can pre-seed what the
 restore will read back.
 
-Known gap, stated so it is not mistaken for a bug in this migration:
-``DELETE /materials/{id}`` (app/api/endpoints/materials.py::delete_material) is a
-SECOND soft-delete writer of ``parts.is_active`` and does NOT record the sidecar.
-A material deleted through that verb therefore restores with NULL -> INACTIVE,
-i.e. the restrictive fallback. That is the safe direction, and closing the gap
-(mirroring the two-line capture into ``delete_material``) is a follow-up, not a
-schema change.
+``parts`` has TWO soft-delete doors and only ONE restore door, and all three now
+agree. ``DELETE /materials/{id}`` (app/api/endpoints/materials.py::delete_material)
+writes the same ``parts`` rows and has no restore verb of its own, so its deletes
+come back through ``POST /parts/{id}/restore`` -- which reads this sidecar. Both
+doors therefore record it, immediately before the ``is_active = False`` mask write
+(the order is load-bearing: reversed, it always records ``False``). Had only one
+door captured it, every part deleted through the other would restore INACTIVE no
+matter how it was really switched -- the safe direction, but a record asserting
+something that was never true.
 
 NULL is meaningful -- no backfill, forward-only
 -----------------------------------------------

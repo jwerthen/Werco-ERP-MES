@@ -2736,7 +2736,9 @@ mixed**:
 | GET | `/parts/{id}` | Get part by ID | Yes |
 | PUT | `/parts/{id}` | Update part — resolves **any** part in the company, engineering or material/supply. (**409** when it turns `backflush_components` on and the part's readiness check reports blockers, and **409** when it reclassifies a material part into a produced one while an **unfinished** work order still ties it — see below) | Admin / Manager / Supervisor |
 | DELETE | `/parts/{id}` | Delete part (soft delete — restorable) | Admin |
-| POST | `/parts/{id}/restore` | Restore a soft-deleted part | Admin / Manager |
+| POST | `/parts/{id}/restore` | Restore a soft-deleted part, **returning it to the `is_active` it had when it was deleted** — not an unconditional re-activate, and an unknowable prior value comes back **inactive**. **400** if it is not actually deleted. See note below | Admin / Manager |
+| POST | `/parts/{id}/deactivate` | Take a part out of use — `is_active=false` + `status='obsolete'`. **Not** a delete; `is_deleted` is never written. Reason required. **409** if it still has stock and `acknowledge_remaining_stock` was not set | **Admin / Manager** |
+| POST | `/parts/{id}/activate` | Put a retired part back into use. Reason optional | **Admin / Manager** |
 | GET | `/parts/{id}/bom` | Get BOM for part | Yes |
 | GET | `/parts/{id}/backflush-readiness` | **PR 4.5** — may this part opt into automatic BOM component backflush, and what refuses it if not. Pure read (writes nothing) | Yes |
 | GET | `/parts/by-number/{part_number}` | Get a part by number, **including a number it used to carry**. Case-insensitive. A hit reached through a retired number sets the `X-Resolved-From-Alias` response header | Yes |
@@ -2838,6 +2840,105 @@ mixed**:
 > names the same physical article the source named; it consults no BOM and cannot change what the
 > operation is for. The closer precedent is laser-nest descriptors, which the same service already
 > re-canonicalizes on the way across so a duplicate cannot re-inject a legacy spelling.
+
+> **Taking a part out of use without deleting it (`POST /parts/{id}/deactivate` and
+> `POST /parts/{id}/activate`).** Until these shipped, nothing could do it: `PartUpdate` carries
+> neither `is_active` nor `status`, and the only writer of those columns was `delete_part`, which
+> also soft-deletes. So a leftover empty SKU — a sheet size the shop no longer buys, sitting at 0
+> after a Combine folded its stock away — could only be left cluttering every picker or deleted
+> outright. Now it can simply be retired.
+>
+> - **`deactivate`** — body `{reason (required, non-blank), acknowledge_remaining_stock: bool = false}`.
+>   Sets `is_active=false` **and** `status='obsolete'`, written together so the two can never disagree.
+>   **409** when the part still has material on hand and the acknowledgement was not sent; the on-hand
+>   figure counts **every** stock row, held and quarantined ones included, because those are still
+>   material on a shelf and hiding the part that names them from every list is exactly what is worth
+>   confirming. Deactivating a part with stock is legitimate (a superseded SKU being wound down) but is
+>   never accidental.
+> - **`activate`** — body `{reason?}`. `reason` is optional here, deliberately asymmetric with
+>   `deactivate`: restoring something to use is the permissive direction and is visible the moment it
+>   happens (the part reappears in every list), while taking it out of use is the one that has to be
+>   explainable months later. `status` is only rewritten when it currently reads `obsolete`, so the verb
+>   undoes exactly what `deactivate` did and never clobbers a meaningful third value
+>   (`pending_approval`). The pairing rule is *"inactive implies obsolete"*, not *"active implies active"*.
+> - **Both return 200 with `no_op: true`** when the part is already in the requested state and nothing
+>   was written. A request that changes nothing must not fail — a double-click and a retry are both
+>   ordinary.
+> - Response: `{part_id, part_number, is_active, status, no_op}`. Both are audited (`resource_type="part"`
+>   UPDATE, the reason in `description` and `extra_data`).
+>
+> **Both refuse a soft-deleted part with 404 — *"restore it first"* — and that refusal is
+> load-bearing, not tidiness.** `parts.is_active` doubles as the **soft-delete mask**: `delete_part`
+> sets `is_deleted` AND `is_active=false` AND `status='obsolete'` together. A verb able to set
+> `is_active=true` on a tombstoned row would therefore be clearing a delete mask — the exact
+> 2026-08-16 `Vendor` trap invariant 3 records, where six vendor query sites looked safe only because
+> `delete_vendor` also cleared `is_active`. `POST /parts/{id}/restore` is the verb for a deleted part;
+> these two are not it, and must not become it by accident. `deactivate` refuses one too, for symmetry
+> and because a deleted part is *already* inactive and obsolete.
+>
+> **These two verbs are the ONLY non-delete writers of `parts.is_active`, and that is deliberate.**
+> Do **not** add `is_active` or `status` to `PartUpdate`: `PUT /parts/{id}` and `PUT /materials/{id}`
+> are blind `setattr` loops whose lookups do not filter `is_deleted`, so exposing the flag there would
+> hand every Supervisor a way to clear a soft-delete mask through an ordinary form save.
+>
+> **Role: ADMIN / MANAGER — deliberately not the Supervisor edit tier**, matching the Combine verb
+> these shipped with and the renumber/revision identity tier. See `docs/RBAC_PERMISSIONS.md` → Parts.
+
+> **⚠️ Behaviour change — `POST /parts/{id}/restore` no longer unconditionally re-activates.** It now
+> returns the part to the `is_active` it had **before** the delete, via the nullable
+> `Part.is_active_before_delete` sidecar (migration `086`): `is_active = COALESCE(is_active_before_delete,
+> false)`. `delete_part` records the current value into the sidecar *before* forcing `is_active=false`
+> (order is load-bearing — reversed, it would always record `false`), `DELETE /materials/{id}` does the
+> same on the second soft-delete door into the same `parts` rows, and the restore **clears** the sidecar
+> so a later delete/restore cycle can never read a stale value. The response now reports `is_active` and
+> `status` alongside the message, precisely so a caller can see that a restore came back switched off.
+>
+> **Why it changed.** The old code hard-coded `is_active = True` / `status = "active"`. That was harmless
+> only while "inactive but not deleted" was essentially unreachable for a part. The Combine feature
+> deliberately creates that state at scale — `POST /parts/{id}/deactivate` and the combine's
+> `deactivate_source` flag retire the folded-away SKU as a routine, reasoned, audited step — so the
+> hazard became real: fold `.0625-60X144-304SS` onto `SH-A240-304-0.0625-60X144-2B` and deactivate the
+> source; someone later deletes the empty husk, someone else restores it, and it comes back **active**
+> and selectable again for receiving and BOM lines, the deliberate retirement silently reversed with no
+> audit row saying anyone decided to re-activate it. Invariant 3 (CLAUDE.md) names this directly: **a
+> restore returns the RECORD, not the permission.** Re-activating a recovered part stays the separately
+> audited `POST /parts/{id}/activate`. This is the same control migration `082` established for
+> `Vendor`; `086` is its twin for `parts`.
+>
+> **A NULL sidecar resolves INACTIVE, not active** — the part was deleted before `086`, so its prior
+> `is_active` is genuinely unknowable (the delete overwrote it in place, and the `audit_log` DELETE row
+> records the deletion, not the flag). That is a deliberate break from the old behaviour, not an
+> oversight: restoring too restrictively costs one explicit, audited re-activation and is visible
+> immediately (the part is missing from a list somebody expected it in), while restoring too permissively
+> is indistinguishable from a legitimate approval and is never detected at all. `Part.is_active` is itself
+> nullable, so a row whose `is_active` was NULL also records NULL and restores inactive — erring the safe
+> way. The column must never be tightened to NOT NULL: NULL has to stay reachable to mean *"deleted before
+> `086` shipped"*.
+>
+> `status` follows whatever `is_active` resolves to and is never hard-coded: it is lifted from `obsolete`
+> back to `active` only when the part resolves ACTIVE, the same minimal-rewrite rule `activate_part` uses,
+> so `pending_approval` is never clobbered. Resolving INACTIVE leaves the `obsolete` the delete wrote,
+> upholding the *"inactive implies obsolete"* pairing.
+>
+> **Reaching a part that came back INACTIVE.** Both list endpoints default `active_only=true`, so a
+> retired part is absent from `GET /parts/` and `GET /materials/` unless the caller asks for it. A
+> restrictive restore obliges shipping the screen that undoes it, so **Materials** carries a server-side
+> **In Use / Retired / In Use + Retired** view (the `activity` URL param, which sends `active_only=false`);
+> the Retired view is where a deactivated or inactive-restored material is found, and its edit modal's
+> **Mark Active…** button is the audited `POST /parts/{id}/activate` that switches it back on. It is the
+> same obligation the Purchasing → Vendors **Active / Inactive / Deleted** switch discharges for vendors.
+>
+> **⚠️ Still open for engineering parts.** The Parts page (`PartsNew.tsx`, `GET /parts/`) has no equivalent
+> view, so an inactive-restored *engineering* part is still invisible there and re-activating it means
+> calling `POST /parts/{id}/activate` directly. Materials — which is where the Combine feature retires
+> SKUs, and therefore where the state is actually produced — is covered.
+>
+> The restore's audit row now carries the **real** prior values read off the row (`is_deleted`,
+> `is_active`, `status`) instead of the fabricated `{"is_deleted": true, "status": "obsolete"}` the old
+> code asserted regardless of what the row actually held — a fabricated prior value written into the
+> tamper-evident chain. `is_active` is in the diff on purpose: this verb writes an approval-relevant flag,
+> and leaving it out would make the one column a reader would ask about the one column the restore row
+> does not record.
 
 > **Retired part numbers keep resolving (`part_number_aliases`).** A part can be renumbered in
 > place, which retires its old number rather than deleting it. One immutable row per retired number
@@ -6114,6 +6215,8 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | POST | `/inventory/issue` | Issue inventory manually (**deprecated** — see below; **400** if `work_order_number` is sent) | Admin / Manager / Supervisor |
 | POST | `/inventory/transfer` | Transfer inventory between locations | Admin / Manager / Supervisor |
 | POST | `/inventory/adjust` | Adjust inventory | Admin / Manager / Supervisor |
+| POST | `/inventory/combine/preview` | What folding one SKU onto another would do — blockers, advisories, per-lot lines, the cost delta. **Pure read (writes nothing)** | Admin / Manager / **Supervisor** |
+| POST | `/inventory/combine` | Fold the source SKU's stock onto the target SKU, as two `ADJUST` ledger rows per lot line netting to **zero** | **Admin / Manager** |
 | GET | `/inventory/cycle-counts` | List cycle counts (optional `status`) | Yes |
 | POST | `/inventory/cycle-counts` | Create a cycle count (enrolls matching stock rows — every active row with **nonzero** on-hand, negatives included) | Admin / Manager / Supervisor |
 | POST | `/inventory/cycle-counts/{count_id}/start` | Open a count for counting | All roles except Viewer |
@@ -6228,8 +6331,12 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 >
 > **`reference_type` is unconstrained free text on the ledger** (`String(50)`, no CHECK / enum /
 > domain), so a client filtering `?reference_type=` must treat the value set as **open** — PR 1 added
-> `work_order_operation` and PR 4.4 added `work_order_backflush`, neither with a migration. Filter on
-> `work_order_id` rather than enumerating shapes.
+> `work_order_operation` and PR 4.4 added `work_order_backflush`, neither with a migration, and the
+> Combine verb added **`inventory_combine`** (`reference_id` = the `inventory_combines` header) the
+> same way. Filter on `work_order_id` rather than enumerating shapes — and note that
+> `inventory_combine` is deliberately **outside** `work_order_ledger_filter`, so `work_order_id=`
+> will never return a combine's rows: a combine is not work-order material and must not appear in
+> job costing or a job's lot genealogy. See "Combining two SKUs" below.
 >
 > Paging is `limit` (default 100, **`ge=1, le=500`**) and `offset` (**`ge=0`**, default 0); a value
 > outside those bounds — `limit=0`, `limit=1000`, a negative `offset` — is rejected **422** by
@@ -6403,6 +6510,246 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > `joinedload(CycleCount.items)`, and PostgreSQL refuses `FOR UPDATE` across the `LEFT OUTER JOIN`
 > that produces. A count id from another tenant never resolves, so the lock is tenant-scoped too
 > (**404**).
+
+#### Combining two SKUs
+
+A materials-numbering recut can leave two part numbers naming the **same physical article** — the
+same sheet, on the same rack, counted twice. `POST /inventory/combine` moves the stock from the
+SOURCE number onto the TARGET number without inventing or destroying a single unit.
+
+It is deliberately neither of the two things a shop would otherwise reach for. *Receiving* the
+quantity onto the good number **mints** stock that does not exist; *issuing* it against a fabricated
+work order **destroys** stock that does, and launders a real quantity through a production record
+that never happened. Instead the combine writes **two linked `ADJUST` ledger rows per moved lot
+line, summing to exactly zero** — that identity is the whole safety argument and is pinned by a
+test. Implementation: `app/services/inventory_combine_service.py`, header table
+`inventory_combines` (migration `085`).
+
+**`POST /inventory/combine/preview` — Admin / Manager / Supervisor.**
+
+Body: `{source_part_id: int, target_part_id: int, quantity?: float}`. `quantity` is optional — omit
+it and the preview models the source's full eligible available quantity, which it returns as
+`default_quantity` for the dialog to pre-fill. When present it is bounded `gt` the ledger epsilon,
+not `gt=0`, so the preview refuses exactly the inputs the write refuses.
+
+Response:
+
+| Field | What it is |
+|-------|------------|
+| `source`, `target` | `PartStockSummary` per side: `part_id`, `part_number`, `name`, `part_type`, `unit_of_measure`, `is_active`, `status`, `is_deleted`, `total_on_hand`, `total_allocated`, `total_available`, `total_pinned`, `eligible_available`, and `lines[]` |
+| `lines[]` | Per stock row: `inventory_item_id`, `location`, `warehouse`, `lot_number`, `serial_number`, `quantity_on_hand`, `quantity_allocated`, `quantity_available`, `quantity_pinned`, `quantity_combinable`, `unit_cost`, `status`, `eligible`, `ineligible_reason` |
+| `unit_of_measure_match` | `uom_label(source) == uom_label(target)`, with a **blank on either side counting as a match** — a part stating no unit makes no claim to contradict (the `uom_disagrees` rule). A blank still raises the `unit_of_measure_unstated` advisory |
+| `default_quantity` | The source's full eligible available quantity |
+| `max_combinable_quantity` | The largest quantity that would **not** trip the open-work-order reservation check, so a dialog can offer the safe number instead of a dead end |
+| `reserved_quantity` | Total outstanding demand from open work-order ties naming the source part |
+| `eligible` | `blockers == []`. **A snapshot, never authorization** — see below |
+| `blockers[]`, `advisories[]` | `{code, detail}`. `detail` is verbatim the sentence the write raises, so the dialog can never explain a refusal in words that disagree with the refusal the operator is about to get |
+| `flagged_parts[]` | `{part_id, part_number, matched_token, field}` — see `flagged_part_not_acknowledged` |
+| `open_source_reservations[]` | `{work_order_id, work_order_number, work_order_status, outstanding_quantity}` |
+| `cost` | `{source_weighted_unit_cost, target_weighted_unit_cost, differs, note}` |
+
+**The preview writes nothing, and that is structural rather than conventional.**
+`build_combine_preview` takes no `AuditService` and no actor id, so it cannot write an audit row, a
+ledger row or an operational event even by accident — the same rule
+`GET /parts/{id}/renumber-impact` and `GET /parts/{id}/backflush-readiness` follow: *a poll is not
+an actor and records no reason.*
+
+**And `eligible: true` is not permission.** Every input the preview reads is mutable by other people
+— stock moves, ties open, parts get renumbered — so `POST /inventory/combine` **re-runs every probe
+server-side**, against state read under its own row locks. A client must never treat a stale
+`eligible: true` as licence to skip the refusal it is about to receive. (Same contract as
+`PartRenumberImpactResponse` and `PartBackflushReadinessResponse`, deliberately.)
+
+The preview is gated **wider than the write** on purpose: a supervisor investigating *"why do we
+have this sheet on two numbers?"* needs to be able to look. Only folding them together is
+restricted.
+
+**`POST /inventory/combine` — Admin / Manager.**
+
+Body: `{source_part_id, target_part_id, quantity (gt epsilon), reason (5–500 chars, non-blank),
+expected_source_part_number, expected_target_part_number, acknowledge_flagged_part_ids: int[] = [],
+deactivate_source: bool = false}`.
+
+Response: `{combine_id, combine_number, source_part_id, source_part_number, target_part_id,
+target_part_number, quantity_moved, lines_moved, source_quantity_before, source_quantity_after,
+target_quantity_before, target_quantity_after, source_deactivated, lines[], transaction_ids[]}`,
+where each line is `{location, lot_number, quantity, unit_cost, source_inventory_item_id,
+target_inventory_item_id, target_row_created}`. The four before/after figures are what make the
+acceptance check answerable on the response alone: source 92 → 0, target 141 → 233, total unchanged.
+
+`combine_number` is minted `COMB-{id:06d}` from the header's own primary key — deliberately **not**
+the `acquire_generator_lock` + `MAX(number)` scan the WO / PO / NCR numbers use, because the id is
+already unique and monotonic, so deriving from it is collision-free with no advisory lock and no
+index scan. The stated cost: the sequence is global to the deployment, not per company, so one
+tenant's numbering has gaps where another tenant's combines fell.
+
+**`quantity_moved` is what actually moved**, summed from the same floats the ledger rows hold, and it
+is what the header row records — not the requested figure. The two can only differ if a probe and the
+draw disagreed, which the refusals above make unreachable; a short draw is logged rather than silently
+recorded, because the stored `quantity` would otherwise overstate the movement it claims to summarize.
+
+**⚠️ `deactivate_source` can be declined after a successful combine — check `source_deactivated`, do
+not assume it.** The `source_still_has_stock` refusal is re-evaluated against the **post-move** total,
+because `FOR UPDATE` locks rows, not the predicate: a `/receive` onto the source part that commits
+after the source rows were locked **inserts** a row that probe never saw. Retiring the part on the
+strength of the earlier probe would take a SKU out of use with material physically on the shelf, and
+would write a header whose `source_quantity_after` is greater than zero while `source_deactivated` is
+true — a record that contradicts itself. So the verb **declines the deactivation rather than raising**:
+the fold itself is correct and already posted, and discarding a correct net-zero move because somebody
+received stock a second earlier helps nobody. The response and the header both carry
+`source_deactivated: false`. A client should surface that as the **`warning`** toast variant, not a
+plain success — the combine happened, the retirement did not — and the remedy is the explicit
+`POST /parts/{id}/deactivate`. (The shipped Combine dialog does, alongside the same treatment for a
+short draw and for stock left behind on ineligible rows.)
+
+**`expected_source_part_number` / `expected_target_part_number` are a compare-and-swap precondition,
+not decoration.** `Part` maps no optimistic-lock `version` column, so the number strings are the only
+concurrency control there is — the same conclusion `POST /parts/{id}/renumber` reached. Send what the
+client last read; a mismatch is **409** rather than folding stock into a SKU the operator never saw.
+They are plain `str` (not the strict `PartNumber` type) for the same reason
+`PartRenumberRequest.expected_part_number` is: production holds numbers the pattern rejects
+(`1/4" PLATE 48 X 96`), and those legacy numbers are exactly the ones a recut leaves duplicated.
+
+**Every refusal is raised before the first write**, so a refused request leaves every row
+byte-identical — the discipline `assert_backflush_change_allowed` and `renumber_part` follow. The
+write raises the **first** blocker; the preview renders all of them.
+
+| Code | HTTP | What it means |
+|------|:----:|---------------|
+| `same_part` | **400** | Source and target are the same part. Checked before either part loads, so the message is about the request |
+| `part_not_found` | **404** | No such part in this company. Another tenant's part id behaves as 404 unconditionally (invariant 1) |
+| `part_deleted` | **400** | Either part is soft-deleted — *"restore it or use a different part number"*, the wording `/inventory/receive` already uses. Deliberately **not** a 404: the preview must be able to SHOW that a correctly-spelled number is deleted (`PartStockSummary.is_deleted` carries it) rather than sending someone hunting for a typo |
+| `unit_of_measure_mismatch` | **409** | `uom_label(source) != uom_label(target)`, both non-blank. Combining would add quantities that do not mean the same thing. Compared through `uom_label` (one side is a native enum column, the other may arrive as a string) — never a raw column comparison |
+| `no_available_stock` | **409** | The source's eligible available is zero. **This is what a SECOND combine of an already-drained SKU gets** |
+| `quantity_below_minimum` | **400** | A sub-epsilon quantity that would move nothing. In practice unreachable through the router — the schema's `gt` bound refuses the same input **422** first — it is the backstop for callers reaching the service directly. It exists because `gt=0` plus a drain loop that breaks on the ledger epsilon let `quantity: 1e-10` return **200** having moved nothing while still writing an immutable combine header, an event and an audit row: a record asserting a combine that did not happen |
+| `quantity_exceeds_available` | **409** | More was requested than is eligible |
+| `open_work_order_reservation` | **409** | What the source would be LEFT WITH cannot cover what open material ties still expect to draw from it. The refusal **names the work orders** to untie or re-tie first, rather than saying only that "something" is reserved |
+| `flagged_part_not_acknowledged` | **409** | A part whose number or name reads as a test/housing part is in the combine and was not confirmed. **An acknowledgement gate, not a ban** — "housing" is an ordinary manufacturing word (the Miratech housing is a real production part), so a ban would refuse exactly the legitimate work this shop does. Name the part's id in `acknowledge_flagged_part_ids` and the audit row records the decision. Matching is word-boundary and case-insensitive over `part_number` and `name`, hand-rolled rather than `\b` because `\b` treats `_` as a word character: `TEST_FIXTURE`, `TEST FIXTURE` and `HOUSING-A` flag; `TESTA-500` and `WAREHOUSING` do not |
+| `expected_part_number_mismatch` | **409** | Somebody renumbered one of these parts while the dialog was open. Compared through `normalize_alias_key` (strip + upper), so a case or whitespace difference in what the client echoes back is not treated as somebody else's edit |
+| `source_still_has_stock` | **409** | `deactivate_source: true` but the source would not land at exactly 0 across **ALL** its stock rows, held and quarantined ones included. Deactivating a part that still has material would hide that material from every list in the app while it is physically on a shelf |
+| `target_row_not_available` | **409** | The material would land on a TARGET row that is on hold, quarantined, rejected or deactivated. **This is the one blocker that says the operator's stock is about to become UNUSABLE.** The landing row resolves on `(company, part, location, lot)` and nothing else — no `is_active`, no `status` — so 92 available sheets folded onto a held target row previously returned **200** with an empty `blockers` list, a row at 102 still `on_hold`, and 92 usable sheets nothing in the app could draw. Counted, present, unusable, behind a success toast |
+| `target_serial_mismatch` | **409** | A serialized lot would merge onto a row carrying a different serial, so one serial number would name two units (invariant 5). The comparison is **symmetric** — either side blank while the other is set is refused too, because merging a serialized lot into an anonymous row loses the serial and merging an anonymous lot into a serialized row inflates it. Landing serialized stock on a **new** row is unaffected: it carries the serial across intact |
+
+Two of those cannot appear on the preview, because the preview request carries neither input:
+`expected_part_number_mismatch` (there are no expected numbers to compare) and
+`source_still_has_stock` (there is no `deactivate_source` flag). Everything else the write can refuse
+is disclosed there. The target-side pair is computed against the rows the *drain plan* would actually
+land on, so a held target row at a location this combine never touches refuses nothing.
+
+Advisories disclose without refusing:
+
+| Code | What it means |
+|------|---------------|
+| `sheet_spec_match` | Both part numbers agree on the thickness / size / grade read out of the numbers themselves. Names any reading only one side states, so "checked" is never overclaimed |
+| `sheet_spec_mismatch` | The numbers describe **different material**. This is the guard against folding 304 into 316 — but deliberately an **advisory, not a blocker**, for the same reason the renumber impact reports rather than refuses: if the current string is wrong the sheet matcher is already mis-matching, and a refusal would block the very case the feature exists for (`.0625-60X144-304SS` → `SH-A240-304-0.0625-60X144-2B` must be allowed, and reads as MATCHING) |
+| `sheet_spec_unreadable` | Neither number states a spec the other can be checked against. The nest screen reads thickness, size and grade out of the part number, so this says: confirm by hand |
+| `unit_of_measure_unstated` | One side states no stocking unit, so the units cannot be checked against each other |
+| `non_available_stock_excluded` | One per source row that will **not** move, with its quantity and why (on hold / quarantine / rejected / deactivated row). Silently folding it would move material somebody put a hold on; silently omitting it would leave the operator wondering why the numbers do not add up |
+| `pinned_lot_reserved` | One per source row a **lot-directed** open tie is holding material on, naming the quantity and the jobs. Without it the cap simply looks wrong — a row showing 60 on hand, nothing allocated, and a refusal to move more than 10 |
+
+The sheet readings reuse `app.services.sheet_stock_spec` (`derive_sheet_spec`, `canonical_alloy`,
+`is_sheet_like`), trying the **number** first and the name second, exactly as
+`part_renumber_service._sheet_delta` does — the number is the shop's canonical identifier and the
+name is prose that drifts. The alias table is deliberately **not** read here; the sheet matcher's own
+module docstring forbids alias reads, and the same stale-spec argument applies.
+
+**The ledger shape, and why it is not a new `TransactionType`.** Per moved lot line, two rows:
+
+* **OUT** — `transaction_type=ADJUST`, `quantity = -qty`, `part_id` = source, `reason_code="COMBINE_OUT"`.
+* **IN** — `transaction_type=ADJUST`, `quantity = +qty`, `part_id` = target, `reason_code="COMBINE_IN"`.
+
+Both carry `reference_type='inventory_combine'`, `reference_id` = the `inventory_combines` header id,
+`reference_number` = the `COMB-…` number, the source row's `unit_cost`, the lot and serial, and
+`from_location == to_location` — **the material does not physically move; only its SKU changes.**
+
+A `COMBINE` member on the `transactiontype` enum was considered and rejected: it would mean an
+`ALTER TYPE` on live Postgres **plus** teaching every consumer — analytics, exports, traceability,
+job costing, the frontend label maps — a value they currently cannot see. That is a broad blast
+radius on live data for a labelling gain. `ADJUST` is already this repo's compensating /
+reconciliation shape (invariant 3; receiving void and correct), and it is the one transaction type
+whose **sign carries direction**. The pair is told apart by `reason_code` and grouped by the header
+row, which is what the header table exists for: without it the 2N rows are related only by having
+happened at the same instant, which is not a relation anything can query.
+
+`reference_type='inventory_combine'` sits **outside** both partial unique predicates
+(`uq_wo_inventory_receipt` / `uq_wo_inventory_issue`, which key on `reference_type = 'work_order'`),
+so a combine can never collide with the work-order backflush idempotency guards; and **outside**
+`work_order_ledger_filter`'s three work-order shapes, so a combine never surfaces as work-order
+material in job costing or a job's lot genealogy. Neither of those was modified — the whole shape
+depends on them staying true.
+
+**What follows the material, and what deliberately does not.**
+
+* **Traceability moves with it.** A target stock row that has to be **created** carries the source
+  row's `lot_number`, `serial_number`, `cert_number`, `heat_lot`, `supplier_id`, `po_number`,
+  `received_date` and `expiration_date`. The MTR and heat lot follow the physical material — that is
+  the entire point of AS9100D 8.5.2 lot traceability, and a merge that dropped them would launder the
+  material's provenance while looking tidy.
+* **Cost is never reblended.** A newly created target row copies the source row's `unit_cost` (the
+  cost travels with the material); an **existing** target row keeps its own, untouched. There is no
+  weighted-average recompute anywhere. The preview's `cost` block surfaces the delta so a human
+  decides whether it matters — a decision this code is not entitled to make. `lines[].target_row_created`
+  on the response tells the two cases apart.
+* **The source part is never deleted.** It stays in the catalog at qty 0 so every traveler, MTR, PO
+  and spreadsheet naming it keeps resolving. `deactivate_source` can take it out of *use*
+  (`is_active=False` + `status='obsolete'`, written together so the two can never disagree); it never
+  touches `is_deleted`.
+* **Nothing here renames anything.** `POST /parts/{id}/renumber` is a separate verb and is untouched:
+  a rename does not imply a merge, and a merge does not imply a rename.
+* **Reversing a combine is a NEW combine in the other direction**, with its own reason and its own
+  audit row — never an edit of the header this one wrote. The header carries no `SoftDeleteMixin`, no
+  `is_active` and no `status`, for the same reason `PartNumberAlias` does not: a third state is a mask
+  every future reader must remember to filter (invariant 3's trap). A combine happened or it did not.
+
+**Three independent reservation rules, all enforced.**
+
+1. **Row level, hard, always** — a line can move at most `quantity_on_hand - quantity_allocated`.
+   Allocated material is spoken for at the lot; it never crosses.
+2. **Row level, lot-directed (pins)** — an open tie carrying `pinned_inventory_item_id` reserves
+   **that lot and nothing else**; the consumption engine locks the pinned row and takes what is there.
+   It is therefore withheld per row exactly the way `quantity_allocated` is, and surfaces as
+   `quantity_pinned` so the operator can see why the cap is lower. Without it a 50-unit pin on the
+   oldest lot was satisfied on paper (`100 - 50 >= 50`) and then drained out of the pinned lot first —
+   the drain is ascending-id — leaving the engine to record a shortage while the sheets sat on the
+   shelf under the target number.
+3. **Part level** — open `work_order_material_allocations` naming the source part on non-terminal work
+   orders still expect to draw from it. **The basis is `eligible_available`, not `total_on_hand`**, and
+   that distinction is load-bearing: those differ by the held / quarantined / deactivated rows, which
+   the consumption engine can no more draw than this verb can move, so computing the remainder from
+   `total_on_hand` let a source with "92 free + 92 on hold" satisfy a 92-unit tie after moving all 92
+   free ones away. `max_combinable_quantity` is computed on the **same** basis as the check, or the
+   dialog would offer a number the server then refuses.
+
+Only demand not already withheld by rule 2 is counted at the part level, so a pin is never charged
+twice.
+
+**Drain order is ascending stock-row id** (oldest lot first, approximately FIFO) — which is
+simultaneously the **lock-acquisition order**, so a combine cannot deadlock against itself. Full lock
+order is *every source row (ascending id) → every target landing row → the audit hash-chain lock*.
+The last leg is not decoration: `AuditService`'s chain lock is a global `pg_advisory_xact_lock` held
+to transaction end, so the per-line audit writes are **buffered and emitted after the drain loop**
+rather than inside it — writing line 1's audit rows and then asking for line 2's target row lock
+deadlocks against a concurrent `/receive` holding that row. As with `/transfer`, source and target
+are not id-ordered relative to each other, so a combine racing an opposing transfer or consumption
+over the same lots can still deadlock; Postgres aborts one victim with an error (never a hang), and
+nothing partial commits — the whole verb runs inside one `atomic_transaction`.
+
+**Audit trail (invariant 2).** Inside that same transaction: a `log_create` for the
+`inventory_combine` header (whose `extra_data` carries the source and target ids and numbers, the
+quantity, the per-line `{location, lot_number, quantity, unit_cost}`, the reason, the flagged-part
+acknowledgements and `deactivate_source`), a `log_create` per ledger row, a `log_update` per
+stock-level change, and — when `deactivate_source` fires — a further audit row on the part. The
+header row is **not** the audit record: the tamper-evident record is the `audit_log` row, and
+`inventory_combines` is a queryable index over the ledger rows, which is why it is thin and why
+nothing in it may ever be edited after the fact.
+
+The verb also emits an `inventory_combined` operational event (`severity: medium`). It is
+deliberately **not** registered in `notification_catalog.py` — neither are `inventory_adjusted`,
+`inventory_received` or `inventory_transferred` — so it records without notifying.
+
+**Tenancy (invariant 1).** Every read and write is scoped by the active `company_id` from
+`get_current_company_id`. Another company's part id behaves as **404**, and its location codes and
+lot numbers are unreachable.
 
 ### Traceability
 

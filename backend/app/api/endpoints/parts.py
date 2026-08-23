@@ -1292,10 +1292,15 @@ def restore_part(
 
     THE RESOLUTION RULE
     -------------------
-    ``is_active = COALESCE(is_active_before_delete, False)``. ``delete_part`` records the
-    pre-delete value in the sidecar (``Part.is_active_before_delete``); NULL means the
-    delete predates migration 086 -- or came through ``DELETE /materials/{id}``, a second
-    soft-delete writer of ``parts.is_active`` that does not record the sidecar -- and that
+    ``is_active = COALESCE(is_active_before_delete, False)``. BOTH soft-delete doors record
+    the pre-delete value in the sidecar (``Part.is_active_before_delete``) --
+    ``delete_part`` here and ``delete_material`` in ``materials.py``, which writes the same
+    ``parts`` rows and has no restore verb of its own, so its deletes come back through
+    THIS handler. They must agree: if one door skipped the capture, every part deleted
+    through it would restore INACTIVE regardless of how it was actually switched, which is
+    safe in direction but is still the record saying something that was never true.
+
+    So NULL now means exactly one thing: the delete predates migration ``086``. That
     unknown resolves to the **RESTRICTIVE** value, ``False``, NOT to the pre-086
     unconditional ``True``.
 
