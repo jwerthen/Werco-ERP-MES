@@ -18,6 +18,7 @@ from app.models.part import ENGINEERING_PART_TYPES, Part, PartType, UnitOfMeasur
 from app.models.user import User, UserRole
 from app.schemas.backflush_preview import BackflushDiagnostic, PartBackflushReadinessResponse
 from app.schemas.part import PartCreate, PartResponse, PartUpdate
+from app.schemas.part_activation import PartActivateRequest, PartActivationResponse, PartDeactivateRequest
 from app.schemas.part_renumber import (
     PartRenumberImpactResponse,
     PartRenumberRequest,
@@ -32,6 +33,7 @@ from app.services.completion_inventory_service import (
     backflush_refusal_sentence,
 )
 from app.services.import_service import ImportFileError, parse_import_file
+from app.services.inventory_combine_service import ACTIVE_PART_STATUS, OBSOLETE_PART_STATUS, part_total_on_hand
 from app.services.material_tie_part_gate import assert_part_type_change_allowed
 from app.services.part_number_resolver import find_part_number_conflict, resolve_part_by_number
 from app.services.part_number_service import generate_werco_part_number, normalize_description
@@ -960,6 +962,207 @@ def create_new_revision(
         "part_number": part.part_number,
         "new_revision": new_revision,
     }
+
+
+def _live_part_or_404(db: Session, company_id: int, part_id: int) -> Part:
+    """A NON-deleted part in the active company, or 404. Used by the two activation verbs.
+
+    **The soft-delete refusal here is load-bearing, not tidiness.** Invariant 3 records
+    that ``parts.is_active`` doubles as the soft-delete MASK: ``delete_part`` sets
+    ``is_deleted`` AND ``is_active=False`` AND ``status="obsolete"`` together. So a verb
+    able to set ``is_active=True`` on a tombstoned row would clear a delete mask — the
+    exact 2026-08-16 ``Vendor`` trap, where six vendor query sites looked safe only
+    because ``delete_vendor`` also cleared ``is_active``. ``POST /parts/{id}/restore`` is
+    the verb for a deleted part; these two are not it, and they must not become it by
+    accident.
+
+    ``deactivate`` refuses a deleted part too, for symmetry and for a second reason: a
+    deleted part is ALREADY inactive and obsolete, so "deactivate" on one is either a
+    no-op dressed up as a state change or a signal the caller meant ``restore`` first.
+
+    Deliberately NOT shared with ``update_part``, which resolves deleted parts on
+    purpose (see the comment there) — that pair's behavior is a decision about the
+    parts/materials edit doors as a whole, not a line to tighten in passing.
+    """
+    part = tenant_query(db, Part, company_id).filter(Part.id == part_id).first()
+    if not part:
+        raise HTTPException(status_code=404, detail="Part not found")
+    if part.is_deleted:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Part '{part.part_number}' is deleted - restore it first",
+        )
+    return part
+
+
+@router.post(
+    "/{part_id}/deactivate",
+    response_model=PartActivationResponse,
+    summary="Take a part out of use without deleting it",
+)
+def deactivate_part(
+    part_id: int,
+    payload: PartDeactivateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Mark a part inactive/obsolete. It is NOT deleted and ``is_deleted`` is never written.
+
+    This exists because until now nothing could do it. ``PartUpdate`` carries neither
+    ``is_active`` nor ``status``, and the only writer of those columns was
+    ``delete_part`` — which also soft-deletes. So a leftover empty SKU (a sheet size the
+    shop no longer buys, sitting at 0) could only be left cluttering every picker, or
+    deleted outright. Now it can simply be retired.
+
+    **These two verbs are the ONLY non-delete writers of ``parts.is_active``, and that
+    is deliberate.** Do NOT add ``is_active`` or ``status`` to ``PartUpdate``:
+    ``PUT /parts/{id}`` and ``PUT /materials/{id}`` are blind ``setattr`` loops whose
+    lookups do not filter ``is_deleted``, so exposing the flag there would hand every
+    Supervisor a way to clear a soft-delete mask through an ordinary form save
+    (invariant 3's ``Vendor`` trap).
+
+    **Role: ADMIN / MANAGER**, matching the combine verb this shipped with and the
+    renumber/revision identity tier — not the Supervisor edit tier.
+
+    * **404** — no such part in this company, or it is soft-deleted ("restore it first").
+    * **409** ``part_still_has_stock`` — the part still has material on hand and
+      ``acknowledge_remaining_stock`` was not set. Deactivating a part with stock is
+      legitimate (a superseded SKU being wound down) but is never accidental.
+    * **200** with ``no_op: true`` — already inactive and obsolete. A request that
+      changes nothing must not fail; a double-click and a retry are both ordinary.
+
+    ``is_active`` and ``status`` are written TOGETHER so the two can never disagree.
+    """
+    part = _live_part_or_404(db, company_id, part_id)
+
+    already_inactive = not bool(part.is_active) and (part.status or "") == OBSOLETE_PART_STATUS
+    if already_inactive:
+        return PartActivationResponse(
+            part_id=part.id,
+            part_number=part.part_number,
+            is_active=False,
+            status=part.status or OBSOLETE_PART_STATUS,
+            no_op=True,
+        )
+
+    # BEFORE the first setattr, so a refusal leaves the row untouched — the same
+    # ordering ``assert_backflush_change_allowed`` and ``renumber_part`` follow.
+    # ``part_total_on_hand`` counts EVERY stock row, held and quarantined ones
+    # included: those are still material on a shelf, and hiding the part that names
+    # them from every list is exactly what makes this worth confirming.
+    on_hand = part_total_on_hand(db, company_id, part.id)
+    if on_hand > 0 and not payload.acknowledge_remaining_stock:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Part '{part.part_number}' still has {on_hand:g} on hand. Confirm you want to deactivate "
+                "it anyway, or move the stock first."
+            ),
+        )
+
+    old_values = {"is_active": bool(part.is_active), "status": part.status}
+    part.is_active = False
+    part.status = OBSOLETE_PART_STATUS
+
+    audit = AuditService(db, current_user, request)
+    audit.log_update(
+        "part",
+        part.id,
+        part.part_number,
+        old_values=old_values,
+        new_values={"is_active": False, "status": OBSOLETE_PART_STATUS},
+        description=(
+            f"Deactivated part {part.part_number} (reason: {payload.reason}). "
+            "Not deleted — it stays in the catalog and every document naming it still resolves."
+        ),
+        extra_data={
+            "reason": payload.reason,
+            "quantity_on_hand_at_deactivation": on_hand,
+            "acknowledged_remaining_stock": bool(payload.acknowledge_remaining_stock),
+        },
+    )
+
+    db.commit()
+    db.refresh(part)
+    return PartActivationResponse(
+        part_id=part.id,
+        part_number=part.part_number,
+        is_active=bool(part.is_active),
+        status=part.status or OBSOLETE_PART_STATUS,
+        no_op=False,
+    )
+
+
+@router.post(
+    "/{part_id}/activate",
+    response_model=PartActivationResponse,
+    summary="Put a retired part back into use",
+)
+def activate_part(
+    part_id: int,
+    payload: PartActivateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Undo a deactivation. Refuses a soft-deleted part — see ``_live_part_or_404``.
+
+    ``status`` is only rewritten when it currently reads ``obsolete``, so this verb
+    undoes exactly what ``deactivate`` did and never clobbers a meaningful third value
+    (``pending_approval``). The pairing rule it upholds is "inactive implies obsolete",
+    not "active implies active".
+
+    Unlike ``restore_vendor``, this does NOT need a remembered prior value. That control
+    exists because a RESTORE (undoing a delete) must return the record without returning
+    the permission — restoring a supplier must not silently re-approve it. This verb is
+    the permission decision itself: an explicit, audited, ADMIN/MANAGER action whose only
+    purpose is to put the part back in use, and which is visible the moment it happens
+    because the part reappears in every list.
+
+    **200** with ``no_op: true`` when the part is already active and not obsolete.
+    """
+    part = _live_part_or_404(db, company_id, part_id)
+
+    currently_obsolete = (part.status or ACTIVE_PART_STATUS) == OBSOLETE_PART_STATUS
+    if bool(part.is_active) and not currently_obsolete:
+        return PartActivationResponse(
+            part_id=part.id,
+            part_number=part.part_number,
+            is_active=True,
+            status=part.status or ACTIVE_PART_STATUS,
+            no_op=True,
+        )
+
+    old_values = {"is_active": bool(part.is_active), "status": part.status}
+    part.is_active = True
+    if currently_obsolete:
+        part.status = ACTIVE_PART_STATUS
+
+    audit = AuditService(db, current_user, request)
+    audit.log_update(
+        "part",
+        part.id,
+        part.part_number,
+        old_values=old_values,
+        new_values={"is_active": True, "status": part.status},
+        description=(
+            f"Reactivated part {part.part_number}" + (f" (reason: {payload.reason})" if payload.reason else "")
+        ),
+        extra_data={"reason": payload.reason} if payload.reason else None,
+    )
+
+    db.commit()
+    db.refresh(part)
+    return PartActivationResponse(
+        part_id=part.id,
+        part_number=part.part_number,
+        is_active=bool(part.is_active),
+        status=part.status or ACTIVE_PART_STATUS,
+        no_op=False,
+    )
 
 
 @router.delete("/{part_id}")

@@ -16,6 +16,8 @@ import {
   MobileDataCard,
 } from '../components/ui';
 import RenumberPartDialog from '../components/parts/RenumberPartDialog';
+import PartActivationDialog from '../components/parts/PartActivationDialog';
+import CombineInventoryDialog from '../components/inventory/CombineInventoryDialog';
 import { useAuth } from '../context/AuthContext';
 import { hasPermission } from '../utils/permissions';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
@@ -115,7 +117,32 @@ export default function MaterialsPage() {
   // require_role([ADMIN, MANAGER]) on POST /parts/{id}/renumber, so a hidden
   // control and a refused call agree.
   const canRenumber = hasPermission(user?.role, 'parts:renumber') || !!user?.is_superuser;
+  // Folding two SKUs together. Its own key, deliberately narrower than
+  // `inventory:adjust` (which reaches supervisor) — see utils/permissions.ts.
+  const canCombine = hasPermission(user?.role, 'inventory:combine') || !!user?.is_superuser;
+  // Activate / deactivate has NO permission key, and borrowing one that means
+  // something else is how a hidden button and a refused call drift apart. The
+  // endpoints are require_role([ADMIN, MANAGER]) — which also admits
+  // platform_admin and superusers — so the roles are named directly here, the
+  // same idiom Inventory.tsx uses for Receive.
+  const canActivate =
+    (!!user && ['platform_admin', 'admin', 'manager'].includes(user.role)) || !!user?.is_superuser;
   const [renumberTarget, setRenumberTarget] = useState<Part | null>(null);
+  const [combineSource, setCombineSource] = useState<Part | null>(null);
+  /**
+   * An UNFILTERED catalog for the combine pickers.
+   *
+   * `materials` is the page's filtered view — a type filter, a status filter and
+   * a search box all narrow it. Handing that to the target picker is a silent
+   * dead end: the whole premise of a combine is that the two numbers look
+   * nothing alike (`.0625-60X144-304SS` vs `SH-A240-304-0.0625-60X144-2B`), so
+   * the number you are folding ONTO is exactly the one a filter is likeliest to
+   * be hiding, and a picker that simply does not offer it gives the operator no
+   * way to tell that from "it does not exist". Loaded lazily, only when the
+   * dialog is opened, and never re-fetched while it stays open.
+   */
+  const [combineCatalog, setCombineCatalog] = useState<Part[] | null>(null);
+  const [activationTarget, setActivationTarget] = useState<Part | null>(null);
   const [form, setForm] = useState<MaterialForm>(BLANK_FORM);
   const [initialForm, setInitialForm] = useState<MaterialForm>(BLANK_FORM);
 
@@ -157,6 +184,24 @@ export default function MaterialsPage() {
   useEffect(() => {
     loadMaterials();
   }, [debouncedSearch, typeFilter]);
+
+  useEffect(() => {
+    if (combineSource === null || combineCatalog !== null) return;
+    let cancelled = false;
+    api
+      .getMaterials({})
+      .then(rows => {
+        if (!cancelled) setCombineCatalog(rows);
+      })
+      .catch(() => {
+        // Left null on purpose: the dialog falls back to the filtered list, so
+        // a failed catalog read degrades the pickers rather than emptying them,
+        // and the next open retries.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [combineSource, combineCatalog]);
 
   const visibleMaterials = useMemo(() => {
     if (!statusFilter) return materials;
@@ -570,6 +615,41 @@ export default function MaterialsPage() {
                 </FormField>
               </div>
 
+              {/* Record actions — the audited verbs that change WHAT THIS ITEM IS
+                  rather than what it says about itself, kept together beside
+                  Renumber for that reason. None of them ride this form's save:
+                  each is its own reasoned, audited endpoint, and this form's
+                  PUT is a blind setattr that must never become a channel for
+                  any of them. */}
+              {editingMaterial && (canCombine || canActivate) && (
+                <div className="flex flex-wrap items-center gap-2 rounded-sm border border-fd-line px-3 py-2">
+                  <span className="mr-auto text-xs text-slate-500">
+                    Two numbers for one material? Fold them together. Empty leftover number? Switch it off
+                    without deleting it.
+                  </span>
+                  {canCombine && (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => setCombineSource(editingMaterial)}
+                    >
+                      Combine SKUs…
+                    </Button>
+                  )}
+                  {canActivate && (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => setActivationTarget(editingMaterial)}
+                    >
+                      {editingMaterial.is_active ? 'Mark Inactive…' : 'Mark Active…'}
+                    </Button>
+                  )}
+                </div>
+              )}
+
               <FormField label="Name" required>
                 {field => (
                   <input
@@ -664,6 +744,53 @@ export default function MaterialsPage() {
           if (!deletePending) setDeleteTarget(null);
         }}
       />
+
+      {/* Combining two SKUs moves STOCK, not catalog fields, so there is nothing
+          on this page's rows to patch from the result — except when
+          `deactivate_source` fired, which flips the source's is_active/status.
+          Re-reading the list is the honest way to reflect that: the result
+          reports THAT the source was deactivated, not what `status` it landed
+          on, and guessing the string here is how a screen starts disagreeing
+          with the record. NON-OPTIMISTIC throughout. */}
+      {canCombine && (
+        <CombineInventoryDialog
+          open={combineSource !== null}
+          parts={combineCatalog ?? materials}
+          initialSourcePartId={combineSource?.id ?? null}
+          onClose={() => setCombineSource(null)}
+          onCombined={() => {
+            setCombineSource(null);
+            loadMaterials();
+          }}
+        />
+      )}
+
+      {/* Inactive is NOT deleted, and these are the only non-delete writers of
+          parts.is_active. The row is patched from the SERVER's is_active/status
+          pair — never a locally flipped copy — so the two can't drift apart on
+          screen, since the server always writes them together. */}
+      {canActivate && (
+        <PartActivationDialog
+          open={activationTarget !== null}
+          part={activationTarget}
+          onClose={() => setActivationTarget(null)}
+          onChanged={result => {
+            setActivationTarget(null);
+            setMaterials(prev =>
+              prev.map(material =>
+                material.id === result.part_id
+                  ? { ...material, is_active: result.is_active, status: result.status }
+                  : material
+              )
+            );
+            setEditingMaterial(prev =>
+              prev && prev.id === result.part_id
+                ? { ...prev, is_active: result.is_active, status: result.status }
+                : prev
+            );
+          }}
+        />
+      )}
 
       {/* Renumbering is its own audited verb, not a field on this form — see the
           comment on the disabled Item Number input. NON-OPTIMISTIC: the row is

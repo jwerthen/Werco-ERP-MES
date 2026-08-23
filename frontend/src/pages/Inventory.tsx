@@ -13,6 +13,7 @@ import {
 import { Modal } from '../components/ui/Modal';
 import {
   Breadcrumbs,
+  Button,
   ErrorState,
   useToast,
   DataTable,
@@ -22,6 +23,7 @@ import {
 } from '../components/ui';
 import { getBreadcrumbParent, getRouteTitle } from '../utils/routeMeta';
 import StockMovementsPanel from '../components/inventory/StockMovementsPanel';
+import CombineInventoryDialog from '../components/inventory/CombineInventoryDialog';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { useAuth } from '../context/AuthContext';
@@ -81,6 +83,12 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   // Transfer keeps the named key: `inventory:transfer` means exactly this verb and
   // resolves to the same role set the server's transfer endpoint allows.
   const canTransfer = hasPermission(user?.role, 'inventory:transfer') || !!user?.is_superuser;
+  // Combining two SKUs carries its own key, deliberately NARROWER than the two
+  // above: adjusting or moving a lot corrects where material is, while folding
+  // two numbers together changes which article it IS — an AS9100D 8.5.2
+  // controlled change. Mirrors require_role([ADMIN, MANAGER]) on
+  // POST /inventory/combine, so the hidden button and a refused call agree.
+  const canCombine = hasPermission(user?.role, 'inventory:combine') || !!user?.is_superuser;
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<TabType>('summary');
   const [groupFilter, setGroupFilter] = useState<InventoryGroup>(() => {
@@ -100,6 +108,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   
   const [showReceiveModal, setShowReceiveModal] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
+  const [showCombineModal, setShowCombineModal] = useState(false);
   const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
 
   const [receiveForm, setReceiveForm] = useState({
@@ -556,18 +565,36 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
             <h1 className="text-2xl font-bold text-white">Inventory</h1>
             <p className="text-sm text-slate-400 mt-1">Engineering parts, materials, and supplies in one place</p>
           </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Two numbers describing one physical material is a CATALOG
+                problem, not a counting one — it belongs beside Receive rather
+                than buried in an item's edit form, because the person who
+                notices it is looking at the on-hand list. */}
+            {canCombine && (
+            <Button variant="secondary" onClick={() => setShowCombineModal(true)}>
+              Combine SKUs…
+            </Button>
+          )}
+            {canReceive && (
+              <button onClick={() => setShowReceiveModal(true)} className="btn-primary flex items-center">
+                <ArrowDownTrayIcon className="h-5 w-5 mr-2" /> Receive Inventory
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+      {embedded && (canReceive || canCombine) && (
+        <div className="flex flex-wrap justify-end gap-2">
+          {canCombine && (
+            <Button variant="secondary" onClick={() => setShowCombineModal(true)}>
+              Combine SKUs…
+            </Button>
+          )}
           {canReceive && (
             <button onClick={() => setShowReceiveModal(true)} className="btn-primary flex items-center">
               <ArrowDownTrayIcon className="h-5 w-5 mr-2" /> Receive Inventory
             </button>
           )}
-        </div>
-      )}
-      {embedded && canReceive && (
-        <div className="flex justify-end">
-          <button onClick={() => setShowReceiveModal(true)} className="btn-primary flex items-center">
-            <ArrowDownTrayIcon className="h-5 w-5 mr-2" /> Receive Inventory
-          </button>
         </div>
       )}
 
@@ -779,6 +806,23 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
             this tab rather than left sitting there implying it filters these rows. */}
         {activeTab === 'movements' && <StockMovementsPanel parts={parts} />}
       </div>
+
+      {/* Combine SKUs — server-GATED, therefore NON-OPTIMISTIC. Nothing here is
+          patched locally: the whole page re-reads on success, because a combine
+          rewrites stock rows on BOTH parts, appends 2N ledger rows and can flip
+          the source part inactive. Reflecting that from a locally-folded guess
+          is how an on-hand figure on screen stops matching the record. */}
+      {canCombine && (
+        <CombineInventoryDialog
+          open={showCombineModal}
+          parts={parts}
+          onClose={() => setShowCombineModal(false)}
+          onCombined={() => {
+            setShowCombineModal(false);
+            loadData();
+          }}
+        />
+      )}
 
       {/* Receive Modal */}
       <Modal open={showReceiveModal && canReceive} onClose={() => setShowReceiveModal(false)} size="lg" closeOnBackdrop={false}>

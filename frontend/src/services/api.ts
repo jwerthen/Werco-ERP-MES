@@ -45,6 +45,10 @@ import {
   InventoryTransactionParams,
   ResumeOperationResult,
   ClearedReceipt,
+  InventoryCombinePreview,
+  InventoryCombineRequest,
+  InventoryCombineResult,
+  PartActivationResult,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
@@ -747,6 +751,69 @@ class ApiService {
   ): Promise<PartRenumberResult> {
     const response = await this.api.post<PartRenumberResult>(`/parts/${id}/renumber`, payload);
     return response.data;
+  }
+
+  /**
+   * Mark a part INACTIVE without deleting it.
+   *
+   * The gap this closes: `PartUpdate` carries neither `is_active` nor `status`,
+   * so until these two verbs existed the only writer of `parts.is_active` was
+   * `delete_material` — which also sets `is_deleted`. An empty leftover SKU could
+   * therefore be tombstoned or left on every picker, and nothing in between.
+   *
+   * SERVER-GATED, therefore NON-OPTIMISTIC: keep a loading state and render only
+   * what the server returns. Two refusals it is built to produce:
+   *   - **409 `part_still_has_stock`** when the part still has on-hand and
+   *     `acknowledge_remaining_stock` is false. Deactivating does not move,
+   *     consume or delete that stock; the acknowledgement is the operator saying
+   *     they know it is staying there.
+   *   - **404** on a soft-deleted part — "restore it first". That refusal is
+   *     load-bearing rather than tidy: `is_active` doubles as the soft-delete
+   *     MASK (`delete_material` sets `is_deleted` AND `is_active=False` AND
+   *     `status="obsolete"`), so a verb that could write `is_active` on a
+   *     tombstoned row would be clearing a delete mask — the 2026-08-16 `Vendor`
+   *     trap, in the parts table.
+   *
+   * `reason` is required and lands on the audit trail.
+   */
+  async deactivatePart(
+    partId: number,
+    payload: { reason: string; acknowledge_remaining_stock?: boolean }
+  ): Promise<PartActivationResult> {
+    const response = await this.api.post<PartActivationResult>(`/parts/${partId}/deactivate`, payload);
+    this.invalidatePartActivationCache(partId);
+    return response.data;
+  }
+
+  /**
+   * Put an inactive part back on the pickers.
+   *
+   * The mirror of `deactivatePart` and subject to the same 404 on a soft-deleted
+   * part, for the same reason: restoring a DELETE is `restore`'s job, not this
+   * one's. `reason` is optional here — switching a part back on is the
+   * permissive direction, and the audit row records who did it either way.
+   *
+   * `no_op: true` means the part was already active. That is a success; say so
+   * plainly rather than reporting a failure for a record that is already right.
+   */
+  async activatePart(partId: number, payload?: { reason?: string }): Promise<PartActivationResult> {
+    const response = await this.api.post<PartActivationResult>(`/parts/${partId}/activate`, payload ?? {});
+    this.invalidatePartActivationCache(partId);
+    return response.data;
+  }
+
+  /**
+   * Drop the cached bodies an is_active/status flip invalidates.
+   *
+   * `invalidatePartCache` covers the `/parts` prefix and nothing else, but the
+   * SAME rows are served by `/materials/` — which is where the Materials &
+   * Supplies screen reads them from, and the screen these two verbs exist for.
+   * Missing it would leave a just-deactivated item still reading "active" on the
+   * list that deactivated it, off a 304.
+   */
+  private invalidatePartActivationCache(partId: number) {
+    this.invalidatePartCache(partId);
+    this.invalidateCache('/materials');
   }
 
   async updateMaterial(id: number, data: PartUpdate): Promise<Part> {
@@ -2383,6 +2450,64 @@ class ApiService {
 
   async adjustInventory(data: any) {
     const response = await this.api.post('/inventory/adjust', data);
+    return response.data;
+  }
+
+  // --- Combining two SKUs into one -----------------------------------------
+  // Folds the on-hand stock of a SOURCE part onto a TARGET part when a numbering
+  // recut left two SKUs describing the same physical material. Never a receipt
+  // (which would overstate the shop by the moved quantity) and never an issue
+  // against a fabricated work order: each moved lot line posts a linked pair of
+  // ADJUST rows that sum to zero.
+
+  /**
+   * What combining these two parts would do, before anything moves.
+   *
+   * PURE READ — no ledger row, no audit row, no operational event. That is
+   * structural on the server (the preview builder takes no AuditService and no
+   * actor id at all), not a convention, so it is safe to call on selection and
+   * safe to re-call.
+   *
+   * `quantity` is optional: omit it to ask "what is the whole pile?" and read
+   * `default_quantity` / `max_combinable_quantity` back. Pass one to have the
+   * server evaluate the quantity-dependent refusals against that exact number.
+   *
+   * `eligible` is a SNAPSHOT, never authorization. Stock moves and parts get
+   * renumbered by other people between this read and the write, so the server
+   * re-runs every probe when the combine is actually posted.
+   */
+  async previewInventoryCombine(payload: {
+    source_part_id: number;
+    target_part_id: number;
+    quantity?: number | null;
+  }): Promise<InventoryCombinePreview> {
+    const response = await this.api.post<InventoryCombinePreview>('/inventory/combine/preview', payload);
+    return response.data;
+  }
+
+  /**
+   * Post the combine.
+   *
+   * SERVER-GATED, therefore NON-OPTIMISTIC by contract: keep a loading state,
+   * render only what the server returns, and never paint the fold locally first.
+   * The refusals are the whole point of the verb — same part, deleted part, unit
+   * mismatch, nothing available, more than is available, an open work-order tie
+   * that would be stranded, an unacknowledged flagged part, a part-number
+   * compare-and-swap miss, and a `deactivate_source` that would not land the
+   * source at zero. Show `detail` verbatim.
+   *
+   * `expected_source_part_number` / `expected_target_part_number` are NOT
+   * decoration: `Part` maps no optimistic-lock version column, so those strings
+   * are the only concurrency control. Send the values the PREVIEW returned.
+   */
+  async combineInventory(payload: InventoryCombineRequest): Promise<InventoryCombineResult> {
+    const response = await this.api.post<InventoryCombineResult>('/inventory/combine', payload);
+    // A combine moves stock on BOTH parts and writes the ledger, so every
+    // on-hand read is stale the moment it lands. `deactivate_source` can also
+    // flip the source part row itself, which the part/material reads serve.
+    this.invalidateCache('/inventory');
+    this.invalidatePartActivationCache(payload.source_part_id);
+    this.invalidatePartActivationCache(payload.target_part_id);
     return response.data;
   }
 

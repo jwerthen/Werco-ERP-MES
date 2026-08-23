@@ -57,6 +57,7 @@ from .inventory import (
     InventoryTransaction,
     TransactionType,
 )
+from .inventory_combine import InventoryCombine
 from .job import Job, JobPriority, JobStatus
 from .job_costing import CostEntry, CostEntrySource, CostEntryType, JobCost, JobCostStatus
 from .kiosk_station import KioskStation
@@ -212,6 +213,7 @@ __all__ = [
     "AllocationStatus",
     "TimeEntry",
     "InventoryItem",
+    "InventoryCombine",
     "InventoryTransaction",
     "TransactionType",
     "AuditLog",

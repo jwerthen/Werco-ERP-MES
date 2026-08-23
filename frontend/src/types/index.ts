@@ -1973,3 +1973,207 @@ export interface PartRenumberResult {
   operations_with_stale_prefix: number;
   sheet_spec_changed: boolean;
 }
+
+// --- Combining two SKUs into one, and the part activate/deactivate verbs -----
+// Mirrors backend/app/schemas/inventory_combine.py and the parts activation verbs.
+//
+// A COMBINE folds the on-hand stock of one part (the SOURCE) onto another (the
+// TARGET) when a numbering recut left two SKUs describing the same physical
+// material. It is NOT a receipt and NOT an issue: each moved lot line writes a
+// linked pair of `ADJUST` ledger rows that sum to zero, so the shop's total
+// on-hand is unchanged and no fabricated work order ever appears in job costing.
+// The source part is never hard-deleted — it stays in the catalog at qty 0.
+
+/** One reason a combine is refused, or one consequence worth disclosing. */
+export interface CombineDiagnostic {
+  code: string;
+  detail: string;
+}
+
+/**
+ * One stock row on either side of the combine.
+ *
+ * `eligible` is the server's verdict on whether this row may be drained:
+ * `is_active`, `status == "available"` and a live `quantity_on_hand -
+ * quantity_allocated > 0`. An INELIGIBLE row is never silently folded — it
+ * carries `ineligible_reason` so the screen can say why the material stayed put
+ * (on hold, quarantined, rejected, fully allocated) instead of leaving an
+ * operator to discover the leftover afterwards.
+ */
+export interface CombineStockLine {
+  inventory_item_id: number;
+  // Nullable to the letter of the server schema, which types every one of these
+  // `Optional[str] = None`. Widening them here is not defensive noise: a null
+  // `status` handed to `<StatusBadge>` calls `.replace()` on null, and an
+  // exception thrown inside a modal unmounts the SPA to a blank page.
+  location?: string | null;
+  warehouse?: string | null;
+  lot_number?: string | null;
+  serial_number?: string | null;
+  quantity_on_hand: number;
+  quantity_allocated: number;
+  quantity_available: number;
+  unit_cost: number;
+  status?: string | null;
+  eligible: boolean;
+  ineligible_reason?: string | null;
+}
+
+/** Everything the preview knows about one side of the fold. */
+export interface CombinePartStockSummary {
+  part_id: number;
+  part_number: string;
+  name: string;
+  part_type?: string | null;
+  unit_of_measure?: string | null;
+  is_active: boolean;
+  status?: string | null;
+  is_deleted: boolean;
+  total_on_hand: number;
+  total_allocated: number;
+  total_available: number;
+  /** On-hand on ELIGIBLE rows only — the ceiling on what a combine can move. */
+  eligible_available: number;
+  lines: CombineStockLine[];
+}
+
+/**
+ * A part whose number or name carries a word the owner asked to be careful
+ * about ("test", "housing"). Matched on WORD boundaries, so `HOUSING-A` flags
+ * and `WAREHOUSING` does not.
+ *
+ * This is an acknowledgement gate, not a ban — "housing" is a legitimate
+ * manufacturing word (the Miratech housing), so refusing outright would be
+ * wrong. The request must name the part in `acknowledge_flagged_part_ids`.
+ * Two entries can share a `part_id` (the token matched both `part_number` and
+ * `name`); the acknowledgement is per PART, not per match.
+ */
+export interface CombineFlaggedPart {
+  part_id: number;
+  part_number: string;
+  matched_token: string;
+  /** Which field the token matched — `part_number` or `name`. */
+  field: string;
+}
+
+/**
+ * An open work-order material tie naming the SOURCE part, with the demand it
+ * still has outstanding. Folding stock away from underneath one of these is what
+ * `open_work_order_reservation` refuses.
+ */
+export interface CombineOpenReservation {
+  work_order_id: number;
+  work_order_number: string;
+  work_order_status: string;
+  outstanding_quantity: number;
+}
+
+/**
+ * What the two SKUs are carried at, side by side.
+ *
+ * Costs are NEVER reblended: a newly-created target stock row inherits the
+ * SOURCE row's unit cost, and an EXISTING target row keeps its own untouched.
+ * This block exists so the operator SEES the delta rather than discovering it in
+ * a valuation report later; `note` is the server's own sentence about it.
+ */
+export interface CombineCostComparison {
+  source_weighted_unit_cost: number;
+  target_weighted_unit_cost: number;
+  differs: boolean;
+  note: string;
+}
+
+export interface InventoryCombinePreview {
+  source: CombinePartStockSummary;
+  target: CombinePartStockSummary;
+  unit_of_measure_match: boolean;
+  /** What to pre-fill: the source's whole eligible pile. */
+  default_quantity: number;
+  /**
+   * The largest quantity that would NOT strand an open work-order tie. Offer
+   * this number when the operator asks for more — a bare refusal makes them
+   * guess at the safe figure the server already computed.
+   */
+  max_combinable_quantity: number;
+  /**
+   * `blockers.length === 0`. NOT a durable verdict — stock moves and parts get
+   * renumbered by other people, so the server re-runs every probe on the write.
+   * Never treat a stale `true` as authorization.
+   */
+  eligible: boolean;
+  blockers: CombineDiagnostic[];
+  advisories: CombineDiagnostic[];
+  flagged_parts: CombineFlaggedPart[];
+  open_source_reservations: CombineOpenReservation[];
+  reserved_quantity: number;
+  cost: CombineCostComparison;
+}
+
+export interface InventoryCombineRequest {
+  source_part_id: number;
+  target_part_id: number;
+  quantity: number;
+  reason: string;
+  /**
+   * Compare-and-swap preconditions. `Part` maps no optimistic-lock version, so
+   * the part-number STRINGS are the only concurrency control there is: send what
+   * the client last READ from the preview, and a 409 means somebody renumbered a
+   * part while the dialog sat open.
+   */
+  expected_source_part_number: string;
+  expected_target_part_number: string;
+  acknowledge_flagged_part_ids: number[];
+  /**
+   * Also mark the source part inactive. Permitted ONLY when the source lands at
+   * exactly 0 on-hand across ALL its stock rows — the ineligible ones included —
+   * else 409 `source_still_has_stock`. It never sets `is_deleted`.
+   */
+  deactivate_source: boolean;
+}
+
+/** One lot line that actually moved, as the server posted it. */
+export interface InventoryCombineResultLine {
+  location?: string | null;
+  lot_number?: string | null;
+  quantity: number;
+  unit_cost: number;
+  source_inventory_item_id: number;
+  target_inventory_item_id: number;
+  /** True when the target had no row at this (location, lot) and one was made. */
+  target_row_created: boolean;
+}
+
+export interface InventoryCombineResult {
+  combine_id: number;
+  combine_number: string;
+  source_part_id: number;
+  source_part_number: string;
+  target_part_id: number;
+  target_part_number: string;
+  quantity_moved: number;
+  lines_moved: number;
+  source_quantity_before: number;
+  source_quantity_after: number;
+  target_quantity_before: number;
+  target_quantity_after: number;
+  source_deactivated: boolean;
+  lines: InventoryCombineResultLine[];
+  /** The 2N linked ADJUST rows. They sum to exactly zero, by construction. */
+  transaction_ids: number[];
+}
+
+/**
+ * The result of `POST /parts/{id}/activate` or `/deactivate`.
+ *
+ * Deliberately NOT a full `Part`: these two verbs are the only non-delete
+ * writers of `parts.is_active`, and they write `is_active` and `status`
+ * together so the pair can never disagree. `no_op` is true when the part was
+ * already in the requested state — that is a success, not a failure.
+ */
+export interface PartActivationResult {
+  part_id: number;
+  part_number: string;
+  is_active: boolean;
+  status: string;
+  no_op: boolean;
+}
