@@ -58,6 +58,15 @@
  * fingers on a field they are still typing to learn something the client can
  * already compute. The server re-runs every probe on the write regardless, so
  * nothing rests on the client's arithmetic.
+ *
+ * The corollary is `CLIENT_SATISFIABLE_BLOCKER_CODES` below, and it is not
+ * optional: because the preview is read ONCE, with no quantity and no
+ * acknowledgements, the blockers those two inputs produce are stuck in the
+ * response for the life of the dialog. A gate that reads `blockers.length > 0`
+ * therefore turns the owner's acknowledgement CONTROL into the outright BAN the
+ * owner rejected, and turns `max_combinable_quantity` into a number the screen
+ * offers and then refuses to accept. Read that constant before touching the
+ * submit gate.
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
@@ -170,22 +179,130 @@ const BLOCKER_NEXT_STEP: Record<string, string> = {
     'Somebody renumbered one of these parts while this was open. Close and reopen so you are looking at the current numbers.',
   source_still_has_stock:
     'The source will not land at zero, so it cannot be marked inactive as part of this. Untick that box, or move the rest of the stock first.',
+  target_row_not_available:
+    'The stock would land on a row that is on hold, quarantined, rejected or switched off — usable material would become unusable the moment it moved. Release that row on the target item first, or move these lots to a location and lot the target does not already hold in that state.',
 };
 
-/** One blocker or advisory. `detail` is the server's, verbatim. */
-function DiagnosticRow({ diagnostic, tone }: { diagnostic: CombineDiagnostic; tone: 'blocking' | 'advisory' }) {
+/**
+ * Blockers that say the operator's material is about to become UNUSABLE, as
+ * opposed to blockers that merely refuse the action.
+ *
+ * `target_row_not_available` is the whole reason this set exists. Every other
+ * refusal leaves the shop exactly as it was; that one describes a fold that
+ * WOULD succeed mechanically and would quietly convert available stock into
+ * held stock — the failure the operator is least able to detect afterwards,
+ * because the totals still add up. It renders first and louder for that reason.
+ * These codes are never client-satisfiable (see below) and must not be made so.
+ */
+const HIGH_ALARM_BLOCKER_CODES = new Set<string>(['target_row_not_available']);
+
+/**
+ * The ONLY blocker codes a change made INSIDE this dialog can clear.
+ *
+ * THE BUG THIS EXISTS TO PREVENT (do not undo it): `submitBlockedReason` used to
+ * read `if (blockers.length > 0) return '…cleared first'` before it looked at
+ * anything the operator had done. The preview is read exactly once, and
+ * `build_combine_preview` runs the probes with `acknowledged_ids=()` and
+ * `quantity=None → default_quantity` ON PURPOSE (the dialog needs the blocker in
+ * order to know it must render the checkbox at all). So:
+ *
+ *   * `flagged_part_not_acknowledged` sat in `blockers` for the life of the
+ *     dialog. Ticking the acknowledgement cleared the sentence and left the
+ *     button dead — shipping the owner's acknowledgement gate as the BAN the
+ *     owner explicitly rejected. A part named "housing" could not be combined
+ *     from this screen at all.
+ *   * `open_work_order_reservation` fires on exactly the same condition as
+ *     `max_combinable_quantity < default_quantity`, so whenever the cap bit at
+ *     all, lowering the quantity — including with this dialog's own "Use 60"
+ *     button — left Combine permanently disabled. Every affordance the cap
+ *     exists for was inert.
+ *
+ * THE PREDICATE. A code belongs here only when BOTH hold:
+ *   1. the server evaluated it against an input this dialog KNOWINGLY did not
+ *      send (the acknowledgement list, or the quantity), so its presence is
+ *      evidence about a placeholder rather than about the operator's choice; and
+ *   2. the client can re-evaluate that identical condition from numbers the SAME
+ *      preview response returned — `flagged_parts` ids, `eligible_available`,
+ *      `max_combinable_quantity` — with no second read and no guessing.
+ *
+ * Everything else is HARD, including every code this build has never heard of:
+ * this is an allowlist, so a blocker added by a newer server is refused by
+ * default rather than waved through by a stale client. `target_row_not_available`
+ * in particular stays hard forever — see above.
+ *
+ * WHY THIS IS NOT OPTIMISTIC UI. The CLAUDE.md convention says a server-GATED
+ * action must reflect only what the server returns, and this obeys it: nothing
+ * is folded, no stock figure moves, no success is shown. The client is deciding
+ * only whether to let the operator ASK. The write path re-runs EVERY probe
+ * server-side against the submitted quantity and acknowledgement list, and a
+ * refusal keeps this dialog open showing the server's verbatim `detail` with the
+ * typed reason intact. The optimistic mistake would be rendering the fold as
+ * done; enabling a button the server may still refuse is the opposite — it is
+ * what "let the server do the talking" means.
+ */
+const CLIENT_SATISFIABLE_BLOCKER_CODES = {
+  /** Cleared by ticking every checkbox the server's `flagged_parts` produced. */
+  FLAGGED: 'flagged_part_not_acknowledged',
+  /** Cleared by typing a quantity within `source.eligible_available`. */
+  OVER_AVAILABLE: 'quantity_exceeds_available',
+  /** Cleared by typing a quantity within `max_combinable_quantity`. */
+  OVER_RESERVATION_CAP: 'open_work_order_reservation',
+} as const;
+
+/**
+ * One blocker or advisory. `detail` is the server's, verbatim.
+ *
+ * `tone` has three values rather than two. `cleared` renders a refusal the
+ * OPERATOR has since satisfied inside this dialog (ticked the acknowledgement,
+ * lowered the quantity): it is still shown, quietly, because the sentence
+ * explains why the control they just used exists — but rendering it under the
+ * red "This is refused" heading beside a live Combine button would have the
+ * screen contradicting itself. Dropping it entirely is the other wrong answer:
+ * the operator would lose the only statement of what they just agreed to.
+ *
+ * An UNRECOGNISED code still renders its server sentence in full — a refusal a
+ * newer server invented is disclosed by this build, never swallowed. Only the
+ * "what to do next" line goes missing, which is the safe half to lose.
+ */
+function DiagnosticRow({
+  diagnostic,
+  tone,
+}: {
+  diagnostic: CombineDiagnostic;
+  tone: 'blocking' | 'advisory' | 'cleared';
+}) {
   const blocking = tone === 'blocking';
+  const highAlarm = blocking && HIGH_ALARM_BLOCKER_CODES.has(diagnostic.code);
   const nextStep = BLOCKER_NEXT_STEP[diagnostic.code];
+  const chrome = highAlarm
+    ? 'border-fd-red bg-fd-red/20 text-red-100'
+    : blocking
+      ? 'border-fd-red/40 bg-fd-red/10 text-red-200'
+      : tone === 'advisory'
+        ? 'border-fd-amber/35 bg-fd-amber/10 text-amber-200'
+        : 'border-fd-line bg-fd-panel text-slate-400';
   return (
     <li
-      className={`flex items-start gap-2 rounded-sm border px-2.5 py-2 text-xs ${
-        blocking ? 'border-fd-red/40 bg-fd-red/10 text-red-200' : 'border-fd-amber/35 bg-fd-amber/10 text-amber-200'
-      }`}
+      className={`flex items-start gap-2 rounded-sm border px-2.5 py-2 text-xs ${chrome}`}
       role={blocking ? 'alert' : undefined}
+      data-testid={highAlarm ? `combine-blocker-alarm-${diagnostic.code}` : undefined}
     >
-      <ExclamationTriangleIcon className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" aria-hidden="true" />
+      <ExclamationTriangleIcon
+        className={`mt-0.5 flex-shrink-0 ${highAlarm ? 'h-4 w-4' : 'h-3.5 w-3.5'}`}
+        aria-hidden="true"
+      />
       <span className="min-w-0">
-        <span className="block">{diagnostic.detail}</span>
+        {highAlarm && (
+          <span className="mb-0.5 block text-[10px] font-bold uppercase tracking-wider text-fd-red">
+            Stock would become unusable
+          </span>
+        )}
+        {tone === 'cleared' && (
+          <span className="mb-0.5 block text-[10px] font-semibold uppercase tracking-wider">
+            Cleared here — the server checks this again on submit
+          </span>
+        )}
+        <span className={`block ${highAlarm ? 'font-medium' : ''}`}>{diagnostic.detail}</span>
         {nextStep && <span className="mt-0.5 block opacity-90">{nextStep}</span>}
         <span className="mt-0.5 block font-mono text-[10px] uppercase tracking-wider opacity-60">
           {diagnostic.code}
@@ -295,6 +412,20 @@ function StockSummaryPanel({
   side: 'source' | 'target';
 }) {
   const isSource = side === 'source';
+  /**
+   * How much of this side is NOT eligible — held, quarantined, rejected,
+   * switched off or fully allocated.
+   *
+   * THE BUG THIS FIXES: the target panel used to show only `total_available`
+   * (= on hand − allocated), which applies no eligibility reduction at all. A
+   * target whose single stock row sat quarantined therefore read "Available 10"
+   * on a screen whose entire job is to disclose what the fold will do — and the
+   * fold was about to drop usable material onto that row. The reduction is now
+   * stated on BOTH sides, and the shortfall is called out beneath the table,
+   * because a number that is merely present is not a number anyone reads.
+   */
+  const withheld = summary.total_available - summary.eligible_available;
+  const hasWithheld = withheld > EPS;
   return (
     <section
       className="rounded-sm border border-fd-line bg-fd-panel p-3"
@@ -335,15 +466,29 @@ function StockSummaryPanel({
           <dd className="tabular-nums text-slate-300">{formatQty(summary.total_available)}</dd>
         </div>
         <div>
-          <dt className="text-slate-500">{isSource ? 'Can move' : 'Unit'}</dt>
-          <dd className="tabular-nums text-slate-300">
-            {isSource ? formatQty(summary.eligible_available) : summary.unit_of_measure || '—'}
+          {/* Stated on the TARGET too, not just the source. On the source it is
+              the ceiling on the fold; on the target it is what the shop can
+              actually draw once the material lands there — the number a
+              quarantined target row silently destroys. */}
+          <dt className="text-slate-500">{isSource ? 'Can move' : 'Usable'}</dt>
+          <dd
+            className={`tabular-nums ${hasWithheld ? 'text-fd-amber' : 'text-slate-300'}`}
+            data-testid={`combine-${side}-eligible`}
+          >
+            {formatQty(summary.eligible_available)}
           </dd>
         </div>
       </dl>
-      {isSource && (
-        <p className="mt-1 text-[11px] text-slate-500">
-          Counted in {summary.unit_of_measure || 'no stated unit'}.
+      <p className="mt-1 text-[11px] text-slate-500">
+        Counted in {summary.unit_of_measure || 'no stated unit'}.
+      </p>
+      {hasWithheld && (
+        <p className="mt-1 text-[11px] text-fd-amber" data-testid={`combine-${side}-withheld`}>
+          {formatQty(withheld)} of the {formatQty(summary.total_available)} shown as available is on hold,
+          quarantined, rejected or on a switched-off row
+          {isSource
+            ? ' — it stays under this number and is never folded.'
+            : ' — material landing on one of those rows would stop being usable.'}
         </p>
       )}
 
@@ -536,8 +681,17 @@ export default function CombineInventoryDialog({
 
   // The two quantity refusals, computed from the numbers the preview returned
   // rather than re-fetched — see the "no re-preview per keystroke" note above.
-  const overAvailable = requestedValid && requested > eligibleAvailable + EPS;
-  const overReservationCap = requestedValid && !overAvailable && requested > maxCombinable + EPS;
+  //
+  // The `within*` pair is stated POSITIVELY and independently of each other on
+  // purpose. `overReservationCap` is deliberately suppressed while
+  // `overAvailable` stands (one notice at a time, the more basic one first), so
+  // deriving "the reservation blocker is satisfied" from `!overReservationCap`
+  // would read TRUE for a quantity that blows past `eligible_available` — a
+  // client-side satisfaction check must never inherit a display-only ordering.
+  const withinAvailable = requestedValid && requested <= eligibleAvailable + EPS;
+  const withinReservationCap = requestedValid && requested <= maxCombinable + EPS;
+  const overAvailable = requestedValid && !withinAvailable;
+  const overReservationCap = requestedValid && withinAvailable && !withinReservationCap;
 
   // `deactivate_source` is refused unless the source lands at exactly zero
   // across ALL its rows, the ineligible ones included. Offering the tick while
@@ -552,8 +706,63 @@ export default function CombineInventoryDialog({
     if (!canDeactivateSource && deactivateSource) setDeactivateSource(false);
   }, [canDeactivateSource, deactivateSource]);
 
-  const blockers = preview?.blockers ?? [];
+  const blockers = useMemo(() => preview?.blockers ?? [], [preview]);
   const advisories = preview?.advisories ?? [];
+
+  const unacknowledged = flaggedByPart.filter((entry) => !acknowledgedIds.includes(entry.part.part_id));
+  const reasonTooShort = reason.trim().length < 5;
+
+  /**
+   * Which of the server's blockers the operator has since satisfied HERE.
+   *
+   * Strictly an allowlist over `CLIENT_SATISFIABLE_BLOCKER_CODES` — read that
+   * constant's docstring before adding to this, including the paragraph on why
+   * this is not optimistic UI. Anything not named there, and anything this build
+   * does not recognise, stays standing and keeps the button dead.
+   */
+  const satisfiedBlockerCodes = useMemo(() => {
+    const satisfied = new Set<string>();
+    // Every flagged PART ticked. Guarded on a non-empty `flaggedByPart` so an
+    // empty list can never satisfy the blocker by vacuous truth: with no
+    // checkbox rendered the operator has acknowledged nothing, and a server
+    // that sent the refusal without the parts is a server we do not second-guess.
+    if (flaggedByPart.length > 0 && unacknowledged.length === 0) {
+      satisfied.add(CLIENT_SATISFIABLE_BLOCKER_CODES.FLAGGED);
+    }
+    // The quantity now clears the ceiling the server itself returned.
+    if (withinAvailable) satisfied.add(CLIENT_SATISFIABLE_BLOCKER_CODES.OVER_AVAILABLE);
+    // …and the open-tie cap. Both conditions, because the cap is only meaningful
+    // for a quantity that is available in the first place.
+    if (withinAvailable && withinReservationCap) {
+      satisfied.add(CLIENT_SATISFIABLE_BLOCKER_CODES.OVER_RESERVATION_CAP);
+    }
+    return satisfied;
+  }, [flaggedByPart.length, unacknowledged.length, withinAvailable, withinReservationCap]);
+
+  /**
+   * Refusals still standing, high-alarm ones first.
+   *
+   * `Array.prototype.sort` is stable per spec, so the server's ordering survives
+   * within each band; only `target_row_not_available` (and anything else added to
+   * `HIGH_ALARM_BLOCKER_CODES`) is lifted to the top. `sort` mutates in place, so
+   * it is only safe here because `filter` has already handed back a fresh array —
+   * `blockers` itself is the preview response object's own array and must not be
+   * reordered under the other readers of it.
+   */
+  const standingBlockers = useMemo(
+    () =>
+      blockers
+        .filter((diagnostic) => !satisfiedBlockerCodes.has(diagnostic.code))
+        .sort(
+          (a, b) =>
+            Number(HIGH_ALARM_BLOCKER_CODES.has(b.code)) - Number(HIGH_ALARM_BLOCKER_CODES.has(a.code))
+        ),
+    [blockers, satisfiedBlockerCodes]
+  );
+  const clearedBlockers = useMemo(
+    () => blockers.filter((diagnostic) => satisfiedBlockerCodes.has(diagnostic.code)),
+    [blockers, satisfiedBlockerCodes]
+  );
 
   /**
    * Unsaved-edit guard.
@@ -581,8 +790,6 @@ export default function CombineInventoryDialog({
     if (!confirmDiscard()) return;
     onClose();
   };
-  const unacknowledged = flaggedByPart.filter((entry) => !acknowledgedIds.includes(entry.part.part_id));
-  const reasonTooShort = reason.trim().length < 5;
 
   /**
    * Why the button is dead, in one sentence — or `null` when it is live.
@@ -592,10 +799,27 @@ export default function CombineInventoryDialog({
    * one moves stock in two places and writes 2N ledger rows: a hopeful click is
    * not a cheap experiment here. The trade that makes a disabled button
    * acceptable is that it is never mute — this string renders beside it.
+   *
+   * THE BUG THAT WAS HERE: the first probe read `blockers.length > 0`, the
+   * server's list verbatim, before looking at a single thing the operator had
+   * done. Since the preview is read once with no quantity and no
+   * acknowledgements, that made the acknowledgement gate a permanent ban and the
+   * reservation cap a dead end — the dialog would even offer "Use 60" and then
+   * refuse 60. It now reads `standingBlockers`, i.e. the server's list minus the
+   * ones the operator has demonstrably satisfied in this dialog. The full
+   * argument, and the exact predicate for which codes may ever appear in that
+   * subtraction, is on `CLIENT_SATISFIABLE_BLOCKER_CODES`.
+   *
+   * The `unacknowledged` / `overAvailable` / `overReservationCap` probes below
+   * are NOT redundant with that subtraction and must stay: they are what gates
+   * the case where the preview returned no such blocker at all (a flagged part
+   * with the acknowledgement already implied, a quantity typed past a cap the
+   * default never tripped). The subtraction only ever REMOVES a stale refusal;
+   * these re-impose the live one.
    */
   const submitBlockedReason = useMemo<string | null>(() => {
     if (!preview) return 'Pick both items to see what would move.';
-    if (blockers.length > 0) return 'The refusals above have to be cleared first.';
+    if (standingBlockers.length > 0) return 'The refusals above have to be cleared first.';
     if (!requestedValid) return 'Enter how much to move.';
     if (overAvailable) return `Only ${formatQty(eligibleAvailable)} is available to move.`;
     if (overReservationCap) return `Open jobs cap this at ${formatQty(maxCombinable)}.`;
@@ -604,7 +828,7 @@ export default function CombineInventoryDialog({
     return null;
   }, [
     preview,
-    blockers.length,
+    standingBlockers.length,
     requestedValid,
     overAvailable,
     overReservationCap,
@@ -786,16 +1010,34 @@ export default function CombineInventoryDialog({
                 <StockSummaryPanel summary={preview.target} side="target" />
               </div>
 
-              {blockers.length > 0 && (
+              {standingBlockers.length > 0 && (
                 <div>
                   <p className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-fd-red">
-                    {blockers.length === 1 ? 'This is refused' : `${blockers.length} refusals`}
+                    {standingBlockers.length === 1 ? 'This is refused' : `${standingBlockers.length} refusals`}
                   </p>
                   <ul className="space-y-1.5" data-testid="combine-blockers">
                     {/* Index-keyed: two diagnostics can legitimately share a code
                         (two lots, two flagged parts), so code alone is not unique. */}
-                    {blockers.map((diagnostic, index) => (
+                    {standingBlockers.map((diagnostic, index) => (
                       <DiagnosticRow key={`blocker-${diagnostic.code}-${index}`} diagnostic={diagnostic} tone="blocking" />
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Refusals the operator has satisfied here. Kept on screen —
+                  quietly — because the sentence is the only statement of what
+                  they just agreed to; moved out of the red list because a
+                  standing refusal beside a live Combine button is a screen
+                  arguing with itself. The server re-runs each of these anyway. */}
+              {clearedBlockers.length > 0 && (
+                <div>
+                  <p className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-slate-500">
+                    Cleared here
+                  </p>
+                  <ul className="space-y-1.5" data-testid="combine-cleared-blockers">
+                    {clearedBlockers.map((diagnostic, index) => (
+                      <DiagnosticRow key={`cleared-${diagnostic.code}-${index}`} diagnostic={diagnostic} tone="cleared" />
                     ))}
                   </ul>
                 </div>

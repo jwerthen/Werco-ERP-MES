@@ -293,9 +293,31 @@ def test_restore_part_emits_committed_restore_audit(client: TestClient, db_sessi
     assert rows[0].action == "RESTORE"
     assert rows[0].resource_id == part.id
     assert rows[0].company_id == COMPANY_A
-    # log_update captures the old/new is_deleted + status transition.
-    assert rows[0].old_values == {"is_deleted": True, "status": "obsolete"}
-    assert rows[0].new_values == {"is_deleted": False, "status": "active"}
+
+    # UPDATED BY MIGRATION 086 (the is_active_before_delete sidecar). These two
+    # assertions used to read
+    #     old_values == {"is_deleted": True, "status": "obsolete"}
+    #     new_values == {"is_deleted": False, "status": "active"}
+    # and BOTH halves were wrong for reasons this file exists to catch:
+    #
+    #  * ``old_values`` was HARD-CODED by the handler rather than read off the row,
+    #    so a part parked at ``pending_approval`` had a FABRICATED prior status
+    #    written into the tamper-evident audit_log (invariant 2). The values are now
+    #    read off the row; ``_make_part(is_deleted=True)`` seeds
+    #    ``is_active=False, status='obsolete'``, so that is what the row records.
+    #  * ``status: "active"`` in ``new_values`` was the other half of the bug:
+    #    ``restore_part`` unconditionally re-activated. It now resolves
+    #    ``is_active = COALESCE(is_active_before_delete, False)``, and this fixture
+    #    leaves the sidecar NULL — the "deleted before 086 shipped" case — which by
+    #    owner decision restores INACTIVE. ``status`` follows ``is_active`` and is
+    #    never hard-coded, so ``obsolete`` correctly survives.
+    #
+    # ``is_active`` is in the diff on purpose: it is the approval-relevant flag this
+    # verb writes, and the whole point of preserving it is that its value matters.
+    # See tests/test_part_activation.py "restore returns the RECORD, not the
+    # permission" for the behavioural coverage.
+    assert rows[0].old_values == {"is_deleted": True, "is_active": False, "status": "obsolete"}
+    assert rows[0].new_values == {"is_deleted": False, "is_active": False, "status": "obsolete"}
 
     # Sanity: the entity itself committed the restore.
     db_session.expire_all()

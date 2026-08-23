@@ -1217,8 +1217,29 @@ def delete_part(
 
     # Soft delete
     part.soft_delete(current_user.id)
+
+    # ORDER IS LOAD-BEARING: capture the CURRENT is_active FIRST, then force it False.
+    # Reversed, the sidecar records the value the very next line is about to write and
+    # every restore reactivates -- the bug this column exists to prevent. See
+    # Part.is_active_before_delete and restore_part below (and migration 086, which
+    # mirrors 082's control for Vendor).
+    #
+    # The ``is_active = False`` write STAYS. Not writing it (so restore would have
+    # nothing to put back) is the tempting shortcut and is a security regression:
+    # ``GET /parts/`` and ``GET /materials/`` both default ``active_only=True`` and
+    # filter this flag, as does every picker built on them. It is a deliberate second
+    # layer behind the ``is_deleted`` filters, and dropping it would silently change
+    # what "deleted" means to any query added later.
+    #
+    # Known, accepted imprecision (same as Vendor): ``Part.is_active`` is itself
+    # NULLABLE, so a row whose is_active is NULL records NULL here -- which restore
+    # cannot tell from "we never recorded one" and therefore restores as INACTIVE.
+    # That errs the SAFE way (off, not on). Stated here because it is the reason this
+    # sentinel must never be "tidied" into a NOT NULL column: NULL has to stay
+    # reachable to mean "deleted before 086 shipped".
+    part.is_active_before_delete = part.is_active
     part.is_active = False
-    part.status = "obsolete"
+    part.status = OBSOLETE_PART_STATUS
 
     # Audit log (before the terminal commit so it persists atomically)
     audit.log_delete("part", part.id, part.part_number, soft_delete=True)
@@ -1237,11 +1258,73 @@ def restore_part(
     company_id: int = Depends(get_current_company_id),
 ):
     """
-    Restore a soft-deleted part.
+    Restore a soft-deleted part, PRESERVING the ``is_active`` state it had when it was
+    deleted. Raw lookup (NOT ``_live_part_or_404``) so it can see the soft-deleted row --
+    seeing the tombstone is this verb's entire job.
 
     **Required roles**: Admin or Manager
 
-    Returns the part to active status and clears deletion metadata.
+    Clears the deletion metadata. It does NOT necessarily return the part to *active*
+    status -- see below.
+
+    WHAT THIS USED TO DO, AND WHY IT WAS WRONG
+    ------------------------------------------
+    This verb hard-coded ``part.is_active = True`` and ``part.status = "active"``. That was
+    harmless while "inactive but not deleted" was essentially unreachable for a part:
+    ``PartUpdate`` carries neither column, and the only writer of them was ``delete_part``,
+    which also sets ``is_deleted``. The **Combine/Merge SKUs** feature deliberately creates
+    that state at scale -- ``POST /parts/{id}/deactivate``, and the combine's
+    ``deactivate_source`` flag, retire the folded-away SKU as a routine, reasoned, audited
+    step -- so the hazard became ours:
+
+        Fold ``.0625-60X144-304SS`` onto ``SH-A240-304-0.0625-60X144-2B`` and deactivate the
+        source. Someone later deletes the empty husk; someone else restores it. It came back
+        ACTIVE and ``status='active'`` -- back in every picker, selectable again for
+        receiving and BOM lines -- the deliberate retirement silently reversed, with **no
+        audit row saying anyone decided to re-activate it**.
+
+    Invariant 3 (CLAUDE.md): **a restore returns the RECORD, not the permission.** Undoing a
+    delete is a records decision; putting a retired part number back into use is an
+    engineering decision, and it must not be made as a side effect. Re-activating a
+    recovered part stays the separately audited ``POST /parts/{id}/activate``. This is the
+    same control migration ``082`` established for ``Vendor``; migration ``086`` is its
+    twin for ``parts``.
+
+    THE RESOLUTION RULE
+    -------------------
+    ``is_active = COALESCE(is_active_before_delete, False)``. ``delete_part`` records the
+    pre-delete value in the sidecar (``Part.is_active_before_delete``); NULL means the
+    delete predates migration 086 -- or came through ``DELETE /materials/{id}``, a second
+    soft-delete writer of ``parts.is_active`` that does not record the sidecar -- and that
+    unknown resolves to the **RESTRICTIVE** value, ``False``, NOT to the pre-086
+    unconditional ``True``.
+
+    That is a DELIBERATE BREAK from the old behavior -- do not "preserve backward
+    compatibility" by flipping it back. The asymmetry is the argument: restoring too
+    restrictively costs one explicit, audited re-activation and is visible immediately (the
+    part is missing from a list somebody expected it in); restoring too permissively is
+    indistinguishable from a legitimate approval and is never detected at all.
+
+    ``status`` follows whatever ``is_active`` resolves to and is never hard-coded. It is
+    only rewritten to ``active`` when the part resolves ACTIVE *and* currently reads
+    ``obsolete`` -- the same minimal-rewrite rule ``activate_part`` uses, so a meaningful
+    third value (``pending_approval``) is never clobbered. Resolving INACTIVE leaves the
+    ``obsolete`` that ``delete_part`` wrote, upholding the "inactive implies obsolete"
+    pairing the deactivate/activate verbs enforce.
+
+    The sidecar is CLEARED here so a later delete/restore cycle can never read this one's
+    stale value.
+
+    OPERATIONAL NOTE (read before assuming a restored part is usable)
+    ----------------------------------------------------------------
+    A part that comes back INACTIVE is filtered out of ``GET /parts/`` and
+    ``GET /materials/`` (both default ``active_only=True``), and the Parts and Materials
+    pages do not override that -- so it is invisible there and the ``PartActivationDialog``
+    on those pages cannot reach it. Re-activating one currently means calling
+    ``POST /parts/{id}/activate`` directly, or adding an ``active_only=false`` view to those
+    lists (the Vendors page's three-way Active/Inactive/Deleted switch is the pattern). The
+    response body below reports ``is_active``/``status`` precisely so a caller can tell that
+    a restore came back switched off rather than discovering it later.
     """
     part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
     if not part:
@@ -1252,20 +1335,73 @@ def restore_part(
 
     audit = AuditService(db, current_user, request)
 
-    part.restore()
-    part.is_active = True
-    part.status = "active"
+    # COALESCE(is_active_before_delete, False) -- see the docstring for why the NULL branch
+    # is False and not the pre-086 True. The prior is_active of a part deleted before 086 is
+    # genuinely unknown: the delete overwrote it in place, and the audit_log delete row
+    # records the deletion, not the flag. Resolving that unknown to ON would fabricate
+    # catalog state; resolving it to OFF asks a human to make the call.
+    restored_is_active = False if part.is_active_before_delete is None else bool(part.is_active_before_delete)
 
-    # Audit log (before the terminal commit so it persists atomically)
+    # READ the real prior values instead of asserting them. The old code hard-coded
+    # ``old_values={"is_deleted": True, "status": "obsolete"}`` -- a FABRICATED prior value
+    # whenever the status was something else (``pending_approval``, or anything a legacy row
+    # carried), written into the tamper-evident audit_log. ``is_deleted: True`` is the one
+    # value safe to assert, and it is still read off the row for symmetry; the "not deleted
+    # -> 400" guard above proves it anyway.
+    previous_is_deleted = bool(part.is_deleted)
+    previous_is_active = part.is_active
+    previous_status = part.status
+
+    part.restore()
+    part.is_active = restored_is_active
+    # Minimal status rewrite, mirroring activate_part: only lift `obsolete` back to `active`,
+    # and only when the part is actually coming back active. Never hard-code "active" here --
+    # that is half of the bug this verb had.
+    if restored_is_active and (part.status or ACTIVE_PART_STATUS) == OBSOLETE_PART_STATUS:
+        part.status = ACTIVE_PART_STATUS
+    # Clear the sidecar: it is only meaningful while the row is deleted. Left set, a part
+    # deleted again and restored again would read THIS cycle's value if some future edit ever
+    # skipped the delete-side capture.
+    part.is_active_before_delete = None
+
+    # Audit log (before the terminal commit so it persists atomically).
+    #
+    # ``is_active`` is in the diff on purpose: this verb writes an approval-relevant flag,
+    # and the entire point of preserving it is that the value matters. Leaving it out would
+    # make the one column a reader would ask about the one column the restore row does not
+    # record. Both halves are READ off the row, so the diff cannot understate a real change
+    # or invent one that did not happen.
     audit.log_update(
         "part",
         part.id,
         part.part_number,
-        old_values={"is_deleted": True, "status": "obsolete"},
-        new_values={"is_deleted": False, "status": "active"},
+        old_values={"is_deleted": previous_is_deleted, "is_active": previous_is_active, "status": previous_status},
+        new_values={"is_deleted": False, "is_active": restored_is_active, "status": part.status},
         action="restore",
+        description=(
+            f"Restored part {part.part_number}"
+            + (
+                ""
+                if restored_is_active
+                else " (returned INACTIVE — the record is back, the permission is not; "
+                "reactivate deliberately via POST /parts/{id}/activate)"
+            )
+        ),
     )
 
     db.commit()
+    db.refresh(part)
 
-    return {"message": "Part restored successfully", "part_id": part.id}
+    return {
+        "message": (
+            "Part restored successfully"
+            if restored_is_active
+            else "Part restored, but left inactive — reactivate it deliberately if it should be usable again"
+        ),
+        "part_id": part.id,
+        # Reported so a caller can SEE that a restore came back switched off. Without these
+        # the restrictive resolution is silent until somebody notices the part missing from
+        # a picker.
+        "is_active": bool(part.is_active),
+        "status": part.status or ACTIVE_PART_STATUS,
+    }

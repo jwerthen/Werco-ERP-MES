@@ -571,10 +571,10 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
                 than buried in an item's edit form, because the person who
                 notices it is looking at the on-hand list. */}
             {canCombine && (
-            <Button variant="secondary" onClick={() => setShowCombineModal(true)}>
-              Combine SKUs…
-            </Button>
-          )}
+              <Button variant="secondary" onClick={() => setShowCombineModal(true)}>
+                Combine SKUs…
+              </Button>
+            )}
             {canReceive && (
               <button onClick={() => setShowReceiveModal(true)} className="btn-primary flex items-center">
                 <ArrowDownTrayIcon className="h-5 w-5 mr-2" /> Receive Inventory

@@ -50,16 +50,45 @@ and the backflush-readiness companions follow ("a poll is not an actor and
 records no reason"). Every input it reads is mutable by other people, so the
 write re-runs every probe server-side against the state at write time.
 
-TWO INDEPENDENT RESERVATION RULES, BOTH ENFORCED
-------------------------------------------------
+THREE INDEPENDENT RESERVATION RULES, ALL ENFORCED
+-------------------------------------------------
 1. **Row level, hard, always.** A line can move at most ``quantity_on_hand -
    quantity_allocated``. Allocated material is spoken for at the lot; it never
    crosses.
-2. **Part level.** OPEN ``work_order_material_allocations`` naming the source part
+2. **Row level, lot-directed (pins).** An OPEN tie carrying
+   ``pinned_inventory_item_id`` is a reservation against THAT lot and nothing else
+   -- the consumption engine locks the pinned row and takes what is there, so
+   material drawn off it by anything else becomes a shortage at completion. It is
+   therefore withheld exactly the way ``quantity_allocated`` is, per row, and shows
+   up on the preview as ``quantity_pinned`` so the operator can see why the cap is
+   lower. THE BUG THIS CLOSES: the part-level rule below aggregates per WORK ORDER
+   and never read the pin, while the drain is ascending-id, so a 50-unit pin on the
+   OLDEST lot was satisfied on paper (``100 - 50 >= 50``) and then drained out of
+   the pinned lot first -- the engine later found 10 where 60 had been and recorded
+   a 40 shortage while 50 sheets sat on the shelf under the target number.
+3. **Part level.** OPEN ``work_order_material_allocations`` naming the source part
    on non-terminal work orders still expect to draw from it. If what the source
    would be left with cannot cover that outstanding demand, the combine is refused
    and the work orders are NAMED, so the operator knows what to untie or re-tie
    first rather than being told only that "something" is reserved.
+   **The basis is ``eligible_available``, not ``total_on_hand``.** Those differ by
+   the held / quarantined / deactivated rows, and the consumption engine cannot
+   draw those any more than this verb can move them: computing the remainder from
+   ``total_on_hand`` let a source with "92 free + 92 on hold" satisfy a 92-unit tie
+   after moving all 92 free ones away, turning a satisfiable job into an unfillable
+   one. Only demand NOT already withheld by rule 2 is counted here, so a pin is
+   never charged twice.
+
+WHERE THE MATERIAL LANDS IS CHECKED TOO
+---------------------------------------
+``_find_stock_row`` resolves the target row by ``(company, part, location, lot)``
+and nothing else -- no ``is_active``, no ``status``. Folding available material
+onto a target row that is ON HOLD would leave the quantity counted and nobody able
+to draw it: 92 usable sheets become 0 usable sheets behind a success response.
+``target_row_not_available`` refuses that, and ``target_serial_mismatch`` refuses
+merging a serialized lot onto a row carrying a different serial (one serial cannot
+name two units -- invariant 5). Both are computed inside ``_combine_blockers``, so
+the PREVIEW discloses them rather than the operator discovering them at submit.
 
 DEFERRED IMPORTS FROM ``app.api.endpoints.inventory``
 -----------------------------------------------------
@@ -72,6 +101,24 @@ worse than the awkwardness: ``_find_stock_row``'s ``lot_number IS NULL`` branch 
 load-bearing (the naive ``lot_number == None`` compiles to ``= NULL`` and never
 matches, which is how lot-less receives used to mint duplicate fragment rows), and
 ``_load_inventory_items`` is what acquires locks in ascending-id order.
+
+LOCK ORDERING, INCLUDING THE AUDIT CHAIN LOCK
+---------------------------------------------
+Order is: **every source row (ascending id) -> every target landing row -> the
+audit hash-chain lock**. The last leg is not decoration.
+``AuditService._acquire_chain_lock`` takes a ``pg_advisory_xact_lock`` on ONE
+GLOBAL key and holds it to transaction end, so anything that asks for a NEW row
+lock after its first audit write is holding a lock the whole system contends on
+while waiting for a row lock somebody else may hold. Every sibling stock mutator
+(``/receive``, ``/transfer``, ``/adjust``) takes all its row locks BEFORE its first
+audit write; this one used to write line 1's audit rows inside the drain loop and
+then ask for line 2's target row, which deadlocks against a ``/receive`` onto that
+row that already holds it and is about to write its own audit row. Postgres aborts
+a victim, and there is no DBAPI deadlock handler, so it surfaced as a 500 on a
+stock verb. Two things now prevent it, deliberately belt-and-braces: every target
+landing row is resolved and locked BEFORE the first write, and the per-line audit
+calls are BUFFERED and emitted after the drain loop. Do not move an audit write
+back inside the loop.
 """
 
 import logging
@@ -79,7 +126,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, cast
 
 from fastapi import HTTPException
 from sqlalchemy import func
@@ -152,14 +199,27 @@ _BLOCKER_STATUS: Dict[str, int] = {
     "same_part": 400,
     "part_not_found": 404,
     "part_deleted": 400,
+    # 400, like ``same_part``: the request names a quantity that cannot be moved at
+    # all. In practice the router never reaches it -- ``InventoryCombineRequest``'s
+    # ``gt=MINIMUM_COMBINE_QUANTITY`` bound refuses the same input with a 422 first
+    # -- it is the backstop for callers that reach the service directly.
+    "quantity_below_minimum": 400,
     "unit_of_measure_mismatch": 409,
     "no_available_stock": 409,
     "quantity_exceeds_available": 409,
     "open_work_order_reservation": 409,
+    "target_row_not_available": 409,
+    "target_serial_mismatch": 409,
     "flagged_part_not_acknowledged": 409,
     "expected_part_number_mismatch": 409,
     "source_still_has_stock": 409,
 }
+
+# The key ``_find_stock_row`` resolves a target row by: ``(location, lot_number)``.
+# Kept as one alias because THREE things have to agree on it -- the drain plan, the
+# ``target_row_not_available`` probe, and the row the write actually increments --
+# and a fourth spelling of the same tuple is how they would drift apart.
+_LandingKey = Tuple[Optional[str], Optional[str]]
 
 # A transient value for ``combine_number`` that lives only between the header
 # INSERT and the UPDATE that stamps the real number, because the number is minted
@@ -195,8 +255,78 @@ class OpenReservation:
 
 
 @dataclass
+class SourceReservations:
+    """Every open claim on the source part, split by the SHAPE of the claim.
+
+    Two shapes, because they bind differently and mixing them double-counts:
+
+    * ``by_work_order`` -- outstanding demand aggregated per job, for the message
+      the operator reads and for the part-level cap.
+    * ``pinned_by_item`` -- outstanding demand that names ONE lot
+      (``pinned_inventory_item_id``). The consumption engine locks that row and
+      draws from it alone, so this binds per row, exactly like
+      ``quantity_allocated``, and is withheld at the row rather than counted in the
+      part-level total.
+
+    ``total`` is every open claim regardless of shape -- what the preview reports as
+    ``reserved_quantity``. The part-level rule uses ``unpinned_total`` instead, so a
+    pin is never charged both at the row and again against the remainder.
+    """
+
+    by_work_order: List[OpenReservation] = field(default_factory=list)
+    pinned_by_item: Dict[int, float] = field(default_factory=dict)
+    pinned_work_orders: Dict[int, List[str]] = field(default_factory=dict)
+
+    @property
+    def total(self) -> float:
+        return sum(r.outstanding_quantity for r in self.by_work_order)
+
+    def unpinned_total(self, withheld: float) -> float:
+        """Demand NOT already protected by a per-row withholding.
+
+        ``withheld`` is what the source picture actually held back at the pinned
+        rows, which can be less than the pinned demand when the pinned lot does not
+        hold enough. The floor at zero matters: a pin larger than its lot is already
+        a shortage, and letting the subtraction go negative would hand the combine
+        credit for demand nobody can satisfy.
+        """
+        return max(0.0, self.total - max(0.0, withheld))
+
+
+@dataclass
+class PlannedLine:
+    """One source row this combine intends to draw from, and how much.
+
+    Computed BEFORE any write, from the same per-row caps the drain loop obeys, so
+    the refusal probes and the write can never model different moves. It is also
+    what tells the ``target_row_not_available`` probe which target rows are actually
+    in play -- a held target row at a location this combine never touches is not a
+    reason to refuse anything.
+    """
+
+    inventory_item_id: int
+    location: Optional[str] = None
+    lot_number: Optional[str] = None
+    serial_number: Optional[str] = None
+    quantity: float = 0.0
+
+    @property
+    def landing_key(self) -> _LandingKey:
+        return (self.location, self.lot_number)
+
+
+@dataclass
 class CombineStockLine:
-    """One stock row, and whether this combine may move it."""
+    """One stock row, and how much of it this combine may move.
+
+    ``quantity_available`` keeps its platform-wide meaning (``on_hand -
+    allocated``). ``quantity_combinable`` is the figure this verb actually draws
+    against: available MINUS anything a lot-directed (pinned) open tie is holding on
+    this exact row. ``unavailable_reason`` is the STATUS half of eligibility only --
+    "this row is on hold / deactivated" -- with no availability clause, because a
+    TARGET row is a perfectly good landing site at zero on hand but is not one while
+    it is quarantined. Splitting the two is what lets one predicate serve both sides.
+    """
 
     inventory_item_id: int
     location: Optional[str] = None
@@ -206,10 +336,18 @@ class CombineStockLine:
     quantity_on_hand: float = 0.0
     quantity_allocated: float = 0.0
     quantity_available: float = 0.0
+    quantity_pinned: float = 0.0
+    quantity_combinable: float = 0.0
     unit_cost: float = 0.0
     status: Optional[str] = None
+    is_active: bool = True
     eligible: bool = False
     ineligible_reason: Optional[str] = None
+    # Not part of the API contract: the status-only verdict, reused for the target
+    # landing check. ``model_validate(..., from_attributes=True)`` only reads the
+    # fields the schema declares, so carrying it here costs the wire nothing.
+    unavailable_reason: Optional[str] = None
+    pinned_work_orders: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -227,6 +365,7 @@ class PartStockPicture:
     total_on_hand: float = 0.0
     total_allocated: float = 0.0
     total_available: float = 0.0
+    total_pinned: float = 0.0
     eligible_available: float = 0.0
     lines: List[CombineStockLine] = field(default_factory=list)
 
@@ -334,10 +473,10 @@ def _stock_rows(db: Session, company_id: int, part_id: int) -> List[InventoryIte
     )
 
 
-def _ineligible_reason(item: InventoryItem, available: float) -> Optional[str]:
-    """Why this row cannot be moved, in the operator's words, or ``None`` if it can.
+def _unavailable_reason(item: InventoryItem) -> Optional[str]:
+    """Why this row's material is not usable at all, or ``None`` when it is.
 
-    THE eligibility gate is ``is_consumable_item`` -- the same predicate the
+    THE gate is ``is_consumable_item`` -- the same predicate the
     material-consumption engine draws lots with. Two rules for "may this lot be
     used" would eventually disagree, and it matters that this one is not
     accidentally STRICTER either: a NULL ``status`` reads as available there (the
@@ -346,13 +485,39 @@ def _ineligible_reason(item: InventoryItem, available: float) -> Optional[str]:
 
     The branches below only DECOMPOSE that verdict into a sentence; they never
     decide it.
+
+    Deliberately STATUS-ONLY -- no availability clause. This is the half that
+    applies to BOTH sides: a source row with nothing free cannot contribute, but a
+    TARGET row with nothing on hand is a perfectly good place to land material,
+    while a quarantined target row is not. ``_ineligible_reason`` adds the source
+    side's availability clause on top.
     """
-    if not is_consumable_item(item):
-        if not item.is_active:
-            return "this stock row is deactivated"
-        status = (item.status or AVAILABLE_ITEM_STATUS).strip().lower()
-        return f"material is {status.replace('_', ' ')}, not available"
-    if available <= LEDGER_QUANTITY_EPSILON:
+    if is_consumable_item(item):
+        return None
+    if not item.is_active:
+        return "this stock row is deactivated"
+    status = (item.status or AVAILABLE_ITEM_STATUS).strip().lower()
+    return f"material is {status.replace('_', ' ')}, not available"
+
+
+def _ineligible_reason(item: InventoryItem, combinable: float, pinned: float) -> Optional[str]:
+    """Why this SOURCE row cannot be moved, in the operator's words, or ``None``.
+
+    ``combinable`` is already net of both per-row reservations (``quantity_allocated``
+    and any lot-directed pin), so the "nothing free" branch reports the cap that
+    actually bit -- naming the pin when the pin is what emptied it, because
+    "nothing free on this row" against a row visibly holding 60 sheets reads as a bug.
+    """
+    reason = _unavailable_reason(item)
+    if reason is not None:
+        return reason
+    if combinable <= LEDGER_QUANTITY_EPSILON:
+        if pinned > LEDGER_QUANTITY_EPSILON:
+            return (
+                f"reserved to a specific lot by open work orders (on hand "
+                f"{item.quantity_on_hand or 0:g}, allocated {item.quantity_allocated or 0:g}, "
+                f"pinned {pinned:g})"
+            )
         return (
             f"nothing free on this row (on hand {item.quantity_on_hand or 0:g}, "
             f"allocated {item.quantity_allocated or 0:g})"
@@ -360,18 +525,31 @@ def _ineligible_reason(item: InventoryItem, available: float) -> Optional[str]:
     return None
 
 
-def _picture_from_rows(part: Part, rows: Sequence[InventoryItem]) -> PartStockPicture:
+def _picture_from_rows(
+    part: Part,
+    rows: Sequence[InventoryItem],
+    reservations: Optional[SourceReservations] = None,
+) -> PartStockPicture:
     """Totals and per-row eligibility for one side of a combine.
 
     ``eligible_available`` -- the figure that actually bounds the move -- is the
-    sum of ``on_hand - allocated`` over the ELIGIBLE rows only. It differs from
-    ``total_available`` by exactly the stock that is held, quarantined, rejected or
-    sitting on a deactivated row, which is why both are reported: an operator
-    seeing "141 available" but a 92 cap deserves to see where the gap is.
+    sum of ``quantity_combinable`` over the ELIGIBLE rows only. It differs from
+    ``total_available`` by exactly the stock that is held, quarantined, rejected,
+    sitting on a deactivated row, or withheld by a lot-directed pin, which is why
+    all of them are reported: an operator seeing "141 available" but a 92 cap
+    deserves to see where the gap is.
+
+    ``reservations`` is passed for the SOURCE side only. Pins on the TARGET part
+    restrict nothing about adding material to it, so passing them there would
+    invent a cap that does not exist.
     """
+    pinned_by_item = reservations.pinned_by_item if reservations is not None else {}
+    pinned_work_orders = reservations.pinned_work_orders if reservations is not None else {}
+
     lines: List[CombineStockLine] = []
     total_on_hand = 0.0
     total_allocated = 0.0
+    total_pinned = 0.0
     eligible_available = 0.0
 
     for item in rows:
@@ -381,10 +559,19 @@ def _picture_from_rows(part: Part, rows: Sequence[InventoryItem]) -> PartStockPi
         total_on_hand += on_hand
         total_allocated += allocated
 
-        reason = _ineligible_reason(item, available)
+        # A pin can only withhold material that is actually on the row. A pin larger
+        # than its lot is already a shortage; letting it withhold more than exists
+        # would push ``combinable`` negative and understate every other row via the
+        # part-level subtraction.
+        pinned_demand = float(pinned_by_item.get(item.id, 0.0))
+        withheld = min(max(0.0, pinned_demand), max(0.0, available))
+        combinable = max(0.0, available - withheld)
+        total_pinned += withheld
+
+        reason = _ineligible_reason(item, combinable, withheld)
         eligible = reason is None
         if eligible:
-            eligible_available += available
+            eligible_available += combinable
 
         lines.append(
             CombineStockLine(
@@ -396,10 +583,15 @@ def _picture_from_rows(part: Part, rows: Sequence[InventoryItem]) -> PartStockPi
                 quantity_on_hand=on_hand,
                 quantity_allocated=allocated,
                 quantity_available=available,
+                quantity_pinned=withheld,
+                quantity_combinable=combinable,
                 unit_cost=float(item.unit_cost or 0.0),
                 status=item.status,
+                is_active=bool(item.is_active),
                 eligible=eligible,
                 ineligible_reason=reason,
+                unavailable_reason=_unavailable_reason(item),
+                pinned_work_orders=list(pinned_work_orders.get(item.id, ())),
             )
         )
 
@@ -415,8 +607,37 @@ def _picture_from_rows(part: Part, rows: Sequence[InventoryItem]) -> PartStockPi
         total_on_hand=total_on_hand,
         total_allocated=total_allocated,
         total_available=total_on_hand - total_allocated,
+        total_pinned=total_pinned,
         eligible_available=eligible_available,
         lines=lines,
+    )
+
+
+def _stock_line_snapshot(item: InventoryItem) -> CombineStockLine:
+    """One stock row as a plain value object, with NO source-side caps applied.
+
+    Used for the TARGET landing rows, where the only questions are "is this row
+    usable?" and "what serial does it carry?" -- so it deliberately carries no
+    eligibility verdict and no combinable figure. Handing the probes a value object
+    rather than the ORM row keeps ``_combine_blockers`` identical between the
+    preview (which never loads locked rows) and the write (which only loads locked
+    ones).
+    """
+    on_hand = float(item.quantity_on_hand or 0.0)
+    allocated = float(item.quantity_allocated or 0.0)
+    return CombineStockLine(
+        inventory_item_id=item.id,
+        location=item.location,
+        warehouse=item.warehouse,
+        lot_number=item.lot_number,
+        serial_number=item.serial_number,
+        quantity_on_hand=on_hand,
+        quantity_allocated=allocated,
+        quantity_available=on_hand - allocated,
+        unit_cost=float(item.unit_cost or 0.0),
+        status=item.status,
+        is_active=bool(item.is_active),
+        unavailable_reason=_unavailable_reason(item),
     )
 
 
@@ -473,8 +694,8 @@ def _flagged_parts(source: Part, target: Part) -> List[FlaggedPart]:
     return list(flags.values())
 
 
-def open_source_reservations(db: Session, company_id: int, part_id: int) -> List[OpenReservation]:
-    """Open work-order material ties still expecting to draw this part, by work order.
+def source_reservations(db: Session, company_id: int, part_id: int) -> SourceReservations:
+    """Open work-order material ties still expecting to draw this part.
 
     **The basis is the PLAN (``qty_planned``), not the live consumption target.**
     ``material_consumption_service._live_consumption_target`` computes
@@ -497,6 +718,15 @@ def open_source_reservations(db: Session, company_id: int, part_id: int) -> List
 
     Aggregated per work order so the refusal can name jobs rather than tie ids --
     the operator's next action is to open a work order and untie or re-tie it.
+
+    **``pinned_inventory_item_id`` is read here, and that is not optional.** A pinned
+    tie is a claim on ONE lot: the consumption engine locks that row and draws from
+    it alone. The per-work-order aggregate above cannot express that, and a combine
+    that satisfied only the aggregate would happily drain the pinned lot first (the
+    drain is ascending-id, i.e. oldest lot first) and leave the pin looking at an
+    empty shelf. So the pinned demand is ALSO returned per inventory item, and the
+    picture withholds it at the row -- see ``SourceReservations``. Do not collapse
+    the two maps back into one number.
     """
     rows = (
         db.query(WorkOrderMaterialAllocation, WorkOrder)
@@ -514,22 +744,46 @@ def open_source_reservations(db: Session, company_id: int, part_id: int) -> List
     )
 
     by_work_order: Dict[int, OpenReservation] = {}
+    pinned_by_item: Dict[int, float] = {}
+    pinned_work_orders: Dict[int, List[str]] = {}
     for allocation, work_order in rows:
         outstanding = float(allocation.qty_planned or 0.0) - float(allocation.qty_consumed or 0.0)
         if outstanding <= LEDGER_QUANTITY_EPSILON:
             continue
+        label = work_order.work_order_number or f"work order {work_order.id}"
         existing = by_work_order.get(work_order.id)
         if existing is None:
             by_work_order[work_order.id] = OpenReservation(
                 work_order_id=work_order.id,
-                work_order_number=work_order.work_order_number or f"work order {work_order.id}",
+                work_order_number=label,
                 work_order_status=str(getattr(work_order.status, "value", work_order.status) or ""),
                 outstanding_quantity=outstanding,
             )
         else:
             existing.outstanding_quantity += outstanding
 
-    return sorted(by_work_order.values(), key=lambda r: r.work_order_number)
+        pinned_item_id = allocation.pinned_inventory_item_id
+        if pinned_item_id is not None:
+            pinned_by_item[pinned_item_id] = pinned_by_item.get(pinned_item_id, 0.0) + outstanding
+            jobs = pinned_work_orders.setdefault(pinned_item_id, [])
+            if label not in jobs:
+                jobs.append(label)
+
+    return SourceReservations(
+        by_work_order=sorted(by_work_order.values(), key=lambda r: r.work_order_number),
+        pinned_by_item=pinned_by_item,
+        pinned_work_orders=pinned_work_orders,
+    )
+
+
+def open_source_reservations(db: Session, company_id: int, part_id: int) -> List[OpenReservation]:
+    """The per-work-order half of ``source_reservations``. Kept as the public name.
+
+    Thin on purpose: everything inside this module wants the pinned map too, and one
+    query has to produce both or the two halves can be read a moment apart and
+    disagree about what is open.
+    """
+    return source_reservations(db, company_id, part_id).by_work_order
 
 
 def _weighted_unit_cost(picture: PartStockPicture) -> Tuple[float, bool]:
@@ -731,6 +985,101 @@ def _excluded_stock_advisories(picture: PartStockPicture) -> List[CombineDiagnos
     return out
 
 
+def _pinned_stock_advisories(picture: PartStockPicture) -> List[CombineDiagnostic]:
+    """One advisory per source row a lot-directed tie is holding material on.
+
+    Without this the cap simply looks wrong: the dialog shows a row with 60 on hand,
+    nothing allocated and an available figure of 60, and then refuses to move more
+    than 10 of it. Naming the pinned quantity AND the jobs holding it turns an
+    inexplicable number into an action -- go to that work order and re-point or
+    release the pin.
+    """
+    out: List[CombineDiagnostic] = []
+    for line in picture.lines:
+        if line.quantity_pinned <= LEDGER_QUANTITY_EPSILON:
+            continue
+        where = line.location or "(no location)"
+        lot = f" lot {line.lot_number}" if line.lot_number else ""
+        jobs = _join_words(line.pinned_work_orders) if line.pinned_work_orders else "an open work order"
+        out.append(
+            CombineDiagnostic(
+                code="pinned_lot_reserved",
+                detail=(
+                    f"{line.quantity_pinned:g} at {where}{lot} is pinned to {jobs} and will NOT move: "
+                    "that job draws from this lot specifically, so moving it would strand the job even "
+                    "though the total looks sufficient."
+                ),
+            )
+        )
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# The drain plan, and where each line would land
+# --------------------------------------------------------------------------- #
+
+
+def _plan_lines(source_picture: PartStockPicture, quantity: float) -> List[PlannedLine]:
+    """Which source rows this combine would draw from, and how much off each.
+
+    ONE definition of the draw, computed before any write and reused by the write,
+    so a refusal probe can never be modelling a different move than the loop
+    performs. Ascending id (the order ``_stock_rows`` returns) is simultaneously
+    the FIFO drain order and the lock-acquisition order.
+
+    Every cap is already baked into ``quantity_combinable``: ``quantity_allocated``
+    and any lot-directed pin. Nothing here may re-derive them.
+    """
+    remaining = float(quantity)
+    planned: List[PlannedLine] = []
+    for line in source_picture.lines:
+        if remaining <= LEDGER_QUANTITY_EPSILON:
+            break
+        if not line.eligible or line.quantity_combinable <= LEDGER_QUANTITY_EPSILON:
+            continue
+        take = min(remaining, line.quantity_combinable)
+        planned.append(
+            PlannedLine(
+                inventory_item_id=line.inventory_item_id,
+                location=line.location,
+                lot_number=line.lot_number,
+                serial_number=line.serial_number,
+                quantity=take,
+            )
+        )
+        remaining -= take
+    return planned
+
+
+def _landing_keys(planned: Sequence[PlannedLine]) -> List[_LandingKey]:
+    """The distinct ``(location, lot)`` keys the plan would land on, in plan order.
+
+    De-duplicated because two source rows can share a ``(location, lot)`` -- a
+    legacy fragmented set does exactly that -- and both would land on the SAME
+    target row.
+    """
+    keys: List[_LandingKey] = []
+    for line in planned:
+        if line.landing_key not in keys:
+            keys.append(line.landing_key)
+    return keys
+
+
+def _landing_rows_from_picture(target_picture: PartStockPicture) -> Dict[_LandingKey, CombineStockLine]:
+    """The target row each ``(location, lot)`` would resolve to, from a read-only picture.
+
+    Mirrors ``_find_stock_row``: same key, and FIRST match wins because that query
+    orders by ascending id and takes ``.first()``. ``_stock_rows`` hands the picture
+    back in ascending-id order, so "first occurrence" and "lowest id" are the same
+    row -- if that ordering is ever relaxed, this resolver silently starts naming a
+    different row than the write increments.
+    """
+    landing: Dict[_LandingKey, CombineStockLine] = {}
+    for line in target_picture.lines:
+        landing.setdefault((line.location, line.lot_number), line)
+    return landing
+
+
 # --------------------------------------------------------------------------- #
 # The refusal probes -- ONE list, shared by the preview and the write
 # --------------------------------------------------------------------------- #
@@ -744,8 +1093,9 @@ def _combine_blockers(
     quantity: float,
     flagged: Sequence[FlaggedPart],
     acknowledged_ids: Sequence[int],
-    reserved_quantity: float,
-    reservations: Sequence[OpenReservation],
+    reservations: SourceReservations,
+    planned: Sequence[PlannedLine],
+    target_landing: Dict[_LandingKey, CombineStockLine],
 ) -> List[CombineDiagnostic]:
     """Every condition that refuses a combine, in the order the write checks them.
 
@@ -758,6 +1108,12 @@ def _combine_blockers(
     checked by ``_assert_expected_part_numbers``) and ``source_still_has_stock``
     (the ``deactivate_source`` guard). Both are checked by the write before its
     first mutation, alongside these.
+
+    ``planned`` and ``target_landing`` are what let the TARGET-side probes live
+    here rather than in the write. They MUST be computed from this same
+    ``source_picture`` (via ``_plan_lines``) -- probes modelling a different draw
+    than the loop performs are how a refusal ends up disagreeing with the write it
+    is supposed to rehearse.
     """
     out: List[CombineDiagnostic] = []
 
@@ -807,7 +1163,25 @@ def _combine_blockers(
                 code="no_available_stock",
                 detail=(
                     f"'{source.part_number}' has no available stock to combine. "
-                    "Anything it still holds is allocated, on hold, quarantined or on a deactivated row."
+                    "Anything it still holds is allocated, pinned to an open job, on hold, quarantined "
+                    "or on a deactivated row."
+                ),
+            )
+        )
+    elif quantity <= LEDGER_QUANTITY_EPSILON:
+        # THE BUG THIS CLOSES: the schema bound was ``gt=0`` while the drain loop
+        # broke on ``remaining <= LEDGER_QUANTITY_EPSILON``, so ``quantity: 1e-10``
+        # returned 200 having moved nothing and still wrote an immutable combine
+        # header, an operational event and an audit row -- a record asserting a
+        # combine that did not happen. Ordered AFTER the availability probe so a
+        # drained SKU still reports ``no_available_stock`` first, which is the
+        # sentence that actually helps.
+        out.append(
+            CombineDiagnostic(
+                code="quantity_below_minimum",
+                detail=(
+                    f"{quantity:g} is too small to move -- it would round to nothing and record a combine "
+                    "that never happened. Enter the quantity you actually want to fold across."
                 ),
             )
         )
@@ -822,21 +1196,43 @@ def _combine_blockers(
             )
         )
 
-    # Part-level reservation (rule 2 of two -- the row-level cap is enforced by the
-    # draw itself and can never be waived). What the source would be LEFT WITH has
-    # to cover what open jobs still expect to pull from it.
-    remaining_after = source_picture.total_on_hand - quantity
-    if reserved_quantity > LEDGER_QUANTITY_EPSILON and remaining_after < reserved_quantity - LEDGER_QUANTITY_EPSILON:
-        named = ", ".join(f"{r.work_order_number} ({r.outstanding_quantity:g})" for r in reservations)
+    # Part-level reservation (rule 3 of three -- the row-level caps are enforced by
+    # the draw itself and can never be waived). What the source would be LEFT WITH
+    # has to cover what open jobs still expect to pull from it.
+    #
+    # BOTH SIDES ARE ELIGIBLE-BASED, and that is the fix for a real defect. This was
+    # ``source_picture.total_on_hand - quantity`` compared against every open tie:
+    # ``total_on_hand`` sums held, quarantined and deactivated rows, which the
+    # consumption engine can no more draw than this verb can move. A source with 92
+    # free and 92 on hold "satisfied" a 92-unit tie (``184 - 92 >= 92``) and was then
+    # left with nothing drawable -- the combine turned a satisfiable job into an
+    # unfillable one, and ``_max_combinable`` inherited the same wrong basis and
+    # ACTIVELY OFFERED the unsafe number. Refusing too much costs one visible
+    # conversation; refusing too little strands material silently.
+    #
+    # Pinned demand is subtracted out because ``source_picture`` already withheld it
+    # at the row -- counting it here as well would charge the same reservation twice.
+    unpinned_reserved = reservations.unpinned_total(source_picture.total_pinned)
+    remaining_after = source_picture.eligible_available - quantity
+    if unpinned_reserved > LEDGER_QUANTITY_EPSILON and remaining_after < unpinned_reserved - LEDGER_QUANTITY_EPSILON:
+        named = ", ".join(f"{r.work_order_number} ({r.outstanding_quantity:g})" for r in reservations.by_work_order)
+        pinned_note = (
+            f" ({source_picture.total_pinned:g} more is pinned to specific lots and is already held back.)"
+            if source_picture.total_pinned > LEDGER_QUANTITY_EPSILON
+            else ""
+        )
         out.append(
             CombineDiagnostic(
                 code="open_work_order_reservation",
                 detail=(
-                    f"Open work orders still expect {reserved_quantity:g} of '{source.part_number}' and this "
-                    f"combine would leave {remaining_after:g}. Untie or re-tie them first: {named}."
+                    f"Open work orders still expect {unpinned_reserved:g} of '{source.part_number}' to be "
+                    f"available and this combine would leave {remaining_after:g} available. Untie or "
+                    f"re-tie them first: {named}.{pinned_note}"
                 ),
             )
         )
+
+    out.extend(_target_landing_blockers(target, planned, target_landing))
 
     acknowledged = set(acknowledged_ids or ())
     unacknowledged = [flag for flag in flagged if flag.part_id not in acknowledged]
@@ -851,6 +1247,88 @@ def _combine_blockers(
                 ),
             )
         )
+
+    return out
+
+
+def _target_landing_blockers(
+    target: Part,
+    planned: Sequence[PlannedLine],
+    target_landing: Dict[_LandingKey, CombineStockLine],
+) -> List[CombineDiagnostic]:
+    """Refusals about the TARGET rows this combine's material would land on.
+
+    ``target_row_not_available`` -- THE BUG THIS CLOSES, and it is the one that made
+    this feature actively dangerous. ``_find_stock_row`` resolves a landing row by
+    ``(company, part, location, lot)`` and nothing else: no ``is_active``, no
+    ``status``. So 92 AVAILABLE sheets folded onto a target row somebody had put
+    ``on_hold`` produced a **200**, an empty ``blockers`` list, a row at 102 still
+    ``on_hold`` -- and 92 usable sheets that nothing in the app could draw any more.
+    Counted, present, unusable, behind a success toast. Eligibility is decided by
+    ``_unavailable_reason`` (i.e. ``is_consumable_item``), the SAME predicate the
+    source side and the consumption engine use, so the two halves cannot drift.
+
+    ``target_serial_mismatch`` -- a serial number names ONE physical unit. Merging a
+    lot carrying ``SN-SOURCE`` onto a row carrying ``SN-TARGET`` produced a single
+    row at quantity 2 claiming ``SN-TARGET``: two units under one serial, which
+    invariant 5 exists to prevent. The comparison is SYMMETRIC (either side blank
+    while the other is set is refused too) deliberately: merging a serialized lot
+    into an anonymous row loses the serial, and merging an anonymous lot into a
+    serialized row inflates it. Both misrepresent, so both are refused. A combine
+    that genuinely needs to move serialized units to a new number lands them on a
+    NEW row, which carries the serial across intact and is unaffected by this.
+
+    Only rows a MOVING line would actually land on are considered -- a held target
+    row at a location this combine never touches refuses nothing. That is why this
+    takes the plan rather than the whole target picture.
+    """
+    out: List[CombineDiagnostic] = []
+    reported: set = set()
+
+    for line in planned:
+        key = line.landing_key
+        if key in reported:
+            continue
+        existing = target_landing.get(key)
+        if existing is None:
+            # No row there yet: ``_resolve_target_row`` will CREATE one, available
+            # and carrying the source lot's traceability. Nothing to refuse.
+            continue
+
+        where = existing.location or "(no location)"
+        lot = f" lot {existing.lot_number}" if existing.lot_number else ""
+
+        if existing.unavailable_reason is not None:
+            reported.add(key)
+            out.append(
+                CombineDiagnostic(
+                    code="target_row_not_available",
+                    detail=(
+                        f"'{target.part_number}' already has stock at {where}{lot} that is not available "
+                        f"({existing.unavailable_reason}, status '{existing.status or 'available'}'). "
+                        f"{line.quantity:g} of usable material would be folded onto it and become unusable "
+                        "too. Release that hold, or move this material to a different location or lot first."
+                    ),
+                )
+            )
+            continue
+
+        source_serial = (line.serial_number or "").strip()
+        target_serial = (existing.serial_number or "").strip()
+        if (source_serial or target_serial) and source_serial != target_serial:
+            reported.add(key)
+            out.append(
+                CombineDiagnostic(
+                    code="target_serial_mismatch",
+                    detail=(
+                        f"The material at {where}{lot} carries serial "
+                        f"'{source_serial or '(none)'}' and '{target.part_number}' already has a row there "
+                        f"carrying serial '{target_serial or '(none)'}'. Merging them would put more than "
+                        "one unit under a single serial number. Combine serialized stock onto a location "
+                        "or lot the target does not already use."
+                    ),
+                )
+            )
 
     return out
 
@@ -927,16 +1405,19 @@ def build_combine_preview(
     source = _resolve_part(db, company_id, source_part_id)
     target = _resolve_part(db, company_id, target_part_id)
 
-    source_picture = _picture_from_rows(source, _stock_rows(db, company_id, source.id))
-    target_picture = _picture_from_rows(target, _stock_rows(db, company_id, target.id))
+    reservations = source_reservations(db, company_id, source.id)
+    reserved_quantity = reservations.total
 
-    reservations = open_source_reservations(db, company_id, source.id)
-    reserved_quantity = sum(r.outstanding_quantity for r in reservations)
+    # Pins are a SOURCE-side cap only: a lot-directed tie on the target part
+    # restricts nothing about adding material to it.
+    source_picture = _picture_from_rows(source, _stock_rows(db, company_id, source.id), reservations)
+    target_picture = _picture_from_rows(target, _stock_rows(db, company_id, target.id))
 
     default_quantity = source_picture.eligible_available
     requested = default_quantity if quantity is None else float(quantity)
 
     flagged = _flagged_parts(source, target)
+    planned = _plan_lines(source_picture, requested)
 
     blockers = _combine_blockers(
         source=source,
@@ -949,8 +1430,9 @@ def build_combine_preview(
         # flagged part is unconfirmed. That is deliberate: the dialog needs the
         # blocker to know it must render the confirmation checkbox.
         acknowledged_ids=(),
-        reserved_quantity=reserved_quantity,
         reservations=reservations,
+        planned=planned,
+        target_landing=_landing_rows_from_picture(target_picture),
     )
 
     advisories: List[CombineDiagnostic] = []
@@ -967,6 +1449,7 @@ def build_combine_preview(
             )
         )
     advisories.extend(_excluded_stock_advisories(source_picture))
+    advisories.extend(_pinned_stock_advisories(source_picture))
     advisories.extend(_sheet_advisories(source, target))
 
     return CombinePreview(
@@ -976,25 +1459,33 @@ def build_combine_preview(
         # reported as an advisory instead -- same rule ``uom_disagrees`` follows.
         unit_of_measure_match=not (source_uom and target_uom and source_uom != target_uom),
         default_quantity=default_quantity,
-        max_combinable_quantity=_max_combinable(source_picture, reserved_quantity),
+        max_combinable_quantity=_max_combinable(source_picture, reservations),
         reserved_quantity=reserved_quantity,
         eligible=not blockers,
         blockers=blockers,
         advisories=advisories,
         flagged_parts=flagged,
-        open_source_reservations=reservations,
+        open_source_reservations=reservations.by_work_order,
         cost=_cost_summary(source_picture, target_picture),
     )
 
 
-def _max_combinable(source_picture: PartStockPicture, reserved_quantity: float) -> float:
+def _max_combinable(source_picture: PartStockPicture, reservations: SourceReservations) -> float:
     """The largest quantity that would NOT trip the open-tie reservation check.
 
     Offered so the dialog can propose the safe number instead of presenting a dead
-    end. Bounded by the eligible available quantity as well, because that cap is
-    the hard one.
+    end -- which means it has to be computed on the SAME basis as the check itself,
+    or the dialog offers a number the server then refuses. It used to be
+    ``total_on_hand - reserved``, while the check compared against every open tie:
+    on a source with held stock that offered a quantity which passed the check and
+    left the open jobs with nothing drawable. Both are ``eligible_available``-based
+    now; if one moves, the other moves with it.
+
+    Bounded by the eligible available quantity as well, because that cap is the hard
+    one, and the subtraction skips pinned demand for the same reason
+    ``_combine_blockers`` does -- ``eligible_available`` is already net of it.
     """
-    reservation_cap = source_picture.total_on_hand - reserved_quantity
+    reservation_cap = source_picture.eligible_available - reservations.unpinned_total(source_picture.total_pinned)
     return max(0.0, min(source_picture.eligible_available, reservation_cap))
 
 
@@ -1018,12 +1509,14 @@ def _lock_source_stock_rows(db: Session, company_id: int, part_id: int) -> List[
 
     LOCK-ORDERING CAVEAT, carried verbatim from the ``/transfer`` handler because
     this verb has the same shape: source rows are locked by id first, then each
-    target row by (part, location, lot). The pair is NOT id-ordered relative to
-    each other, so a combine racing an opposing transfer/consumption over the same
-    lots can deadlock. Postgres detects it and aborts one victim with an error
-    (never a hang), and nothing partial commits -- the whole verb runs inside one
-    ``atomic_transaction``. A two-phase ascending-id acquisition would close the
-    window if this ever shows up in practice.
+    target row by (part, location, lot), and only then the global audit hash-chain
+    lock (``_lock_target_landing_rows`` runs before the first audit write precisely
+    so that leg comes last -- see the module docstring). The source/target pair is
+    NOT id-ordered relative to each other, so a combine racing an opposing
+    transfer/consumption over the same lots can deadlock. Postgres detects it and
+    aborts one victim with an error (never a hang), and nothing partial commits --
+    the whole verb runs inside one ``atomic_transaction``. A two-phase ascending-id
+    acquisition would close the window if this ever shows up in practice.
 
     ``with_for_update`` is a no-op on the SQLite test backend, as everywhere else
     in this codebase.
@@ -1041,20 +1534,80 @@ def _lock_source_stock_rows(db: Session, company_id: int, part_id: int) -> List[
     return [locked[item_id] for item_id in sorted(locked)]
 
 
-def _resolve_target_row(
+def _lock_target_landing_rows(
+    db: Session,
+    company_id: int,
+    *,
+    target_part_id: int,
+    planned: Sequence[PlannedLine],
+) -> Dict[_LandingKey, InventoryItem]:
+    """Resolve and LOCK every existing target row the plan would land on.
+
+    Run BEFORE the first write, for three reasons that are all load-bearing:
+
+    1. The ``target_row_not_available`` / ``target_serial_mismatch`` probes have to
+       read the row as LOCKED, not as some other transaction last left it -- a
+       refusal computed off a stale copy is not a refusal.
+    2. Every row lock this verb needs is then held before the first audit write, so
+       the global audit hash-chain lock is the LAST lock taken. Taking a new row
+       lock while holding it is what deadlocked this verb against ``/receive``.
+    3. It replaces the unlocked ``_stock_rows(target)`` read that used to run here.
+       **THE BUG THAT READ CAUSED:** it seeded the Session identity map with every
+       target row, and SQLAlchemy's default behaviour on a later ``SELECT ... FOR
+       UPDATE`` of the same row is to return the ALREADY-PRESENT instance and
+       DISCARD the freshly-read column values. Measured: the DB row held 150, the
+       locked SELECT handed back the cached 100, and the write landed 110 instead of
+       160 -- 50 received units silently gone, with a ledger that still nets to zero
+       over an understated on-hand. ``_stock_row_query`` now calls
+       ``.populate_existing()`` on the ``for_update`` path as the structural guard
+       (mirroring ``material_consumption_service``'s locked operation read), and this
+       function is the reason nothing re-seeds the map beforehand.
+
+    Resolution goes through ``_find_stock_row``, which is NULL-safe on a lot-less
+    row: the naive ``lot_number == None`` compiles to ``lot_number = NULL`` and
+    never matches, which is how lot-less receives used to mint a duplicate fragment
+    row every time instead of incrementing the one already there.
+
+    ``with_for_update`` is a no-op on the SQLite test backend, as everywhere else in
+    this codebase.
+    """
+    from app.api.endpoints.inventory import _find_stock_row  # deferred: see module docstring
+
+    landing: Dict[_LandingKey, InventoryItem] = {}
+    for key in _landing_keys(planned):
+        location, lot_number = key
+        row = _find_stock_row(
+            db,
+            company_id=company_id,
+            part_id=target_part_id,
+            # ``InventoryItem.location`` is NOT NULL, so this is a ``str`` in every
+            # real row; the annotation on the dataclass is Optional only because the
+            # ORM attribute is untyped. Cast rather than widen ``_find_stock_row``,
+            # which is shared with /receive and /transfer.
+            location_code=cast(str, location),
+            lot_number=lot_number,
+            for_update=True,
+        )
+        if row is not None:
+            landing[key] = row
+    return landing
+
+
+def _apply_to_target_row(
     db: Session,
     company_id: int,
     *,
     target_part: Part,
     source_row: InventoryItem,
     quantity: float,
+    existing: Optional[InventoryItem],
 ) -> Tuple[InventoryItem, bool]:
-    """The target stock row this line lands on, locked. Returns (row, created).
+    """Land one line's material on the target. Returns (row, created).
 
-    Resolution goes through ``_find_stock_row``, which is NULL-safe on a lot-less
-    row: the naive ``lot_number == None`` compiles to ``lot_number = NULL`` and
-    never matches, which is how lot-less receives used to mint a duplicate fragment
-    row every time instead of incrementing the one already there.
+    ``existing`` is the row ``_lock_target_landing_rows`` already resolved and
+    LOCKED for this line's ``(location, lot)``, or ``None`` when there is none. It is
+    passed in rather than re-queried so the row the probes vetted is provably the row
+    that gets incremented.
 
     WHEN A ROW MUST BE CREATED it carries the source row's traceability wholesale
     -- lot, serial, cert, heat lot, supplier, PO, received and expiration dates --
@@ -1067,17 +1620,8 @@ def _resolve_target_row(
     is left untouched: a combine never reblends a cost basis, and the preview
     surfaced the delta so a human could decide before approving.
     """
-    from app.api.endpoints.inventory import _find_stock_row  # deferred: see module docstring
-
-    existing = _find_stock_row(
-        db,
-        company_id=company_id,
-        part_id=target_part.id,
-        location_code=source_row.location,
-        lot_number=source_row.lot_number,
-        for_update=True,
-    )
     if existing is not None:
+        _assert_target_row_still_landable(target_part, source_row, existing)
         existing.quantity_on_hand = float(existing.quantity_on_hand or 0.0) + quantity
         existing.quantity_available = existing.quantity_on_hand - float(existing.quantity_allocated or 0.0)
         return existing, False
@@ -1103,11 +1647,56 @@ def _resolve_target_row(
     )
     created.company_id = company_id
     db.add(created)
-    # Flushed immediately: two source rows can share a (location, lot), and the
-    # second one's ``_find_stock_row`` must see the row the first one created
-    # rather than minting a duplicate fragment beside it.
+    # Flushed immediately so the row has an id for the ledger row's
+    # ``inventory_item_id``. Two source rows CAN share a (location, lot); the caller
+    # records the created row back into its landing map so the second line
+    # increments it rather than minting a duplicate fragment beside it.
     db.flush()
     return created, True
+
+
+def _assert_target_row_still_landable(
+    target_part: Part,
+    source_row: InventoryItem,
+    existing: InventoryItem,
+) -> None:
+    """Backstop for the two TARGET-row refusals, evaluated on the row as locked.
+
+    ``_combine_blockers`` already refused both conditions before anything was
+    written, and it did so against these same locked rows -- so in normal operation
+    this never fires. It exists because the alternative to a cheap assertion here is
+    trusting that the plan, the probe and the loop can never drift: the probe reads a
+    ``CombineStockLine`` copy while the loop holds the ORM row, and "those two always
+    agree" is the kind of claim that stops being true a year later. Raising is safe
+    at any point in the loop -- the endpoint's ``atomic_transaction`` rolls the whole
+    verb back, so a refusal here still leaves every row byte-identical.
+    """
+    reason = _unavailable_reason(existing)
+    if reason is not None:
+        raise _refuse(
+            CombineDiagnostic(
+                code="target_row_not_available",
+                detail=(
+                    f"'{target_part.part_number}' already has stock at "
+                    f"{existing.location or '(no location)'} that is not available ({reason}). Folding "
+                    "usable material onto it would make that material unusable too."
+                ),
+            )
+        )
+
+    source_serial = (source_row.serial_number or "").strip()
+    target_serial = (existing.serial_number or "").strip()
+    if (source_serial or target_serial) and source_serial != target_serial:
+        raise _refuse(
+            CombineDiagnostic(
+                code="target_serial_mismatch",
+                detail=(
+                    f"Serial '{source_serial or '(none)'}' cannot be merged onto a "
+                    f"'{target_part.part_number}' row carrying serial '{target_serial or '(none)'}' -- "
+                    "one serial number cannot name two units."
+                ),
+            )
+        )
 
 
 def combine_inventory(
@@ -1139,6 +1728,10 @@ def combine_inventory(
 
     **The preview is not authorization.** Every probe re-runs here, server-side,
     against state read under the row locks this function takes.
+
+    **Lock order is source rows (ascending id) -> target landing rows -> the audit
+    hash-chain lock**, and the last leg is why the per-line audit calls are buffered
+    and emitted after the drain loop instead of inside it. See the module docstring.
     """
     # --- Probes. Nothing below this block writes; nothing above it does either. ---
     if source_part_id == target_part_id:
@@ -1161,12 +1754,19 @@ def combine_inventory(
     # refusal past this point still leaves every row byte-identical, because the
     # endpoint's ``atomic_transaction`` rolls back and releases.
     source_rows = _lock_source_stock_rows(db, company_id, source.id)
-    source_picture = _picture_from_rows(source, source_rows)
-    target_picture = _picture_from_rows(target, _stock_rows(db, company_id, target.id))
-
-    reservations = open_source_reservations(db, company_id, source.id)
-    reserved_quantity = sum(r.outstanding_quantity for r in reservations)
+    reservations = source_reservations(db, company_id, source.id)
+    source_picture = _picture_from_rows(source, source_rows, reservations)
     flagged = _flagged_parts(source, target)
+
+    # The plan comes first because it decides WHICH target rows are in play, and
+    # those are the only ones worth locking or refusing over.
+    planned = _plan_lines(source_picture, quantity)
+    target_rows_by_key = _lock_target_landing_rows(
+        db,
+        company_id,
+        target_part_id=target.id,
+        planned=planned,
+    )
 
     blockers = _combine_blockers(
         source=source,
@@ -1175,14 +1775,21 @@ def combine_inventory(
         quantity=quantity,
         flagged=flagged,
         acknowledged_ids=acknowledge_flagged_part_ids,
-        reserved_quantity=reserved_quantity,
         reservations=reservations,
+        planned=planned,
+        target_landing={key: _stock_line_snapshot(row) for key, row in target_rows_by_key.items()},
     )
     if blockers:
         raise _refuse(blockers[0])
 
     source_quantity_before = source_picture.total_on_hand
-    target_quantity_before = target_picture.total_on_hand
+    # An AGGREGATE, deliberately, not ``_picture_from_rows(target, _stock_rows(...))``.
+    # That read was only ever used for this one number, and it seeded the Session
+    # identity map with every target row -- which is what made the later locked
+    # SELECT hand back stale cached quantities and silently lose concurrently
+    # received stock. See ``_lock_target_landing_rows`` for the measured failure.
+    # ``func.sum`` returns no ORM instances, so it cannot re-open that hole.
+    target_quantity_before = part_total_on_hand(db, company_id, target.id)
 
     if deactivate_source and abs(source_quantity_before - quantity) > LEDGER_QUANTITY_EPSILON:
         # "Lands at exactly 0" is measured across ALL the source's stock rows,
@@ -1226,36 +1833,49 @@ def combine_inventory(
 
     lines: List[CombineLine] = []
     transaction_ids: List[int] = []
-    remaining = quantity
+    # BUFFERED, not written inside the loop. ``AuditService._acquire_chain_lock``
+    # takes a global ``pg_advisory_xact_lock`` held to transaction end, so writing
+    # line 1's audit rows and THEN asking for line 2's target row lock deadlocks
+    # against any ``/receive`` that already holds that row and is about to write its
+    # own audit row -- surfacing as a 500 on a stock verb, because there is no DBAPI
+    # deadlock handler. Every row lock this verb needs is taken above; the chain lock
+    # is taken last, once, after the loop. Do not move these calls back inside it.
+    pending_audit: List[Dict[str, object]] = []
+    rows_by_id = {row.id: row for row in source_rows}
 
-    for source_row in source_rows:
-        if remaining <= LEDGER_QUANTITY_EPSILON:
-            break
+    for plan in planned:
+        source_row = rows_by_id[plan.inventory_item_id]
         on_hand = float(source_row.quantity_on_hand or 0.0)
         allocated = float(source_row.quantity_allocated or 0.0)
-        available = on_hand - allocated
-        if not is_consumable_item(source_row) or available <= LEDGER_QUANTITY_EPSILON:
-            continue
 
-        # RULE 1 of the two reservation rules, and the hard one: never move into
-        # ``quantity_allocated``. It is enforced here, at the draw, so no caller
-        # and no future flag can waive it.
-        take = min(remaining, available)
+        # RULE 1 and RULE 2 of the three reservation rules, and the hard ones: never
+        # move into ``quantity_allocated``, and never move material a lot-directed
+        # open tie is pinned to. Both are already netted into the plan's ``quantity``
+        # by ``_plan_lines``, which is also what the refusal probes measured -- one
+        # computation, so the probe and the draw cannot disagree.
+        take = plan.quantity
         unit_cost = float(source_row.unit_cost or 0.0)
         lot_label = f" lot {source_row.lot_number}" if source_row.lot_number else ""
 
         source_before = on_hand
         source_row.quantity_on_hand = on_hand - take
         source_row.quantity_available = source_row.quantity_on_hand - allocated
+        source_after = float(source_row.quantity_on_hand or 0.0)
 
-        target_row, target_created = _resolve_target_row(
+        target_row, target_created = _apply_to_target_row(
             db,
             company_id,
             target_part=target,
             source_row=source_row,
             quantity=take,
+            existing=target_rows_by_key.get(plan.landing_key),
         )
-        target_before = float(target_row.quantity_on_hand or 0.0) - take
+        # Two source rows can share a (location, lot). Recording the row back means
+        # the second line increments the one the first line created instead of
+        # minting a duplicate fragment beside it.
+        target_rows_by_key[plan.landing_key] = target_row
+        target_after = float(target_row.quantity_on_hand or 0.0)
+        target_before = target_after - take
 
         # THE LEDGER SHAPE: two linked ADJUST rows, net zero, grouped by this
         # combine. Not a new TransactionType -- adding a value to ``transactiontype``
@@ -1320,20 +1940,29 @@ def combine_inventory(
 
         # Tamper-evident audit trail (invariant 2), the dual-row convention every
         # stock mutator in this codebase follows: the movement, plus the stock-level
-        # change it produced.
-        _audit_combine_line(
-            audit,
-            out_txn=out_txn,
-            in_txn=in_txn,
-            source_row=source_row,
-            source_before=source_before,
-            target_row=target_row,
-            target_before=target_before,
-            target_created=target_created,
-            combine_number=combine.combine_number,
-            source_part_number=source.part_number,
-            target_part_number=target.part_number,
-            quantity=take,
+        # change it produced. QUEUED here and emitted after the loop -- see
+        # ``pending_audit`` above for why that ordering is load-bearing.
+        #
+        # The before/after quantities are captured NOW, not re-read at emit time:
+        # two source rows can land on the SAME target row, and reading
+        # ``target_row.quantity_on_hand`` after the loop would report the cumulative
+        # figure on both lines' audit rows.
+        pending_audit.append(
+            {
+                "out_txn": out_txn,
+                "in_txn": in_txn,
+                "source_row": source_row,
+                "source_before": source_before,
+                "source_after": source_after,
+                "target_row": target_row,
+                "target_before": target_before,
+                "target_after": target_after,
+                "target_created": target_created,
+                "combine_number": combine.combine_number,
+                "source_part_number": source.part_number,
+                "target_part_number": target.part_number,
+                "quantity": take,
+            }
         )
 
         lines.append(
@@ -1348,10 +1977,20 @@ def combine_inventory(
             )
         )
         transaction_ids.extend([out_txn.id, in_txn.id])
-        remaining -= take
 
-    moved = quantity - remaining
-    if remaining > LEDGER_QUANTITY_EPSILON:
+    for entry in pending_audit:
+        # Called through the module global on purpose: the atomicity test
+        # monkeypatches ``inventory_combine_service._audit_combine_line`` to prove a
+        # mid-flight failure unwinds every earlier write.
+        _audit_combine_line(audit, **entry)  # type: ignore[arg-type]
+
+    # SUMMED FROM WHAT WAS ACTUALLY POSTED, never re-derived as ``quantity -
+    # remaining``. In the multi-line case that subtraction is the same sum plus the
+    # accumulated float error of the running remainder, so the header's ``quantity``
+    # could differ in the last bits from the ledger rows it claims to summarize.
+    # This value is the sum of the same floats the ledger holds, by construction.
+    moved = sum((line.quantity for line in lines), 0.0)
+    if quantity - moved > LEDGER_QUANTITY_EPSILON:
         # Unreachable while the probes above hold: ``quantity_exceeds_available``
         # already refused anything larger than the eligible available total, and the
         # rows were locked before that probe read them. Logged rather than silently
@@ -1376,12 +2015,36 @@ def combine_inventory(
 
     source_deactivated = False
     if deactivate_source:
-        source_deactivated = _deactivate_source_part(
-            audit,
-            part=source,
-            combine_number=combine.combine_number,
-            reason=reason,
-        )
+        # RE-CHECKED against the POST-move total, not just the pre-move probe above.
+        # ``FOR UPDATE`` locks ROWS, not the predicate: a ``/receive`` onto this part
+        # that commits after ``_lock_source_stock_rows`` ran INSERTS a row the
+        # ``source_still_has_stock`` probe never saw. Deactivating on the strength of
+        # that probe alone would retire a part with material physically on the shelf,
+        # and would write a header row whose ``source_quantity_after`` is > 0 while
+        # its ``source_deactivated`` is True -- a record that contradicts itself.
+        #
+        # It DECLINES rather than raising: the fold itself is correct and already
+        # posted, and throwing away a correct net-zero move because somebody received
+        # stock a second earlier helps nobody. The response and the header both carry
+        # ``source_deactivated: false``, so the caller can see the request was only
+        # partly honoured (a client should surface that as a WARNING, not a success)
+        # and can retire the part explicitly via ``POST /parts/{id}/deactivate``.
+        if source_quantity_after > LEDGER_QUANTITY_EPSILON:
+            logger.warning(
+                "combine %s did not deactivate part_id=%s (company_id=%s): %s on hand after the move, "
+                "so stock arrived between the lock and the write",
+                combine.combine_number,
+                source.id,
+                company_id,
+                source_quantity_after,
+            )
+        else:
+            source_deactivated = _deactivate_source_part(
+                audit,
+                part=source,
+                combine_number=combine.combine_number,
+                reason=reason,
+            )
     combine.source_deactivated = source_deactivated
     db.flush()
 
@@ -1446,8 +2109,10 @@ def _audit_combine_line(
     in_txn: InventoryTransaction,
     source_row: InventoryItem,
     source_before: float,
+    source_after: float,
     target_row: InventoryItem,
     target_before: float,
+    target_after: float,
     target_created: bool,
     combine_number: str,
     source_part_number: str,
@@ -1465,6 +2130,13 @@ def _audit_combine_line(
     claiming ``0 -> n`` on a row that did not exist a moment ago would be a
     fabricated fact on a tamper-evident chain. When the target row already existed,
     ``_audit_stock_movement`` handles it and the pair is symmetric.
+
+    ``source_after`` / ``target_after`` are PASSED IN rather than read off the rows.
+    These calls are deliberately deferred until after the drain loop (see the
+    module docstring's lock-ordering section), and by then the rows carry their
+    FINAL quantities -- two source lines landing on one target row would otherwise
+    both record the cumulative figure, so line 1's audit row would claim a change
+    that never happened at that moment.
     """
     from app.api.endpoints.inventory import _audit_stock_movement  # deferred: see module docstring
 
@@ -1473,7 +2145,7 @@ def _audit_combine_line(
         out_txn,
         source_row,
         source_before,
-        float(source_row.quantity_on_hand or 0.0),
+        source_after,
         movement_description=(
             f"Combine {combine_number}: moved {quantity:g} of {source_part_number} out of "
             f"{source_row.location or '(no location)'} onto {target_part_number}"
@@ -1499,7 +2171,7 @@ def _audit_combine_line(
         in_txn,
         target_row,
         target_before,
-        float(target_row.quantity_on_hand or 0.0),
+        target_after,
         movement_description=(
             f"Combine {combine_number}: received {quantity:g} onto {target_part_number} at "
             f"{target_row.location or '(no location)'}"
@@ -1618,8 +2290,11 @@ __all__ = [
     "FlaggedPart",
     "OpenReservation",
     "PartStockPicture",
+    "PlannedLine",
+    "SourceReservations",
     "build_combine_preview",
     "combine_inventory",
     "open_source_reservations",
     "part_total_on_hand",
+    "source_reservations",
 ]

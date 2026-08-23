@@ -170,6 +170,23 @@ def _load_inventory_items(
     (the same lock-ordering rule as the consumption engine, so a completion drawing the
     same lots concurrently cannot deadlock against a cycle-count posting). No-op on the
     SQLite test backend.
+
+    It also calls ``populate_existing()``, for the same reason ``_stock_row_query`` does
+    and that ``material_consumption_service`` documents: without it, a row already in the
+    Session's identity map is returned AS CACHED and the freshly-locked row's column
+    values are DISCARDED. Every caller here does a read-modify-write of
+    ``quantity_on_hand`` off the returned row, so a stale copy does not merely mislay
+    quantity -- on a DECREASE it destroys it. Measured on the combine path: a source row
+    cached at 10 while the database held 50 computed ``10 - 10`` and wrote **0** where a
+    fresh read leaves 40.
+
+    Neither caller can reach that today (the combine touches no ``InventoryItem`` before
+    this lock, and the cycle-count completion's ``joinedload`` does not pull the lazy
+    ``CycleCountItem.inventory_item`` relationship) -- but both rest that safety on a
+    coincidence of what happens to have been loaded earlier in the request, which is
+    exactly the shape of the bug this guard was added to close on the target-row side. Any
+    future eligibility pre-check, inlined preview, or eager relationship load reopens it
+    silently. The guard makes the correctness structural instead of circumstantial.
     """
     loaded: Dict[int, InventoryItem] = {}
     ids = sorted(i for i in item_ids if i is not None)
@@ -177,7 +194,7 @@ def _load_inventory_items(
         chunk = ids[start : start + _IN_CHUNK]
         query = db.query(InventoryItem).filter(InventoryItem.company_id == company_id, InventoryItem.id.in_(chunk))
         if for_update:
-            query = query.order_by(InventoryItem.id.asc()).with_for_update()
+            query = query.order_by(InventoryItem.id.asc()).populate_existing().with_for_update()
         loaded.update({row.id: row for row in query.all()})
     return loaded
 
@@ -223,7 +240,26 @@ def _stock_row_query(
     lot_number: Optional[str],
     for_update: bool = False,
 ):
-    """The query behind ``_find_stock_row``, exposed for the dialect-compile test."""
+    """The query behind ``_find_stock_row``, exposed for the dialect-compile test.
+
+    ``populate_existing()`` rides with ``for_update`` and is NOT cosmetic. Taking a
+    row lock is worthless if the caller then reads a value from before the lock, and
+    that is SQLAlchemy's default: when the Session's identity map already holds the
+    instance, a later ``SELECT ... FOR UPDATE`` returns the CACHED object and
+    DISCARDS the freshly-read column values. Measured on the combine verb, which
+    had loaded every target row unlocked a few statements earlier: the DB row held
+    150, the locked SELECT handed back the cached 100, and the read-modify-write
+    landed 110 instead of 160 -- concurrently received stock silently gone, behind a
+    ledger that still nets to zero. ``populate_existing()`` forces the incoming row
+    values over the cached instance, so "the row as locked" is what the caller sees.
+
+    Precedent and rationale: ``material_consumption_service``'s locked operation read
+    ("the caller's session may already hold a stale copy ... MUST be computed from
+    the row as locked"). Strictly more correct for ``/receive`` and ``/transfer`` too
+    -- both do a read-modify-write of ``quantity_on_hand`` under this lock. Never
+    applied to the unlocked path, where overwriting a caller's pending in-session
+    edits with committed values would be a different bug.
+    """
     lot_clause = InventoryItem.lot_number.is_(None) if lot_number is None else InventoryItem.lot_number == lot_number
     query = db.query(InventoryItem).filter(
         InventoryItem.company_id == company_id,
@@ -233,7 +269,7 @@ def _stock_row_query(
     )
     query = query.order_by(InventoryItem.id.asc())
     if for_update:
-        query = query.with_for_update()
+        query = query.populate_existing().with_for_update()
     return query
 
 

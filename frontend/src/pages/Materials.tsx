@@ -85,6 +85,23 @@ export default function MaterialsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const typeFilter = searchParams.get('type') ?? '';
   const statusFilter = searchParams.get('status') ?? '';
+  // '' (default) = active only, 'inactive' = retired only, 'all' = both.
+  //
+  // This is a SERVER-side view, not another client filter, and that is the whole
+  // point of it. `GET /materials/` defaults `active_only=true`, so before this
+  // existed an inactive material was never in the response at all -- which made the
+  // "Obsolete" status option below unreachable, because the deactivate verb writes
+  // `is_active=false` and `status='obsolete'` TOGETHER.
+  //
+  // Why it had to ship WITH the Combine feature: `POST /parts/{id}/deactivate` and
+  // the combine's `deactivate_source` both retire a part deliberately, and
+  // `POST /parts/{id}/restore` now returns a deleted part to its PRE-DELETE activity
+  // rather than forcing it active (invariant 3 -- "a restore returns the RECORD, not
+  // the permission"). A restrictive restore obliges shipping the screen that undoes
+  // it: without this view a retired SKU is invisible in every list, and the only way
+  // to switch it back on is calling the API by hand. The Vendors page's
+  // Active/Inactive/Deleted switch is the same obligation, met the same way.
+  const activityFilter = searchParams.get('activity') ?? '';
 
   const setFilterParam = (key: string, value: string) => {
     const next = new URLSearchParams(searchParams);
@@ -97,13 +114,15 @@ export default function MaterialsPage() {
   };
   const setTypeFilter = (value: string) => setFilterParam('type', value);
   const setStatusFilter = (value: string) => setFilterParam('status', value);
-  // Clear must drop both params in ONE update — two sequential setFilterParam
-  // calls would each copy the same stale searchParams and lose one deletion.
+  const setActivityFilter = (value: string) => setFilterParam('activity', value);
+  // Clear must drop every param in ONE update — sequential setFilterParam calls
+  // would each copy the same stale searchParams and lose all but the last deletion.
   const clearFilters = () => {
     setSearch('');
     const next = new URLSearchParams(searchParams);
     next.delete('type');
     next.delete('status');
+    next.delete('activity');
     setSearchParams(next);
   };
 
@@ -140,6 +159,18 @@ export default function MaterialsPage() {
    * be hiding, and a picker that simply does not offer it gives the operator no
    * way to tell that from "it does not exist". Loaded lazily, only when the
    * dialog is opened, and never re-fetched while it stays open.
+   *
+   * RE-FETCHED ON EVERY OPEN, and that is the fix for a real bug: this used to
+   * read `if (combineSource === null || combineCatalog !== null) return`, which
+   * fetched once and then cached for the lifetime of the page. A combine is
+   * PRECISELY the action that invalidates this list — it drains the source to
+   * zero and can flip it inactive — so the second open of the dialog offered a
+   * catalog describing the shop as it was before the first combine, with the
+   * just-retired number still sitting there as a plausible pick. The previous
+   * catalog is deliberately NOT cleared on close: the dialog falls back to the
+   * page's filtered list when this is null, so blanking it would downgrade the
+   * pickers for the moment the re-read is in flight. Stale-then-correct beats
+   * narrow-then-correct here.
    */
   const [combineCatalog, setCombineCatalog] = useState<Part[] | null>(null);
   const [activationTarget, setActivationTarget] = useState<Part | null>(null);
@@ -165,6 +196,9 @@ export default function MaterialsPage() {
       const params: any = {};
       if (typeFilter) params.part_type = typeFilter;
       if (debouncedSearch) params.search = debouncedSearch;
+      // Only widened when asked. The endpoint's own default is active_only=true, so
+      // the untouched page behaves exactly as it always did.
+      if (activityFilter) params.active_only = false;
       const data = await api.getMaterials(params);
       if (requestId !== loadRequestRef.current) return;
       setMaterials(data);
@@ -176,37 +210,50 @@ export default function MaterialsPage() {
       if (requestId !== loadRequestRef.current) return;
       setLoading(false);
     }
-  }, [debouncedSearch, showToast, typeFilter]);
+  }, [activityFilter, debouncedSearch, showToast, typeFilter]);
 
   // Keyed on the filter INPUTS, not the callback identity: a type-filter change
   // reloads immediately (no debounce), and nothing else — e.g. a showToast
   // identity change — can re-fire the load.
   useEffect(() => {
     loadMaterials();
-  }, [debouncedSearch, typeFilter]);
+  }, [activityFilter, debouncedSearch, typeFilter]);
 
+  // Keyed on the dialog OPENING only. `combineCatalog` is deliberately not a
+  // dependency: including it would re-run this effect on its own `setState` and
+  // loop. `combineSource` is a state value, so it is identity-stable while the
+  // dialog stays open — one read per open, not one per render.
   useEffect(() => {
-    if (combineSource === null || combineCatalog !== null) return;
+    if (combineSource === null) return;
     let cancelled = false;
     api
-      .getMaterials({})
+      // `active_only: false` on purpose. A SOURCE is very often a SKU somebody has
+      // already retired — that is what a recut leaves behind — and an active-only
+      // catalog would make exactly those un-foldable. The dialog shows each side's
+      // status, and the server refuses whatever it should refuse.
+      .getMaterials({ active_only: false })
       .then(rows => {
         if (!cancelled) setCombineCatalog(rows);
       })
       .catch(() => {
-        // Left null on purpose: the dialog falls back to the filtered list, so
-        // a failed catalog read degrades the pickers rather than emptying them,
-        // and the next open retries.
+        // Whatever was last read is left in place on purpose: the dialog falls
+        // back to the page's filtered list when this is null, so a failed
+        // catalog read degrades the pickers rather than emptying them, and the
+        // next open retries.
       });
     return () => {
       cancelled = true;
     };
-  }, [combineSource, combineCatalog]);
+  }, [combineSource]);
 
   const visibleMaterials = useMemo(() => {
-    if (!statusFilter) return materials;
-    return materials.filter(material => material.status === statusFilter);
-  }, [materials, statusFilter]);
+    // 'inactive' narrows the widened response back down to the retired rows; 'all'
+    // keeps both. The server has already applied the widening, so this only ever
+    // subtracts from what came back.
+    let rows = activityFilter === 'inactive' ? materials.filter(material => !material.is_active) : materials;
+    if (statusFilter) rows = rows.filter(material => material.status === statusFilter);
+    return rows;
+  }, [activityFilter, materials, statusFilter]);
 
   const stats = useMemo(() => ({
     total: materials.length,
@@ -473,7 +520,7 @@ export default function MaterialsPage() {
     />
   ), []);
 
-  const hasFilters = Boolean(search || typeFilter || statusFilter);
+  const hasFilters = Boolean(search || typeFilter || statusFilter || activityFilter);
 
   return (
     <div className="space-y-5">
@@ -522,7 +569,12 @@ export default function MaterialsPage() {
             <option value="obsolete">Obsolete</option>
             <option value="pending_approval">Pending</option>
           </select>
-          {(search || typeFilter || statusFilter) && (
+          <select value={activityFilter} onChange={event => setActivityFilter(event.target.value)} className="input py-2 text-sm w-36" aria-label="Filter by in-use or retired">
+            <option value="">In Use</option>
+            <option value="inactive">Retired</option>
+            <option value="all">In Use + Retired</option>
+          </select>
+          {(search || typeFilter || statusFilter || activityFilter) && (
             <button
               type="button"
               onClick={clearFilters}
