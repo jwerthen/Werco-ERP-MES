@@ -105,6 +105,58 @@ interface ReceiveFormData {
   over_receive_approved: boolean;
 }
 
+/**
+ * The receive-form fields that describe THE MATERIAL ON THIS LINE rather than the
+ * shipment it arrived on. `handleSelectLine` blanks every one of them each time a PO
+ * line is picked, so nothing carries over from the part received a moment ago.
+ *
+ * Owner request (2026-08-24): re-typing over a stale lot and heat was an extra delete
+ * step on every line of a multi-part delivery. The split below is wider than those two
+ * fields on purpose, and the reason is traceability, not tidiness:
+ *
+ *  - `cert_number` / `coc_attached` are issued together with the lot and heat, per heat
+ *    lot, by the mill. Clearing lot and heat but leaving the cert behind would record a
+ *    certificate against material it does not cover — a false traceability record
+ *    (invariant 5), which is worse than the keystroke it saves.
+ *  - `serial_numbers` and `notes` describe one specific receipt line.
+ *  - `requires_inspection` was already reset here before this change and keeps its
+ *    original owner-requested behaviour: the checkbox ALWAYS starts unchecked, with no
+ *    within-session stickiness. A part the part master flags shows an advisory hint
+ *    beside the checkbox instead, so the receiver opts in deliberately.
+ *  - `over_receive_approved` resets for the same reason `requires_inspection` already
+ *    did: it is an APPROVAL, and its checkbox is hidden whenever the quantity fits the
+ *    line. A sticky `true` therefore survives invisibly and silently satisfies
+ *    handleReceive's over-receipt guard on the next line, approving an over-receipt
+ *    that nobody clicked.
+ *
+ * Shipment-level fields — packing slip #, carrier, tracking #, location — deliberately
+ * stay sticky. They are identical for every line off one delivery, which is the
+ * convenience this stickiness existed for in the first place. Do not widen this set to
+ * include them without asking; that would trade one re-typing chore for another.
+ */
+type PerItemReceiveFields = Pick<
+  ReceiveFormData,
+  | 'lot_number'
+  | 'serial_numbers'
+  | 'heat_number'
+  | 'cert_number'
+  | 'coc_attached'
+  | 'notes'
+  | 'requires_inspection'
+  | 'over_receive_approved'
+>;
+
+const BLANK_PER_ITEM_RECEIVE_FIELDS: PerItemReceiveFields = {
+  lot_number: '',
+  serial_numbers: '',
+  heat_number: '',
+  cert_number: '',
+  coc_attached: false,
+  notes: '',
+  requires_inspection: false,
+  over_receive_approved: false,
+};
+
 // PO / part context is nullable to match the backend InspectionQueueItem
 // schema: an orphaned receipt row (missing PO line / purchase order / part)
 // degrades to null fields instead of dropping off the queue.
@@ -567,13 +619,14 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     setSelectedLine(line);
     const nextForm: ReceiveFormData = {
       ...formData,
+      // Blank everything that belongs to the PREVIOUS part before carrying the
+      // rest of the form across — lot, heat, cert, CoC, serials, notes, and the
+      // two approval checkboxes. See BLANK_PER_ITEM_RECEIVE_FIELDS for why the
+      // set is exactly these and why the shipment fields stay sticky. Spread
+      // BEFORE the line-derived values below, so nothing here can overwrite them.
+      ...BLANK_PER_ITEM_RECEIVE_FIELDS,
       po_line_id: line.line_id,
       quantity_received: line.quantity_remaining,
-      // Owner-requested receiving default: the checkbox ALWAYS starts
-      // unchecked (reset per line select — no within-session stickiness for
-      // this field). A part flagged in the part master shows an advisory hint
-      // next to the checkbox instead, so the receiver opts in deliberately.
-      requires_inspection: false,
     };
     setFormData(nextForm);
     setInitialFormData(nextForm);
