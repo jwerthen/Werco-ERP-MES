@@ -19,6 +19,7 @@ import {
   isDateBeforeTodayInCentral,
 } from '../utils/centralTime';
 import { formatOperationLabel, hasOperationNumber } from '../utils/operationLabel';
+import { operationTargetQuantity } from '../utils/operationQuantity';
 import {
   ClipboardDocumentListIcon,
   ExclamationTriangleIcon,
@@ -906,9 +907,40 @@ function MachineRow({
 }
 
 function ActiveAssignmentRow({ assignment, nowMs }: { assignment: ActiveAssignment; nowMs: number }) {
-  const orderedQty = Number(assignment.work_order.quantity_ordered || 0);
-  const completeQty = Number(assignment.operation.quantity_complete ?? assignment.work_order.quantity_complete ?? 0);
-  const progress = orderedQty > 0 ? Math.min(100, Math.round((completeQty / orderedQty) * 100)) : 0;
+  // Progress here is OPERATION-scoped, because a row IS one assignment to one
+  // operation. It must print the same fraction Dispatch, the WO routing table and
+  // Shop Floor Operations already print for that operation: a running nest reads
+  // "0/2 runs", not "0/102" — 102 being the sheet count of all 21 nests on the job.
+  //
+  // BOTH HALVES MUST COME FROM THE SAME SCOPE. Mixing them is the defect this
+  // replaced: an operation numerator over a work-order denominator rendered a nest
+  // sitting at 0 of 2 as "0/102 (0%)", which matched neither the nest (0/2) nor the
+  // job (38/102). So the two fall back together — an entry with no operation
+  // (indirect/setup labor) prints the work order's own pair, never a half of each.
+  //
+  // The target is server-resolved (`operation_target_quantity`); `operationTargetQuantity`
+  // is the shared client mirror of that same rule. The fallback covers DEPLOY SKEW —
+  // this SPA ships to Vercel and the API to Railway independently, so this build can be
+  // live against a backend that does not send the field yet — and it degrades to the
+  // work-order figure, i.e. exactly the pre-fix behavior. Not the ETag cache, which is
+  // an in-memory Map that starts empty every page load and so can never hold a payload
+  // older than the bundle reading it. Keep the fallback: without it, a frontend that
+  // ships ahead of the backend renders 0/102 again, and no test catches it.
+  const hasOperation = assignment.operation?.id != null;
+  const orderedQty = hasOperation
+    ? Number(
+        assignment.operation.quantity_ordered ??
+          operationTargetQuantity(assignment.operation, assignment.work_order.quantity_ordered)
+      )
+    : Number(assignment.work_order.quantity_ordered || 0);
+  const completeQty = hasOperation
+    ? Number(assignment.operation.quantity_complete || 0)
+    : Number(assignment.work_order.quantity_complete || 0);
+  // Unclamped percent, clamped bar — the ShopFloorSimple convention for this same
+  // figure. It matters more now that the denominator is one nest's sheet count
+  // rather than the whole job's: over-completion is reachable at this scale, and a
+  // clamped "3/2 (100%)" would contradict the raw fraction printed beside it.
+  const progress = orderedQty > 0 ? Math.round((completeQty / orderedQty) * 100) : 0;
   const dueDate = assignment.work_order.due_date;
   const isOverdue = Boolean(dueDate && isDateBeforeTodayInCentral(dueDate));
 
@@ -921,6 +953,21 @@ function ActiveAssignmentRow({ assignment, nowMs }: { assignment: ActiveAssignme
       : assignment.user.name || getOperatorDisplayName(assignment.user),
     getEntryTypeLabel(assignment.entry_type),
     `Started ${formatCentralTime(assignment.clock_in)}`,
+    // The WHOLE-JOB figure is kept, but EXPLICITLY LABELLED so it can never be read
+    // as this operation's progress — the inline fraction beside the bar is the
+    // operation's and stays the operation's.
+    //
+    // Only when the two actually DIFFER. On an ordinary routing operation the
+    // operation target IS the work order's quantity_ordered, so the segment would
+    // repeat the inline fraction verbatim on the majority of non-laser rows; and on a
+    // row with no operation the inline fraction already IS the work order's pair.
+    // It earns its place on exactly the rows that provoked this fix — a nest showing
+    // 0/2 whose job is really 38/102.
+    orderedQty !== Number(assignment.work_order.quantity_ordered || 0)
+      ? `Work order total ${Number(assignment.work_order.quantity_complete || 0)}/${Number(
+          assignment.work_order.quantity_ordered || 0
+        )}`
+      : null,
     `Due ${dueDate ? formatCentralDate(dueDate, { year: undefined }) : 'none'}`,
     assignment.work_order.customer_name || null,
     assignment.work_order.priority ? `Priority ${assignment.work_order.priority}` : null,
@@ -957,7 +1004,7 @@ function ActiveAssignmentRow({ assignment, nowMs }: { assignment: ActiveAssignme
             : ''}
         </span>
         <div className="h-1 w-16 flex-shrink-0 rounded-sm bg-slate-800">
-          <div className="h-1 rounded-sm bg-werco-500" style={{ width: `${progress}%` }} />
+          <div className="h-1 rounded-sm bg-werco-500" style={{ width: `${Math.min(100, progress)}%` }} />
         </div>
         <span className="flex-shrink-0 whitespace-nowrap text-[10px] text-slate-500 tabular-nums">
           {completeQty}/{orderedQty || 0} ({progress}%)
