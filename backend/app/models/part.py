@@ -157,6 +157,47 @@ class Part(Base, SoftDeleteMixin, TenantMixin):
     is_active = Column(Boolean, default=True)
     status = Column(String(50), default="active")  # active, obsolete, pending_approval
 
+    # Lock-step with migration 086_part_active_before_delete. A SIDECAR to the
+    # delete/restore pair in app/api/endpoints/parts.py -- NOT a general-purpose
+    # activity flag, and nothing else reads or writes it:
+    #   delete_part  records the CURRENT is_active here, THEN forces
+    #                is_active = False (order matters -- reversed, it always
+    #                records False).
+    #   restore_part sets is_active = COALESCE(is_active_before_delete, False),
+    #                sets `status` consistently with that resolution, then clears
+    #                this back to NULL so a second delete/restore cycle cannot
+    #                read a stale value.
+    #
+    # THE BUG IT FIXES: restore_part used to hard-code `is_active = True` /
+    # `status = "active"`. That was harmless while "inactive but not deleted" was
+    # unreachable for a part -- PartUpdate carries neither column and delete_part
+    # was their only writer. The Combine/Merge SKUs feature CREATES that state at
+    # scale (POST /parts/{id}/deactivate, and the combine's deactivate_source),
+    # so a deliberately retired SKU that somebody deleted and somebody else
+    # restored came back ACTIVE and selectable again in every picker, with no
+    # audit row saying anyone decided to re-activate it. Invariant 3: a restore
+    # returns the RECORD, not the permission.
+    #
+    # NULL means "we never recorded one" -- every part deleted before 086 shipped,
+    # plus anything deleted through DELETE /materials/{id}, which is a second
+    # soft-delete writer of parts.is_active that does not (yet) record the
+    # sidecar. Restore treats that unknown as INACTIVE and falls back to False,
+    # NOT to the pre-086 unconditional True: restoring too restrictively costs one
+    # explicit audited re-activation and is visible immediately, while restoring
+    # too permissively is indistinguishable from a legitimate approval and is
+    # never detected. Deliberate break from the old behavior -- do not "restore
+    # compatibility" by flipping it back.
+    #
+    # Nullable for exactly that reason; forward-only, never backfilled, and never
+    # tightened to NOT NULL -- NULL has to stay reachable to mean "deleted before
+    # 086". Kept OUT of PartBase/PartCreate/PartUpdate so no blind-setattr PUT can
+    # pre-seed what the restore reads back.
+    #
+    # (The delete keeps writing is_active = False on purpose -- GET /parts/ and
+    # GET /materials/ both default active_only=True and filter that flag; it is a
+    # deliberate second layer behind the is_deleted filters, not redundancy.)
+    is_active_before_delete = Column(Boolean, nullable=True, default=None)
+
     # Customer/Supplier info
     customer_name = Column(String(255), nullable=True)
     customer_part_number = Column(String(100))

@@ -23,7 +23,20 @@ from app.models.part import Part
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
 from app.schemas.inventory import InventoryTransactionResponse
+from app.schemas.inventory_combine import (
+    CombineCostSchema,
+    CombineDiagnosticSchema,
+    CombineLineSchema,
+    FlaggedPartSchema,
+    InventoryCombinePreviewRequest,
+    InventoryCombinePreviewResponse,
+    InventoryCombineRequest,
+    InventoryCombineResponse,
+    OpenReservationSchema,
+    PartStockSummarySchema,
+)
 from app.services.audit_service import AuditService
+from app.services.inventory_combine_service import build_combine_preview, combine_inventory
 from app.services.operational_event_service import OperationalEventService
 
 logger = logging.getLogger(__name__)
@@ -157,6 +170,23 @@ def _load_inventory_items(
     (the same lock-ordering rule as the consumption engine, so a completion drawing the
     same lots concurrently cannot deadlock against a cycle-count posting). No-op on the
     SQLite test backend.
+
+    It also calls ``populate_existing()``, for the same reason ``_stock_row_query`` does
+    and that ``material_consumption_service`` documents: without it, a row already in the
+    Session's identity map is returned AS CACHED and the freshly-locked row's column
+    values are DISCARDED. Every caller here does a read-modify-write of
+    ``quantity_on_hand`` off the returned row, so a stale copy does not merely mislay
+    quantity -- on a DECREASE it destroys it. Measured on the combine path: a source row
+    cached at 10 while the database held 50 computed ``10 - 10`` and wrote **0** where a
+    fresh read leaves 40.
+
+    Neither caller can reach that today (the combine touches no ``InventoryItem`` before
+    this lock, and the cycle-count completion's ``joinedload`` does not pull the lazy
+    ``CycleCountItem.inventory_item`` relationship) -- but both rest that safety on a
+    coincidence of what happens to have been loaded earlier in the request, which is
+    exactly the shape of the bug this guard was added to close on the target-row side. Any
+    future eligibility pre-check, inlined preview, or eager relationship load reopens it
+    silently. The guard makes the correctness structural instead of circumstantial.
     """
     loaded: Dict[int, InventoryItem] = {}
     ids = sorted(i for i in item_ids if i is not None)
@@ -164,7 +194,7 @@ def _load_inventory_items(
         chunk = ids[start : start + _IN_CHUNK]
         query = db.query(InventoryItem).filter(InventoryItem.company_id == company_id, InventoryItem.id.in_(chunk))
         if for_update:
-            query = query.order_by(InventoryItem.id.asc()).with_for_update()
+            query = query.order_by(InventoryItem.id.asc()).populate_existing().with_for_update()
         loaded.update({row.id: row for row in query.all()})
     return loaded
 
@@ -210,7 +240,26 @@ def _stock_row_query(
     lot_number: Optional[str],
     for_update: bool = False,
 ):
-    """The query behind ``_find_stock_row``, exposed for the dialect-compile test."""
+    """The query behind ``_find_stock_row``, exposed for the dialect-compile test.
+
+    ``populate_existing()`` rides with ``for_update`` and is NOT cosmetic. Taking a
+    row lock is worthless if the caller then reads a value from before the lock, and
+    that is SQLAlchemy's default: when the Session's identity map already holds the
+    instance, a later ``SELECT ... FOR UPDATE`` returns the CACHED object and
+    DISCARDS the freshly-read column values. Measured on the combine verb, which
+    had loaded every target row unlocked a few statements earlier: the DB row held
+    150, the locked SELECT handed back the cached 100, and the read-modify-write
+    landed 110 instead of 160 -- concurrently received stock silently gone, behind a
+    ledger that still nets to zero. ``populate_existing()`` forces the incoming row
+    values over the cached instance, so "the row as locked" is what the caller sees.
+
+    Precedent and rationale: ``material_consumption_service``'s locked operation read
+    ("the caller's session may already hold a stale copy ... MUST be computed from
+    the row as locked"). Strictly more correct for ``/receive`` and ``/transfer`` too
+    -- both do a read-modify-write of ``quantity_on_hand`` under this lock. Never
+    applied to the unlocked path, where overwriting a caller's pending in-session
+    edits with committed values would be a different bug.
+    """
     lot_clause = InventoryItem.lot_number.is_(None) if lot_number is None else InventoryItem.lot_number == lot_number
     query = db.query(InventoryItem).filter(
         InventoryItem.company_id == company_id,
@@ -220,7 +269,7 @@ def _stock_row_query(
     )
     query = query.order_by(InventoryItem.id.asc())
     if for_update:
-        query = query.with_for_update()
+        query = query.populate_existing().with_for_update()
     return query
 
 
@@ -1022,6 +1071,182 @@ def adjust_inventory(
         )
 
     return {"message": "Adjustment complete", "old_quantity": old_qty, "new_quantity": adjust_in.new_quantity}
+
+
+@router.post(
+    "/combine/preview",
+    response_model=InventoryCombinePreviewResponse,
+    summary="What would folding one SKU into another do?",
+)
+def preview_inventory_combine(
+    payload: InventoryCombinePreviewRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(STOCK_MUTATOR_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    """The structured form of the refusals — and the disclosures — the write would produce.
+
+    **Pure read — writes nothing.** No stock change, no ledger row, no audit row, no
+    operational event. That is STRUCTURAL, not conventional: ``build_combine_preview``
+    takes no ``AuditService`` and no actor id, so it could not write one by accident.
+    Same rule as ``GET /parts/{id}/renumber-impact`` and the backflush-readiness
+    companions — a poll is not an actor and records no reason.
+
+    ``eligible`` is a snapshot, NOT authorization. Stock moves, material ties open,
+    parts get renumbered; ``POST /inventory/combine`` re-runs every one of these probes
+    server-side under row locks. A client must never treat a stale ``eligible: true`` as
+    permission to skip the refusal it will get.
+
+    **Role: ADMIN / MANAGER / SUPERVISOR** (``STOCK_MUTATOR_ROLES``), deliberately wider
+    than the write. A supervisor investigating "why do we have this sheet on two
+    numbers?" needs to be able to look; only folding them together is restricted.
+
+    ``quantity`` is optional — omit it and the preview answers for the source's full
+    eligible available quantity, which it returns as ``default_quantity`` for the dialog
+    to pre-fill. ``max_combinable_quantity`` is the largest quantity that would not trip
+    the open-work-order reservation check, so the dialog can offer the safe number
+    instead of a dead end.
+    """
+    preview = build_combine_preview(
+        db,
+        company_id,
+        payload.source_part_id,
+        payload.target_part_id,
+        payload.quantity,
+    )
+    return InventoryCombinePreviewResponse(
+        # ``model_validate`` over the service's dataclasses (``from_attributes`` is on
+        # ``UTCModel``), the same shape ``get_part_backflush_readiness`` uses for its
+        # diagnostics. The field names on both sides are deliberately identical.
+        source=PartStockSummarySchema.model_validate(preview.source, from_attributes=True),
+        target=PartStockSummarySchema.model_validate(preview.target, from_attributes=True),
+        unit_of_measure_match=preview.unit_of_measure_match,
+        default_quantity=preview.default_quantity,
+        max_combinable_quantity=preview.max_combinable_quantity,
+        reserved_quantity=preview.reserved_quantity,
+        eligible=preview.eligible,
+        blockers=[CombineDiagnosticSchema.model_validate(d, from_attributes=True) for d in preview.blockers],
+        advisories=[CombineDiagnosticSchema.model_validate(d, from_attributes=True) for d in preview.advisories],
+        flagged_parts=[FlaggedPartSchema.model_validate(f, from_attributes=True) for f in preview.flagged_parts],
+        open_source_reservations=[
+            OpenReservationSchema.model_validate(r, from_attributes=True) for r in preview.open_source_reservations
+        ],
+        cost=CombineCostSchema.model_validate(preview.cost, from_attributes=True),
+    )
+
+
+@router.post(
+    "/combine",
+    response_model=InventoryCombineResponse,
+    summary="Fold one SKU's stock onto another, net zero",
+)
+def combine_inventory_endpoint(
+    payload: InventoryCombineRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Move stock from one part number onto another, when both name the same article.
+
+    Writes **two linked ``ADJUST`` ledger rows per moved lot line, summing to exactly
+    zero** — nothing is minted and nothing is destroyed. It is deliberately NOT a
+    receive (which would overstate on-hand by the moved quantity) and deliberately NOT
+    an issue against a fabricated work order (which would launder a real quantity
+    through a production record that never happened).
+
+    **Role: ADMIN / MANAGER — deliberately NOT Supervisor**, and so deliberately
+    NARROWER than ``inventory:adjust``, which reaches Supervisor. Adjusting one lot
+    corrects a count; folding two SKUs together is a controlled change to article
+    identity under AS9100D 8.5.2, so it sits with ``POST /parts/{id}/renumber`` and
+    ``POST /parts/{id}/revision``, not with the stock-mutator tier.
+
+    **Refusals, every one raised before the first write** so a refused request leaves
+    every row untouched:
+
+    * **400** ``same_part`` — source and target are the same part.
+    * **404** — no such part in this company (another tenant's part id included).
+    * **400** ``part_deleted`` — restore it or use a different part number.
+    * **409** ``expected_part_number_mismatch`` — somebody renumbered one of these parts
+      while the dialog was open. ``Part`` maps no optimistic-lock version column, so the
+      number strings ARE the concurrency control, applied as a compare-and-swap.
+    * **409** ``unit_of_measure_mismatch`` — the two parts are stocked in different units.
+    * **409** ``no_available_stock`` — the source has nothing free to move. This is what
+      a SECOND combine of an already-drained SKU gets. (A ``quantity`` at or below
+      ``MINIMUM_COMBINE_QUANTITY`` is a **422** before this handler runs — the field is
+      ``gt=MINIMUM_COMBINE_QUANTITY``, which is the ledger epsilon, not ``gt=0``. The two
+      have to agree: at ``gt=0`` a request of ``1e-10`` passed validation, moved nothing,
+      and still wrote an immutable header row, an audit row and an event for a combine
+      that never happened.)
+    * **400** ``quantity_below_minimum`` — the service-level backstop for the same thing,
+      ordered AFTER the availability probes so a drained SKU still reports
+      ``no_available_stock`` first, which is the more useful answer.
+    * **409** ``quantity_exceeds_available`` — more was requested than is eligible.
+    * **409** ``open_work_order_reservation`` — open material ties still expect to draw
+      this material; the refusal names the work orders to untie or re-tie first. Measured
+      against DRAWABLE stock, not total on-hand: material the engine cannot pull (held,
+      quarantined, on a deactivated row, or withheld for a lot-pinned tie) can never
+      "cover" a tie, so counting it would let a fold strand a job that was satisfiable
+      before it.
+    * **409** ``target_row_not_available`` — the stock would land on a target row that is
+      on hold, quarantined, rejected or deactivated. The refusal names the location, lot
+      and status. Without it the verb quietly turns usable material into unusable
+      material: the fold reports success, and the moved quantity is instantly invisible to
+      the consumption engine and the nest matcher.
+    * **409** ``target_serial_mismatch`` — the source row carries a serial number and the
+      row it would land on carries a different one (checked symmetrically, so a blank on
+      either side while the other is set also refuses). Merging them would leave one stock
+      row claiming two units under one serial.
+    * **409** ``flagged_part_not_acknowledged`` — a part whose number or name reads as a
+      test/housing part must be confirmed explicitly via ``acknowledge_flagged_part_ids``.
+      An acknowledgement gate, not a ban: "housing" is a real manufacturing word.
+    * **409** ``source_still_has_stock`` — ``deactivate_source`` was asked for but the
+      source would not land at exactly 0 across ALL its rows, held ones included.
+
+    **What it never does.** It never changes a cost basis (a target row created by the
+    move carries the source lot's unit cost; an existing target row keeps its own), never
+    moves allocated material, never touches stock that is on hold, quarantined, rejected
+    or on a deactivated row (those are listed in the preview instead), and never deletes
+    the source part — it stays in the catalog at qty 0 so every document naming it keeps
+    resolving. ``deactivate_source`` sets ``is_active``/``status`` only; ``is_deleted`` is
+    never written here.
+
+    Reversing a combine is a NEW combine in the other direction, with its own reason and
+    its own audit row — never an edit of the record this one wrote.
+    """
+    with atomic_transaction(db):
+        result = combine_inventory(
+            db,
+            company_id,
+            source_part_id=payload.source_part_id,
+            target_part_id=payload.target_part_id,
+            quantity=payload.quantity,
+            reason=payload.reason,
+            expected_source_part_number=payload.expected_source_part_number,
+            expected_target_part_number=payload.expected_target_part_number,
+            acknowledge_flagged_part_ids=payload.acknowledge_flagged_part_ids,
+            deactivate_source=payload.deactivate_source,
+            actor_user_id=current_user.id,
+            audit=audit,
+        )
+
+    return InventoryCombineResponse(
+        combine_id=result.combine_id,
+        combine_number=result.combine_number,
+        source_part_id=result.source_part_id,
+        source_part_number=result.source_part_number,
+        target_part_id=result.target_part_id,
+        target_part_number=result.target_part_number,
+        quantity_moved=result.quantity_moved,
+        lines_moved=result.lines_moved,
+        source_quantity_before=result.source_quantity_before,
+        source_quantity_after=result.source_quantity_after,
+        target_quantity_before=result.target_quantity_before,
+        target_quantity_after=result.target_quantity_after,
+        source_deactivated=result.source_deactivated,
+        lines=[CombineLineSchema.model_validate(line, from_attributes=True) for line in result.lines],
+        transaction_ids=result.transaction_ids,
+    )
 
 
 # Cycle Count endpoints

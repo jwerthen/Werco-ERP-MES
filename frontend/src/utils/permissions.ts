@@ -50,6 +50,17 @@ export type Permission =
   | 'inventory:view'
   | 'inventory:adjust'
   | 'inventory:transfer'
+  // Folding two SKUs into one when a numbering recut left both describing the
+  // same physical material. Deliberately NARROWER than inventory:adjust, which
+  // reaches supervisor: adjusting one lot corrects a count, while combining
+  // changes which article the material IS — an AS9100D 8.5.2 controlled change,
+  // so it sits with parts:renumber rather than with a cycle-count correction.
+  // Mirrors require_role([ADMIN, MANAGER]) on POST /inventory/combine.
+  //
+  // FRONTEND-ONLY, like parts:renumber: this key gates the button, and the
+  // backend role check is the enforcement. It is deliberately absent from the
+  // backend's role_permission.py ALL_PERMISSIONS.
+  | 'inventory:combine'
   // Purchasing
   | 'purchasing:view'
   | 'purchasing:create'
@@ -102,7 +113,7 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'boms:view', 'boms:create', 'boms:edit', 'boms:delete', 'boms:release',
     'routings:view', 'routings:create', 'routings:edit', 'routings:delete', 'routings:release',
     'process_sheets:author', 'process_sheets:release',
-    'inventory:view', 'inventory:adjust', 'inventory:transfer',
+    'inventory:view', 'inventory:adjust', 'inventory:transfer', 'inventory:combine',
     'purchasing:view', 'purchasing:create', 'purchasing:approve',
     'receiving:view', 'receiving:create', 'receiving:inspect',
     'shipping:view', 'shipping:create', 'shipping:complete',
@@ -119,7 +130,7 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'boms:view', 'boms:create', 'boms:edit', 'boms:delete', 'boms:release',
     'routings:view', 'routings:create', 'routings:edit', 'routings:delete', 'routings:release',
     'process_sheets:author', 'process_sheets:release',
-    'inventory:view', 'inventory:adjust', 'inventory:transfer',
+    'inventory:view', 'inventory:adjust', 'inventory:transfer', 'inventory:combine',
     'purchasing:view', 'purchasing:create', 'purchasing:approve',
     'receiving:view', 'receiving:create', 'receiving:inspect',
     'shipping:view', 'shipping:create', 'shipping:complete',
@@ -136,7 +147,7 @@ const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'boms:view', 'boms:create', 'boms:edit', 'boms:delete', 'boms:release',
     'routings:view', 'routings:create', 'routings:edit', 'routings:delete', 'routings:release',
     'process_sheets:author', 'process_sheets:release',
-    'inventory:view', 'inventory:adjust', 'inventory:transfer',
+    'inventory:view', 'inventory:adjust', 'inventory:transfer', 'inventory:combine',
     'purchasing:view', 'purchasing:create', 'purchasing:approve',
     'receiving:view', 'receiving:create', 'receiving:inspect',
     'shipping:view', 'shipping:create', 'shipping:complete',

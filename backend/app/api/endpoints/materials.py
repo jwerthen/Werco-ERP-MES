@@ -370,6 +370,19 @@ def delete_material(
         db.commit()
         return {"message": "Material permanently deleted"}
 
+    # Record the pre-delete activity BEFORE the mask write, exactly as ``delete_part``
+    # does -- reversed, this always records False. ``parts`` has TWO soft-delete doors
+    # (this one and ``DELETE /parts/{id}``) writing the same rows, and only ONE restore
+    # door (``POST /parts/{id}/restore``, since ``materials.py`` has no restore verb of
+    # its own). So a material deleted here is restored by code that reads this sidecar:
+    # if this door did not write it, every material would restore INACTIVE regardless of
+    # how it was switched at delete time -- safe in direction, but a silent behaviour
+    # change and a lie about what the record said. Both doors must agree.
+    #
+    # ``is_active = False`` stays a deliberate SECOND layer over the ``is_deleted``
+    # tombstone (invariant 3). The tempting shortcut -- stop writing the mask so the
+    # restore has nothing to put back -- is a security regression, not a simplification.
+    material.is_active_before_delete = material.is_active
     material.soft_delete(current_user.id)
     material.is_active = False
     material.status = "obsolete"
