@@ -5932,6 +5932,20 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > hint next to its "Requires Inspection" checkbox (which always starts unchecked) so the
 > receiver can opt in deliberately.
 >
+> **What the receive form carries between lines (UI behaviour).** Receiving one delivery
+> usually means receiving several PO lines back to back, so the Receiving page keeps the
+> **shipment-level** fields filled as the receiver moves from line to line — packing slip #,
+> carrier, tracking #, and location are identical for every line off one truck. The
+> **material-level** fields are blanked for each newly selected line and never carry over:
+> `lot_number`, `heat_number`, `cert_number`, `serial_numbers`, the CoC-attached flag, the
+> line notes, `requires_inspection`, and the over-receipt approval. Lot, heat and cert are
+> issued together per heat lot by the mill, so carrying a cert past the lot and heat it
+> belongs to would record a certificate against material it does not cover; and the two
+> checkboxes are approvals, whose whole meaning is that somebody ticked them for **this**
+> receipt. The over-receipt checkbox is additionally *hidden* whenever the quantity fits the
+> line, so a value carried over there would be invisible as well as unearned. This is a UI
+> default only — the API accepts whatever the caller sends on every field.
+>
 > A receipt's **`inspection_status`** (returned by `/receiving/history` and
 > `/receiving/receipt/{receipt_id}`) is one of: **`not_required`** (dock-to-stock — accepted
 > without inspection; no inspector/method/time — set either by receiving with the flag off, or by
