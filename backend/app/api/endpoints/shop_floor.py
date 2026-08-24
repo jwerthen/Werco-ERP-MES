@@ -3116,6 +3116,38 @@ def shop_floor_dashboard(
                     else (entry.operation.status if entry.operation else None)
                 ),
                 "sequence": entry.operation.sequence if entry.operation else None,
+                # THIS operation's target, resolved by the ONE server rule
+                # (``operation_target_quantity``): a laser nest is targeted at its own
+                # planned_runs, a batch/pool line at its own piece count, and only an
+                # ordinary routing operation inherits the work order's quantity_ordered.
+                # The same three-key group the kiosk row, my-active-job, /operations and
+                # the operation-detail payloads already emit -- minus a redundant
+                # ``work_order_quantity_ordered``, because an assignment already nests the
+                # whole ``work_order`` dict beside this one and that dict carries it.
+                #
+                # It exists because Live Shop Activity divides ``quantity_complete`` by a
+                # denominator, and until this field there was no operation-scoped one to
+                # divide by: the panel reached for the sibling work order's figure and read
+                # a running nest as "0/102" while Dispatch, the WO routing table and Shop
+                # Floor Operations all said "0/2".
+                #
+                # NULL (not 0.0) when the entry carries no operation -- indirect/setup
+                # labor -- so the client can tell "no operation" apart from "target zero"
+                # and keep BOTH halves of its fraction on the same scope.
+                #
+                # Costs no query on every entry a clock-in verb produced: ``ClockIn``
+                # requires both ids, and ``entry.operation`` / ``entry.work_order`` are
+                # both eager-loaded above, so the rule's lazy ``operation.work_order``
+                # tier is never reached for them. It is NOT unreachable in general --
+                # ``TimeEntry.work_order_id`` is nullable, so a legacy or import-drifted
+                # row carrying an operation but no work order resolves through that third
+                # tier and costs one lazy SELECT. Left as-is rather than widened into the
+                # joinedload chain: no such row is creatable through the API today, and
+                # the rule still returns the right number for one.
+                "quantity_ordered": (
+                    operation_target_quantity(entry.operation, entry.work_order) if entry.operation else None
+                ),
+                "component_quantity": entry.operation.component_quantity if entry.operation else None,
                 "quantity_complete": entry.operation.quantity_complete if entry.operation else None,
                 "quantity_scrapped": entry.operation.quantity_scrapped if entry.operation else None,
             },

@@ -1251,14 +1251,53 @@ export interface ActiveAssignment {
     quantity_ordered?: number;
     quantity_complete?: number;
   };
+  /**
+   * The operation this entry is clocked into. The object is ALWAYS present, but
+   * EVERY field in it is `null` TOGETHER when the time entry carries no operation
+   * (indirect / setup labor) — the backend writes each one as
+   * `entry.operation.X if entry.operation else None`. `id` is the field to test:
+   * it is what tells an operation-scoped row from a work-order-scoped one, and
+   * both halves of a progress fraction must follow that same test or they end up
+   * on different scopes. Typed nullable so that test is meaningful rather than a
+   * check TypeScript believes can never fail.
+   */
   operation: {
-    id: number;
-    operation_number?: string;
-    name: string;
-    status: OperationStatus;
-    sequence?: number;
-    quantity_complete?: number;
-    quantity_scrapped?: number;
+    id: number | null;
+    operation_number?: string | null;
+    name: string | null;
+    status: OperationStatus | null;
+    sequence?: number | null;
+    /**
+     * THIS operation's quantity target, resolved server-side by the one rule
+     * (`operation_target_quantity`): a laser nest's own `planned_runs`, a batch/pool
+     * line's own piece count, else the work order's `quantity_ordered`. It is the
+     * denominator any operation-scoped progress figure must use — the sibling
+     * `work_order.quantity_ordered` is the WHOLE JOB and reads a running nest as
+     * "0/102" instead of "0/2".
+     *
+     * `null` when the time entry carries no operation (indirect/setup labor).
+     *
+     * OPTIONAL BECAUSE THE TWO HALVES OF THIS APP DEPLOY INDEPENDENTLY — the SPA
+     * ships to Vercel and the API to Railway, so a frontend build carrying this
+     * field can be live against a backend that does not send it yet. That window
+     * is the ONLY way it goes missing, and `operationTargetQuantity` degrades it to
+     * the work-order figure (the pre-fix behavior) rather than dividing by zero.
+     * It is NOT about the ETag cache: `etagCache` is an in-memory Map
+     * (services/api.ts:187) that starts empty on every page load, so a bundle that
+     * reads this field can never find a payload older than itself in it. Said
+     * explicitly because "the cache can't hold a stale shape" is a true statement
+     * that makes the fallback look like dead code — delete it and the next
+     * frontend-ahead-of-backend deploy renders 0/102 again with every test passing.
+     */
+    quantity_ordered?: number | null;
+    /**
+     * Raw target input, so the shared client mirror of the same rule can resolve it.
+     * Also plain payload parity with the three sibling operation payloads
+     * (`_kiosk_job_row`, `/my-active-job`, the operation detail), which all ship it.
+     */
+    component_quantity?: number | null;
+    quantity_complete?: number | null;
+    quantity_scrapped?: number | null;
   };
   work_center: {
     id: number;
