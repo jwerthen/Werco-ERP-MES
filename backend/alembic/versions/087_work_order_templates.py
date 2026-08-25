@@ -193,7 +193,14 @@ def _create_table() -> None:
         # SoftDeleteMixin. ``is_deleted`` carries the server_default the mixin
         # declares; ``deleted_by`` is a bare Integer with no FK, which is the mixin's
         # own shape and is deliberately not "corrected" here.
-        sa.Column("is_deleted", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+        # ``server_default="false"`` is the plain string the mixin declares, NOT
+        # ``sa.text("false")``. They diverge: SQLAlchemy quotes the string, so the two
+        # bootstrap paths would emit ``DEFAULT 'false'`` (create_all) against
+        # ``DEFAULT false`` (this migration) -- a schema diff that never comes back
+        # empty, which is exactly what the lock-step convention exists to prevent.
+        # Verified by diffing a create_all database against a migrated one. Same
+        # spelling as 006/037/046/053.
+        sa.Column("is_deleted", sa.Boolean(), nullable=False, server_default="false"),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("deleted_by", sa.Integer(), nullable=True),
         # TenantMixin, last.
