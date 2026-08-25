@@ -50,6 +50,21 @@ describe('getRouteTitle', () => {
     expect(getRouteTitle(loc('/warehouse', '?tab=receiving&page=2'))).toBe('Receiving');
   });
 
+  it('titles the work-order Templates tab, which is a TAB precisely because it cannot be a route', () => {
+    // `/work-orders/templates` is matched by App.tsx's `/work-orders/:id` route
+    // AND by the WO-detail pattern below, so a real route there would resolve as
+    // a work order whose id is the word "templates". Hence `?tab=templates` —
+    // and hence a query title, since the bare path is still the list.
+    expect(getRouteTitle(loc('/work-orders', '?tab=templates'))).toBe('Work Order Templates');
+    // The tab rides alongside the page's other URL filters, which must not
+    // stop it resolving.
+    expect(getRouteTitle(loc('/work-orders', '?status=in_progress&tab=templates'))).toBe(
+      'Work Order Templates'
+    );
+    expect(getRouteTitle(loc('/work-orders'))).toBe('Work Orders');
+    expect(getRouteTitle(loc('/work-orders', '?status=in_progress'))).toBe('Work Orders');
+  });
+
   it('falls back to the bare-path title when the query has no matching tab', () => {
     // Unknown tab value -> no query-title match -> static /warehouse title.
     expect(getRouteTitle(loc('/warehouse', '?tab=nope'))).toBe('Warehouse');

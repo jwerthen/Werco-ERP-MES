@@ -41,6 +41,11 @@ import {
   BOMUomMismatchParams,
   BOMUomMismatchReport,
   WorkOrderDuplicateResult,
+  WorkOrderTemplate,
+  WorkOrderTemplateCreatePayload,
+  WorkOrderTemplateListResult,
+  WorkOrderTemplateUpdatePayload,
+  WorkOrderTemplateUsePayload,
   InventoryTransaction,
   InventoryTransactionParams,
   ResumeOperationResult,
@@ -1030,6 +1035,95 @@ class ApiService {
     // is what keeps that true: `response.data` is `any`, so an unwrapped return
     // here type-checks clean and only fails in front of a planner — as "undefined
     // created as a draft" and a navigation to /work-orders/undefined.
+    return response.data;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Work Order Templates — /api/v1/work-order-templates
+  //
+  // A template is a NAME plus a POINTER at the work order whose plan it stands
+  // for; the plan itself is copied at USE time by the SAME engine
+  // `duplicateWorkOrder` drives. Every verb here is role-gated
+  // (admin/manager/supervisor), so callers stay non-optimistic and render only
+  // what comes back.
+  //
+  // Each call is typed at the axios boundary (`get<T>` / `post<T>`), because
+  // `response.data` is `any`: an unwrapped or mis-shaped return type-checks clean
+  // and fails only in front of a planner — which is exactly how the duplicate
+  // envelope once shipped as "undefined created as a draft".
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The catalog. `search` is a case-insensitive substring match on name AND notes.
+   *
+   * Returns the ENVELOPE (`{ templates, total }`), not a bare array: the list is
+   * unpaged and small, and keeping the wrapper means a server shape change fails
+   * loudly here instead of rendering an empty catalog.
+   */
+  async listWorkOrderTemplates(params?: { search?: string }): Promise<WorkOrderTemplateListResult> {
+    const search = params?.search?.trim();
+    const response = await this.api.get<WorkOrderTemplateListResult>('/work-order-templates', {
+      params: search ? { search } : undefined,
+    });
+    return response.data;
+  }
+
+  /** One template plus its LIVE plan summary. 404 when it is not live in this company. */
+  async getWorkOrderTemplate(id: number): Promise<WorkOrderTemplate> {
+    const response = await this.api.get<WorkOrderTemplate>(`/work-order-templates/${id}`);
+    return response.data;
+  }
+
+  /**
+   * Point a name at a work order. **The source work order is not modified.**
+   *
+   * 404 when the source is not live in the active company; 409 when another live
+   * template already holds the name (compared case-insensitively).
+   */
+  async createWorkOrderTemplate(data: WorkOrderTemplateCreatePayload): Promise<WorkOrderTemplate> {
+    const response = await this.api.post<WorkOrderTemplate>('/work-order-templates', data);
+    return response.data;
+  }
+
+  /**
+   * Edit the label, not the plan.
+   *
+   * `null` is MEANINGFUL for `notes` / `default_quantity` — it clears them — while
+   * an omitted key leaves the stored value alone, so the payload is forwarded
+   * as-is rather than being normalized here.
+   */
+  async updateWorkOrderTemplate(id: number, data: WorkOrderTemplateUpdatePayload): Promise<WorkOrderTemplate> {
+    const response = await this.api.put<WorkOrderTemplate>(`/work-order-templates/${id}`, data);
+    return response.data;
+  }
+
+  /** Soft delete. Frees the name immediately; a second delete answers 404. */
+  async deleteWorkOrderTemplate(id: number): Promise<{ message: string; id: number }> {
+    const response = await this.api.delete<{ message: string; id: number }>(`/work-order-templates/${id}`);
+    return response.data;
+  }
+
+  /**
+   * Run the saved plan again: a new work order number, a new due date, **DRAFT**.
+   *
+   * Returns the very same `WorkOrderDuplicateResult` envelope
+   * `duplicateWorkOrder` does — the skip lists are the point, and both dialogs
+   * render them through one shared view.
+   *
+   * Both body fields are optional. `due_date` is sent as an explicit `null` when
+   * blank rather than omitted: unscheduled is a decision, and the source's date is
+   * never inherited.
+   */
+  async useWorkOrderTemplate(
+    id: number,
+    data: WorkOrderTemplateUsePayload = {}
+  ): Promise<WorkOrderDuplicateResult> {
+    const body: WorkOrderTemplateUsePayload = { due_date: data.due_date ?? null };
+    // Omitted, not null: the server resolves the quantity from the template's
+    // default and then the source work order, and `null` would fail its `gt=0`
+    // validator instead of falling through to that resolution.
+    if (data.quantity_ordered !== undefined) body.quantity_ordered = data.quantity_ordered;
+    const response = await this.api.post<WorkOrderDuplicateResult>(`/work-order-templates/${id}/use`, body);
     return response.data;
   }
 

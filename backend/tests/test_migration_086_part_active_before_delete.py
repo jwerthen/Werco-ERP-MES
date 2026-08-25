@@ -122,15 +122,21 @@ def _body() -> str:
 
 @pytest.mark.unit
 def test_single_head_and_revision_chain():
-    """086 is the head, and it hangs off 085 (the combine header table).
+    """The chain is unbranched, and 086 hangs off 085 (the combine header table).
 
     A second head is not a cosmetic problem: ``upgrade head`` fails outright, so a
     branched chain is a deploy that cannot run.
+
+    This deliberately does NOT assert that 086 IS the head. It used to, and that
+    assertion was wrong by construction: it fails for whoever writes the NEXT
+    migration no matter what they write, so the first thing a later author learns
+    from it is that an unrelated test broke. (087 was the one that hit it.) The two
+    things worth pinning survive -- exactly one head, and 086's own parent -- which
+    is the shape 082 and 083 already use.
     """
     scripts = _script_directory()
     heads = scripts.get_heads()
     assert len(heads) == 1, f"multiple alembic heads: {heads}"
-    assert heads[0] == REVISION_086
 
     revision = scripts.get_revision(REVISION_086)
     assert revision.down_revision == DOWN_REVISION

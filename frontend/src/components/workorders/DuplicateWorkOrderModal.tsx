@@ -63,19 +63,21 @@
  * The result view is a RESULT, not an error: the work order exists and is a
  * valid draft, so it is amber and it names the new work order number. Rendering
  * it as a failure would send someone hunting for a job that is already there.
+ *
+ * That view, and the reason vocabulary behind it, live in `copyPlanSkips.tsx` —
+ * shared verbatim with the Use-template dialog, which receives the SAME envelope
+ * from `POST /work-order-templates/{id}/use`. Two renderings of the same news
+ * would drift, and the second one would become the one that counts skips without
+ * naming them.
  */
 
 import React, { useEffect, useId, useRef, useState } from 'react';
 import api from '../../services/api';
 import { Button, FormField, LoadingButton, Modal, useToast } from '../ui';
-import { toDisplayString } from '../../utils/apiError';
-import { formatOperationLabel, hasOperationNumber } from '../../utils/operationLabel';
-import type {
-  WorkOrder,
-  WorkOrderDuplicateResult,
-  WorkOrderDuplicateSkippedAllocation,
-  WorkOrderDuplicateSkippedOperation,
-} from '../../types';
+// The skip vocabulary and the result view are SHARED with the Use-template
+// dialog, which renders the identical envelope. See `copyPlanSkips.tsx`.
+import { CopyPlanSkipReport, hasSkips, serverErrorDetail, storedQuantityNote } from './copyPlanSkips';
+import type { WorkOrder, WorkOrderDuplicateResult } from '../../types';
 
 /**
  * The fields this dialog needs off the source work order. Deliberately narrow
@@ -120,117 +122,6 @@ export interface DuplicateWorkOrderModalProps {
    * out from under a list of omissions the planner just declined to follow.
    */
   onDuplicated: (result: WorkOrderDuplicateResult) => void;
-}
-
-/**
- * Machine-readable skip reason → the phrase shown to a planner.
- *
- * The server owns this vocabulary and can add to it, so every lookup falls back
- * to the raw token rather than asserting a reason. `skipSummary` used to state
- * "(its laser nest was deleted)" for ANY skipped operation, which is true only
- * while `laser_nest_deleted` is the only reason there is — a sentence that
- * becomes a falsehood the moment the server grows a second one.
- */
-const OPERATION_SKIP_REASONS: Record<string, string> = {
-  laser_nest_deleted: 'its laser nest was deleted',
-};
-
-const ALLOCATION_SKIP_REASONS: Record<string, string> = {
-  part_not_available: 'the tied part is no longer available',
-  // The whole argument for SKIPPING this row rather than refusing the duplicate
-  // outright is that the planner is told legibly which tie to re-make by hand.
-  // Falling through to the raw `part_not_tieable` token would spend the refusal
-  // and deliver none of the explanation that justified it.
-  part_not_tieable: 'the tied part is one the shop produces, not stock material',
-  operation_not_copied: 'its operation was not copied',
-  nest_runs_unavailable: 'no nest run count to plan against',
-};
-
-/** The phrase for one reason, falling back to the server's own token. */
-function reasonLabel(reason: string, labels: Record<string, string>): string {
-  return labels[reason] ?? reason;
-}
-
-/**
- * A parenthetical naming the reason — but ONLY when every entry shares one, and
- * only when we have a phrase for it. Mixed reasons get no parenthetical rather
- * than one that describes a subset.
- */
-function sharedReasonNote(entries: Array<{ reason: string }>, labels: Record<string, string>): string {
-  const distinct = Array.from(new Set(entries.map((entry) => entry.reason)));
-  if (distinct.length !== 1) return '';
-  const label = labels[distinct[0]];
-  return label ? ` (${label})` : '';
-}
-
-/** Did the server leave anything behind? Both lists empty is the "clean copy" signal. */
-function hasSkips(result: WorkOrderDuplicateResult): boolean {
-  return (result.skipped_operations?.length ?? 0) > 0 || (result.skipped_material_allocations?.length ?? 0) > 0;
-}
-
-/**
- * A sentence for what the server refused to carry across, or `null` when the
- * copy was clean.
- *
- * This is not decoration. A skipped material tie means the new job carries NO
- * demand for that material: no shortage is raised, the nests run, and stock is
- * never deducted. That omission is on the audit chain either way — this is what
- * puts it in front of the person who pressed the button, while they can still
- * act on it.
- *
- * Counts only. Ties carry a per-row reason in the itemized list below it, where
- * a mixed set can be shown honestly; collapsing three different tie reasons into
- * one parenthetical here could not be.
- */
-function skipSummary(result: WorkOrderDuplicateResult): string | null {
-  const operations = result.skipped_operations ?? [];
-  const ties = result.skipped_material_allocations ?? [];
-  if (operations.length === 0 && ties.length === 0) return null;
-  const parts: string[] = [];
-  if (operations.length > 0) {
-    parts.push(
-      `${operations.length} operation${operations.length === 1 ? '' : 's'}` +
-        sharedReasonNote(operations, OPERATION_SKIP_REASONS)
-    );
-  }
-  if (ties.length > 0) parts.push(`${ties.length} material tie${ties.length === 1 ? '' : 's'}`);
-  return `Not copied: ${parts.join(' and ')}. Check the new work order before releasing it.`;
-}
-
-/** How a skipped operation is named. Falls back through the ids the envelope carries. */
-function operationLabel(operation: WorkOrderDuplicateSkippedOperation): string {
-  // The FULL label, matching the `Seq 20` / `Operation #72` fallbacks below --
-  // these three are one vocabulary, and a bare "20" among them names nothing.
-  //
-  // `formatOperationLabel` and not the bare text, even though this notice is
-  // emitted ONLY for nest-backed operations (`laser_nest_deleted`), whose stored
-  // number is `Nest 3`: the helper leaves a self-labeled value alone, so a nest
-  // reads `Nest 3` and a legacy office row still reads `Op 20`. Both spellings
-  // reach here -- a nest task can carry either -- and only the label names both.
-  if (hasOperationNumber(operation.operation_number)) {
-    return formatOperationLabel(operation.operation_number);
-  }
-  if (operation.sequence != null) return `Seq ${operation.sequence}`;
-  return `Operation #${operation.source_operation_id}`;
-}
-
-/**
- * How a skipped tie is named. The envelope carries `part_id`, not a part
- * number — an internal id is still enough to look the part up, and far more
- * than a bare count.
- */
-function allocationLabel(allocation: WorkOrderDuplicateSkippedAllocation): string {
-  return allocation.part_id != null ? `Part #${allocation.part_id}` : `Tie #${allocation.source_allocation_id}`;
-}
-
-/** Pull a displayable `detail` off any error shape, incl. a structured 409 body. */
-function duplicateErrorDetail(err: unknown, fallback: string): string {
-  const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-  const rendered = toDisplayString(detail);
-  if (rendered.trim()) return rendered;
-  const message = (err as { message?: unknown })?.message;
-  if (typeof message === 'string' && message.trim()) return message;
-  return fallback;
 }
 
 /** Does this work order carry live laser nests? Nests hang off operations. */
@@ -359,27 +250,20 @@ export default function DuplicateWorkOrderModal({
       const created = result.work_order;
       // Quantity comes off the RESPONSE, never off the form: on a nest-bearing
       // work order the server stores the derived sum, not what was submitted.
-      const storedQuantity = Number(created.quantity_ordered);
-      const quantityNote = Number.isFinite(storedQuantity) ? ` — qty ${storedQuantity}` : '';
       // A clean copy stays exactly one click — that contrast is the point.
       showToast(
         'success',
-        `${created.work_order_number} created as a draft${quantityNote}, copied from ${workOrder.work_order_number}.` +
-          ' Review it, then release.'
+        `${created.work_order_number} created as a draft${storedQuantityNote(result)}, ` +
+          `copied from ${workOrder.work_order_number}. Review it, then release.`
       );
       onDuplicated(result);
       onClose();
     } catch (err) {
-      setError(duplicateErrorDetail(err, 'Failed to duplicate this work order'));
+      setError(serverErrorDetail(err, 'Failed to duplicate this work order'));
     } finally {
       setSubmitting(false);
     }
   };
-
-  const createdQuantity = partialResult ? Number(partialResult.work_order.quantity_ordered) : NaN;
-  const createdQuantityNote = Number.isFinite(createdQuantity) ? ` — qty ${createdQuantity}` : '';
-  const skippedOperations = partialResult?.skipped_operations ?? [];
-  const skippedTies = partialResult?.skipped_material_allocations ?? [];
 
   return (
     <Modal
@@ -410,73 +294,14 @@ export default function DuplicateWorkOrderModal({
 
           {partialResult ? (
             <div className="modal-body max-h-[70vh] space-y-4 overflow-y-auto">
-              {/* Amber, not red: the work order WAS created and is a valid
-                  draft. Calling this a failure sends someone hunting for a job
-                  that is already there. */}
-              <div
-                role="status"
-                data-testid="duplicate-wo-skips"
-                className="rounded-sm border border-amber-500/50 bg-amber-500/5 px-4 py-3 text-sm text-slate-300"
-              >
-                <p className="font-semibold text-amber-200">
-                  <span className="font-mono">{partialResult.work_order.work_order_number}</span> created as a draft
-                  {createdQuantityNote}, copied from{' '}
-                  <span className="font-mono">{workOrder.work_order_number}</span>.
-                </p>
-                <p className="mt-1">{skipSummary(partialResult)}</p>
-              </div>
-
-              {skippedOperations.length > 0 && (
-                <section>
-                  <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-                    Operations not copied
-                  </h4>
-                  <ul
-                    data-testid="duplicate-wo-skipped-operations"
-                    className="mt-2 divide-y divide-fd-line border border-fd-line"
-                  >
-                    {skippedOperations.map((operation) => (
-                      <li
-                        key={operation.source_operation_id}
-                        className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 px-3 py-2"
-                      >
-                        <span className="font-mono text-sm text-slate-200">{operationLabel(operation)}</span>
-                        <span className="text-xs text-slate-400">
-                          {reasonLabel(operation.reason, OPERATION_SKIP_REASONS)}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
-              )}
-
-              {skippedTies.length > 0 && (
-                <section>
-                  <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-                    Material ties not copied
-                  </h4>
-                  <ul
-                    data-testid="duplicate-wo-skipped-ties"
-                    className="mt-2 divide-y divide-fd-line border border-fd-line"
-                  >
-                    {skippedTies.map((tie) => (
-                      <li
-                        key={tie.source_allocation_id}
-                        className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 px-3 py-2"
-                      >
-                        <span className="font-mono text-sm text-slate-200">{allocationLabel(tie)}</span>
-                        <span className="text-xs text-slate-400">
-                          {reasonLabel(tie.reason, ALLOCATION_SKIP_REASONS)}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                  <p className="mt-2 text-xs text-slate-400">
-                    Nothing on the new draft records these. Re-tie the material by hand before releasing it: a job
-                    with no tie carries no demand, so no shortage shows, the nests run, and stock is never deducted.
-                  </p>
-                </section>
-              )}
+              <CopyPlanSkipReport
+                result={partialResult}
+                origin={
+                  <>
+                    copied from <span className="font-mono">{workOrder.work_order_number}</span>.
+                  </>
+                }
+              />
             </div>
           ) : (
           <div className="modal-body max-h-[70vh] space-y-4 overflow-y-auto">
