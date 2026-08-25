@@ -110,6 +110,11 @@ export const routeTitles: Record<string, string> = {
  * Key is `"<path>?<param>=<value>"`; checked before the bare path.
  */
 const queryTitles: Record<string, string> = {
+  // Templates is a TAB on /work-orders rather than a route of its own: the
+  // WO-detail pattern below (`/work-orders/(?!new$)[^/]+`) and App.tsx's
+  // `/work-orders/:id` route BOTH match `/work-orders/templates`, so a real
+  // route there would resolve as a work order whose id is the word "templates".
+  '/work-orders?tab=templates': 'Work Order Templates',
   '/warehouse?tab=inventory': 'Inventory',
   '/warehouse?tab=receiving': 'Receiving',
   '/warehouse?tab=shipping': 'Shipping',

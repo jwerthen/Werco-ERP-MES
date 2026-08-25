@@ -14,6 +14,7 @@ import { CompleteWorkModal, CompleteWorkSubmit } from '../components/workorders/
 import MaterialTiesPanel from '../components/workorders/MaterialTiesPanel';
 import OperationMaterialTieModal from '../components/workorders/OperationMaterialTieModal';
 import DuplicateWorkOrderModal from '../components/workorders/DuplicateWorkOrderModal';
+import SaveAsTemplateModal from '../components/workorders/SaveAsTemplateModal';
 import BackflushPreviewPanel from '../components/workorders/BackflushPreviewPanel';
 import OperationStepsPanel from '../components/processSheets/OperationStepsPanel';
 import {
@@ -74,6 +75,7 @@ import {
   UserGroupIcon,
   WrenchScrewdriverIcon,
   DocumentDuplicateIcon,
+  BookmarkSquareIcon,
   InformationCircleIcon,
 } from '@heroicons/react/24/outline';
 
@@ -352,6 +354,11 @@ export default function WorkOrderDetail() {
   // canCorrectCount so the gate reads at its call site: hiding the control and
   // refusing the call must agree, or a supervisor sees a button that 403s.
   const canDuplicateWorkOrder = canCorrectCount;
+  // Saving a template is the same backend trio (require_role ADMIN/MANAGER/
+  // SUPERVISOR on every /work-order-templates verb), which is exactly what
+  // work_orders:edit maps to. Named separately so the gate reads at its call
+  // site — a hidden control and a refused call have to agree.
+  const canSaveAsTemplate = canCorrectCount;
   // Flipping the operation-sequencing mode writes through the same
   // PUT /work-orders/{id} the due-date and notes editors use, whose backend gate
   // is require_role([ADMIN, MANAGER, SUPERVISOR]) — exactly what work_orders:edit
@@ -376,6 +383,7 @@ export default function WorkOrderDetail() {
   const [deleting, setDeleting] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [duplicateOpen, setDuplicateOpen] = useState(false);
+  const [saveTemplateOpen, setSaveTemplateOpen] = useState(false);
   // In-flight flag for the "Sequential operations" switch. It ONLY drives the
   // pending chrome — the switch's checked state is read from the server value,
   // never from a local draft (see handleSequencingToggle).
@@ -1688,6 +1696,16 @@ export default function WorkOrderDetail() {
               Duplicate
             </Button>
           )}
+          {canSaveAsTemplate && (
+            <Button
+              variant="secondary"
+              onClick={() => setSaveTemplateOpen(true)}
+              className="flex items-center"
+            >
+              <BookmarkSquareIcon className="h-5 w-5 mr-2" aria-hidden="true" />
+              Save as template
+            </Button>
+          )}
           <Button
             variant="secondary"
             onClick={() => window.open(`/print/traveler/${workOrder.id}?autoprint=1`, '_blank')}
@@ -2942,6 +2960,21 @@ export default function WorkOrderDetail() {
           hasLaserNests={laserNests.length > 0}
           onClose={() => setDuplicateOpen(false)}
           onDuplicated={(result) => navigate(`/work-orders/${result.work_order.id}`)}
+        />
+      )}
+
+      {/* Catalog this work order's plan under a name. Unlike Duplicate this
+          creates NOTHING to navigate to — one row pointing at this work order —
+          and it must leave this page's record completely untouched, so there is
+          no reload on success either. */}
+      {canSaveAsTemplate && (
+        <SaveAsTemplateModal
+          open={saveTemplateOpen}
+          workOrder={workOrder}
+          // This page already has the nests loaded, so the dialog never has to
+          // ask what kind of job this is.
+          hasLaserNests={laserNests.length > 0}
+          onClose={() => setSaveTemplateOpen(false)}
         />
       )}
 

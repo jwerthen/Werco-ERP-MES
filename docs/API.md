@@ -1660,6 +1660,110 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > flushes into **one** transaction, so a partial duplicate (a header with no nests) cannot survive a
 > failure mid-copy.
 
+> **Work order templates (`/api/v1/work-order-templates`).** A named, searchable catalog of the jobs
+> this shop re-runs. A template is a **name plus a pointer**, never a stored plan: one row carries a
+> name, an optional note, an optional default quantity, and the id of the work order whose plan it
+> stands for. `POST …/{id}/use` hands that work order to the **same copy engine**
+> `POST /work-orders/{id}/duplicate` uses, so everything the section above decides holds here
+> byte-for-byte — the plan is copied, the production record is left behind, and the result lands
+> **DRAFT** with **PENDING** operations. A template adds a name and a lookup; it adds **no
+> authority**: every verb, reads included, is `require_role([ADMIN, MANAGER, SUPERVISOR])` — the
+> duplicate endpoint's own trio — and every refusal the copy engine raises reaches the caller
+> untouched. Full runbook: [docs/WORK_ORDER_TEMPLATES.md](WORK_ORDER_TEMPLATES.md).
+>
+> | Method | Endpoint | Description | Auth Required |
+> |--------|----------|-------------|---------------|
+> | GET | `/work-order-templates` | The catalog, each entry carrying a **live** plan summary. Query `search` — case-insensitive substring on **name and notes**. **Unpaged** (a curated set in the tens, not a feed): the response is `{templates, total}` | Admin / Manager / Supervisor |
+> | GET | `/work-order-templates/{id}` | One template + its live plan summary | Admin / Manager / Supervisor |
+> | POST | `/work-order-templates` | Save a work order's plan under a name. Body `{source_work_order_id, name, notes?, default_quantity?}`; **201**. **The source work order is not modified** | Admin / Manager / Supervisor |
+> | PUT | `/work-order-templates/{id}` | Rename / re-note / re-default. Body `{name?, notes?, default_quantity?}`, `extra="forbid"`. An explicit `null` **clears** `notes` / `default_quantity`; an omitted key leaves it alone (`model_fields_set`) | Admin / Manager / Supervisor |
+> | DELETE | `/work-order-templates/{id}` | Soft delete → **200** `{message, id}`. The name is freed immediately; a second delete is **404** | Admin / Manager / Supervisor |
+> | POST | `/work-order-templates/{id}/use` | Create a new **DRAFT** work order from the template. Body `{quantity_ordered?, due_date?}` — **both optional**, `extra="forbid"`; **201** returning the **`WorkOrderDuplicateResponse` envelope** | Admin / Manager / Supervisor |
+>
+> **`plan` is computed on every read, never stored.** Each template response carries
+> `plan: {available, unavailable_reason, source_work_order_number, source_status, work_order_type,
+> sequential_operations, priority, operation_count, nest_count, planned_runs_total,
+> open_material_tie_count, work_centers[], source_quantity_ordered}`, read live off the source work
+> order — the list builds them **batched**, five queries for the whole page rather than a handful per row.
+> Nothing in it can go stale, which is the point: a *stored* `nest_count` would be wrong the first
+> time somebody soft-deleted a nest on the source, and the planner would pick a template believing it
+> carries 21 nests and get 20. The consequence to state plainly: **editing the source changes what the
+> template produces**, and that is intended — the exemplar *is* the plan. `work_centers` is distinct
+> **in sequence order**, not alphabetical.
+>
+> **A template whose source has been deleted is listed, flagged and refused — never hidden.** It stays
+> in the list with `plan.available = false` and `plan.unavailable_reason = "source_work_order_deleted"`,
+> and `POST …/use` answers **409** naming the two remedies (restore the work order, or delete the
+> template and save a new one). Hiding it is the mask trap invariant 3 documents; auto-deleting it
+> destroys a curated name as a side effect of somebody removing a work order. **Treat
+> `unavailable_reason` as an open set** — render an unrecognized value verbatim rather than dropping
+> the row.
+>
+> **Quantity resolves server-side to the first POSITIVE of:** the request's `quantity_ordered` → the
+> template's `default_quantity` → the source work order's `quantity_ordered`. All three non-positive
+> is **422** naming the template and the source, *not* a fabricated `1` — a quantity of one on a job
+> that should have run fifty is a plan nobody approved. **For a nest-bearing template
+> (`plan.nest_count > 0`) the server overrules all of it** and derives the quantity from the copied
+> nests' `planned_runs`, exactly as the duplicate path does. **Quote the stored quantity off the
+> response, never off the form**; the audit row records `requested_quantity` only when the two differ.
+>
+> **`due_date` always starts blank.** It is never inherited from the source — that date belongs to the
+> run that already happened, and carrying it forward would make the new job overdue the moment it
+> exists, on the dispatch board and in OTD, for a promise nobody made. Like
+> `WorkOrderDuplicateRequest` and unlike `WorkOrderCreate`, it carries **no "not in the past"**
+> validator: a template is most often used to re-run something already late. `must_ship_by` is not
+> carried either.
+>
+> **`POST …/use` returns the SAME envelope as `POST /work-orders/{id}/duplicate`** — `work_order` plus
+> `skipped_operations` / `skipped_material_allocations`, same entry shapes and the same open reason
+> vocabulary (see "Duplicating a work order" above). That is deliberate, not tidiness: the skip lists
+> reach the same result view the Duplicate dialog already renders, so the two paths cannot describe an
+> omission differently. Both lists empty is the "clean copy" signal; a non-empty list is **not** an
+> error, but the draft is missing something the source had — **a skipped material tie means the new
+> job carries no demand for that material, so no shortage is raised, the work runs, and stock is never
+> deducted.**
+>
+> **Refusals — nothing is written in any of these cases:**
+>
+> | Code | When |
+> |------|------|
+> | **404** | The template is not live in the active company (a cross-tenant or soft-deleted id is indistinguishable from one that never existed), or — on `POST` — the `source_work_order_id` is not live in the active company |
+> | **409** | On `POST` / `PUT`, another **live** template in this company already holds the name. Compared **case-insensitively**, deliberately stricter than the byte-wise unique index: two names differing only in case are indistinguishable in a picker. The partial index is the backstop for the concurrent-save race the probe cannot close, and returns the same 409 rather than a 500 |
+> | **409** | On `…/use`, the template's source work order has been **deleted** |
+> | **409** | On `…/use`, every refusal the copy engine raises, untouched — a **retired produced part**, `PROCESS_SHEET_UNAVAILABLE` (structured `code`) for a process-sheet family with no released revision, and an `IntegrityError` on the generated data |
+> | **422** | On `…/use`, no positive quantity is resolvable from the request, the template's default, or the source work order |
+>
+> **The name is freed the moment a template is deleted.** Uniqueness is enforced by a **partial**
+> unique index — `uq_work_order_templates_company_name_live`, `UNIQUE (company_id, name) WHERE NOT
+> is_deleted` (migration `087`, declared for **both** dialects) — so tidying the list does not burn
+> "Miratech nest group" forever. **There is no restore verb, on purpose**: a template stores no plan,
+> so re-creating it is one click on "Save as template" against the same work order.
+>
+> **`source_work_order_id` is not editable.** It is deliberately absent from the update schema:
+> re-pointing a template at a different work order under the same name silently changes what every
+> future click produces, with the only thing anyone reads unchanged. Save a new template and delete
+> the old one — both halves are then on the chain.
+>
+> **The result reaches no dispatch board, and note what that rests on.** The dispatch query
+> (`dispatch_service.queued_operations_query`) filters on **operation** status (`READY` /
+> `IN_PROGRESS`) and on the parent work order being non-terminal and not soft-deleted — it does
+> **not** exclude `DRAFT` work orders, and `DRAFT` is not terminal. A template's output is off
+> `/dispatch` and out of the kiosk queue because **its operations are born `PENDING` and nothing
+> promotes a DRAFT** (see "READY promotion" above; the read-path heal carries an explicit DRAFT
+> carve-out, because Release is the authorization step). Do not restate it as "the board filters
+> drafts out". This is also the difference between this door and **Import Nest Package**, which is
+> **unchanged** and still force-sets `RELEASED` — deliberately, since the planner has just reviewed
+> every extracted row in the wizard. Templates are the draft door.
+>
+> **Audit.** `POST` / `PUT` / `DELETE` write the usual `log_create` / `log_update` / `log_delete` rows
+> against `work_order_template` (the delete records `name_released_for_reuse`). `…/use` writes
+> **two**: the copy engine's own work-order `log_create` naming the source work order, plus a
+> `USE_TEMPLATE` row against the **template** naming the work order it produced, the stored quantity,
+> the operation / nest / tie counts and both skip lists — the only place the fact that a *catalog
+> entry* produced this job exists, and what makes "how often do we run this template" answerable.
+> Every write is wrapped in `atomic_transaction`, so the work order, its operations, nests, ties and
+> every audit row commit together or not at all.
+
 > **Material ties (`/work-orders/{id}/material-allocations`).** The optional tie between a work order
 > (or one of its operations) and a **material** part — what makes stock deplete as work completes.
 > Ties are **opt-in and additive**: a work order with no allocation rows behaves exactly as it did

@@ -27,6 +27,7 @@ import {
   PencilSquareIcon,
   CheckIcon,
   XMarkIcon,
+  BookmarkSquareIcon,
 } from '@heroicons/react/24/outline';
 import { SkeletonTable, SkeletonCard } from '../components/ui/Skeleton';
 import { ConfirmDialog, EmptyState, ErrorState, useToast, DataTable, DataTableColumn, StatusBadge, Button, UnitBadge } from '../components/ui';
@@ -35,6 +36,8 @@ import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
 import DuplicateWorkOrderModal from '../components/workorders/DuplicateWorkOrderModal';
+import SaveAsTemplateModal from '../components/workorders/SaveAsTemplateModal';
+import WorkOrderTemplatesPanel from '../components/workorders/WorkOrderTemplatesPanel';
 
 const priorityConfig: Record<number, { bg: string; text: string; label: string }> = {
   1: { bg: 'bg-red-500/20', text: 'text-red-400', label: 'Critical' },
@@ -229,6 +232,7 @@ function RowActionsCell({
   wo,
   onDelete,
   onDuplicate,
+  onSaveTemplate,
   onRelease,
   isReleasing,
   isDeleting,
@@ -236,6 +240,7 @@ function RowActionsCell({
   wo: WorkOrderSummary;
   onDelete?: (wo: WorkOrderSummary) => void;
   onDuplicate?: (wo: WorkOrderSummary) => void;
+  onSaveTemplate?: (wo: WorkOrderSummary) => void;
   onRelease?: (wo: WorkOrderSummary) => void;
   isReleasing: boolean;
   isDeleting: boolean;
@@ -269,6 +274,16 @@ function RowActionsCell({
           <DocumentDuplicateIcon className="h-4 w-4" aria-hidden="true" />
         </button>
       )}
+      {onSaveTemplate && (
+        <button
+          onClick={() => onSaveTemplate(wo)}
+          className="p-2 rounded-lg text-surface-400 hover:text-werco-600 hover:bg-werco-50 transition-colors"
+          title="Save as template"
+          aria-label={`Save ${wo.work_order_number} as a template`}
+        >
+          <BookmarkSquareIcon className="h-4 w-4" aria-hidden="true" />
+        </button>
+      )}
       {onDelete && (
         <button
           onClick={() => onDelete(wo)}
@@ -295,6 +310,8 @@ interface WorkOrderColumnOptions {
   hideColumn?: 'customer' | 'part';
   onDelete?: (wo: WorkOrderSummary) => void;
   onDuplicate?: (wo: WorkOrderSummary) => void;
+  /** Catalog this row's plan under a name. Same gate as Duplicate. */
+  onSaveTemplate?: (wo: WorkOrderSummary) => void;
   onRelease?: (wo: WorkOrderSummary) => void;
   releasingIds?: Set<number>;
   deletePending?: boolean;
@@ -305,6 +322,7 @@ function buildWorkOrderColumns({
   hideColumn,
   onDelete,
   onDuplicate,
+  onSaveTemplate,
   onRelease,
   releasingIds,
   deletePending,
@@ -405,13 +423,15 @@ function buildWorkOrderColumns({
     {
       key: 'actions',
       header: '',
-      // Fits the widest row: Release (draft only) + Duplicate + Delete + View.
-      className: 'w-36',
+      // Fits the widest row: Release (draft only) + Duplicate + Save as
+      // template + Delete + View.
+      className: 'w-44',
       render: (wo) => (
         <RowActionsCell
           wo={wo}
           onDelete={onDelete}
           onDuplicate={onDuplicate}
+          onSaveTemplate={onSaveTemplate}
           onRelease={onRelease}
           isReleasing={Boolean(releasingIds?.has(wo.id))}
           isDeleting={Boolean(deletePending)}
@@ -475,9 +495,22 @@ export default function WorkOrders() {
     setSearchParams(next);
   };
   const setStatusFilter = (value: string) => setFilterParam('status', value);
+  // Templates is a TAB here, not a route: `/work-orders/templates` is matched by
+  // App.tsx's `/work-orders/:id` route AND by routeMeta's WO-detail pattern, so a
+  // real route there would resolve as a work order whose id is the word
+  // "templates". The tab rides on `?tab=` through the SAME copy-and-set setter
+  // every other filter uses, so switching tabs preserves the status / customer /
+  // COTS / grouping params instead of wiping them.
+  const setActiveTab = (value: 'orders' | 'templates') => setFilterParam('tab', value === 'orders' ? '' : value);
   const setCustomerFilter = (value: string) => setFilterParam('customer', value);
   const setHideCOTS = (hide: boolean) => setFilterParam('cots', hide ? '' : '1');
   const setGroupBy = (value: GroupBy) => setFilterParam('group', value === 'none' ? '' : value);
+
+  // A deep link to ?tab=templates from someone WITHOUT work_orders:edit falls
+  // back to the list: every template verb (reads included) is role-gated to the
+  // trio that permission maps to, so showing the tab would only produce a 403.
+  const activeTab: 'orders' | 'templates' =
+    searchParams.get('tab') === 'templates' && canEditWorkOrders ? 'templates' : 'orders';
 
   const [releasingIds, setReleasingIds] = useState<Set<number>>(new Set());
   const [dueDateEdit, setDueDateEdit] = useState<DueDateEditState | null>(null);
@@ -614,6 +647,16 @@ export default function WorkOrders() {
 
   const handleDuplicate = useCallback((wo: WorkOrderSummary) => {
     setDuplicateTarget(wo);
+  }, []);
+
+  // Save-as-template writes ONE row and points it at this work order — it copies
+  // nothing now and changes nothing on the source, so there is no list state to
+  // update and nowhere to navigate. The token below just re-reads the catalog if
+  // the Templates tab is already mounted.
+  const [saveTemplateTarget, setSaveTemplateTarget] = useState<WorkOrderSummary | null>(null);
+
+  const handleSaveTemplate = useCallback((wo: WorkOrderSummary) => {
+    setSaveTemplateTarget(wo);
   }, []);
 
   const handleConfirmDelete = useCallback(async () => {
@@ -800,6 +843,7 @@ export default function WorkOrders() {
       buildWorkOrderColumns({
         onDelete: canDeleteWorkOrders ? handleDelete : undefined,
         onDuplicate: canDuplicateWorkOrders ? handleDuplicate : undefined,
+        onSaveTemplate: canEditWorkOrders ? handleSaveTemplate : undefined,
         onRelease: handleRelease,
         releasingIds,
         deletePending,
@@ -808,8 +852,10 @@ export default function WorkOrders() {
     [
       canDeleteWorkOrders,
       canDuplicateWorkOrders,
+      canEditWorkOrders,
       handleDelete,
       handleDuplicate,
+      handleSaveTemplate,
       handleRelease,
       releasingIds,
       deletePending,
@@ -889,18 +935,95 @@ export default function WorkOrders() {
     return { overdue, inProgress, dueToday };
   }, [filteredWorkOrders]);
 
+  // The page header and the tab strip are built here, ABOVE the work-order
+  // loading gate below, and rendered by every branch. A deep link to
+  // ?tab=templates used to land on the full-page skeleton — which only the WORK
+  // ORDER fetch ever clears — leaving the tab it asked for unreachable.
+  const pageHeader = (
+    <div className="page-header mb-0">
+      <div className="min-w-0">
+        <h1 className="page-title">Work Orders</h1>
+        <p className="page-subtitle">Manage and track manufacturing orders</p>
+      </div>
+      <div className="page-actions w-full sm:w-auto" data-tour="wo-create">
+        {canImportNests && (
+          <Button
+            variant="secondary"
+            onClick={() => setNestWizardOpen(true)}
+            className="w-full sm:w-auto flex items-center justify-center"
+          >
+            <ArrowUpTrayIcon className="h-5 w-5 mr-2 flex-shrink-0" />
+            Import Nest Package
+          </Button>
+        )}
+        {canEditWorkOrders && (
+          <Button
+            variant="secondary"
+            onClick={() => setActiveTab('templates')}
+            className="w-full sm:w-auto flex items-center justify-center"
+          >
+            <BookmarkSquareIcon className="h-5 w-5 mr-2 flex-shrink-0" aria-hidden="true" />
+            New from template
+          </Button>
+        )}
+        <Link to="/work-orders/new" className="btn-primary w-full sm:w-auto">
+          <PlusIcon className="h-5 w-5 mr-2 flex-shrink-0" />
+          New Work Order
+        </Link>
+      </div>
+    </div>
+  );
+
+  // Hand-rolled rather than the <Tabs> primitive, matching the neighbouring
+  // Inventory / Purchasing / Warehouse pages.
+  const tabStrip = canEditWorkOrders ? (
+    <div className="border-b border-slate-700">
+      <nav className="-mb-px flex space-x-8">
+        {([
+          { id: 'orders' as const, label: 'Work Orders' },
+          { id: 'templates' as const, label: 'Templates' },
+        ]).map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setActiveTab(tab.id)}
+            aria-current={activeTab === tab.id ? 'page' : undefined}
+            className={`py-4 px-1 border-b-2 font-medium text-sm ${
+              activeTab === tab.id
+                ? 'border-werco-primary text-werco-primary'
+                : 'border-transparent text-slate-400 hover:text-slate-300'
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </nav>
+    </div>
+  ) : null;
+
+  // Templates is its own view over its own endpoint, and it returns BEFORE the
+  // work-order loading gate: the catalog must not wait on (or be hidden by) a
+  // fetch it does not use.
+  if (activeTab === 'templates') {
+    return (
+      <div className="space-y-5 sm:space-y-6">
+        {pageHeader}
+        {tabStrip}
+        <WorkOrderTemplatesPanel
+          // A template's output is a DRAFT nobody has reviewed, so the hand-off
+          // is the same as Duplicate's: land on the new work order.
+          onUsed={(result) => navigate(`/work-orders/${result.work_order.id}`)}
+        />
+      </div>
+    );
+  }
+
   if (loading) {
     return (
-      <div className="space-y-6">
-        {/* Header skeleton */}
-        <div className="flex items-center justify-between">
-          <div className="space-y-2">
-            <div className="h-8 w-48 bg-slate-700 rounded animate-pulse" />
-            <div className="h-4 w-72 bg-slate-700 rounded animate-pulse" />
-          </div>
-          <div className="h-10 w-40 bg-slate-700 rounded animate-pulse" />
-        </div>
-        
+      <div className="space-y-5 sm:space-y-6">
+        {pageHeader}
+        {tabStrip}
+
         {/* Stats skeleton */}
         <div className="grid grid-cols-3 gap-4">
           {[1, 2, 3].map((i) => (
@@ -918,29 +1041,8 @@ export default function WorkOrders() {
 
   return (
     <div className="space-y-5 sm:space-y-6">
-      {/* Page Header */}
-      <div className="page-header mb-0">
-        <div className="min-w-0">
-          <h1 className="page-title">Work Orders</h1>
-          <p className="page-subtitle">Manage and track manufacturing orders</p>
-        </div>
-        <div className="page-actions w-full sm:w-auto" data-tour="wo-create">
-          {canImportNests && (
-            <Button
-              variant="secondary"
-              onClick={() => setNestWizardOpen(true)}
-              className="w-full sm:w-auto flex items-center justify-center"
-            >
-              <ArrowUpTrayIcon className="h-5 w-5 mr-2 flex-shrink-0" />
-              Import Nest Package
-            </Button>
-          )}
-          <Link to="/work-orders/new" className="btn-primary w-full sm:w-auto">
-            <PlusIcon className="h-5 w-5 mr-2 flex-shrink-0" />
-            New Work Order
-          </Link>
-        </div>
-      </div>
+      {pageHeader}
+      {tabStrip}
 
       {/* Quick Stats */}
       <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-3 gap-2">
@@ -1083,6 +1185,7 @@ export default function WorkOrders() {
                     hideColumn: groupBy === 'customer' ? 'customer' : groupBy === 'part' ? 'part' : undefined,
                     onDelete: canDeleteWorkOrders ? handleDelete : undefined,
                     onDuplicate: canDuplicateWorkOrders ? handleDuplicate : undefined,
+                    onSaveTemplate: canEditWorkOrders ? handleSaveTemplate : undefined,
                     onRelease: handleRelease,
                     releasingIds,
                     deletePending,
@@ -1099,6 +1202,7 @@ export default function WorkOrders() {
                 workOrders={orders}
                 onDelete={canDeleteWorkOrders ? handleDelete : undefined}
                 onDuplicate={canDuplicateWorkOrders ? handleDuplicate : undefined}
+                onSaveTemplate={canEditWorkOrders ? handleSaveTemplate : undefined}
                 onRelease={handleRelease}
                 releasingIds={releasingIds}
                 deletePending={deletePending}
@@ -1131,6 +1235,7 @@ export default function WorkOrders() {
                 workOrders={filteredWorkOrders}
                 onDelete={canDeleteWorkOrders ? handleDelete : undefined}
                 onDuplicate={canDuplicateWorkOrders ? handleDuplicate : undefined}
+                onSaveTemplate={canEditWorkOrders ? handleSaveTemplate : undefined}
                 onRelease={handleRelease}
                 releasingIds={releasingIds}
                 deletePending={deletePending}
@@ -1167,6 +1272,28 @@ export default function WorkOrders() {
           hasLaserNests={duplicateTarget?.work_order_type === 'laser_cutting' ? undefined : false}
           onClose={() => setDuplicateTarget(null)}
           onDuplicated={(result) => navigate(`/work-orders/${result.work_order.id}`)}
+        />
+      )}
+
+      {/* Save this work order's plan under a name. Writes ONE row and points it
+          at the work order: nothing is copied now, nothing on the source
+          changes, and there is nowhere to navigate — so it stays on this page
+          and only nudges the catalog to re-read. */}
+      {canEditWorkOrders && (
+        <SaveAsTemplateModal
+          open={saveTemplateTarget !== null}
+          workOrder={saveTemplateTarget}
+          // Answered from the row we already hold — nests only ever land on a
+          // laser_cutting work order, and unlike Duplicate this dialog has no
+          // reason to probe: `getWorkOrder` runs the operation-quantity
+          // reconcile and can COMMIT writes against the very work order this
+          // dialog promises not to touch.
+          hasLaserNests={saveTemplateTarget?.work_order_type === 'laser_cutting'}
+          onClose={() => setSaveTemplateTarget(null)}
+          // Nothing to refresh here. This dialog renders only on the ORDERS tab and
+          // the templates panel only on the TEMPLATES tab, so the two are never
+          // co-mounted: switching tabs remounts the panel, which fetches on mount.
+          onSaved={() => setSaveTemplateTarget(null)}
         />
       )}
 
@@ -1247,13 +1374,14 @@ interface WorkOrderMobileListProps {
   workOrders: WorkOrderSummary[];
   onDelete?: (wo: WorkOrderSummary) => void;
   onDuplicate?: (wo: WorkOrderSummary) => void;
+  onSaveTemplate?: (wo: WorkOrderSummary) => void;
   onRelease?: (wo: WorkOrderSummary) => void;
   releasingIds?: Set<number>;
   deletePending?: boolean;
   className?: string;
 }
 
-const WorkOrderMobileList = React.memo(function WorkOrderMobileList({ workOrders, onDelete, onDuplicate, onRelease, releasingIds, deletePending, className = '' }: WorkOrderMobileListProps) {
+const WorkOrderMobileList = React.memo(function WorkOrderMobileList({ workOrders, onDelete, onDuplicate, onSaveTemplate, onRelease, releasingIds, deletePending, className = '' }: WorkOrderMobileListProps) {
   if (workOrders.length === 0) return null;
 
   return (
@@ -1264,6 +1392,7 @@ const WorkOrderMobileList = React.memo(function WorkOrderMobileList({ workOrders
           workOrder={wo}
           onDelete={onDelete}
           onDuplicate={onDuplicate}
+          onSaveTemplate={onSaveTemplate}
           onRelease={onRelease}
           isReleasing={Boolean(releasingIds?.has(wo.id))}
           isDeleting={Boolean(deletePending)}
@@ -1277,17 +1406,19 @@ interface WorkOrderMobileCardProps {
   workOrder: WorkOrderSummary;
   onDelete?: (wo: WorkOrderSummary) => void;
   onDuplicate?: (wo: WorkOrderSummary) => void;
+  onSaveTemplate?: (wo: WorkOrderSummary) => void;
   onRelease?: (wo: WorkOrderSummary) => void;
   isReleasing?: boolean;
   isDeleting?: boolean;
 }
 
-const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder: wo, onDelete, onDuplicate, onRelease, isReleasing, isDeleting }: WorkOrderMobileCardProps) {
+const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder: wo, onDelete, onDuplicate, onSaveTemplate, onRelease, isReleasing, isDeleting }: WorkOrderMobileCardProps) {
   const priority = priorityConfig[wo.priority] || priorityConfig[4];
   const overdue = isWorkOrderOverdue(wo);
   const canRelease = onRelease && wo.status === 'draft';
   const canDelete = Boolean(onDelete);
   const canDuplicate = Boolean(onDuplicate);
+  const canSaveTemplate = Boolean(onSaveTemplate);
   const progress = getWorkOrderProgress(wo);
 
   return (
@@ -1374,6 +1505,17 @@ const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder:
             >
               <DocumentDuplicateIcon className="h-4 w-4 mr-1" aria-hidden="true" />
               Duplicate
+            </Button>
+          )}
+          {canSaveTemplate && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onSaveTemplate?.(wo)}
+              aria-label={`Save ${wo.work_order_number} as a template`}
+            >
+              <BookmarkSquareIcon className="h-4 w-4 mr-1" aria-hidden="true" />
+              Template
             </Button>
           )}
           {canDelete && (

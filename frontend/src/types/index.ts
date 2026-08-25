@@ -502,6 +502,122 @@ export interface WorkOrderDuplicateResult {
   skipped_material_allocations: WorkOrderDuplicateSkippedAllocation[];
 }
 
+/**
+ * What USING a work order template would produce, read LIVE off the source work
+ * order on every request.
+ *
+ * Nothing in here is stored on the template row, and that is deliberate: a
+ * template is a NAME plus a POINTER at a work order, so the only honest summary
+ * is the one computed at read time. A stored `nest_count` goes stale the first
+ * time somebody soft-deletes a nest on the source, and the planner picks a
+ * template believing it carries 21 nests and gets 20.
+ *
+ * When `available` is false the source work order has been soft-deleted and
+ * every other field is null/zero. The template is still LISTED — hiding it tells
+ * the planner nothing, and the only fixes (restore the work order, or delete the
+ * template) start with seeing it — but `POST .../use` refuses it 409.
+ */
+export interface WorkOrderTemplatePlan {
+  available: boolean;
+  /**
+   * Machine-readable cause when `available` is false. Currently only
+   * `source_work_order_deleted`. Treat the set as OPEN: render an unrecognized
+   * token rather than asserting a cause, exactly like the copy skip reasons.
+   */
+  unavailable_reason?: string | null;
+  source_work_order_number?: string | null;
+  /**
+   * The source work order's CURRENT status, lowercase. Informational only — a
+   * template pointing at a COMPLETE job is the headline case, not a problem.
+   */
+  source_status?: string | null;
+  /** `production` | `laser_cutting`. */
+  work_order_type?: string | null;
+  /**
+   * True = a sequenced routing; false = a same-work-center dispatch POOL. Carried
+   * by the copy, and inert on a laser work order (whose pooling comes from its
+   * type instead).
+   */
+  sequential_operations?: boolean | null;
+  priority?: number | null;
+  operation_count: number;
+  /** LIVE laser nests. Non-zero means the new job's quantity is DERIVED, not typed. */
+  nest_count: number;
+  /** Sum of those nests' planned runs — the quantity a nest-bearing copy is given. */
+  planned_runs_total: number;
+  /** OPEN ties only: the exact set the copy carries. Tombstoned ties are not counted. */
+  open_material_tie_count: number;
+  /** Distinct work centers the operations sit on, in sequence order. */
+  work_centers: string[];
+  source_quantity_ordered?: number | null;
+}
+
+/**
+ * One saved work order template: what it is called, what it points at, and what
+ * using it would produce.
+ *
+ * `default_quantity` is a PREFILL, not a promise. At use time the server resolves
+ * the first positive of (request quantity, this default, the source work order's
+ * quantity) and refuses 422 if none is positive — and for a nest-bearing template
+ * it overrules all three with the sum of the copied nests' planned runs. Read the
+ * stored quantity back off the response.
+ */
+export interface WorkOrderTemplate {
+  id: number;
+  name: string;
+  notes?: string | null;
+  source_work_order_id: number;
+  default_quantity?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  created_by?: number | null;
+  plan: WorkOrderTemplatePlan;
+}
+
+/**
+ * `GET /work-order-templates`.
+ *
+ * An ENVELOPE, and unpaged: this is a curated set a planner maintains by hand, in
+ * the tens. Kept as the envelope the server actually sends rather than unwrapped
+ * to a bare array, so a shape change fails at the client boundary instead of
+ * silently rendering an empty catalog.
+ */
+export interface WorkOrderTemplateListResult {
+  templates: WorkOrderTemplate[];
+  total: number;
+}
+
+/** Body for `POST /work-order-templates`. The source work order is NOT modified. */
+export interface WorkOrderTemplateCreatePayload {
+  source_work_order_id: number;
+  name: string;
+  notes?: string | null;
+  default_quantity?: number | null;
+}
+
+/**
+ * Body for `PUT /work-order-templates/{id}` (extra fields are FORBIDDEN server-side).
+ *
+ * `null` is MEANINGFUL for the two nullable fields — it CLEARS them — while an
+ * omitted key leaves the stored value alone. `source_work_order_id` is deliberately
+ * not editable: re-pointing a name at a different job silently changes what every
+ * future click produces.
+ */
+export interface WorkOrderTemplateUpdatePayload {
+  name?: string;
+  notes?: string | null;
+  default_quantity?: number | null;
+}
+
+/**
+ * Body for `POST /work-order-templates/{id}/use`. BOTH fields are optional — that
+ * is what makes the click-once case click-once — and extra fields are forbidden.
+ */
+export interface WorkOrderTemplateUsePayload {
+  quantity_ordered?: number;
+  due_date?: string | null;
+}
+
 export interface LaserNestPackagePreview {
   package_name: string;
   nest_count: number;

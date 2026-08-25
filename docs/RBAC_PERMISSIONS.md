@@ -81,6 +81,9 @@ tier, that tier stands — this rule is a floor, never a loosening.
 | Approve labor (TimeEntry) | ✓ | ✓ | ✓ | | ✓ | | |
 | View material ties | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Tie / edit / untie material | ✓ | ✓ | ✓ | | | | |
+| View work order templates | ✓ | ✓ | ✓ | | | | |
+| Save / rename / delete a work order template | ✓ | ✓ | ✓ | | | | |
+| Use a work order template (creates a DRAFT WO) | ✓ | ✓ | ✓ | | | | |
 
 > **Delete — code now matches the matrix (Admin + Manager).** `DELETE /api/v1/work-orders/{id}`
 > (`app/api/endpoints/work_orders.py`) was previously gated **stricter than this matrix** —
@@ -496,6 +499,35 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > and work-order delete cancel or refuse ties under **their own** existing gates (Admin / Manager /
 > Supervisor for import; Admin / Manager for WO delete). See `docs/API.md` → Work Orders →
 > "Material ties" and [docs/MATERIAL_CONSUMPTION_PLAN.md](MATERIAL_CONSUMPTION_PLAN.md).
+
+> **Work order templates — the same trio as Duplicate, on *every* verb including the reads.**
+> `/api/v1/work-order-templates` (`app/api/endpoints/work_order_templates.py`) gates all six verbs
+> — list, get, create, update, delete, use — with `require_role([ADMIN, MANAGER, SUPERVISOR])`,
+> the same set `POST /work-orders/` and `POST /work-orders/{id}/duplicate` require. **No role gained
+> a capability.** A template is a name plus a pointer at an existing work order; using one calls the
+> duplicate service against that work order, so it can only ever mint a work order the caller could
+> already have minted by hand — with the same refusals and landing in **DRAFT**, off every
+> dispatch board until somebody with **Release** releases it.
+>
+> Note the shape of the **View** row: unlike work-order **View** (every role), reading the catalog is
+> restricted to the same three roles. That is deliberate rather than an oversight to "fix" — the
+> only thing the catalog is for is creating work orders, so a role that cannot create one has nothing
+> to do with the list, and the entries carry a live plan summary of the source job. Widening the read
+> without widening the write would put a picker full of disabled buttons in front of an Operator.
+>
+> The frontend gates every template control (the Templates tab on `/work-orders`, "Save as template"
+> on the list row actions and the detail action bar, and the "New from template" header button) on
+> the existing **`work_orders:edit`** permission, which maps to exactly Admin / Manager / Supervisor
+> — so a hidden control and a refused call agree, per the standing nav/route-gating rule. As
+> everywhere, `require_role` also admits **PLATFORM_ADMIN** and superusers (see
+> [Superuser Override](#superuser-override)); `work_orders:edit` is on the platform-admin permission
+> set too, so the two stay consistent.
+>
+> **Related gap, not fixed here:** this matrix has no **Duplicate** row, so
+> `POST /work-orders/{id}/duplicate` — Admin / Manager / Supervisor in code — is
+> undocumented in the matrix even though the rows above are defined by reference to it. Worth adding
+> when someone next edits this section. See `docs/API.md` → Work Orders → "Work order
+> templates" and [docs/WORK_ORDER_TEMPLATES.md](WORK_ORDER_TEMPLATES.md).
 
 ### Parts
 
@@ -1961,6 +1993,7 @@ def create_work_order(
 
 ```python
 class UserRole(str, enum.Enum):
+    PLATFORM_ADMIN = "platform_admin"  # Werco oversight role — cross-company read access
     ADMIN = "admin"
     MANAGER = "manager"
     SUPERVISOR = "supervisor"

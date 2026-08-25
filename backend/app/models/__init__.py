@@ -167,6 +167,7 @@ from .work_order_blocker import (
     WorkOrderBlockerStatus,
 )
 from .work_order_material import AllocationSource, AllocationStatus, WorkOrderMaterialAllocation
+from .work_order_template import WorkOrderTemplate
 
 __all__ = [
     "Company",
@@ -209,6 +210,7 @@ __all__ = [
     "WorkOrderBlockerSeverity",
     "WorkOrderBlockerStatus",
     "WorkOrderMaterialAllocation",
+    "WorkOrderTemplate",
     "AllocationSource",
     "AllocationStatus",
     "TimeEntry",
