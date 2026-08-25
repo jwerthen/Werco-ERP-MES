@@ -497,9 +497,7 @@ def test_every_index_matches_the_model_exactly():
     the two environments stop being the same schema.
     """
     module = _load_module()
-    migration = {
-        name: (tuple(columns), bool(unique), predicate) for name, columns, unique, predicate in module.INDEXES
-    }
+    migration = {name: (tuple(columns), bool(unique), predicate) for name, columns, unique, predicate in module.INDEXES}
     assert set(migration) == EXPECTED_INDEXES
     assert len(module.INDEXES) == len(EXPECTED_INDEXES), "duplicate entry in the migration's INDEXES list"
     assert migration == _model_indexes()
@@ -788,7 +786,6 @@ def _index_sql(db_url: str, index_name: str) -> str:
 def _bootstrap(db_url: str) -> None:
     """create_all -> stamp, exactly as production bootstraps an empty database."""
     import app.models  # noqa: F401  (registers every table on Base.metadata)
-
     from app.db.database import Base
 
     engine = _fresh_engine(db_url)
