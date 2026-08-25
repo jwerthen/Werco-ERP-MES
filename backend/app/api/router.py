@@ -64,6 +64,7 @@ from app.api.endpoints import (
     work_centers,
     work_order_blockers,
     work_order_materials,
+    work_order_templates,
     work_orders,
 )
 
@@ -92,6 +93,10 @@ api_router.include_router(work_orders.router, prefix="/work-orders", tags=["Work
 api_router.include_router(work_order_materials.router, prefix="/work-orders", tags=["Work Order Materials"])
 api_router.include_router(laser_nests.router, prefix="/laser-nests", tags=["Laser Nests"])
 api_router.include_router(work_order_blockers.router, prefix="/work-order-blockers", tags=["Work Order Blockers"])
+# A named catalog of jobs the shop re-runs. Its own prefix rather than a sibling under
+# /work-orders because a template is not a work order: nothing on the shop floor reads
+# this table, and "use template" only ever asks the duplicate service for a new DRAFT.
+api_router.include_router(work_order_templates.router, prefix="/work-order-templates", tags=["Work Order Templates"])
 api_router.include_router(shop_floor.router, prefix="/shop-floor", tags=["Shop Floor"])
 api_router.include_router(purchasing.router, prefix="/purchasing", tags=["Purchasing"])
 api_router.include_router(scheduling.router, prefix="/scheduling", tags=["Scheduling"])

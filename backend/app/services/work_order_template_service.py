@@ -1,0 +1,758 @@
+"""Named work-order templates — save a job's plan under a name, run it again in one click.
+
+THE WHOLE FEATURE IN ONE SENTENCE
+---------------------------------
+A template is a NAME plus a POINTER at the work order whose plan it stands for, and
+"use template" hands that work order to
+``work_order_duplicate_service.duplicate_work_order`` — the same copy engine ``POST
+/work-orders/{id}/duplicate`` uses, landing a new ``DRAFT`` with ``PENDING``
+operations.
+
+THE RULE THIS MODULE EXISTS TO KEEP
+-----------------------------------
+**A template must never mint a work order the duplicate path would not have.** It
+adds a name and a lookup; it adds no authority. Concretely, and each of these is a
+property a test pins rather than a convention:
+
+* The role gate is the duplicate endpoint's own trio (ADMIN / MANAGER / SUPERVISOR),
+  enforced in the router.
+* Every refusal ``duplicate_work_order`` raises propagates untouched — the retired
+  produced part (409) and ``ProcessSheetUnavailableError``
+  (409 ``PROCESS_SHEET_UNAVAILABLE``). This module catches neither.
+* The skip envelope propagates untouched. ``DuplicateResult.skipped_operations`` /
+  ``.skipped_allocations`` are safety information, not telemetry: a skipped material
+  tie means the new job carries NO demand for that material, so no shortage is
+  raised, the work runs, and stock is never deducted. The use endpoint returns the
+  SAME ``WorkOrderDuplicateResponse`` envelope, so the planner sees the omission on
+  the same result view the Duplicate dialog shows.
+* The result lands ``DRAFT``. ``_copy_header`` hard-codes it, and
+  :func:`_assert_landed_as_draft` re-checks it before the caller commits — see that
+  function for why a redundant check earns its keep here.
+
+WHY NOTHING ABOUT THE PLAN IS STORED
+------------------------------------
+A frozen plan would need ``work_order_template_operations`` / ``_nests`` /
+``_allocations`` and a second copy service to walk them, re-deciding everything the
+existing one already decides: what scales with quantity, how a nest tie's
+``qty_planned`` is derived, which omissions skip and which refuse the whole call.
+Two implementations of those rules is how the office and floor sequencing gates
+drifted apart, and this system has paid that bill once already.
+
+So the plan is read LIVE off the source work order every time — including for the
+list, which returns a per-template :class:`TemplatePlanSummary` (operation count,
+nest count, open ties, work centers, type, pooled-vs-sequenced) so the planner sees
+what they are about to get. There is no stored summary that can go stale, because
+there is no stored summary.
+
+WHAT AN UNAVAILABLE SOURCE DOES
+-------------------------------
+The source work order is soft-deletable. ``tenant_query`` scopes ``company_id`` and
+NOTHING else (invariant 3), so every read of it here carries its own explicit
+``is_deleted == False``.
+
+A template whose source is gone is **listed, flagged and refused** — not hidden and
+not auto-deleted. Hiding it is the mask trap invariant 3 documents: the planner's
+template silently vanishes and nothing says why. Deleting it destroys a curated name
+as a side effect of somebody removing a work order. Flagging it is the only option
+that lets the planner see the cause and act on it (restore the work order, or delete
+the template deliberately).
+
+TENANCY, AUDIT, ATOMICITY
+-------------------------
+Every read is company-scoped through ``tenant_query`` (invariant 1). Every write goes
+through ``AuditService`` (invariant 2) — including USE, which writes a row against
+the template naming the work order it produced, so "which template made this job" and
+"how often is this template run" are both answerable from the chain. Nothing here
+commits; the router wraps each write in ``atomic_transaction``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date
+from typing import Optional
+
+from fastapi import HTTPException
+from sqlalchemy import func
+from sqlalchemy.orm import Query, Session
+
+from app.db.tenant_filter import tenant_query
+from app.models.laser_nest import LaserNest
+from app.models.work_center import WorkCenter
+from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus, WorkOrderType
+from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
+from app.models.work_order_template import WorkOrderTemplate
+from app.services.audit_service import AuditService
+from app.services.work_order_duplicate_service import DuplicateResult, duplicate_work_order
+
+# Machine-readable reason a template cannot be used right now. Returned on the
+# summary so the list can disable the button WITH the cause, and echoed in the 409
+# detail so the two cannot disagree.
+UNAVAILABLE_SOURCE_DELETED = "source_work_order_deleted"
+
+
+@dataclass
+class TemplatePlanSummary:
+    """What using this template would produce, read LIVE off the source work order.
+
+    Nothing here is stored. That is the point: a template is a pointer, so the only
+    honest summary is the one computed at read time. A stored ``nest_count`` would go
+    stale the first time somebody soft-deleted a nest on the source, and the planner
+    would pick a template believing it carries 21 nests and get 20.
+
+    ``available`` is False when the source work order is soft-deleted or gone. The
+    template is still listed — see the module docstring on why hiding it would be
+    worse — with ``unavailable_reason`` naming the cause.
+    """
+
+    available: bool = True
+    unavailable_reason: Optional[str] = None
+
+    source_work_order_number: Optional[str] = None
+    source_status: Optional[str] = None
+    work_order_type: Optional[str] = None
+    # False = a dispatch POOL (press-brake / weld-sub batches promote together);
+    # True = a sequenced routing. Carried by the duplicate, so it is part of what the
+    # planner is picking. Inert on a laser work order, whose pooling comes from
+    # ``is_laser_dispatch_work_order`` instead — surfaced anyway rather than hidden,
+    # because the column is what the copy will carry.
+    sequential_operations: Optional[bool] = None
+    priority: Optional[int] = None
+
+    operation_count: int = 0
+    # Live nests only. A nest-BEARING template is the laser case: its quantity is
+    # derived from the sum of these nests' planned runs, not typed.
+    nest_count: int = 0
+    planned_runs_total: int = 0
+    # OPEN ties only — cancelled/closed rows are tombstones the duplicate does not
+    # copy, so counting them would promise material the copy will not carry.
+    open_material_tie_count: int = 0
+    # Distinct work centers the operations sit on, in sequence order. This is what
+    # makes "the press-brake set" recognisable in a list of names.
+    work_centers: list[str] = field(default_factory=list)
+    source_quantity_ordered: Optional[float] = None
+
+    @property
+    def nest_bearing(self) -> bool:
+        """True when the produced work order's quantity will be DERIVED, not typed."""
+        return self.nest_count > 0
+
+
+@dataclass
+class TemplateUseResult:
+    """One use of a template: the duplicate's own result, plus which template ran it."""
+
+    template: WorkOrderTemplate
+    duplicate: DuplicateResult
+
+
+# --------------------------------------------------------------------------- #
+# Reads
+# --------------------------------------------------------------------------- #
+
+
+def live_templates_query(db: Session, company_id: int) -> Query:
+    """Every LIVE template in this company. The one place the tombstone filter lives.
+
+    ``tenant_query`` scopes ``company_id`` and nothing else (invariant 3), so the
+    ``is_deleted == False`` predicate is written here explicitly and every read goes
+    through this function rather than re-deriving it. The deliberate NON-users are
+    named rather than left to be discovered:
+
+    * :func:`create_template`'s duplicate-name probe reads LIVE rows only — which is
+      correct here and is NOT the usual "a duplicate probe must see tombstones"
+      exception, because the unique index is PARTIAL
+      (``uq_work_order_templates_company_name_live``, ``WHERE NOT is_deleted``). A
+      deleted template does not own its name, so probing tombstones would refuse a
+      name the database would happily accept.
+    * :func:`delete_template` resolves through :func:`_live_template_or_404`, so a
+      second delete answers 404 rather than re-deleting. There is no restore verb to
+      need the other direction — see the model docstring.
+    """
+    return tenant_query(db, WorkOrderTemplate, company_id).filter(WorkOrderTemplate.is_deleted == False)  # noqa: E712
+
+
+def _live_template_or_404(db: Session, template_id: int, company_id: int) -> WorkOrderTemplate:
+    """Resolve one live template, or 404.
+
+    404 and never 403: a template in another company must be indistinguishable from
+    one that does not exist, or the response leaks that it does (invariant 1).
+    """
+    template = live_templates_query(db, company_id).filter(WorkOrderTemplate.id == template_id).first()
+    if template is None:
+        raise HTTPException(status_code=404, detail="Work order template not found")
+    return template
+
+
+def resolve_source_work_order(db: Session, work_order_id: int, company_id: int) -> Optional[WorkOrder]:
+    """The live source work order behind a template, or ``None``.
+
+    Its own ``is_deleted == False`` — ``tenant_query`` does not filter tombstones and
+    an ``is_active``-style flag is a mask, not a filter (invariant 3). Returning
+    ``None`` rather than raising is deliberate: the LIST path turns it into an
+    ``unavailable`` flag on the summary, while the USE path turns it into a 409. One
+    resolver, two answers, so the list and the write can never disagree about which
+    templates are usable.
+    """
+    return (
+        tenant_query(db, WorkOrder, company_id)
+        .filter(
+            WorkOrder.id == work_order_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
+
+
+def plan_summaries_for(
+    db: Session,
+    templates: list[WorkOrderTemplate],
+    company_id: int,
+) -> dict[int, TemplatePlanSummary]:
+    """Live plan summaries for a whole page of templates, in a bounded number of queries.
+
+    Batched rather than per-row on purpose: the catalog is a list screen, and a
+    per-template summary built with four queries each is the PERF-4 N+1 shape this
+    repo has fixed elsewhere. Six queries total regardless of page size — sources,
+    operations+work-centers, nests, ties — and every one of them tenant-scoped.
+
+    Templates whose source is missing or soft-deleted get an ``available=False``
+    summary carrying only the reason. They are NOT dropped: see the module docstring.
+    """
+    summaries: dict[int, TemplatePlanSummary] = {}
+    if not templates:
+        return summaries
+
+    source_ids = {template.source_work_order_id for template in templates}
+
+    sources = {
+        work_order.id: work_order
+        for work_order in tenant_query(db, WorkOrder, company_id)
+        .filter(
+            WorkOrder.id.in_(source_ids),
+            WorkOrder.is_deleted == False,  # noqa: E712
+        )
+        .all()
+    }
+    live_source_ids = set(sources)
+
+    operation_rows = []
+    nest_rows = []
+    tie_rows = []
+    if live_source_ids:
+        # Operations + their work centers, in sequence order, so ``work_centers``
+        # reads the way the traveler does rather than alphabetically.
+        operation_rows = (
+            db.query(
+                WorkOrderOperation.work_order_id,
+                WorkOrderOperation.id,
+                WorkOrderOperation.sequence,
+                WorkCenter.name,
+            )
+            .outerjoin(WorkCenter, WorkOrderOperation.work_center_id == WorkCenter.id)
+            .filter(
+                WorkOrderOperation.company_id == company_id,
+                WorkOrderOperation.work_order_id.in_(live_source_ids),
+            )
+            .order_by(WorkOrderOperation.work_order_id, WorkOrderOperation.sequence, WorkOrderOperation.id)
+            .all()
+        )
+
+        # Live nests only, reached through their operation — the same join
+        # ``_copy_laser_nests`` uses, which scopes to the work order, drops
+        # soft-deleted nests (invariant 3) and drops nests with a NULL operation.
+        # Counting differently from the copy would promise a nest count the copy
+        # does not produce.
+        nest_rows = (
+            db.query(
+                WorkOrderOperation.work_order_id,
+                func.count(LaserNest.id),
+                func.coalesce(func.sum(LaserNest.planned_runs), 0),
+            )
+            .join(WorkOrderOperation, LaserNest.work_order_operation_id == WorkOrderOperation.id)
+            .filter(
+                LaserNest.company_id == company_id,
+                LaserNest.is_deleted == False,  # noqa: E712
+                WorkOrderOperation.company_id == company_id,
+                WorkOrderOperation.work_order_id.in_(live_source_ids),
+            )
+            .group_by(WorkOrderOperation.work_order_id)
+            .all()
+        )
+
+        # OPEN ties only — the exact set ``_copy_material_allocations`` copies.
+        tie_rows = (
+            db.query(
+                WorkOrderMaterialAllocation.work_order_id,
+                func.count(WorkOrderMaterialAllocation.id),
+            )
+            .filter(
+                WorkOrderMaterialAllocation.company_id == company_id,
+                WorkOrderMaterialAllocation.work_order_id.in_(live_source_ids),
+                WorkOrderMaterialAllocation.status == AllocationStatus.OPEN,
+            )
+            .group_by(WorkOrderMaterialAllocation.work_order_id)
+            .all()
+        )
+
+    operation_counts: dict[int, int] = {}
+    work_centers: dict[int, list[str]] = {}
+    for work_order_id, _operation_id, _sequence, work_center_name in operation_rows:
+        operation_counts[work_order_id] = operation_counts.get(work_order_id, 0) + 1
+        if work_center_name:
+            names = work_centers.setdefault(work_order_id, [])
+            # Distinct, but in first-appearance (sequence) order — a set would
+            # scramble the route into an arbitrary order on every read.
+            if work_center_name not in names:
+                names.append(work_center_name)
+
+    nest_counts = {row[0]: (int(row[1] or 0), int(row[2] or 0)) for row in nest_rows}
+    tie_counts = {row[0]: int(row[1] or 0) for row in tie_rows}
+
+    for template in templates:
+        source = sources.get(template.source_work_order_id)
+        if source is None:
+            summaries[template.id] = TemplatePlanSummary(
+                available=False,
+                unavailable_reason=UNAVAILABLE_SOURCE_DELETED,
+            )
+            continue
+
+        nest_count, planned_runs_total = nest_counts.get(source.id, (0, 0))
+        status_value = source.status.value if hasattr(source.status, "value") else source.status
+        type_value = (
+            source.work_order_type.value if hasattr(source.work_order_type, "value") else source.work_order_type
+        )
+        summaries[template.id] = TemplatePlanSummary(
+            available=True,
+            source_work_order_number=source.work_order_number,
+            source_status=status_value,
+            work_order_type=type_value,
+            sequential_operations=bool(source.sequential_operations),
+            priority=source.priority,
+            operation_count=operation_counts.get(source.id, 0),
+            nest_count=nest_count,
+            planned_runs_total=planned_runs_total,
+            open_material_tie_count=tie_counts.get(source.id, 0),
+            work_centers=work_centers.get(source.id, []),
+            source_quantity_ordered=float(source.quantity_ordered or 0.0),
+        )
+
+    return summaries
+
+
+# --------------------------------------------------------------------------- #
+# Writes
+# --------------------------------------------------------------------------- #
+
+
+def _normalized_name(name: str) -> str:
+    """The stored form of a template name: trimmed, inner whitespace collapsed.
+
+    Normalises SPELLING, never MEANING — the same rule
+    ``laser_nest_text.normalize_*`` follows. Case is preserved (the planner's
+    capitalisation is theirs), and nothing is stripped or escaped: this system does
+    no ingest-time sanitisation, and the name is never rendered as raw HTML.
+
+    Collapsing matters because the uniqueness rule is a database index over the
+    stored bytes: without it ``"Miratech  nest"`` and ``"Miratech nest"`` are two
+    templates that look identical in a list.
+    """
+    return " ".join((name or "").split())
+
+
+def _assert_name_available(
+    db: Session,
+    *,
+    name: str,
+    company_id: int,
+    exclude_template_id: Optional[int] = None,
+) -> None:
+    """Refuse (409) a name another LIVE template in this company already holds.
+
+    Case-insensitive, which is DELIBERATELY STRICTER than the database index
+    (``uq_work_order_templates_company_name_live`` is over the stored bytes, so
+    Postgres and SQLite would both accept "Miratech Nest" beside "Miratech nest").
+    Two templates whose names differ only in case are indistinguishable in a picker,
+    and the picker is the entire feature. The index stays as the backstop against a
+    race this probe cannot close; this is the message a planner can act on.
+
+    Probes LIVE rows only — see :func:`live_templates_query` on why that is right
+    here rather than the usual tombstone-matching duplicate probe.
+    """
+    probe = live_templates_query(db, company_id).filter(func.lower(WorkOrderTemplate.name) == (name or "").lower())
+    if exclude_template_id is not None:
+        probe = probe.filter(WorkOrderTemplate.id != exclude_template_id)
+    existing = probe.first()
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"A work order template named '{existing.name}' already exists. "
+                "Pick a different name, or rename the existing template."
+            ),
+        )
+
+
+def create_template(
+    db: Session,
+    *,
+    source: WorkOrder,
+    name: str,
+    notes: Optional[str],
+    default_quantity: Optional[float],
+    company_id: int,
+    user_id: int,
+    audit: AuditService,
+) -> WorkOrderTemplate:
+    """Save ``source``'s plan under a name. Writes ONE row and touches nothing else.
+
+    ``source`` must already be resolved company-scoped and non-deleted by the caller.
+
+    **The source work order is not modified.** Not its status, not its quantities, not
+    its ties, not its dispatch position — this function adds a row that points AT it.
+    That is worth stating because "save as template" reads like an action on the work
+    order, and the acceptance criterion for this feature is that the exemplar comes
+    through untouched.
+
+    There is deliberately no validity gate here beyond the name. A template may name a
+    work order whose part is currently retired or whose process-sheet family has no
+    released revision — both of which ``duplicate_work_order`` refuses at USE time,
+    which is the right moment: refusing to SAVE would block cataloguing a job that
+    will be perfectly fine next month, and the refusal would name a condition the
+    planner cannot see from the save dialog.
+
+    Flushes but never commits. Wrap the call in ``atomic_transaction(db)``.
+    """
+    stored_name = _normalized_name(name)
+    _assert_name_available(db, name=stored_name, company_id=company_id)
+
+    template = WorkOrderTemplate(
+        company_id=company_id,
+        name=stored_name,
+        notes=notes,
+        source_work_order_id=source.id,
+        default_quantity=float(default_quantity) if default_quantity is not None else None,
+        created_by=user_id,
+    )
+    db.add(template)
+    db.flush()
+
+    audit.log_create(
+        resource_type="work_order_template",
+        resource_id=template.id,
+        resource_identifier=template.name,
+        new_values=template,
+        description=(f"Saved work order {source.work_order_number} as template '{template.name}'"),
+        extra_data={
+            "source": "work_order_template_save",
+            "source_work_order_id": source.id,
+            "source_work_order_number": source.work_order_number,
+            "default_quantity": template.default_quantity,
+        },
+    )
+    return template
+
+
+def update_template(
+    db: Session,
+    *,
+    template: WorkOrderTemplate,
+    name: Optional[str],
+    notes: Optional[str],
+    default_quantity: Optional[float],
+    notes_provided: bool,
+    default_quantity_provided: bool,
+    company_id: int,
+    audit: AuditService,
+) -> WorkOrderTemplate:
+    """Rename a template / edit its note or default quantity.
+
+    The two ``*_provided`` flags exist because ``None`` is a MEANINGFUL value for both
+    nullable fields — "clear the note", "no default quantity" — and a partial update
+    that could not express clearing would leave a planner unable to undo a typo. The
+    router derives them from ``model_fields_set`` so an omitted key and an explicit
+    ``null`` stay distinguishable.
+
+    Deliberately NOT editable: ``source_work_order_id``. Re-pointing a template at a
+    different work order under the same name silently changes what every future click
+    produces, with the name — the only thing anyone reads — unchanged. Save a new
+    template and delete the old one; both halves are then on the chain.
+
+    Flushes but never commits.
+    """
+    old_values = {
+        "name": template.name,
+        "notes": template.notes,
+        "default_quantity": template.default_quantity,
+    }
+
+    if name is not None:
+        stored_name = _normalized_name(name)
+        _assert_name_available(db, name=stored_name, company_id=company_id, exclude_template_id=template.id)
+        template.name = stored_name
+    if notes_provided:
+        template.notes = notes
+    if default_quantity_provided:
+        template.default_quantity = float(default_quantity) if default_quantity is not None else None
+
+    db.flush()
+
+    audit.log_update(
+        resource_type="work_order_template",
+        resource_id=template.id,
+        resource_identifier=template.name,
+        old_values=old_values,
+        new_values={
+            "name": template.name,
+            "notes": template.notes,
+            "default_quantity": template.default_quantity,
+        },
+        description=f"Updated work order template '{template.name}'",
+        extra_data={"source_work_order_id": template.source_work_order_id},
+    )
+    return template
+
+
+def delete_template(
+    db: Session,
+    *,
+    template: WorkOrderTemplate,
+    user_id: int,
+    audit: AuditService,
+) -> WorkOrderTemplate:
+    """Soft-delete a template (invariant 3). Nothing it ever produced is affected.
+
+    The work orders this template created are ordinary work orders and are not
+    touched, and neither is the source work order it pointed at. What disappears is a
+    name in a picker.
+
+    No reason is required, unlike the destructive verbs elsewhere in this system
+    (receipt void, NCR void, vendor delete, part renumber). Those all unwind or
+    re-identify a PRODUCTION record; this removes a shortcut. Demanding a written
+    justification for tidying a list would train people to type "x" — which is worse
+    for the chain than not asking, because it makes every other required reason in the
+    system look like a formality.
+
+    Flushes but never commits.
+    """
+    template.soft_delete(user_id)
+    db.flush()
+
+    audit.log_delete(
+        resource_type="work_order_template",
+        resource_id=template.id,
+        resource_identifier=template.name,
+        old_values=template,
+        description=f"Deleted work order template '{template.name}'",
+        extra_data={
+            "source_work_order_id": template.source_work_order_id,
+            # The name is freed for reuse the moment this commits -- the unique index
+            # is partial (WHERE NOT is_deleted). Recorded so a chain reader can tell a
+            # later template of the same name from this one.
+            "name_released_for_reuse": True,
+        },
+        soft_delete=True,
+    )
+    return template
+
+
+def _assert_landed_as_draft(work_order: WorkOrder, template: WorkOrderTemplate) -> None:
+    """Refuse to hand back anything that is not a DRAFT. Rolls the whole use back.
+
+    This is a redundant check today — ``_copy_header`` hard-codes
+    ``status=WorkOrderStatus.DRAFT`` and nothing between here and there changes it —
+    and it is kept anyway, which is a deliberate exception to "don't write dead code".
+
+    The reason is the failure mode. The ENTIRE point of routing templates through the
+    duplicate path rather than through the nest importer is that the importer
+    force-sets ``RELEASED`` and puts a job on the dispatch board before anyone has
+    reviewed it. If a future change to ``_copy_header`` — or a new keyword argument
+    threaded through it — ever made the copy land RELEASED, a template would silently
+    become the third release-forcing door in this system, and it would look identical
+    to the planner right up to the moment unreviewed work appeared on the floor. That
+    is not a defect a test on some other file would catch at the right time, and it is
+    not one the chain would explain after the fact.
+
+    So the guarantee is asserted where it is relied upon, and it fails LOUDLY: the
+    caller's ``atomic_transaction`` rolls back, so a work order that broke the promise
+    does not survive the request that made it.
+    """
+    status = work_order.status
+    if status is WorkOrderStatus.DRAFT or status == WorkOrderStatus.DRAFT.value:
+        return
+    actual = status.value if hasattr(status, "value") else status
+    raise RuntimeError(
+        f"Work order template '{template.name}' produced work order "
+        f"{work_order.work_order_number} with status {actual!r}, not DRAFT. A template must never "
+        "put work on the dispatch board without a planner releasing it; refusing rather than "
+        "committing an unreviewed released job."
+    )
+
+
+def use_template(
+    db: Session,
+    *,
+    template: WorkOrderTemplate,
+    quantity_ordered: Optional[float],
+    due_date: Optional[date],
+    company_id: int,
+    user_id: int,
+    audit: AuditService,
+) -> TemplateUseResult:
+    """Create a new DRAFT work order from ``template``. The copy engine does the work.
+
+    ``quantity_ordered`` is OPTIONAL, which is what makes the click-once case
+    click-once. Resolution order — first positive value wins:
+
+    1. the caller's value, when they supplied one;
+    2. ``template.default_quantity``, the number the planner saved with the template;
+    3. the source work order's own ``quantity_ordered``.
+
+    If all three are non-positive the call is refused 422 rather than defaulted to 1:
+    a fabricated quantity of one on a job that should have run fifty is a plan the
+    planner never approved, and a legacy source with a zero quantity is the only way
+    to get here.
+
+    For a NEST-BEARING template none of this matters and that is not a bug: a laser
+    work order's ``quantity_ordered`` is DEFINED as the sum of its nests' planned runs
+    (``laser_nest_service._recompute_child_quantity_ordered``), the duplicate service
+    derives it, and the resolved value above is overruled. It is still resolved and
+    still sent, because the underlying call requires a positive number — and the
+    response reports what was actually STORED, so no planner is shown a quantity the
+    server did not keep.
+
+    ``due_date`` is never inherited. The source's due date belongs to the run that
+    already happened; carrying it forward would make the new job overdue the moment it
+    exists — red on the dispatch board and counted against OTD — for a promise nobody
+    made. ``None`` means unscheduled, which reads as "not promised yet" everywhere,
+    where a stale date reads as "late". (``must_ship_by`` is not carried either; that
+    refusal lives in the duplicate service.)
+
+    Raises 409 when the source work order is gone, and propagates every refusal
+    ``duplicate_work_order`` raises untouched. Flushes but never commits — wrap the
+    call in ``atomic_transaction(db)``.
+    """
+    source = resolve_source_work_order(db, template.source_work_order_id, company_id)
+    if source is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Template '{template.name}' cannot be used: the work order it was saved from has been "
+                "deleted. Restore that work order, or delete this template and save a new one from a "
+                "current job."
+            ),
+        )
+
+    effective_quantity = _resolve_quantity(template, source, quantity_ordered)
+
+    result = duplicate_work_order(
+        db,
+        source=source,
+        quantity_ordered=effective_quantity,
+        due_date=due_date,
+        company_id=company_id,
+        user_id=user_id,
+        audit=audit,
+    )
+
+    # The promise this whole feature rests on, checked where it is relied upon.
+    _assert_landed_as_draft(result.work_order, template)
+
+    # A second row, against the TEMPLATE rather than the work order. The duplicate
+    # service already wrote the work order's own CREATE row naming its source work
+    # order; this one names the TEMPLATE, which is the only place the fact that a
+    # catalog entry (rather than a planner browsing the list) produced this job
+    # exists. It is also what makes "how often do we run this template" answerable
+    # from the chain instead of from nothing.
+    audit.log(
+        action="USE_TEMPLATE",
+        resource_type="work_order_template",
+        resource_id=template.id,
+        resource_identifier=template.name,
+        description=(
+            f"Created work order {result.work_order.work_order_number} as a draft from template " f"'{template.name}'"
+        ),
+        extra_data={
+            "source": "work_order_template_use",
+            "template_id": template.id,
+            "template_name": template.name,
+            "source_work_order_id": source.id,
+            "source_work_order_number": source.work_order_number,
+            "created_work_order_id": result.work_order.id,
+            "created_work_order_number": result.work_order.work_order_number,
+            "created_work_order_status": WorkOrderStatus.DRAFT.value,
+            "quantity": float(result.work_order.quantity_ordered),
+            # Recorded only when the two differ, i.e. a nest-bearing template whose
+            # quantity was derived from its runs rather than taken from the request.
+            # Same key and same condition the duplicate service uses.
+            **(
+                {"requested_quantity": effective_quantity}
+                if float(result.work_order.quantity_ordered) != effective_quantity
+                else {}
+            ),
+            "operation_count": result.operation_count,
+            "laser_nest_count": result.nest_count,
+            "material_allocation_count": result.allocation_count,
+            # The same omissions the response envelope carries, on the chain too --
+            # ``model_dump()`` of the very objects the endpoint returns, so the two
+            # can never describe a skip differently.
+            "skipped_material_allocations": [entry.model_dump() for entry in result.skipped_allocations],
+            "skipped_operations": [entry.model_dump() for entry in result.skipped_operations],
+        },
+    )
+
+    return TemplateUseResult(template=template, duplicate=result)
+
+
+def _resolve_quantity(
+    template: WorkOrderTemplate,
+    source: WorkOrder,
+    requested: Optional[float],
+) -> float:
+    """The quantity the duplicate is asked for. See :func:`use_template` for the order.
+
+    Each candidate must be POSITIVE to win, not merely present: ``quantity_ordered``
+    has a ``> 0`` CHECK on new rows, so a zero or negative candidate would only fail
+    deeper in with a message about a constraint rather than about the template.
+    """
+    for candidate in (requested, template.default_quantity, source.quantity_ordered):
+        if candidate is None:
+            continue
+        value = float(candidate)
+        if value > 0:
+            return value
+
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            f"Template '{template.name}' has no quantity to run: it carries no default quantity and "
+            f"work order {source.work_order_number} has none either. Enter a quantity for this run."
+        ),
+    )
+
+
+def summary_for_one(db: Session, template: WorkOrderTemplate, company_id: int) -> TemplatePlanSummary:
+    """The single-template convenience over :func:`plan_summaries_for`.
+
+    Routed through the batched implementation rather than given its own queries, so a
+    detail page and a list row can never report a template differently.
+    """
+    return plan_summaries_for(db, [template], company_id).get(template.id, TemplatePlanSummary())
+
+
+__all__ = [
+    "UNAVAILABLE_SOURCE_DELETED",
+    "TemplatePlanSummary",
+    "TemplateUseResult",
+    "WorkOrderType",
+    "create_template",
+    "delete_template",
+    "live_templates_query",
+    "plan_summaries_for",
+    "resolve_source_work_order",
+    "summary_for_one",
+    "update_template",
+    "use_template",
+    "_live_template_or_404",
+]
