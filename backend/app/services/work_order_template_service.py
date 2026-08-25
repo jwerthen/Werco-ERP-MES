@@ -79,7 +79,7 @@ from sqlalchemy.orm import Query, Session
 from app.db.tenant_filter import tenant_query
 from app.models.laser_nest import LaserNest
 from app.models.work_center import WorkCenter
-from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus, WorkOrderType
+from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
 from app.models.work_order_template import WorkOrderTemplate
 from app.services.audit_service import AuditService
@@ -745,7 +745,6 @@ __all__ = [
     "UNAVAILABLE_SOURCE_DELETED",
     "TemplatePlanSummary",
     "TemplateUseResult",
-    "WorkOrderType",
     "create_template",
     "delete_template",
     "live_templates_query",
