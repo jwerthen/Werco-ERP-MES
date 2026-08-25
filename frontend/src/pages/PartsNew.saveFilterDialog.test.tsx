@@ -14,6 +14,17 @@ import api from '../services/api';
 import PartsNew from './PartsNew';
 import { ToastProvider } from '../components/ui';
 
+// PartsNew reads the signed-in role to decide whether to offer "New Part"
+// (POST /parts is admin/manager/supervisor). This suite is about the saved-filter
+// dialog, so it just needs a role that renders the page normally.
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({
+    user: { id: 1, role: 'admin', is_superuser: false },
+    isAuthenticated: true,
+    isLoading: false,
+  }),
+}));
+
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {
