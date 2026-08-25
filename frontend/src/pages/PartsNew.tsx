@@ -12,6 +12,8 @@ import { ConfirmDialog, FormField, InputDialog } from '../components/ui';
 import { useToast } from '../components/ui/Toast';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
+import { useAuth } from '../context/AuthContext';
+import { hasPermission } from '../utils/permissions';
 import { BOMImportWizard } from '../components/parts/BOMImportWizard';
 import { SkeletonTable } from '../components/ui/Skeleton';
 import {
@@ -89,6 +91,13 @@ export default function PartsPage() {
   const [typeFilter, setTypeFilter] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [viewMode, setViewMode] = useState<ViewMode>('table');
+  // POST /parts is require_role([ADMIN, MANAGER, SUPERVISOR]) (api/endpoints/parts.py),
+  // which is exactly the trio `parts:create` maps to. A hidden control and a refused
+  // call have to agree: without this an OPERATOR -- who holds `parts:view` and can
+  // reach this page -- was shown "New Part", could fill the whole modal in, and only
+  // found out at submit, via a 403.
+  const { user } = useAuth();
+  const canCreateParts = hasPermission(user?.role, 'parts:create') || !!user?.is_superuser;
   const [showImport, setShowImport] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showBOMComponents, setShowBOMComponents] = useState(false);
@@ -599,10 +608,12 @@ export default function PartsPage() {
             <ArrowUpTrayIcon className="h-4 w-4" />
             Import
           </button>
-          <button onClick={openCreateModal} className="btn-primary flex items-center gap-2">
-            <PlusIcon className="h-4 w-4" />
-            New Part
-          </button>
+          {canCreateParts && (
+            <button onClick={openCreateModal} className="btn-primary flex items-center gap-2">
+              <PlusIcon className="h-4 w-4" />
+              New Part
+            </button>
+          )}
         </div>
       </div>
 

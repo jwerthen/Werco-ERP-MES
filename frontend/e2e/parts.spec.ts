@@ -9,9 +9,29 @@ import type { Page } from '@playwright/test';
 
 const API_URL = process.env.E2E_API_URL || 'http://localhost:8000/api/v1';
 
+/**
+ * The "New Part" control, by its accessible name.
+ *
+ * Every call site here used to share one locator:
+ *
+ *     page.locator('button, a').filter({ hasText: /new|create|add/i }).first()
+ *
+ * `.first()` binds in DOM order, so that expression tracked whichever header
+ * control happened to come first rather than the one the test meant -- and the
+ * header is exactly where controls get added. The identical shape on the Work
+ * Orders page broke the moment a "New from template" button landed beside "New
+ * Work Order": `.first()` started clicking the wrong one, and the failure read as
+ * "part creation is broken" instead of "the test grabbed the wrong button".
+ *
+ * An exact accessible name cannot be captured by a neighbour.
+ */
+function createPartButton(page: Page) {
+  return page.getByRole('button', { name: /^new part$/i });
+}
+
 async function openCreatePartForm(page: Page) {
   await page.goto('/parts');
-  await page.locator('button, a').filter({ hasText: /new|create|add/i }).first().click();
+  await createPartButton(page).click();
   await expect(page.locator('form')).toBeVisible();
 }
 
@@ -70,8 +90,7 @@ test.describe('Parts List', () => {
   });
 
   test('shows new part button for authorized users', async ({ page }) => {
-    const createBtn = page.locator('button, a').filter({ hasText: /new|create|add.*part/i }).first();
-    await expect(createBtn).toBeVisible();
+    await expect(createPartButton(page)).toBeVisible();
   });
 });
 
@@ -83,9 +102,7 @@ test.describe('Part Creation', () => {
   test('can access part creation form', async ({ page }) => {
     await page.goto('/parts');
     
-    // Click create button
-    const createBtn = page.locator('button, a').filter({ hasText: /new|create|add/i }).first();
-    await createBtn.click();
+    await createPartButton(page).click();
     
     // Should show form
     await expect(page.locator('form')).toBeVisible();
@@ -259,20 +276,33 @@ test.describe('Parts Access Control', () => {
     // Should see parts list
     await expect(page.locator('table')).toBeVisible({ timeout: 10000 });
     
-    // Create button should not be visible or disabled
-    const createBtn = page.locator('button, a').filter({ hasText: /new|create|add.*part/i }).first();
-    const isHidden = !(await createBtn.isVisible().catch(() => false));
-    const isDisabled = await createBtn.isDisabled().catch(() => true);
-    
-    expect(isHidden || isDisabled).toBe(true);
+    // An operator holds `parts:view` but not `parts:create`, and POST /parts is
+    // require_role([ADMIN, MANAGER, SUPERVISOR]) -- so the control must not be offered.
+    //
+    // THE ANCHOR BELOW IS LOAD-BEARING, and this is the second bug in this assertion.
+    //
+    // The original read `isVisible()` once, immediately after the table appeared, and
+    // passed for ANY role -- verified by running it as an admin, where it also passed
+    // while the button was in fact visible. Replacing it with a retrying
+    // `toBeHidden()` is NOT enough on its own: `toBeHidden()` is satisfied the instant
+    // the element is ABSENT, and it is absent for a moment after the table paints but
+    // before the header renders. So it too passed against a deliberately un-gated
+    // button.
+    //
+    // Waiting for a header control that is ALWAYS rendered pins the check to a header
+    // that has actually painted. Only then does "New Part is not here" mean the gate,
+    // rather than "the header has not arrived yet".
+    await expect(page.getByRole('button', { name: /^import$/i })).toBeVisible();
+    await expect(createPartButton(page)).toHaveCount(0);
   });
 
   test('manager can create parts', async ({ page }) => {
     await loginAs(page, TEST_USERS.manager);
     await page.goto('/parts');
     
-    // Create button should be visible
-    const createBtn = page.locator('button, a').filter({ hasText: /new|create|add/i }).first();
-    await expect(createBtn).toBeVisible();
+    // The mirror of the operator case: a manager holds `parts:create`, so the control
+    // must be offered. Together the two pin the gate in BOTH directions -- a gate that
+    // hides the button from everybody would pass the operator test alone.
+    await expect(createPartButton(page)).toBeVisible();
   });
 });
