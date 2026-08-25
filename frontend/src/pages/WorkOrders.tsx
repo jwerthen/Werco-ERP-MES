@@ -654,7 +654,6 @@ export default function WorkOrders() {
   // update and nowhere to navigate. The token below just re-reads the catalog if
   // the Templates tab is already mounted.
   const [saveTemplateTarget, setSaveTemplateTarget] = useState<WorkOrderSummary | null>(null);
-  const [templateRefreshToken, setTemplateRefreshToken] = useState(0);
 
   const handleSaveTemplate = useCallback((wo: WorkOrderSummary) => {
     setSaveTemplateTarget(wo);
@@ -1014,7 +1013,6 @@ export default function WorkOrders() {
           // A template's output is a DRAFT nobody has reviewed, so the hand-off
           // is the same as Duplicate's: land on the new work order.
           onUsed={(result) => navigate(`/work-orders/${result.work_order.id}`)}
-          refreshToken={templateRefreshToken}
         />
       </div>
     );
@@ -1292,7 +1290,10 @@ export default function WorkOrders() {
           // dialog promises not to touch.
           hasLaserNests={saveTemplateTarget?.work_order_type === 'laser_cutting'}
           onClose={() => setSaveTemplateTarget(null)}
-          onSaved={() => setTemplateRefreshToken((token) => token + 1)}
+          // Nothing to refresh here. This dialog renders only on the ORDERS tab and
+          // the templates panel only on the TEMPLATES tab, so the two are never
+          // co-mounted: switching tabs remounts the panel, which fetches on mount.
+          onSaved={() => setSaveTemplateTarget(null)}
         />
       )}
 

@@ -74,8 +74,10 @@ Two consequences are deliberate:
   cannot be reproduced in one click: re-open the source work order and press "Save
   as template" again, and the result is identical, because the plan was never in
   here. The tombstone exists so nothing is physically destroyed (invariant 3's
-  letter) and so a ``template_id`` on an audit row keeps resolving to a name — not
-  because the row needs an undo path.
+  letter) — not because the row needs an undo path, and not to keep audit rows
+  readable: ``_live_template_or_404`` 404s a deleted template anyway, and every
+  audit row already carries the name verbatim in ``resource_identifier`` and
+  ``extra_data.template_name``.
 
 THIS ROW IS NOT THE AUDIT RECORD
 --------------------------------
@@ -92,7 +94,6 @@ See ``app/services/work_order_template_service.py`` for the rules,
 from datetime import datetime
 
 from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, Integer, String, Text, text
-from sqlalchemy.orm import relationship
 
 from app.db.database import Base
 from app.db.mixins import SoftDeleteMixin, TenantMixin
@@ -129,9 +130,10 @@ class WorkOrderTemplate(Base, SoftDeleteMixin, TenantMixin):
         # the ``create_all`` + ``alembic stamp`` bootstrap, which is how prod lost
         # ~42 read-path indexes and 22 lineage FKs).
         Index("ix_work_order_templates_company_live", "company_id", "is_deleted", "name"),
-        # "Which templates point at this work order?" — the read behind the detail
-        # page's "saved as a template" disclosure and behind refusing to orphan a
-        # template silently.
+        # "Which templates point at this work order?" — not read by a screen today; it
+        # serves the batched source lookup in ``plan_summaries_for`` (an ``IN`` over
+        # source ids on every catalog page) and keeps the obvious future question
+        # answerable without a scan.
         Index("ix_work_order_templates_company_source", "company_id", "source_work_order_id"),
         Index(
             UNIQUE_LIVE_NAME_INDEX,
@@ -178,11 +180,11 @@ class WorkOrderTemplate(Base, SoftDeleteMixin, TenantMixin):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
 
-    # Read-only convenience for the service's plan summary. ``foreign_keys`` is
-    # explicit (the kiosk_station / part_number_alias precedent) so the mapper never
-    # has to guess, and there is no cascade of any kind: deleting a template must not
-    # be able to touch the work order it names.
-    source_work_order = relationship("WorkOrder", foreign_keys=[source_work_order_id])
+    # Deliberately NO ``relationship()`` to the source work order. Nothing reads one:
+    # the plan summary is built from BATCHED queries in
+    # ``work_order_template_service.plan_summaries_for`` precisely so a catalog page
+    # costs a bounded number of round trips, and a lazy relationship sitting here is an
+    # invitation to write the per-row version that reintroduces the N+1.
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<WorkOrderTemplate {self.name!r} -> work_order {self.source_work_order_id}>"

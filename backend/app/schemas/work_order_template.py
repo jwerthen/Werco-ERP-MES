@@ -38,6 +38,8 @@ class WorkOrderTemplateCreate(BaseModel):
     exists and is live in the active company, and then pointed at.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     source_work_order_id: int = Field(
         ...,
         description="The work order whose plan this template stands for. Must be live in the active "

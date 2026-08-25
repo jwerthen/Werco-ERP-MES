@@ -73,16 +73,18 @@ from datetime import date
 from typing import Optional
 
 from fastapi import HTTPException
-from sqlalchemy import func
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Query, Session
 
 from app.db.tenant_filter import tenant_query
 from app.models.laser_nest import LaserNest
+from app.models.part import Part
 from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
 from app.models.work_order_template import WorkOrderTemplate
 from app.services.audit_service import AuditService
+from app.services.material_tie_part_gate import part_is_tieable_material
 from app.services.work_order_duplicate_service import DuplicateResult, duplicate_work_order
 
 # Machine-readable reason a template cannot be used right now. Returned on the
@@ -212,9 +214,33 @@ def plan_summaries_for(
     """Live plan summaries for a whole page of templates, in a bounded number of queries.
 
     Batched rather than per-row on purpose: the catalog is a list screen, and a
-    per-template summary built with four queries each is the PERF-4 N+1 shape this
-    repo has fixed elsewhere. Six queries total regardless of page size — sources,
-    operations+work-centers, nests, ties — and every one of them tenant-scoped.
+    per-template summary built with a handful of queries each is the PERF-4 N+1 shape
+    this repo has fixed elsewhere. FIVE queries total regardless of page size —
+    sources, operations+work-centers, nests, ties, tied parts — and every one of them
+    tenant-scoped, on every joined table.
+
+    THE COUNTS MUST MATCH WHAT THE COPY ACTUALLY PRODUCES
+    ----------------------------------------------------
+    This summary is the whole justification for a template being a POINTER rather than
+    a frozen plan: what the planner is shown is what they will get. A count that is
+    merely an upper bound breaks that promise in the direction that matters — a row
+    reading "2 ops · 21 nests · 4 open ties" when the copy will carry one fewer tie is
+    a planner releasing a job believing it carries material demand it does not have.
+
+    So the two counts that ``duplicate_work_order`` can SKIP are reduced by exactly the
+    skips it would apply, using the SAME rules rather than a second opinion:
+
+    * an operation whose only laser nest is soft-deleted is not copied
+      (``_copy_operations`` via ``_LaserNestBacking.deleted_only_operation_ids``), so it
+      is not counted, and neither is a tie scoped to it (``operation_not_copied``);
+    * a tie whose part has been soft-deleted (``part_not_available``) or is one the shop
+      PRODUCES (``part_not_tieable``) is not copied, so it is not counted. The second
+      test is ``material_tie_part_gate.part_is_tieable_material`` — the shared predicate
+      the copy itself calls, imported rather than restated, so the two cannot drift.
+
+    That is reuse of the rules, not a reimplementation of the copy: no plan is built
+    here and nothing is written. The remaining skip reason, ``nest_runs_unavailable``,
+    is documented as defensive and unreachable, so there is nothing to subtract for it.
 
     Templates whose source is missing or soft-deleted get an ``available=False``
     summary carrying only the reason. They are NOT dropped: see the module docstring.
@@ -242,14 +268,31 @@ def plan_summaries_for(
     if live_source_ids:
         # Operations + their work centers, in sequence order, so ``work_centers``
         # reads the way the traveler does rather than alphabetically.
+        #
+        # The company predicate on the OUTER-JOINED ``WorkCenter`` rides in the ON
+        # clause, not in ``.filter()``. Two reasons, both load-bearing:
+        #   * ``WorkCenter`` is a ``TenantMixin`` table and its ``name`` is SELECTed
+        #     straight into the response. Without a predicate, an operation pointing at
+        #     another company's work center (``_assert_work_center_in_company`` exists
+        #     in ``work_orders.py`` because that cross-tenant write really happened, so
+        #     pre-fix rows can still exist) would render that tenant's work-center name
+        #     here and in the panel's CSV export. That is invariant 1.
+        #   * putting it in ``.filter()`` would silently convert the OUTER join to an
+        #     INNER one, dropping every work-center-less operation from
+        #     ``operation_count`` — trading a leak for an undercount.
         operation_rows = (
             db.query(
                 WorkOrderOperation.work_order_id,
                 WorkOrderOperation.id,
-                WorkOrderOperation.sequence,
                 WorkCenter.name,
             )
-            .outerjoin(WorkCenter, WorkOrderOperation.work_center_id == WorkCenter.id)
+            .outerjoin(
+                WorkCenter,
+                and_(
+                    WorkOrderOperation.work_center_id == WorkCenter.id,
+                    WorkCenter.company_id == company_id,
+                ),
+            )
             .filter(
                 WorkOrderOperation.company_id == company_id,
                 WorkOrderOperation.work_order_id.in_(live_source_ids),
@@ -258,46 +301,66 @@ def plan_summaries_for(
             .all()
         )
 
-        # Live nests only, reached through their operation — the same join
-        # ``_copy_laser_nests`` uses, which scopes to the work order, drops
-        # soft-deleted nests (invariant 3) and drops nests with a NULL operation.
-        # Counting differently from the copy would promise a nest count the copy
-        # does not produce.
+        # Nests reached through their operation — the same join ``_copy_laser_nests``
+        # and ``_laser_nest_backing`` use, which scopes to the work order and drops
+        # nests with a NULL operation. Unlike the copy's own read this does NOT filter
+        # ``is_deleted``: it needs BOTH, because a live nest feeds the nest count while
+        # an operation whose nests are ALL dead is an operation the copy will skip.
         nest_rows = (
             db.query(
                 WorkOrderOperation.work_order_id,
-                func.count(LaserNest.id),
-                func.coalesce(func.sum(LaserNest.planned_runs), 0),
+                WorkOrderOperation.id,
+                LaserNest.is_deleted,
+                LaserNest.planned_runs,
             )
             .join(WorkOrderOperation, LaserNest.work_order_operation_id == WorkOrderOperation.id)
             .filter(
                 LaserNest.company_id == company_id,
-                LaserNest.is_deleted == False,  # noqa: E712
                 WorkOrderOperation.company_id == company_id,
                 WorkOrderOperation.work_order_id.in_(live_source_ids),
             )
-            .group_by(WorkOrderOperation.work_order_id)
             .all()
         )
 
-        # OPEN ties only — the exact set ``_copy_material_allocations`` copies.
+        # OPEN ties only — cancelled/closed rows are tombstones the copy does not
+        # carry. This is the set ``_copy_material_allocations`` STARTS from; the skips
+        # it then applies are subtracted below.
         tie_rows = (
             db.query(
                 WorkOrderMaterialAllocation.work_order_id,
-                func.count(WorkOrderMaterialAllocation.id),
+                WorkOrderMaterialAllocation.work_order_operation_id,
+                WorkOrderMaterialAllocation.part_id,
             )
             .filter(
                 WorkOrderMaterialAllocation.company_id == company_id,
                 WorkOrderMaterialAllocation.work_order_id.in_(live_source_ids),
                 WorkOrderMaterialAllocation.status == AllocationStatus.OPEN,
             )
-            .group_by(WorkOrderMaterialAllocation.work_order_id)
             .all()
         )
 
+    # Which operations will the copy refuse to carry? An operation is nest-backed if it
+    # has any nest row at all; it is DEAD if none of them is live. Byte-identical to
+    # ``_LaserNestBacking``'s ``nest_backed - with_live_nest``.
+    nest_backed_operations: set[int] = set()
+    operations_with_live_nest: set[int] = set()
+    nest_counts: dict[int, tuple[int, int]] = {}
+    for work_order_id, operation_id, is_deleted, planned_runs in nest_rows:
+        nest_backed_operations.add(operation_id)
+        if is_deleted:
+            continue
+        operations_with_live_nest.add(operation_id)
+        count, runs = nest_counts.get(work_order_id, (0, 0))
+        nest_counts[work_order_id] = (count + 1, runs + int(planned_runs or 0))
+    dead_nest_operations = nest_backed_operations - operations_with_live_nest
+
     operation_counts: dict[int, int] = {}
     work_centers: dict[int, list[str]] = {}
-    for work_order_id, _operation_id, _sequence, work_center_name in operation_rows:
+    for work_order_id, operation_id, work_center_name in operation_rows:
+        if operation_id in dead_nest_operations:
+            # The copy skips this one (``laser_nest_deleted``), so neither its count
+            # nor its work center belongs in a summary of what the planner will get.
+            continue
         operation_counts[work_order_id] = operation_counts.get(work_order_id, 0) + 1
         if work_center_name:
             names = work_centers.setdefault(work_order_id, [])
@@ -306,8 +369,25 @@ def plan_summaries_for(
             if work_center_name not in names:
                 names.append(work_center_name)
 
-    nest_counts = {row[0]: (int(row[1] or 0), int(row[2] or 0)) for row in nest_rows}
-    tie_counts = {row[0]: int(row[1] or 0) for row in tie_rows}
+    # One batched read of the tied parts, so the two part-shaped skips can be applied
+    # with the copy's own predicate instead of a second opinion.
+    tie_part_ids = {part_id for _wo, _op, part_id in tie_rows if part_id is not None}
+    tieable_part_ids: set[int] = set()
+    if tie_part_ids:
+        for part in tenant_query(db, Part, company_id).filter(Part.id.in_(tie_part_ids)).all():
+            if getattr(part, "is_deleted", False):
+                continue  # part_not_available
+            if not part_is_tieable_material(part):
+                continue  # part_not_tieable — the SHARED predicate, not a restatement
+            tieable_part_ids.add(part.id)
+
+    tie_counts: dict[int, int] = {}
+    for work_order_id, operation_id, part_id in tie_rows:
+        if part_id not in tieable_part_ids:
+            continue
+        if operation_id is not None and operation_id in dead_nest_operations:
+            continue  # operation_not_copied
+        tie_counts[work_order_id] = tie_counts.get(work_order_id, 0) + 1
 
     for template in templates:
         source = sources.get(template.source_work_order_id)
@@ -536,6 +616,18 @@ def delete_template(
 
     Flushes but never commits.
     """
+    # Snapshot BEFORE the mutation. ``soft_delete`` sets is_deleted/deleted_at/
+    # deleted_by, so passing the live object afterwards would record the POST-delete
+    # state as ``old_values`` -- an audit row whose "before" says it was already
+    # deleted. The house precedent (purchasing.py) sidesteps this by passing no
+    # old_values at all; a real before-image is better, so take it here.
+    old_values = {
+        "name": template.name,
+        "notes": template.notes,
+        "source_work_order_id": template.source_work_order_id,
+        "default_quantity": template.default_quantity,
+        "is_deleted": bool(template.is_deleted),
+    }
     template.soft_delete(user_id)
     db.flush()
 
@@ -543,7 +635,7 @@ def delete_template(
         resource_type="work_order_template",
         resource_id=template.id,
         resource_identifier=template.name,
-        old_values=template,
+        old_values=old_values,
         description=f"Deleted work order template '{template.name}'",
         extra_data={
             "source_work_order_id": template.source_work_order_id,
@@ -738,7 +830,15 @@ def summary_for_one(db: Session, template: WorkOrderTemplate, company_id: int) -
     Routed through the batched implementation rather than given its own queries, so a
     detail page and a list row can never report a template differently.
     """
-    return plan_summaries_for(db, [template], company_id).get(template.id, TemplatePlanSummary())
+    return plan_summaries_for(db, [template], company_id).get(
+        template.id,
+        # Fail CLOSED. ``TemplatePlanSummary()`` defaults to ``available=True`` with
+        # zero counts, so a fallback that used it would present an unresolvable
+        # template as usable and then 409 on the click. Unreachable today --
+        # ``plan_summaries_for`` writes an entry per template -- but the safe answer
+        # to "I could not resolve this" is the one that disables the button.
+        TemplatePlanSummary(available=False, unavailable_reason=UNAVAILABLE_SOURCE_DELETED),
+    )
 
 
 __all__ = [

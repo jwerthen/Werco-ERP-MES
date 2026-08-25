@@ -49,12 +49,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_db, require_role
+from app.core.realtime import safe_broadcast
+from app.core.websocket import broadcast_dashboard_update
 from app.db.database import atomic_transaction
 from app.models.laser_nest import LaserNest
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.models.work_order_template import WorkOrderTemplate
-from app.schemas.work_order import WorkOrderDuplicateResponse
+from app.schemas.work_order import WorkOrderDuplicateResponse, WorkOrderResponse
 from app.schemas.work_order_template import (
     WorkOrderTemplateCreate,
     WorkOrderTemplateListResponse,
@@ -415,8 +417,25 @@ def use_work_order_template(
     )
     _enrich(work_order)
 
+    # The same broadcast ``POST /work-orders`` and ``POST /work-orders/{id}/duplicate``
+    # emit. Without it a template-created draft is invisible on every OTHER open
+    # session's Work Orders list until someone reloads, while a duplicate appears --
+    # an unexplained divergence in a pair that is otherwise deliberately identical.
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {
+            "event": "work_order_created",
+            "work_order_id": work_order.id,
+            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+        },
+        company_id=company_id,
+    )
+
     return WorkOrderDuplicateResponse(
-        work_order=work_order,
+        # ``model_validate`` rather than handing the ORM object straight in, matching
+        # the duplicate endpoint line-for-line -- the two "identical envelope" paths
+        # should read identically, not merely behave the same via from_attributes.
+        work_order=WorkOrderResponse.model_validate(work_order),
         skipped_operations=skipped_operations,
         skipped_material_allocations=skipped_material_allocations,
     )

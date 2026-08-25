@@ -1764,6 +1764,56 @@ class TestTheCatalogRead:
         assert plan["nest_count"] == 1
         assert plan["planned_runs_total"] == 3
 
+        # ...and so do the counts the copy would SKIP for the same reason. This is the
+        # assertion this test was missing when it first shipped: the summary reported
+        # `operation_count == 2` and `open_material_tie_count == 2` while the copy
+        # carried one of each, because it counted the source's rows instead of the
+        # rows the copy keeps. On a laser job that renders as "2 ops - 1 nest", which is
+        # self-contradictory; the tie half is the one that matters, since a tie the copy
+        # drops means the new job carries no demand for that material.
+        assert plan["operation_count"] == 1, "an operation whose only nest is dead is not copied"
+        assert plan["open_material_tie_count"] == 1, "nor is a tie scoped to it"
+
+        # And the use delivers exactly the reduced numbers, which is the property the
+        # whole pointer-not-frozen-plan design rests on.
+        draft = created_work_order(db_session, use_template(client, headers_for(admin), template_id))
+        assert len(operations_of(db_session, draft)) == plan["operation_count"]
+        assert len(nests_of(db_session, draft)) == plan["nest_count"]
+        assert len(ties_of(db_session, draft)) == plan["open_material_tie_count"]
+
+    def test_a_tie_whose_part_the_copy_would_skip_is_not_counted(self, client: TestClient, db_session: Session):
+        """The summary applies the copy's OWN part predicates, not a second opinion.
+
+        ``_copy_material_allocations`` skips a tie whose part has been soft-deleted
+        (``part_not_available``) or is one the shop PRODUCES (``part_not_tieable``).
+        A summary that counted those would promise material demand the draft will not
+        carry -- no shortage raised, the job runs, stock never deducted.
+        """
+        admin = make_user(db_session)
+        source = build_brake_source(db_session, quantity=10.0)
+        operation = operations_of(db_session, source.work_order)[0]
+
+        good = make_part(db_session, part_type="raw_material", uom="pounds")
+        retired = make_part(db_session, part_type="raw_material", uom="pounds")
+        produced = make_part(db_session, part_type="manufactured")
+        for part in (good, retired, produced):
+            make_tie(db_session, source.work_order, part, operation=operation, qty_planned=5.0)
+        retired.is_deleted = True
+        db_session.commit()
+
+        template_id = saved(client, headers_for(admin), source.work_order.id, "Brake set")
+        plan = client.get(f"{BASE}/{template_id}", headers=headers_for(admin)).json()["plan"]
+        assert plan["open_material_tie_count"] == 1, "only the raw-material, live-part tie is copyable"
+
+        response = use_template(client, headers_for(admin), template_id)
+        draft = created_work_order(db_session, response)
+        assert len(ties_of(db_session, draft)) == plan["open_material_tie_count"]
+        # ...and the two it dropped still reach the planner through the envelope.
+        assert {entry["reason"] for entry in response.json()["skipped_material_allocations"]} == {
+            "part_not_available",
+            "part_not_tieable",
+        }
+
     def test_search_matches_name_and_notes_case_insensitively(self, client: TestClient, db_session: Session):
         admin = make_user(db_session)
         source = build_brake_source(db_session, quantity=10.0)

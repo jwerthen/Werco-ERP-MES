@@ -172,6 +172,7 @@ def _create_table() -> None:
     op.create_table(
         TABLE,
         sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("company_id", sa.Integer(), nullable=False),
         # What the planner calls this job. Stored verbatim -- there is no ingest-time
         # sanitization in this system and nothing renders it as raw HTML.
         sa.Column("name", sa.String(length=120), nullable=False),
@@ -204,7 +205,6 @@ def _create_table() -> None:
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("deleted_by", sa.Integer(), nullable=True),
         # TenantMixin, last.
-        sa.Column("company_id", sa.Integer(), nullable=False),
         sa.ForeignKeyConstraint(["source_work_order_id"], ["work_orders.id"]),
         sa.ForeignKeyConstraint(["created_by"], ["users.id"]),
         sa.ForeignKeyConstraint(["company_id"], ["companies.id"]),

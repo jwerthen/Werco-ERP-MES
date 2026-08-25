@@ -1684,7 +1684,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > `plan: {available, unavailable_reason, source_work_order_number, source_status, work_order_type,
 > sequential_operations, priority, operation_count, nest_count, planned_runs_total,
 > open_material_tie_count, work_centers[], source_quantity_ordered}`, read live off the source work
-> order — the list builds them **batched**, six queries for the whole page rather than four per row.
+> order — the list builds them **batched**, five queries for the whole page rather than a handful per row.
 > Nothing in it can go stale, which is the point: a *stored* `nest_count` would be wrong the first
 > time somebody soft-deleted a nest on the source, and the planner would pick a template believing it
 > carries 21 nests and get 20. The consequence to state plainly: **editing the source changes what the

@@ -65,8 +65,6 @@ export interface WorkOrderTemplatesPanelProps {
    * split the Duplicate dialog uses, so the hand-off shape stays one thing.
    */
   onUsed: (result: WorkOrderDuplicateResult) => void;
-  /** Bumping this re-reads the catalog (e.g. after a template is saved elsewhere). */
-  refreshToken?: number;
 }
 
 /** "3 ops · 21 nests · 63 runs · 2 ties" — only the parts that are non-zero. */
@@ -84,7 +82,7 @@ function planSummaryParts(template: WorkOrderTemplate): string[] {
   return parts;
 }
 
-export default function WorkOrderTemplatesPanel({ onUsed, refreshToken = 0 }: WorkOrderTemplatesPanelProps) {
+export default function WorkOrderTemplatesPanel({ onUsed }: WorkOrderTemplatesPanelProps) {
   const { showToast } = useToast();
   const [templates, setTemplates] = useState<WorkOrderTemplate[]>([]);
   const [loading, setLoading] = useState(true);
@@ -126,7 +124,11 @@ export default function WorkOrderTemplatesPanel({ onUsed, refreshToken = 0 }: Wo
 
   useEffect(() => {
     loadTemplates();
-  }, [loadTemplates, refreshToken]);
+  // The panel refetches on mount and after its own rename/delete. It needs no
+  // external refresh signal: it is rendered only on the templates tab, and the
+  // save-as-template dialog lives on the ORDERS tab, so the two are never
+  // co-mounted and switching tabs remounts this component.
+  }, [loadTemplates]);
 
   const handleRename = useCallback(
     async (name: string) => {
@@ -294,13 +296,11 @@ export default function WorkOrderTemplatesPanel({ onUsed, refreshToken = 0 }: Wo
         className: 'w-56',
         render: (template) => {
           const unusable = !template.plan.available;
+          // No stopPropagation guard on the wrapper: this DataTable has no
+          // onRowClick, so there is nothing to stop. Adding one "just in case" is an
+          // inert handler that reads as if row click-through exists.
           return (
-            <div
-              className="flex items-center justify-end gap-1.5"
-              role="presentation"
-              onClick={(e) => e.stopPropagation()}
-              onKeyDown={(e) => e.stopPropagation()}
-            >
+            <div className="flex items-center justify-end gap-1.5">
               <Button
                 size="sm"
                 onClick={() => setUseTarget(template)}
