@@ -48,11 +48,22 @@ test.describe('Work Orders', () => {
 
   test('can navigate to work order creation', async ({ page }) => {
     await page.goto('/work-orders');
-    
-    // Click create button
-    const createBtn = page.locator('button, a').filter({ hasText: /new|create|add/i }).first();
-    await createBtn.click();
-    
+
+    // Target the create LINK by its destination, not by a loose /new|create|add/
+    // match over every button and anchor on the page.
+    //
+    // That locator took `.first()` in DOM order, so it silently bound to whichever
+    // header control happened to come first — and the header is a place controls get
+    // added. It broke the day "New from template" landed beside "New Work Order":
+    // `.first()` started picking the template button, which switches a tab rather
+    // than navigating, so no form ever appeared and the failure read as "work order
+    // creation is broken" rather than "the test grabbed the wrong button".
+    //
+    // `/work-orders/new` is what this test is actually about, and it cannot be
+    // captured by a neighbour.
+    await page.locator('a[href="/work-orders/new"]').first().click();
+    await expect(page).toHaveURL(/\/work-orders\/new$/);
+
     // Should be on create page or modal
     await expect(page.locator('form')).toBeVisible();
     await expect(page.locator('text=/part|quantity/i').first()).toBeVisible();
