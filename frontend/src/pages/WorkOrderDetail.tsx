@@ -3245,8 +3245,8 @@ export default function WorkOrderDetail() {
         title="Delete Work Order"
         message={
           CURRENT_WORK_ORDER_STATUSES.includes(workOrder.status)
-            ? `Delete current work order ${workOrder.work_order_number}?\n\nThis removes it from active lists, scheduling, and shop floor queues while preserving the record for audit/restore.`
-            : `Delete work order ${workOrder.work_order_number}?\n\nThis removes it from active lists while preserving the record for audit/restore.`
+            ? `Delete current work order ${workOrder.work_order_number}?\n\nThis removes it from active lists, scheduling, and shop floor queues while preserving the record for audit/restore.\n\nYou can put it back from Work Orders \u2192 Deleted.`
+            : `Delete work order ${workOrder.work_order_number}?\n\nThis removes it from active lists while preserving the record for audit/restore.\n\nYou can put it back from Work Orders \u2192 Deleted.`
         }
         confirmLabel="Delete"
         pending={deleting}

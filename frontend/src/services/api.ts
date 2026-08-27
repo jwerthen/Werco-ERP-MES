@@ -41,6 +41,7 @@ import {
   BOMUomMismatchParams,
   BOMUomMismatchReport,
   WorkOrderDuplicateResult,
+  WorkOrderRestoreResponse,
   WorkOrderTemplate,
   WorkOrderTemplateCreatePayload,
   WorkOrderTemplateListResult,
@@ -969,7 +970,21 @@ class ApiService {
   }
 
   // Work Orders
-  async getWorkOrders(params?: { status?: string; search?: string; limit?: number; skip?: number }) {
+  //
+  // `deleted_only: true` inverts the endpoint's soft-delete filter and returns ONLY the
+  // company's soft-deleted work orders (each carrying is_deleted / deleted_at /
+  // deleted_by_name), which is the ONLY way to see one — every other read hard-filters
+  // them out, so nothing can be restored without it. The server also drops its default
+  // complete/closed/cancelled exclusion on that view, so a finished-then-deleted job is
+  // still listed. Leave the key OFF for the normal list: axios omits `undefined` params,
+  // so a call that does not pass it sends the byte-identical query string it always has.
+  async getWorkOrders(params?: {
+    status?: string;
+    search?: string;
+    limit?: number;
+    skip?: number;
+    deleted_only?: boolean;
+  }) {
     if (params?.limit) {
       const response = await this.api.get('/work-orders/', {
         params: { ...params, _ts: Date.now() },
@@ -1134,6 +1149,21 @@ class ApiService {
 
   async deleteWorkOrder(id: number) {
     const response = await this.api.delete(`/work-orders/${id}`);
+    return response.data;
+  }
+
+  // Undo a soft delete. Server-gated (ADMIN/MANAGER, and 400 if the work order is not
+  // actually deleted), so callers stay NON-optimistic: await it, then reflect what came
+  // back. Reachable only from the deleted view above — you cannot restore what you
+  // cannot list.
+  //
+  // Typed because the answer is an ENVELOPE, not a bare message: the restore re-opens
+  // the material ties the delete cancelled, and it is allowed to leave one CANCELLED
+  // (its part was reclassified into something the shop produces while the work order was
+  // deleted). A non-empty `skipped_material_allocations` is a PARTIAL restore the
+  // planner has to re-tie by hand, so the caller must read it rather than assume.
+  async restoreWorkOrder(id: number): Promise<WorkOrderRestoreResponse> {
+    const response = await this.api.post<WorkOrderRestoreResponse>(`/work-orders/${id}/restore`);
     return response.data;
   }
 

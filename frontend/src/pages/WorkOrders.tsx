@@ -8,6 +8,7 @@ import { useAuth } from '../context/AuthContext';
 import { hasPermission } from '../utils/permissions';
 import {
   formatCentralDate,
+  formatCentralDateTime,
   getCentralDateStamp,
   isDateBeforeTodayInCentral,
   isDateTodayInCentral,
@@ -30,7 +31,19 @@ import {
   BookmarkSquareIcon,
 } from '@heroicons/react/24/outline';
 import { SkeletonTable, SkeletonCard } from '../components/ui/Skeleton';
-import { ConfirmDialog, EmptyState, ErrorState, useToast, DataTable, DataTableColumn, StatusBadge, Button, UnitBadge } from '../components/ui';
+import {
+  ConfirmDialog,
+  EmptyState,
+  ErrorState,
+  useToast,
+  DataTable,
+  DataTableColumn,
+  LoadingButton,
+  MobileDataCard,
+  StatusBadge,
+  Button,
+  UnitBadge,
+} from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
@@ -58,6 +71,16 @@ const TERMINAL_WO_STATUSES = ['complete', 'closed', 'cancelled'];
 const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
 
 type GroupBy = 'none' | 'customer' | 'part' | 'status';
+
+/**
+ * The three views this page serves off `?tab=`.
+ *
+ * `deleted` is the restore archive: `GET /work-orders/?deleted_only=true`, the ONLY
+ * read in the app that returns soft-deleted work orders. It is gated on the same
+ * population the backend's DELETE and RESTORE verbs admit (admin/manager, plus
+ * superuser), so a hidden control and a refused call agree.
+ */
+type WorkOrdersTab = 'orders' | 'templates' | 'deleted';
 
 const statusOptions: { value: string; label: string }[] = [
   { value: '', label: 'All Active' },
@@ -466,6 +489,34 @@ export default function WorkOrders() {
   const [workOrders, setWorkOrders] = useState<WorkOrderSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  // --- The deleted book -----------------------------------------------------
+  // Its OWN state, NEVER merged into `workOrders`, and that is load-bearing rather
+  // than tidy. Everything this page reports derives from `workOrders`: the customer
+  // filter options, `filteredWorkOrders`, the groupings, the Overdue / In Progress /
+  // Due Today stats, the "showing X of Y" counter, `workOrdersRef` (the delete
+  // rollback index), the due-date conflict lookup and the ErrorState gate. A deleted
+  // row landing in that array would silently inflate every one of them — a job
+  // somebody deleted would still be counted overdue. Kept apart, the guarantee is
+  // STRUCTURAL: no `is_deleted` filter to forget on a derivation added later, and no
+  // dependence on the server's provenance tri-state holding.
+  //
+  // It also carries its own loading/error state, so a failed archive read degrades
+  // that one table instead of blanking the orders tab, and vice versa.
+  const [deletedWorkOrders, setDeletedWorkOrders] = useState<WorkOrderSummary[]>([]);
+  // Starts TRUE, unlike the orders tab's twin. The archive read fires from a passive
+  // effect AFTER the first paint, and DataTable's empty state is
+  // `!loading && !isError && rows.length === 0` — so `false` here paints "No deleted
+  // work orders" for a frame over an archive that is on its way.
+  const [deletedLoading, setDeletedLoading] = useState(true);
+  const [deletedError, setDeletedError] = useState(false);
+  // The archive's own free-text filter, deliberately NOT the orders tab's `search`:
+  // that one is a server param on `GET /work-orders/`, this one never leaves the
+  // client (same shape as Purchasing's deleted-PO filter). Sharing the state would
+  // mean a term typed on one tab silently hides rows on the other.
+  const [deletedSearch, setDeletedSearch] = useState('');
+  const debouncedDeletedSearch = useDebouncedValue(deletedSearch.trim(), 250);
+  const [restoreTarget, setRestoreTarget] = useState<WorkOrderSummary | null>(null);
+  const [restorePending, setRestorePending] = useState(false);
   // Free-text search stays local state; only the debounced value drives the fetch.
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search.trim(), 250);
@@ -501,7 +552,7 @@ export default function WorkOrders() {
   // "templates". The tab rides on `?tab=` through the SAME copy-and-set setter
   // every other filter uses, so switching tabs preserves the status / customer /
   // COTS / grouping params instead of wiping them.
-  const setActiveTab = (value: 'orders' | 'templates') => setFilterParam('tab', value === 'orders' ? '' : value);
+  const setActiveTab = (value: WorkOrdersTab) => setFilterParam('tab', value === 'orders' ? '' : value);
   const setCustomerFilter = (value: string) => setFilterParam('customer', value);
   const setHideCOTS = (hide: boolean) => setFilterParam('cots', hide ? '' : '1');
   const setGroupBy = (value: GroupBy) => setFilterParam('group', value === 'none' ? '' : value);
@@ -509,8 +560,17 @@ export default function WorkOrders() {
   // A deep link to ?tab=templates from someone WITHOUT work_orders:edit falls
   // back to the list: every template verb (reads included) is role-gated to the
   // trio that permission maps to, so showing the tab would only produce a 403.
-  const activeTab: 'orders' | 'templates' =
-    searchParams.get('tab') === 'templates' && canEditWorkOrders ? 'templates' : 'orders';
+  //
+  // ?tab=deleted falls back the same silent way for anyone outside admin/manager
+  // (+superuser): `deleted_only=true` is role-gated on the server to exactly that
+  // population, so the tab would render a 403 rather than an archive.
+  const tabParam = searchParams.get('tab');
+  const activeTab: WorkOrdersTab =
+    tabParam === 'templates' && canEditWorkOrders
+      ? 'templates'
+      : tabParam === 'deleted' && canDeleteWorkOrders
+        ? 'deleted'
+        : 'orders';
 
   const [releasingIds, setReleasingIds] = useState<Set<number>>(new Set());
   const [dueDateEdit, setDueDateEdit] = useState<DueDateEditState | null>(null);
@@ -518,6 +578,7 @@ export default function WorkOrders() {
   const [dueDateConflict, setDueDateConflict] = useState<{ wo: WorkOrderSummary; serverStamp: string } | null>(null);
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const loadRequestRef = useRef(0);
+  const deletedRequestRef = useRef(0);
   const realtimeUrl = useMemo(() => {
     const token = getAccessToken();
     return buildWsUrl('/ws/updates', token ? { token } : undefined);
@@ -710,6 +771,329 @@ export default function WorkOrders() {
       });
     }
   }, [loadWorkOrders, showToast]);
+
+  // --- Deleted view: load, restore -----------------------------------------
+  /**
+   * Read the deleted book.
+   *
+   * `deleted_only=true` is the ONLY way any caller sees a soft-deleted work order —
+   * every other read of this endpoint hard-filters `is_deleted == False` — so without
+   * this fetch the Restore control below would have nothing to act on. The server also
+   * drops its default complete/closed/cancelled exclusion here, deliberately: an
+   * archive that hides finished jobs is empty exactly when someone needs it.
+   *
+   * Kept OUT of `loadWorkOrders`, and out of the 30s poll / focus / websocket refresh
+   * loop that drives it: this runs only when the user asks for the view, so the orders
+   * tab keeps emitting exactly the requests it always did.
+   */
+  const loadDeletedWorkOrders = useCallback(async () => {
+    // Request-sequence latch. Entering the view fires a read, so Deleted -> Orders ->
+    // Deleted can leave two in flight; without this the SLOWER (older) response wins
+    // and paints a stale archive — the exact thing re-fetching on every entry exists
+    // to prevent. Same shape as `loadRequestRef` above.
+    const requestId = deletedRequestRef.current + 1;
+    deletedRequestRef.current = requestId;
+    setDeletedLoading(true);
+    setDeletedError(false);
+    try {
+      const rows: WorkOrderSummary[] = await api.getWorkOrders({ deleted_only: true });
+      if (deletedRequestRef.current !== requestId) return;
+      setDeletedWorkOrders(rows);
+    } catch (err) {
+      console.error('Failed to load deleted work orders:', err);
+      if (deletedRequestRef.current !== requestId) return;
+      setDeletedError(true);
+    } finally {
+      if (deletedRequestRef.current === requestId) setDeletedLoading(false);
+    }
+  }, []);
+
+  // Fetch on every ENTRY into the view, not just the first: somebody else may have
+  // deleted or restored a work order since, and a stale archive is how you end up
+  // clicking Restore on a row the server will refuse. The tab lives in the URL, so
+  // this covers a deep link to ?tab=deleted as well as a click on the strip.
+  useEffect(() => {
+    if (activeTab !== 'deleted') {
+      // `?tab=` is a search param on the SAME route, so leaving this view does not
+      // unmount the page and `restoreTarget` would outlive it: come back later and
+      // the dialog remounts open, pulling focus and naming a work order the user
+      // stopped thinking about two tabs ago. Clear it on the way out.
+      setRestoreTarget(null);
+      return;
+    }
+    void loadDeletedWorkOrders();
+  }, [activeTab, loadDeletedWorkOrders]);
+
+  const handleRestoreClick = useCallback((wo: WorkOrderSummary) => {
+    setRestoreTarget(wo);
+  }, []);
+
+  /**
+   * Undo a soft delete (invariant 3 — the record was never destroyed, only hidden).
+   *
+   * Restore is server-GATED, so this is NON-OPTIMISTIC: nothing moves in the UI until
+   * the call resolves. On success both books are re-read, which is what takes the row
+   * out of the archive and puts it back on the orders tab; on failure the server's
+   * `detail` is surfaced verbatim so a retry is a decision rather than a guess, and
+   * whether the dialog survives depends on whether the ROW does — see the catch.
+   */
+  const handleConfirmRestore = useCallback(async () => {
+    const wo = restoreTarget;
+    if (!wo || restorePending) return;
+    setRestorePending(true);
+    try {
+      const result = await api.restoreWorkOrder(wo.id);
+      const skipped = result?.skipped_material_allocations ?? [];
+      // Two ways this restore can SUCCEED and still not do everything asked, and
+      // `warning` is the house variant for exactly that — `success` would hide the
+      // shortfall and send a planner looking for something that is on no list they
+      // can open, or running a job whose material demand quietly went missing.
+      //
+      //  1. Ties the delete cancelled that could not be re-opened (the part was
+      //     reclassified into something the shop PRODUCES while the WO was deleted).
+      //     The job then runs with no demand for that material: no shortage shows and
+      //     stock is never deducted until a count disagrees. It has to be re-tied by
+      //     hand.
+      //  2. A terminal status. The archive deliberately lists complete/closed/
+      //     cancelled work orders, but the default orders list excludes exactly those
+      //     — so such a row leaves the Deleted tab without appearing on the other one.
+      const offActiveList = TERMINAL_WO_STATUSES.includes(wo.status);
+      const statusNote = offActiveList
+        ? ` It is ${wo.status}, so it stays off the default work order list until its status changes.`
+        : '';
+      if (skipped.length > 0) {
+        showToast(
+          'warning',
+          `${wo.work_order_number} restored, but ${skipped.length} material tie` +
+            `${skipped.length === 1 ? '' : 's'} did not come back — re-tie ` +
+            `${skipped.length === 1 ? 'it' : 'them'} by hand before the job runs.` +
+            statusNote
+        );
+      } else if (offActiveList) {
+        showToast('warning', `${wo.work_order_number} restored.${statusNote}`);
+      } else {
+        showToast('success', `${wo.work_order_number} restored`);
+      }
+      setRestoreTarget(null);
+      await Promise.all([loadWorkOrders(), loadDeletedWorkOrders()]);
+    } catch (err: any) {
+      showToast('error', err?.response?.data?.detail || 'Failed to restore work order');
+      // A 4xx means the SERVER disagrees with what this table is showing —
+      // overwhelmingly "Work order is not deleted", i.e. somebody else restored it
+      // while this archive sat open. Re-read so the phantom row goes away, and close
+      // the dialog WITH it: the re-read drops the row the dialog names, so leaving it
+      // up would offer an enabled Restore button for a work order that is no longer in
+      // the table and whose every retry can only 400 again.
+      //
+      // On 5xx/offline neither happens. That says nothing about the row — it is still
+      // real and still deleted — so the dialog stays open where a retry is one click,
+      // and a failing re-read is not allowed to swap the archive for an error state
+      // over a transient blip.
+      const statusCode = err?.response?.status;
+      if (typeof statusCode === 'number' && statusCode >= 400 && statusCode < 500) {
+        setRestoreTarget(null);
+        await loadDeletedWorkOrders();
+      }
+    } finally {
+      setRestorePending(false);
+    }
+  }, [restoreTarget, restorePending, showToast, loadWorkOrders, loadDeletedWorkOrders]);
+
+  /**
+   * The archive's search, filtered CLIENT-side over rows already in hand.
+   *
+   * The archive grows monotonically — nothing ages out, and it keeps the
+   * complete/closed/cancelled rows the live list excludes — so within a year finding
+   * one work order means paging 25 at a time. A server `search` param would mean a
+   * second race surface on a view whose whole read is already latched, for no gain
+   * over filtering an array we have fetched; Purchasing's deleted-PO book does the
+   * same. Matches the fields somebody actually arrives knowing: the WO number, the
+   * part, and whose job it was.
+   */
+  const filteredDeletedWorkOrders = useMemo(() => {
+    const term = debouncedDeletedSearch.toLowerCase();
+    if (!term) return deletedWorkOrders;
+    return deletedWorkOrders.filter((wo) =>
+      [wo.work_order_number, wo.part_number, wo.part_name, wo.customer_name].some((field) =>
+        (field || '').toLowerCase().includes(term)
+      )
+    );
+  }, [deletedWorkOrders, debouncedDeletedSearch]);
+
+  /**
+   * Columns for the archive — written out rather than bent out of
+   * `buildWorkOrderColumns`, on purpose.
+   *
+   * `GET /work-orders/{id}` 404s on a soft-deleted work order, and that builder emits
+   * TWO unconditional detail links (the work-order number cell and the row-actions
+   * chevron) that no `undefined` handler can switch off. Every other action it carries
+   * — Release, Duplicate, Save as template, Delete, the inline due-date pencil — is
+   * likewise something a deleted row cannot honor: Duplicate and Save-as-template read
+   * the source WO through that same 404ing endpoint, and Save-as-template would mint a
+   * template pointing at a dead job. So this view offers exactly one verb, Restore, and
+   * the table below passes no `onRowClick`.
+   */
+  const deletedWorkOrderColumns = useMemo<Array<DataTableColumn<WorkOrderSummary>>>(
+    () => [
+      {
+        key: 'work_order_number',
+        header: 'Work Order',
+        sortable: true,
+        accessor: (wo) => wo.work_order_number,
+        render: (wo) => (
+          <div className="min-w-0">
+            {/* Plain text, not a Link — the detail route 404s on a deleted row. */}
+            <p className="font-semibold text-surface-900">{wo.work_order_number}</p>
+            {wo.unit_number ? (
+              <div className="mt-1">
+                <UnitBadge unitNumber={wo.unit_number} size="sm" />
+              </div>
+            ) : null}
+          </div>
+        ),
+      },
+      {
+        key: 'part',
+        header: 'Part',
+        sortable: true,
+        accessor: (wo) => wo.part_number ?? '',
+        csv: (wo) => wo.part_number ?? '',
+        render: (wo) => (
+          <div>
+            <p className="font-medium text-surface-900">
+              {wo.part_number || (wo.work_order_type === 'laser_cutting' ? 'Nest package' : '—')}
+            </p>
+            <p className="text-sm text-surface-500 line-clamp-1">
+              {wo.part_name || (!wo.part_number && wo.work_order_type === 'laser_cutting' ? 'Laser sheet runs' : '')}
+            </p>
+          </div>
+        ),
+      },
+      {
+        key: 'customer',
+        header: 'Customer',
+        sortable: true,
+        accessor: (wo) => wo.customer_name ?? '',
+        className: 'text-surface-600',
+        // Same position it holds on the live table. "Whose job was it" is a primary
+        // way people identify a work order they are hunting for, and without the
+        // column the CSV export of the archive omits it too.
+        render: (wo) => wo.customer_name || '—',
+      },
+      {
+        key: 'status',
+        header: 'Status',
+        sortable: true,
+        accessor: (wo) => wo.status,
+        // Load-bearing on THIS table: the server drops its terminal-status exclusion on
+        // the deleted view, so a complete/closed/cancelled job appears here and the
+        // reader has to be able to see which it is before restoring it.
+        render: (wo) => <StatusCell status={wo.status} />,
+      },
+      {
+        key: 'quantity_ordered',
+        header: 'Qty',
+        sortable: true,
+        align: 'right',
+        accessor: (wo) => Number(wo.quantity_ordered || 0),
+        csv: (wo) => String(Number(wo.quantity_ordered || 0)),
+        render: (wo) => <span className="tabular-nums">{Number(wo.quantity_ordered || 0)}</span>,
+      },
+      {
+        key: 'due_date',
+        header: 'Due Date',
+        sortable: true,
+        accessor: (wo) => wo.due_date ?? '',
+        csv: (wo) => (wo.due_date ? formatCentralDate(wo.due_date) : ''),
+        // No pencil and no OVERDUE badge: a deleted job is on no schedule, so it is not
+        // late, and `PUT /work-orders/{id}` has nothing to reschedule.
+        render: (wo) => (
+          <span className="text-sm text-surface-700">{wo.due_date ? formatCentralDate(wo.due_date) : '—'}</span>
+        ),
+      },
+      {
+        key: 'deleted_at',
+        header: 'Deleted',
+        sortable: true,
+        accessor: (wo) => wo.deleted_at ?? '',
+        // UTC over the wire, rendered in shop-local Central like every other timestamp.
+        render: (wo) => (wo.deleted_at ? formatCentralDateTime(wo.deleted_at) : '—'),
+        csv: (wo) => (wo.deleted_at ? formatCentralDateTime(wo.deleted_at) : ''),
+      },
+      {
+        key: 'deleted_by_name',
+        header: 'Deleted By',
+        sortable: true,
+        accessor: (wo) => wo.deleted_by_name ?? '',
+        // Null when that user row is gone. A neutral dash, not a guess about who it
+        // was — the audit log still holds the actor either way.
+        render: (wo) => wo.deleted_by_name || <span className="text-surface-500">—</span>,
+        csv: (wo) => wo.deleted_by_name ?? '',
+      },
+      {
+        key: 'actions',
+        header: 'Actions',
+        align: 'center',
+        // No stopPropagation wrapper: this DataTable passes no onRowClick, so there is
+        // nothing to stop. One "just in case" is an inert handler that reads as if row
+        // click-through exists here — and it does not, deliberately.
+        render: (wo) => (
+          <LoadingButton
+            variant="secondary"
+            size="sm"
+            loading={restorePending && restoreTarget?.id === wo.id}
+            loadingText="Restoring…"
+            disabled={restorePending}
+            onClick={() => handleRestoreClick(wo)}
+            aria-label={`Restore work order ${wo.work_order_number}`}
+          >
+            Restore
+          </LoadingButton>
+        ),
+      },
+    ],
+    [restorePending, restoreTarget, handleRestoreClick]
+  );
+
+  // Mobile twin of the archive row. No onClick (the detail route 404s) and no verb but
+  // Restore, same as the table.
+  const renderDeletedWorkOrderCard = useCallback(
+    (wo: WorkOrderSummary) => (
+      <MobileDataCard
+        title={wo.work_order_number}
+        subtitle={wo.customer_name || undefined}
+        badge={<StatusBadge status={wo.status} />}
+        fields={[
+          {
+            label: 'Part',
+            value: wo.part_number || (wo.work_order_type === 'laser_cutting' ? 'Nest package' : '—'),
+          },
+          { label: 'Qty', value: <span className="tabular-nums">{Number(wo.quantity_ordered || 0)}</span> },
+          { label: 'Due', value: wo.due_date ? formatCentralDate(wo.due_date) : '—' },
+          { label: 'Deleted', value: wo.deleted_at ? formatCentralDateTime(wo.deleted_at) : '—' },
+          { label: 'Deleted By', value: wo.deleted_by_name || '—' },
+        ]}
+        actions={
+          // Same as the table cell: no stopPropagation guard, because MobileDataCard
+          // is given no onClick here — the detail route 404s on a deleted row.
+          <div className="flex justify-end">
+            <LoadingButton
+              variant="secondary"
+              size="sm"
+              loading={restorePending && restoreTarget?.id === wo.id}
+              loadingText="Restoring…"
+              disabled={restorePending}
+              onClick={() => handleRestoreClick(wo)}
+              aria-label={`Restore work order ${wo.work_order_number}`}
+            >
+              Restore
+            </LoadingButton>
+          </div>
+        }
+      />
+    ),
+    [restorePending, restoreTarget, handleRestoreClick]
+  );
 
   // --- Inline due-date edit ------------------------------------------------
   // A due date is a promise date feeding OTD (`must_ship_by || due_date`), so a
@@ -939,6 +1323,14 @@ export default function WorkOrders() {
   // loading gate below, and rendered by every branch. A deep link to
   // ?tab=templates used to land on the full-page skeleton — which only the WORK
   // ORDER fetch ever clears — leaving the tab it asked for unreachable.
+  //
+  // The nest-import wizard is mounted HERE, inside the header, rather than down in
+  // the orders-tab return: the button that opens it lives in this fragment, which
+  // every branch renders, so a wizard mounted anywhere else is a live button that
+  // does nothing on the Templates and Deleted tabs. Everyone who can see either tab
+  // clears `canImportNests`, so it was inert for all of them. Keeping the control
+  // and its dialog in one place is what stops the next tab reopening the hole; the
+  // Modal portals to document.body, so sitting inside the header costs no layout.
   const pageHeader = (
     <div className="page-header mb-0">
       <div className="min-w-0">
@@ -971,18 +1363,36 @@ export default function WorkOrders() {
           New Work Order
         </Link>
       </div>
+      {canImportNests && (
+        <LaserNestImportWizard
+          open={nestWizardOpen}
+          onClose={() => setNestWizardOpen(false)}
+          onImported={handleNestPackageImported}
+        />
+      )}
     </div>
   );
 
   // Hand-rolled rather than the <Tabs> primitive, matching the neighbouring
   // Inventory / Purchasing / Warehouse pages.
-  const tabStrip = canEditWorkOrders ? (
+  //
+  // Each entry is gated on the permission its OWN view needs, not on one blanket
+  // gate: Templates on work_orders:edit (the trio every template verb is role-gated
+  // to), Deleted on the admin/manager (+superuser) population that `deleted_only=true`
+  // and the restore verb admit. PLATFORM_ADMIN is deliberately outside the Deleted
+  // gate even though the backend's require_role short-circuits for it — the house
+  // convention (see Purchasing) errs toward a hidden control over a button that 403s.
+  // The strip renders as soon as any view beyond the list is visible, so nobody who
+  // can reach a tab is left without a way back off it.
+  const visibleTabs: Array<{ id: WorkOrdersTab; label: string }> = [
+    { id: 'orders', label: 'Work Orders' },
+    ...(canEditWorkOrders ? [{ id: 'templates' as const, label: 'Templates' }] : []),
+    ...(canDeleteWorkOrders ? [{ id: 'deleted' as const, label: 'Deleted' }] : []),
+  ];
+  const tabStrip = visibleTabs.length > 1 ? (
     <div className="border-b border-slate-700">
       <nav className="-mb-px flex space-x-8">
-        {([
-          { id: 'orders' as const, label: 'Work Orders' },
-          { id: 'templates' as const, label: 'Templates' },
-        ]).map((tab) => (
+        {visibleTabs.map((tab) => (
           <button
             key={tab.id}
             type="button"
@@ -1013,6 +1423,116 @@ export default function WorkOrders() {
           // A template's output is a DRAFT nobody has reviewed, so the hand-off
           // is the same as Duplicate's: land on the new work order.
           onUsed={(result) => navigate(`/work-orders/${result.work_order.id}`)}
+          // A template whose source work order was deleted names restoring it as one
+          // of the two fixes. That fix now has a screen — the Deleted tab above — so
+          // the panel links at it for the population that can actually use it, and
+          // names them for everybody else.
+          canRestoreWorkOrders={canDeleteWorkOrders}
+        />
+      </div>
+    );
+  }
+
+  // The archive is its own view over its own request, and — like Templates — it
+  // returns ABOVE the work-order loading gate below. `loading` is cleared only by
+  // `loadWorkOrders`'s finally, so a deep link to ?tab=deleted falling through to that
+  // gate would land on a work-order skeleton and sit there until a fetch this view
+  // does not use resolves.
+  if (activeTab === 'deleted') {
+    return (
+      <div className="space-y-5 sm:space-y-6">
+        {pageHeader}
+        {tabStrip}
+
+        <div className="flex items-start gap-2 rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+          <TrashIcon className="h-5 w-5 flex-shrink-0" aria-hidden="true" />
+          {/* "where they still can be" is a hedge, not hedging. A tie the delete
+              cancelled and a later nest re-import then DETACHED comes back cancelled,
+              and the restore response reports no skip for it — so the toast cannot
+              tell anyone, and an unqualified promise here is the last thing they read
+              before the job runs with no demand for that material. Same wording as the
+              confirm dialog, which already got this right. */}
+          <p>
+            These work orders are deleted records. They are off scheduling, the dispatch board and every
+            shop-floor queue, and nothing can be booked against them. Restore one to put it back in the active
+            book — the material ties the delete cancelled are re-opened where they still can be.
+          </p>
+        </div>
+
+        {/* Same control as the orders tab's search, over the archive's own state. The
+            archive never ages out and keeps the terminal-status rows the live list
+            drops, so it only grows; without this, finding one job is paging 25 at a
+            time. */}
+        <div className="card rounded-sm border-fd-line p-2.5 sm:p-3">
+          <div className="relative min-w-0">
+            <MagnifyingGlassIcon className="h-5 w-5 absolute left-4 top-1/2 transform -translate-y-1/2 text-surface-400" />
+            <input
+              type="text"
+              placeholder="Search by WO#, part, or customer..."
+              aria-label="Search deleted work orders"
+              value={deletedSearch}
+              onChange={(e) => setDeletedSearch(e.target.value)}
+              className="input pl-11"
+            />
+          </div>
+        </div>
+
+        <DataTable
+          columns={deletedWorkOrderColumns}
+          data={filteredDeletedWorkOrders}
+          rowKey={(wo) => wo.id}
+          // No onRowClick, and no detail link in any cell: GET /work-orders/{id} 404s
+          // on a soft-deleted row, so click-through would read as the app breaking.
+          rowClassName={() => 'opacity-70'}
+          loading={deletedLoading}
+          // Named rather than DataTable's generic "Couldn't load this data." — on this
+          // page a failed read has to be distinguishable from an empty archive, which
+          // is the answer somebody stops looking on.
+          error={deletedError ? 'Could not load deleted work orders.' : false}
+          onRetry={loadDeletedWorkOrders}
+          defaultSort={{ key: 'deleted_at', dir: 'desc' }}
+          pageSize={25}
+          csvExport={{ filename: 'deleted-work-orders' }}
+          mobileCards={renderDeletedWorkOrderCard}
+          // An empty archive and an archive the search emptied are different facts, and
+          // saying "nothing has been deleted" over a filtered-out row sends someone
+          // looking somewhere else for a job that is right here.
+          empty={{
+            icon: TrashIcon,
+            title: debouncedDeletedSearch ? 'No matching deleted work orders' : 'No deleted work orders',
+            description: debouncedDeletedSearch
+              ? 'No deleted work order matches that search. Clear it to see the whole archive.'
+              : 'Deleted work orders appear here so they can be restored.',
+          }}
+        />
+
+        {/* Restore is server-GATED, so it stays NON-optimistic: the dialog holds
+            `pending` while the call is in flight and the row leaves the archive only
+            after the server answers. Unlike the deleted-PO twin this one DOES confirm,
+            because the restore can come back partial (ties it refused to re-open) and
+            because a terminal-status job reappears on no list — both are worth saying
+            before the click, not only in the toast afterwards. */}
+        <ConfirmDialog
+          open={restoreTarget !== null}
+          title="Restore Work Order"
+          message={
+            restoreTarget
+              ? `Restore work order ${restoreTarget.work_order_number}?\n\n` +
+                'It returns to active lists, scheduling and shop floor queues, and the material ties the ' +
+                'delete cancelled are re-opened where they still can be.' +
+                (TERMINAL_WO_STATUSES.includes(restoreTarget.status)
+                  ? `\n\nIt is ${restoreTarget.status}, so it will not appear on the default work order ` +
+                    'list until its status changes.'
+                  : '')
+              : ''
+          }
+          confirmLabel="Restore"
+          pending={restorePending}
+          variant="info"
+          onConfirm={handleConfirmRestore}
+          onCancel={() => {
+            if (!restorePending) setRestoreTarget(null);
+          }}
         />
       </div>
     );
@@ -1246,14 +1766,6 @@ export default function WorkOrders() {
         </div>
       )}
 
-      {canImportNests && (
-        <LaserNestImportWizard
-          open={nestWizardOpen}
-          onClose={() => setNestWizardOpen(false)}
-          onImported={handleNestPackageImported}
-        />
-      )}
-
       {/* Duplicate a work order's plan onto a new draft. On success we navigate
           to the new WO rather than refreshing this list — a draft that nobody
           reviews is worse than no copy at all. */}
@@ -1304,8 +1816,8 @@ export default function WorkOrders() {
         message={
           deleteTarget
             ? CURRENT_WORK_ORDER_STATUSES.includes(deleteTarget.status)
-              ? `Delete current work order ${deleteTarget.work_order_number}?\n\nThis removes it from active lists, scheduling, and shop floor queues while preserving the record for audit/restore.`
-              : `Delete work order ${deleteTarget.work_order_number}?\n\nThis removes it from active lists while preserving the record for audit/restore.`
+              ? `Delete current work order ${deleteTarget.work_order_number}?\n\nThis removes it from active lists, scheduling, and shop floor queues while preserving the record for audit/restore.\n\nYou can put it back from the Deleted tab.`
+              : `Delete work order ${deleteTarget.work_order_number}?\n\nThis removes it from active lists while preserving the record for audit/restore.\n\nYou can put it back from the Deleted tab.`
             : ''
         }
         confirmLabel="Delete"

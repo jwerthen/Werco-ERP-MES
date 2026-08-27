@@ -1528,13 +1528,68 @@ def list_work_orders(
     status: Optional[WorkOrderStatus] = None,
     search: Optional[str] = None,
     include_deleted: bool = Query(False, description="Include soft-deleted work orders (admin only)"),
+    deleted_only: bool = Query(
+        False,
+        description="Return ONLY soft-deleted work orders (the restore view). Default false = live WOs only.",
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """List work orders with summary info"""
+    """List work orders with summary info.
+
+    ``deleted_only=true`` inverts the soft-delete filter and returns ONLY the
+    company's soft-deleted work orders, each carrying ``is_deleted`` / ``deleted_at`` /
+    ``deleted_by_name`` so the caller can decide whether to restore it (via
+    ``POST /work-orders/{id}/restore``, ADMIN/MANAGER). Without this a deleted work order
+    is invisible to every API caller and nothing can be restored.
+
+    UNLIKE the PO and vendor restore views, this one DOES carry its own role gate:
+    ADMIN/MANAGER, mirroring exactly the population ``require_role`` admits on
+    ``DELETE /work-orders/{id}`` and ``POST /work-orders/{id}/restore`` (superusers and
+    platform admins included). A work-order archive is not a view of rows the same
+    reader could already see -- the *live* list is role-open to every authenticated
+    user, including operators, so leaving the archive ungated would put every deleted
+    job in front of a population that can neither delete nor restore one. The gate is an
+    explicit in-handler check rather than a router dependency because it applies to this
+    ONE parameter; the endpoint dependency stays ``get_current_user``.
+
+    ``deleted_only`` WINS over ``include_deleted`` if both are passed -- it is the
+    narrower, explicit view, and the union is not a thing anybody asked for. Note that
+    ``include_deleted`` itself is unchanged: an ADMIN passing it still gets live AND
+    deleted rows mixed together, and those rows still report ``is_deleted: null``, i.e.
+    they stay indistinguishable from live ones in the payload exactly as they are today.
+    Non-null provenance means "came from the restore view", nothing else.
+    """
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     response.headers["Pragma"] = "no-cache"
+
+    # The archive gate. Mirrors ``deps.require_role([UserRole.ADMIN, UserRole.MANAGER])``
+    # clause for clause (deps.py) rather than hard-coding the two roles: it admits
+    # ``is_superuser`` whatever the role column says, and PLATFORM_ADMIN, BOTH before the
+    # role test. Miss either and the same person who can DELETE a work order gets 403'd
+    # from the only view that would let them undo it. Detail string kept byte-identical to
+    # require_role's so an archive refusal is indistinguishable from a delete/restore one.
+    #
+    # NOT ``status.HTTP_403_FORBIDDEN``: this handler declares a query param named
+    # ``status``, which shadows the fastapi ``status`` module for the whole function body
+    # -- that expression raises AttributeError and serves 500 instead of 403, and only
+    # when the gate actually fires.
+    if deleted_only and not (
+        current_user.is_superuser
+        or current_user.role == UserRole.PLATFORM_ADMIN
+        or current_user.role in (UserRole.ADMIN, UserRole.MANAGER)
+    ):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    # Tenancy is unconditional and unchanged -- company_id from get_current_company_id
+    # scopes BOTH views. ``deleted_only`` only ever flips the is_deleted predicate; it can
+    # never widen the tenant scope.
+    #
+    # The joined part deliberately carries NO ``is_deleted`` predicate (it never did): a
+    # deleted work order can legitimately point at a soft-deleted part, and blanking
+    # part_number/part_name on the archive would erase exactly the identifying information
+    # a reader uses to decide whether to restore the job.
     query = (
         db.query(WorkOrder)
         .filter(WorkOrder.company_id == company_id)
@@ -1544,14 +1599,32 @@ def list_work_orders(
         )
     )
 
+    if deleted_only:
+        # The restore view. Tested FIRST so it wins over ``include_deleted``: folding it
+        # into the branch below would hand an ADMIN who passed both the UNION (live +
+        # deleted) instead of the archive. The one-line
+        # ``is_deleted == (True if deleted_only else False)`` form the PO/vendor twins use
+        # does not transplant here, because this endpoint's false branch carries the extra
+        # include_deleted/ADMIN condition.
+        query = query.filter(WorkOrder.is_deleted == True)  # noqa: E712
     # Filter out soft-deleted unless explicitly requested by admin
-    if not include_deleted or current_user.role != UserRole.ADMIN:
+    elif not include_deleted or current_user.role != UserRole.ADMIN:
         query = query.filter(WorkOrder.is_deleted == False)
 
     if status:
         query = query.filter(WorkOrder.status == status)
-    else:
+    elif not deleted_only:
         # Default: exclude complete/closed/cancelled (only show active work orders)
+        #
+        # DELIBERATELY SKIPPED on the deleted view -- do not "tidy" this back into a plain
+        # ``else``. A soft-deleted work order can sit in ANY status (WorkOrder.soft_delete
+        # leaves ``status`` untouched), and a COMPLETE- or CANCELLED-then-deleted job is
+        # among the likeliest things somebody wants back. Applying this exclusion here
+        # would hide those rows from the ONLY list that can see them, so the restore
+        # control could never be offered for them and nothing else in the API would reach
+        # them either: an archive that hides finished jobs is empty exactly when someone
+        # needs it. An explicit ``?status=`` still narrows the deleted view -- that is the
+        # branch above, which both views share, as ``search`` below likewise does.
         query = query.filter(
             WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED])
         )
@@ -1571,15 +1644,72 @@ def list_work_orders(
             )
         )
 
-    work_orders = query.order_by(WorkOrder.priority, WorkOrder.due_date).offset(skip).limit(limit).all()
+    # ``WorkOrder.id`` is a TIEBREAKER, not decoration -- do not tidy it away. priority and
+    # due_date tie constantly in a real shop (a whole day's jobs share both), and this
+    # endpoint is paged with OFFSET/LIMIT by every caller -- the frontend walks it in
+    # 500-row windows, on BOTH views. Postgres guarantees no row order at all among tied
+    # sort keys, so two OFFSET windows over one tied block can repeat a work order and
+    # drop another silently. Pre-existing exposure on the live list, hardened here rather
+    # than a bug the deleted view introduced; the archive only made it reachable from a
+    # second screen.
+    work_orders = query.order_by(WorkOrder.priority, WorkOrder.due_date, WorkOrder.id).offset(skip).limit(limit).all()
     # Reconcile-on-read: a concurrent-write conflict here is benign (idempotent),
     # so it must NOT 500 the list -- _reconcile_and_commit swallows StaleDataError.
     # AUD-3: terminal reconcile-driven transitions are audited to the requesting user.
-    _reconcile_and_commit(db, work_orders, current_user, company_id)
+    #
+    # NOT RUN on the deleted view, and that carve-out is load-bearing. The reconcile
+    # filters only TERMINAL_WO_STATUSES (work_order_state_service) and carries NO
+    # is_deleted predicate anywhere -- it has never been handed a deleted row because this
+    # list never returned one. Run it over the archive and merely OPENING the restore
+    # screen would drive a soft-deleted RELEASED/IN_PROGRESS job to COMPLETE from stale
+    # labor evidence, write audit rows, refresh scheduling, and fire the FG receipt +
+    # gated backflush -- inventory movements against a job somebody deleted, caused by a
+    # GET, with no actor intent and no reason recorded. The archive is a read of the
+    # tombstones, not a resumption of the work; the reconcile resumes when the row is
+    # restored and shows up on the live list again.
+    if not deleted_only:
+        _reconcile_and_commit(db, work_orders, current_user, company_id)
+
+    # Resolve deleted_by -> display name in ONE batched query, and ONLY for the deleted
+    # view. SoftDeleteMixin.deleted_by is a bare Integer column with no FK/relationship,
+    # so there is nothing to joinedload and the alternative is a lookup per row. On the
+    # default path this dict stays empty, NO query is emitted at all, and the loop below
+    # reads None out of it -- that is what keeps the unset parameter inert.
+    #
+    # Not company-scoped, on purpose: deleted_by is whoever's session performed the
+    # delete, and a platform admin acting inside this company is not a user row of it, so
+    # scoping would blank exactly the name a reader most needs. The id is read off our own
+    # already-tenant-scoped row and never comes from the caller, so this cannot be steered
+    # into enumerating another tenant's users. It discloses nothing new either:
+    # AuditService already snapshots the same actor's full_name onto this tenant's
+    # audit_log row for the very same delete.
+    #
+    # It also deliberately applies NO ``is_active`` / ``is_deleted`` filter to User:
+    # provenance must survive the deleter's own departure. Adding one would silently
+    # regress the name to "Unknown" for exactly the deletes people ask about most -- the
+    # ones done by someone who has since left.
+    #
+    # User.full_name is a plain Python property, not a mapped column, so it cannot be
+    # SELECTed -- pull first_name/last_name and join them here.
+    deleted_by_names: dict[int, str] = {}
+    if deleted_only:
+        deleter_ids = {wo.deleted_by for wo in work_orders if wo.deleted_by is not None}
+        if deleter_ids:
+            for user_id, first_name, last_name in db.query(User.id, User.first_name, User.last_name).filter(
+                User.id.in_(deleter_ids)
+            ):
+                name = f"{first_name or ''} {last_name or ''}".strip()
+                if name:
+                    deleted_by_names[user_id] = name
 
     result = []
     for wo in work_orders:
         metrics = work_order_operation_progress(wo)
+        # Hand-built kwarg by kwarg, and it MUST stay that way. WorkOrderSummary sets
+        # from_attributes, and is_deleted/deleted_at are real SoftDeleteMixin columns on
+        # WorkOrder -- so "simplifying" this into WorkOrderSummary.model_validate(wo)
+        # would make every LIVE row answer ``is_deleted: false``, killing the tri-state
+        # silently and putting a Restore control on jobs nobody deleted.
         summary = WorkOrderSummary(
             id=wo.id,
             # Carried so the list's inline due-date edit can PUT with the lock held.
@@ -1606,6 +1736,16 @@ def list_work_orders(
             operation_progress_percent=metrics["operation_progress_percent"],
             due_date=wo.due_date,
             customer_name=wo.customer_name,
+            # Left at their None defaults on every other path -- see WorkOrderSummary.
+            # Off the deleted view the ternary short-circuits on ``deleted_only``, so
+            # ``.get()`` never runs and no lookup dict was ever built; that is what keeps
+            # the unset parameter inert, not the emptiness of the dict. ON the archive a
+            # dict MISS -- a row whose deleted_by is NULL (pre-mixin rows), or a deleter
+            # whose name came back blank and was skipped when the dict was built -- yields
+            # None, i.e. "somebody deleted this, we cannot say who", not an error.
+            is_deleted=wo.is_deleted if deleted_only else None,
+            deleted_at=wo.deleted_at if deleted_only else None,
+            deleted_by_name=(deleted_by_names.get(wo.deleted_by) if deleted_only else None),
         )
         result.append(summary)
 

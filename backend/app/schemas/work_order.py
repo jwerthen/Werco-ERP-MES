@@ -1029,6 +1029,28 @@ class WorkOrderSummary(UTCModel):
     customer_name: Optional[str]
     current_operation: Optional[str] = None
 
+    # Soft-delete provenance -- populated ONLY by the ``deleted_only=true`` view of
+    # GET /work-orders/ (the restore view). All three stay None on every other path,
+    # deliberately: the default list filters ``is_deleted == False`` and so never
+    # *asserts* deletion state, and a tri-state ``is_deleted`` lets one shared row
+    # renderer tell "this came from the restore view" from "this is a live work order"
+    # without threading the query param through the UI. Collapse the tri-state and a
+    # live row answers ``is_deleted: false``, which that renderer reads as provenance
+    # and offers a Restore control on a job nobody deleted.
+    #
+    # ``from_attributes = True`` is set below and ``is_deleted`` / ``deleted_at`` are
+    # REAL COLUMNS on WorkOrder (SoftDeleteMixin), so the tri-state survives only
+    # because the one construction site in the backend hand-builds kwargs. Never
+    # ``WorkOrderSummary.model_validate(work_order_row)`` -- see the comment on that
+    # construction site in api/endpoints/work_orders.py::list_work_orders.
+    #
+    # ``deleted_by_name`` is resolved from ``users`` (SoftDeleteMixin.deleted_by is a
+    # bare Integer column with no FK relationship to load) and stays None when that
+    # user row no longer exists or carries no name.
+    is_deleted: Optional[bool] = None
+    deleted_at: Optional[datetime] = None
+    deleted_by_name: Optional[str] = None
+
     @field_serializer(
         "quantity_ordered",
         "quantity_complete",

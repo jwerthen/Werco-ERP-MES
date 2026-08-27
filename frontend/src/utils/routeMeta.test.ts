@@ -65,6 +65,17 @@ describe('getRouteTitle', () => {
     expect(getRouteTitle(loc('/work-orders', '?status=in_progress'))).toBe('Work Orders');
   });
 
+  it('titles the work-order Deleted tab, which is a TAB for the same reason', () => {
+    // The soft-delete archive: `/work-orders/deleted` would resolve as a work order
+    // whose id is the word "deleted", so it rides on `?tab=` like Templates — and
+    // needs its own title, or the top bar and the browser tab both say "Work Orders"
+    // while the screen is showing deleted ones.
+    expect(getRouteTitle(loc('/work-orders', '?tab=deleted'))).toBe('Deleted Work Orders');
+    expect(getRouteTitle(loc('/work-orders', '?status=complete&tab=deleted'))).toBe(
+      'Deleted Work Orders'
+    );
+  });
+
   it('falls back to the bare-path title when the query has no matching tab', () => {
     // Unknown tab value -> no query-title match -> static /warehouse title.
     expect(getRouteTitle(loc('/warehouse', '?tab=nope'))).toBe('Warehouse');

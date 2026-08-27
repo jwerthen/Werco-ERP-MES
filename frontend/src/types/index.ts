@@ -503,6 +503,43 @@ export interface WorkOrderDuplicateResult {
 }
 
 /**
+ * One material tie `POST /work-orders/{id}/restore` deliberately left CANCELLED.
+ *
+ * The soft delete auto-cancels every OPEN tie and the restore is its inverse, so a
+ * tie that does NOT come back is an omission the planner has to act on: the restored
+ * job carries no demand for that material, no shortage is raised, and stock is never
+ * deducted until a count disagrees.
+ *
+ * NOT the duplicate shape. The field names are the restore's own — `allocation_id`,
+ * not `source_allocation_id`; `work_order_operation_id`, not
+ * `source_work_order_operation_id` — because nothing here is a "source" row. Aliasing
+ * this onto `WorkOrderDuplicateSkippedAllocation` would compile against a shape the
+ * server does not send.
+ *
+ * `reason` is an OPEN vocabulary the server owns (today only `part_not_tieable`);
+ * render an unrecognized token verbatim rather than dropping the row.
+ */
+export interface WorkOrderRestoreSkippedAllocation {
+  allocation_id: number;
+  part_id: number;
+  work_order_operation_id: number | null;
+  reason: string;
+}
+
+/**
+ * `POST /work-orders/{id}/restore`.
+ *
+ * An envelope, not a bare message: the work order WAS restored either way, but a
+ * non-empty `skipped_material_allocations` means the restore was PARTIAL. A caller
+ * must say something when it is non-empty (the house `warning` toast) and stay quiet
+ * when it is not — a success toast over a partial restore hides the shortfall.
+ */
+export interface WorkOrderRestoreResponse {
+  message: string;
+  skipped_material_allocations: WorkOrderRestoreSkippedAllocation[];
+}
+
+/**
  * What USING a work order template would produce, read LIVE off the source work
  * order on every request.
  *
@@ -749,6 +786,21 @@ export interface WorkOrderSummary {
   due_date?: string;
   customer_name?: string;
   current_operation?: string;
+  /**
+   * Soft-delete provenance — populated ONLY by the deleted view
+   * (`GET /work-orders/?deleted_only=true`), `undefined` on every live row.
+   *
+   * That tri-state is the contract, not an accident of the serializer: a client
+   * reading "non-null `is_deleted` means this row came from the restore view" would
+   * otherwise offer a Restore control on a live work order. The backend hand-builds
+   * these three so a live row answers `null` rather than `false`. Do not fill them in
+   * on a fixture for a live row.
+   */
+  is_deleted?: boolean | null;
+  /** UTC ISO-8601 (`Z`). Render through `formatCentralDateTime`. */
+  deleted_at?: string | null;
+  /** Name of the actor who deleted it; null when that user row is gone. */
+  deleted_by_name?: string | null;
 }
 
 // --- Material ties (work-order material allocations) ------------------------
