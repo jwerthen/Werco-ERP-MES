@@ -19,6 +19,13 @@
  * start with seeing it. So the row renders, carries the reason in words, and its
  * Use action is disabled to match the server's 409.
  *
+ * The FIRST of those two fixes now has a screen: Work Orders → Deleted, the
+ * `deleted_only=true` archive with a Restore control on every row. Naming a fix the
+ * reader cannot perform is barely better than hiding the row, so the reason line
+ * links straight at it — for the admin/manager population that can actually restore
+ * (`canRestoreWorkOrders`), and names them for everyone else rather than offering a
+ * link that would silently bounce back to the list.
+ *
  * ---------------------------------------------------------------------------
  * EVERY WRITE HERE IS SERVER-GATED, THEREFORE NON-OPTIMISTIC
  * ---------------------------------------------------------------------------
@@ -34,6 +41,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   BookmarkSquareIcon,
   MagnifyingGlassIcon,
@@ -65,7 +73,24 @@ export interface WorkOrderTemplatesPanelProps {
    * split the Duplicate dialog uses, so the hand-off shape stays one thing.
    */
   onUsed: (result: WorkOrderDuplicateResult) => void;
+  /**
+   * Does this user hold the admin/manager (+superuser) tier that
+   * `GET /work-orders/?deleted_only=true` and `POST /work-orders/{id}/restore` admit?
+   *
+   * Only decides the WORDING of the "source work order deleted" line below: `true`
+   * links it at the Deleted tab, `false` names who can go there. Passed in rather
+   * than read from `useAuth` so this panel stays a presentation component with no
+   * provider requirement, and defaults to the narrower answer.
+   */
+  canRestoreWorkOrders?: boolean;
 }
+
+/**
+ * The one `plan.unavailable_reason` token with a fix that now has a screen. The
+ * vocabulary is the server's and is OPEN, so this is a match, never an assumption:
+ * any other token renders its own sentence and no pointer.
+ */
+const SOURCE_WORK_ORDER_DELETED_REASON = 'source_work_order_deleted';
 
 /** "3 ops · 21 nests · 63 runs · 2 ties" — only the parts that are non-zero. */
 function planSummaryParts(template: WorkOrderTemplate): string[] {
@@ -82,7 +107,10 @@ function planSummaryParts(template: WorkOrderTemplate): string[] {
   return parts;
 }
 
-export default function WorkOrderTemplatesPanel({ onUsed }: WorkOrderTemplatesPanelProps) {
+export default function WorkOrderTemplatesPanel({
+  onUsed,
+  canRestoreWorkOrders = false,
+}: WorkOrderTemplatesPanelProps) {
   const { showToast } = useToast();
   const [templates, setTemplates] = useState<WorkOrderTemplate[]>([]);
   const [loading, setLoading] = useState(true);
@@ -194,6 +222,17 @@ export default function WorkOrderTemplatesPanel({ onUsed }: WorkOrderTemplatesPa
                 className="mt-1 text-xs font-medium text-fd-red"
               >
                 {templateUnavailableSentence(template.plan.unavailable_reason)}
+                {template.plan.unavailable_reason === SOURCE_WORK_ORDER_DELETED_REASON &&
+                  (canRestoreWorkOrders ? (
+                    <>
+                      {' '}
+                      <Link to="/work-orders?tab=deleted" className="underline hover:no-underline">
+                        Find it on the Deleted tab.
+                      </Link>
+                    </>
+                  ) : (
+                    ' An admin or manager can restore it from the Deleted tab.'
+                  ))}
               </p>
             )}
           </div>
@@ -335,7 +374,7 @@ export default function WorkOrderTemplatesPanel({ onUsed }: WorkOrderTemplatesPa
         },
       },
     ],
-    []
+    [canRestoreWorkOrders]
   );
 
   const empty: DataTableEmpty = useMemo(
