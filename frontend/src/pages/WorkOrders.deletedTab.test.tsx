@@ -171,11 +171,12 @@ const deletedOverdue: WorkOrderSummary = {
 };
 
 /**
- * A template whose source work order was soft-deleted. Its row names restoring the
- * work order as one of the two fixes, and the wording depends on a prop this page
- * has to pass down (see the `canRestoreWorkOrders` block at the bottom).
+ * A template whose source work order was soft-deleted. The template still WORKS —
+ * the plan is read through the deleted work order — so its row carries a muted note
+ * rather than a refusal. Whether that note points at the archive depends on a prop
+ * this page has to pass down (see the `canRestoreWorkOrders` block at the bottom).
  */
-const deadTemplate: WorkOrderTemplate = {
+const deletedSourceTemplate: WorkOrderTemplate = {
   id: 9,
   name: 'Old weld fixture',
   notes: null,
@@ -185,19 +186,20 @@ const deadTemplate: WorkOrderTemplate = {
   updated_at: '2026-08-20T12:00:00Z',
   created_by: 3,
   plan: {
-    available: false,
-    unavailable_reason: 'source_work_order_deleted',
-    source_work_order_number: null,
-    source_status: null,
-    work_order_type: null,
-    sequential_operations: null,
-    priority: null,
-    operation_count: 0,
+    available: true,
+    unavailable_reason: null,
+    source_work_order_deleted: true,
+    source_work_order_number: 'WO-20260420-007',
+    source_status: 'complete',
+    work_order_type: 'production',
+    sequential_operations: true,
+    priority: 3,
+    operation_count: 4,
     nest_count: 0,
     planned_runs_total: 0,
     open_material_tie_count: 0,
-    work_centers: [],
-    source_quantity_ordered: null,
+    work_centers: ['WELD-1'],
+    source_quantity_ordered: 12,
   },
 };
 
@@ -877,12 +879,15 @@ describe('WorkOrders: the header actions work on every tab that shows them', () 
 });
 
 describe('WorkOrders: the Templates panel is told who can restore', () => {
-  it('wires canRestoreWorkOrders through, so a dead template LINKS at the archive', async () => {
-    // The four tests that pin this pointer render the panel directly and pass the prop
+  it('wires canRestoreWorkOrders through, so the deleted-source note LINKS at the archive', async () => {
+    // The tests that pin this pointer render the panel directly and pass the prop
     // themselves, so dropping the wiring HERE degrades in total silence: every admin
-    // would get the "an admin or manager can restore it" sentence — advice to go ask
-    // themselves — because the prop defaults to the narrower answer.
-    mockedApi.listWorkOrderTemplates.mockResolvedValue({ templates: [deadTemplate], total: 1 });
+    // would get the bare note, with no way to reach the job the note is about,
+    // because the prop defaults to the narrower answer.
+    mockedApi.listWorkOrderTemplates.mockResolvedValue({
+      templates: [deletedSourceTemplate],
+      total: 1,
+    });
 
     renderAt('/work-orders?tab=templates');
 
@@ -890,17 +895,22 @@ describe('WorkOrders: the Templates panel is told who can restore', () => {
     expect(link).toHaveAttribute('href', '/work-orders?tab=deleted');
   });
 
-  it('gives a SUPERVISOR the sentence instead — they hold work_orders:edit but not delete', async () => {
+  it('gives a SUPERVISOR the note alone — they hold work_orders:edit but not delete', async () => {
     // The gates genuinely differ: Templates is work_orders:edit (admin/manager/
     // supervisor), the archive is admin/manager (+superuser). A link would be a dead
-    // end — `?tab=deleted` falls back to the orders list for them.
+    // end — `?tab=deleted` falls back to the orders list for them. The note still
+    // stands: it is context about the source job, not an instruction, and the
+    // template is usable either way.
     mockUser.current = { id: 4, role: 'supervisor', is_superuser: false };
-    mockedApi.listWorkOrderTemplates.mockResolvedValue({ templates: [deadTemplate], total: 1 });
+    mockedApi.listWorkOrderTemplates.mockResolvedValue({
+      templates: [deletedSourceTemplate],
+      total: 1,
+    });
 
     renderAt('/work-orders?tab=templates');
 
     expect(
-      await screen.findByText(/an admin or manager can restore it from the Deleted tab/i)
+      await screen.findByText(/source work order was deleted — the saved plan still copies/i)
     ).toBeInTheDocument();
     expect(
       screen.queryByRole('link', { name: 'Find it on the Deleted tab.' })

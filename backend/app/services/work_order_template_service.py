@@ -44,18 +44,37 @@ nest count, open ties, work centers, type, pooled-vs-sequenced) so the planner s
 what they are about to get. There is no stored summary that can go stale, because
 there is no stored summary.
 
-WHAT AN UNAVAILABLE SOURCE DOES
--------------------------------
-The source work order is soft-deletable. ``tenant_query`` scopes ``company_id`` and
-NOTHING else (invariant 3), so every read of it here carries its own explicit
-``is_deleted == False``.
+WHAT A DELETED SOURCE DOES: NOTHING TO THE TEMPLATE
+---------------------------------------------------
+The source work order is soft-deletable, and a template **reads through** the
+tombstone: the plan summary is still computed off it, and ``POST /{id}/use`` still
+produces a DRAFT. That is an owner decision (2026-08-27) overriding the original
+refuse-on-deleted design — *"templates need to stay even if there is no work order
+present for it"*. A catalog entry that stops working because somebody tidied up a
+finished job is the worse failure: the name, the note and the one-click re-run are the
+curated part, and an unrelated action destroyed them.
 
-A template whose source is gone is **listed, flagged and refused** — not hidden and
-not auto-deleted. Hiding it is the mask trap invariant 3 documents: the planner's
-template silently vanishes and nothing says why. Deleting it destroys a curated name
-as a side effect of somebody removing a work order. Flagging it is the only option
-that lets the planner see the cause and act on it (restore the work order, or delete
-the template deliberately).
+**The invariant-3 tension, stated rather than argued away.** Invariant 3 says every
+read of a soft-deletable model carries its own ``is_deleted`` predicate, with four
+legitimate non-filterers: the delete verb, the restore verb, a duplicate probe, and a
+HISTORICAL RECORD. A template's source is the historical-record shape — the template
+permanently names the job it was saved from, and ``source_work_order_id`` is
+``NOT NULL`` with a plain FK and no ``ON DELETE``, so the template owns that row for
+the row's whole life and the row can never physically vanish underneath it
+(``work_orders.py``'s hard delete refuses 409 rather than orphaning one — that refusal
+exists *because* this read stopped filtering).
+
+The counter-argument is real: minting a NEW job from a deleted plan is closer to
+SELECTION than to reading a record, and selection is exactly what invariant 3 gates.
+It is not resolved, it is decided — and the half that stays gated is saving a template
+FROM a deleted work order, which is still 404 (:func:`resolve_catalogable_work_order`).
+An already-saved template is a catalog entry; a new one is a fresh selection.
+
+**Only the refusal is dropped, never the signal.** ``TemplatePlanSummary`` carries
+``source_work_order_deleted``, so every read still discloses that the job behind the
+name is gone. ``available`` now means the much narrower "the source row could not be
+resolved at all", which the FK makes near-unreachable and which is kept anyway: a
+defensive branch that can still answer is better than one that was deleted.
 
 TENANCY, AUDIT, ATOMICITY
 -------------------------
@@ -87,10 +106,19 @@ from app.services.audit_service import AuditService
 from app.services.material_tie_part_gate import part_is_tieable_material
 from app.services.work_order_duplicate_service import DuplicateResult, duplicate_work_order
 
-# Machine-readable reason a template cannot be used right now. Returned on the
-# summary so the list can disable the button WITH the cause, and echoed in the 409
-# detail so the two cannot disagree.
-UNAVAILABLE_SOURCE_DELETED = "source_work_order_deleted"
+# Machine-readable reason a template cannot be used at all. Returned on the summary so
+# the list can disable the button WITH the cause, and echoed in the 409 detail so the
+# two cannot disagree.
+#
+# ONE value, and it is deliberately NOT the one that used to live here.
+# ``source_work_order_deleted`` was retired as an *unavailability* reason when the owner
+# ruled that a deleted source must not stop a template from working (module docstring):
+# deletion is now disclosed on the summary as ``source_work_order_deleted: true`` while
+# ``available`` stays true. What is left is the case the ``NOT NULL`` FK makes
+# near-unreachable — the source ROW cannot be resolved at all (a cross-tenant id, or a
+# row that escaped the FK somehow). Kept rather than deleted, because a branch that can
+# still answer beats one that was removed on the argument that it cannot fire.
+UNAVAILABLE_SOURCE_MISSING = "source_work_order_missing"
 
 
 @dataclass
@@ -102,13 +130,20 @@ class TemplatePlanSummary:
     stale the first time somebody soft-deleted a nest on the source, and the planner
     would pick a template believing it carries 21 nests and get 20.
 
-    ``available`` is False when the source work order is soft-deleted or gone. The
-    template is still listed — see the module docstring on why hiding it would be
-    worse — with ``unavailable_reason`` naming the cause.
+    ``available`` is False only when the source work order row could not be RESOLVED —
+    not when it has been soft-deleted. A soft-deleted source is summarised in full and
+    is usable; it is disclosed through ``source_work_order_deleted`` instead. See the
+    module docstring for why, and for the invariant-3 tension that decision carries.
     """
 
     available: bool = True
     unavailable_reason: Optional[str] = None
+    # The disclosure that replaced the refusal. True means the job this template was
+    # saved from has been soft-deleted: the template still works and still produces the
+    # same DRAFT, but a planner reading the catalog should know the exemplar is in the
+    # archive — restoring it, or saving a fresh template from a current job, are both
+    # things they may want to do, and neither is discoverable if nothing says so.
+    source_work_order_deleted: bool = False
 
     source_work_order_number: Optional[str] = None
     source_status: Optional[str] = None
@@ -174,6 +209,33 @@ def live_templates_query(db: Session, company_id: int) -> Query:
     return tenant_query(db, WorkOrderTemplate, company_id).filter(WorkOrderTemplate.is_deleted == False)  # noqa: E712
 
 
+def templates_pointing_at_work_order(db: Session, work_order_id: int, company_id: int) -> Query:
+    """Every template row whose FK names ``work_order_id`` — **tombstones included**.
+
+    The one read in this module scoped to the FOREIGN KEY rather than to what a user
+    can see, and that is the whole point. ``work_order_templates.source_work_order_id``
+    is ``NOT NULL`` with a plain FK and no ``ON DELETE``, and Postgres does not consult
+    ``is_deleted`` before refusing to drop the row it points at. A soft-deleted
+    template is invisible in the catalog and still holds that reference just as hard as
+    a live one.
+
+    So the hard-delete guard in ``work_orders.py`` MUST come through here and not
+    through :func:`live_templates_query`: filtering tombstones out would let the
+    physical delete proceed into a ``ForeignKeyViolation`` — a 500 on prod that no test
+    on this repo's in-memory SQLite can reproduce, since SQLite runs with foreign-key
+    enforcement off. Refusing legibly is the behavior; soft-deleting the work order is
+    the remedy, and it is unaffected.
+
+    Company-scoped like every other probe on that path. A template in ANOTHER company
+    naming this work order is not a state any verb here can create (the save path
+    resolves the source company-scoped), and naming one in a refusal would leak that it
+    exists (invariant 1).
+    """
+    return tenant_query(db, WorkOrderTemplate, company_id).filter(
+        WorkOrderTemplate.source_work_order_id == work_order_id
+    )
+
+
 def _live_template_or_404(db: Session, template_id: int, company_id: int) -> WorkOrderTemplate:
     """Resolve one live template, or 404.
 
@@ -187,23 +249,49 @@ def _live_template_or_404(db: Session, template_id: int, company_id: int) -> Wor
 
 
 def resolve_source_work_order(db: Session, work_order_id: int, company_id: int) -> Optional[WorkOrder]:
-    """The live source work order behind a template, or ``None``.
+    """The source work order behind a template — **soft-deleted or not**.
 
-    Its own ``is_deleted == False`` — ``tenant_query`` does not filter tombstones and
-    an ``is_active``-style flag is a mask, not a filter (invariant 3). Returning
-    ``None`` rather than raising is deliberate: the LIST path turns it into an
-    ``unavailable`` flag on the summary, while the USE path turns it into a 409. One
-    resolver, two answers, so the list and the write can never disagree about which
-    templates are usable.
+    This is the one read in this module that deliberately carries no ``is_deleted``
+    predicate, i.e. the one place it departs from invariant 3's default. The
+    justification AND the counter-argument are in the module docstring under "WHAT A
+    DELETED SOURCE DOES"; the short version is that a template permanently NAMES the
+    job it was saved from and the ``NOT NULL`` FK means it owns that row for the row's
+    whole life, so this is the historical-record exception rather than a forgotten
+    filter. It is not a comfortable one — see the docstring — and it was the owner's
+    call, not an inference from the invariant.
+
+    **Tenancy is unchanged.** ``tenant_query`` still scopes ``company_id``, so a
+    cross-tenant id still resolves to ``None`` (invariant 1). Nothing about this change
+    widens what one company can see.
+
+    Returning ``None`` rather than raising is still deliberate, and it now means
+    something much narrower: the row could not be resolved AT ALL. The LIST path turns
+    that into ``available=False``, the USE path into a 409 — one resolver, two answers,
+    so the catalog and the write still cannot disagree. Deletion is no longer either
+    answer; it is disclosed as ``source_work_order_deleted`` on the summary.
+
+    The SELECTION half — which work order a NEW template may be saved from — is
+    :func:`resolve_catalogable_work_order`, and that one does filter.
     """
-    return (
-        tenant_query(db, WorkOrder, company_id)
-        .filter(
-            WorkOrder.id == work_order_id,
-            WorkOrder.is_deleted == False,  # noqa: E712
-        )
-        .first()
-    )
+    return tenant_query(db, WorkOrder, company_id).filter(WorkOrder.id == work_order_id).first()
+
+
+def resolve_catalogable_work_order(db: Session, work_order_id: int, company_id: int) -> Optional[WorkOrder]:
+    """The **live** work order a new template may be saved FROM, or ``None``.
+
+    Keeps invariant 3's explicit tombstone filter, because pointing a brand-new
+    template at a work order is SELECTION, not reading a record: a job somebody has
+    deleted is not a job the shop should be able to catalogue as one to re-run.
+
+    The asymmetry with :func:`resolve_source_work_order` is the design, not an
+    inconsistency — an already-saved template reads through a tombstone, a new one
+    cannot be created over one. Written as a wrapper so there is exactly one place that
+    knows how a template's source is fetched, with the predicate visible on top.
+    """
+    source = resolve_source_work_order(db, work_order_id, company_id)
+    if source is None or source.is_deleted:
+        return None
+    return source
 
 
 def plan_summaries_for(
@@ -242,8 +330,17 @@ def plan_summaries_for(
     here and nothing is written. The remaining skip reason, ``nest_runs_unavailable``,
     is documented as defensive and unreachable, so there is nothing to subtract for it.
 
-    Templates whose source is missing or soft-deleted get an ``available=False``
-    summary carrying only the reason. They are NOT dropped: see the module docstring.
+    A SOFT-DELETED source is summarised in full, exactly like a live one, and flagged
+    ``source_work_order_deleted``. The batched read below therefore carries no
+    ``is_deleted`` predicate — it must change in LOCKSTEP with
+    :func:`resolve_source_work_order` or a template the use path happily runs would
+    render with a blank plan, which is the "summary must match what the copy produces"
+    promise broken in the direction that matters.
+
+    Only a source that could not be resolved at all gets an ``available=False`` summary
+    carrying nothing but the reason. Such a template is still NOT dropped from the
+    list: hiding it is the mask trap invariant 3 documents — the planner's template
+    silently vanishes and nothing says why.
     """
     summaries: dict[int, TemplatePlanSummary] = {}
     if not templates:
@@ -251,21 +348,20 @@ def plan_summaries_for(
 
     source_ids = {template.source_work_order_id for template in templates}
 
+    # No ``is_deleted`` filter, in lockstep with ``resolve_source_work_order`` — a
+    # tombstoned source is summarised like any other. ``tenant_query`` still scopes
+    # ``company_id``, so this is narrower than it looks: it reads through a tombstone,
+    # never across a tenant.
     sources = {
         work_order.id: work_order
-        for work_order in tenant_query(db, WorkOrder, company_id)
-        .filter(
-            WorkOrder.id.in_(source_ids),
-            WorkOrder.is_deleted == False,  # noqa: E712
-        )
-        .all()
+        for work_order in tenant_query(db, WorkOrder, company_id).filter(WorkOrder.id.in_(source_ids)).all()
     }
-    live_source_ids = set(sources)
+    resolved_source_ids = set(sources)
 
     operation_rows = []
     nest_rows = []
     tie_rows = []
-    if live_source_ids:
+    if resolved_source_ids:
         # Operations + their work centers, in sequence order, so ``work_centers``
         # reads the way the traveler does rather than alphabetically.
         #
@@ -295,7 +391,7 @@ def plan_summaries_for(
             )
             .filter(
                 WorkOrderOperation.company_id == company_id,
-                WorkOrderOperation.work_order_id.in_(live_source_ids),
+                WorkOrderOperation.work_order_id.in_(resolved_source_ids),
             )
             .order_by(WorkOrderOperation.work_order_id, WorkOrderOperation.sequence, WorkOrderOperation.id)
             .all()
@@ -317,7 +413,7 @@ def plan_summaries_for(
             .filter(
                 LaserNest.company_id == company_id,
                 WorkOrderOperation.company_id == company_id,
-                WorkOrderOperation.work_order_id.in_(live_source_ids),
+                WorkOrderOperation.work_order_id.in_(resolved_source_ids),
             )
             .all()
         )
@@ -333,7 +429,7 @@ def plan_summaries_for(
             )
             .filter(
                 WorkOrderMaterialAllocation.company_id == company_id,
-                WorkOrderMaterialAllocation.work_order_id.in_(live_source_ids),
+                WorkOrderMaterialAllocation.work_order_id.in_(resolved_source_ids),
                 WorkOrderMaterialAllocation.status == AllocationStatus.OPEN,
             )
             .all()
@@ -392,9 +488,12 @@ def plan_summaries_for(
     for template in templates:
         source = sources.get(template.source_work_order_id)
         if source is None:
+            # Not the deleted case any more -- the read above sees tombstones. This is
+            # the source row failing to resolve at all, which the NOT NULL FK makes
+            # near-unreachable. Answered rather than crashed.
             summaries[template.id] = TemplatePlanSummary(
                 available=False,
-                unavailable_reason=UNAVAILABLE_SOURCE_DELETED,
+                unavailable_reason=UNAVAILABLE_SOURCE_MISSING,
             )
             continue
 
@@ -405,6 +504,9 @@ def plan_summaries_for(
         )
         summaries[template.id] = TemplatePlanSummary(
             available=True,
+            # Usable AND deleted is the ordinary state now, not a contradiction: the
+            # flag discloses, it does not gate.
+            source_work_order_deleted=bool(source.is_deleted),
             source_work_order_number=source.work_order_number,
             source_status=status_value,
             work_order_type=type_value,
@@ -721,7 +823,15 @@ def use_template(
     where a stale date reads as "late". (``must_ship_by`` is not carried either; that
     refusal lives in the duplicate service.)
 
-    Raises 409 when the source work order is gone, and propagates every refusal
+    **A SOFT-DELETED source is used normally.** It used to be a 409; the owner
+    overrode that (module docstring), because a catalog entry that stops working
+    because somebody deleted last month's job is the worse failure. Nothing about the
+    copy changes — ``duplicate_work_order`` never inspected whether the source was
+    deleted, it copies the object it is handed, and its own ``is_deleted`` predicates
+    are about PARTS and LASER NESTS rather than the source work order.
+
+    Raises 409 only when the source row cannot be resolved AT ALL, which the ``NOT
+    NULL`` FK makes near-unreachable, and propagates every refusal
     ``duplicate_work_order`` raises untouched. Flushes but never commits — wrap the
     call in ``atomic_transaction(db)``.
     """
@@ -730,9 +840,9 @@ def use_template(
         raise HTTPException(
             status_code=409,
             detail=(
-                f"Template '{template.name}' cannot be used: the work order it was saved from has been "
-                "deleted. Restore that work order, or delete this template and save a new one from a "
-                "current job."
+                f"Template '{template.name}' cannot be used: the work order it was saved from "
+                f"(#{template.source_work_order_id}) could not be found in this company. Delete this "
+                "template and save a new one from a current job."
             ),
         )
 
@@ -837,18 +947,20 @@ def summary_for_one(db: Session, template: WorkOrderTemplate, company_id: int) -
         # template as usable and then 409 on the click. Unreachable today --
         # ``plan_summaries_for`` writes an entry per template -- but the safe answer
         # to "I could not resolve this" is the one that disables the button.
-        TemplatePlanSummary(available=False, unavailable_reason=UNAVAILABLE_SOURCE_DELETED),
+        TemplatePlanSummary(available=False, unavailable_reason=UNAVAILABLE_SOURCE_MISSING),
     )
 
 
 __all__ = [
-    "UNAVAILABLE_SOURCE_DELETED",
+    "UNAVAILABLE_SOURCE_MISSING",
     "TemplatePlanSummary",
     "TemplateUseResult",
     "create_template",
     "delete_template",
     "live_templates_query",
+    "templates_pointing_at_work_order",
     "plan_summaries_for",
+    "resolve_catalogable_work_order",
     "resolve_source_work_order",
     "summary_for_one",
     "update_template",

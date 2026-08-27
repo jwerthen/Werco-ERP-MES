@@ -1423,10 +1423,12 @@ export default function WorkOrders() {
           // A template's output is a DRAFT nobody has reviewed, so the hand-off
           // is the same as Duplicate's: land on the new work order.
           onUsed={(result) => navigate(`/work-orders/${result.work_order.id}`)}
-          // A template whose source work order was deleted names restoring it as one
-          // of the two fixes. That fix now has a screen — the Deleted tab above — so
-          // the panel links at it for the population that can actually use it, and
-          // names them for everybody else.
+          // A template whose source work order was deleted still WORKS (it reads the
+          // plan through the tombstone), so the panel's note about it is context, not
+          // a remedy — but "where did that job go?" is a real question and the Deleted
+          // tab above is the only screen that answers it. Link it for the population
+          // that can actually reach that tab; everybody else gets the bare note, since
+          // ?tab=deleted falls back to the orders list below Admin/Manager.
           canRestoreWorkOrders={canDeleteWorkOrders}
         />
       </div>

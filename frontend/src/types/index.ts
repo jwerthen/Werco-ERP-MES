@@ -549,19 +549,32 @@ export interface WorkOrderRestoreResponse {
  * time somebody soft-deletes a nest on the source, and the planner picks a
  * template believing it carries 21 nests and gets 20.
  *
- * When `available` is false the source work order has been soft-deleted and
- * every other field is null/zero. The template is still LISTED — hiding it tells
- * the planner nothing, and the only fixes (restore the work order, or delete the
- * template) start with seeing it — but `POST .../use` refuses it 409.
+ * A DELETED source work order does NOT make the plan unavailable. The template
+ * is a catalog entry and must keep working: `source_work_order_id` is NOT NULL
+ * with no `ON DELETE`, so the source row can only ever be SOFT-deleted, and a
+ * soft-deleted work order keeps every operation, nest, tie and process-sheet step
+ * it had. The plan reads through to it, `available` stays true, and
+ * `source_work_order_deleted` carries the fact as context.
+ *
+ * When `available` IS false the source is genuinely unresolvable and every other
+ * field is null/zero. The template is still LISTED — hiding it tells the planner
+ * nothing — but `POST .../use` refuses it 409.
  */
 export interface WorkOrderTemplatePlan {
   available: boolean;
   /**
-   * Machine-readable cause when `available` is false. Currently only
-   * `source_work_order_deleted`. Treat the set as OPEN: render an unrecognized
-   * token rather than asserting a cause, exactly like the copy skip reasons.
+   * Machine-readable cause when `available` is false. Treat the set as OPEN:
+   * render an unrecognized token rather than asserting a cause, exactly like the
+   * copy skip reasons.
    */
   unavailable_reason?: string | null;
+  /**
+   * INFORMATIONAL only — the template is usable regardless. True means the source
+   * work order has been soft-deleted; the plan is read through to it unchanged, so
+   * every count below is real and `POST .../use` succeeds. Optional because a
+   * pre-change server omits the field, and absent reads the same as false.
+   */
+  source_work_order_deleted?: boolean;
   source_work_order_number?: string | null;
   /**
    * The source work order's CURRENT status, lowercase. Informational only — a

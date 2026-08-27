@@ -691,7 +691,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 | POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) and the optional `unit_number` (≤ 50 chars — see "Unit #" below) | Yes |
 | GET | `/work-orders/{id}` | Get work order by ID | Yes |
 | PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below) | Admin / Manager / Supervisor |
-| DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled) | Admin / Manager |
+| DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it) | Admin / Manager |
 | POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below. Reached from Work Orders → **Deleted** (`deleted_only=true` above) | Admin / Manager |
 | POST | `/work-orders/{id}/release` | Release to production | Yes |
 | POST | `/work-orders/{id}/start` | Start production | Yes |
@@ -1681,9 +1681,9 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > | POST | `/work-order-templates/{id}/use` | Create a new **DRAFT** work order from the template. Body `{quantity_ordered?, due_date?}` — **both optional**, `extra="forbid"`; **201** returning the **`WorkOrderDuplicateResponse` envelope** | Admin / Manager / Supervisor |
 >
 > **`plan` is computed on every read, never stored.** Each template response carries
-> `plan: {available, unavailable_reason, source_work_order_number, source_status, work_order_type,
-> sequential_operations, priority, operation_count, nest_count, planned_runs_total,
-> open_material_tie_count, work_centers[], source_quantity_ordered}`, read live off the source work
+> `plan: {available, unavailable_reason, source_work_order_deleted, source_work_order_number,
+> source_status, work_order_type, sequential_operations, priority, operation_count, nest_count,
+> planned_runs_total, open_material_tie_count, work_centers[], source_quantity_ordered}`, read live off the source work
 > order — the list builds them **batched**, five queries for the whole page rather than a handful per row.
 > Nothing in it can go stale, which is the point: a *stored* `nest_count` would be wrong the first
 > time somebody soft-deleted a nest on the source, and the planner would pick a template believing it
@@ -1691,11 +1691,41 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > template produces**, and that is intended — the exemplar *is* the plan. `work_centers` is distinct
 > **in sequence order**, not alphabetical.
 >
-> **A template whose source has been deleted is listed, flagged and refused — never hidden.** It stays
-> in the list with `plan.available = false` and `plan.unavailable_reason = "source_work_order_deleted"`,
-> and `POST …/use` answers **409** naming the two remedies (restore the work order, or delete the
-> template and save a new one). Hiding it is the mask trap invariant 3 documents; auto-deleting it
-> destroys a curated name as a side effect of somebody removing a work order. **Treat
+> **A template whose source has been deleted still works — that is the whole posture** (owner decision
+> 2026-08-27, overriding the original refuse-on-deleted design: *"templates need to stay even if there
+> is no work order present for it"*). The plan is read straight **through** the tombstone: the summary
+> is computed in full (real operation / nest / tie counts, not zeros), `plan.available` stays **true**,
+> `plan.unavailable_reason` stays **null**, and `POST …/use` returns **201** with a normal DRAFT. The
+> copy engine is unaffected — `duplicate_work_order` never asked whether its source was deleted; it
+> copies the object it is handed. **Only the refusal was dropped, never the signal:**
+> `plan.source_work_order_deleted` is `true` on every read. It is **disclosure, not a gate** — do not
+> disable Use, dim the row, or hide the counts on it. (The app renders it as a muted note, and links
+> Admins/Managers to `/work-orders?tab=deleted` so *"where did that job go?"* is answerable — context,
+> not a remedy.)
+>
+> **Why read-through is a complete answer, and not a lucky one.**
+> `work_order_templates.source_work_order_id` is **`NOT NULL`**, a plain `ForeignKey("work_orders.id")`,
+> with **no `ON DELETE`** (model and migration `087` alike). Postgres will not remove a `work_orders`
+> row a template still points at, so *"no work order present"* can only ever mean **soft-deleted** —
+> and a soft-deleted work order keeps every operation, laser nest, material tie and process-sheet step
+> it had. The plan is therefore always still there to read, which is also why freezing a snapshot of it
+> into the template would buy nothing (it would guard a disappearance that cannot happen, at the cost
+> of a second copy service). That FK guarantee used to be an accident surfacing as a 500; it is now
+> load-bearing, so `DELETE /work-orders/{id}?hard_delete=true` **refuses 409** naming the templates
+> rather than orphaning one. **Soft delete is deliberately unaffected.**
+>
+> **The half that stays gated is SAVING.** `POST /work-order-templates` still answers **404** for a
+> soft-deleted `source_work_order_id`. Reading and using an already-saved template is the invariant-3
+> *historical record* exception; cataloguing a **new** one is *selection*, which invariant 3 gates.
+> Stated as an asymmetry on purpose, not an inconsistency to "fix".
+>
+> **`plan.available = false` survives, with a narrower meaning:** the source row could not be resolved
+> **at all** (a cross-tenant id, or a row that escaped the FK) — near-unreachable, kept anyway, and
+> `POST …/use` answers **409** for it. `plan.unavailable_reason` is then `"source_work_order_missing"`.
+> The old `"source_work_order_deleted"` value was **retired** from this field: a token whose text says
+> *deleted* would actively mislead a client that renders it verbatim, now that deletion makes nothing
+> unavailable. Such a template is still **listed, never hidden** — hiding it is the mask trap invariant
+> 3 documents; auto-deleting it destroys a curated name as a side effect of something else. **Treat
 > `unavailable_reason` as an open set** — render an unrecognized value verbatim rather than dropping
 > the row.
 >
@@ -1729,7 +1759,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > |------|------|
 > | **404** | The template is not live in the active company (a cross-tenant or soft-deleted id is indistinguishable from one that never existed), or — on `POST` — the `source_work_order_id` is not live in the active company |
 > | **409** | On `POST` / `PUT`, another **live** template in this company already holds the name. Compared **case-insensitively**, deliberately stricter than the byte-wise unique index: two names differing only in case are indistinguishable in a picker. The partial index is the backstop for the concurrent-save race the probe cannot close, and returns the same 409 rather than a 500 |
-> | **409** | On `…/use`, the template's source work order has been **deleted** |
+> | **409** | On `…/use`, the source work order row cannot be **resolved at all** (`plan.available = false`). A merely **soft-deleted** source is *not* this case and is used normally — see above |
 > | **409** | On `…/use`, every refusal the copy engine raises, untouched — a **retired produced part**, `PROCESS_SHEET_UNAVAILABLE` (structured `code`) for a process-sheet family with no released revision, and an `IntegrityError` on the generated data |
 > | **422** | On `…/use`, no positive quantity is resolvable from the request, the template's default, or the source work order |
 >
@@ -2124,6 +2154,23 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 >   would now name a verb that exists and still would not help. Unconsumed ties are removed with
 >   the work order, each audited first (`reason: "work_order_hard_deleted"`).
 
+> **Hard delete is also refused 409 when a work order template was saved from the work order**
+> (2026-08-27). A template is a name plus a **pointer** — it holds no copy of the plan and reads it
+> live off the job it points at, *including through a soft delete* — so permanently removing the row
+> would leave the template with nothing to run. The refusal is raised **before the first mutation**,
+> alongside the ledger probe above, and names the live templates in the way (*"N work order template(s)
+> were saved from this work order (…), and a template copies its plan straight off the job it points
+> at… Soft delete instead — a soft-deleted work order keeps every template working."*).
+>
+> Two details are deliberate. **The probe counts soft-deleted templates too**, because
+> `work_order_templates.source_work_order_id` is `NOT NULL` with a plain FK and no `ON DELETE`, and
+> Postgres does not consult `is_deleted` before refusing to drop a referenced row — a tombstoned
+> template holds the FK exactly as hard as a live one, and filtering it out would put the old
+> `ForeignKeyViolation` **500** back for that population (the SQLite test backend could never show it;
+> FK enforcement is off there). **Only live templates are named**, since a tombstone has no name the
+> planner can act on. And **soft delete is untouched** — it is the point: a soft-deleted work order
+> keeps every template working. See Work Orders → "Work order templates".
+
 > **Seeing a deleted work order: `GET /work-orders/?deleted_only=true` (the restore view).**
 > The work-order twin of the vendor and PO restore views documented under Purchasing, and it exists
 > for the sharper of their two reasons: `POST /work-orders/{id}/restore` had shipped, been audited and
@@ -2131,9 +2178,12 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > other read of this endpoint hard-filters `is_deleted == false`, and `GET /work-orders/{id}` **404s**
 > on a deleted row — so an accidental delete could be undone only by someone who already knew the id
 > and could issue an authenticated `POST` by hand. Anything that pointed at a deleted work order named
-> restoring it as the remedy (a work-order template whose source was deleted says exactly that) while
-> giving the reader nowhere to do it. This parameter is that remedy, and it is the **only** read in the
-> API that can return a soft-deleted work order.
+> restoring it as the remedy while giving the reader nowhere to do it. This parameter is that remedy,
+> and it is the **only** read in the API that can return a soft-deleted work order. (Work-order
+> templates used to be that motivating case — a template whose source was deleted was refused and told
+> the planner to restore the job. Since 2026-08-27 such a template simply keeps working, so it now
+> *links* here as context rather than naming it as a fix. The justification above stands on its own:
+> the restore verb still had no other door.)
 >
 > - **`deleted_only=false` (the default) is provably inert.** Unset, the `is_deleted` predicate, the
 >   `include_deleted`/ADMIN branch, the terminal-status exclusion, the `search` join, the ordering and

@@ -53,8 +53,13 @@ The rest, in one line each:
   runs. The response reports what was STORED; the chain records the overruled request.
 * **Refusals propagate untouched.** A template must never mint a work order the
   duplicate path would have refused: a retired produced part, a process-sheet family
-  with no released revision, a deleted source. One button is not a licence to route
-  around a gate.
+  with no released revision. One button is not a licence to route around a gate. A
+  DELETED SOURCE is the documented exception and used to be in that list — the owner
+  overrode it (*"templates need to stay even if there is no work order present for
+  it"*), so a template reads through the tombstone and still produces a DRAFT. That
+  is not a hole in the rule: the duplicate service never asked whether the source was
+  deleted either. The gate that stays is at the other end — saving a NEW template
+  from a deleted work order is still 404, because that is SELECTION.
 * **Skips propagate untouched too**, in the SAME envelope the Duplicate dialog renders.
   A skipped material tie means the new job carries no demand for that material — so no
   shortage is raised, the work runs, and stock is never deducted. A skip only the audit
@@ -1124,53 +1129,97 @@ class TestRefusalsPropagateUntouched:
         db_session.expire_all()
         assert db_session.query(WorkOrder).count() == work_orders_before
 
-    def test_a_deleted_source_is_listed_as_unavailable_rather_than_hidden(
+    # THE ONE DOCUMENTED EXCEPTION TO THIS CLASS'S RULE.
+    #
+    # A deleted source used to be a refusal that propagated like the others, and the
+    # owner overrode it (2026-08-27): "templates need to stay even if there is no work
+    # order present for it". The two tests below stay in this class deliberately —
+    # this is where anyone looking for that refusal comes to find it, and finding it
+    # gone WITH the reason beats finding nothing. It is not a hole in the "a template
+    # adds a name, not authority" rule: nothing the duplicate path would refuse is
+    # admitted, because ``duplicate_work_order`` never asked whether the source was
+    # deleted in the first place. What is refused instead is the other end — saving a
+    # NEW template from a deleted work order, still 404 below.
+
+    def test_a_deleted_source_is_disclosed_on_the_summary_and_does_not_disable_the_template(
         self, client: TestClient, db_session: Session
     ):
-        """Flagged, not hidden and not auto-deleted.
+        """Deleting the job a template was saved from changes exactly ONE field.
 
-        Hiding it is the mask trap invariant 3 documents — the planner's template
-        silently vanishes and nothing says why. Deleting it destroys a curated name as a
-        side effect of somebody removing a work order. Only flagging lets the planner see
-        the cause and act on it.
+        The summary is still computed in full off the tombstoned source — the read
+        deliberately carries no ``is_deleted`` predicate, the historical-record
+        exception to invariant 3 argued in the service module docstring — so the whole
+        plan the planner picks by is still there.
+
+        Asserted as a DIFF against the live reading rather than by restating the
+        counts. A summary that silently went blank over a tombstone would still satisfy
+        "available is true", and the planner would discover it by pressing Use and
+        getting an empty draft.
         """
         admin = make_user(db_session)
         source = build_brake_source(db_session, quantity=20.0)
         template_id = saved(client, headers_for(admin), source.work_order.id, "Doomed set", notes="keep the name")
+
+        alive = client.get(f"{BASE}/{template_id}", headers=headers_for(admin)).json()["plan"]
+        assert alive["available"] is True and alive["source_work_order_deleted"] is False
+        assert alive["operation_count"] > 0, "the diff below is only meaningful against a populated summary"
+
         source.work_order.soft_delete(admin.id)
         db_session.commit()
 
         listing = list_templates(client, headers_for(admin))
         assert listing.status_code == status.HTTP_200_OK, listing.text
         [row] = [entry for entry in listing.json()["templates"] if entry["id"] == template_id]
-        assert row["plan"]["available"] is False
-        assert row["plan"]["unavailable_reason"] == "source_work_order_deleted"
         assert row["name"] == "Doomed set", "the name and note survive — they are the curated part"
         assert row["notes"] == "keep the name"
 
+        plan = row["plan"]
+        assert plan["available"] is True, "a deleted source is a disclosure, not a refusal"
+        assert plan["unavailable_reason"] is None
+        assert plan["source_work_order_deleted"] is True
+        assert plan == {**alive, "source_work_order_deleted": True}, "only the disclosure flag moved"
+
         detail = client.get(f"{BASE}/{template_id}", headers=headers_for(admin))
         assert detail.status_code == status.HTTP_200_OK, detail.text
-        assert detail.json()["plan"]["available"] is False
+        assert detail.json()["plan"] == plan, "one resolver, so the detail read and the list read agree"
 
-    def test_using_a_template_whose_source_is_deleted_is_409(self, client: TestClient, db_session: Session):
-        """The LIST flag and the USE refusal come from one resolver, so they cannot disagree."""
+    def test_a_template_whose_source_is_deleted_still_produces_a_draft(self, client: TestClient, db_session: Session):
+        """The catalog entry keeps working. This used to pin a 409; the owner removed it.
+
+        The list flag and the use path still come from ONE resolver, so they still
+        cannot disagree — the resolver now reads through the tombstone for both
+        answers. What this pins is that the copy is genuinely unaffected (the duplicate
+        service copies the object it is handed and never inspected the source's
+        tombstone), that the DRAFT guarantee holds over a deleted source, and that
+        using a template is not a back-door restore of the job it points at.
+        """
         admin = make_user(db_session)
         source = build_brake_source(db_session, quantity=20.0)
         template_id = saved(client, headers_for(admin), source.work_order.id, "Doomed set")
         source.work_order.soft_delete(admin.id)
         db_session.commit()
-        work_orders_before = db_session.query(WorkOrder).count()
 
         response = use_template(client, headers_for(admin), template_id)
-        assert response.status_code == status.HTTP_409_CONFLICT, response.text
-        assert "deleted" in response.json()["detail"].lower()
+        assert response.status_code == status.HTTP_201_CREATED, response.text
 
-        db_session.expire_all()
-        assert db_session.query(WorkOrder).count() == work_orders_before
+        draft = created_work_order(db_session, response)
+        assert draft.status == WorkOrderStatus.DRAFT
+        assert draft.is_deleted is False, "the copy is a live job, not an inherited tombstone"
+        assert len(operations_of(db_session, draft)) == len(operations_of(db_session, source.work_order))
+
+        db_session.refresh(source.work_order)
+        assert source.work_order.is_deleted is True, "using a template does not restore the source"
 
     def test_saving_a_template_from_a_deleted_work_order_is_404(self, client: TestClient, db_session: Session):
-        """A tombstoned source is not a catalogable job. ``tenant_query`` scopes
-        ``company_id`` and nothing else, so the filter is explicit at the resolve."""
+        """A tombstoned source is not a catalogable job — and this is now the ASYMMETRY test.
+
+        An already-saved template reads THROUGH a soft-deleted source (the two tests
+        above); creating a new one over it is refused, because picking a work order to
+        catalogue is SELECTION and invariant 3 gates selection. The filter lives in
+        ``resolve_catalogable_work_order``, deliberately not in the read-through
+        ``resolve_source_work_order`` — ``tenant_query`` scopes ``company_id`` and
+        nothing else, so it is explicit there.
+        """
         admin = make_user(db_session)
         source = build_brake_source(db_session, quantity=20.0)
         source.work_order.soft_delete(admin.id)

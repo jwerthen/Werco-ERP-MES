@@ -49,6 +49,7 @@ from app.models.time_entry import TimeEntry, TimeEntrySource
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus, WorkOrderType
+from app.models.work_order_template import WorkOrderTemplate
 from app.schemas.import_kit import WorkOrderImportResponse
 from app.schemas.time_entry import ProductionReductionRequest
 from app.schemas.work_order import (
@@ -171,6 +172,7 @@ from app.services.work_order_state_service import (
     validate_operation_quantity,
     work_order_operation_progress,
 )
+from app.services.work_order_template_service import templates_pointing_at_work_order
 
 logger = logging.getLogger(__name__)
 
@@ -3756,7 +3758,12 @@ def delete_work_order(
     **Soft delete (default)**: Marks the work order as deleted but preserves data.
 
     **Hard delete**: Only allowed for draft or cancelled work orders.
-    Permanently removes the record and associated operations.
+    Permanently removes the record and associated operations. Refused **409** when
+    inventory-ledger movement is tied to it, or when a work order template was saved
+    from it — a template copies its plan live off the job it points at, so the row has
+    to outlive the template. A soft-deleted template still counts: its foreign key is
+    just as real, and only Postgres would notice. Both refusals name a remedy, and both
+    leave soft delete available: a soft-deleted work order keeps every template working.
     """
     work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
@@ -3800,6 +3807,47 @@ def delete_work_order(
                     "its material record stay intact."
                 ),
             )
+
+        # A saved TEMPLATE points at this work order, and a template reads its plan LIVE
+        # off the work order it points at -- there is no frozen copy anywhere. Since
+        # templates now read THROUGH a soft-delete (owner decision: a catalog entry must
+        # not stop working because somebody deleted a job), this FK is what guarantees
+        # "no work order present" can only ever mean tombstoned, never physically gone.
+        #
+        # That guarantee was an ACCIDENT until now: work_order_templates
+        # .source_work_order_id is NOT NULL with a plain FK and no ON DELETE, so this
+        # branch hit a ForeignKeyViolation on Postgres and surfaced as a 500. Something
+        # load-bearing should refuse legibly and name what is in the way, before the
+        # first mutation. Soft delete is deliberately unaffected -- it is the whole
+        # point: the templates keep working.
+        #
+        # The probe reads TOMBSTONED templates too (``templates_pointing_at_work_order``,
+        # not ``live_templates_query``). Postgres does not consult ``is_deleted`` before
+        # refusing to drop a referenced row, so a soft-deleted template holds this FK
+        # exactly as hard as a live one -- filtering it out would put the 500 back for
+        # that population, and the in-memory SQLite the suite runs on could never show
+        # it (foreign-key enforcement is off there). Only LIVE templates are NAMED: a
+        # tombstone has no name the planner can act on, and "delete those templates
+        # first" is not a remedy for one that is already deleted. Soft delete is, and it
+        # is always available.
+        blocking_templates = (
+            templates_pointing_at_work_order(db, wo_id, company_id)
+            .order_by(WorkOrderTemplate.name, WorkOrderTemplate.id)
+            .all()
+        )
+        if blocking_templates:
+            live_names = [t.name for t in blocking_templates if not t.is_deleted]
+            named = f" ({', '.join(repr(name) for name in live_names)})" if live_names else ""
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{len(blocking_templates)} work order template(s) were saved from this work order"
+                    f"{named}, and a template copies its plan straight off the job it points at, so "
+                    "permanently deleting it would leave them with nothing to run. Soft delete instead — "
+                    "a soft-deleted work order keeps every template working."
+                ),
+            )
+
         for tie in tie_rows:
             audit.log_delete(
                 "work_order_material_allocation",

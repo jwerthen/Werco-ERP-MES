@@ -98,6 +98,7 @@ def _serialize(template: WorkOrderTemplate, plan: templates.TemplatePlanSummary)
         plan=WorkOrderTemplatePlan(
             available=plan.available,
             unavailable_reason=plan.unavailable_reason,
+            source_work_order_deleted=plan.source_work_order_deleted,
             source_work_order_number=plan.source_work_order_number,
             source_status=plan.source_status,
             work_order_type=plan.work_order_type,
@@ -116,11 +117,17 @@ def _serialize(template: WorkOrderTemplate, plan: templates.TemplatePlanSummary)
 def _live_source_or_404(db: Session, work_order_id: int, company_id: int) -> WorkOrder:
     """Resolve the work order a template is being saved FROM, or 404.
 
-    Its own ``is_deleted == False``: ``tenant_query`` scopes ``company_id`` and nothing
-    else (invariant 3). 404 and never 403 for a cross-tenant id, so the response cannot
-    confirm that it exists elsewhere.
+    Keeps invariant 3's tombstone filter — via
+    ``resolve_catalogable_work_order``, deliberately NOT the read-through
+    ``resolve_source_work_order`` an existing template uses. Saving a template is
+    SELECTION: a deleted job is not one the shop should be able to catalogue. That an
+    already-saved template keeps working over the same tombstone is the asymmetry the
+    owner asked for, not an inconsistency; see the service module docstring.
+
+    404 and never 403 for a cross-tenant id, so the response cannot confirm that it
+    exists elsewhere.
     """
-    source = templates.resolve_source_work_order(db, work_order_id, company_id)
+    source = templates.resolve_catalogable_work_order(db, work_order_id, company_id)
     if source is None:
         raise HTTPException(status_code=404, detail="Work order not found")
     return source
@@ -139,11 +146,16 @@ def list_work_order_templates(
 ):
     """The catalog, each entry carrying a LIVE summary of what using it would produce.
 
-    A template whose source work order has been deleted is INCLUDED, with
-    ``plan.available = false`` and ``plan.unavailable_reason`` naming the cause. It is
-    deliberately not filtered out: a template that silently vanishes tells the planner
-    nothing, and the only way they can fix it (restore the work order, or delete the
-    template) starts with seeing it.
+    A template whose source work order has been DELETED is included, summarised in
+    full, and **still usable** — ``plan.available`` stays true and
+    ``plan.source_work_order_deleted`` is the disclosure. Templates must not stop
+    working because somebody deleted a job (owner decision); the flag is there so the
+    planner can see that the exemplar is in the archive, not so the client can disable
+    anything.
+
+    ``plan.available = false`` is reserved for a source row that could not be resolved
+    at all, with ``plan.unavailable_reason`` naming the cause. Such a template is still
+    not filtered out: one that silently vanishes tells the planner nothing.
 
     Unpaged — see ``WorkOrderTemplateListResponse``.
     """
@@ -358,11 +370,18 @@ def use_work_order_template(
     something the source had, and the planner has to be told — a skipped material tie
     that nobody surfaces means the job runs and stock is never deducted.
 
+    **A soft-deleted source work order is used normally** — that refusal was removed by
+    owner decision, because a template is a catalog entry and must not stop working
+    because somebody deleted a job. The copy is unaffected: ``duplicate_work_order``
+    never asked whether the source was deleted, it copies the object it is handed.
+
     **404** when the template is not live in this company.
-    **409** when the template's source work order has been deleted, when the source's
-    produced part has been retired, when an operation's process-sheet family has no
-    released revision (structured detail, ``code: PROCESS_SHEET_UNAVAILABLE``), or on a
-    constraint fault in the generated data. Nothing is written in any of those cases.
+    **409** when the source work order row cannot be resolved at all (near-unreachable:
+    ``source_work_order_id`` is NOT NULL with an FK, and the hard-delete verb refuses
+    rather than orphaning a template), when the source's produced part has been
+    retired, when an operation's process-sheet family has no released revision
+    (structured detail, ``code: PROCESS_SHEET_UNAVAILABLE``), or on a constraint fault
+    in the generated data. Nothing is written in any of those cases.
     **422** when no positive quantity can be resolved from the request, the template's
     default, or the source work order.
     """
