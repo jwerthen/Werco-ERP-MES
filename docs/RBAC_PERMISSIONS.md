@@ -71,6 +71,8 @@ tier, that tier stands — this rule is a floor, never a loosening.
 | Create | ✓ | ✓ | ✓ | | | | |
 | Edit | ✓ | ✓ | ✓ | | | | |
 | Delete | ✓ | ✓ | | | | | |
+| View deleted work orders (the restore view) | ✓ | ✓ | | | | | |
+| Restore a deleted work order | ✓ | ✓ | | | | | |
 | Release | ✓ | ✓ | ✓ | | | | |
 | Start operation (office verb) | ✓ | ✓ | ✓ | | ✓ | | |
 | Start operation (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -91,6 +93,29 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > gate is now `require_role([ADMIN, MANAGER])`, so a Manager can soft-delete a work order as documented.
 > Soft/hard-delete and restore behavior is otherwise unchanged (default soft delete; `hard_delete=true`
 > only for draft/cancelled WOs). See `docs/API.md` → Work Orders.
+
+> **Seeing a deleted work order — a deliberate widening for Managers.** `GET /api/v1/work-orders/`
+> gained `deleted_only=true`, the restore view behind Work Orders → **Deleted**, gated **Admin +
+> Manager** by an in-handler check mirroring `require_role([ADMIN, MANAGER])` clause for clause
+> (`is_superuser` and `PLATFORM_ADMIN` admitted the same way it admits them). **Before this, no
+> Manager could see a deleted work order at all** — the pre-existing `include_deleted=true` on the same
+> endpoint is **Admin-only** and is unchanged. That was incoherent: the **Delete** and **Restore** rows
+> above are both Admin + Manager, so a Manager could delete a work order and then had no screen that
+> would list it back. The new gate matches those two rows exactly, so a hidden tab and a refused call
+> agree.
+>
+> It discloses no new *class* of data: the live work-order list is role-open to **every** authenticated
+> user (the **View** row above), Managers could read the same rows before they were deleted, and the
+> `audit_log` DELETE row — already Admin + Manager via `GET /audit/` — carries the same actor and
+> timestamp the view now surfaces as `deleted_by_name` / `deleted_at`.
+>
+> **This diverges from the Vendors and Purchase Orders restore views on purpose.** Those leave
+> `deleted_only=true` on `get_current_user` (see → Purchasing), reasoning that the archive returns rows
+> the same reader could already see. The reasoning transfers; the situation does not. Work orders
+> already ship an Admin-only `include_deleted`, and an ungated `deleted_only` would let any
+> authenticated reader fetch the deleted set and merge it client-side — silently repealing that gate
+> instead of deciding to change it. If that Admin-only gate is ever revisited, revisit this one with it
+> rather than letting the two drift.
 
 > **Approve labor — endpoint mapping (Batch 11B / G5-A).** The shop-floor labor sign-off
 > `POST /api/v1/shop-floor/time-entries/{id}/approve` and `…/unapprove` (which set / clear

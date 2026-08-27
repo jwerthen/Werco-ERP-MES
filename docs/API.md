@@ -687,12 +687,12 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/work-orders/` | List all work orders (`skip` ≥ 0, `limit` 1–5000 default 100 — the standard list tier, see [Pagination](#pagination)) | Yes |
+| GET | `/work-orders/` | List all work orders (`skip` ≥ 0, `limit` 1–5000 default 100 — the standard list tier, see [Pagination](#pagination)). `deleted_only=true` returns **only** this company's soft-deleted work orders — the restore view, **Admin / Manager**, and the only read in the API that can see one; see "Seeing a deleted work order" below | Yes (`deleted_only=true`: Admin / Manager) |
 | POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) and the optional `unit_number` (≤ 50 chars — see "Unit #" below) | Yes |
 | GET | `/work-orders/{id}` | Get work order by ID | Yes |
 | PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below) | Admin / Manager / Supervisor |
 | DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled) | Admin / Manager |
-| POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below | Admin / Manager |
+| POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below. Reached from Work Orders → **Deleted** (`deleted_only=true` above) | Admin / Manager |
 | POST | `/work-orders/{id}/release` | Release to production | Yes |
 | POST | `/work-orders/{id}/start` | Start production | Yes |
 | POST | `/work-orders/{id}/complete` | Complete work order (409 if the WO is CANCELLED) | Yes |
@@ -2123,6 +2123,81 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 >   returned tie is still ledger-backed; the message used to say "Reverse consumption first", which
 >   would now name a verb that exists and still would not help. Unconsumed ties are removed with
 >   the work order, each audited first (`reason: "work_order_hard_deleted"`).
+
+> **Seeing a deleted work order: `GET /work-orders/?deleted_only=true` (the restore view).**
+> The work-order twin of the vendor and PO restore views documented under Purchasing, and it exists
+> for the sharper of their two reasons: `POST /work-orders/{id}/restore` had shipped, been audited and
+> been role-gated for months with **no way to reach it**. Nothing in the frontend called it, every
+> other read of this endpoint hard-filters `is_deleted == false`, and `GET /work-orders/{id}` **404s**
+> on a deleted row — so an accidental delete could be undone only by someone who already knew the id
+> and could issue an authenticated `POST` by hand. Anything that pointed at a deleted work order named
+> restoring it as the remedy (a work-order template whose source was deleted says exactly that) while
+> giving the reader nowhere to do it. This parameter is that remedy, and it is the **only** read in the
+> API that can return a soft-deleted work order.
+>
+> - **`deleted_only=false` (the default) is provably inert.** Unset, the `is_deleted` predicate, the
+>   `include_deleted`/ADMIN branch, the terminal-status exclusion, the `search` join, the ordering and
+>   the row count are all unchanged, the reconcile-on-read still runs, and the `deleted_by` name lookup
+>   below is never issued (**zero** extra queries). The response *body* gains three keys, all `null` on
+>   this path — additive.
+> - **`deleted_only=true` returns only this company's soft-deleted work orders.** `company_id` still
+>   comes from `get_current_company_id` and scopes **both** views; the flag can only invert the delete
+>   predicate, never widen the tenant scope.
+> - **Role posture — deliberate, and it DIVERGES from the vendor/PO twins.** Those two leave the
+>   deleted list on `get_current_user`, reasoning that it returns rows the same reader could already
+>   see before the delete. Here the list carries its own **Admin / Manager** gate (an in-handler check
+>   mirroring `require_role([ADMIN, MANAGER])` clause for clause, so `is_superuser` and
+>   `PLATFORM_ADMIN` are admitted the same way), because this endpoint already ships an **admin-only**
+>   `include_deleted` — leaving `deleted_only` ungated would let any authenticated reader fetch the
+>   deleted set and merge it client-side, silently repealing that gate rather than deciding to change
+>   it. The gate matches the population that can `DELETE` and `restore`, so the hidden tab and the
+>   refused call agree. **This is a widening for Managers**, who could not see a deleted work order
+>   before; see `docs/RBAC_PERMISSIONS.md` → Work Orders.
+> - **The terminal-status exclusion is dropped on this view — this is the non-obvious part, and getting
+>   it wrong makes the screen useless.** With no `?status=`, the live list excludes
+>   complete/closed/cancelled. `WorkOrder.soft_delete` leaves `status` untouched, so a deleted work
+>   order can sit in **any** status, and a finished- or cancelled-then-deleted job is among the
+>   likeliest things somebody wants back. Applying the exclusion here would hide those rows from the
+>   only list that can see them — the Restore control could never be offered for them, and nothing else
+>   in the API would reach them either. Same species as the closed/cancelled carve-out on the deleted
+>   PO list. An explicit `?status=` still narrows the deleted view, and `search` applies to both.
+> - **Reconcile-on-read does NOT run on this view, and that carve-out is load-bearing.**
+>   `_reconcile_and_commit` carries no `is_deleted` predicate anywhere — it has never been handed a
+>   deleted row, because this list never returned one. Run over the archive, merely **opening the
+>   restore screen** would drive a soft-deleted RELEASED/IN_PROGRESS job to COMPLETE from stale labor
+>   evidence, write audit rows, refresh scheduling and fire the FG receipt + gated backflush: inventory
+>   movements against a job somebody deleted, caused by a `GET`, with no actor intent and no reason
+>   recorded. The archive is a read of the tombstones, not a resumption of the work; the reconcile
+>   resumes when the row is restored and rejoins the live list.
+> - **Three response fields carry the provenance**, added to `WorkOrderSummary` as optionals:
+>   `is_deleted` (bool), `deleted_at` (UTC ISO-8601 with a trailing `Z` — `WorkOrderSummary` inherits
+>   `UTCModel`; render it in Central via `utils/centralTime.ts`), and `deleted_by_name` (the deleting
+>   user's display name, resolved from `users` in **one batched query** — `SoftDeleteMixin.deleted_by`
+>   is a bare Integer with no FK relationship to load, and `User.full_name` is a Python property, not a
+>   mapped column, so `first_name`/`last_name` are selected and joined in Python). That lookup is
+>   deliberately **not** company-scoped — a platform admin acting inside the company is not a user row
+>   of it, and scoping would blank exactly the name a reader most needs — and applies no
+>   `is_active`/`is_deleted` filter to `User`, so provenance survives the deleter's own departure. The
+>   id is read off an already-tenant-scoped row and never comes from the caller. The name is visible
+>   only *while* the work order is deleted (`SoftDeleteMixin.restore()` clears `deleted_by`); the
+>   `audit_log` DELETE row keeps it permanently — invariant #2.
+> - **All three stay `null` on every other path — including `include_deleted=true`.** `is_deleted` and
+>   `deleted_at` are **real columns** on `WorkOrder` and `WorkOrderSummary` sets `from_attributes`, so
+>   the tri-state survives only because the schema's **one** construction site in the backend hand-builds
+>   kwargs. `WorkOrderSummary.model_validate(work_order_row)` would make every **live** row answer
+>   `is_deleted: false`, and a shared row renderer keying on "non-null means the restore view" would
+>   then offer Restore on a job nobody deleted. Non-null means *"came from the restore view"*, nothing
+>   else — an ADMIN's `include_deleted=true` still mixes live and deleted rows that all report `null`,
+>   exactly as it does today.
+> - **UI.** Work Orders grows a third tab, **Deleted** (`?tab=deleted`), beside Work Orders and
+>   Templates, gated on the same Admin/Manager population. It keeps its own book — never merged into
+>   the live list, so no KPI, count or grouping on the page can pick up a deleted row — fetched lazily
+>   on entry into the view. It drops row click-through and every verb but **Restore** (the detail route
+>   404s on a deleted row; Duplicate and Save-as-template read the source through that same endpoint),
+>   and Restore is **non-optimistic** per the convention in `CLAUDE.md`. A restore that comes back
+>   partial raises the **`warning`** toast rather than `success` — either because the envelope reported
+>   ties it refused to re-open, or because the job's status is terminal, so it leaves the archive
+>   without appearing on the default work-order list.
 
 > **Restoring a work order (`POST /work-orders/{id}/restore`) — the response is an envelope.**
 > `{"message": "...", "skipped_material_allocations": [...]}`. `message` is unchanged from the
