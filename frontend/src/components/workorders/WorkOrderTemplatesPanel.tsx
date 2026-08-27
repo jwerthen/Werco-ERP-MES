@@ -10,21 +10,37 @@
  * gets 20.
  *
  * ---------------------------------------------------------------------------
+ * A DELETED SOURCE JOB IS CONTEXT, NOT A BROKEN TEMPLATE
+ * ---------------------------------------------------------------------------
+ * A template must not stop working because somebody deleted a job. It cannot,
+ * either: `source_work_order_id` is NOT NULL with no `ON DELETE`, so the source
+ * row can only ever be SOFT-deleted, and a soft-deleted work order still holds
+ * every operation, nest, tie and process-sheet step it had. The server therefore
+ * reads the plan straight through it — `available` stays true, the counts are
+ * real, Use works — and reports the deletion as the informational
+ * `plan.source_work_order_deleted`.
+ *
+ * So that row gets a MUTED note, not the red refusal it used to get. The note is
+ * context ("the job it came from is gone, the plan is not"), and it must not read
+ * as a warning: there is nothing here for the planner to fix.
+ *
+ * It does still say WHERE the job went, because someone who wants the JOB back —
+ * a different want from using the template — otherwise has nowhere to look: Work
+ * Orders → Deleted, the `deleted_only=true` archive with a Restore control on
+ * every row. That pointer renders only for the admin/manager population that can
+ * actually restore (`canRestoreWorkOrders`); for everyone else the tab falls back
+ * to the orders list, and a dead link is worse than a shorter note.
+ *
+ * ---------------------------------------------------------------------------
  * AN UNUSABLE TEMPLATE IS FLAGGED, NEVER HIDDEN
  * ---------------------------------------------------------------------------
- * When the source work order has been soft-deleted the server still LISTS the
- * template, with `plan.available = false` and a reason. Filtering it out here
- * would be the mask trap invariant 3 documents: the row would simply vanish, and
- * the only two fixes — restore the work order, or delete the template — both
- * start with seeing it. So the row renders, carries the reason in words, and its
- * Use action is disabled to match the server's 409.
- *
- * The FIRST of those two fixes now has a screen: Work Orders → Deleted, the
- * `deleted_only=true` archive with a Restore control on every row. Naming a fix the
- * reader cannot perform is barely better than hiding the row, so the reason line
- * links straight at it — for the admin/manager population that can actually restore
- * (`canRestoreWorkOrders`), and names them for everyone else rather than offering a
- * link that would silently bounce back to the list.
+ * A source the server genuinely cannot resolve still comes back with
+ * `plan.available = false` and a reason. Filtering it out here would be the mask
+ * trap invariant 3 documents: the row would simply vanish, and the fixes all start
+ * with seeing it. So the row renders, carries the reason in words, and its Use
+ * action is disabled to match the server's 409. The reason vocabulary is the
+ * server's and is OPEN — an unrecognized token renders its own sentence rather
+ * than being dropped.
  *
  * ---------------------------------------------------------------------------
  * EVERY WRITE HERE IS SERVER-GATED, THEREFORE NON-OPTIMISTIC
@@ -77,20 +93,22 @@ export interface WorkOrderTemplatesPanelProps {
    * Does this user hold the admin/manager (+superuser) tier that
    * `GET /work-orders/?deleted_only=true` and `POST /work-orders/{id}/restore` admit?
    *
-   * Only decides the WORDING of the "source work order deleted" line below: `true`
-   * links it at the Deleted tab, `false` names who can go there. Passed in rather
-   * than read from `useAuth` so this panel stays a presentation component with no
-   * provider requirement, and defaults to the narrower answer.
+   * Only decides whether the "source work order deleted" note points at the Deleted
+   * tab. It never gates the template itself — that note is context and the row is
+   * usable either way. Passed in rather than read from `useAuth` so this panel stays
+   * a presentation component with no provider requirement, and defaults to the
+   * narrower answer.
    */
   canRestoreWorkOrders?: boolean;
 }
 
 /**
- * The one `plan.unavailable_reason` token with a fix that now has a screen. The
- * vocabulary is the server's and is OPEN, so this is a match, never an assumption:
- * any other token renders its own sentence and no pointer.
+ * The muted note on a template whose source job was soft-deleted.
+ *
+ * Deliberately short and free of any instruction: the plan copies, Use works, and
+ * there is nothing to fix. Anything longer reads as a warning again.
  */
-const SOURCE_WORK_ORDER_DELETED_REASON = 'source_work_order_deleted';
+const SOURCE_DELETED_NOTE = 'Its source work order was deleted — the saved plan still copies.';
 
 /** "3 ops · 21 nests · 63 runs · 2 ties" — only the parts that are non-zero. */
 function planSummaryParts(template: WorkOrderTemplate): string[] {
@@ -216,23 +234,32 @@ export default function WorkOrderTemplatesPanel({
             {template.notes?.trim() ? (
               <p className="text-sm text-surface-500 line-clamp-2">{template.notes.trim()}</p>
             ) : null}
+            {/* Context, in the secondary text colour the notes above use — NOT the
+                red error treatment. The template works; only the job it was saved
+                from is gone. The Deleted-tab pointer rides along for the reader who
+                wants that JOB back, and only when they could actually restore it. */}
+            {template.plan.source_work_order_deleted === true && (
+              <p
+                data-testid={`template-source-deleted-${template.id}`}
+                className="mt-1 text-xs text-surface-500"
+              >
+                {SOURCE_DELETED_NOTE}
+                {canRestoreWorkOrders && (
+                  <>
+                    {' '}
+                    <Link to="/work-orders?tab=deleted" className="underline hover:no-underline">
+                      Find it on the Deleted tab.
+                    </Link>
+                  </>
+                )}
+              </p>
+            )}
             {!template.plan.available && (
               <p
                 data-testid={`template-unavailable-${template.id}`}
                 className="mt-1 text-xs font-medium text-fd-red"
               >
                 {templateUnavailableSentence(template.plan.unavailable_reason)}
-                {template.plan.unavailable_reason === SOURCE_WORK_ORDER_DELETED_REASON &&
-                  (canRestoreWorkOrders ? (
-                    <>
-                      {' '}
-                      <Link to="/work-orders?tab=deleted" className="underline hover:no-underline">
-                        Find it on the Deleted tab.
-                      </Link>
-                    </>
-                  ) : (
-                    ' An admin or manager can restore it from the Deleted tab.'
-                  ))}
               </p>
             )}
           </div>

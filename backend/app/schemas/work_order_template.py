@@ -155,21 +155,35 @@ class WorkOrderTemplatePlan(UTCModel):
     somebody soft-deletes a nest on the source, and the planner picks a template
     believing it carries 21 nests and gets 20.
 
-    When ``available`` is false the source work order has been soft-deleted and every
-    other field is null/zero. The template is still LISTED — hiding it is the mask trap
-    invariant 3 documents, and the planner needs to see the cause to act on it — but
-    ``POST .../use`` refuses it 409.
+    **A soft-deleted source does NOT make a template unavailable.** It is summarised
+    in full, ``available`` stays true, ``POST .../use`` produces the same DRAFT, and
+    the deletion is disclosed through ``source_work_order_deleted``. That is an owner
+    decision — a catalog entry must not stop working because somebody deleted a job —
+    and the service module docstring carries the invariant-3 argument behind it.
+
+    ``available`` is false only when the source ROW could not be resolved at all, which
+    the NOT NULL foreign key makes near-unreachable; every other field is then
+    null/zero. Such a template is still LISTED — hiding it is the mask trap invariant 3
+    documents — and ``POST .../use`` refuses it 409.
     """
 
     available: bool = Field(
         ...,
-        description="False when the source work order has been deleted. The template is still listed; "
-        "using it is refused 409.",
+        description="False only when the source work order row could not be resolved at all — NOT when "
+        "it has been deleted (see source_work_order_deleted). The template is still listed; using it is "
+        "refused 409.",
     )
     unavailable_reason: Optional[str] = Field(
         None,
         description="Machine-readable cause when available is false. Currently only "
-        "'source_work_order_deleted'. Treat the set as open and tolerate an unknown value.",
+        "'source_work_order_missing'. Treat the set as open and tolerate an unknown value. Note that "
+        "'source_work_order_deleted' was retired as a value here: deletion is now a flag, not a refusal.",
+    )
+    source_work_order_deleted: bool = Field(
+        False,
+        description="True when the work order this template was saved from has been soft-deleted. The "
+        "template still WORKS — this is disclosure, not a gate — but the exemplar is in the archive, so "
+        "surface it rather than dropping it silently.",
     )
 
     source_work_order_number: Optional[str] = None

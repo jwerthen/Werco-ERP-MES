@@ -26,21 +26,63 @@ here and it has consequences worth stating before someone files them as bugs:
   It is also why the list endpoint returns a LIVE plan summary read off the source
   (operation count, nest count, open ties, work centers) rather than a stored one:
   what the planner is shown is what they will get, with no hidden drift.
-* Delete the source work order and the template stops working. It is not
-  auto-removed and it is not hidden — it is listed as UNAVAILABLE with the reason,
-  and using it is refused 409. Silently hiding it is the mask trap invariant 3
-  documents; silently deleting it destroys a name nobody asked to lose.
+* Delete the source work order and the template KEEPS WORKING. It is not
+  auto-removed, not hidden, and — since 2026-08-27 — not refused either: the plan is
+  read straight through the tombstone and ``…/use`` still produces a DRAFT. That is an
+  owner decision overriding the original design (*"templates need to stay even if there
+  is no work order present for it"*); a catalog entry that stops working because
+  somebody tidied up a finished job is the worse failure, since the name and the
+  one-click re-run are the curated part and an unrelated action destroyed them. Only
+  the refusal was dropped, never the signal: every read still discloses
+  ``plan.source_work_order_deleted``. Silently hiding it would be the mask trap
+  invariant 3 documents; silently deleting it destroys a name nobody asked to lose.
 * Process-sheet steps are re-snapshotted from each family's currently-RELEASED
   revision at use time (``_resnapshot_process_sheet_steps``), so one template used
   twice six months apart can legitimately produce two different travelers. Correct,
   and only possible because this is a pointer.
 
 The alternative — freezing the plan into ``work_order_template_operations`` /
-``_nests`` / ``_allocations`` — was rejected outright. It would mean a SECOND copy
-service reimplementing every decision the 1,300-line duplicate service already makes
-(what scales with quantity, what a nest tie's ``qty_planned`` is derived from, which
-skips reach the planner and which refuse the whole call), and every future fix would
-have to be made twice or the two would drift. One copy engine, one set of rules.
+``_nests`` / ``_allocations`` — was rejected outright, and STAYS rejected. It would
+mean a SECOND copy service reimplementing every decision the 1,300-line duplicate
+service already makes (what scales with quantity, what a nest tie's ``qty_planned`` is
+derived from, which skips reach the planner and which refuse the whole call), and every
+future fix would have to be made twice or the two would drift. One copy engine, one set
+of rules.
+
+WHY DELETION DOES NOT REOPEN THAT QUESTION — THE LOAD-BEARING FK
+-----------------------------------------------------------------
+"Read through the tombstone" is a complete answer, not a partial one, and the reason is
+a schema fact nobody would rediscover from the service code: ``source_work_order_id``
+below is ``nullable=False`` with a PLAIN ``ForeignKey("work_orders.id")`` and **no**
+``ON DELETE`` clause — in this model and in migration ``087`` alike. Postgres therefore
+refuses to remove a ``work_orders`` row any template still points at. So the source row
+**cannot be physically gone while the template exists**, and *"there is no work order
+present for it"* can only ever mean **soft-deleted** — a state in which every operation,
+laser nest, material tie and process-sheet step the job had is still sitting there to be
+read.
+
+That is what makes the frozen-plan alternative buy nothing: it would exist to survive a
+disappearance that cannot happen. One predicate dropped from one resolver covers 100% of
+the reachable cases; a snapshot table would cover the same cases with a second copy
+engine and all the drift that comes with it.
+
+The FK guarantee used to be an ACCIDENT (a hard delete hit a ``ForeignKeyViolation`` and
+surfaced as a 500). It is now depended upon, so it is enforced legibly:
+``DELETE /work-orders/{id}?hard_delete=true`` refuses **409** naming the templates saved
+from the job, before its first mutation. **Soft delete is deliberately unaffected** —
+that is the entire point.
+
+**The invariant-3 tension, stated rather than argued away.** Invariant 3 wants an
+``is_deleted`` predicate on every read of a soft-deletable model, with four legitimate
+non-filterers: delete, restore, a duplicate probe, and a HISTORICAL RECORD. A template's
+source is the historical-record shape — the template permanently names the job it was
+saved from, and the FK above means it owns that row for the row's whole life. The
+counter-argument is real and is not waved off: minting a NEW work order from a deleted
+plan is closer to SELECTION than to reading a record, and selection is exactly what
+invariant 3 gates. It is decided rather than resolved, and the half that stays gated is
+the asymmetry that carries the decision: **saving** a template FROM a deleted work order
+is still 404 (``work_order_template_service.resolve_catalogable_work_order``). An
+already-saved template is a catalog entry; a new one is a fresh selection.
 
 WHY THIS IS NOT A SECOND WORK-ORDER TABLE
 ------------------------------------------
@@ -73,8 +115,14 @@ Two consequences are deliberate:
 * **There is no restore verb, on purpose.** A template holds no information that
   cannot be reproduced in one click: re-open the source work order and press "Save
   as template" again, and the result is identical, because the plan was never in
-  here. The tombstone exists so nothing is physically destroyed (invariant 3's
-  letter) — not because the row needs an undo path, and not to keep audit rows
+  here. **One narrow case now escapes that argument and is recorded rather than
+  patched**: if the source work order has been soft-deleted, "Save as template" is
+  404 (the selection half keeps its filter, above), so deleting such a template
+  cannot be undone from the UI — restore the work order first, then re-save. It is a
+  two-step recovery rather than a lost one, and nobody has asked for a restore verb;
+  revisit if that changes. The tombstone exists so nothing is physically destroyed
+  (invariant 3's letter) — not because the row needs an undo path, and not to keep
+  audit rows
   readable: ``_live_template_or_404`` 404s a deleted template anyway, and every
   audit row already carries the name verbatim in ``resource_identifier`` and
   ``extra_data.template_name``.
@@ -156,11 +204,18 @@ class WorkOrderTemplate(Base, SoftDeleteMixin, TenantMixin):
     notes = Column(Text, nullable=True)
 
     # THE POINTER. Not nullable: a template with no exemplar has no plan, and there
-    # is nothing sensible for the use endpoint to copy. The referenced work order is
-    # SOFT-DELETABLE, so every read of it must carry its own ``is_deleted == False``
-    # (invariant 3 — ``tenant_query`` scopes ``company_id`` and nothing else); a
-    # template whose source is tombstoned is reported UNAVAILABLE, never hidden and
-    # never silently repaired.
+    # is nothing sensible for the use endpoint to copy.
+    #
+    # The NOT NULL + plain FK + no ``ON DELETE`` combination is LOAD-BEARING, not
+    # incidental — see "WHY DELETION DOES NOT REOPEN THAT QUESTION" above. It is what
+    # guarantees the referenced row cannot be physically removed while this template
+    # exists, so a source that is "gone" is always merely tombstoned and its plan is
+    # always still readable. ``work_order_template_service.resolve_source_work_order``
+    # therefore deliberately carries NO ``is_deleted`` filter (the invariant-3
+    # historical-record exception, argued above), while
+    # ``resolve_catalogable_work_order`` — the SELECTION half, used when saving a NEW
+    # template — keeps it. Don't add an ``ON DELETE`` here, and don't "restore
+    # consistency" by putting the filter back on the read-through resolver.
     source_work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=False, index=True)
 
     # A PREFILL, not a stored plan number. ``POST /work-order-templates/{id}/use``

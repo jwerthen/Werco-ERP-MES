@@ -17,9 +17,28 @@ how a nest tie's ``qty_planned`` is derived, which omissions skip and which refu
 the whole call), and every future fix would have to be made twice.
 
 The cost, stated so nobody files it as a bug: editing the source work order changes
-what the template produces, and deleting the source makes the template unusable
-(reported UNAVAILABLE and refused 409 — never auto-removed, never hidden). See
-``app/models/work_order_template.py``.
+what the template produces. See ``app/models/work_order_template.py``.
+
+**AMENDED 2026-08-27 — deleting the source no longer breaks the template.** As
+shipped, a template whose source work order was soft-deleted was reported UNAVAILABLE
+and refused 409. The owner overrode that: the template now reads its plan straight
+THROUGH the tombstone and still produces a DRAFT. No schema change was needed, and
+that is not a coincidence — it is a property of the FK declared below.
+
+``source_work_order_id`` is ``nullable=False`` with a PLAIN
+``ForeignKeyConstraint(["source_work_order_id"], ["work_orders.id"])`` and **no
+``ondelete``**. Postgres therefore refuses to remove a ``work_orders`` row any
+template still points at, so *"the source work order is gone"* can only ever mean
+**soft-deleted** — and a soft-deleted work order keeps every operation, nest, tie and
+process-sheet step it had. The plan is always still there to be read, which is exactly
+why read-through is a complete answer and a frozen-plan table would buy nothing.
+
+**Do not add an ``ondelete`` to that constraint in a later migration, and do not
+"clean up" the NOT NULL.** What used to be an incidental integrity error (a hard
+delete raised ``ForeignKeyViolation`` and surfaced as a 500) is now depended upon:
+``DELETE /work-orders/{id}?hard_delete=true`` refuses **409** naming the templates
+saved from the job, before its first mutation. A ``CASCADE`` here would silently
+destroy catalog entries as a side effect of deleting a draft work order.
 
 Lock-step with ``app/models/work_order_template.py``
 ----------------------------------------------------
