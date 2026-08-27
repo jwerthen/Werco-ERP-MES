@@ -1644,7 +1644,15 @@ def list_work_orders(
             )
         )
 
-    work_orders = query.order_by(WorkOrder.priority, WorkOrder.due_date).offset(skip).limit(limit).all()
+    # ``WorkOrder.id`` is a TIEBREAKER, not decoration -- do not tidy it away. priority and
+    # due_date tie constantly in a real shop (a whole day's jobs share both), and this
+    # endpoint is paged with OFFSET/LIMIT by every caller -- the frontend walks it in
+    # 500-row windows, on BOTH views. Postgres guarantees no row order at all among tied
+    # sort keys, so two OFFSET windows over one tied block can repeat a work order and
+    # drop another silently. Pre-existing exposure on the live list, hardened here rather
+    # than a bug the deleted view introduced; the archive only made it reachable from a
+    # second screen.
+    work_orders = query.order_by(WorkOrder.priority, WorkOrder.due_date, WorkOrder.id).offset(skip).limit(limit).all()
     # Reconcile-on-read: a concurrent-write conflict here is benign (idempotent),
     # so it must NOT 500 the list -- _reconcile_and_commit swallows StaleDataError.
     # AUD-3: terminal reconcile-driven transitions are audited to the requesting user.
@@ -1729,9 +1737,12 @@ def list_work_orders(
             due_date=wo.due_date,
             customer_name=wo.customer_name,
             # Left at their None defaults on every other path -- see WorkOrderSummary.
-            # ``deleted_by_names`` is empty off the deleted view, so the .get() below is a
-            # dict miss, not a query; and .get(None) for a row whose deleted_by is NULL
-            # (pre-mixin rows, blank-named users) is harmlessly None.
+            # Off the deleted view the ternary short-circuits on ``deleted_only``, so
+            # ``.get()`` never runs and no lookup dict was ever built; that is what keeps
+            # the unset parameter inert, not the emptiness of the dict. ON the archive a
+            # dict MISS -- a row whose deleted_by is NULL (pre-mixin rows), or a deleter
+            # whose name came back blank and was skipped when the dict was built -- yields
+            # None, i.e. "somebody deleted this, we cannot say who", not an error.
             is_deleted=wo.is_deleted if deleted_only else None,
             deleted_at=wo.deleted_at if deleted_only else None,
             deleted_by_name=(deleted_by_names.get(wo.deleted_by) if deleted_only else None),

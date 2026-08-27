@@ -51,7 +51,7 @@ import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import WorkOrders from './WorkOrders';
 import { ToastProvider } from '../components/ui/Toast';
-import type { WorkOrderRestoreResponse, WorkOrderSummary } from '../types';
+import type { WorkOrderRestoreResponse, WorkOrderSummary, WorkOrderTemplate } from '../types';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -146,6 +146,61 @@ const deletedDraft: WorkOrderSummary = {
   deleted_by_name: null,
 };
 
+/**
+ * Deleted, OVERDUE and IN PROGRESS — built so that a leak into `workOrders` would be
+ * visible in the numbers rather than only in the table: it would add an Overdue, an
+ * In Progress, a row to the "showing X of Y" counter and a customer to the filter.
+ */
+const deletedOverdue: WorkOrderSummary = {
+  id: 9,
+  work_order_number: 'WO-20260803-009',
+  part_id: 90,
+  work_order_type: 'production',
+  part_number: 'PN-LATE',
+  part_name: 'Manifold',
+  part_type: 'manufactured',
+  status: 'in_progress',
+  priority: 1,
+  quantity_ordered: 30,
+  quantity_complete: 5,
+  customer_name: 'Gamma Metalworks',
+  due_date: '2020-01-15',
+  is_deleted: true,
+  deleted_at: '2026-08-24T18:00:00Z',
+  deleted_by_name: 'Dana Reyes',
+};
+
+/**
+ * A template whose source work order was soft-deleted. Its row names restoring the
+ * work order as one of the two fixes, and the wording depends on a prop this page
+ * has to pass down (see the `canRestoreWorkOrders` block at the bottom).
+ */
+const deadTemplate: WorkOrderTemplate = {
+  id: 9,
+  name: 'Old weld fixture',
+  notes: null,
+  source_work_order_id: 42,
+  default_quantity: 12,
+  created_at: '2026-08-20T12:00:00Z',
+  updated_at: '2026-08-20T12:00:00Z',
+  created_by: 3,
+  plan: {
+    available: false,
+    unavailable_reason: 'source_work_order_deleted',
+    source_work_order_number: null,
+    source_status: null,
+    work_order_type: null,
+    sequential_operations: null,
+    priority: null,
+    operation_count: 0,
+    nest_count: 0,
+    planned_runs_total: 0,
+    open_material_tie_count: 0,
+    work_centers: [],
+    source_quantity_ordered: null,
+  },
+};
+
 /** Mutable so a restore can take a row out of the archive the refetch re-reads. */
 let deletedRows: WorkOrderSummary[] = [];
 
@@ -165,6 +220,13 @@ const deletedFetchCalls = () =>
 /** The desktop table, once it has painted. Mobile cards mount too; ignore them. */
 const desktopTable = async (): Promise<HTMLElement> =>
   (await screen.findAllByTestId('data-table'))[0] as HTMLElement;
+
+/** Same, for assertions that must NOT await (a stale response must not be waited in). */
+const desktopTableSync = (): HTMLElement => screen.getAllByTestId('data-table')[0] as HTMLElement;
+
+/** The orders tab's three MiniStat values, in strip order: Overdue, In Progress, Due Today. */
+const statValues = (): string[] =>
+  Array.from(document.querySelectorAll('.stat-value')).map((el) => el.textContent ?? '');
 
 /** The archive's desktop row for a work-order number. */
 async function archiveRow(workOrderNumber: string): Promise<HTMLElement> {
@@ -306,8 +368,9 @@ describe('WorkOrders: what an archived row shows', () => {
     const row = await archiveRow('WO-20260802-008');
 
     const cells = within(row).getAllByRole('cell');
-    // Columns: Work Order | Part | Status | Qty | Due Date | Deleted | Deleted By | Actions
-    expect(cells[6]).toHaveTextContent('—');
+    // Columns: Work Order | Part | Customer | Status | Qty | Due Date | Deleted |
+    // Deleted By | Actions
+    expect(cells[7]).toHaveTextContent('—');
     expect(row).not.toHaveTextContent(/null|undefined/);
   });
 
@@ -456,13 +519,19 @@ describe('WorkOrders: restoring is confirmed, non-optimistic, and honest about p
     );
   });
 
-  it('surfaces the server detail verbatim on refusal and leaves the row in the archive', async () => {
+  it('surfaces the server detail verbatim on a 4xx refusal, and closes the dialog WITH the row it names', async () => {
+    // A 4xx is the server saying this table is wrong — overwhelmingly "somebody else
+    // restored it already". The catch re-reads the archive, which drops the phantom
+    // row; a dialog left open then names a work order that is no longer in the table,
+    // with an enabled Restore button whose every retry can only 400 again.
     mockedApi.restoreWorkOrder.mockRejectedValue({
       response: { status: 409, data: { detail: 'Work order is not deleted' } },
     });
 
     renderAt('/work-orders?tab=deleted');
     await archiveRow('WO-20260802-008');
+    // What the re-read finds: somebody else already restored it.
+    deletedRows = [deletedComplete];
 
     const confirmButton = await openRestoreDialog('WO-20260802-008');
     await userEvent.click(confirmButton);
@@ -470,12 +539,371 @@ describe('WorkOrders: restoring is confirmed, non-optimistic, and honest about p
     const toast = await screen.findByRole('alert');
     expect(toast).toHaveTextContent('Work order is not deleted');
     expect(toast).toHaveClass('bg-red-600');
-    // Nothing was changed, so nothing moves: the row is still restorable and the
-    // dialog stays up so a retry is a decision rather than a re-hunt.
-    expect(within(await desktopTable()).getByText('WO-20260802-008')).toBeInTheDocument();
-    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryAllByText('WO-20260802-008')).toHaveLength(0));
     // No success/warning toast alongside the failure.
     expect(document.querySelector('.bg-green-600')).toBeNull();
     expect(document.querySelector('.bg-amber-600')).toBeNull();
+  });
+
+  it('keeps the dialog up — and the row — on a 5xx, where the row is still real', async () => {
+    // The other half of the split. A 500 (or an offline `err.response === undefined`)
+    // says nothing about the row: it is still deleted and still restorable, so the
+    // retry has to stay one click away rather than a re-hunt through the archive.
+    // Deliberately no re-read either — a failing one would swap the archive for an
+    // error state over a transient blip.
+    mockedApi.restoreWorkOrder.mockRejectedValue({
+      response: { status: 500, data: { detail: 'Internal Server Error' } },
+    });
+
+    renderAt('/work-orders?tab=deleted');
+    await archiveRow('WO-20260802-008');
+    const fetchesBefore = deletedFetchCalls().length;
+
+    const confirmButton = await openRestoreDialog('WO-20260802-008');
+    await userEvent.click(confirmButton);
+
+    const toast = await screen.findByRole('alert');
+    expect(toast).toHaveClass('bg-red-600');
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(within(await desktopTable()).getByText('WO-20260802-008')).toBeInTheDocument();
+    expect(deletedFetchCalls()).toHaveLength(fetchesBefore);
+    // ...and the retry is live, not stuck disabled behind `restorePending`.
+    await waitFor(() =>
+      expect(within(screen.getByRole('dialog')).getByRole('button', { name: 'Restore' })).toBeEnabled()
+    );
+  });
+});
+
+describe('WorkOrders: the archive read is latched and re-run on every entry', () => {
+  it('lets the NEWEST archive request win, however late the older one lands', async () => {
+    // Deleted -> Orders -> Deleted leaves two reads in flight. Without the
+    // `deletedRequestRef` latch the SLOWER (older) response paints last and the user
+    // is looking at an archive from before whatever they left the tab to do — the
+    // exact staleness that re-fetching on every entry exists to prevent, reached by a
+    // different road.
+    const pending: Array<(rows: WorkOrderSummary[]) => void> = [];
+    mockedApi.getWorkOrders.mockImplementation(async (params?: { deleted_only?: boolean }) => {
+      if (!params?.deleted_only) return [liveWorkOrder];
+      return new Promise<WorkOrderSummary[]>((resolve) => {
+        pending.push(resolve);
+      });
+    });
+
+    renderAt('/work-orders?tab=deleted');
+    await waitFor(() => expect(pending).toHaveLength(1));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Work Orders' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Deleted' }));
+    await waitFor(() => expect(pending).toHaveLength(2));
+
+    // The SECOND (current) read answers first.
+    await act(async () => {
+      pending[1]([deletedDraft]);
+    });
+    expect(await archiveRow('WO-20260802-008')).toBeInTheDocument();
+
+    // ...and the first, superseded one lands afterwards carrying different rows.
+    await act(async () => {
+      pending[0]([deletedComplete]);
+    });
+    expect(within(desktopTableSync()).getByText('WO-20260802-008')).toBeInTheDocument();
+    expect(screen.queryAllByText('WO-20260801-007')).toHaveLength(0);
+  });
+
+  it('re-reads the archive on RE-entry, not just the first time', async () => {
+    // Somebody else may have deleted or restored a work order in between; a cached
+    // archive is how you end up clicking Restore on a row the server will refuse.
+    renderAt('/work-orders?tab=deleted');
+    await archiveRow('WO-20260801-007');
+    expect(deletedFetchCalls()).toHaveLength(1);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Work Orders' }));
+    await screen.findAllByText('WO-1001');
+    // Leaving does NOT re-read — the archive stays out of the orders tab's traffic.
+    expect(deletedFetchCalls()).toHaveLength(1);
+
+    // A row this session never saw was deleted while the user was away.
+    deletedRows = [deletedComplete, deletedDraft, deletedOverdue];
+    await userEvent.click(screen.getByRole('button', { name: 'Deleted' }));
+
+    expect(await archiveRow('WO-20260803-009')).toBeInTheDocument();
+    expect(deletedFetchCalls()).toHaveLength(2);
+  });
+
+  it('shows the loading state, never an "empty archive", before the first read answers', async () => {
+    // `deletedLoading` starts TRUE because the read fires from a passive effect after
+    // the first paint. Started false, DataTable's `!loading && !isError && !rows`
+    // empty state paints "No deleted work orders" over an archive that is on its way
+    // — the one sentence that makes someone stop looking.
+    let resolveArchive: (rows: WorkOrderSummary[]) => void = () => {};
+    mockedApi.getWorkOrders.mockImplementation(async (params?: { deleted_only?: boolean }) => {
+      if (!params?.deleted_only) return [liveWorkOrder];
+      return new Promise<WorkOrderSummary[]>((resolve) => {
+        resolveArchive = resolve;
+      });
+    });
+
+    renderAt('/work-orders?tab=deleted');
+
+    // The banner is up, so the branch has rendered — and it is not claiming the
+    // archive is empty.
+    expect(await screen.findByText(/These work orders are deleted records/)).toBeInTheDocument();
+    expect(screen.queryByText('No deleted work orders')).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveArchive([deletedComplete]);
+    });
+    expect(await archiveRow('WO-20260801-007')).toBeInTheDocument();
+  });
+
+  it('renders the archive error state with a Retry that re-reads', async () => {
+    mockedApi.getWorkOrders.mockImplementation(async (params?: { deleted_only?: boolean }) => {
+      if (!params?.deleted_only) return [liveWorkOrder];
+      throw new Error('boom');
+    });
+
+    renderAt('/work-orders?tab=deleted');
+
+    // A blank section (or an empty state) would read as "nothing was ever deleted" —
+    // the opposite of what happened.
+    expect(
+      await screen.findAllByText('Could not load deleted work orders.')
+    ).not.toHaveLength(0);
+    expect(screen.queryByText('No deleted work orders')).not.toBeInTheDocument();
+    expect(deletedFetchCalls()).toHaveLength(1);
+
+    mockedApi.getWorkOrders.mockImplementation(async (params?: { deleted_only?: boolean }) =>
+      params?.deleted_only ? deletedRows : [liveWorkOrder]
+    );
+    await userEvent.click(screen.getAllByRole('button', { name: /retry/i })[0]);
+
+    expect(await archiveRow('WO-20260801-007')).toBeInTheDocument();
+    expect(deletedFetchCalls()).toHaveLength(2);
+  });
+});
+
+describe('WorkOrders: the archive is structurally separate from the orders book', () => {
+  it('leaves every orders-tab count and KPI untouched after the archive loads', async () => {
+    // `deletedWorkOrders` is its OWN state and never merges into `workOrders`. That is
+    // the whole guarantee: the customer options, the filters, the groupings, the
+    // "showing X of Y" counter and all three MiniStats derive from `workOrders`, so a
+    // deleted row landing there would count a job somebody deleted as overdue and in
+    // progress. `deletedOverdue` is built to be visible in exactly those numbers if it
+    // ever leaks.
+    deletedRows = [deletedComplete, deletedDraft, deletedOverdue];
+    renderAt('/work-orders');
+    await screen.findAllByText('WO-1001');
+
+    const before = statValues();
+    const countBefore = screen.getByText(/work orders$/).textContent;
+
+    await userEvent.click(screen.getByRole('button', { name: 'Deleted' }));
+    await archiveRow('WO-20260803-009');
+    await userEvent.click(screen.getByRole('button', { name: 'Work Orders' }));
+    await screen.findAllByText('WO-1001');
+
+    expect(statValues()).toEqual(before);
+    expect(screen.getByText(/work orders$/).textContent).toBe(countBefore);
+    // State the numbers outright too, so a refactor cannot make this pass by zeroing
+    // the strip: Overdue / In Progress / Due Today, none of which the live row moves.
+    expect(before).toEqual(['0', '0', '0']);
+    // And the deleted row is nowhere on the orders tab — not in the table, and not in
+    // the customer filter it would otherwise contribute an option to.
+    expect(screen.queryAllByText('WO-20260803-009')).toHaveLength(0);
+    expect(screen.queryByRole('option', { name: 'Gamma Metalworks' })).not.toBeInTheDocument();
+  });
+});
+
+describe('WorkOrders: finding a row in an archive that only grows', () => {
+  it('filters the archive client-side on WO number, part and customer', async () => {
+    // Nothing ages out of the archive and it keeps the terminal-status rows the live
+    // list drops, so within a year finding one job is paging 25 at a time. Filtering
+    // rows already in hand keeps that off the wire — no second race surface on a read
+    // that is already latched (Purchasing's deleted-PO book does the same).
+    deletedRows = [deletedComplete, deletedDraft, deletedOverdue];
+    renderAt('/work-orders?tab=deleted');
+    await archiveRow('WO-20260801-007');
+
+    const box = screen.getByRole('textbox', { name: 'Search deleted work orders' });
+    const fetchesBefore = deletedFetchCalls().length;
+
+    // By work order number.
+    await userEvent.type(box, '008');
+    await waitFor(() => expect(screen.queryAllByText('WO-20260801-007')).toHaveLength(0));
+    expect(within(desktopTableSync()).getByText('WO-20260802-008')).toBeInTheDocument();
+
+    // By part number — case-insensitively.
+    await userEvent.clear(box);
+    await userEvent.type(box, 'pn-dead');
+    await waitFor(() => expect(screen.queryAllByText('WO-20260802-008')).toHaveLength(0));
+    expect(within(desktopTableSync()).getByText('WO-20260801-007')).toBeInTheDocument();
+
+    // By part NAME.
+    await userEvent.clear(box);
+    await userEvent.type(box, 'spacer');
+    await waitFor(() => expect(screen.queryAllByText('WO-20260801-007')).toHaveLength(0));
+    expect(within(desktopTableSync()).getByText('WO-20260802-008')).toBeInTheDocument();
+
+    // By customer.
+    await userEvent.clear(box);
+    await userEvent.type(box, 'Gamma');
+    await waitFor(() => expect(screen.queryAllByText('WO-20260802-008')).toHaveLength(0));
+    expect(within(desktopTableSync()).getByText('WO-20260803-009')).toBeInTheDocument();
+
+    // Client-side throughout: not one extra request.
+    expect(deletedFetchCalls()).toHaveLength(fetchesBefore);
+  });
+
+  it('says the SEARCH came up empty, not that nothing was ever deleted', async () => {
+    renderAt('/work-orders?tab=deleted');
+    await archiveRow('WO-20260801-007');
+
+    await userEvent.type(
+      screen.getByRole('textbox', { name: 'Search deleted work orders' }),
+      'no-such-job'
+    );
+
+    // Twice: DataTable mounts the desktop empty state and the mobile one in jsdom.
+    expect(await screen.findAllByText('No matching deleted work orders')).not.toHaveLength(0);
+    // The other sentence would send someone looking somewhere else for a job that is
+    // right here behind a filter they typed.
+    expect(screen.queryByText('No deleted work orders')).not.toBeInTheDocument();
+  });
+
+  it('keeps the archive filter out of the orders tab, and vice versa', async () => {
+    // Two boxes, two states. Shared state would mean a term typed on one tab silently
+    // hides rows on the other — and the orders one is a SERVER param, so it would also
+    // re-query the wrong book.
+    renderAt('/work-orders?tab=deleted');
+    await archiveRow('WO-20260801-007');
+    await userEvent.type(
+      screen.getByRole('textbox', { name: 'Search deleted work orders' }),
+      'PN-DEAD'
+    );
+    await waitFor(() => expect(screen.queryAllByText('WO-20260802-008')).toHaveLength(0));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Work Orders' }));
+    const liveBox = await screen.findByRole('textbox', { name: 'Search work orders' });
+    expect(liveBox).toHaveValue('');
+    expect(await screen.findAllByText('WO-1001')).not.toHaveLength(0);
+    // No archive term reached the SERVER read of the live book.
+    expect(mockedApi.getWorkOrders.mock.calls.some((call) => call[0]?.search === 'PN-DEAD')).toBe(
+      false
+    );
+  });
+
+  it('shows the customer on an archived row, and gives it a sortable column', async () => {
+    // "Whose job was it" is a primary way people identify a work order they are
+    // hunting for; the live table has always had the column, and without it here the
+    // archive's CSV export drops it too.
+    renderAt('/work-orders?tab=deleted');
+    const row = await archiveRow('WO-20260801-007');
+
+    expect(within(row).getByText('Beta Defense')).toBeInTheDocument();
+    expect(
+      within(await desktopTable()).getByRole('button', { name: /^Customer/ })
+    ).toBeInTheDocument();
+  });
+});
+
+describe('WorkOrders: the archive banner and the confirm dialog say the same thing', () => {
+  it('hedges the material-tie promise the way the dialog does', async () => {
+    // A tie the delete cancelled and a later nest re-import then DETACHED comes back
+    // cancelled, and the restore response reports NO skip for it — so the toast cannot
+    // tell anyone. An unqualified "they come back with it" is then the last thing the
+    // user reads before the job runs with no demand for that material.
+    renderAt('/work-orders?tab=deleted');
+    const banner = await screen.findByText(/These work orders are deleted records/);
+
+    expect(banner).toHaveTextContent(/re-opened where they still can be/i);
+    expect(banner).not.toHaveTextContent(/come back with it/i);
+
+    // ...and the dialog, which already got this right, still agrees with it.
+    await archiveRow('WO-20260802-008');
+    await openRestoreDialog('WO-20260802-008');
+    expect(screen.getByRole('dialog')).toHaveTextContent(/re-opened where they still can be/i);
+  });
+});
+
+describe('WorkOrders: the restore dialog does not outlive the view', () => {
+  it('closes when the user leaves the Deleted tab', async () => {
+    // `?tab=` is a search param on the SAME route, so the page stays mounted across a
+    // tab switch and `restoreTarget` would survive it: come back and the dialog
+    // remounts open, pulling focus and naming a work order the user stopped thinking
+    // about two tabs ago.
+    renderAt('/work-orders?tab=deleted');
+    await archiveRow('WO-20260802-008');
+    await openRestoreDialog('WO-20260802-008');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Work Orders' }));
+    await screen.findAllByText('WO-1001');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Deleted' }));
+    await archiveRow('WO-20260802-008');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(mockedApi.restoreWorkOrder).not.toHaveBeenCalled();
+  });
+});
+
+describe('WorkOrders: the header actions work on every tab that shows them', () => {
+  it('opens the nest-import wizard from the Deleted tab', async () => {
+    // The header — Import Nest Package included — is rendered by all three branches,
+    // but the wizard used to be mounted only below the orders return, so the button
+    // was live and inert on Templates and Deleted. Everyone who can see either tab
+    // clears `canImportNests`, so it was inert for all of them.
+    renderAt('/work-orders?tab=deleted');
+    await archiveRow('WO-20260801-007');
+
+    await userEvent.click(screen.getByRole('button', { name: /import nest package/i }));
+
+    expect(
+      await screen.findByText(/creates a new released laser cutting work order/i)
+    ).toBeInTheDocument();
+  });
+
+  it('opens the nest-import wizard from the Templates tab', async () => {
+    // Same hole, shipped one commit earlier. Fixing it in one place is the point.
+    renderAt('/work-orders?tab=templates');
+    await screen.findByRole('button', { name: 'Templates', current: 'page' });
+
+    await userEvent.click(screen.getByRole('button', { name: /import nest package/i }));
+
+    expect(
+      await screen.findByText(/creates a new released laser cutting work order/i)
+    ).toBeInTheDocument();
+  });
+});
+
+describe('WorkOrders: the Templates panel is told who can restore', () => {
+  it('wires canRestoreWorkOrders through, so a dead template LINKS at the archive', async () => {
+    // The four tests that pin this pointer render the panel directly and pass the prop
+    // themselves, so dropping the wiring HERE degrades in total silence: every admin
+    // would get the "an admin or manager can restore it" sentence — advice to go ask
+    // themselves — because the prop defaults to the narrower answer.
+    mockedApi.listWorkOrderTemplates.mockResolvedValue({ templates: [deadTemplate], total: 1 });
+
+    renderAt('/work-orders?tab=templates');
+
+    const link = await screen.findByRole('link', { name: 'Find it on the Deleted tab.' });
+    expect(link).toHaveAttribute('href', '/work-orders?tab=deleted');
+  });
+
+  it('gives a SUPERVISOR the sentence instead — they hold work_orders:edit but not delete', async () => {
+    // The gates genuinely differ: Templates is work_orders:edit (admin/manager/
+    // supervisor), the archive is admin/manager (+superuser). A link would be a dead
+    // end — `?tab=deleted` falls back to the orders list for them.
+    mockUser.current = { id: 4, role: 'supervisor', is_superuser: false };
+    mockedApi.listWorkOrderTemplates.mockResolvedValue({ templates: [deadTemplate], total: 1 });
+
+    renderAt('/work-orders?tab=templates');
+
+    expect(
+      await screen.findByText(/an admin or manager can restore it from the Deleted tab/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('link', { name: 'Find it on the Deleted tab.' })
+    ).not.toBeInTheDocument();
   });
 });

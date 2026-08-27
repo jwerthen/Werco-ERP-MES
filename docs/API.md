@@ -2192,7 +2192,10 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > - **UI.** Work Orders grows a third tab, **Deleted** (`?tab=deleted`), beside Work Orders and
 >   Templates, gated on the same Admin/Manager population. It keeps its own book — never merged into
 >   the live list, so no KPI, count or grouping on the page can pick up a deleted row — fetched lazily
->   on entry into the view. It drops row click-through and every verb but **Restore** (the detail route
+>   on entry into the view, with its own **client-side** filter over the fetched rows (the archive
+>   never ages out and keeps the terminal-status rows the live list drops, so it only grows; the
+>   server's `search` param is deliberately not used for it, to avoid a second race surface on a view
+>   whose read is already latched). It drops row click-through and every verb but **Restore** (the detail route
 >   404s on a deleted row; Duplicate and Save-as-template read the source through that same endpoint),
 >   and Restore is **non-optimistic** per the convention in `CLAUDE.md`. A restore that comes back
 >   partial raises the **`warning`** toast rather than `success` — either because the envelope reported

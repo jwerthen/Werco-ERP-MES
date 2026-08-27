@@ -115,6 +115,9 @@ const queryTitles: Record<string, string> = {
   // `/work-orders/:id` route BOTH match `/work-orders/templates`, so a real
   // route there would resolve as a work order whose id is the word "templates".
   '/work-orders?tab=templates': 'Work Order Templates',
+  // The soft-delete archive, a tab for the same reason: `/work-orders/deleted` would
+  // resolve as a work order whose id is the word "deleted".
+  '/work-orders?tab=deleted': 'Deleted Work Orders',
   '/warehouse?tab=inventory': 'Inventory',
   '/warehouse?tab=receiving': 'Receiving',
   '/warehouse?tab=shipping': 'Shipping',

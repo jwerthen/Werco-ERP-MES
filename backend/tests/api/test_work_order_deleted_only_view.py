@@ -39,8 +39,12 @@ Sections, and the failure each one exists to catch:
 * **§6 Provenance.** ``is_deleted`` / ``deleted_at`` / ``deleted_by_name``, resolved
   through the real ``DELETE /work-orders/{id}`` so the columns are written by production
   code. ``deleted_by`` is a bare Integer with no FK, resolved in one batched query with
-  NO ``is_active`` filter: provenance must survive the deleter's departure, and the
-  deletes people ask about most are the ones done by someone who has since left.
+  NO ``is_active`` filter and NO ``company_id`` filter: provenance must survive the
+  deleter's departure (the deletes people ask about most are the ones done by someone
+  who has since left) AND the deleter being a platform admin whose own user row lives in
+  another company. The cross-company case has its own test because every other one here
+  uses a same-company deleter, so a "tenancy hardening" that scopes the lookup would
+  otherwise pass the entire file.
 
 * **§7 The tri-state.** ``WorkOrderSummary`` sets ``from_attributes`` and
   ``is_deleted``/``deleted_at`` are REAL columns on ``WorkOrder``, so a future
@@ -69,6 +73,7 @@ from fastapi import status
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.core.security import create_access_token
 from app.models.user import User, UserRole
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderStatus
 from tests.lean_phase1_helpers import (
@@ -130,6 +135,24 @@ def _superuser(db: Session, *, role: UserRole = UserRole.OPERATOR) -> User:
     db.commit()
     db.refresh(user)
     return user
+
+
+def _wo_with_completion_evidence(db: Session, actor: User) -> WorkOrder:
+    """A RELEASED WO whose closed labor evidence covers the whole order — the shape the
+    read-path reconcile drives to COMPLETE.
+
+    Shared by §3 and §9, and it lives up here rather than beside §9 because that sharing
+    is the point: this is the ONLY fixture in the file that gives the reconcile anything
+    to do, so it is the only one against which a test can claim the reconcile did NOT
+    run. A plain ``make_wo`` has no operations and no ``TimeEntry``, so a WO built that
+    way stays RELEASED whether the reconcile fires or not, and any such assertion is
+    vacuous."""
+    part = make_part(db)
+    wc = make_work_center(db)
+    wo = make_wo(db, part, status_=WorkOrderStatus.RELEASED, quantity_ordered=10)
+    op = make_op(db, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS)
+    make_entry(db, actor, wo, op, wc, quantity_produced=10)
+    return wo
 
 
 # ---------------------------------------------------------------------------
@@ -260,12 +283,23 @@ class TestRoleGate:
         assert resp.status_code == status.HTTP_200_OK, resp.text
 
     def test_the_gate_refuses_before_any_row_is_read(self, client: TestClient, db_session: Session):
-        """A refused archive read must not have touched the database — the reconcile-on-
-        read commits, so a gate placed after the query would let a 403'd caller still
-        drive state changes."""
+        """A refused archive read must not have committed anything — the reconcile-on-read
+        is the handler's only write, and it commits.
+
+        The fixture is deliberately ``_wo_with_completion_evidence``, not a bare
+        ``make_wo``. That is the whole test: a plain work order has no operations and no
+        ``TimeEntry``, so the reconcile has nothing to act on and the row stays RELEASED
+        no matter where the gate sits — the assertion below would be true against every
+        arrangement of this handler, including the broken ones.
+
+        What it pins, precisely: TWO independent guards keep a 403'd caller from
+        committing here — the gate runs above the query, and ``if not deleted_only``
+        skips ``_reconcile_and_commit`` on the archive path. Either alone suppresses the
+        reconcile, so this is a both-removed detector rather than a single-fault one (a
+        gate moved below the reconcile still reconciles nothing while the carve-out
+        stands). Only the evidence-bearing fixture can detect that pair at all; keep it."""
         operator = make_user(db_session, role=UserRole.OPERATOR)
-        part = make_part(db_session)
-        wo = make_wo(db_session, part, status_=WorkOrderStatus.RELEASED)
+        wo = _wo_with_completion_evidence(db_session, operator)
         _soft_delete_direct(db_session, wo)
 
         refused = client.get(f"{WORK_ORDERS_URL}?deleted_only=true", headers=headers_for(operator))
@@ -388,6 +422,56 @@ class TestProvenance:
 
         resp = client.get(f"{WORK_ORDERS_URL}?deleted_only=true", headers=headers_for(admin))
         assert _row(resp, wo)["deleted_by_name"] == "Gone Away"
+
+    def test_the_name_resolves_when_the_deleter_belongs_to_another_company(
+        self, client: TestClient, db_session: Session
+    ):
+        """The ``deleted_by`` -> name lookup is deliberately NOT company-scoped, and this
+        is the shape that argument is about: a PLATFORM_ADMIN context-switched INTO this
+        company does the delete, but their ``users`` row lives in another company
+        entirely, so ``User.company_id == company_id`` would find nothing.
+
+        Every other test in this class uses a same-company deleter, which means adding
+        that filter as a plausible-looking "tenancy hardening" passes the whole suite
+        while blanking exactly the name a reader deciding whether to restore most needs.
+        (It is not a user-enumeration door: the id is read off our own already-scoped
+        work-order row and never comes from the caller — see the comment on the lookup.)"""
+        outsider = make_user(
+            db_session,
+            role=UserRole.PLATFORM_ADMIN,
+            company_id=COMPANY_B,
+            first_name="Platform",
+            last_name="Operator",
+        )
+        admin = make_user(db_session, role=UserRole.ADMIN, company_id=COMPANY_A)
+        part = make_part(db_session, company_id=COMPANY_A)
+        wo = make_wo(db_session, part, company_id=COMPANY_A, status_=WorkOrderStatus.RELEASED)
+        wo_id, wo_number = wo.id, wo.work_order_number
+
+        # The context switch: the token names COMPANY_A as the ACTIVE company (which is
+        # what get_current_company_id returns and what the delete scopes by) while the
+        # user row itself stays in COMPANY_B. Deleted through the real endpoint, so
+        # ``deleted_by`` is written by production code.
+        switched = {
+            "Authorization": f"Bearer {create_access_token(subject=outsider.id, company_id=COMPANY_A)}",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        deleted = client.delete(f"{WORK_ORDERS_URL}{wo_id}", headers=switched)
+        assert deleted.status_code == status.HTTP_204_NO_CONTENT, deleted.text
+
+        db_session.expire_all()
+        stored = db_session.query(WorkOrder).filter(WorkOrder.id == wo_id).one()
+        assert stored.deleted_by == outsider.id, "fixture broken — a different actor was recorded"
+        assert outsider.company_id == COMPANY_B, "fixture broken — the deleter is not cross-company"
+        assert stored.company_id == COMPANY_A
+
+        resp = client.get(f"{WORK_ORDERS_URL}?deleted_only=true", headers=headers_for(admin))
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        rows = {row["work_order_number"]: row for row in resp.json()}
+        assert wo_number in rows, f"{wo_number} missing from {sorted(rows)}"
+        assert (
+            rows[wo_number]["deleted_by_name"] == "Platform Operator"
+        ), "the cross-company deleter's name blanked — the lookup was company-scoped"
 
     def test_deleted_by_name_is_none_when_the_user_row_is_gone(self, client: TestClient, db_session: Session):
         """``deleted_by`` is a bare Integer with no FK, so a hard-deleted user leaves a
@@ -531,17 +615,6 @@ class TestDefaultPathAndPrecedence:
 # ---------------------------------------------------------------------------
 # §9 The reconcile-on-read carve-out
 # ---------------------------------------------------------------------------
-
-
-def _wo_with_completion_evidence(db: Session, actor: User) -> WorkOrder:
-    """A RELEASED WO whose closed labor evidence covers the whole order — the shape the
-    read-path reconcile drives to COMPLETE."""
-    part = make_part(db)
-    wc = make_work_center(db)
-    wo = make_wo(db, part, status_=WorkOrderStatus.RELEASED, quantity_ordered=10)
-    op = make_op(db, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS)
-    make_entry(db, actor, wo, op, wc, quantity_produced=10)
-    return wo
 
 
 class TestReconcileIsNotRunOverTheArchive:
