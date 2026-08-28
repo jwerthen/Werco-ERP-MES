@@ -1,20 +1,25 @@
 /**
  * WorkOrderTemplatesPanel — the catalog of jobs the shop re-runs.
  *
- * Three properties here are the reason the file exists:
+ * Four properties here are the reason the file exists:
  *
- * 1. **An unusable template is FLAGGED, never hidden.** When the source work
- *    order has been soft-deleted the server still lists the template, with the
- *    cause. Filtering it out is the mask trap invariant 3 documents: the row
- *    would vanish and the only two fixes — restore the work order, or delete the
- *    template — both start with seeing it. So the row renders, carries the reason
- *    in words, and its Use action is DISABLED to match the server's 409.
+ * 1. **A deleted source job does not break a template.** The source work order can
+ *    only ever be SOFT-deleted (NOT NULL FK, no `ON DELETE`), and a soft-deleted
+ *    work order keeps its whole plan — so the server reads through it, the counts
+ *    are real and Use stays ENABLED. The row carries a muted note, never the red
+ *    refusal it used to.
  *
- * 2. **The plan summary is read live and shown honestly.** Nothing about the plan
+ * 2. **An unusable template is FLAGGED, never hidden.** A source the server
+ *    genuinely cannot resolve still comes back `available = false` with a reason.
+ *    Filtering it out is the mask trap invariant 3 documents: the row would vanish
+ *    and every fix starts with seeing it. So the row renders, carries the reason in
+ *    words, and its Use action is DISABLED to match the server's 409.
+ *
+ * 3. **The plan summary is read live and shown honestly.** Nothing about the plan
  *    is stored on the template row; a nest count on a picker card is only worth
  *    rendering because the server recomputes it off the live source work order.
  *
- * 3. **The three async states are the shared primitives, and Retry actually
+ * 4. **The three async states are the shared primitives, and Retry actually
  *    re-fetches.** A failed load must not be a blank section a planner reads as
  *    "no templates yet" — the two are opposite conclusions.
  *
@@ -98,12 +103,28 @@ const NEST_TEMPLATE = makeTemplate({
   }),
 });
 
-const DEAD_TEMPLATE = makeTemplate({
+/**
+ * A template whose source work order was SOFT-DELETED — still fully usable. The
+ * plan is read through the deleted work order, so every count is real.
+ */
+const DELETED_SOURCE_TEMPLATE = makeTemplate({
   id: 9,
   name: 'Old weld fixture',
   plan: makePlan({
+    source_work_order_deleted: true,
+    source_work_order_number: 'WO-20260420-007',
+    operation_count: 4,
+    work_centers: ['WELD-1'],
+  }),
+});
+
+/** A template the server genuinely cannot resolve — the only unusable shape left. */
+const DEAD_TEMPLATE = makeTemplate({
+  id: 11,
+  name: 'Mystery template',
+  plan: makePlan({
     available: false,
-    unavailable_reason: 'source_work_order_deleted',
+    unavailable_reason: 'some_future_reason',
     source_work_order_number: null,
     source_status: null,
     work_order_type: null,
@@ -182,6 +203,40 @@ describe('WorkOrderTemplatesPanel: the catalog', () => {
   });
 });
 
+describe('WorkOrderTemplatesPanel: a deleted source job is context, not a broken template', () => {
+  beforeEach(() => {
+    mockApi.listWorkOrderTemplates.mockResolvedValue(list([makeTemplate(), DELETED_SOURCE_TEMPLATE]));
+  });
+
+  it('says so in a MUTED note, not the red refusal treatment', async () => {
+    renderPanel();
+    await screen.findByText('Old weld fixture');
+
+    const note = screen.getByTestId('template-source-deleted-9');
+    expect(note).toHaveTextContent(/source work order was deleted — the saved plan still copies/i);
+    // The red class is the error treatment; this is context and must not borrow it.
+    expect(note.className).not.toMatch(/text-fd-red/);
+    // And it is not the unavailable line — that branch is for a source the server
+    // genuinely cannot resolve, which a soft-deleted work order is not.
+    expect(screen.queryByTestId('template-unavailable-9')).not.toBeInTheDocument();
+  });
+
+  it('leaves Use ENABLED — the plan is read through the deleted work order', async () => {
+    renderPanel();
+    await screen.findByText('Old weld fixture');
+
+    expect(screen.getByRole('button', { name: 'Use template Old weld fixture' })).toBeEnabled();
+  });
+
+  it('still summarizes the plan, because the counts are real', async () => {
+    renderPanel();
+    await screen.findByText('Old weld fixture');
+
+    expect(rowFor('Old weld fixture')).toHaveTextContent('4 ops');
+    expect(rowFor('Old weld fixture')).toHaveTextContent('WELD-1');
+  });
+});
+
 describe('WorkOrderTemplatesPanel: an unusable template is flagged, not hidden', () => {
   beforeEach(() => {
     mockApi.listWorkOrderTemplates.mockResolvedValue(list([makeTemplate(), DEAD_TEMPLATE]));
@@ -190,26 +245,26 @@ describe('WorkOrderTemplatesPanel: an unusable template is flagged, not hidden',
   it('still renders the row and names the cause in words', async () => {
     renderPanel();
 
-    expect(await screen.findByText('Old weld fixture')).toBeInTheDocument();
-    expect(screen.getByTestId('template-unavailable-9')).toHaveTextContent(
-      /The work order this template was saved from has been deleted/i
-    );
+    expect(await screen.findByText('Mystery template')).toBeInTheDocument();
+    // The vocabulary is the server's and is OPEN: an unrecognized token gets its own
+    // sentence, verbatim, rather than being dropped or guessed at.
+    expect(screen.getByTestId('template-unavailable-11')).toHaveTextContent('some_future_reason');
   });
 
   it('disables Use on that row, and only that row', async () => {
     renderPanel();
-    await screen.findByText('Old weld fixture');
+    await screen.findByText('Mystery template');
 
-    expect(screen.getByRole('button', { name: 'Use template Old weld fixture' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Use template Mystery template' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Use template Bracket brake set' })).toBeEnabled();
   });
 
-  it('leaves Rename and Delete available — deleting it is one of the two fixes', async () => {
+  it('leaves Rename and Delete available — deleting it is one of the fixes', async () => {
     renderPanel();
-    await screen.findByText('Old weld fixture');
+    await screen.findByText('Mystery template');
 
-    expect(screen.getByRole('button', { name: 'Rename template Old weld fixture' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Delete template Old weld fixture' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Rename template Mystery template' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Delete template Mystery template' })).toBeEnabled();
   });
 });
 

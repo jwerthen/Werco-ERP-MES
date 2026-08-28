@@ -1,6 +1,7 @@
 # Work Order Templates — a named catalog of jobs the shop re-runs
 
-**Date:** 2026-08-25 · **Status:** shipped on `feat/work-order-templates` (`0bfda8b`) — backend (migration `087`, one new table, one new router) plus the Templates tab on `/work-orders`
+**Date:** 2026-08-25 · **Amended:** 2026-08-27 — a template whose source work order was deleted now **reads through the tombstone and still works** (owner decision; see [A deleted source does not stop a template](#a-deleted-source-does-not-stop-a-template)). Anything you read elsewhere claiming it is flagged unavailable and refused 409 predates that amendment.
+**Status:** shipped on `feat/work-order-templates` (`0bfda8b`) — backend (migration `087`, one new table, one new router) plus the Templates tab on `/work-orders`
 **Feature:** A named, searchable list of the jobs this shop runs over and over. Picking one produces a new **DRAFT** work order with the same plan — through the *existing* duplicate engine, with the *existing* role gate, and reaching no dispatch board until a planner releases it.
 
 Code: `backend/app/models/work_order_template.py` · `backend/app/services/work_order_template_service.py` · `backend/app/api/endpoints/work_order_templates.py` · `backend/app/schemas/work_order_template.py` · `backend/alembic/versions/087_work_order_templates.py`. Each carries a long docstring arguing its own decisions; this document is the operator- and planner-facing view of the same argument.
@@ -51,18 +52,53 @@ If the release-on-import posture is ever revisited, that is its own change with 
 
 `_assert_landed_as_draft` is dead code today and is a deliberate exception to "don't write dead code". The failure mode is what justifies it: if a future change to `_copy_header` — or a new keyword argument threaded through it — ever made the copy land `RELEASED`, templates would silently become another release-forcing door in this system, and it would look identical to the planner right up to the moment unreviewed work appeared on the floor. That is not a defect a test on some other file catches at the right time, and the audit chain would only explain it afterwards. So the promise is asserted where it is relied on, and it fails loudly.
 
-## An unavailable source is flagged, listed, and refused
+## A deleted source does not stop a template
 
-The source work order is soft-deletable. `tenant_query()` scopes `company_id` and **nothing else** (invariant 3), so every read of the source in this feature carries its own explicit `is_deleted == False` — in `resolve_source_work_order`, in the batched summary read, and in the router's `_live_source_or_404`.
+**Owner decision, 2026-08-27, overriding the original design:** *"templates need to stay even if there is no work order present for it."* A template is a catalog entry, and it must not stop working because somebody deleted a job.
 
-When the source is gone, the template is **listed, flagged and refused**:
+So when the source work order is soft-deleted:
 
-- it still appears in `GET /work-order-templates`, with `plan.available = false` and `plan.unavailable_reason = "source_work_order_deleted"`;
-- `POST /work-order-templates/{id}/use` returns **409** naming the cause and the two remedies (restore that work order, or delete this template and save a new one).
+- the template still appears in `GET /work-order-templates`, **fully summarised** — real operation count, nest count, planned runs, open ties, work centers, exactly as before the delete;
+- `plan.available` stays **true** and `plan.unavailable_reason` stays **null**;
+- `plan.source_work_order_deleted` is **true** — the disclosure, not a gate;
+- `POST /work-order-templates/{id}/use` returns **201** and produces the same DRAFT it always would. `duplicate_work_order` never asked whether its source was deleted; it copies the object it is handed.
 
-The two other options were both worse. **Hiding it** is the mask trap invariant 3 documents after the 2026-08-16 vendor sweep: the planner's template silently vanishes from the picker and nothing anywhere says why, so the only thing they can do is re-create it — possibly from a *different* job. **Auto-deleting it** destroys a curated name as a side effect of somebody removing a work order, and nobody asked for that. Flagging is the only option that lets the planner see the cause and act on it.
+The UI matches: the row renders at full opacity with its real counts, Use stays enabled, and the deleted source is a **muted** note ("Its source work order was deleted — the saved plan still copies.") rather than the red unavailable line. Admins and managers get a link to the Deleted tab from it, because *"where did that job go?"* is a real question — but it is context, not a remedy, and the note no longer instructs anyone to restore anything.
 
-`unavailable_reason` has exactly one value today. **Treat the set as open** — render an unrecognized value verbatim rather than dropping the row, the same rule the duplicate skip reasons carry.
+### The FK is what makes read-through a complete answer
+
+This is the load-bearing fact and it is easy to walk past, because it lives in the schema rather than in the service:
+
+> `work_order_templates.source_work_order_id` is **`NOT NULL`**, a **plain `ForeignKey("work_orders.id")`**, with **no `ON DELETE`** — in the model and in migration `087` alike.
+
+Postgres therefore refuses to remove a `work_orders` row while a template still points at it. Two consequences follow:
+
+1. **"No work order present" can only ever mean *soft-deleted*.** The row cannot be physically gone. A soft-deleted work order keeps every operation, laser nest, material tie and process-sheet step it had, so the plan is always still sitting there to be read.
+2. **A frozen snapshot of the plan would buy nothing.** It would exist to survive a disappearance that cannot happen. Read-through covers 100% of the reachable cases by dropping one predicate from one resolver; the snapshot would cover the same cases with a second copy service and all the drift [The rejected alternative](#the-rejected-alternative) describes. That rejection still stands, and this is now the second reason for it.
+
+That FK guarantee used to be an **accident** — a hard delete hit a `ForeignKeyViolation` and surfaced as a 500. It is now depended upon, so it is enforced legibly: `DELETE /work-orders/{id}?hard_delete=true` refuses **409** naming the templates saved from the job, raised before the first mutation. **Soft delete is deliberately unaffected**, which is the entire point — a soft-deleted work order keeps every template working. (Hard delete is draft/cancelled-only anyway, so this refusal is rare by construction.)
+
+### The invariant-3 tension, stated rather than argued away
+
+Invariant 3 asks for an `is_deleted` predicate on every read of a soft-deletable model, and names four legitimate non-filterers: delete, restore, a duplicate probe, and a **historical record**. A template's source is the historical-record shape — the template permanently names the job it was saved from, and the FK above means it owns that row for the row's whole life.
+
+The counter-argument is real and is not waved off: **minting a new work order from a deleted plan is closer to *selection* than to reading a record**, and selection is exactly what invariant 3 gates. It is *decided*, not resolved. What carries the decision is the asymmetry that stays gated:
+
+| Action | Deleted source |
+|---|---|
+| Read / summarise an existing template | Allowed — reads through (`resolve_source_work_order`, no filter) |
+| **Use** an existing template | Allowed — 201, a normal DRAFT |
+| **Save a NEW template** from that work order | **404** — filter kept (`resolve_catalogable_work_order`) |
+
+An already-saved template is a catalog entry; a new one is a fresh selection. Where the filter lives is the whole story: `resolve_source_work_order` is the read-through resolver, `resolve_catalogable_work_order` wraps it and adds the tombstone filter back for the selection half, and the batched read in `plan_summaries_for` changes **in lockstep** with the former (a summary that filtered would render blank over a tombstone — a silent blank, found by a planner pressing Use).
+
+Note one knock-on the no-restore-verb argument does not cover: because "Save as template" is 404 against a deleted work order, **deleting a template whose source is already deleted cannot be undone in one click** — restore the work order first, then re-save. A two-step recovery, not a lost one; recorded here rather than patched, since nobody has asked for a template restore verb.
+
+### `available: false` still exists, and still means something
+
+`plan.available = false` is now reserved for the much narrower case: **the source row could not be resolved at all** — a cross-tenant id, or a row that somehow escaped the FK. `plan.unavailable_reason` is then `"source_work_order_missing"`, and `POST …/use` answers **409**. The template is still listed, never hidden: hiding it is the mask trap invariant 3 documents after the 2026-08-16 vendor sweep — the planner's entry silently vanishes from the picker with nothing anywhere saying why — and auto-deleting it destroys a curated name as a side effect of something else.
+
+The old value `"source_work_order_deleted"` was **retired** as an `unavailable_reason`; leaving a token whose text says *deleted* while deletion no longer makes anything unavailable would actively mislead a client rendering it verbatim. **Treat the set as open** — render an unrecognized value verbatim rather than dropping the row, the same rule the duplicate skip reasons carry. (Old clients that still map the retired token are harmless: nothing emits it any more.)
 
 ## Deleting a template
 
@@ -72,7 +108,7 @@ The two other options were both worse. **Hiding it** is the mask trap invariant 
 
 Because the index is partial, the service's own duplicate-name probe reads **live rows only**. That is *not* the usual invariant-3 exception where a duplicate probe must keep matching tombstones (a deleted vendor still owns its code) — here a deleted template genuinely does not own its name, so probing tombstones would refuse a name the database would happily accept. The probe is additionally **case-insensitive**, deliberately stricter than the byte-wise index: two templates differing only in case are indistinguishable in a picker, and the picker is the entire feature. The index backs a **narrower** race than the probe covers, and the difference is worth stating: it is over the stored bytes, so two concurrent saves of the *same* name race safely (the loser gets a **409**, not a 500), but two concurrent saves of `Bracket set` and `bracket set` both pass the probe and both commit. The window is small and the outcome is cosmetic — two near-identical picker rows, either renameable — which is why it is not closed with a `lower(name)` expression index: reflection of expression indexes is unreliable enough that the migration's own `_has_index` guard could not see one, trading a cosmetic race for a broken idempotency guard.
 
-**There is no restore verb, on purpose.** A template holds no information that cannot be reproduced in one click: open the source work order, press "Save as template" again, and the result is identical — because the plan was never stored in the template. The tombstone exists so nothing is physically destroyed (invariant 3's letter), not because the row needs an undo path. (It is *not* needed to keep audit rows readable: `_live_template_or_404` 404s a deleted template anyway, and every audit row already carries the name verbatim in `resource_identifier` and `extra_data.template_name`, so the chain stays legible with or without the row.) Contrast `restore_vendor`, which exists because a vendor row carries irreplaceable history and an approval flag; a template carries neither.
+**There is no restore verb, on purpose.** A template holds no information that cannot be reproduced in one click: open the source work order, press "Save as template" again, and the result is identical — because the plan was never stored in the template. (One case escapes that: if the source work order has *itself* been deleted, "Save as template" is 404, so the recovery is restore-the-work-order-then-re-save — two steps rather than one. Recorded, not patched.) The tombstone exists so nothing is physically destroyed (invariant 3's letter), not because the row needs an undo path. (It is *not* needed to keep audit rows readable: `_live_template_or_404` 404s a deleted template anyway, and every audit row already carries the name verbatim in `resource_identifier` and `extra_data.template_name`, so the chain stays legible with or without the row.) Contrast `restore_vendor`, which exists because a vendor row carries irreplaceable history and an approval flag; a template carries neither.
 
 Deleting is also the **only** verb here that requires no reason, unlike receipt void, NCR void, vendor delete or part renumber. Those unwind or re-identify a *production* record; this removes a shortcut. Demanding a written justification for tidying a list trains people to type "x", which is worse for the chain than not asking — it makes every other required reason in the system look like a formality.
 
@@ -188,18 +224,19 @@ Templates are a **tab on `/work-orders`** (`?tab=templates`), not a separate rou
 
 The result of a use renders through the **same** skip view the Duplicate dialog uses — one shared renderer, so the two paths cannot describe an omission differently.
 
-Two client rules worth repeating because they are correctness, not styling: quote the stored quantity off the **response**, and render an unknown `unavailable_reason` or skip `reason` **verbatim** rather than dropping the row.
+Two client rules worth repeating because they are correctness, not styling: quote the stored quantity off the **response**, and render an unknown `unavailable_reason` or skip `reason` **verbatim** rather than dropping the row. A third, since 2026-08-27: **`source_work_order_deleted` is disclosure, never a gate** — do not disable Use, dim the row, or hide the plan counts on it.
 
 ## Traps
 
 - **Do not write "the dispatch board filters out drafts."** It does not. See [The DRAFT guarantee](#the-draft-guarantee--and-what-it-actually-rests-on).
 - **Do not add a frozen-plan table.** That is a second copy service; see [The rejected alternative](#the-rejected-alternative).
 - **Do not make `source_work_order_id` editable.**
-- **Do not hide or auto-delete a template whose source was deleted.**
+- **Do not hide, auto-delete, or re-refuse a template whose source was deleted.** It reads through the tombstone and still produces a DRAFT; see [A deleted source does not stop a template](#a-deleted-source-does-not-stop-a-template).
+- **Do not put the `is_deleted` filter back on `resolve_source_work_order`** "for invariant-3 consistency", and do not add an `ON DELETE` to `source_work_order_id`. The bare FK is what guarantees a missing source can only ever be a tombstone.
 - **Do not add a restore verb** "for symmetry" — re-saving from the same work order is the undo, and it is one click.
 - **Do not "align" the template gate with anything looser than the duplicate endpoint's trio.** A template that could route around a gate a planner would have hit by hand is a one-click hole in the create path.
 - **Do not remove `_assert_landed_as_draft`** because coverage says it never fires.
-- **Do not read `plan.*` as stored data.** It is computed per read, and it is `available: false` with everything else null/zero when the source is gone.
+- **Do not read `plan.*` as stored data.** It is computed per read. A soft-deleted source still yields a **full** summary with `available: true` and `source_work_order_deleted: true`; only an *unresolvable* source gives `available: false` with everything else null/zero.
 
 ## Not built (and why)
 

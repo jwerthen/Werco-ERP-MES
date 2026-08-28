@@ -27,10 +27,16 @@
  *    hand-off, no auto-close — and BOTH branches are asserted, because a
  *    regression in either direction is silent.
  *
- * 5. **An unusable template is refused in words, with no submit control.** The
- *    server still LISTS a template whose source work order was deleted (hiding it
- *    tells the planner nothing) and refuses the use 409. The dialog says so
- *    first.
+ * 5. **A deleted source work order does NOT refuse the copy.** It cannot: the FK
+ *    is NOT NULL with no `ON DELETE`, so the source can only ever be SOFT-deleted
+ *    and keeps its whole plan. The form renders as usual and the deletion is a
+ *    muted disclosure above it.
+ *
+ * 6. **A genuinely unusable template is refused in words, with no submit
+ *    control.** `available = false` means the server cannot resolve the source and
+ *    will refuse the use 409. The dialog reads `template.plan` off the prop rather
+ *    than re-fetching, so this branch is reachable only from a stale list — which
+ *    is exactly why it stays.
  *
  * Mocks `services/api`; the wire shapes are pinned in
  * `services/api.workOrderTemplates.test.ts`. Read both together.
@@ -515,6 +521,37 @@ describe('UseTemplateModal: server-gated, therefore non-optimistic', () => {
   });
 });
 
+describe('UseTemplateModal: a deleted source work order still copies', () => {
+  const deletedSourceTemplate = makeTemplate({
+    plan: makePlan({ source_work_order_deleted: true }),
+  });
+
+  it('renders the form and the submit control, exactly as for a live source', async () => {
+    renderModal({ template: deletedSourceTemplate });
+
+    // A soft-deleted work order keeps every operation, nest and tie it had, so
+    // there is nothing to refuse — and refusing was the bug.
+    expect(screen.queryByTestId('use-template-unavailable')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Create draft work order/i })).toBeInTheDocument();
+    expect(screen.getByLabelText(/Quantity/i)).toBeEnabled();
+  });
+
+  it('discloses the deletion as a muted line, not an alert', async () => {
+    renderModal({ template: deletedSourceTemplate });
+
+    const note = screen.getByTestId('use-template-source-deleted');
+    expect(note).toHaveTextContent(/That work order has been deleted/i);
+    // `role="alert"` is the treatment the refusal box and the server-error box get.
+    // This is context: it interrupts nobody.
+    expect(note).not.toHaveAttribute('role', 'alert');
+  });
+
+  it('says nothing at all when the source is live', async () => {
+    renderModal();
+    expect(screen.queryByTestId('use-template-source-deleted')).not.toBeInTheDocument();
+  });
+});
+
 describe('UseTemplateModal: an unusable template is refused in words', () => {
   const deadTemplate = makeTemplate({
     plan: makePlan({
@@ -530,13 +567,16 @@ describe('UseTemplateModal: an unusable template is refused in words', () => {
   });
 
   it('offers no submit control at all, and names the cause', async () => {
+    // A pre-change server (or a list cached from one) is the only thing that sends
+    // this shape now — the current server reads the plan through a deleted source.
+    // A stale row must not submit a write the server it came from will refuse.
     renderModal({ template: deadTemplate });
 
     expect(screen.getByTestId('use-template-unavailable')).toHaveTextContent(
-      /The work order this template was saved from has been deleted/i
+      /The work order this template was saved from has been deleted, and this copy was refused/i
     );
     expect(screen.queryByRole('button', { name: /Creat/i })).not.toBeInTheDocument();
-    // No form to fill in either — there is no plan left to copy.
+    // No form to fill in either — nothing here can be submitted.
     expect(screen.queryByLabelText(/Quantity/i)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument();
   });

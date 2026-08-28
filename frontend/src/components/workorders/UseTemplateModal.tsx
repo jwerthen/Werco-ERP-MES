@@ -36,13 +36,25 @@
  * as an explicit `null` when blank, because unscheduled is a decision.
  *
  * ---------------------------------------------------------------------------
+ * A DELETED SOURCE JOB DOES NOT MAKE A TEMPLATE UNUSABLE
+ * ---------------------------------------------------------------------------
+ * It used to: the plan came back `available = false` and this dialog refused it.
+ * It no longer does. A soft-deleted work order — the only kind reachable, since
+ * `source_work_order_id` is NOT NULL with no `ON DELETE` — keeps every operation,
+ * nest and tie it had, so the plan is read straight through it and the copy runs
+ * normally. The deletion is disclosed as a muted line above the form, because a
+ * planner is entitled to know the job they are copying is in the archive; it is
+ * not a warning and it gates nothing.
+ *
+ * ---------------------------------------------------------------------------
  * AN UNUSABLE TEMPLATE IS SHOWN, NOT HIDDEN
  * ---------------------------------------------------------------------------
- * When the source work order has been deleted the catalog still lists the
- * template (hiding it tells the planner nothing) and the server refuses the use
- * with a 409. This dialog refuses first, in words, with no submit control at
- * all: the fix is to restore the work order or delete the template, and both
- * start with reading the reason.
+ * A source the server genuinely cannot resolve still comes back
+ * `available = false`, and `POST .../use` refuses it 409. This dialog refuses
+ * first, in words, with no submit control at all. The branch is reachable only
+ * from a stale list (the modal reads `template.plan` off the prop rather than
+ * re-fetching), which is exactly why it stays: a stale row must not submit a
+ * write the server will refuse.
  *
  * ---------------------------------------------------------------------------
  * A PARTIAL COPY STOPS THE FLOW; A CLEAN ONE STAYS ONE CLICK
@@ -70,9 +82,22 @@ import type { WorkOrderDuplicateResult, WorkOrderTemplate, WorkOrderTemplateUseP
  * being dropped or guessed at — the same rule the copy skip reasons follow.
  */
 const TEMPLATE_UNAVAILABLE_REASONS: Record<string, string> = {
+  // The only reason the CURRENT server sends. It does not mean "deleted" — a deleted
+  // source is read straight through and reported as `plan.source_work_order_deleted`
+  // — it means the source row could not be resolved at all, which the NOT NULL FK on
+  // `work_order_templates.source_work_order_id` makes near-unreachable. So the sentence
+  // deliberately does not name restoring a work order as the remedy: there is no
+  // tombstone to restore, and sending someone to the Deleted tab to look for one is
+  // worse than admitting the template needs re-saving.
+  source_work_order_missing:
+    'The work order this template was saved from can no longer be found, so there is no plan to ' +
+    'copy. Save a new template from a current job.',
+  // Retained for a PRE-CHANGE server, or a list cached from one. That server DID refuse
+  // a deleted source; this one never does. Kept because the sentence has to be true of
+  // the server that sent the token, not of the one we happen to be running.
   source_work_order_deleted:
-    'The work order this template was saved from has been deleted, so there is no plan left to copy. ' +
-    'Restore that work order, or delete this template and save a new one from a live job.',
+    'The work order this template was saved from has been deleted, and this copy was refused. ' +
+    'Restoring that work order clears it.',
 };
 
 /** The full sentence for an unusable template, never an empty string. */
@@ -261,6 +286,17 @@ export default function UseTemplateModal({ open, template, onClose, onUsed }: Us
                     lot/serial. The new work order starts as a <strong className="text-slate-300">draft</strong>{' '}
                     under a new number, so nothing reaches the floor until somebody releases it.
                   </div>
+
+                  {/* Muted, never an alert: the source job being in the archive
+                      changes nothing about this copy — a soft-deleted work order
+                      keeps its whole plan — but the planner should not learn it
+                      afterwards from a work order number that leads nowhere. */}
+                  {plan?.source_work_order_deleted === true ? (
+                    <p data-testid="use-template-source-deleted" className="text-xs text-slate-400">
+                      That work order has been deleted. Its plan is still intact and copies exactly as it
+                      stands; only the job itself is in the archive.
+                    </p>
+                  ) : null}
 
                   {template.notes?.trim() ? (
                     <p data-testid="use-template-notes" className="text-sm text-surface-500">
