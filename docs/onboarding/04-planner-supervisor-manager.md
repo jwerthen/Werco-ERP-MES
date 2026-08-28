@@ -190,6 +190,15 @@ Scheduling decides *what week* a job runs. The **Dispatch Board** (sidebar → *
 
 The board shows **one column per machine**, with every job currently queued at it. Machines with nothing queued still get a column, so you can hand work to an idle machine.
 
+**Getting across a wide board.** With a machine per column the board runs off the right of the screen, so there are four ways to move sideways, and none of them need you to scroll the page first — the board is sized to end at the bottom of the window, which keeps its own scrollbar and the header's **‹ ›** buttons on screen wherever you are:
+
+- **Swipe** sideways on a trackpad, anywhere over the board.
+- **Scroll wheel** — a plain wheel pans the board sideways whenever there is nothing left to scroll down to in the columns; hold **Shift** and the wheel always pans sideways.
+- **The ‹ and › buttons** next to **Refresh** step two machines at a time. They grey out at each end.
+- **Drag the scrollbar** under the columns.
+
+A soft fade down the right edge means the board continues past it; the fade disappears at the last machine.
+
 If a machine was deactivated while it still had jobs queued, the board doesn't hide that work: the machine shows up first, marked **DEACTIVATED**, with a red callout in the header. Its column is read-only — you can't re-order its cards or drop new work on it — but each card's **Move to machine…** dropdown still works (listing active machines only), so you can move the stranded jobs off it. The column disappears once its queue is empty. (Deactivating a machine that still has live jobs is now refused outright, so this mostly covers machines deactivated before that rule existed.)
 
 1. **Drag a card up or down** inside a column to set the order. The number on the left of each card is the run order — 1 runs first.

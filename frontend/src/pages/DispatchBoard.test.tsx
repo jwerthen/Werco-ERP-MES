@@ -29,6 +29,11 @@
  *    an all-idle board still renders with no disclosure at all, the header reports
  *    the busy/idle split, hidden idle machines stay in every card's move list, and
  *    the Scroll left/right buttons go inert at each end of the board;
+ *  - PANNING: the board is capped at the window bottom so its horizontal scrollbar
+ *    never lands below the fold, a plain wheel pans sideways only when there is
+ *    nothing left to scroll down to, Shift+wheel always pans (line-mode deltas
+ *    included), a horizontal trackpad delta is left to the browser, and a wheel at
+ *    the board's end chains to the page instead of being swallowed;
  *  - laser nests: the card carries the material/thickness/sheet/sheets-left line,
  *    a material or thickness change is marked between the two cards that cause it
  *    (never above the first card or against a non-nest job), the column header
@@ -327,14 +332,33 @@ const columnOrder = (): string[] =>
  * jsdom lays nothing out, so the scroll geometry the buttons key off has to be
  * stubbed. `scrollBy` is stubbed too — jsdom does not implement it.
  */
-const stubScrollGeometry = (scrollLeft: number, scrollWidth = 3000, clientWidth = 1000) => {
+const stubScrollGeometry = (
+  scrollLeft: number,
+  scrollWidth = 3000,
+  clientWidth = 1000,
+  // Vertical geometry decides whether a PLAIN wheel pans sideways or scrolls the
+  // board down; equal values mean "nothing to scroll down to".
+  { scrollHeight = 600, clientHeight = 600 }: { scrollHeight?: number; clientHeight?: number } = {}
+) => {
   const el = screen.getByTestId('dispatch-board-scroll');
   Object.defineProperty(el, 'scrollLeft', { value: scrollLeft, configurable: true, writable: true });
   Object.defineProperty(el, 'scrollWidth', { value: scrollWidth, configurable: true });
   Object.defineProperty(el, 'clientWidth', { value: clientWidth, configurable: true });
+  Object.defineProperty(el, 'scrollHeight', { value: scrollHeight, configurable: true });
+  Object.defineProperty(el, 'clientHeight', { value: clientHeight, configurable: true });
   const scrollBy = jest.fn();
   (el as HTMLElement & { scrollBy: jest.Mock }).scrollBy = scrollBy;
   return { el, scrollBy };
+};
+
+/** Dispatch a real, cancelable wheel event so `defaultPrevented` can be asserted. */
+const wheel = (el: HTMLElement, init: WheelEventInit) => {
+  const event = new WheelEvent('wheel', { bubbles: true, cancelable: true, ...init });
+  // The handler syncs the end-of-travel state, so the dispatch is a React update.
+  act(() => {
+    el.dispatchEvent(event);
+  });
+  return event;
 };
 
 const cardOrder = (workCenterId: number): number[] =>
@@ -945,6 +969,100 @@ describe('DispatchBoard', () => {
     await waitFor(() => expect(right).toHaveAttribute('aria-disabled', 'true'));
     expect(left).not.toHaveAttribute('aria-disabled');
     expect(screen.queryByTestId('dispatch-board-more')).not.toBeInTheDocument();
+  });
+
+  // --- Panning without the scrollbar ---------------------------------------
+  //
+  // The board is capped at the bottom of the WINDOW rather than running off the
+  // end of the page, because a tall column used to push its own horizontal
+  // scrollbar below the fold: panning left meant scrolling the page to the
+  // bottom first. The wheel/trackpad rules below are the other half of that fix.
+
+  it('caps the board at the window bottom so its scrollbar stays on screen', async () => {
+    mockApi.getDispatchBoard.mockResolvedValue(scaleBoard());
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    const el = screen.getByTestId('dispatch-board-scroll');
+    // jsdom lays nothing out, so the board's measured top is 0 and the cap is the
+    // whole window less the gutter. What matters is that a cap is APPLIED at all
+    // and that the element scrolls on both axes.
+    await waitFor(() => expect(el.style.maxHeight).toBe(`${window.innerHeight - 16}px`));
+    expect(el).toHaveClass('overflow-auto');
+  });
+
+  it('pans sideways on a plain wheel when the board has nothing to scroll down to', async () => {
+    mockApi.getDispatchBoard.mockResolvedValue(scaleBoard());
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    const { el } = stubScrollGeometry(0);
+    const event = wheel(el, { deltaY: 120 });
+
+    expect(el.scrollLeft).toBe(120);
+    // Prevented, or the page would scroll as well as the board.
+    expect(event.defaultPrevented).toBe(true);
+    // The panned position feeds the buttons and the edge fade like any scroll.
+    await waitFor(() => expect(screen.getByTestId('dispatch-scroll-left')).not.toHaveAttribute('aria-disabled'));
+  });
+
+  it('leaves a plain wheel alone when the board still has somewhere to scroll DOWN', async () => {
+    mockApi.getDispatchBoard.mockResolvedValue(scaleBoard());
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    // A 20-job column: the wheel belongs to the vertical axis, not the board's.
+    const { el } = stubScrollGeometry(0, 3000, 1000, { scrollHeight: 2400, clientHeight: 600 });
+    const event = wheel(el, { deltaY: 120 });
+
+    expect(el.scrollLeft).toBe(0);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('pans on Shift+wheel even when the board scrolls down, and on a LINE-mode delta', async () => {
+    mockApi.getDispatchBoard.mockResolvedValue(scaleBoard());
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    const { el } = stubScrollGeometry(0, 3000, 1000, { scrollHeight: 2400, clientHeight: 600 });
+    expect(wheel(el, { deltaY: 120, shiftKey: true }).defaultPrevented).toBe(true);
+    expect(el.scrollLeft).toBe(120);
+
+    // Firefox reports LINES (deltaMode 1), not pixels — 3 lines is a pan, not 3px.
+    el.scrollLeft = 0;
+    wheel(el, { deltaY: 3, deltaMode: 1, shiftKey: true });
+    expect(el.scrollLeft).toBe(48);
+  });
+
+  it('hands a horizontal trackpad swipe straight to the browser', async () => {
+    mockApi.getDispatchBoard.mockResolvedValue(scaleBoard());
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    // A two-finger swipe already carries deltaX: the native scroller is doing the
+    // right thing and must not be fought with a second, competing offset.
+    const { el } = stubScrollGeometry(0);
+    const event = wheel(el, { deltaX: 90, deltaY: 4 });
+
+    expect(el.scrollLeft).toBe(0);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('lets the gesture chain to the page once the board is at its end', async () => {
+    mockApi.getDispatchBoard.mockResolvedValue(scaleBoard());
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+
+    // jsdom does not clamp scrollLeft, so pin it: the board cannot move further.
+    const el = screen.getByTestId('dispatch-board-scroll');
+    Object.defineProperty(el, 'scrollLeft', { get: () => 2000, set: () => {}, configurable: true });
+    Object.defineProperty(el, 'scrollWidth', { value: 3000, configurable: true });
+    Object.defineProperty(el, 'clientWidth', { value: 1000, configurable: true });
+    Object.defineProperty(el, 'scrollHeight', { value: 600, configurable: true });
+    Object.defineProperty(el, 'clientHeight', { value: 600, configurable: true });
+
+    // Not prevented: a stuck-feeling wheel at the edge is worse than chaining.
+    expect(wheel(el, { deltaY: 120 }).defaultPrevented).toBe(false);
   });
 
   // --- Deactivated machines that still hold work ----------------------------
