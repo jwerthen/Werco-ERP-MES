@@ -104,6 +104,13 @@ class LaserNestManualCreate(BaseModel):
     material: Optional[str] = Field(None, max_length=100)
     thickness: Optional[str] = Field(None, max_length=50)
     sheet_size: Optional[str] = Field(None, max_length=100)
+    work_center_id: Optional[int] = Field(
+        None,
+        gt=0,
+        description="Which laser this nest runs on. Omitted, the nest inherits the machine the work "
+        "order's existing nests already run on, and only falls back to the shop-wide laser auto-detect "
+        "when the work order has no nests yet. An unknown, cross-tenant or inactive work center is 404.",
+    )
     material_part_id: Optional[int] = Field(
         None,
         gt=0,

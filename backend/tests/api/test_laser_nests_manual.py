@@ -20,7 +20,8 @@ from app.models.laser_nest import LaserNest
 from app.models.part import Part
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
-from app.models.work_order import WorkOrder
+from app.models.work_order import WorkOrder, WorkOrderOperation
+from app.services.work_center_type_service import get_work_center_group
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -735,3 +736,350 @@ class TestSheetDescriptorNormalization:
         assert resp.status_code == status.HTTP_201_CREATED, resp.text
         nest = db_session.query(LaserNest).filter(LaserNest.id == resp.json()["id"]).first()
         assert nest.sheet_size == "remnant drop"
+
+
+# --------------------------------------------------------------------------- #
+# Which LASER a nest lands on
+#
+# The reported bug: adding a nest to a job whose nests already run on the
+# Ermaksan silently dispatched the new one to the HSG tube laser. ``POST
+# /work-orders/{id}/laser-nests/manual`` shipped in #55 (2026-06-23) a month
+# before #136 (2026-07-20) taught the IMPORT path about work-center assignment,
+# and the manual path was never converged: it re-asked the shop-wide question
+# ("which laser does this shop prefer?") on every call instead of the job-level
+# one ("which laser is this job on?"), and offered no way to say.
+#
+# None of the 114 tests above pinned the machine, which is exactly why the
+# defect survived. These do.
+# --------------------------------------------------------------------------- #
+def _make_wc(
+    db: Session,
+    *,
+    name: str,
+    code: str,
+    wc_type: str = "laser_cutting",
+    is_active: bool = True,
+    company_id: int = COMPANY_A,
+) -> WorkCenter:
+    """A work center with FULL control of the three fields the resolver reads."""
+    _ensure_company(db, company_id)
+    wc = WorkCenter(
+        name=name,
+        code=code,
+        work_center_type=wc_type,
+        description="work-center-resolution fixture",
+        hourly_rate=120,
+        is_active=is_active,
+        company_id=company_id,
+    )
+    db.add(wc)
+    db.commit()
+    db.refresh(wc)
+    return wc
+
+
+def _op_work_center(db: Session, nest_body: dict) -> int:
+    return db.get(WorkOrderOperation, nest_body["work_order_operation_id"]).work_center_id
+
+
+class TestManualNestWorkCenterResolution:
+    def test_second_nest_inherits_the_machine_the_first_one_runs_on(self, client, db_session, laser_setup):
+        """The job's own laser beats the shop's preferred laser."""
+        headers = headers_for(laser_setup["admin"])
+        first = _create_manual_nest(client, headers, laser_setup["parent"].id, {"cnc_number": "A-1", "planned_runs": 1})
+        assert first.status_code == status.HTTP_201_CREATED, first.text
+        assert _op_work_center(db_session, first.json()) == laser_setup["wc"].id
+
+        # A machine the SHOP-WIDE auto-detect ranks strictly higher (tier 0,
+        # "ermaksan") appears after the job is already running. Auto-detect would
+        # now return it; the job is not on it.
+        preferred = _make_wc(db_session, name="Ermaksan Fiber Laser", code="ERM-1")
+
+        second = _create_manual_nest(
+            client, headers, laser_setup["parent"].id, {"cnc_number": "A-2", "planned_runs": 1}
+        )
+        assert second.status_code == status.HTTP_201_CREATED, second.text
+        assert _op_work_center(db_session, second.json()) == laser_setup["wc"].id
+        assert _op_work_center(db_session, second.json()) != preferred.id
+
+    def test_inherits_the_jobs_laser_even_when_autodetect_would_pick_the_tube(self, client, db_session, laser_setup):
+        """The owner's exact report, in one test.
+
+        Nests already on the Ermaksan; the only machine auto-detect can still see
+        is the HSG tube laser. The new nest must stay on the Ermaksan.
+        """
+        headers = headers_for(laser_setup["admin"])
+        ermaksan = _make_wc(db_session, name="Ermaksan Fiber Laser 6KW Bay 2", code="ERM-6K")
+        first = _create_manual_nest(
+            client,
+            headers,
+            laser_setup["parent"].id,
+            {"cnc_number": "TUBE-1", "planned_runs": 2, "work_center_id": ermaksan.id},
+        )
+        assert first.status_code == status.HTTP_201_CREATED, first.text
+        assert _op_work_center(db_session, first.json()) == ermaksan.id
+
+        # Take every OTHER laser out of auto-detect's reach, so the shop-wide
+        # answer is unambiguously the tube laser.
+        tube = _make_wc(db_session, name="HSG Tube Laser", code="HSG-1")
+        laser_setup["wc"].is_active = False
+        ermaksan.is_active = False
+        db_session.commit()
+        assert work_orders_endpoint._find_laser_work_center(db_session, COMPANY_A).id == tube.id
+
+        second = _create_manual_nest(
+            client, headers, laser_setup["parent"].id, {"cnc_number": "TUBE-2", "planned_runs": 2}
+        )
+        assert second.status_code == status.HTTP_201_CREATED, second.text
+        # Inherited, NOT auto-detected. is_active is deliberately not filtered on
+        # the inherit path: "the same machine as the rest of the job" is the whole
+        # point, and a work center holding live work cannot be deactivated anyway.
+        assert _op_work_center(db_session, second.json()) == ermaksan.id
+        assert _op_work_center(db_session, second.json()) != tube.id
+
+    def test_inherits_the_packages_modal_machine_not_its_last_one(self, client, db_session, laser_setup):
+        """A nest package may legitimately span two lasers; one outlier must not drag the rest."""
+        headers = headers_for(laser_setup["admin"])
+        other = _make_wc(db_session, name="Second Laser", code="LSR-2")
+        for cnc in ("MODE-1", "MODE-2"):
+            resp = _create_manual_nest(
+                client, headers, laser_setup["parent"].id, {"cnc_number": cnc, "planned_runs": 1}
+            )
+            assert resp.status_code == status.HTTP_201_CREATED, resp.text
+        # One nest deliberately moved to the other machine, and it is the HIGHEST
+        # sequence — a "last nest wins" rule would follow it.
+        outlier = _create_manual_nest(
+            client,
+            headers,
+            laser_setup["parent"].id,
+            {"cnc_number": "MODE-3", "planned_runs": 1, "work_center_id": other.id},
+        )
+        assert outlier.status_code == status.HTTP_201_CREATED, outlier.text
+        assert _op_work_center(db_session, outlier.json()) == other.id
+
+        # A machine the shop-wide auto-detect ranks above BOTH, so landing on the
+        # modal machine cannot be a coincidence of the fallback agreeing.
+        preferred = _make_wc(db_session, name="Ermaksan Fiber Laser", code="ERM-MODE")
+        assert work_orders_endpoint._find_laser_work_center(db_session, COMPANY_A).id == preferred.id
+
+        added = _create_manual_nest(
+            client, headers, laser_setup["parent"].id, {"cnc_number": "MODE-4", "planned_runs": 1}
+        )
+        assert added.status_code == status.HTTP_201_CREATED, added.text
+        landed = _op_work_center(db_session, added.json())
+        assert landed == laser_setup["wc"].id  # the MODE, not...
+        assert landed != other.id  # ...the last nest's machine, and not...
+        assert landed != preferred.id  # ...the shop-wide preference.
+
+    def test_explicit_work_center_id_wins_over_the_incumbent(self, client, db_session, laser_setup):
+        headers = headers_for(laser_setup["admin"])
+        first = _create_manual_nest(client, headers, laser_setup["parent"].id, {"cnc_number": "X-1", "planned_runs": 1})
+        assert first.status_code == status.HTTP_201_CREATED, first.text
+        chosen = _make_wc(db_session, name="Ermaksan Fiber Laser", code="ERM-2")
+
+        moved = _create_manual_nest(
+            client,
+            headers,
+            laser_setup["parent"].id,
+            {"cnc_number": "X-2", "planned_runs": 1, "work_center_id": chosen.id},
+        )
+        assert moved.status_code == status.HTTP_201_CREATED, moved.text
+        assert _op_work_center(db_session, moved.json()) == chosen.id
+
+    def test_unknown_and_cross_tenant_work_center_ids_are_404_with_nothing_created(
+        self, client, db_session, laser_setup
+    ):
+        headers = headers_for(laser_setup["admin"])
+        before = db_session.query(LaserNest).count()
+        foreign = _make_wc(db_session, name="Other Co Laser", code="OC-1", company_id=COMPANY_B)
+
+        for work_center_id in (999_999, foreign.id):
+            resp = _create_manual_nest(
+                client,
+                headers,
+                laser_setup["parent"].id,
+                {"cnc_number": "NOPE", "planned_runs": 1, "work_center_id": work_center_id},
+            )
+            assert resp.status_code == status.HTTP_404_NOT_FOUND, resp.text
+        assert db_session.query(LaserNest).count() == before
+
+    def test_inactive_work_center_id_is_refused(self, client, db_session, laser_setup):
+        """An explicit pick still has to be a machine you can dispatch to."""
+        headers = headers_for(laser_setup["admin"])
+        retired = _make_wc(db_session, name="Retired Laser", code="RET-1", is_active=False)
+        resp = _create_manual_nest(
+            client,
+            headers,
+            laser_setup["parent"].id,
+            {"cnc_number": "RET", "planned_runs": 1, "work_center_id": retired.id},
+        )
+        assert resp.status_code == status.HTTP_404_NOT_FOUND, resp.text
+
+    def test_first_nest_on_a_fresh_job_still_prefers_the_ermaksan_over_the_tube(self, client, db_session, laser_setup):
+        """No incumbent to inherit: the shop-wide preference applies, tube last."""
+        headers = headers_for(laser_setup["admin"])
+        laser_setup["wc"].is_active = False
+        db_session.commit()
+        tube = _make_wc(db_session, name="HSG Tube Laser", code="HSG-2")
+        ermaksan = _make_wc(db_session, name="Ermaksan Fiber Laser", code="ERM-3")
+        assert tube.id < ermaksan.id  # the id tiebreak must NOT be what decides this
+
+        resp = _create_manual_nest(client, headers, laser_setup["parent"].id, {"cnc_number": "F-1", "planned_runs": 1})
+        assert resp.status_code == status.HTTP_201_CREATED, resp.text
+        assert _op_work_center(db_session, resp.json()) == ermaksan.id
+
+    def test_autodetect_sees_an_ermaksan_that_never_says_laser(self, client, db_session, laser_setup):
+        """The candidate set is keyed on the same tokens the tiering is.
+
+        A prefilter demanding the literal "laser" dropped an Ermaksan row spelled
+        "Ermaksan 6KW Bay 2" / "ERM-6K" under a non-laser type, while a tube laser
+        typed ``laser_cutting`` sailed through -- so the auto-detect returned the
+        one machine the rule exists to avoid.
+        """
+        laser_setup["wc"].is_active = False
+        db_session.commit()
+        tube = _make_wc(db_session, name="HSG Tube Laser", code="HSG-3", wc_type="laser_cutting")
+        ermaksan = _make_wc(db_session, name="Ermaksan 6KW Bay 2", code="ERM-6KB", wc_type="fabrication")
+        assert tube.id < ermaksan.id
+
+        resolved = work_orders_endpoint._find_laser_work_center(db_session, COMPANY_A)
+        assert resolved.id == ermaksan.id
+
+        resp = _create_manual_nest(
+            client,
+            headers_for(laser_setup["admin"]),
+            laser_setup["parent"].id,
+            {"cnc_number": "NL-1", "planned_runs": 1},
+        )
+        assert resp.status_code == status.HTTP_201_CREATED, resp.text
+        assert _op_work_center(db_session, resp.json()) == ermaksan.id
+
+    def test_inherits_from_nests_on_a_machine_whose_name_never_says_laser(self, client, db_session, laser_setup):
+        """The shape that defeats an ``operation_group``-keyed incumbent probe.
+
+        A nest operation derives its group from ITS work center via
+        ``get_work_center_group``, which keys on the literal token "LASER" in the
+        machine's type or name. Nests on an Ermaksan row spelled "Ermaksan 6KW Bay 2"
+        / type ``fabrication`` therefore carry group "OTHER" -- and that is exactly
+        the row shape that makes the shop-wide auto-detect wrong in the first place.
+        Reading the incumbent off ``operation_group`` would miss the case the fix
+        exists for; it is read off the nests themselves.
+        """
+        headers = headers_for(laser_setup["admin"])
+        ermaksan = _make_wc(db_session, name="Ermaksan 6KW Bay 2", code="ERM-NG", wc_type="fabrication")
+        first = _create_manual_nest(
+            client,
+            headers,
+            laser_setup["parent"].id,
+            {"cnc_number": "NG-1", "planned_runs": 1, "work_center_id": ermaksan.id},
+        )
+        assert first.status_code == status.HTTP_201_CREATED, first.text
+        first_op = db_session.get(WorkOrderOperation, first.json()["work_order_operation_id"])
+        assert first_op.work_center_id == ermaksan.id
+
+        # Re-stamp the group the way an IMPORT would have. `create_manual_laser_nest`
+        # hard-codes "LASER", but `import_nest_package` derives it per nest from the
+        # nest's own work center (`get_work_center_group`) -- and nest packages are
+        # normally imported, so this is the shape a real job carries. Hand-built for
+        # the same reason `_legacy_tombstone` is: the manual endpoint cannot produce it.
+        assert get_work_center_group(ermaksan) != "LASER"
+        first_op.operation_group = get_work_center_group(ermaksan)
+        db_session.commit()
+
+        second = _create_manual_nest(
+            client, headers, laser_setup["parent"].id, {"cnc_number": "NG-2", "planned_runs": 1}
+        )
+        assert second.status_code == status.HTTP_201_CREATED, second.text
+        second_op = db_session.get(WorkOrderOperation, second.json()["work_order_operation_id"])
+        assert second_op.work_center_id == ermaksan.id
+        # ...and the sequence/label probe has the same blind spot: without the same
+        # remedy the second nest lands back at sequence 10 as a duplicate "Nest 1".
+        assert second_op.sequence > first_op.sequence
+        assert second_op.operation_number != first_op.operation_number
+
+    def test_a_legacy_tombstone_cannot_out_vote_the_live_nests(self, client, db_session, laser_setup):
+        """Soft-deleted nests are excluded from the incumbent tally.
+
+        Every delete made before the removal verb shipped left an ON_HOLD operation
+        with its nest soft-deleted and the FK intact, and those rows are in
+        production. Counting them would let two dead nests on one machine outvote
+        the live one on another and re-home the job by arithmetic.
+        """
+        headers = headers_for(laser_setup["admin"])
+        live = _make_wc(db_session, name="Live Laser", code="LIVE-1")
+        abandoned = _make_wc(db_session, name="Abandoned Laser", code="DEAD-1")
+
+        keep = _create_manual_nest(
+            client,
+            headers,
+            laser_setup["parent"].id,
+            {"cnc_number": "TB-KEEP", "planned_runs": 1, "work_center_id": live.id},
+        )
+        assert keep.status_code == status.HTTP_201_CREATED, keep.text
+        for cnc in ("TB-DEAD-1", "TB-DEAD-2"):
+            dead = _create_manual_nest(
+                client,
+                headers,
+                laser_setup["parent"].id,
+                {"cnc_number": cnc, "planned_runs": 1, "work_center_id": abandoned.id},
+            )
+            assert dead.status_code == status.HTTP_201_CREATED, dead.text
+            # The legacy tombstone shape: nest soft-deleted, operation still attached.
+            db_session.get(LaserNest, dead.json()["id"]).is_deleted = True
+        db_session.commit()
+
+        added = _create_manual_nest(
+            client, headers, laser_setup["parent"].id, {"cnc_number": "TB-NEW", "planned_runs": 1}
+        )
+        assert added.status_code == status.HTTP_201_CREATED, added.text
+        # 1 live nest beats 2 tombstones.
+        assert _op_work_center(db_session, added.json()) == live.id
+
+    def test_equal_counts_break_on_the_earliest_sequence(self, client, db_session, laser_setup):
+        """The COUNT DESC leg ties; `MIN(sequence) ASC` is what makes the answer deterministic."""
+        headers = headers_for(laser_setup["admin"])
+        second = _make_wc(db_session, name="Runner Up Laser", code="TIE-2")
+        first = _create_manual_nest(
+            client, headers, laser_setup["parent"].id, {"cnc_number": "TIE-A", "planned_runs": 1}
+        )
+        assert first.status_code == status.HTTP_201_CREATED, first.text
+        later = _create_manual_nest(
+            client,
+            headers,
+            laser_setup["parent"].id,
+            {"cnc_number": "TIE-B", "planned_runs": 1, "work_center_id": second.id},
+        )
+        assert later.status_code == status.HTTP_201_CREATED, later.text
+        # One nest each — the tally is tied.
+        first_op = db_session.get(WorkOrderOperation, first.json()["work_order_operation_id"])
+        later_op = db_session.get(WorkOrderOperation, later.json()["work_order_operation_id"])
+        assert first_op.sequence < later_op.sequence
+
+        added = _create_manual_nest(
+            client, headers, laser_setup["parent"].id, {"cnc_number": "TIE-C", "planned_runs": 1}
+        )
+        assert added.status_code == status.HTTP_201_CREATED, added.text
+        assert _op_work_center(db_session, added.json()) == laser_setup["wc"].id
+
+    def test_a_job_whose_nests_were_all_removed_falls_back_instead_of_failing(self, client, db_session, laser_setup):
+        """No incumbent left: auto-detect, not a 500."""
+        headers = headers_for(laser_setup["admin"])
+        gone = _create_manual_nest(
+            client, headers, laser_setup["parent"].id, {"cnc_number": "GONE-1", "planned_runs": 1}
+        )
+        assert gone.status_code == status.HTTP_201_CREATED, gone.text
+        # What `remove_laser_nest` leaves behind: the nest soft-deleted AND detached
+        # from an operation row that is itself gone.
+        nest = db_session.get(LaserNest, gone.json()["id"])
+        operation = nest.operation
+        nest.operation = None
+        db_session.flush()
+        db_session.delete(operation)
+        nest.is_deleted = True
+        db_session.commit()
+
+        added = _create_manual_nest(
+            client, headers, laser_setup["parent"].id, {"cnc_number": "GONE-2", "planned_runs": 1}
+        )
+        assert added.status_code == status.HTTP_201_CREATED, added.text
+        assert _op_work_center(db_session, added.json()) == laser_setup["wc"].id

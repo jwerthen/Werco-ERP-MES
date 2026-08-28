@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Set
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.orm.attributes import set_committed_value
@@ -876,16 +876,100 @@ def _find_laser_work_center(db: Session, company_id: int, work_center_id: Option
     # Auto-detect: prefer the Ermaksan fiber laser over other lasers, and any
     # tube laser last (see _laser_work_center_preference); id is the
     # deterministic tiebreak within a preference tier.
+    #
+    # The candidate set must be keyed on the SAME tokens the tiering is, or the
+    # preference is decided before it runs: tier 0 is "ermaksan"/"fiber", so a
+    # prefilter demanding the literal "laser" drops an Ermaksan row spelled
+    # "Ermaksan 6KW Bay 2" / "ERM-6K" with a non-laser work_center_type -- while
+    # a tube laser typed `laser_cutting` sails through -- and min() then returns
+    # the one machine this rule exists to avoid. That is the exact inversion the
+    # frontend does not have: `laserDispatchTier` in
+    # frontend/src/utils/laserWorkCenters.ts accepts "ermaksan"/"fiber" with no
+    # "laser" token anywhere. These two sets must stay in step; edit them together.
     candidates = query.filter(
         or_(
             WorkCenter.name.ilike("%laser%"),
             WorkCenter.work_center_type.ilike("%laser%"),
             WorkCenter.code.ilike("%laser%"),
+            WorkCenter.name.ilike("%ermaksan%"),
+            WorkCenter.code.ilike("%ermaksan%"),
+            WorkCenter.name.ilike("%fiber%"),
+            WorkCenter.code.ilike("%fiber%"),
         )
     ).all()
     if not candidates:
         raise HTTPException(status_code=400, detail="No active laser work center found")
     return min(candidates, key=lambda wc: (_laser_work_center_preference(wc), wc.id))
+
+
+def _laser_work_center_for_added_nest(
+    db: Session,
+    *,
+    laser_work_order: WorkOrder,
+    company_id: int,
+    work_center_id: Optional[int] = None,
+) -> WorkCenter:
+    """Which laser a nest ADDED to an existing package runs on.
+
+    Precedence: the caller's explicit choice, then **the machine this work order's
+    own nests already run on**, then the shop-wide auto-detect.
+
+    The middle step is the point. ``_find_laser_work_center`` answers "which laser
+    does this SHOP prefer?", which is the right question when a package is first
+    imported and the wrong one when a nest is appended to a job already running
+    somewhere: the manual add shipped in #55 a month before #136 taught the import
+    path about work-center assignment, so it kept asking the shop-wide question and
+    silently dispatched the new nest to whatever machine auto-detect happened to
+    return -- a different machine from the rest of the package, splitting one job
+    across two lasers with nothing on screen saying so.
+
+    The inherited machine is the package's MODAL work center, not its last one: a
+    nest package is a dispatch pool and may legitimately span two lasers (see
+    ``is_laser_dispatch_work_order``), so one nest deliberately moved to the tube
+    laser must not drag every later addition after it. Ties break on the earliest
+    sequence, so the answer is deterministic. ``is_active`` is deliberately NOT
+    filtered here: this is "the same machine as the rest of the job", and a work
+    center holding live work cannot be deactivated in the first place.
+
+    The incumbent is read off the nests themselves -- ``LaserNest`` joined to its
+    operation -- and deliberately NOT off ``operation_group == "LASER"``. A nest
+    operation derives its group from ITS work center via ``get_work_center_group``,
+    which keys on the literal token "LASER" in the machine's type or name, so a
+    nest running on an Ermaksan row spelled "Ermaksan 6KW Bay 2" / type
+    ``fabrication`` carries group "OTHER". Keying on the group would therefore
+    find no incumbent and fall through to auto-detect under **exactly** the data
+    shape that makes auto-detect wrong -- the fix would miss the case it exists
+    for. ``import_nest_package``'s wipe filter already had to be widened for this
+    same reason; it is the precedent, not a new concern. Soft-deleted nests are
+    excluded so a legacy ON_HOLD tombstone cannot out-vote the live nests.
+    """
+    if work_center_id:
+        return _find_laser_work_center(db, company_id, work_center_id)
+
+    incumbent = (
+        db.query(WorkOrderOperation.work_center_id)
+        .join(LaserNest, LaserNest.work_order_operation_id == WorkOrderOperation.id)
+        .filter(
+            WorkOrderOperation.company_id == company_id,
+            WorkOrderOperation.work_order_id == laser_work_order.id,
+            WorkOrderOperation.work_center_id.isnot(None),
+            LaserNest.company_id == company_id,
+            LaserNest.is_deleted == False,  # noqa: E712
+        )
+        .group_by(WorkOrderOperation.work_center_id)
+        .order_by(func.count(WorkOrderOperation.id).desc(), func.min(WorkOrderOperation.sequence).asc())
+        .first()
+    )
+    if incumbent is not None:
+        work_center = (
+            db.query(WorkCenter).filter(WorkCenter.id == incumbent[0], WorkCenter.company_id == company_id).first()
+        )
+        if work_center is not None:
+            return work_center
+
+    # No nests yet (the first one on a fresh laser WO): fall back to the shop-wide
+    # preference, which is what the import path uses for the same "no incumbent" case.
+    return _find_laser_work_center(db, company_id)
 
 
 def _find_nest_material_part(db: Session, company_id: int, part_id: int) -> Part:
@@ -2838,6 +2922,20 @@ async def _run_laser_nest_import(
                     # that WO-level change must be audited (invariant 2) -- the
                     # per-nest DELETE/CREATE rows alone don't record it.
                     pre_import_wo_values = _laser_wo_audit_values(child_work_order)
+                    # A re-import onto a job ALREADY running on a machine keeps that
+                    # machine. IMPORT-REPLACES-EVERYTHING rebuilds every operation onto
+                    # `laser_work_center`, so without this the shop-wide auto-detect
+                    # moves the WHOLE package -- not just the nest being added -- to
+                    # whichever laser it happens to prefer. Resolved HERE because it is
+                    # the first point where the target WO is known and the last before
+                    # the wipe below deletes the operations it reads. Only when the
+                    # caller named no machine: an explicit pick (package-level or
+                    # per-row) still wins, and it was already validated above so a bad
+                    # id still 404s with nothing persisted.
+                    if work_center_id is None:
+                        laser_work_center = _laser_work_center_for_added_nest(
+                            db, laser_work_order=child_work_order, company_id=company_id
+                        )
                 child_work_order.status = WorkOrderStatus.RELEASED
                 child_work_order.quantity_complete = 0
                 child_work_order.quantity_scrapped = 0
@@ -3227,8 +3325,15 @@ def create_manual_laser_nest_endpoint(
         # (invariant 2). log_update self-suppresses when nothing changed.
         pre_add_wo_values = _laser_wo_audit_values(child_work_order)
         child_work_order.status = WorkOrderStatus.RELEASED
-        # _find_laser_work_center raises 400 when no active laser work center exists.
-        laser_work_center = _find_laser_work_center(db, company_id)
+        # The machine the rest of this job's nests already run on; the shop-wide
+        # auto-detect only when there are none. Raises 400 when neither yields a
+        # laser work center, and 404 on an unknown/inactive explicit choice.
+        laser_work_center = _laser_work_center_for_added_nest(
+            db,
+            laser_work_order=child_work_order,
+            company_id=company_id,
+            work_center_id=payload.work_center_id,
+        )
 
         nest = create_manual_laser_nest(
             db,
