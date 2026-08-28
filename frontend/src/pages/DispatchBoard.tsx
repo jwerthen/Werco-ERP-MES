@@ -198,6 +198,18 @@ const IDLE_HELP =
 // nudge on a 7,680px board.
 const COLUMN_STEP_PX = (320 + 12) * 2;
 
+// The board is capped at the bottom of the WINDOW rather than allowed to run off
+// the end of the page. A 20-job column used to push the board's own horizontal
+// scrollbar hundreds of pixels below the fold, so panning sideways meant first
+// scrolling the page all the way down to reach the bar. Capped, the bar — and the
+// header's Scroll left/right buttons — stay on screen wherever the board is.
+/** Breathing room under the board so the scrollbar isn't flush with the window edge. */
+const BOARD_BOTTOM_GUTTER_PX = 16;
+/** Never squeeze the board below this, however little room the viewport leaves. */
+const BOARD_MIN_HEIGHT_PX = 320;
+/** Firefox reports wheel deltas in LINES (`deltaMode === 1`); one line ≈ this many px. */
+const WHEEL_LINE_PX = 16;
+
 interface DragSource {
   operationId: number;
   fromWorkCenterId: number;
@@ -293,6 +305,9 @@ export default function DispatchBoard() {
   // Whether the board is scrolled to each end — drives the scroll buttons and the
   // "there is more over here" edge fade.
   const [scrollEdges, setScrollEdges] = useState({ atStart: true, atEnd: true });
+  // How tall the board is allowed to get before it scrolls internally, measured
+  // from where it sits to the bottom of the window. Null until first measured.
+  const [boardMaxHeight, setBoardMaxHeight] = useState<number | null>(null);
 
   const nextReorderSeq = useCallback((workCenterId: number) => {
     const seq = (reorderSeqRef.current.get(workCenterId) || 0) + 1;
@@ -357,6 +372,9 @@ export default function DispatchBoard() {
   // simply render.
   const idleCollapsible = busyColumns.length + deactivatedColumns.length > 0 && idleColumns.length > 0;
   const idleVisible = !idleCollapsible || showIdle;
+  // Whether the scrolling board element is on screen at all (the empty state
+  // replaces it), which is what the wheel listener has to re-attach to.
+  const hasBoard = (columns?.length ?? 0) > 0;
 
   const totals = useMemo(() => {
     const all = columns || [];
@@ -389,12 +407,86 @@ export default function DispatchBoard() {
     setScrollEdges((prev) => (prev.atStart === next.atStart && prev.atEnd === next.atEnd ? prev : next));
   }, []);
 
-  useLayoutEffect(syncScrollEdges);
+  /**
+   * Cap the board's height at the bottom of the window, so its horizontal
+   * scrollbar sits on screen instead of at the foot of a page-length column.
+   *
+   * The top is measured DOCUMENT-relative (`rect.top + scrollY`), which is
+   * invariant under page scroll — shrinking the board can clamp `window.scrollY`,
+   * and a viewport-relative measurement would feed that back in and oscillate.
+   */
+  const syncBoardHeight = useCallback(() => {
+    const el = boardRef.current;
+    if (!el) return;
+    const top = el.getBoundingClientRect().top + window.scrollY;
+    const room = Math.round(window.innerHeight - top - BOARD_BOTTOM_GUTTER_PX);
+    const next = Math.max(BOARD_MIN_HEIGHT_PX, room);
+    setBoardMaxHeight((prev) => (prev === next ? prev : next));
+  }, []);
+
+  const syncBoardMetrics = useCallback(() => {
+    syncScrollEdges();
+    syncBoardHeight();
+  }, [syncScrollEdges, syncBoardHeight]);
+
+  useLayoutEffect(syncBoardMetrics);
 
   useEffect(() => {
-    window.addEventListener('resize', syncScrollEdges);
-    return () => window.removeEventListener('resize', syncScrollEdges);
-  }, [syncScrollEdges]);
+    window.addEventListener('resize', syncBoardMetrics);
+    return () => window.removeEventListener('resize', syncBoardMetrics);
+  }, [syncBoardMetrics]);
+
+  /**
+   * Re-measure when the page reflows WITHOUT this component re-rendering — the
+   * read-only banner arriving, a font landing, the header wrapping. Those move
+   * the board down without a resize and without a render of our own, and the cap
+   * would otherwise stay at its old value and put the scrollbar back below the
+   * fold. Feature-detected: jsdom has no ResizeObserver, and the render-time and
+   * resize-time measurements already cover the tests.
+   */
+  useEffect(() => {
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(syncBoardMetrics);
+    observer.observe(document.body);
+    return () => observer.disconnect();
+  }, [syncBoardMetrics]);
+
+  /**
+   * Pan the board with the WHEEL and with trackpad swipes, not only by dragging
+   * the scrollbar. Rules, in order:
+   *   • a horizontal delta (two-finger swipe, tilt wheel) is already going the
+   *     right way — leave it to the browser;
+   *   • Shift+wheel is the platform's "scroll sideways" gesture — always pans;
+   *   • a plain wheel pans sideways only when the board has nothing left to
+   *     scroll vertically, so a tall board still scrolls DOWN under the pointer.
+   * `preventDefault` runs only when the board actually moved, so at either end
+   * the gesture chains to the page instead of feeling stuck.
+   *
+   * Registered by hand because React's `onWheel` is attached passively at the
+   * root: `preventDefault()` from a React handler is a no-op and the page would
+   * scroll as well.
+   */
+  useEffect(() => {
+    const el = boardRef.current;
+    if (!el) return undefined;
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaX !== 0) return;
+      if (el.scrollWidth <= el.clientWidth + 1) return;
+      const scrollsVertically = el.scrollHeight > el.clientHeight + 1;
+      if (!event.shiftKey && scrollsVertically) return;
+      const step = event.deltaMode === 1 ? event.deltaY * WHEEL_LINE_PX : event.deltaY;
+      if (step === 0) return;
+      const before = el.scrollLeft;
+      el.scrollLeft = before + step;
+      if (el.scrollLeft === before) return;
+      event.preventDefault();
+      syncScrollEdges();
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+    // The board element is unmounted with the empty state, so re-attach when the
+    // columns come back.
+  }, [syncScrollEdges, hasBoard]);
 
   const scrollBoard = useCallback(
     (direction: -1 | 1) => {
@@ -895,12 +987,16 @@ export default function DispatchBoard() {
             </div>
           )}
 
-          {/* The BOARD scrolls sideways, never the page body. */}
+          {/* The BOARD scrolls — sideways AND down — never the page body. Capping
+              it at the window bottom is what keeps its horizontal scrollbar
+              reachable without scrolling the page to the foot of the tallest
+              column first. */}
           <div className="relative">
             <div
-              className="board-scroll-x overflow-x-auto pb-2"
+              className="board-scroll-x overflow-auto pb-2"
               data-testid="dispatch-board-scroll"
               ref={boardRef}
+              style={boardMaxHeight == null ? undefined : { maxHeight: boardMaxHeight }}
               onScroll={syncScrollEdges}
             >
               <div className="flex min-w-max items-start gap-3">
@@ -921,7 +1017,10 @@ export default function DispatchBoard() {
               <div
                 aria-hidden="true"
                 data-testid="dispatch-board-more"
-                className="pointer-events-none absolute bottom-3 right-0 top-0 w-16 bg-gradient-to-l from-fd-canvas via-fd-canvas/80 to-transparent"
+                // Inset by the 10px scrollbar gutter on both edges: the fade is a
+                // sibling painted OVER the board, and at `right-0`/`bottom-0` it
+                // would sit on top of the board's own scrollbars.
+                className="pointer-events-none absolute bottom-3 right-2.5 top-0 w-16 bg-gradient-to-l from-fd-canvas via-fd-canvas/80 to-transparent"
               />
             )}
           </div>

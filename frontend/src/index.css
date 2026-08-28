@@ -1075,10 +1075,16 @@
        overlay bar. Resetting to `auto` hands the element back to the
        ::-webkit rules, i.e. a real 10px scrollbar that is visible at rest. */
     scrollbar-color: auto;
+    /* Stop a two-finger swipe at the left edge from being handed to the browser
+       as a BACK gesture. On macOS that turned "swipe right to see the machines
+       on the left" into "leave the Dispatch Board", which is why panning by
+       trackpad read as not working at all. */
+    overscroll-behavior-x: contain;
   }
 
   .board-scroll-x::-webkit-scrollbar {
     height: 10px;
+    width: 10px; /* the board is capped at the window bottom, so it scrolls DOWN too */
     -webkit-appearance: none;
   }
 
