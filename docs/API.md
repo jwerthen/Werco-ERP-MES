@@ -2534,16 +2534,45 @@ mixed**:
 > lowering one nest's evidence lowers the pool header by the same delta (see "Over-count
 > correction" under Work Orders and Shop Floor).
 >
-> **Work-center selection (package-level pick, auto-detect order, per-row override).** Each nest's
+> **Work-center selection (explicit pick, the job's own laser, auto-detect).** Each nest's
 > backing operation lands on a work center resolved in this order:
 > 1. The row's **`work_center_id`** (PDF confirm-and-commit `rows` only — see the `rows`
 >    validation below). Per-row overrides let one package be spread across multiple lasers.
-> 2. The import's package-level **`work_center_id`** form field.
-> 3. **Auto-detect** when neither is sent: among active work centers whose name/code/type matches
->    `%laser%`, the pick prefers entries mentioning **"ermaksan"** or **"fiber"** (the Ermaksan
->    fiber laser), then any other laser, with entries mentioning **"tube"** ranked **last** — the
->    HSG tube laser is never the silent default; lowest id breaks ties within a tier. No active
->    laser work center → **400**.
+> 2. The request's package-level **`work_center_id`** (import form field, or manual-create body key).
+> 3. **The machine this work order's existing nests already run on** — the incumbent. A nest added
+>    to a job already running somewhere stays on that machine; only a work order with **no** nests
+>    falls through to auto-detect. Without this, appending a nest re-asked the shop-wide question
+>    ("which laser does this shop *prefer*?") instead of the job-level one ("which laser is this job
+>    *on*?") and silently split one job across two machines — and on the import path, which rebuilds
+>    every operation, it moved the **whole package**. The incumbent is the package's **modal** work
+>    center, not its most recent: a nest package is a dispatch pool and may legitimately span two
+>    lasers, so one nest deliberately moved elsewhere must not drag every later addition after it;
+>    ties break on earliest sequence. It is read off the **nests themselves** (`laser_nests` joined
+>    to its operation, soft-deleted nests excluded), deliberately **not** off
+>    `operation_group == 'LASER'` — a nest operation derives its group from its own work center, so
+>    nests on a machine whose name and type lack the token "LASER" carry group `OTHER` and a
+>    group-keyed probe would miss under exactly the data shape that makes auto-detect wrong.
+>    `is_active` is **not** filtered on this step: "the same machine as the rest of the job" is the
+>    point, and a work center holding live work cannot be deactivated anyway.
+> 4. **Auto-detect** when none of the above apply: among active work centers whose name/code/type
+>    matches `%laser%`, **`%ermaksan%`** or **`%fiber%`**, the pick prefers entries mentioning
+>    **"ermaksan"** or **"fiber"** (the Ermaksan fiber laser), then any other laser, with entries
+>    mentioning **"tube"** ranked **last** — the HSG tube laser is never the silent default; lowest
+>    id breaks ties within a tier. No matching active work center → **400**.
+>
+> The candidate set in (4) is keyed on the **same tokens** the ranking is. A prefilter demanding the
+> literal `%laser%` dropped an Ermaksan row spelled `Ermaksan 6KW Bay 2` / `ERM-6K` under a
+> non-laser `work_center_type` — while a tube laser typed `laser_cutting` sailed through — so the
+> "never the tube laser" rule returned the tube. `laserDispatchTier` in
+> `frontend/src/utils/laserWorkCenters.ts` accepts "ermaksan"/"fiber" with no "laser" token; the two
+> sets must stay in step, so **edit them together**.
+>
+> Ranking is not a veto: tiering only **orders** the candidates, so a tube laser that is the only
+> surviving candidate is still returned. The frontend twin refuses instead (`defaultLaserWorkCenter`
+> returns `undefined`, leaving the picker on "(auto-detect)"). That divergence is deliberate — the
+> backend has to return *something* — but it means a shop whose Ermaksan row is inactive, filed
+> under another company, or named so it matches neither token will still auto-detect onto the tube.
+> Steps (1)–(3) are what keep that off an existing job.
 >
 > An explicit `work_center_id` (package-level or per-row) always wins over auto-detect and must be
 > an **active** work center in the caller's company (it need not match `%laser%`) — otherwise
@@ -2552,7 +2581,11 @@ mixed**:
 > `operation_group` derives from **its own** work center. The legacy CNC-program path (no `rows`)
 > is package-level only. In the wizard this is the dispatch strip's work-center select (defaulting
 > to the Ermaksan fiber laser, with "(auto-detect)" available) plus the per-row work-center
-> column; the same auto-detect resolves the manual-create path's laser work center.
+> column. **The dispatch strip renders only in standalone mode** — an import launched from a work
+> order's Laser Nest Package card sends no package-level `work_center_id`, which is exactly the case
+> step (3) resolves. Each nest row on that card shows its machine (`WC:`) and carries a reassign
+> select, so a nest can be moved after the fact; the server refuses a move on a completed or
+> in-progress operation.
 >
 > **PDF auto-extraction (CNC #, material, material size).** Nest-report PDFs (SigmaNEST / Ermaksan
 > style) are read automatically; the planner verifies before saving. Extraction is **layout-aware
@@ -2677,10 +2710,13 @@ mixed**:
 > **Manual nest create (`POST /work-orders/{id}/laser-nests/manual`).** Body: `cnc_number`
 > (required, 1–100 chars), `planned_runs` (required, **≥ 1**), and optional `nest_name`,
 > `material`, `thickness`, `sheet_size`, plus the same optional **material tie** the import rows take
-> (`material_part_id` **> 0**, `qty_per_run` **> 0** — see "Nest material ties" below). Resolves the target laser WO (find-or-create the child on
-> an assembly WO; the addressed WO itself when it is `laser_cutting`) and an active
-> laser work center — **400** if no active laser work center exists (auto-detected with the same
-> Ermaksan-fiber-first, tube-last preference — see "Work-center selection" above). Every manual
+> (`material_part_id` **> 0**, `qty_per_run` **> 0** — see "Nest material ties" below), and an
+> optional **`work_center_id`** (**> 0**) naming the laser this nest runs on. Resolves the target
+> laser WO (find-or-create the child on an assembly WO; the addressed WO itself when it is
+> `laser_cutting`) and its work center by the full precedence in "Work-center selection" above —
+> the explicit `work_center_id` (**404** when it is unknown, inactive or another tenant's), else
+> **the machine this work order's existing nests already run on**, else the shop-wide auto-detect
+> (**400** when that finds nothing). Every manual
 > nest is created **READY** (clock-in-able now) regardless of how many nests already exist —
 > laser WOs are dispatch pools (see "Laser WOs are dispatch pools" above). This is a standalone
 > creation path that **does not change** the package-import behavior. Returns **201** with the new

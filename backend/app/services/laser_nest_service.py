@@ -885,8 +885,30 @@ def create_manual_laser_nest(
         db.add(package)
         db.flush()
 
-    # Next LASER sequence on the child = current max LASER sequence + 10 (default 10).
+    # Next nest sequence on the child = current max + 10 (default 10).
+    #
+    # Counted over the operations that actually CARRY a nest, not over
+    # ``operation_group == "LASER"``. A nest op derives its group from its work
+    # center (``get_work_center_group``, keyed on the literal token "LASER" in the
+    # machine's type or name), so nests running on an Ermaksan row spelled
+    # "Ermaksan 6KW Bay 2" / type ``fabrication`` carry group "OTHER" -- the group
+    # probe then returns NULL on a WO that already has nests, and every added nest
+    # lands back at sequence 10 labelled "Nest 1", colliding with the one already
+    # there. Same blind spot, and same remedy, as ``import_nest_package``'s wipe
+    # filter and ``_laser_work_center_for_added_nest``'s incumbent probe.
+    # Soft-deleted nests still count: their sequences are taken.
     max_sequence = (
+        db.query(func.max(WorkOrderOperation.sequence))
+        .join(LaserNest, LaserNest.work_order_operation_id == WorkOrderOperation.id)
+        .filter(
+            WorkOrderOperation.company_id == company_id,
+            WorkOrderOperation.work_order_id == child_work_order.id,
+            LaserNest.company_id == company_id,
+        )
+        .scalar()
+    )
+    # Belt and braces for a WO carrying group-LASER operations with no nest row.
+    max_group_sequence = (
         db.query(func.max(WorkOrderOperation.sequence))
         .filter(
             WorkOrderOperation.company_id == company_id,
@@ -895,7 +917,7 @@ def create_manual_laser_nest(
         )
         .scalar()
     )
-    sequence = int(max_sequence or 0) + 10
+    sequence = max(int(max_sequence or 0), int(max_group_sequence or 0)) + 10
 
     operation = WorkOrderOperation(
         company_id=company_id,

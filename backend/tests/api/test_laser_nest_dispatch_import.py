@@ -779,3 +779,65 @@ class TestSchedulingReassignParity:
         resp = self._move(client, admin, op.id, brake.id)
         assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
         assert "Completed operations" in resp.json()["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# A re-import keeps the machine the job is already running on
+#
+# IMPORT-REPLACES-EVERYTHING rebuilds every operation onto the resolved laser, so
+# a package-level pick that falls through to the shop-wide auto-detect moves the
+# WHOLE job -- not just the nest being added. The wizard's dispatch strip (and
+# with it the Ermaksan default) renders only in standalone mode, so an import
+# launched from a work order's Laser Nest Package card always sends no
+# work_center_id and lands in exactly this path.
+# --------------------------------------------------------------------------- #
+class TestReimportKeepsTheJobsMachine:
+    def test_reimport_without_a_pick_keeps_every_nest_on_the_incumbent_machine(self, client, db_session):
+        admin = make_user(db_session)
+        headers = headers_for(admin)
+        origin = make_work_center(db_session, name="Second Laser", code="LSR-RI")
+
+        created = _standalone_import(client, headers, _cnc_zip("a.nc", "b.nc"), work_center_id=origin.id)
+        assert created.status_code == status.HTTP_200_OK, created.text
+        child_id = created.json()["child_work_order"]["id"]
+        assert {
+            op.work_center_id
+            for op in db_session.query(WorkOrderOperation).filter(WorkOrderOperation.work_order_id == child_id)
+        } == {origin.id}
+
+        # A machine the shop-wide auto-detect ranks strictly higher appears after
+        # the job is already running on `origin`.
+        preferred = make_work_center(db_session, name="Ermaksan Fiber Laser", code="ERM-RI")
+        assert work_orders_endpoint._find_laser_work_center(db_session, COMPANY_A).id == preferred.id
+
+        again = _wo_import(client, headers, child_id, _cnc_zip("a.nc", "b.nc", "c.nc"))
+        assert again.status_code == status.HTTP_200_OK, again.text
+
+        db_session.expire_all()
+        ops = (
+            db_session.query(WorkOrderOperation)
+            .filter(WorkOrderOperation.work_order_id == child_id)
+            .order_by(WorkOrderOperation.sequence)
+            .all()
+        )
+        assert len(ops) == 3  # the added nest came through
+        # ...and NOT ONE of them moved to the shop's preferred laser.
+        assert {op.work_center_id for op in ops} == {origin.id}
+
+    def test_an_explicit_pick_still_moves_the_package(self, client, db_session):
+        """The incumbent is a DEFAULT, not a lock: a planner can still re-home a job."""
+        admin = make_user(db_session)
+        headers = headers_for(admin)
+        origin = make_work_center(db_session, name="Second Laser", code="LSR-RI2")
+        target = make_work_center(db_session, name="Ermaksan Fiber Laser", code="ERM-RI2")
+
+        created = _standalone_import(client, headers, _cnc_zip("a.nc"), work_center_id=origin.id)
+        assert created.status_code == status.HTTP_200_OK, created.text
+        child_id = created.json()["child_work_order"]["id"]
+
+        again = _wo_import(client, headers, child_id, _cnc_zip("a.nc", "b.nc"), work_center_id=target.id)
+        assert again.status_code == status.HTTP_200_OK, again.text
+
+        db_session.expire_all()
+        ops = db_session.query(WorkOrderOperation).filter(WorkOrderOperation.work_order_id == child_id).all()
+        assert {op.work_center_id for op in ops} == {target.id}
