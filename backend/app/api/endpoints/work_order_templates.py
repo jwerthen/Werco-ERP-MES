@@ -434,7 +434,7 @@ def use_work_order_template(
         .filter(WorkOrder.id == new_work_order_id, WorkOrder.company_id == company_id)
         .first()
     )
-    _enrich(work_order)
+    _enrich(work_order, db=db, company_id=company_id)
 
     # The same broadcast ``POST /work-orders`` and ``POST /work-orders/{id}/duplicate``
     # emit. Without it a template-created draft is invisible on every OTHER open
@@ -460,8 +460,15 @@ def use_work_order_template(
     )
 
 
-def _enrich(work_order) -> None:
+def _enrich(work_order, *, db: Session, company_id: int) -> None:
     """Apply the work-orders router's own response enrichment to the created draft.
+
+    ``db``/``company_id`` are forwarded because the enrichment now also serves hold
+    provenance (why an operation is held, by whom, when) and that read is tenant-scoped.
+    ``company_id`` is the ACTIVE company the endpoint already resolved, never client input.
+    A template always produces a DRAFT with PENDING operations, so nothing here is ever on
+    hold and the lookup short-circuits without a query -- forwarded anyway so this path
+    cannot silently diverge from the duplicate endpoint it is required to mirror.
 
     Imported lazily: ``work_orders.py`` imports the duplicate service at load time and
     this module's service imports it too, so a module-scope import here would risk
@@ -474,4 +481,4 @@ def _enrich(work_order) -> None:
     """
     from app.api.endpoints.work_orders import _enrich_work_order_operations
 
-    _enrich_work_order_operations(work_order)
+    _enrich_work_order_operations(work_order, db=db, company_id=company_id)

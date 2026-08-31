@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
-import { User, WorkOrder, WorkOrderOperation, LaserNestInfo, WorkCenter } from '../types';
+import { OperationHold, User, WorkOrder, WorkOrderOperation, LaserNestInfo, WorkCenter } from '../types';
 import { WorkOrderBlocker, WorkOrderBlockerCategory, WorkOrderBlockerSeverity } from '../types/aiForward';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
@@ -44,6 +44,20 @@ import {
 import { useUnsavedChanges } from '../hooks/useUnsavedChanges';
 import { formatCentralDate, formatCentralDateTime, getCentralDateStamp } from '../utils/centralTime';
 import { formatOperationLabel, hasOperationNumber } from '../utils/operationLabel';
+// The held-operation vocabulary the two kiosks already speak. Imported rather
+// than re-derived so the office page and the floor name one hold the same way:
+// same category labels, same "Held by Dana R. · <Central time>" attribution line,
+// same independence of reason from attribution. Pure helpers over the shared
+// `OperationHold` / `ResumeOperationResult` shapes -- no kiosk runtime is pulled in.
+import {
+  clearHoldOutcome,
+  formatHoldAttribution,
+  holdIsUnexplained,
+  holdReasonLabel,
+  holdSeverityLabel,
+  holdTitleText,
+  openBlockerLine,
+} from '../components/kiosk/heldOperations';
 import { sortWorkCentersForLaserDispatch } from '../utils/laserWorkCenters';
 import {
   ArrowLeftIcon,
@@ -194,6 +208,138 @@ interface WorkOrderDocument {
 
 const formatDateTimeCT = (value?: string) =>
   formatCentralDateTime(value, { timeZoneName: 'short' });
+
+/**
+ * "Op 20" for an operation, falling back to its sequence when the routing never
+ * got an operation number. Same expression the Report-Blocker picker uses; named
+ * so the Clear Hold copy and that picker cannot drift apart.
+ */
+const operationLabel = (op: WorkOrderOperation): string =>
+  hasOperationNumber(op.operation_number) ? formatOperationLabel(op.operation_number) : `Op ${op.sequence}`;
+
+/**
+ * The lines that answer "why is this held?", in reading order.
+ *
+ * Shared by the compact in-row disclosure and the full Clear Hold dialog so the
+ * two can never say different things about one hold.
+ *
+ * TWO RULES HERE ARE CORRECTNESS, NOT COPY:
+ *
+ * 1. **Reason and attribution are INDEPENDENT.** A BARE hold (no note, category
+ *    OTHER) -- exactly the accidental fat-finger case -- files no blocker at all,
+ *    so `blocker` is null while `held_by_name` / `held_at` still carry provenance.
+ *    Gating one on the other makes the mis-tap render as both anonymous and
+ *    reasonless, the single case that most needs to read as an accident.
+ * 2. **Free text is read DIRECTLY off `note` / `title`, never behind `has_note`.**
+ *    The work-order response deliberately omits `has_note` (nothing is withheld
+ *    from an identified office session, so the flag is redundant here), and an
+ *    absent flag is falsy -- a `has_note` gate would print "no reason recorded"
+ *    over a hold that has a written one.
+ *
+ * All-null is a REAL state, not an error: the server reports what was recorded
+ * and never infers a holder from `operation.updated_at`.
+ */
+interface HoldSummary {
+  /** "Machine down · High" -- category and severity. Null when no blocker is open. */
+  headline: string | null;
+  /** The blocker's own title, dropped when it is only restating the headline. */
+  title: string | null;
+  /** The operator's written note, verbatim. */
+  note: string | null;
+  /** "Held by Dana R. · Aug 11, 2026, 2:14 PM" -- Central, via the shared formatter. */
+  attribution: string | null;
+  /** Nothing was recorded at all: no open blocker AND no holder. */
+  unexplained: boolean;
+}
+
+/**
+ * ABSENT is not the same claim as EMPTY, and conflating them puts a false
+ * statement on a quality record. Returns null when the block did not arrive.
+ *
+ * `hold_contexts_for_operations` gives EVERY id it is asked about a key -- an
+ * operation with neither a blocker nor a hold event maps to an ALL-NULL
+ * `HoldContext`, not to a missing one -- and `_enrich_work_order_operations`
+ * passes every ON_HOLD row through it. So on a served response an `on_hold` row
+ * ALWAYS carries an object, and `hold_context == null` can only mean the block
+ * did not arrive. Two reachable paths produce that:
+ *
+ *  - `hydrateOperationsFromShopFloor` overwrites `status` from
+ *    `GET /shop-floor/operations/{id}`, whose `all_operations` rows carry no hold
+ *    block, so a row that only reads `on_hold` AFTER hydration still holds the
+ *    work-order read's null; or
+ *  - SPA/API deploy skew, before the field ships.
+ *
+ * Returning null (rather than an all-null summary) is what stops both cases
+ * rendering as the affirmative "On hold -- reason not recorded" / "Who placed the
+ * hold was not recorded". That is a claim no reason was ever WRITTEN, printed
+ * directly above the control that lifts an AS9100D hold, over a hold that may
+ * have an open NCR-driven blocker behind it. Same posture as the shop floor's
+ * `<OperationHoldReason>`, which renders nothing when `hold` is absent.
+ *
+ * The genuinely-recorded-nothing case still reports as such, and still reads as
+ * the mis-tap it usually is -- it just has to come from a block the server sent.
+ */
+function summarizeHold(hold?: OperationHold | null): HoldSummary | null {
+  if (!hold) return null;
+  const blocker = hold?.blocker ?? null;
+  const category = holdReasonLabel(blocker?.category);
+  const severity = holdSeverityLabel(blocker?.severity);
+  const headline = [category, severity].filter(Boolean).join(' \u00b7 ') || null;
+  return {
+    headline,
+    // Echo suppression (a title that only restates the category chip) lives in the
+    // shared `holdTitleText`, so this panel and the shop-floor `OperationHoldReason`
+    // cannot decide differently about the same blocker.
+    title: holdTitleText(hold),
+    note: (blocker?.note || '').trim() || null,
+    attribution: formatHoldAttribution(hold),
+    unexplained: holdIsUnexplained(hold),
+  };
+}
+
+/**
+ * The Clear Hold confirm body: why it is held, who held it, and the two things
+ * clearing it does NOT do.
+ *
+ * A plain string because `ConfirmDialog.message` renders `whitespace-pre-line` --
+ * the blank lines below are load-bearing paragraph breaks, not padding.
+ *
+ * The second paragraph is the honesty the reported bug turned on: clearing a hold
+ * and closing a blocker are decoupled server-side (the resume endpoint lifts the
+ * status and hands back whatever blockers are still open), so a dialog that
+ * implied otherwise would let a live quality stop read as cleared.
+ */
+function clearHoldMessage(op: WorkOrderOperation, workOrderNumber: string): string {
+  const hold = summarizeHold(op.hold_context);
+  const lines: string[] = [`${workOrderNumber} \u00b7 ${operationLabel(op)} \u2014 ${op.name}`, ''];
+
+  if (!hold) {
+    // The block did not arrive (see `summarizeHold`) -- which is NOT the same as
+    // "nothing was recorded", and must not be worded as it. Say the reason could
+    // not be loaded and give the reader a way to get it, so nobody lifts a hold
+    // believing this screen already told them there was no reason behind it.
+    lines.push('Why it is held: could not be loaded. Refresh the page to see the reason before clearing it.');
+  } else if (hold.unexplained) {
+    lines.push(
+      'Why it is held: not recorded. No blocker is open on it, and no one was recorded placing the hold.'
+    );
+  } else {
+    lines.push(`Why it is held: ${hold.headline ?? 'no open blocker explains it'}`);
+    if (hold.title) lines.push(hold.title);
+    if (hold.note) lines.push(`\u201c${hold.note}\u201d`);
+    lines.push(hold.attribution ?? 'Who placed the hold was not recorded.');
+  }
+
+  lines.push('');
+  lines.push(
+    'Clearing the hold does NOT close the blocker. It stays open until a supervisor or manager resolves it in the Blockers panel below.'
+  );
+  lines.push('');
+  lines.push(
+    'The operation goes back to where it was. If nobody has clocked time on it yet it returns to Pending, and it will not show on the dispatch board or at the kiosk until the work order is released and any earlier operations are finished.'
+  );
+  return lines.join('\n');
+}
 
 const isPdfDocument = (document: WorkOrderDocument) =>
   document.mime_type === 'application/pdf' || Boolean(document.file_name?.toLowerCase().endsWith('.pdf'));
@@ -366,6 +512,18 @@ export default function WorkOrderDetail() {
   // control and refusing the call have to agree, or a supervisor sees a switch
   // that 403s.
   const canEditSequencing = canCorrectCount;
+  // Closing a blocker is ADMIN/MANAGER/SUPERVISOR on the backend
+  // (`POST /work-order-blockers/{id}/resolve`, require_role([ADMIN, MANAGER,
+  // SUPERVISOR])) -- exactly what work_orders:edit maps to. Until this gate
+  // existed the Resolve button rendered for EVERY role, so an operator or a
+  // viewer looking at a stuck job was offered the one control that would 403 on
+  // them, and nothing on the page offered the one that would work. Named
+  // separately from canCorrectCount so the gate reads at its call site: a hidden
+  // control and a refused call have to agree. Clearing the HOLD is deliberately
+  // NOT gated with it -- `PUT /shop-floor/operations/{id}/resume` takes
+  // `get_current_user`, any authenticated tenant user, which is why the copy
+  // under the hidden button points there.
+  const canResolveBlocker = canCorrectCount;
   const [workOrder, setWorkOrder] = useState<WorkOrder | null>(null);
 
   // Inline due-date edit shares the same work_orders:edit tier, AND is refused on a
@@ -434,6 +592,14 @@ export default function WorkOrderDetail() {
   const [submittingBlocker, setSubmittingBlocker] = useState(false);
   const [resolvingBlockerId, setResolvingBlockerId] = useState<number | null>(null);
   const [resolveBlockerTarget, setResolveBlockerTarget] = useState<WorkOrderBlocker | null>(null);
+  // Clear Hold (office lift of an ON_HOLD operation). `clearHoldTarget` is the
+  // operation the confirm is open for; `clearingHoldOpId` is the in-flight id.
+  // NON-OPTIMISTIC by convention: this is a server-GATED action (409 on a
+  // cancelled-nest tombstone, 400 when the row is not actually on hold, and the
+  // status it lands on is the server's promotion rule to decide, not ours), so
+  // nothing on the page moves until the refetch returns.
+  const [clearHoldTarget, setClearHoldTarget] = useState<WorkOrderOperation | null>(null);
+  const [clearingHoldOpId, setClearingHoldOpId] = useState<number | null>(null);
   const [userNameById, setUserNameById] = useState<Record<number, string>>({});
   const [activeUsersOnWorkOrder, setActiveUsersOnWorkOrder] = useState<ActiveShopUser[]>([]);
   // Batch ZIP import runs through the LaserNestImportWizard modal.
@@ -1484,6 +1650,90 @@ export default function WorkOrderDetail() {
     }
   };
 
+  /**
+   * CLEAR HOLD -- the office lift of an ON_HOLD operation.
+   *
+   * The bug this closes: this page had no control that cleared a hold at all
+   * (`resumeOperation` had zero call sites here), so an owner who held a nest
+   * could only get it back by walking to a kiosk. The three existing call sites
+   * are all shop-floor screens.
+   *
+   * NON-OPTIMISTIC, per the app convention for a server-GATED action: nothing
+   * moves until `loadWorkOrder()` returns, and a refusal renders the server's
+   * `detail` verbatim.
+   *
+   * THE RESPONSE IS BOUND, AND THAT IS THE POINT. `PUT /shop-floor/operations/
+   * {id}/resume` returns two facts a green toast would bury:
+   *
+   * 1. `open_blockers` -- resuming does NOT resolve the blocker that caused the
+   *    hold; the endpoint returns whatever is still open precisely so operation
+   *    status and blocker status cannot silently diverge. Swallowing it lets a
+   *    live quality stop read as cleared.
+   * 2. `status === "pending"` -- resume RESTORES, it does not release. An
+   *    operation with no labor evidence is floored at PENDING and lifted to
+   *    READY only by the server's own promotion rule, so a hold placed on a
+   *    PENDING op (or on one whose WO is still DRAFT, or whose predecessor is
+   *    incomplete) comes back PENDING and stays off the board -- the dispatch
+   *    board and the kiosk surface READY work only. "Resumed" there sends the
+   *    shop looking for a card that is never going to appear.
+   *
+   * Either one earns the `warning` variant -- the repo's documented "succeeded
+   * but did not do everything asked" case. BOTH at once compose into ONE toast:
+   * two stacked toasts about one click read as two failures.
+   *
+   * NOT PRE-CHECKED HERE, deliberately: the cancelled-nest tombstone. The resume
+   * endpoint 409s on an operation whose laser nest was soft-deleted, but THIS
+   * branch's `WorkOrderOperationResponse` carries no `cancelled_nest_id` (it
+   * ships with the laser-nest-removal work, which is not merged here) and the
+   * enrich step nulls a soft-deleted nest out of the row entirely -- so the page
+   * has no signal to gate on before the click. The non-optimistic path is what
+   * keeps that honest: the row does not move and the server's own 409 reason is
+   * what the user reads. When that field lands, guard the button on
+   * `op.cancelled_nest_id != null && op.status !== 'complete'` (the status pair
+   * matters: the read path can flip a marked operation to COMPLETE, and calling
+   * that row a leftover nest would claim work that never happened).
+   */
+  const handleConfirmClearHold = async () => {
+    const op = clearHoldTarget;
+    if (!op || !workOrder || clearingHoldOpId !== null) return;
+    setClearingHoldOpId(op.id);
+    try {
+      const result = await api.resumeOperation(op.id);
+      await loadWorkOrder();
+      setClearHoldTarget(null);
+
+      const label = `${workOrder.work_order_number} \u00b7 ${operationLabel(op)}`;
+      // The success-vs-warning JUDGEMENT comes from the shared `clearHoldOutcome`
+      // (heldOperations.ts), the same one the two shop-floor screens use; only the
+      // WORDING below is office-specific. Re-deriving `status === 'pending'` here
+      // is how three screens end up disagreeing about one server answer.
+      const { landedPending, openBlockers: open, fellShort } = clearHoldOutcome(result);
+      const shortfalls: string[] = [];
+      if (landedPending) {
+        shortfalls.push(
+          'It did NOT go back on the board \u2014 it is Pending again, so it will not show on the dispatch ' +
+            'board or at the kiosk until the work order is released and any earlier operations are finished.'
+        );
+      }
+      if (open.length > 0) {
+        shortfalls.push(
+          `${open.length === 1 ? 'A blocker is' : `${open.length} blockers are`} still open ` +
+            `(${open.map(openBlockerLine).join('; ')}). Clearing a hold does not close a blocker \u2014 ` +
+            'a supervisor or manager closes it in the Blockers panel.'
+        );
+      }
+      if (fellShort) {
+        showToast('warning', `${label}: hold cleared. ${shortfalls.join(' ')}`);
+      } else {
+        showToast('success', `${label}: hold cleared.`);
+      }
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to clear the hold');
+    } finally {
+      setClearingHoldOpId(null);
+    }
+  };
+
   // --- Manual laser nest handlers -----------------------------------------
   const openAddNestModal = () => {
     setNestModalTarget(null);
@@ -2508,15 +2758,30 @@ export default function WorkOrderDetail() {
                       </div>
                       {blocker.note && <p className="text-sm text-slate-300 mt-2">{blocker.note}</p>}
                     </div>
-                    {(blocker.status === 'open' || blocker.status === 'acknowledged') && (
-                      <button
-                        onClick={() => setResolveBlockerTarget(blocker)}
-                        disabled={resolvingBlockerId === blocker.id}
-                        className="btn-success btn-sm"
-                      >
-                        {resolvingBlockerId === blocker.id ? 'Resolving...' : 'Resolve'}
-                      </button>
-                    )}
+                    {/* RESOLVE is ADMIN/MANAGER/SUPERVISOR on the server. It used to
+                        render for every role, so an operator or a viewer staring at a
+                        stuck job was shown the one button guaranteed to 403 -- and no
+                        other control on this page could get the job moving. Below the
+                        gate the copy says who closes a blocker AND points at the thing
+                        the reader can actually do, since clearing the hold is open to
+                        any authenticated user. Do NOT widen the endpoint to match. */}
+                    {(blocker.status === 'open' || blocker.status === 'acknowledged') &&
+                      (canResolveBlocker ? (
+                        <button
+                          type="button"
+                          onClick={() => setResolveBlockerTarget(blocker)}
+                          disabled={resolvingBlockerId === blocker.id}
+                          className="btn-success btn-sm"
+                        >
+                          {resolvingBlockerId === blocker.id ? 'Resolving...' : 'Resolve'}
+                        </button>
+                      ) : (
+                        <p className="text-xs text-slate-400 md:max-w-[15rem] md:text-right">
+                          A supervisor or manager closes a blocker. If it left an operation on hold,
+                          you can still clear that hold yourself in Operations / Routing above —
+                          clearing a hold does not close the blocker.
+                        </p>
+                      ))}
                   </div>
                 </div>
               ))
@@ -2712,6 +2977,13 @@ export default function WorkOrderDetail() {
                         ? `Previous operations must be completed first — this work order runs its operations in sequence, and operation ${lowestIncompleteOperation.sequence} (${lowestIncompleteOperation.name}) is not complete.`
                         : null;
                     
+                    // WHY this row is held, for the compact in-row disclosure below.
+                    // Computed once and reused by the confirm dialog's copy so the
+                    // pre-click reason and the in-dialog reason cannot diverge.
+                    // Non-null only for an ON_HOLD row -- `hold_context` is null on
+                    // every other one, by construction on the server.
+                    const holdSummary = op.status === 'on_hold' ? summarizeHold(op.hold_context) : null;
+
                     const groupColors: Record<string, string> = {
                       'LASER': 'bg-fd-red/15 text-fd-red',
                       'MACHINE': 'bg-fd-blue/15 text-fd-blue',
@@ -2785,6 +3057,31 @@ export default function WorkOrderDetail() {
                                 </div>
                               </div>
                             ) : null}
+                            {/* WHY IT IS HELD -- disclosed on the row, BEFORE anyone
+                                clicks Clear Hold. Reason and attribution render on
+                                their own terms: a bare hold (mis-tap at the kiosk --
+                                no note, category OTHER) files no blocker, so it has a
+                                holder and no reason, and gating one on the other would
+                                make exactly that case read as anonymous AND reasonless.
+                                Free text is read straight off note/title: this response
+                                withholds nothing, and `has_note` is not sent. */}
+                            {holdSummary && (
+                              <div className="mt-2 rounded-sm border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs">
+                                <div className="flex flex-wrap items-center gap-1.5 font-semibold text-amber-300">
+                                  <ExclamationTriangleIcon className="h-4 w-4 flex-shrink-0" aria-hidden="true" />
+                                  <span>{holdSummary.headline ?? 'On hold \u2014 reason not recorded'}</span>
+                                </div>
+                                {holdSummary.title && (
+                                  <div className="mt-1 text-amber-100">{holdSummary.title}</div>
+                                )}
+                                {holdSummary.note && (
+                                  <p className="mt-1 text-amber-100">{holdSummary.note}</p>
+                                )}
+                                <div className="mt-1 text-amber-200/70">
+                                  {holdSummary.attribution ?? 'Who placed the hold was not recorded'}
+                                </div>
+                              </div>
+                            )}
                           </div>
                         </td>
                         <td className="px-4 py-3">
@@ -2832,6 +3129,32 @@ export default function WorkOrderDetail() {
                         </td>
                         <td className="px-4 py-3 text-center">
                           <div className="flex items-center justify-center gap-3">
+                            {/* CLEAR HOLD -- first in the group because on a held row
+                                it is the only action that moves the job. Ungated on
+                                purpose: `PUT /shop-floor/operations/{id}/resume` takes
+                                `get_current_user`, i.e. any authenticated tenant user,
+                                so gating it here would hide a control the server allows.
+                                Styled like its siblings (icon + text) rather than as a
+                                <Button>, which is the established chrome for this cell. */}
+                            {op.status === 'on_hold' && (
+                              <button
+                                type="button"
+                                onClick={() => setClearHoldTarget(op)}
+                                disabled={clearingHoldOpId !== null}
+                                className="text-amber-400 hover:text-amber-300 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                title="Lift the hold on this operation"
+                              >
+                                {clearingHoldOpId === op.id ? (
+                                  <>
+                                    <ArrowPathIcon className="h-5 w-5 inline animate-spin" /> Clearing...
+                                  </>
+                                ) : (
+                                  <>
+                                    <PlayIcon className="h-5 w-5 inline" /> Clear hold
+                                  </>
+                                )}
+                              </button>
+                            )}
                             <button
                               type="button"
                               onClick={() => setStepsOpenOpId(stepsOpenOpId === op.id ? null : op.id)}
@@ -3236,6 +3559,27 @@ export default function WorkOrderDetail() {
         onSubmit={handleResolveBlocker}
         onCancel={() => {
           if (resolvingBlockerId === null) setResolveBlockerTarget(null);
+        }}
+      />
+
+      {/* Clear Hold confirm. `variant="warning"` rather than danger: lifting a
+          hold destroys nothing, but it is not routine either -- the message
+          states WHY the operation is held (who, when, the open blocker's
+          category / title / note) and the two things clearing it does NOT do.
+          `pending` keeps it non-optimistic: backdrop and Escape are refused
+          while the call is on the wire, and it closes only on success, so a
+          refusal stays readable against the row that was clicked. */}
+      <ConfirmDialog
+        open={clearHoldTarget !== null}
+        title="Clear hold on this operation"
+        message={clearHoldTarget ? clearHoldMessage(clearHoldTarget, workOrder.work_order_number) : ''}
+        confirmLabel="Clear hold"
+        cancelLabel="Leave it on hold"
+        pending={clearHoldTarget !== null && clearingHoldOpId === clearHoldTarget.id}
+        variant="warning"
+        onConfirm={handleConfirmClearHold}
+        onCancel={() => {
+          if (clearingHoldOpId === null) setClearHoldTarget(null);
         }}
       />
 

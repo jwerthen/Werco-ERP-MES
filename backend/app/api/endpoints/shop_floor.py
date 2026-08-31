@@ -3426,6 +3426,15 @@ def get_all_operations(
     or null when the operation is unranked or not currently queued
     (e.g. pending or on hold). Advisory only: it never gates a start.
 
+    An ON_HOLD row additionally carries ``hold`` -- WHY it is held, WHO placed it
+    and WHEN -- from the same batched, pure-read ``operation_hold_view`` the
+    kiosk's held list uses, so the desk screen and the floor cannot tell two
+    different stories about one hold. The key is ABSENT on every other row, and
+    every field inside it is nullable (``blocker`` is None for a BARE hold, which
+    is exactly the accidental fat-finger case). Free text rides this response:
+    every caller here is an identified user session, never a crew-station
+    principal -- see the inline note at the build site.
+
     Response includes pagination metadata for building UI controls.
     """
     from app.core.pagination import paginate_query
@@ -3535,12 +3544,59 @@ def get_all_operations(
             run_positions.update(dispatch_service.display_positions(wc_queue_rows))
 
     # Build response data
+    # WHY each ON_HOLD row is held, batched -- the SAME pure-read view the kiosk's
+    # held list uses (``operation_hold_view``), so the desk screen and the floor
+    # cannot tell two different stories about one hold. ShopFloorSimple offers the
+    # only Clear Hold control on this page, and until now it offered it with no
+    # reason on screen: an operator lifted somebody else's quality stop without
+    # ever being shown that there was one.
+    #
+    # Scoped to the ON_HOLD rows of THIS page: no held rows, no queries at all, so
+    # the ordinary poll is unchanged. Two batched queries otherwise, regardless of
+    # how many are held.
+    held_ids_on_page = [op.id for op in operations if op.status == OperationStatus.ON_HOLD]
+    hold_contexts = (
+        operation_hold_view.hold_contexts_for_operations(db, company_id=company_id, operation_ids=held_ids_on_page)
+        if held_ids_on_page
+        else {}
+    )
+
     result = []
     for op in operations:
         wo = op.work_order
         wc = op.work_center
         target_qty = operation_target_quantity(op, wo)
         check_in_state = _operation_check_in_state(db, op)
+        # ON_HOLD rows only: every other row's payload stays byte-identical to
+        # what it has always been, so no existing consumer changes behavior.
+        #
+        # FREE TEXT RIDES THIS RESPONSE. ``_hold_blocker_payload`` withholds
+        # title/note from a crew-STATION principal (an unattended, PIN-unlocked
+        # tablet), and this endpoint has none: it depends on ``get_current_user``,
+        # which a station token cannot satisfy -- ``verify_token`` rejects any
+        # ``type != "access"``. Withholding the reason on a screen built to act on
+        # the hold would leave the reported defect unfixed.
+        #
+        # BUT "no station principal" is NOT "no crew-station tablet". This path IS
+        # inside ``KIOSK_TOKEN_PATH_PREFIXES`` and is not denied (api/deps.py), so a
+        # badge-minted ``scope="kiosk"`` OPERATOR token -- a 5-minute credential
+        # scanned on that same shared tablet -- reaches it and gets the free text.
+        # Deliberate, and not a new exposure: the identical principal already
+        # receives the identical text from the work-center queue read, whose gate is
+        # ``principal.kind != "station"`` and a badge token is ``kind="user"``.
+        # Stated explicitly so nobody reads the paragraph above as "unreachable from
+        # a crew station" and builds a weaker gate on that belief. If the shop ever
+        # decides a badge tap must not surface free text, this and the queue read
+        # have to change together.
+        hold_payload = None
+        if op.status == OperationStatus.ON_HOLD:
+            hold = hold_contexts.get(op.id, HoldContext())
+            hold_payload = {
+                "held_at": to_utc_iso(hold.held_at) if hold.held_at else None,
+                "held_by_user_id": hold.held_by_user_id,
+                "held_by_name": hold.held_by_name,
+                "blocker": _hold_blocker_payload(hold.blocker, include_free_text=True, operation=op),
+            }
         result.append(
             {
                 "id": op.id,
@@ -3577,6 +3633,9 @@ def get_all_operations(
                 "setup_instructions": op.setup_instructions,
                 "run_instructions": op.run_instructions,
                 "requires_inspection": op.requires_inspection,
+                # Present on ON_HOLD rows only (see above); the key is absent
+                # everywhere else rather than sent as null.
+                **({"hold": hold_payload} if hold_payload is not None else {}),
                 **check_in_state,
             }
         )
