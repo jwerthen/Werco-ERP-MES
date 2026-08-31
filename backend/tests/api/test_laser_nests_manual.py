@@ -6,7 +6,7 @@ Covers the standalone manual creation path (POST
 RBAC, tenant-isolation, and soft-delete serialization invariants.
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from fastapi import status
@@ -20,7 +20,13 @@ from app.models.laser_nest import LaserNest
 from app.models.part import Part
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
-from app.models.work_order import WorkOrder, WorkOrderOperation
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
+from app.models.work_order_blocker import (
+    WorkOrderBlocker,
+    WorkOrderBlockerCategory,
+    WorkOrderBlockerSeverity,
+    WorkOrderBlockerStatus,
+)
 from app.services.work_center_type_service import get_work_center_group
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
@@ -534,6 +540,20 @@ class TestSoftDeleteFKIntegrity:
         assert wo_resp.status_code == status.HTTP_200_OK
 
         # Re-read the nest straight from the DB; the FK must be intact.
+        # FLUSH FIRST, and this line is the whole guard.
+        #
+        # ``expire_all()`` on its own made this assertion VACUOUS: expiring an attribute
+        # DISCARDS any pending in-memory change to it, so the dissociation the guard
+        # exists to catch was thrown away before the re-read, and what got measured was
+        # the untouched DB row. Verified 2026-08-31 -- swapping ``set_committed_value``
+        # back to ``op.laser_nest = None`` (the exact bug) left this test GREEN.
+        #
+        # Flushing first is what a real regression does for us: ``op.laser_nest = None``
+        # back-populates ``nest.operation = None``, which sits pending until ANY flush in
+        # the same session -- a commit later in the request, or the autoflush from a lazy
+        # load during response serialization -- writes ``work_order_operation_id = NULL``.
+        # Do not delete this line, and never put ``expire_all()`` above it.
+        db_session.flush()
         db_session.expire_all()
         reloaded = db_session.query(LaserNest).filter(LaserNest.id == nest_id).first()
         assert reloaded is not None
@@ -541,6 +561,94 @@ class TestSoftDeleteFKIntegrity:
         assert reloaded.work_order_operation_id == op_id, (
             "soft-deleted nest lost its operation FK after the WorkOrderResponse render -- "
             "the in-memory dissociation guard corrupted traceability"
+        )
+
+    def test_hold_context_on_a_deleted_nests_operation_costs_the_nest_neither_its_row_nor_its_fk(
+        self, client, db_session, laser_setup
+    ):
+        """The two guards inside ``_enrich_work_order_operations`` must COEXIST.
+
+        Deleting a nest parks its operation at ``ON_HOLD``, so a soft-deleted nest's
+        operation is now EXACTLY the row the hold-provenance lookup targets -- the one
+        query this render step did not used to issue at all. Three things have to hold
+        on that single row at once, and only the combination is interesting:
+
+        1. the hold reason IS served (the office page can say why the nest stopped);
+        2. the soft-deleted nest is STILL hidden from the response (invariant 3 -- a
+           tombstone must never surface on a ``WorkOrderResponse``);
+        3. the deleted nest STILL owns its ``work_order_operation_id``.
+
+        (3) is the one the new query put at risk. ``set_committed_value`` is what keeps
+        the dissociation from dirtying ``nest.operation``; a plain ``op.laser_nest = None``
+        would leave that pending, and ANY flush afterwards -- an autoflush from a query
+        issued later in this same function is now one -- NULLs the FK and severs the
+        traceability link between the deleted nest and the operation it ran on.
+        """
+        headers = headers_for(laser_setup["admin"])
+        nest = _create_manual_nest(
+            client, headers, laser_setup["parent"].id, {"cnc_number": "PRG-660", "planned_runs": 2}
+        ).json()
+        nest_id = nest["id"]
+        op_id = nest["work_order_operation_id"]
+        assert op_id is not None
+
+        db_nest = db_session.query(LaserNest).filter(LaserNest.id == nest_id).first()
+        child_id = db_nest.operation.work_order_id
+
+        assert client.delete(f"/api/v1/laser-nests/{nest_id}", headers=headers).status_code == status.HTTP_200_OK
+
+        # Somebody then files a blocker against the parked operation -- the reason the
+        # office page exists to disclose.
+        operation = db_session.query(WorkOrderOperation).filter(WorkOrderOperation.id == op_id).first()
+        assert operation.status == OperationStatus.ON_HOLD
+        db_session.add(
+            WorkOrderBlocker(
+                company_id=COMPANY_A,
+                work_order_id=child_id,
+                operation_id=op_id,
+                category=WorkOrderBlockerCategory.MATERIAL_MISSING.value,
+                severity=WorkOrderBlockerSeverity.HIGH.value,
+                status=WorkOrderBlockerStatus.OPEN.value,
+                title="Material Missing: cancelled nest",
+                note="sheet pulled for another job",
+                reported_by=laser_setup["admin"].id,
+                reported_at=datetime.utcnow(),
+            )
+        )
+        db_session.commit()
+
+        wo_resp = client.get(f"/api/v1/work-orders/{child_id}", headers=headers)
+        assert wo_resp.status_code == status.HTTP_200_OK
+        held = next(op for op in wo_resp.json()["operations"] if op["id"] == op_id)
+
+        # (1) the reason is served on the tombstone's operation...
+        assert held["hold_context"] is not None
+        assert held["hold_context"]["blocker"]["note"] == "sheet pulled for another job"
+        # (2) ...while the soft-deleted nest itself stays off the response.
+        assert held.get("laser_nest") is None
+
+        # (3) and the FK the whole guard exists for is untouched. The query below is
+        # itself an autoflush point, which is what makes this assertion load-bearing.
+        # FLUSH FIRST, and this line is the whole guard.
+        #
+        # ``expire_all()`` on its own made this assertion VACUOUS: expiring an attribute
+        # DISCARDS any pending in-memory change to it, so the dissociation the guard
+        # exists to catch was thrown away before the re-read, and what got measured was
+        # the untouched DB row. Verified 2026-08-31 -- swapping ``set_committed_value``
+        # back to ``op.laser_nest = None`` (the exact bug) left this test GREEN.
+        #
+        # Flushing first is what a real regression does for us: ``op.laser_nest = None``
+        # back-populates ``nest.operation = None``, which sits pending until ANY flush in
+        # the same session -- a commit later in the request, or the autoflush from a lazy
+        # load during response serialization -- writes ``work_order_operation_id = NULL``.
+        # Do not delete this line, and never put ``expire_all()`` above it.
+        db_session.flush()
+        db_session.expire_all()
+        reloaded = db_session.query(LaserNest).filter(LaserNest.id == nest_id).first()
+        assert reloaded.is_deleted is True
+        assert reloaded.work_order_operation_id == op_id, (
+            "the hold-provenance read cost the soft-deleted nest its operation FK -- "
+            "the dissociation guard and the new query are not safe together"
         )
 
 

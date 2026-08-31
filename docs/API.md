@@ -1416,6 +1416,85 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > Floor. In the app this is the **Correct count** action on each operation row of the work-order
 > detail page (gated on `work_orders:edit`).
 
+> **`hold_context` — WHY an operation is held, on every work-order response.** Each
+> `WorkOrderOperationResponse` row carries `hold_context`, populated **only** when
+> `status == "on_hold"` and explicitly `null` on every other row, so absence never encodes anything:
+>
+> ```
+> hold_context: {
+>   held_at, held_by_user_id, held_by_name,
+>   blocker: { id, category, severity, status, title, note, free_text_withheld,
+>              reported_at, reported_by_user_id, reported_by_name } | null
+> } | null
+> ```
+>
+> Names are the public-screen-safe **"First L."** form (`wallboard_service.operator_display_name`),
+> the same form the kiosk `held` payload uses; timestamps are UTC ISO-8601 with a trailing `Z`. It
+> rides every response this router builds from operations — `GET /work-orders/{id}`,
+> `POST /work-orders/`, `POST /work-orders/{id}/duplicate`, both laser-nest-package import responses
+> — and `POST /work-order-templates/{id}/use`, which shares the same enrichment (a template always
+> yields a DRAFT with PENDING operations, so it is always `null` there).
+>
+> **Every field is nullable by design, and `blocker: null` is the case it exists for.** There is no
+> `held_by` / `held_at` column on `work_order_operations`; provenance is *reconstructed* by
+> `services/operation_hold_view.py` — the same batched view the kiosk `held` list reads, so the
+> office page and the floor cannot tell two stories about one hold. Two provenance cases:
+>
+> - **Blocker-backed** — the hold filed a `WorkOrderBlocker` (a note, a non-`OTHER` category, the
+>   blocker API, or the kiosk's OOT→NCR one-tap hold). `blocker` carries the reason, and only the
+>   newest **OPEN / ACKNOWLEDGED** one qualifies: `RESOLVED` / `DISMISSED` blockers are stale
+>   narrative, because the resolve/dismiss flow is what auto-resumes an operation.
+> - **Bare `operation_hold` event** — no note, category `OTHER`, which is exactly the accidental
+>   fat-finger case. No blocker is filed at all, so `blocker` is `null` while `held_by_name` /
+>   `held_at` still name who pressed it.
+>
+> **Reason and attribution are therefore INDEPENDENT — never gate one on the other**, or the mis-tap
+> renders as anonymous *and* reasonless. When both records exist the **more recent** supplies the
+> actor and timestamp while the open blocker stays the reason shown; when neither exists every field
+> is `null` — a real state, not an error, since the module reports what was recorded and never infers
+> a holder from `operation.updated_at`. The `audit_log` records every hold too and is deliberately
+> **not** read here: it is the tamper-evident chain, not a display source.
+>
+> **The blocker's free text (`title` / `note`) rides this response, unlike the kiosk queue payload.**
+> `shop_floor._hold_blocker_payload` withholds those two keys from a crew-**station** principal (an
+> unattended, PIN-unlocked tablet — the wallboard's standing rule). These endpoints are reachable
+> only through `get_current_user`, the identified office session that gate already exempts, and
+> withholding the reason on the one screen built to *act* on the hold was the defect — so the station
+> gate is **not** copied here. `free_text_withheld` is consequently always `false`, sent explicitly
+> so a client sharing render code with the kiosk takes the right branch, and **`has_note` is
+> deliberately absent** (it is a stand-in for withheld text, and nothing is withheld here). Read
+> `note` / `title` directly; a `has_note` gate would print "no reason recorded" over a hold that has
+> a written one. **That is the one shape difference from the two shop-floor payloads**, which build
+> `blocker` through `shop_floor._hold_blocker_payload` and therefore always send `has_note`
+> alongside `free_text_withheld`; everything else in the block is field-for-field identical, which
+> is why one client type serves all three surfaces.
+>
+> **Pure read, and free when nothing is held.** The lookup runs *before* the enrichment normalizes
+> any mapped column and inside `no_autoflush`, so rendering a work order still writes nothing — no
+> ledger row, no audit row, no event. A work order with no `ON_HOLD` operation costs **zero** extra
+> queries; a held set costs two batched ones however many rows are held.
+>
+> **Clearing a hold from the office is the existing shop-floor verb, not a new endpoint.** Work
+> Orders → Operations / Routing carries a **Clear hold** action on each `on_hold` row, calling
+> `PUT /shop-floor/operations/{id}/resume` and nothing else — that page previously had no control
+> that lifted a hold at all. It is deliberately **not** role-gated, because that endpoint takes a
+> bare `get_current_user`. The **Resolve** button on the same page's Blockers panel now *is* gated to
+> Admin / Manager / Supervisor, matching `POST /work-order-blockers/{id}/resolve`, which always
+> required it — it used to render for every role and 403 for most of them. **Neither server gate
+> changed**; see [docs/RBAC_PERMISSIONS.md](RBAC_PERMISSIONS.md) → "Hold / resume are
+> operator-facing".
+>
+> **A cancelled-nest tombstone is NOT filtered out of this response.** The kiosk `held` list and
+> `GET /shop-floor/operations` both filter on `~dispatch_service.cancelled_nest_exists`; the
+> work-order responses do not, so a soft-deleted laser nest's operation still appears here as an
+> ordinary `ON_HOLD` row — carrying an all-`null` `hold_context`, because
+> `laser_nest_service.soft_delete_laser_nest` only flips the operation's status: it files neither a
+> blocker nor an `operation_hold` event, so there is nothing for the view to reconstruct. The **write** is the guard: the resume returns **409**
+> (*"This nest was cancelled; its operation cannot be resumed."*), which the client renders verbatim
+> while moving nothing. There is no pre-click signal on this response today — the enrichment nulls a
+> soft-deleted nest out of the row entirely (`set_committed_value(op, "laser_nest", None)`), and
+> `cancelled_nest_id` is not on this branch.
+
 > **Operation work-center reassignment (`PUT /work-orders/operations/{id}`).** The update body
 > (`WorkOrderOperationUpdate`) accepts an optional **`work_center_id`** — a planner move of the
 > operation to another work center (e.g. re-dispatching a laser nest to a different laser, but
@@ -4247,7 +4326,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 |--------|----------|-------------|---------------|
 | GET | `/shop-floor/dashboard` | Shop floor dashboard | Yes |
 | GET | `/shop-floor/my-active-job` | Get current user's active job, incl. the job's written guidance (WO notes/special instructions + the operation's description/setup/run text) | Yes |
-| GET | `/shop-floor/operations` | List not-complete/cancelled operations for the desktop shop-floor pages (paginated, max 200/page; filters `work_center_id` / `status` / `search` / `due_today`) — rows in the **canonical dispatch order**, each carrying the advisory `run_order` display rank (see "Desktop parity" under the Dispatch run order note below) | Yes |
+| GET | `/shop-floor/operations` | List not-complete/cancelled operations for the desktop shop-floor pages (paginated, max 200/page; filters `work_center_id` / `status` / `search` / `due_today`) — rows in the **canonical dispatch order**, each carrying the advisory `run_order` display rank (see "Desktop parity" under the Dispatch run order note below). An **`ON_HOLD` row additionally carries `hold`** — `{ held_at, held_by_user_id, held_by_name, blocker }`, from the same batched pure-read `operation_hold_view` the kiosk `held` list uses, so the desk page and the floor cannot tell two stories about one hold. The key is **absent on every other row** (unheld payloads stay byte-identical), every field inside is nullable, and `blocker: null` is the BARE-hold case (no note, category OTHER — the accidental one), which still carries `held_by_name` / `held_at`: reason and attribution are INDEPENDENT. **Free text (`title` / `note`) rides this response** — every caller is an identified `get_current_user` session, never a crew-station principal, so the station withholding rule does not apply and `free_text_withheld` is `false` | Yes |
 | GET | `/shop-floor/operations/{id}/documents` | Kiosk doc-viewer discovery: the operation's controlled part drawing, live nest reference PDF, nest material, and critical SPC characteristics (see note below) | Yes |
 | GET | `/shop-floor/documents/{id}/inline` | Serve a kiosk-viewable document PDF inline — DRAWING-type or live-nest-referenced only, tenant-scoped, uniform **404** on any miss (see note below) | Yes |
 | POST | `/shop-floor/clock-in` | Clock in to operation | Yes |
@@ -4575,9 +4654,27 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > rows — no client iterating `queue` can render a held operation as a startable job card by accident.
 >
 > Why it exists: an operation put on hold by mistake vanished from every screen an operator can see
-> (`ON_HOLD` is not a queue status), and the kiosk can *place* a hold but carries no resume — the
-> app's only Resume control is the desktop `ShopFloorSimple` page — so recovery required desk access.
-> That was a one-way door on the shop floor's own terminal.
+> (`ON_HOLD` is not a queue status), and the kiosk could *place* a hold but carried no resume — at
+> the time the app's only Resume control was the desktop `ShopFloorSimple` page — so recovery
+> required desk access. That was a one-way door on the shop floor's own terminal.
+>
+> **Five surfaces now clear a hold**, and all of them call this one endpoint,
+> `PUT /shop-floor/operations/{id}/resume`, with no second write beside it: both kiosks (RESUME),
+> the desktop `ShopFloorSimple` page and the desk Time Clock page (**Clear Hold**), and the Work
+> Order page (Work Orders → Operations / Routing → **Clear hold**, see Work Orders →
+> `hold_context`). On `ShopFloorSimple` that used to be a single **Check In** button running
+> `resumeOperation` *then* `clockIn`; when the second leg was refused the first had already
+> committed, the card was never refreshed, and the next tap answered *"Operation is not on hold"* —
+> because it wasn't. The two verbs are now two buttons, and `handleCheckIn` refuses an `on_hold`
+> operation outright so nothing can restore the two-write path.
+>
+> **The desk Time Clock page renders `held` too** (`frontend/src/pages/ShopFloor.tsx`). It read this
+> endpoint and kept only `queue`, throwing `held` away — so the page that can *place* a hold with its
+> own "No Material" button could not show the operation again afterwards, and the row simply left the
+> queue. It now keeps `held` on its own state (never merged into `queue` — the list boundary above is
+> the safety property) and renders it as a distinct **On Hold** section carrying the reason, the
+> attribution and a single **Clear Hold** verb calling `PUT /shop-floor/operations/{id}/resume` and
+> nothing else. `held_truncated` is surfaced rather than silently showing a subset.
 >
 > Each `held` row is the **same job card a `queue` row is**, built by the same helper so the two
 > cannot drift: `operation_id`, `work_order_id` / `work_order_number`, `part_number` / `part_name` /
@@ -4661,15 +4758,24 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > rule flips in the same call, for which that event is their *first* and only — the read-path heal
 > never emits for a row that is already `READY`. A resume that promotes nothing emits nothing.
 >
-> Two refusals guard it, both on the **write**, so every caller inherits them — the desktop
-> `ShopFloorSimple` page and both kiosks. A **cancelled (soft-deleted) laser nest**'s operation is
+> Two refusals guard it, both on the **write**, so every caller inherits them — both kiosks, the
+> desktop `ShopFloorSimple` page, the desk Time Clock page and the Work Order page. A **cancelled
+> (soft-deleted) laser nest**'s operation is
 > parked in `ON_HOLD` as a tombstone (`OperationStatus` has no operation-level CANCELLED), and
 > resuming one would undo a soft delete from the front end: **409**. And resume **restores, never
 > promotes** — it floors at `PENDING` and delegates the lift to the shared promotion rule, so a hold
 > placed on a `PENDING` operation, or on one whose work order is still `DRAFT`, comes back `PENDING`
 > and stays off the board. Release is the authorization step; a resume does not get to perform one.
 > `GET /shop-floor/operations` applies the same cancelled-nest exclusion, since that list is where
-> the desktop Resume button is offered.
+> the desktop **Clear Hold** button is offered (labelled *Resume* until Release 1 split it from
+> Check In), and so does the kiosk `held` list.
+>
+> **The work-order responses do NOT apply that exclusion**, so the Work Order page's **Clear hold**
+> is the one caller that can be *offered* on a tombstone — the row arrives as an ordinary `ON_HOLD`
+> operation with an all-`null` `hold_context`, and only the 409 above stops it. That is deliberate
+> rather than overlooked: the page has no pre-click signal to gate on (see Work Orders →
+> `hold_context`, last paragraph), and the control is non-optimistic, so the refusal's `detail` is
+> what the user reads and nothing on the page moves.
 >
 > **Disclosure (`held`).** A station principal is an unattended, PIN-unlocked terminal with **no
 > operator identity and no idle logout**, so whatever the board renders is readable by anyone walking

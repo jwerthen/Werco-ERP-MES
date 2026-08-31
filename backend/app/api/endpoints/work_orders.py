@@ -126,6 +126,11 @@ from app.services.operation_action_gates import (
     MSG_PREDECESSORS_INCOMPLETE,
     operation_blocked_by_predecessors,
 )
+
+# WHY an operation is held, WHO held it and WHEN -- the SAME batched, pure-read view the
+# kiosk queue renders (shop_floor.py), so the office page and the floor cannot tell two
+# different stories about one hold. Two queries for the whole held set, tenant-scoped.
+from app.services.operation_hold_view import HoldContext, hold_contexts_for_operations
 from app.services.operational_event_service import OperationalEventService
 from app.services.production_reduction_service import (
     approved_produced_total,
@@ -762,8 +767,46 @@ def _reconcile_operation_component_quantities(
     return changed
 
 
-def _enrich_work_order_operations(work_order: WorkOrder) -> None:
+def _enrich_work_order_operations(work_order: WorkOrder, *, db: Session, company_id: int) -> None:
+    """Inject the computed, non-column attributes every work-order response renders.
+
+    ``db``/``company_id`` are KEYWORD-ONLY and required: they exist for the hold-provenance
+    read below, and a new call site has to state which tenant it is reading as rather than
+    inherit one. ``company_id`` must be the ACTIVE company already resolved at the call site
+    (``get_current_company_id``) -- never client input, never ``current_user.company_id``.
+    """
+    # HOLD PROVENANCE (why an operation is held, who held it, when). Read FIRST, and under
+    # ``no_autoflush``, for two reasons that are correctness rather than style:
+    #
+    # 1. This function normalizes MAPPED columns below (quantity_complete, actual hours, ...).
+    #    A query issued after that loop would autoflush those in-memory normalizations into
+    #    the open transaction -- turning a render step into a write. This addition must stay a
+    #    PURE READ: no writes, no audit rows, no events. ``get_work_order`` already runs (and
+    #    commits) a reconcile of its own before calling us; nothing here may add to it.
+    # 2. The lookup is skipped ENTIRELY when nothing is held, so the common path costs zero
+    #    extra queries. A held set costs two, batched, regardless of how many rows are held.
+    #
+    # ``OperationStatus`` is a ``str`` enum, so this comparison is correct whether the loaded
+    # value is the enum member or the raw column string.
+    held_operation_ids = [
+        op.id for op in work_order.operations if op.id is not None and op.status == OperationStatus.ON_HOLD
+    ]
+    hold_contexts: Dict[int, HoldContext] = {}
+    if held_operation_ids:
+        with db.no_autoflush:
+            hold_contexts = hold_contexts_for_operations(db, company_id=company_id, operation_ids=held_operation_ids)
+
     for op in work_order.operations:
+        # Only an ON_HOLD row carries provenance; every other row is explicitly None rather
+        # than left unset, so the response shape does not depend on attribute presence.
+        #
+        # The blocker's free text (title/note) rides this response. That is deliberate and it
+        # is NOT the crew-station rule: ``shop_floor._hold_blocker_payload`` withholds those
+        # two keys from a station principal -- an unattended, PIN-unlocked tablet with no
+        # operator identity and no idle logout -- and this is the office page, reached only
+        # through ``get_current_user``, which is the identified audience that gate already
+        # exempts. Withholding the reason on the one screen built to act on it is the bug.
+        op.hold_context = hold_contexts.get(op.id) if op.status == OperationStatus.ON_HOLD else None
         op.setup_time_hours = op.setup_time_hours or 0
         op.run_time_hours = op.run_time_hours or 0
         op.run_time_per_piece = op.run_time_per_piece or 0
@@ -2126,7 +2169,7 @@ def create_work_order(
         },
     )
     db.commit()
-    _enrich_work_order_operations(work_order)
+    _enrich_work_order_operations(work_order, db=db, company_id=company_id)
 
     safe_broadcast(
         broadcast_dashboard_update,
@@ -2252,7 +2295,7 @@ def duplicate_work_order_endpoint(
         .filter(WorkOrder.id == new_work_order_id, WorkOrder.company_id == company_id)
         .first()
     )
-    _enrich_work_order_operations(work_order)
+    _enrich_work_order_operations(work_order, db=db, company_id=company_id)
 
     safe_broadcast(
         broadcast_dashboard_update,
@@ -3163,7 +3206,7 @@ async def _run_laser_nest_import(
         )
         .first()
     )
-    _enrich_work_order_operations(child_work_order)
+    _enrich_work_order_operations(child_work_order, db=db, company_id=company_id)
 
     safe_broadcast(
         broadcast_work_order_update,
@@ -3409,7 +3452,18 @@ def get_work_order(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get a specific work order with all operations"""
+    """Get a specific work order with all operations.
+
+    Each ``ON_HOLD`` operation additionally carries ``hold_context`` -- WHY it is
+    held, WHO placed the hold and WHEN -- reconstructed by
+    ``services/operation_hold_view`` (the same batched, PURE-READ view the kiosk's
+    held list uses, so the office page and the floor cannot tell two different
+    stories about one hold). Every other operation row carries ``hold_context:
+    null``, every field inside it is nullable (``blocker`` is null for a BARE
+    hold), and the blocker's free text rides this response because every caller
+    here is an identified session -- see ``OperationHoldInfo`` in
+    ``app/schemas/work_order.py``.
+    """
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     response.headers["Pragma"] = "no-cache"
     work_order = (
@@ -3453,7 +3507,7 @@ def get_work_order(
         db.expire_all()
     # AUD-3: terminal reconcile-driven transitions are audited to the requesting user.
     _reconcile_and_commit(db, [work_order], current_user, company_id)
-    _enrich_work_order_operations(work_order)
+    _enrich_work_order_operations(work_order, db=db, company_id=company_id)
 
     return work_order
 

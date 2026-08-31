@@ -197,6 +197,28 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > `POST /work-orders/{id}/release` owns — a hold placed on a `PENDING` operation, or on one whose work
 > order is still `DRAFT`, resumes to `PENDING` and stays off the board.
 >
+> **Reach widened again on the office side, and again no gate moved.** The Work Order page now
+> carries a **Clear hold** action on every `on_hold` operation row (it previously had *no* control
+> that lifted a hold — `resumeOperation` had zero call sites there, so an owner who held a nest had
+> to walk to a kiosk or a shop-floor page). It calls the same role-open
+> `PUT /api/v1/shop-floor/operations/{id}/resume`, so it is deliberately **not** role-gated in the
+> UI: gating it would hide a control the server allows, and the matrix row above already reads ✓ for
+> all seven roles. The consequence worth stating plainly is that **Viewer and Shipping now have a
+> hold-lifting control on a page they can read** — not new authorization (either role could always
+> call the endpoint, and `ShopFloorSimple`'s old "Check In" button already did on the same
+> `work_orders:view` route), but it is now a prominent office-page button for two roles with no
+> other write on that page. Narrowing it is an **endpoint** change, not a UI one; do it there or not
+> at all, so the hidden control and the refused call keep agreeing.
+>
+> **The Blockers panel's Resolve button is now gated to the tier the endpoint always required.** It
+> used to render for every role, so an Operator, Quality user, Shipping user or Viewer looking at a
+> stuck job was offered the one control guaranteed to **403** on them — and, before Clear hold
+> existed, nothing on that page could get the job moving. The button is now gated on
+> `work_orders:edit`, which resolves to exactly the set `require_role([ADMIN, MANAGER, SUPERVISOR])`
+> admits (plus superuser / platform admin) — i.e. the **"Resolve / dismiss the blocker behind a
+> hold"** row above, unchanged. Where it is hidden the copy names who closes a blocker and points at
+> Clear hold, which the reader *can* use. `app/api/endpoints/work_order_blockers.py` was not touched.
+>
 > **A shared crew station is not an identified caller, and the held payload reflects that.** The
 > station token is a 24-hour shared-PIN credential on an unattended tablet with no idle logout, so
 > the blocker's free text (`note`, `title`) is **not sent** to it — only `category`, `severity`, the

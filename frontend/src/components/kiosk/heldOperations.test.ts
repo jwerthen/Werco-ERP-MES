@@ -13,6 +13,7 @@
  */
 
 import {
+  clearHoldToast,
   formatHoldAttribution,
   hasHoldReason,
   holdFreeTextWithheld,
@@ -267,6 +268,68 @@ describe('resumeToast', () => {
     expect(resumeToast({ status: 'ready' }, '  ').message).toBe('Operation resumed');
     expect(resumeToast(null, null).message).toBe('Operation resumed');
     expect(resumeToast(undefined, undefined).type).toBe('success');
+  });
+});
+
+describe('clearHoldToast (the desk screens: ShopFloor + ShopFloorSimple)', () => {
+  it('claims success only when the hold came off cleanly AND left nothing open', () => {
+    expect(clearHoldToast({ status: 'ready', open_blockers: [] }, 'WO-1001')).toEqual({
+      type: 'success',
+      message: 'WO-1001 hold cleared',
+    });
+    expect(clearHoldToast({ status: 'in_progress', open_blockers: [] }, 'WO-1001').type).toBe('success');
+  });
+
+  it('warns — never succeeds — when the resume landed back on PENDING', () => {
+    // The write worked, but the job did NOT come back to the board. Green here
+    // sends the operator looking for a card that is not going to appear.
+    const toast = clearHoldToast({ status: 'pending', open_blockers: [] }, 'WO-1001');
+    expect(toast.type).toBe('warning');
+    expect(toast.message).toMatch(/did not return to the queue/i);
+  });
+
+  it('warns and NAMES the blockers the resume did not resolve', () => {
+    const toast = clearHoldToast({ status: 'ready', open_blockers: [TITLED_BLOCKER] }, 'WO-1001');
+    expect(toast.type).toBe('warning');
+    expect(toast.message).toContain('1 blocker still open');
+    // The server's own title, verbatim — the UI never rewords a quality record.
+    expect(toast.message).toContain('Machine Down: OP20 Deburr');
+  });
+
+  it('falls back to the category when the title is withheld, rather than going silent', () => {
+    const toast = clearHoldToast({ status: 'ready', open_blockers: [STATION_BLOCKER] }, 'WO-1001');
+    expect(toast.type).toBe('warning');
+    expect(toast.message).toContain('Machine down');
+  });
+
+  it('composes ONE warning when the job stayed off the board AND a blocker is open', () => {
+    // Two toasts for one tap read as two things happening, and the second would
+    // push the first off the stack before it was read.
+    const toast = clearHoldToast({ status: 'pending', open_blockers: [TITLED_BLOCKER] }, 'WO-1001');
+    expect(toast.type).toBe('warning');
+    expect(toast.message).toMatch(/did not return to the queue/i);
+    expect(toast.message).toContain('Machine Down: OP20 Deburr');
+    expect(toast.message.startsWith('WO-1001 hold cleared')).toBe(true);
+  });
+
+  it('pluralizes the blocker count', () => {
+    const two = clearHoldToast(
+      { status: 'ready', open_blockers: [TITLED_BLOCKER, { ...TITLED_BLOCKER, id: 6, title: 'Second stop' }] },
+      'WO-1001'
+    );
+    expect(two.message).toContain('2 blockers still open');
+    expect(two.message).toContain('Second stop');
+  });
+
+  it('tolerates an older payload with no open_blockers key', () => {
+    expect(clearHoldToast({ status: 'ready' }, 'WO-1001').type).toBe('success');
+    expect(clearHoldToast({}, 'WO-1001').type).toBe('success');
+  });
+
+  it('never renders a blank subject line', () => {
+    expect(clearHoldToast({ status: 'ready' }, '  ').message).toBe('Operation hold cleared');
+    expect(clearHoldToast(null, null).message).toBe('Operation hold cleared');
+    expect(clearHoldToast(undefined, undefined).type).toBe('success');
   });
 });
 

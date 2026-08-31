@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
-import { WorkCenter, QueueItem, ActiveJob } from '../types';
+import { WorkCenter, QueueItem, HeldQueueItem, WorkCenterQueueResponse, ActiveJob } from '../types';
 import { usePermissions } from '../hooks/usePermissions';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
@@ -11,6 +11,8 @@ import {
   isDateBeforeTodayInCentral,
 } from '../utils/centralTime';
 import { KioskRunOrderChip } from '../components/kiosk/KioskQueueCard';
+import { clearHoldToast } from '../components/kiosk/heldOperations';
+import OperationHoldReason from '../components/shopfloor/OperationHoldReason';
 import { useToast } from '../components/ui/Toast';
 import { Button, EmptyState, ErrorState, FormField, InputDialog, StatusBadge, UnitBadge, statusColor, statusVariant } from '../components/ui';
 import {
@@ -23,6 +25,7 @@ import {
   ArrowPathIcon,
   ChevronDownIcon,
   ChevronRightIcon,
+  PauseCircleIcon,
 } from '@heroicons/react/24/solid';
 import { QueueListIcon, DocumentTextIcon, ArrowTopRightOnSquareIcon } from '@heroicons/react/24/outline';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId, isKioskMode } from '../utils/kiosk';
@@ -82,6 +85,11 @@ export default function ShopFloor() {
     }
   }, []);
   const [queue, setQueue] = useState<QueueItem[]>([]);
+  // Held work lives on its OWN state, never merged into `queue` — the list
+  // boundary is the safety property (heldOperations.ts, rule 1), so nothing that
+  // iterates `queue` to render a Start button can reach a held operation.
+  const [held, setHeld] = useState<HeldQueueItem[]>([]);
+  const [heldTruncated, setHeldTruncated] = useState(false);
   const [activeJobs, setActiveJobs] = useState<ActiveJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -102,12 +110,20 @@ export default function ShopFloor() {
   });
   const [clockingInOperationId, setClockingInOperationId] = useState<number | null>(null);
   const [clockingOut, setClockingOut] = useState(false);
+  // Non-optimistic: Clear Hold is server-GATED (a cancelled-nest tombstone is
+  // 409, a not-held operation 400), so the row is never moved locally — it is
+  // re-read from the server and only what came back is reflected.
+  const [clearingHoldOperationId, setClearingHoldOperationId] = useState<number | null>(null);
   // Back-entry (offline paper catch-up) mode. When on, clock-in/clock-out send
   // source='backfill' so the rows are excluded from live shop metrics + audited.
   // Ephemeral state on purpose (clears on reload) so it can't be silently left on.
   const [backEntry, setBackEntry] = useState(false);
   const [priorityReason, setPriorityReason] = useState('');
-  const [notice, setNotice] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
+  // 'warning' = the call SUCCEEDED but did not do everything asked (a hold
+  // cleared that left the job off the board, or left a blocker open). Not
+  // 'success' (hides the shortfall) and not 'error' (claims a failure that did
+  // not happen, sending someone to look for work that is no longer held).
+  const [notice, setNotice] = useState<{ type: 'success' | 'error' | 'warning' | 'info'; message: string } | null>(null);
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const isKiosk = useMemo(() => isKioskMode(location.pathname, location.search), [location.pathname, location.search]);
   const kioskParams = useMemo(() => {
@@ -131,7 +147,7 @@ export default function ShopFloor() {
   // backfill to dodge the live-capture metrics.
   const canBackEntry = can('work_orders:edit');
 
-  const notify = useCallback((type: 'success' | 'error' | 'info', message: string) => {
+  const notify = useCallback((type: 'success' | 'error' | 'warning' | 'info', message: string) => {
     setNotice({ type, message });
     showToast(type, message);
   }, [showToast]);
@@ -189,8 +205,14 @@ export default function ShopFloor() {
   const loadQueue = useCallback(async (workCenterId: number) => {
     setQueueError(false);
     try {
-      const response = await api.getWorkCenterQueue(workCenterId);
+      // Explicit envelope type — the api client returns `any` here.
+      const response: WorkCenterQueueResponse = await api.getWorkCenterQueue(workCenterId);
       setQueue(response.queue);
+      // `held` rides beside `queue` and used to be dropped on the floor here, so
+      // an operation this very page put ON_HOLD (the "No Material" button)
+      // vanished from it. Kept on its own state, never merged.
+      setHeld(response.held || []);
+      setHeldTruncated(Boolean(response.held_truncated));
     } catch (err) {
       console.error('Failed to load queue:', err);
       setQueueError(true);
@@ -317,6 +339,36 @@ export default function ShopFloor() {
       notify('error', err.response?.data?.detail || 'Failed to clock in');
     } finally {
       setClockingInOperationId(null);
+    }
+  };
+
+  /**
+   * Lift a hold from the Time Clock page. ONE write — `resumeOperation` and
+   * nothing else — then a re-read.
+   *
+   * The toast is composed from what the SERVER returned, not from the fact that
+   * the call did not throw: resume RESTORES the operation and deliberately does
+   * not resolve the blocker, and it lands PENDING (off the board) whenever the
+   * parent is unreleased or a predecessor is incomplete. `clearHoldToast` folds
+   * both shortfalls into a single `warning`; only a clean lift is `success`.
+   */
+  const handleClearHold = async (item: HeldQueueItem) => {
+    if (clearingHoldOperationId !== null) return;
+
+    setClearingHoldOperationId(item.operation_id);
+    try {
+      const result = await api.resumeOperation(item.operation_id);
+      // Re-read before speaking: non-optimistic, so the row moves only because
+      // the server says it did.
+      if (selectedWorkCenter) {
+        await loadQueue(selectedWorkCenter);
+      }
+      const { type, message } = clearHoldToast(result, item.work_order_number);
+      notify(type, message);
+    } catch (err: any) {
+      notify('error', err.response?.data?.detail || 'Failed to clear the hold');
+    } finally {
+      setClearingHoldOperationId(null);
     }
   };
 
@@ -473,9 +525,13 @@ export default function ShopFloor() {
               ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
               : notice.type === 'error'
               ? 'bg-red-500/10 border-red-500/30 text-red-300'
+              : notice.type === 'warning'
+              ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
               : 'bg-blue-500/10 border-blue-500/30 text-blue-300'
           }`}
-          role="status"
+          // A warning earns the screen-reader interruption for the same reason
+          // an error does: it reports a shortfall the operator has to act on.
+          role={notice.type === 'error' || notice.type === 'warning' ? 'alert' : 'status'}
         >
           <p className="text-sm font-medium">{notice.message}</p>
           <button
@@ -973,6 +1029,100 @@ export default function ShopFloor() {
           </div>
         )}
       </div>
+
+      {/* ON HOLD — the `held` list this page used to discard.
+          Its OWN section, visually distinct from the queue above and carrying
+          exactly one verb (Clear Hold), because held work is never startable.
+          This page can put an operation on hold ("No Material") and until now
+          could not show it again: the row simply left the queue, which is what
+          made a hold look like the job had disappeared. */}
+      {held.length > 0 && (
+        <div className="card card-flush" data-testid="shop-floor-held-section">
+          <div className="px-3 py-3 border-b border-amber-500/30 bg-amber-500/10 flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold text-amber-200 flex items-center gap-2">
+                <PauseCircleIcon className="h-4 w-4" aria-hidden="true" />
+                On Hold
+              </h2>
+              <p className="text-xs text-amber-200/80">
+                <span className="tabular-nums">{held.length}</span> job{held.length !== 1 ? 's' : ''} stopped at this
+                work center &bull; clear the hold before starting
+              </p>
+            </div>
+          </div>
+
+          {/* The server caps the held list; say so rather than showing a silent
+              subset of somebody's stopped work. */}
+          {heldTruncated && (
+            <p
+              data-testid="shop-floor-held-truncated"
+              className="border-b border-fd-line bg-fd-sunken px-3 py-2 text-xs text-surface-500"
+            >
+              Showing the most recent holds only — more are on hold at this work center.
+            </p>
+          )}
+
+          <ul className="divide-y divide-fd-line">
+            {held.map((item) => (
+              <li key={item.operation_id} className="px-3 py-3" data-testid={`shop-floor-held-${item.operation_id}`}>
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="min-w-0 flex-1 space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold text-werco-600">{item.work_order_number}</span>
+                      <UnitBadge unitNumber={item.unit_number} size="sm" />
+                      <span className="text-sm text-surface-700">
+                        {formatOperationLabel(item.operation_number)}
+                        {item.operation_name ? ` · ${item.operation_name}` : ''}
+                      </span>
+                      <span className="text-sm text-surface-500 truncate">
+                        {item.part_number || '—'}
+                        {item.part_name ? ` · ${item.part_name}` : ''}
+                      </span>
+                      <span className="text-sm font-medium text-surface-700 tabular-nums">
+                        {item.quantity_complete}/{item.quantity_ordered}
+                      </span>
+                    </div>
+
+                    {/* WHY it stopped, BEFORE the button. Clearing a hold you
+                        cannot see the reason for is how somebody else's real
+                        quality stop gets lifted by accident. */}
+                    <OperationHoldReason
+                      hold={item.hold}
+                      testId={`shop-floor-hold-reason-${item.operation_id}`}
+                    />
+                  </div>
+
+                  <div className="shrink-0 lg:w-44">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="w-full"
+                      onClick={() => handleClearHold(item)}
+                      disabled={clearingHoldOperationId !== null}
+                      aria-label={`Clear hold on ${item.work_order_number}, operation ${
+                        item.operation_name || operationNumberText(item.operation_number) || ''
+                      }`}
+                    >
+                      {clearingHoldOperationId === item.operation_id ? (
+                        <ArrowPathIcon className="h-4 w-4 mr-1.5 animate-spin" />
+                      ) : (
+                        <PlayIcon className="h-4 w-4 mr-1.5" />
+                      )}
+                      {clearingHoldOperationId === item.operation_id ? 'Clearing...' : 'Clear Hold'}
+                    </Button>
+                    {/* Resume does NOT close the blocker — the backend leaves the
+                        two decoupled on purpose. Say so before the tap, not only
+                        in the toast after it. */}
+                    <p className="mt-1.5 text-[11px] leading-snug text-surface-500">
+                      Lifts the hold only. Any blocker stays open for a supervisor to resolve.
+                    </p>
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Clock Out Modal */}
       <Modal open={clockOutModal} onClose={closeClockOutModal} size="md" closeOnBackdrop={!clockingOut}>

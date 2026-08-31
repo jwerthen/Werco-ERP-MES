@@ -126,6 +126,39 @@ export function hasHoldReason(hold: OperationHold | null | undefined): boolean {
 }
 
 /**
+ * The blocker's `title`, or null when it only restates the category chip.
+ *
+ * WHY THIS EXISTS: `title` is `nullable=False` server-side but only SOMETIMES
+ * server-composed — `POST /work-order-blockers` takes a caller-supplied one, and
+ * per `_blocker_free_text_recorded` an office-created blocker "routinely puts its
+ * free text there with an empty note". Dropping `title` therefore hides the ONLY
+ * reason text such a hold has, on the screens built to show the reason before the
+ * Clear Hold button. `hasHoldReason` counts a title as a reason, so the "No reason
+ * given" fallback does not fire either: the panel would render a bare category and
+ * nothing under it, which is the exact "silence reads as no reason given" mis-read
+ * this module already guards against for a withheld note.
+ *
+ * The echo suppression is the other half: a title identical to the category (or to
+ * "category · severity") printed under that same chip reads as a rendering bug on
+ * the one panel that has to be believed.
+ *
+ * Null when the text was withheld (a station payload sends no `title` key) — that
+ * case is `holdFreeTextWithheld`'s to state, not this one's to guess at.
+ */
+export function holdTitleText(hold: OperationHold | null | undefined): string | null {
+  const blocker = hold?.blocker;
+  const raw = (blocker?.title || '').trim();
+  if (!raw) return null;
+  const category = holdReasonLabel(blocker?.category);
+  const severity = holdSeverityLabel(blocker?.severity);
+  const headline = [category, severity].filter(Boolean).join(' · ');
+  const lowered = raw.toLowerCase();
+  if (category && lowered === category.toLowerCase()) return null;
+  if (headline && lowered === headline.toLowerCase()) return null;
+  return raw;
+}
+
+/**
  * True when a written reason EXISTS but this response deliberately did not carry
  * it — a crew-station (shared, unattended, PIN-unlocked) payload.
  *
@@ -190,6 +223,84 @@ export function resumeToast(
     return { type: 'info', message: `${wo} hold lifted — still waiting on release or an earlier step.` };
   }
   return { type: 'success', message: `${wo} resumed` };
+}
+
+/**
+ * THE ONE PLACE that decides whether a Clear Hold fell short — read off the
+ * SERVER's answer, never off "the call did not throw".
+ *
+ * Two shortfalls, and either alone is enough:
+ *
+ * 1. **`status === 'pending'`** — the hold came off but the job did NOT come
+ *    back to the board (unreleased parent, or an incomplete predecessor).
+ * 2. **`open_blockers` is non-empty** — resume RESTORES the operation and
+ *    deliberately does not resolve the blocker.
+ *
+ * Extracted because THREE screens clear a hold — the Time Clock page,
+ * ShopFloorSimple and the Work Order page — and they word the outcome
+ * differently on purpose (a phone-sized toast vs. an office sentence) while the
+ * JUDGEMENT has to be identical. A drifted copy of this rule is how one screen
+ * ends up reporting a live quality stop as cleared. Compose the words at the
+ * call site; take the verdict from here.
+ */
+export function clearHoldOutcome(result: ResumeOperationResult | null | undefined): {
+  landedPending: boolean;
+  openBlockers: ResumeOpenBlocker[];
+  fellShort: boolean;
+} {
+  const openBlockers = stillOpenBlockers(result);
+  const landedPending = (result?.status || '').trim() === 'pending';
+  return { landedPending, openBlockers, fellShort: landedPending || openBlockers.length > 0 };
+}
+
+/**
+ * The toast a CLEAR HOLD earns on the desk screens — ShopFloor (Time Clock) and
+ * ShopFloorSimple — where the shared `<Toast>` carries a `warning` variant the
+ * two station screens do not.
+ *
+ * Same two shortfalls `resumeToast` reasons about, plus the one it cannot say:
+ *
+ * 1. **`status === 'pending'`** — the hold came off but the job did NOT come
+ *    back to the board (unreleased parent, or an incomplete predecessor). A
+ *    green "cleared" there sends somebody looking for a card that will not
+ *    appear.
+ * 2. **`open_blockers` is non-empty** — resume RESTORES the operation and
+ *    deliberately does not resolve the blocker, so the record stays open for
+ *    somebody to close. Green would report a quality stop as handled.
+ *
+ * Both can hold at once, and they compose into ONE warning rather than two
+ * toasts: two toasts for one tap read as two things happening, and the second
+ * would push the first off the stack before it was read.
+ *
+ * `warning` and not `error`: the write SUCCEEDED. Claiming a failure would send
+ * the operator to look for an operation that is, in fact, no longer held.
+ *
+ * Deliberately NOT merged with `resumeToast`: that one serves the kiosk and
+ * crew station, whose local toast vocabulary is success/error/info, and
+ * widening it there is a styling change those screens do not need. The two
+ * share every fact they read (`stillOpenBlockers`, `openBlockerLine`) so they
+ * cannot disagree about what happened — only about which chrome says it.
+ */
+export function clearHoldToast(
+  result: ResumeOperationResult | null | undefined,
+  workOrderNumber: string | null | undefined
+): { type: 'success' | 'warning'; message: string } {
+  const wo = (workOrderNumber || 'Operation').trim() || 'Operation';
+  const { landedPending, openBlockers: blockers, fellShort } = clearHoldOutcome(result);
+
+  if (!fellShort) {
+    return { type: 'success', message: `${wo} hold cleared` };
+  }
+
+  const shortfalls: string[] = [];
+  if (landedPending) {
+    shortfalls.push('the job did not return to the queue (still waiting on release or an earlier operation)');
+  }
+  if (blockers.length > 0) {
+    const named = blockers.map(openBlockerLine).join('; ');
+    shortfalls.push(`${blockers.length} blocker${blockers.length === 1 ? '' : 's'} still open: ${named}`);
+  }
+  return { type: 'warning', message: `${wo} hold cleared — ${shortfalls.join('; ')}.` };
 }
 
 /**

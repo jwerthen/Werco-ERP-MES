@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { usePermissions } from '../hooks/usePermissions';
-import { ActiveJob, LaserNestInfo } from '../types';
+import { ActiveJob, LaserNestInfo, OperationHold } from '../types';
 import {
   formatCentralDate,
   formatCentralDateTime,
@@ -30,6 +30,8 @@ import { Button, ConfirmDialog, EmptyState, ErrorState, Modal, SelectField, Unit
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { HOLD_REASONS } from '../components/kiosk/kioskConstants';
 import { KioskRunOrderChip } from '../components/kiosk/KioskQueueCard';
+import { clearHoldToast } from '../components/kiosk/heldOperations';
+import OperationHoldReason from '../components/shopfloor/OperationHoldReason';
 import {
   EMPTY_SCRAP_SELECTION,
   ScrapReasonFields,
@@ -72,6 +74,18 @@ interface Operation {
   blocked_by_previous_operations?: boolean;
   laser_nest?: LaserNestInfo | null;
   /**
+   * WHY this operation is held, WHO placed it and WHEN — sent by
+   * `GET /shop-floor/operations` on ON_HOLD rows only, and absent on every
+   * other row (the payload for unheld work is byte-identical to what it always
+   * was). The same batched, pure-read view the kiosk's held list uses, so the
+   * desk and the floor cannot tell two stories about one hold.
+   *
+   * Optional because the SPA and the API deploy independently: a build carrying
+   * this can be live against a backend that does not send it yet, and the card
+   * then renders exactly as it did before — a hold with no stated reason.
+   */
+  hold?: OperationHold | null;
+  /**
    * Manager-dictated run order (Dispatch Board), 1..N per work center —
    * gap-free display position, same semantics as the kiosk queue payload.
    * `null`/absent = unranked. The server already returns rows in canonical
@@ -88,7 +102,12 @@ interface WorkCenter {
 
 interface Toast {
   id: number;
-  type: 'success' | 'error' | 'info';
+  // 'warning' = the call SUCCEEDED but did not do everything asked — a hold that
+  // came off without putting the job back on the board, or one that left a
+  // blocker open. 'success' would hide the shortfall; 'error' would claim a
+  // failure that did not happen and send the operator looking for held work
+  // that is no longer held.
+  type: 'success' | 'error' | 'warning' | 'info';
   message: string;
 }
 
@@ -218,7 +237,7 @@ export default function ShopFloorSimple() {
   // the network down), and same-ms ids duplicated React keys and made the first
   // 4s timeout dismiss every colliding toast at once.
   const toastIdRef = useRef(0);
-  const showToast = useCallback((type: 'success' | 'error' | 'info', message: string) => {
+  const showToast = useCallback((type: Toast['type'], message: string) => {
     const id = ++toastIdRef.current;
     setToasts(prev => [...prev, { id, type, message }]);
     setTimeout(() => {
@@ -587,8 +606,55 @@ export default function ShopFloorSimple() {
     return Math.max(0, Number(operation.quantity_ordered || 0) - Number(operation.quantity_complete || 0));
   }, []);
 
+  /**
+   * Lift a hold. ONE write — `resumeOperation` and nothing else — then a re-read.
+   *
+   * SPLIT OUT OF `handleCheckIn`, partially reverting the consolidation made in
+   * 6cbdb95 ("Improve mobile shop floor flow"), which folded Resume into Check
+   * In and put TWO writes behind one tap: `resumeOperation` then `clockIn`. When
+   * the second leg was refused — most reachably by the already-clocked-in gate —
+   * the FIRST had already committed. The operator saw a red "failed", the card
+   * was never refreshed (the catch skips the reload), and a second tap answered
+   * "Operation is not on hold", because it wasn't: the resume had worked. The
+   * two verbs are now two buttons, so a refusal on either leaves the other
+   * untouched and the card always reflects what actually happened.
+   *
+   * The toast is composed from what the SERVER returned, never from the absence
+   * of a throw: resume RESTORES the operation and deliberately does not resolve
+   * the blocker, and it lands PENDING (off the board) when the parent is
+   * unreleased or a predecessor is incomplete. `clearHoldToast` folds both
+   * shortfalls into ONE warning; only a clean lift is `success`.
+   */
+  const handleClearHold = async (operation: Operation) => {
+    if (actionLoading !== null) return;
+
+    setActionLoading(operation.id);
+    try {
+      const result = await api.resumeOperation(operation.id);
+      // Non-optimistic: re-read first, so the card moves only because the server
+      // moved it. Clear Hold is server-GATED (409 on a cancelled-nest tombstone,
+      // 400 when the operation is not actually held).
+      await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
+      const { type, message } = clearHoldToast(result, operation.work_order_number);
+      showToast(type, message);
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || err.message || 'Failed to clear the hold');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   // Action handlers
   const handleCheckIn = async (operation: Operation) => {
+    // A held operation is never checked in from here — Clear Hold is its own
+    // button now (see handleClearHold). Guarded rather than assumed: this
+    // handler is reachable from the mobile "Next Job" strip and the grid card,
+    // and a silent fall-through would put the old two-write path back.
+    if (operation.status === 'on_hold') {
+      showToast('info', 'This operation is on hold — clear the hold before checking in.');
+      return;
+    }
+
     if (operation.can_check_in === false) {
       showToast('info', 'Previous work-center operations must be completed first');
       return;
@@ -596,12 +662,9 @@ export default function ShopFloorSimple() {
 
     setActionLoading(operation.id);
     try {
-      if (operation.status === 'in_progress' || operation.status === 'on_hold') {
+      if (operation.status === 'in_progress') {
         if (!operation.work_center_id) {
           throw new Error('Operation is missing a work center');
-        }
-        if (operation.status === 'on_hold') {
-          await api.resumeOperation(operation.id);
         }
         await api.clockIn({
           work_order_id: operation.work_order_id,
@@ -1024,11 +1087,16 @@ export default function ShopFloorSimple() {
             className={`px-4 py-3 rounded-lg shadow-lg flex items-center gap-3 animate-slide-in ${
               toast.type === 'success' ? 'bg-green-600 text-white' :
               toast.type === 'error' ? 'bg-red-600 text-white' :
+              toast.type === 'warning' ? 'bg-amber-600 text-white' :
               'bg-blue-600 text-white'
             }`}
+            // A warning earns the screen-reader interruption for the same reason
+            // an error does: the action succeeded but fell short, and the
+            // operator has to act on the shortfall.
+            role={toast.type === 'error' || toast.type === 'warning' ? 'alert' : 'status'}
           >
             {toast.type === 'success' && <CheckCircleIcon className="h-5 w-5" />}
-            {toast.type === 'error' && <ExclamationTriangleIcon className="h-5 w-5" />}
+            {(toast.type === 'error' || toast.type === 'warning') && <ExclamationTriangleIcon className="h-5 w-5" />}
             {toast.type === 'info' && <ClockIcon className="h-5 w-5" />}
             <span className="font-medium">{toast.message}</span>
           </div>
@@ -1536,6 +1604,10 @@ export default function ShopFloorSimple() {
             const op = priorityFocusQueue[0];
             const activeJob = getActiveJobForOperation(op);
             const overdue = isOverdue(op.due_date);
+            // priorityFocusQueue includes ON_HOLD work, so this strip could put
+            // the old resume+clock-in double write behind a phone-sized button.
+            // A held job gets the same one-write Clear Hold the grid card does.
+            const onHold = op.status === 'on_hold';
             return (
               <div className="space-y-3">
                 <div className="flex items-start justify-between gap-3">
@@ -1562,14 +1634,26 @@ export default function ShopFloorSimple() {
                     {op.due_date ? `Due ${formatCentralDate(op.due_date, { year: undefined })}` : 'No due date'}
                   </span>
                 </div>
+                {onHold && (
+                  <OperationHoldReason hold={op.hold} testId={`shop-floor-next-hold-reason-${op.id}`} />
+                )}
                 <button
                   type="button"
-                  onClick={() => activeJob ? handleOpenCheckOut(op, activeJob) : handleCheckIn(op)}
-                  disabled={actionLoading === op.id}
-                  className={`min-h-12 w-full ${activeJob ? 'btn-success' : 'btn-primary'}`}
+                  onClick={() => {
+                    if (onHold) return handleClearHold(op);
+                    return activeJob ? handleOpenCheckOut(op, activeJob) : handleCheckIn(op);
+                  }}
+                  disabled={onHold ? actionLoading !== null : actionLoading === op.id}
+                  data-testid={onHold ? `shop-floor-next-clear-hold-${op.id}` : undefined}
+                  className={`min-h-12 w-full ${activeJob && !onHold ? 'btn-success' : 'btn-primary'} disabled:opacity-50 disabled:cursor-not-allowed`}
                 >
                   {actionLoading === op.id ? (
                     <ArrowPathIcon className="h-5 w-5 animate-spin" />
+                  ) : onHold ? (
+                    <>
+                      <PlayIcon className="h-5 w-5 mr-2" />
+                      Clear Hold
+                    </>
                   ) : activeJob ? (
                     <>
                       <CheckCircleIcon className="h-5 w-5 mr-2" />
@@ -1680,7 +1764,21 @@ export default function ShopFloorSimple() {
                     </div>
                   )}
                 </div>
-                
+
+                {/* WHY it stopped — on the card, BEFORE the Clear Hold button.
+                    The card showed the "on hold" pill and nothing else, so
+                    clearing a hold meant lifting a stop whose reason you could
+                    not see. Renders nothing when the payload carries no hold
+                    block (a backend that predates the field). */}
+                {op.status === 'on_hold' && (
+                  <OperationHoldReason
+                    hold={op.hold}
+                    size="md"
+                    className="mb-3"
+                    testId={`shop-floor-hold-reason-${op.id}`}
+                  />
+                )}
+
                 {/* Progress */}
                 <div className="mb-3">
                   <div className="flex justify-between text-sm mb-1">
@@ -1843,19 +1941,26 @@ export default function ShopFloorSimple() {
                     </button>
                   )}
                   
-                  {/* Resume Button - visible when on hold */}
+                  {/* Clear Hold — ONE write (resumeOperation), never a clock-in.
+                      This button used to be labelled "Check In" and ran resume +
+                      clockIn in one try block; a refusal on the clock-in leg left
+                      the resume committed, showed a red error, and skipped the
+                      refresh — so the next tap answered "Operation is not on
+                      hold". Splitting the verbs is what fixes that. */}
                   {op.status === 'on_hold' && (
                     <button
-                      onClick={() => handleCheckIn(op)}
-                      disabled={actionLoading === op.id}
-                      className="flex-1 btn-primary text-base sm:text-sm py-3 sm:py-2.5 w-full"
+                      onClick={() => handleClearHold(op)}
+                      disabled={actionLoading !== null}
+                      data-testid={`shop-floor-clear-hold-${op.id}`}
+                      className="flex-1 btn-primary text-base sm:text-sm py-3 sm:py-2.5 w-full disabled:opacity-50 disabled:cursor-not-allowed"
+                      title="Lifts the hold only — any blocker stays open for a supervisor to resolve"
                     >
                       {actionLoading === op.id ? (
                         <ArrowPathIcon className="h-4 w-4 animate-spin mx-auto" />
                       ) : (
                         <>
                           <PlayIcon className="h-4 w-4 mr-1.5" />
-                          <span>Check In</span>
+                          <span>Clear Hold</span>
                         </>
                       )}
                     </button>

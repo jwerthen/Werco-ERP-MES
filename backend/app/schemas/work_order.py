@@ -506,6 +506,82 @@ class WorkOrderOperationUpdate(BaseModel):
         return self
 
 
+class OperationHoldBlockerInfo(UTCModel):
+    """The still-open blocker explaining a hold, nested inside :class:`OperationHoldInfo`.
+
+    Field-for-field the shape the kiosk queue already sends (``shop_floor._hold_blocker_payload``),
+    so the frontend reuses its existing ``OperationHoldBlocker`` type verbatim rather than growing a
+    second, office-only hold type that would drift from the floor's.
+
+    Only ever the NEWEST still-OPEN/ACKNOWLEDGED blocker -- resolved and dismissed ones are excluded
+    by ``operation_hold_view.OPEN_BLOCKER_STATUSES``, because the resolve/dismiss flow is what
+    auto-resumes an operation, so a closed blocker on a still-held operation is stale narrative
+    rather than the current reason.
+
+    FREE TEXT RIDES THIS RESPONSE, deliberately. ``shop_floor._hold_blocker_payload`` WITHHOLDS
+    ``title``/``note`` (keys absent, not blanked) from a crew-station principal -- an unattended,
+    PIN-unlocked tablet with no operator identity and no idle logout, the audience the wallboard
+    already withholds NCR titles from. This schema is served only by the work-order endpoints, whose
+    every caller is an authenticated, identified office session behind ``get_current_user`` -- the
+    same audience the single-operator kiosk and the desktop already get the full block on. So the
+    station gate is NOT copied here: withholding the reason on the one screen built to act on it
+    would leave the reported bug (an owner who could not find out why a nest was held) unfixed.
+
+    ``has_note`` is therefore deliberately ABSENT rather than always-true: it exists on the kiosk
+    payload as a stand-in for text that was withheld, and nothing is withheld here. Read ``note``
+    and ``title`` directly; ``free_text_withheld`` is stated as ``False`` so a client sharing render
+    code with the kiosk takes the right branch instead of inferring the policy from a missing key.
+    """
+
+    id: int
+    # WorkOrderBlockerCategory / WorkOrderBlockerSeverity / WorkOrderBlockerStatus values. Typed as
+    # plain strings, exactly as the kiosk payload sends them -- these are display facts, and a
+    # renderer must not 500 a work-order read because a new category value was added.
+    category: Optional[str] = None
+    severity: Optional[str] = None
+    status: Optional[str] = None
+    title: Optional[str] = None
+    note: Optional[str] = None
+    # Constant on this response (see the class docstring); present so the shared client-side
+    # renderer does not have to treat a missing key as "unknown policy".
+    free_text_withheld: bool = False
+    reported_at: Optional[datetime] = None
+    reported_by_user_id: Optional[int] = None
+    reported_by_name: Optional[str] = None
+
+    @field_serializer("reported_at", when_used="json")
+    def serialize_utc_datetime(self, value: Optional[datetime]) -> Optional[str]:
+        return to_utc_iso(value)
+
+
+class OperationHoldInfo(UTCModel):
+    """WHY an operation is on hold, WHO placed it and WHEN. Populated only when ON_HOLD.
+
+    Assembled by ``services/operation_hold_view.hold_contexts_for_operations`` -- the same batched,
+    PURE-READ view the kiosk queue uses, so the office page and the floor cannot tell two different
+    stories about one hold.
+
+    EVERY FIELD IS NULLABLE, and ``blocker is None`` is the case this exists for. There is no
+    ``held_by``/``held_at`` column on ``work_order_operations``; provenance is reconstructed from
+    whichever record the hold path happened to write, and the paths differ -- a hold with a note or
+    a non-OTHER category files a ``WorkOrderBlocker``, while a BARE hold (no note, category OTHER --
+    exactly the accidental fat-finger case) emits an ``operation_hold`` event and files no blocker.
+    So the reason and the attribution are INDEPENDENT: never gate one on the other, or the mis-tap
+    renders as both anonymous and reasonless. All-null ("held by unknown, reason not recorded") is a
+    real state a hold placed before either record existed produces, not an error.
+    """
+
+    held_at: Optional[datetime] = None
+    held_by_user_id: Optional[int] = None
+    # Public-screen-safe display form ("Dana R."), from wallboard_service.operator_display_name.
+    held_by_name: Optional[str] = None
+    blocker: Optional[OperationHoldBlockerInfo] = None
+
+    @field_serializer("held_at", when_used="json")
+    def serialize_utc_datetime(self, value: Optional[datetime]) -> Optional[str]:
+        return to_utc_iso(value)
+
+
 class WorkOrderOperationResponse(WorkOrderOperationBase):
     id: int
     version: Optional[int] = 0
@@ -536,6 +612,13 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
     started_by: Optional[int] = None
     completed_by: Optional[int] = None
     laser_nest: Optional[LaserNestOperationInfo] = None
+
+    # WHY this operation is held, WHO held it and WHEN -- so the Work Order page can disclose the
+    # reason BEFORE anyone clicks Clear Hold. NOT an ORM column: injected as an in-memory attr by
+    # ``work_orders._enrich_work_order_operations`` (like ``work_center_name`` above), and only for
+    # an ON_HOLD operation -- every other row is None, and a work order with no held operation
+    # costs no query at all.
+    hold_context: Optional[OperationHoldInfo] = None
 
     @field_serializer(
         "setup_time_hours",

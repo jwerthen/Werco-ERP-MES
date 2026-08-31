@@ -206,6 +206,26 @@ export interface WorkOrderOperation {
   started_by?: number;
   completed_by?: number;
   laser_nest?: LaserNestInfo | null;
+  /**
+   * WHY this operation is held, WHO placed the hold and WHEN.
+   *
+   * Present only on an `on_hold` row -- every other row is explicitly `null`, so
+   * absence never encodes anything. Injected by
+   * `work_orders._enrich_work_order_operations` from the SAME batched view
+   * (`services/operation_hold_view`) the kiosk queue reads, so the office page
+   * and the floor cannot tell two different stories about one hold.
+   *
+   * Reuses `OperationHold` verbatim with ONE difference: **`has_note` is
+   * deliberately NOT sent on this response.** On the kiosk that flag stands in
+   * for text WITHHELD from an unattended, PIN-unlocked station; nothing is
+   * withheld here (the work-order endpoints are reachable only through an
+   * identified office session, the audience that gate already exempts), so
+   * `free_text_withheld` is always `false` and the free text rides the response.
+   * Read `blocker.note` / `blocker.title` DIRECTLY: an absent `has_note` is
+   * falsy, so `blocker.has_note ? note : 'no reason given'` would print "no
+   * reason given" over a hold that has one.
+   */
+  hold_context?: OperationHold | null;
 }
 
 export type OperationStatus = 'pending' | 'ready' | 'in_progress' | 'complete' | 'on_hold';
@@ -1512,6 +1532,55 @@ export interface QueueItem {
    * the kiosks render server order and only DISPLAY this rank.
    */
   run_order?: number | null;
+}
+
+/**
+ * One ON_HOLD row of `GET /shop-floor/work-center-queue/{id}` — the `held` list.
+ *
+ * Identical to a `QueueItem` (the server builds both from ONE row builder, so a
+ * held operation's identity IS a queued one's) plus the two keys that only ever
+ * ride a held row: `startable: false` and the `hold` block explaining it.
+ *
+ * **The LIST BOUNDARY is the safety property, not `startable`.** `held` arrives
+ * beside `queue`, never inside it, so no client iterating `queue` can render a
+ * held operation as startable by accident — which is why this is a separate type
+ * rather than optional fields bolted onto `QueueItem`. Never merge the two
+ * lists. See `components/kiosk/heldOperations.ts`, rule 1.
+ */
+export interface HeldQueueItem extends QueueItem {
+  /**
+   * Stated by the server on held rows, with no `true` twin on queue rows on
+   * purpose: whether a QUEUED operation may actually start is decided by the
+   * server gates at the moment of the action, so a poll asserting
+   * `startable: true` would make a claim this read cannot honor.
+   */
+  startable?: false;
+  /**
+   * WHY it is held, WHO placed it and WHEN. Every field inside is nullable and
+   * `hold.blocker` is null for a BARE hold — exactly the accidental case. Read
+   * the reason from `hold.blocker` and the attribution from `held_by_name` /
+   * `held_at`; they are INDEPENDENT, never gate one on the other.
+   */
+  hold?: OperationHold | null;
+}
+
+/**
+ * `GET /shop-floor/work-center-queue/{id}` as the DESK screens read it. The
+ * kiosk twin, which carries the station-only extras (roster, step counts, job
+ * guidance, scrap reason codes), is `KioskWorkCenterQueueResponse` in
+ * `components/kiosk/kioskConstants.ts`.
+ *
+ * Every field but `queue` is optional so a frontend build can run against a
+ * backend that predates it — the SPA and the API deploy independently.
+ */
+export interface WorkCenterQueueResponse {
+  queue: QueueItem[];
+  /** ON_HOLD operations at this work center, on their OWN list. Most-recently-held first. */
+  held?: HeldQueueItem[];
+  /** True when the server's cap (`MAX_HELD_OPERATIONS`) dropped older holds — say so. */
+  held_truncated?: boolean;
+  /** UTC ISO server clock at response time. */
+  server_time?: string;
 }
 
 /**

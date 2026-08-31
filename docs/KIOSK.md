@@ -598,8 +598,8 @@ kiosk, inline on the crew sign screen, and nothing in the UI moves. Three refusa
 **409 *"This nest was cancelled; its operation cannot be resumed."*** (below).
 
 > **RESUME restores; it does not release, and it does not resurrect.** Both guards live on the
-> **write**, so the desktop `ShopFloorSimple` page inherits them too — they are not kiosk-only UI
-> rules.
+> **write**, so every other Clear Hold surface inherits them too — the desktop `ShopFloorSimple`
+> page, the desk Time Clock page and the Work Order page. They are not kiosk-only UI rules.
 >
 > **A cancelled nest's operation is a tombstone, not a hold → 409.**
 > `laser_nest_service.soft_delete_laser_nest` parks a soft-deleted nest's operation in `ON_HOLD`
@@ -609,6 +609,12 @@ kiosk, inline on the crew sign screen, and nothing in the UI moves. Three refusa
 > longer counts back on the board. `dispatch_service.cancelled_nest_exists` is the shared predicate:
 > it keeps the tombstone off the kiosk's `held` list, off `GET /shop-floor/operations` (the desktop
 > list where Resume is offered), and refuses the resume itself.
+>
+> **One surface is not covered by the read half, on purpose.** The work-order responses apply no
+> such exclusion, so the Work Order page's **Clear hold** button can be offered on a tombstone row
+> and the 409 is the only thing that stops it — see `docs/API.md` → Work Orders → `hold_context`.
+> Nothing about the kiosk changes here; it is noted so the "shared predicate" above is not read as
+> covering every Resume surface in the app.
 >
 > **A resume never performs a release.** `PUT …/hold` refuses only COMPLETE, so a `PENDING`
 > operation can be held — and the old *"`IN_PROGRESS` if `actual_start` else `READY`"* rule then let
