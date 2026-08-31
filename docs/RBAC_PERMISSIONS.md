@@ -181,6 +181,16 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > the blocker — it returns the still-open ones on the response (BLK-4, warn-and-record) so operation
 > status and blocker status can be seen to diverge rather than diverging silently.
 >
+> **The other direction discloses too, and it had to be taught to.** Closing a blocker *does* resume
+> its operation as a side effect — but only when no other OPEN/ACKNOWLEDGED blocker still names it,
+> and only as a restore, so it can land at `PENDING` and stay off the board. Both write verbs on the
+> blocker router (`POST …/resolve` and `PUT …/{id}`, which resumes identically on a **dismiss**) now
+> return `operation_outcome` saying which way it went; the Work Order page raises a `warning` rather
+> than a green toast when the operation is still held or came off hold into `PENDING`. Same
+> principle as BLK-4 — the person who can close the finding is told whether the job actually moved —
+> and **no gate moved to do it**: see `docs/API.md` → "Closing a blocker now SAYS what it did to the
+> operation".
+>
 > **What changed is reach, not authorization.** The crew-station queue read now surfaces the work
 > center's `ON_HOLD` operations (`docs/API.md` → Shop Floor → "Held work"), and resume sits inside
 > the kiosk path fence on none of its deny lists, so a **badge-scanned Operator can take a job off
@@ -217,7 +227,11 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > `work_orders:edit`, which resolves to exactly the set `require_role([ADMIN, MANAGER, SUPERVISOR])`
 > admits (plus superuser / platform admin) — i.e. the **"Resolve / dismiss the blocker behind a
 > hold"** row above, unchanged. Where it is hidden the copy names who closes a blocker and points at
-> Clear hold, which the reader *can* use. `app/api/endpoints/work_order_blockers.py` was not touched.
+> Clear hold, which the reader *can* use. **No gate in
+> `app/api/endpoints/work_order_blockers.py` was touched** — then or since. That file has changed
+> since (both write verbs now return `operation_outcome`), but `require_role([ADMIN, MANAGER,
+> SUPERVISOR])` on each of them is byte-identical to what it always was; the response grew, the
+> authorization did not.
 >
 > **A shared crew station is not an identified caller, and the held payload reflects that.** The
 > station token is a 24-hour shared-PIN credential on an unattended tablet with no idle logout, so

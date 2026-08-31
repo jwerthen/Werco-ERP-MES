@@ -20,13 +20,18 @@ import {
   holdIsUnexplained,
   holdReasonLabel,
   holdSeverityLabel,
+  namedOpenBlockers,
+  offTheBoardSentence,
   openBlockerLine,
   openBlockerMeta,
   openBlockersFreeTextWithheld,
+  resolveBlockerOutcome,
   resumeToast,
+  stillHeldSentence,
   stillOpenBlockers,
 } from './heldOperations';
 import type { OperationHold, ResumeOpenBlocker } from '../../types';
+import type { BlockerOperationOutcome, WorkOrderBlockerWriteResult } from '../../types/aiForward';
 
 /** A still-open blocker as an IDENTIFIED session gets it back from resume. */
 const TITLED_BLOCKER: ResumeOpenBlocker = {
@@ -372,9 +377,9 @@ describe('openBlockerLine', () => {
   });
 
   it('falls back to the category label only when the title is blank', () => {
-    expect(
-      openBlockerLine({ id: 1, title: '  ', category: 'quality_hold', severity: 'high', status: 'open' })
-    ).toBe('Quality hold');
+    expect(openBlockerLine({ id: 1, title: '  ', category: 'quality_hold', severity: 'high', status: 'open' })).toBe(
+      'Quality hold'
+    );
   });
 
   it('never renders an empty line', () => {
@@ -418,9 +423,7 @@ describe('openBlockersFreeTextWithheld', () => {
     // free_text_withheld is true on EVERY station row; `has_note` is what says a
     // human wrote something. Announcing a withheld note that does not exist would
     // send an operator chasing a supervisor for a server-composed title.
-    expect(
-      openBlockersFreeTextWithheld([{ ...STATION_BLOCKER, has_note: false }])
-    ).toBe(false);
+    expect(openBlockersFreeTextWithheld([{ ...STATION_BLOCKER, has_note: false }])).toBe(false);
   });
 
   it('is true when ANY row in the list withheld one', () => {
@@ -428,8 +431,263 @@ describe('openBlockersFreeTextWithheld', () => {
   });
 
   it('tolerates an older backend that sends neither flag', () => {
-    expect(openBlockersFreeTextWithheld([{ id: 9, title: 'x', category: 'other', severity: 'low', status: 'open' }])).toBe(
-      false
+    expect(
+      openBlockersFreeTextWithheld([{ id: 9, title: 'x', category: 'other', severity: 'low', status: 'open' }])
+    ).toBe(false);
+  });
+});
+
+describe('resolveBlockerOutcome (closing a blocker — did the job actually come off hold?)', () => {
+  /** A resolved blocker row, with whatever operation account the server sent. */
+  function resolved(outcome: BlockerOperationOutcome | null): WorkOrderBlockerWriteResult {
+    return {
+      id: 1,
+      company_id: 1,
+      work_order_id: 42,
+      category: 'material_missing',
+      severity: 'high',
+      status: 'resolved',
+      title: 'Material missing',
+      reported_at: '2026-01-01T00:00:00Z',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      operation_outcome: outcome,
+    };
+  }
+
+  it('reports "not attempted" — never a shortfall — when no outcome rides the response', () => {
+    // An acknowledge never puts the operation in play. Warning here would attach
+    // a "still held" notice to a call that was never about the hold.
+    const verdict = resolveBlockerOutcome(resolved(null));
+    expect(verdict).toEqual({
+      attempted: false,
+      stillHeld: false,
+      landedPending: false,
+      openBlockers: [],
+      withheldReason: null,
+      fellShort: false,
+    });
+  });
+
+  it('tolerates a null/absent result the same way', () => {
+    expect(resolveBlockerOutcome(null).fellShort).toBe(false);
+    expect(resolveBlockerOutcome(undefined).attempted).toBe(false);
+  });
+
+  it('flags the reported defect: the operation is still on hold', () => {
+    const verdict = resolveBlockerOutcome(
+      resolved({
+        operation_id: 9,
+        operation_status: 'on_hold',
+        operation_resumed: false,
+        resume_withheld_reason: 'other_blockers_open',
+        operation_still_held: true,
+        open_blockers: [TITLED_BLOCKER],
+      })
     );
+    expect(verdict.stillHeld).toBe(true);
+    expect(verdict.landedPending).toBe(false);
+    expect(verdict.openBlockers).toEqual([TITLED_BLOCKER]);
+    expect(verdict.fellShort).toBe(true);
+  });
+
+  it('flags a resume that landed off the board', () => {
+    const verdict = resolveBlockerOutcome(
+      resolved({
+        operation_id: 9,
+        operation_status: 'pending',
+        operation_resumed: true,
+        resume_withheld_reason: null,
+        operation_still_held: false,
+        open_blockers: [],
+      })
+    );
+    expect(verdict.landedPending).toBe(true);
+    expect(verdict.stillHeld).toBe(false);
+    expect(verdict.fellShort).toBe(true);
+  });
+
+  it('does NOT flag a withheld reason that never held anything', () => {
+    // `no_operation` / `operation_not_held` / `operation_missing` all mean there
+    // was nothing to resume. Keying the warning on "a reason is present" would
+    // put a hold notice on a blocker that never touched an operation.
+    for (const reason of ['no_operation', 'operation_not_held', 'operation_missing'] as const) {
+      const verdict = resolveBlockerOutcome(
+        resolved({
+          operation_id: null,
+          operation_status: null,
+          operation_resumed: false,
+          resume_withheld_reason: reason,
+          operation_still_held: false,
+          open_blockers: [],
+        })
+      );
+      expect(verdict.attempted).toBe(true);
+      expect(verdict.fellShort).toBe(false);
+    }
+  });
+
+  it('stays green on a resume that reached READY', () => {
+    const verdict = resolveBlockerOutcome(
+      resolved({
+        operation_id: 9,
+        operation_status: 'ready',
+        operation_resumed: true,
+        resume_withheld_reason: null,
+        operation_still_held: false,
+        open_blockers: [],
+      })
+    );
+    expect(verdict.fellShort).toBe(false);
+  });
+
+  it('does not read PENDING as a shortfall when nothing resumed', () => {
+    // A held operation that was already PENDING-adjacent must not be reported as
+    // "the hold cleared but stayed off the board" — nothing cleared.
+    const verdict = resolveBlockerOutcome(
+      resolved({
+        operation_id: 9,
+        operation_status: 'pending',
+        operation_resumed: false,
+        resume_withheld_reason: 'other_blockers_open',
+        operation_still_held: false,
+        open_blockers: [TITLED_BLOCKER],
+      })
+    );
+    expect(verdict.landedPending).toBe(false);
+    expect(verdict.fellShort).toBe(false);
+  });
+});
+
+describe('namedOpenBlockers (how the three toasts name what is still in the way)', () => {
+  it('prints the server line per blocker, joined the one way', () => {
+    expect(namedOpenBlockers([TITLED_BLOCKER, { ...TITLED_BLOCKER, id: 6, title: 'Awaiting MTR' }])).toBe(
+      'Machine Down: OP20 Deburr; Awaiting MTR'
+    );
+  });
+
+  it('falls back to the category label for a title-less row, exactly as openBlockerLine does', () => {
+    expect(namedOpenBlockers([STATION_BLOCKER])).toBe('Machine down');
+  });
+
+  it('is empty for an empty list — every caller checks length before printing anything', () => {
+    expect(namedOpenBlockers([])).toBe('');
+  });
+});
+
+describe('offTheBoardSentence (ONE explanation of a resume floored at PENDING)', () => {
+  /**
+   * The point of this suite is not the prose; it is that BOTH verbs on the Work
+   * Order page — Clear Hold and Resolve-a-blocker — get the identical
+   * explanation, because it describes one piece of server behavior. The subject
+   * is the only thing a call site may vary.
+   */
+  it('explains what PENDING means for the floor, not just that it is PENDING', () => {
+    const sentence = offTheBoardSentence();
+    expect(sentence).toContain('did NOT go back on the board');
+    expect(sentence).toContain('dispatch board or at the kiosk');
+    expect(sentence).toContain('released');
+  });
+
+  it('varies ONLY the subject', () => {
+    const asClearHold = offTheBoardSentence();
+    const asResolve = offTheBoardSentence('The hold cleared, but the job');
+    expect(asClearHold.startsWith('It ')).toBe(true);
+    expect(asResolve.startsWith('The hold cleared, but the job ')).toBe(true);
+    // Everything after the subject is the same sentence, character for character.
+    expect(asResolve.slice('The hold cleared, but the job'.length)).toBe(asClearHold.slice('It'.length));
+  });
+});
+
+describe('stillHeldSentence (why the job is STILL stopped, and the two ways off it)', () => {
+  it('names how many and which, and both remedies', () => {
+    const sentence = stillHeldSentence('other_blockers_open', [TITLED_BLOCKER]);
+    expect(sentence).toContain('STILL on hold');
+    expect(sentence).toContain('another blocker is');
+    expect(sentence).toContain('Machine Down: OP20 Deburr');
+    expect(sentence).toContain('Resolve that one too');
+    expect(sentence).toContain('Clear Hold');
+  });
+
+  it('counts off the LIST, so the number and the names can never disagree', () => {
+    const sentence = stillHeldSentence('other_blockers_open', [
+      TITLED_BLOCKER,
+      { ...TITLED_BLOCKER, id: 6, title: 'Awaiting MTR' },
+    ]);
+    expect(sentence).toContain('2 other blockers are');
+    expect(sentence).toContain('Machine Down: OP20 Deburr; Awaiting MTR');
+    expect(sentence).toContain('Resolve those too');
+  });
+
+  it('still says something true when the reason arrives without its list', () => {
+    const sentence = stillHeldSentence('other_blockers_open', []);
+    expect(sentence).toContain('STILL on hold');
+    expect(sentence).not.toContain('()');
+    expect(sentence).toContain('Clear Hold');
+  });
+
+  it('is defensive about the nothing-to-resume reasons rather than silent', () => {
+    // The caller only reaches this function when the SERVER says the operation is
+    // still on hold, so these pairings should not occur — but a vague true
+    // sentence beats an empty toast if one ever does.
+    for (const reason of ['no_operation', 'operation_not_held', 'operation_missing'] as const) {
+      const sentence = stillHeldSentence(reason, []);
+      expect(sentence).toContain('STILL on hold');
+      expect(sentence).toContain('Clear Hold');
+    }
+    expect(stillHeldSentence(null, [])).toContain('STILL on hold');
+    expect(stillHeldSentence(undefined, [])).toContain('STILL on hold');
+  });
+});
+
+describe('resolveBlockerOutcome carries the reason through', () => {
+  it('hands the withheld reason to the wording layer without judging on it', () => {
+    const verdict = resolveBlockerOutcome({
+      id: 1,
+      company_id: 1,
+      work_order_id: 42,
+      category: 'material_missing',
+      severity: 'high',
+      status: 'resolved',
+      title: 'Material missing',
+      reported_at: '2026-01-01T00:00:00Z',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      operation_outcome: {
+        operation_id: 9,
+        operation_status: 'on_hold',
+        operation_resumed: false,
+        resume_withheld_reason: 'other_blockers_open',
+        operation_still_held: true,
+        open_blockers: [TITLED_BLOCKER],
+      },
+    });
+    expect(verdict.withheldReason).toBe('other_blockers_open');
+    // The WARNING still comes off the operation's status, never off the reason.
+    expect(verdict.stillHeld).toBe(true);
+  });
+
+  it('reports no reason when the resume happened', () => {
+    const verdict = resolveBlockerOutcome({
+      id: 1,
+      company_id: 1,
+      work_order_id: 42,
+      category: 'material_missing',
+      severity: 'high',
+      status: 'resolved',
+      title: 'Material missing',
+      reported_at: '2026-01-01T00:00:00Z',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      operation_outcome: {
+        operation_id: 9,
+        operation_status: 'ready',
+        operation_resumed: true,
+        resume_withheld_reason: null,
+        operation_still_held: false,
+        open_blockers: [],
+      },
+    });
+    expect(verdict.withheldReason).toBeNull();
   });
 });

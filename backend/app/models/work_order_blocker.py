@@ -33,6 +33,53 @@ class WorkOrderBlockerStatus(str, enum.Enum):
     DISMISSED = "dismissed"
 
 
+class BlockerResumeWithheldReason(str, enum.Enum):
+    """Why closing a blocker did NOT take its operation off hold. CLOSED VOCABULARY.
+
+    Closing a blocker resumes its operation as a side effect
+    (``WorkOrderBlockerService._resume_operation_if_no_open_blockers``) -- but only
+    sometimes, and the four situations where it does not used to collapse into a
+    bare ``(None, None)`` that the response could not express. A shop owner
+    resolved a blocker on a held nest, got a green "Resolved blocker" toast, and
+    the operation was still ON_HOLD. These names are what the response says now.
+
+    ``other_blockers_open`` is the one that matters, and it is categorically
+    different from the other three: there a resume was OWED -- the operation IS on
+    hold and the caller reasonably expects their click to lift it -- and something
+    withheld it. The other three mean there was nothing to resume in the first
+    place, and warning "still held" for one of those would be a NEW kind of
+    dishonesty, not a fix. The wire field that draws that line is
+    ``BlockerOperationOutcome.operation_still_held``; see
+    ``BlockerResumeOutcome.operation_still_held`` for why the two are one fact.
+
+    NOT PERSISTED and not a column -- it lives here, beside the status vocabulary
+    it explains, to break an import cycle: the response schema has to name these
+    values, ``app/schemas/work_order_blocker.py`` is imported BY
+    ``work_order_blocker_service``, and having that schema import the service back
+    is a cycle. Models import neither, so this is the one home both can reach. The
+    service re-exports it, so it still reads as co-located at the call sites that
+    raise it.
+
+    STABLE: the UI and ``docs/API.md`` key on these strings. Add members rather
+    than renaming, and add them fail-closed -- a new member must describe a
+    situation that genuinely withheld a resume, because every consumer reads an
+    unknown reason as "something stopped it". The laser-nest tombstone guard (a
+    cancelled nest's operation must never be resumed) lives on the unmerged
+    nest-removal branch and slots in here as a fifth member.
+
+    The FIFTH OUTCOME is deliberately NOT a member: an operation that DID resume
+    but landed at PENDING instead of READY. Nothing was withheld there -- the hold
+    genuinely cleared -- so it is reported as ``operation_resumed=True`` with
+    ``operation_status="pending"``, and the UI warns off the status. Folding it in
+    here would make "withheld" mean two different things.
+    """
+
+    NO_OPERATION = "no_operation"
+    OTHER_BLOCKERS_OPEN = "other_blockers_open"
+    OPERATION_NOT_HELD = "operation_not_held"
+    OPERATION_MISSING = "operation_missing"
+
+
 class WorkOrderBlocker(Base, TenantMixin):
     """Operator-reported blocker that explains why a job or operation is stuck."""
 

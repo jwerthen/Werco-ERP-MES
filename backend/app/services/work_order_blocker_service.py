@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+# Aliased: ``update_blocker`` iterates ``for field, value in update_data.items()``
+# and an unaliased ``field`` would be shadowed by that loop variable (flake8 F402).
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from sqlalchemy.orm import Session, joinedload
 
@@ -10,6 +14,7 @@ from app.models.quality import NonConformanceReport
 from app.models.user import User
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_blocker import (
+    BlockerResumeWithheldReason,
     WorkOrderBlocker,
     WorkOrderBlockerCategory,
     WorkOrderBlockerStatus,
@@ -41,6 +46,83 @@ def blocker_default_title(category: str, work_order: WorkOrder, operation: Optio
     label = category.replace("_", " ").title()
     target = operation.name if operation else work_order.work_order_number
     return f"{label}: {target}"
+
+
+@dataclass
+class BlockerResumeOutcome:
+    """What closing a blocker actually did to its operation.
+
+    Replaces the ``(None, None)`` this service used to return, which collapsed
+    four distinct situations into one silence the response could not express --
+    the reason a shop owner could resolve a blocker on a held nest, get a green
+    "Resolved blocker" toast, and find the operation still ON_HOLD.
+
+    THIS IS A DISCLOSURE OBJECT, NOT A DECISION. Nothing here changes when a
+    resume happens, where it lands, or what it writes. Every field is read off a
+    decision the resume rule had already made; adding one must never move the
+    rule.
+
+    ``previous_status`` is set on the RESUME PATH ONLY, and that is load-bearing:
+    :meth:`WorkOrderBlockerService.update_blocker_with_outcome` writes the
+    operation's ``log_status_change`` row under exactly
+    ``operation is not None and previous_status is not None``, unchanged from
+    before this object existed. A status-change row for a transition that did not
+    happen is a false entry in a tamper-evident chain (invariant 2), so
+    ``operation`` alone must never be the guard -- it is now populated in the
+    WITHHELD cases too, purely so the response can report the operation's status.
+    """
+
+    #: The operation id the BLOCKER names -- present even when the row could not
+    #: be loaded, which is the whole point: OPERATION_MISSING has an id and no row.
+    operation_id: Optional[int] = None
+    #: The operation the blocker names, when the row could be loaded. Populated
+    #: for disclosure even when no resume happened -- never a "did it resume?"
+    #: signal on its own. ``None`` for NO_OPERATION / OPERATION_MISSING.
+    operation: Optional[WorkOrderOperation] = None
+    #: The status the operation held BEFORE this call, set only when it actually
+    #: moved. The audit guard keys on this; see the class docstring.
+    previous_status: Optional[str] = None
+    #: ``None`` when a resume was not withheld -- i.e. one happened.
+    withheld_reason: Optional[BlockerResumeWithheldReason] = None
+    #: The OPEN/ACKNOWLEDGED blockers still naming this operation. Non-empty only
+    #: for OTHER_BLOCKERS_OPEN; they are what the caller has to close next.
+    other_open_blockers: List[WorkOrderBlocker] = dataclass_field(default_factory=list)
+
+    @property
+    def resumed(self) -> bool:
+        """True when the operation actually moved off hold in this call."""
+        return self.operation is not None and self.previous_status is not None
+
+    @property
+    def operation_still_held(self) -> bool:
+        """A resume was OWED and WITHHELD -- the one thing the UI must warn about.
+
+        This is the line the reason vocabulary alone cannot draw. ``no_operation``
+        / ``operation_not_held`` / ``operation_missing`` all mean *there was
+        nothing to resume*, and warning "still held" for one of those would be a
+        new kind of dishonesty. ``other_blockers_open`` usually means a resume was
+        owed -- but not always: another blocker can name an operation somebody
+        already resumed from the kiosk without closing the record, and that
+        operation is not held either.
+
+        So the judgement is read off the operation, not off the reason: the
+        operation exists and is STILL ``ON_HOLD`` after this call. That is
+        equivalent to "a resume was owed and withheld" in both directions -- a
+        resume that happened leaves the row not-ON_HOLD, and a row that was never
+        ON_HOLD owed nothing -- and it stays correct when a fifth withheld reason
+        is added (the cancelled-nest tombstone on the nest-removal branch), which
+        a reason-name test would not.
+
+        Compared with ``==`` against the enum member exactly as the resume gate
+        itself compares, deliberately: if the two ever read the column
+        differently, the disclosure would contradict the decision it describes.
+        """
+        return self.operation is not None and self.operation.status == OperationStatus.ON_HOLD
+
+    @property
+    def operation_status(self) -> Optional[str]:
+        """The operation's status AFTER this call. ``None`` when there is no row."""
+        return _enum_value(self.operation.status) if self.operation is not None else None
 
 
 class WorkOrderBlockerService:
@@ -216,6 +298,45 @@ class WorkOrderBlockerService:
         data: WorkOrderBlockerUpdate,
         audit: Optional[AuditService] = None,
     ) -> WorkOrderBlocker:
+        """Backwards-compatible wrapper -- the blocker only, no resume outcome.
+
+        Kept for the caller that cannot act on the outcome anyway --
+        ``ai_action_applier``'s escalate/acknowledge, the only non-HTTP caller of
+        either wrapper (``copilot_service`` and ``process_sheet_service`` reach
+        this service, but only through ``list_blockers`` / ``create_blocker``).
+        The two HTTP verbs use
+        :meth:`update_blocker_with_outcome`, because a caller who can be MISLED
+        about whether the operation came off hold is exactly who needs the answer.
+        """
+        return self.update_blocker_with_outcome(
+            company_id=company_id,
+            user=user,
+            blocker_id=blocker_id,
+            data=data,
+            audit=audit,
+        )[0]
+
+    def update_blocker_with_outcome(
+        self,
+        *,
+        company_id: int,
+        user: User,
+        blocker_id: int,
+        data: WorkOrderBlockerUpdate,
+        audit: Optional[AuditService] = None,
+    ) -> Tuple[WorkOrderBlocker, Optional[BlockerResumeOutcome]]:
+        """Update the blocker, and report what that did to its operation.
+
+        The second element is ``None`` when NO RESUME WAS EVEN ATTEMPTED -- this
+        call did not leave the blocker RESOLVED/DISMISSED, so the operation was
+        never a candidate. That is a third state, distinct from "attempted and
+        withheld", and collapsing it into a withheld reason would have the UI warn
+        about a hold on an acknowledge.
+
+        Note the attempt condition tests the blocker's status AFTER the update,
+        not the transition: re-PUTting an already-resolved blocker re-attempts the
+        resume. That is pre-existing behavior and is left exactly as it was.
+        """
         blocker = self._get_blocker(company_id=company_id, blocker_id=blocker_id)
         previous_status = blocker.status
         update_data = data.model_dump(exclude_unset=True)
@@ -224,14 +345,13 @@ class WorkOrderBlockerService:
                 continue
             setattr(blocker, field, _enum_value(value) if hasattr(value, "value") else value)
 
-        resumed_operation = None
-        resumed_operation_previous_status = None
+        resume: Optional[BlockerResumeOutcome] = None
         if blocker.status == WorkOrderBlockerStatus.ACKNOWLEDGED.value and previous_status != blocker.status:
             blocker.acknowledged_at = datetime.utcnow()
         if blocker.status in {WorkOrderBlockerStatus.RESOLVED.value, WorkOrderBlockerStatus.DISMISSED.value}:
             blocker.resolved_at = blocker.resolved_at or datetime.utcnow()
             blocker.resolved_by = blocker.resolved_by or user.id
-            resumed_operation, resumed_operation_previous_status = self._resume_operation_if_no_open_blockers(blocker)
+            resume = self._resume_operation_if_no_open_blockers(blocker)
         blocker.updated_at = datetime.utcnow()
 
         OperationalEventService(self.db).emit_best_effort(
@@ -259,6 +379,17 @@ class WorkOrderBlockerService:
                 blocker.status,
                 description=f"Blocker '{blocker.title}' status changed from '{previous_status}' to '{blocker.status}'",
             )
+        # INVARIANT 2, UNCHANGED BY THE DISCLOSURE REFACTOR. The operation
+        # status-change row is written under exactly the condition it always was:
+        # an operation AND a previous status, both of which only the resume path
+        # sets. ``resume.operation`` alone would NOT do -- it is now populated in
+        # the withheld cases too, so that a response can report the operation's
+        # status, and keying the row on it would write a status change for a
+        # transition that never happened: a false entry in a tamper-evident chain.
+        # ``resume is not None`` is the "no resume was attempted" case, where both
+        # locals used to be None and this branch was equally False.
+        resumed_operation = resume.operation if resume is not None else None
+        resumed_operation_previous_status = resume.previous_status if resume is not None else None
         if audit is not None and resumed_operation is not None and resumed_operation_previous_status is not None:
             audit.log_status_change(
                 "work_order_operation",
@@ -273,7 +404,7 @@ class WorkOrderBlockerService:
             )
 
         self.db.flush()
-        return blocker
+        return blocker, resume
 
     def resolve_blocker(
         self,
@@ -284,7 +415,25 @@ class WorkOrderBlockerService:
         resolution_note: Optional[str] = None,
         audit: Optional[AuditService] = None,
     ) -> WorkOrderBlocker:
-        return self.update_blocker(
+        """Backwards-compatible wrapper. See :meth:`resolve_blocker_with_outcome`."""
+        return self.resolve_blocker_with_outcome(
+            company_id=company_id,
+            user=user,
+            blocker_id=blocker_id,
+            resolution_note=resolution_note,
+            audit=audit,
+        )[0]
+
+    def resolve_blocker_with_outcome(
+        self,
+        *,
+        company_id: int,
+        user: User,
+        blocker_id: int,
+        resolution_note: Optional[str] = None,
+        audit: Optional[AuditService] = None,
+    ) -> Tuple[WorkOrderBlocker, Optional[BlockerResumeOutcome]]:
+        return self.update_blocker_with_outcome(
             company_id=company_id,
             user=user,
             blocker_id=blocker_id,
@@ -322,17 +471,48 @@ class WorkOrderBlockerService:
             raise ValueError("Blocker not found")
         return blocker
 
-    def _resume_operation_if_no_open_blockers(
-        self, blocker: WorkOrderBlocker
-    ) -> tuple[Optional[WorkOrderOperation], Optional[str]]:
-        """Resume the operation if no other open blockers remain.
+    def _resume_operation_if_no_open_blockers(self, blocker: WorkOrderBlocker) -> BlockerResumeOutcome:
+        """Resume the operation if no other open blockers remain -- and SAY what happened.
 
-        Returns ``(operation, previous_status)`` when an operation was actually
-        resumed (for audit logging by the caller), otherwise ``(None, None)``.
+        SAME RESUMES, SAME CASES, SAME LANDING STATUSES, SAME AUDIT ROWS as before
+        the outcome object existed. This returns a :class:`BlockerResumeOutcome`
+        where it used to return a bare ``(None, None)`` that four distinct
+        situations shared; nothing about WHEN it resumes changed.
+
+        Two reads are new and both are DISCLOSURE ONLY:
+
+        * the operation row is now loaded BEFORE the open-blocker probe, so every
+          branch can report the operation's status. That reorders which *reason*
+          a doubly-disqualified call reports (a missing row now reads
+          ``operation_missing`` rather than ``other_blockers_open``) and reports
+          the more fundamental fact; it cannot change the resume, because the
+          resume needs all four conditions to hold regardless of the order they
+          are tested in.
+        * the open-blocker probe is ``.all()`` where it was ``.count()``, on the
+          identical predicate, so the response can name the blockers that are
+          still in the way. Ordered by id so the list is stable between calls.
+
+        Both are tenant-scoped to ``blocker.company_id`` -- the company the
+        blocker was already resolved under (:meth:`_get_blocker` scopes it to the
+        caller's active company), never a company re-derived here.
         """
         if not blocker.operation_id:
-            return None, None
-        open_count = (
+            return BlockerResumeOutcome(withheld_reason=BlockerResumeWithheldReason.NO_OPERATION)
+        operation_id = int(blocker.operation_id)
+        operation = (
+            self.db.query(WorkOrderOperation)
+            .filter(
+                WorkOrderOperation.id == blocker.operation_id,
+                WorkOrderOperation.company_id == blocker.company_id,
+            )
+            .first()
+        )
+        if operation is None:
+            return BlockerResumeOutcome(
+                operation_id=operation_id,
+                withheld_reason=BlockerResumeWithheldReason.OPERATION_MISSING,
+            )
+        other_open_blockers = (
             self.db.query(WorkOrderBlocker)
             .filter(
                 WorkOrderBlocker.company_id == blocker.company_id,
@@ -342,19 +522,17 @@ class WorkOrderBlockerService:
                     [WorkOrderBlockerStatus.OPEN.value, WorkOrderBlockerStatus.ACKNOWLEDGED.value]
                 ),
             )
-            .count()
+            .order_by(WorkOrderBlocker.id.asc())
+            .all()
         )
-        if open_count:
-            return None, None
-        operation = (
-            self.db.query(WorkOrderOperation)
-            .filter(
-                WorkOrderOperation.id == blocker.operation_id,
-                WorkOrderOperation.company_id == blocker.company_id,
+        if other_open_blockers:
+            return BlockerResumeOutcome(
+                operation_id=operation_id,
+                operation=operation,
+                withheld_reason=BlockerResumeWithheldReason.OTHER_BLOCKERS_OPEN,
+                other_open_blockers=other_open_blockers,
             )
-            .first()
-        )
-        if operation and operation.status == OperationStatus.ON_HOLD:
+        if operation.status == OperationStatus.ON_HOLD:
             previous_status = _enum_value(operation.status)
             parent = operation.work_order
             if operation.actual_start:
@@ -391,8 +569,17 @@ class WorkOrderBlockerService:
             else:
                 operation.status = OperationStatus.READY
             operation.updated_at = datetime.utcnow()
-            return operation, previous_status
-        return None, None
+            # THE FIFTH OUTCOME, and it is not a withheld reason: the hold really
+            # did clear, but PENDING means the job did NOT come back to the
+            # dispatch board or the kiosk (both surface READY only). Nothing is
+            # named here -- the landing status IS the disclosure, and the caller
+            # reads it off ``operation_status``.
+            return BlockerResumeOutcome(operation_id=operation_id, operation=operation, previous_status=previous_status)
+        return BlockerResumeOutcome(
+            operation_id=operation_id,
+            operation=operation,
+            withheld_reason=BlockerResumeWithheldReason.OPERATION_NOT_HELD,
+        )
 
     def _create_blocker_recommendation(
         self,

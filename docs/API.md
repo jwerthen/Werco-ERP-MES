@@ -1484,6 +1484,60 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > changed**; see [docs/RBAC_PERMISSIONS.md](RBAC_PERMISSIONS.md) → "Hold / resume are
 > operator-facing".
 >
+> **Closing a blocker now SAYS what it did to the operation.** `POST /work-order-blockers/{id}/resolve`
+> and `PUT /work-order-blockers/{id}` both return `WorkOrderBlockerWriteResponse` — the blocker row
+> every caller already got, **plus** `operation_outcome`. **A 200 from either verb has never meant
+> the operation came off hold** — closing a blocker resumes its operation as a side effect, but only
+> sometimes, and until now the response could not say which way it went: an owner resolved a blocker
+> on a held nest, read a green "Resolved blocker", and the operation was still `ON_HOLD` because a
+> second blocker still named it. The 200 means the same thing it always did; what changed is that
+> the body now accounts for the operation. Both verbs carry `operation_outcome` because both reach
+> the same `update_blocker` body — **dismissing** a blocker runs the identical resume — so a caller of either
+> could be misled. `operation_outcome` is **`null` when no resume was attempted** (the call left the
+> blocker open or acknowledged); absence means not-applicable, and a client must not warn on it.
+> Its **presence** is not "this call closed the blocker" either: the attempt condition reads the
+> blocker's status *after* the update rather than the transition, so a `PUT` that only changes
+> `severity` on an already-resolved blocker re-attempts the resume and answers with a full
+> `operation_outcome`. Pre-existing behavior, unchanged — now merely visible.
+>
+> | Field | Meaning |
+> |---|---|
+> | `operation_id` | The operation the blocker names. Read off the **blocker**, so it survives `operation_missing`. |
+> | `operation_status` | The operation's status **after** the call. `null` when the row could not be loaded. |
+> | `operation_resumed` | True only when this call actually moved the operation off hold. |
+> | `resume_withheld_reason` | Why it did not — closed vocabulary, `null` exactly when a resume happened. |
+> | `operation_still_held` | **A resume was owed and withheld.** The field a client warns on. |
+> | `open_blockers` | The OPEN/ACKNOWLEDGED blockers still naming the operation — what to close next. |
+>
+> `resume_withheld_reason` is one of `no_operation` (the blocker named no operation; nothing was ever
+> held), `other_blockers_open` (another OPEN/ACKNOWLEDGED blocker still names it — **the reported
+> defect**), `operation_not_held`, or `operation_missing`. **Do not warn off this field.** Three of
+> the four mean *there was nothing to resume*, and a "still held" notice on one of those is a new
+> falsehood rather than a fix; `operation_still_held` is the judgement, and it is read off the
+> operation's status so it stays right when a fifth reason is added.
+>
+> **A second warnable outcome carries no reason at all:** `operation_resumed: true` with
+> `operation_status: "pending"`. The hold genuinely cleared, and PENDING is off the dispatch board
+> and off the kiosk (both surface READY only), so "resolved" alone sends the shop looking for a card
+> that will not appear. The Work Order page raises the **`warning`** toast for either shortfall
+> (composed into one toast when both hold), never `success` and never `error` — the write succeeded.
+>
+> `open_blockers` reuses the shape `PUT /shop-floor/operations/{id}/resume` already returns, so one
+> client type serves both, **minus `has_note` / `free_text_withheld`**. Those two describe the
+> crew-station free-text gate, and that gate cannot apply here: a station token is minted
+> `type == "kiosk"` and never passes `verify_token`, a badge-minted `scope == "kiosk"` operator token
+> is 403 outside `KIOSK_TOKEN_PATH_PREFIXES` (`/api/v1/shop-floor`), and both verbs are
+> Admin / Manager / Supervisor. `title` therefore always rides this response. **Nothing about when a
+> resume happens, where it lands, or what it audits changed** — the operation's `log_status_change`
+> row is still written if and only if the operation actually moved.
+>
+> **The router's other two verbs are unchanged.** `GET /work-order-blockers/` (the list) and
+> `POST /work-order-blockers/work-orders/{work_order_id}` (file a blocker) still answer
+> `WorkOrderBlockerResponse` and carry **no** `operation_outcome`. That is deliberate rather than
+> pending: a list row would have to report `operation_resumed: false` on a row where nothing was
+> ever attempted, which reads as "a resume was withheld" — the same class of false statement this
+> field exists to remove. There is no by-id `GET` on this router.
+>
 > **A cancelled-nest tombstone is NOT filtered out of this response.** The kiosk `held` list and
 > `GET /shop-floor/operations` both filter on `~dispatch_service.cancelled_nest_exists`; the
 > work-order responses do not, so a soft-deleted laser nest's operation still appears here as an

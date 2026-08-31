@@ -66,6 +66,7 @@
 import { HOLD_REASONS } from './kioskConstants';
 import { formatCentralDateTime } from '../../utils/centralTime';
 import type { OperationHold, ResumeOpenBlocker, ResumeOperationResult } from '../../types';
+import type { BlockerResumeWithheldReason, WorkOrderBlockerWriteResult } from '../../types/aiForward';
 
 /**
  * "Machine down" for `machine_down`. Reuses the EXISTING kiosk hold vocabulary
@@ -297,10 +298,185 @@ export function clearHoldToast(
     shortfalls.push('the job did not return to the queue (still waiting on release or an earlier operation)');
   }
   if (blockers.length > 0) {
-    const named = blockers.map(openBlockerLine).join('; ');
-    shortfalls.push(`${blockers.length} blocker${blockers.length === 1 ? '' : 's'} still open: ${named}`);
+    shortfalls.push(
+      `${blockers.length} blocker${blockers.length === 1 ? '' : 's'} still open: ${namedOpenBlockers(blockers)}`
+    );
   }
   return { type: 'warning', message: `${wo} hold cleared — ${shortfalls.join('; ')}.` };
+}
+
+/**
+ * THE ONE PLACE that decides whether RESOLVING A BLOCKER fell short.
+ *
+ * Twin of `clearHoldOutcome` for the other verb, and it exists for the same
+ * defect wearing a different hat: a shop owner resolved a blocker on a held nest,
+ * got a green "Resolved blocker" toast, and the operation was still ON_HOLD.
+ * Closing a blocker resumes its operation only SOMETIMES, and the 200 now says
+ * which way it went (`operation_outcome`).
+ *
+ * Three states, and conflating any two of them is a bug:
+ *
+ * 1. **Not attempted** (`operation_outcome` absent/null) — the call left the
+ *    blocker open or acknowledged, so the operation was never a candidate.
+ *    `fellShort` is false. Warning here would put a "still held" notice on an
+ *    acknowledge, which is a NEW false statement, not a fix.
+ * 2. **Owed and withheld** (`operation_still_held`) — the operation IS still on
+ *    hold. Usually because another blocker still names it; `openBlockers` says
+ *    which. This is the reported defect.
+ * 3. **Cleared but off the board** (`operation_resumed` and
+ *    `operation_status === 'pending'`) — the hold really did lift, but PENDING is
+ *    off the dispatch board and off the kiosk (both surface READY only), so the
+ *    job did not come back to the queue. Not a withheld resume, and it carries no
+ *    withheld reason: read the STATUS, not just the boolean.
+ *
+ * Read off the SERVER's answer, never off "the call did not throw" — and never
+ * off `resume_withheld_reason` alone, which is true for three reasons that mean
+ * *there was nothing to resume*. Compose the words at the call site; take the
+ * verdict from here, exactly as the three Clear Hold screens do.
+ */
+export function resolveBlockerOutcome(result: WorkOrderBlockerWriteResult | null | undefined): {
+  attempted: boolean;
+  stillHeld: boolean;
+  landedPending: boolean;
+  openBlockers: ResumeOpenBlocker[];
+  withheldReason: BlockerResumeWithheldReason | null;
+  fellShort: boolean;
+} {
+  const outcome = result?.operation_outcome;
+  if (!outcome) {
+    return {
+      attempted: false,
+      stillHeld: false,
+      landedPending: false,
+      openBlockers: [],
+      withheldReason: null,
+      fellShort: false,
+    };
+  }
+  const stillHeld = outcome.operation_still_held === true;
+  const landedPending = outcome.operation_resumed === true && (outcome.operation_status || '').trim() === 'pending';
+  const openBlockers = Array.isArray(outcome.open_blockers) ? outcome.open_blockers : [];
+  return {
+    attempted: true,
+    stillHeld,
+    landedPending,
+    openBlockers,
+    withheldReason: outcome.resume_withheld_reason ?? null,
+    fellShort: stillHeld || landedPending,
+  };
+}
+
+/**
+ * The still-open blockers NAMED — "Machine Down: OP20 Deburr; Awaiting MTR".
+ *
+ * One line per blocker from the server's own text (`openBlockerLine`), joined
+ * the one way. Three toasts print this list — the desk Clear Hold
+ * (`clearHoldToast`), the Work Order page's Clear Hold, and its resolve-a-blocker
+ * — and a separator that drifts between them is a small thing that makes two
+ * screens look like two systems. Empty string for an empty list: every caller
+ * already tests `length` before deciding to say anything at all.
+ */
+export function namedOpenBlockers(blockers: ResumeOpenBlocker[]): string {
+  return blockers.map(openBlockerLine).join('; ');
+}
+
+/**
+ * THE ONE EXPLANATION of a resume that landed at PENDING — the office-length
+ * sentence, shared by the two verbs on the Work Order page that can produce it.
+ *
+ * Both Clear Hold and Resolve-a-blocker end in the same server behavior: resume
+ * RESTORES, it does not release, so an operation with no labor evidence is
+ * floored at PENDING, and PENDING is off the dispatch board and off the kiosk
+ * (both surface READY only). The job did not come back. That is ONE fact about
+ * the server, and it was written out twice — a copy each in `handleConfirmClearHold`
+ * and `handleResolveBlocker` — which is how two buttons on one page end up
+ * describing one outcome in two ways, one of them eventually stale.
+ *
+ * `subject` is the only thing the two call sites legitimately differ on: Clear
+ * Hold has already named the operation ("...: hold cleared. It did NOT..."),
+ * while the resolve toast has been talking about a BLOCKER and has to hand the
+ * subject back to the job ("...The hold cleared, but the job did NOT..."). The
+ * explanation after it is identical, and that is the part that must not drift.
+ *
+ * Deliberately NOT folded into `clearHoldToast`: that one is the phone-sized
+ * station/desk toast and words the same fact short on purpose ("still waiting on
+ * release or an earlier operation"). Two audiences, one fact — the fact is what
+ * is shared.
+ */
+export function offTheBoardSentence(subject: string = 'It'): string {
+  return (
+    `${subject} did NOT go back on the board — it is Pending again, so it will not show on the dispatch ` +
+    'board or at the kiosk until the work order is released and any earlier operations are finished.'
+  );
+}
+
+/**
+ * Why the operation is STILL on hold after a blocker was closed, and the two
+ * ways off it — the sentence the reported defect's green toast replaced with
+ * silence.
+ *
+ * EXHAUSTIVE over `BlockerResumeWithheldReason` on purpose. The backend's
+ * vocabulary is closed and documented as growing (the cancelled-nest tombstone
+ * guard on the unmerged nest-removal branch is a known fifth member), and the
+ * failure mode of a `default:` clause here is precisely the one this whole change
+ * exists to remove: a new server reason silently rendering a vague line that
+ * happens to still be grammatical. The `never` binding below turns that into a
+ * COMPILE ERROR, so whoever adds the fifth reason has to decide what the shop
+ * reads.
+ *
+ * Called ONLY when `resolveBlockerOutcome` reports `stillHeld` — read off the
+ * operation's status, never off the reason name (three of the four reasons mean
+ * there was nothing to resume). The reason only picks the WORDS; it never decides
+ * whether to warn. The nothing-to-resume reasons are handled here anyway, and
+ * defensively: a server that ever pairs one of them with a held operation gets a
+ * true, if unspecific, sentence rather than a crash or an empty string.
+ *
+ * Clear Hold is named as the second remedy because Release 1 put that control on
+ * the operation's own row on this very page — the person reading this toast can
+ * act on it without leaving the screen. Naming only "resolve the others" would
+ * describe half the exits.
+ */
+export function stillHeldSentence(
+  reason: BlockerResumeWithheldReason | null | undefined,
+  blockers: ResumeOpenBlocker[]
+): string {
+  const clearHold = "Use Clear Hold on the operation's row to lift it.";
+  switch (reason) {
+    case 'other_blockers_open': {
+      // The count is read off the LIST, not off the reason: the list is what the
+      // reader has to go and close, so "2 other blockers" must never be printed
+      // beside one name.
+      if (blockers.length === 0) {
+        return (
+          'The operation is STILL on hold — another blocker is still open on it. Resolve it too, or ' +
+          lowerFirst(clearHold)
+        );
+      }
+      const many = blockers.length > 1;
+      return (
+        `The operation is STILL on hold — ${many ? `${blockers.length} other blockers are` : 'another blocker is'} ` +
+        `still open on it (${namedOpenBlockers(blockers)}). Resolve ${many ? 'those' : 'that one'} too, or ` +
+        lowerFirst(clearHold)
+      );
+    }
+    case 'no_operation':
+    case 'operation_not_held':
+    case 'operation_missing':
+    case null:
+    case undefined:
+      return `The operation is STILL on hold — closing this blocker did not lift it. ${clearHold}`;
+    default: {
+      // A reason this build has never heard of. It cannot be worded honestly, so
+      // it is a compile error instead — see the docstring.
+      const unhandled: never = reason;
+      return `The operation is STILL on hold (${String(unhandled)}). ${clearHold}`;
+    }
+  }
+}
+
+/** "Use Clear Hold..." -> "use Clear Hold...", for mid-sentence reuse. */
+function lowerFirst(text: string): string {
+  return text.replace(/^./, (c) => c.toLowerCase());
 }
 
 /**
