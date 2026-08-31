@@ -4,7 +4,19 @@
  * Resolving a blocker used to succeed silently (the list simply refreshed);
  * now success shows a toast naming the blocker, mirroring the page's other
  * mutation toasts. The error path (verbatim server detail in an error toast)
- * is pinned as existing behavior. The note capture goes through the shared
+ * is pinned as existing behavior.
+ *
+ * AND THE GREEN TOAST IS NO LONGER UNCONDITIONAL. A shop owner resolved a
+ * blocker on a held nest, read "Resolved blocker", and the operation was still
+ * ON_HOLD — a second blocker still named it, so the server withheld the resume
+ * and the response could not say so. `operation_outcome` says so now, and two of
+ * its states earn `warning` rather than `success`: the operation is still held,
+ * or it resumed but landed PENDING (off the dispatch board and off the kiosk,
+ * which surface READY only). The suite below pins BOTH warnings AND the two
+ * cases that must stay green — a blocker that never held anything must not
+ * acquire a "still held" notice, which would be a new falsehood, not a fix.
+ *
+ * The note capture goes through the shared
  * InputDialog (the native prompt() is gone), so the tests drive the dialog:
  * open via the page's Resolve button, then submit via the DIALOG's Resolve
  * button (scoped `within(dialog)` — the two buttons share a name). Dialog
@@ -22,6 +34,9 @@ import api from '../services/api';
 import WorkOrderDetail from './WorkOrderDetail';
 import { ToastProvider } from '../components/ui';
 import { WorkOrderBlocker } from '../types/aiForward';
+// Imported rather than retyped: the assertion below has to fail if the page
+// ever stops printing the SHARED pending explanation and grows a copy.
+import { offTheBoardSentence, stillHeldSentence } from '../components/kiosk/heldOperations';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -119,6 +134,39 @@ async function resolveViaDialog() {
   return dialog;
 }
 
+/**
+ * THE TOAST'S VARIANT, not just its words.
+ *
+ * Without these, every assertion in this file passes on a build that fires
+ * `showToast('success', ...)` with the identical long message: the shortfall
+ * would still be printed, in GREEN, with `role="status"` -- which is a green
+ * toast over a job that is still stopped, i.e. the exact defect this suite
+ * exists to prevent, wearing longer words. `warning` renders amber and
+ * interrupts the screen reader with `role="alert"`; `success` renders green and
+ * waits for a pause with `role="status"` (see components/ui/Toast.tsx).
+ */
+function toastPanel(node: HTMLElement): HTMLElement {
+  const panel = node.closest('[role="alert"], [role="status"]');
+  expect(panel).not.toBeNull();
+  return panel as HTMLElement;
+}
+
+/** Amber + `role="alert"`: succeeded, but did not do everything asked. */
+function expectWarningToast(node: HTMLElement): void {
+  const panel = toastPanel(node);
+  expect(panel).toHaveAttribute('role', 'alert');
+  expect(panel.className).toContain('bg-amber-600');
+  expect(panel.className).not.toContain('bg-green-600');
+}
+
+/** Green + `role="status"`: it really did all of it. */
+function expectSuccessToast(node: HTMLElement): void {
+  const panel = toastPanel(node);
+  expect(panel).toHaveAttribute('role', 'status');
+  expect(panel.className).toContain('bg-green-600');
+  expect(panel.className).not.toContain('bg-amber-600');
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
 
@@ -139,12 +187,155 @@ describe('WorkOrderDetail resolve-blocker toast', () => {
 
     await resolveViaDialog();
 
-    await waitFor(() =>
-      expect(mockedApi.resolveWorkOrderBlocker).toHaveBeenCalledWith(7, 'Resolved')
-    );
+    await waitFor(() => expect(mockedApi.resolveWorkOrderBlocker).toHaveBeenCalledWith(7, 'Resolved'));
     // Toast fires after the non-optimistic refetch completes (and the dialog closes).
-    expect(await screen.findByText('Resolved blocker "Material missing"')).toBeInTheDocument();
+    const green = await screen.findByText('Resolved blocker "Material missing"');
+    expect(green).toBeInTheDocument();
+    expectSuccessToast(green);
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('warns instead of celebrating when the operation is STILL on hold', async () => {
+    // The reported defect, exactly: the blocker closed, another one still names
+    // the operation, and the server withheld the resume.
+    mockedApi.resolveWorkOrderBlocker.mockResolvedValue({
+      ...BLOCKER,
+      status: 'resolved',
+      operation_outcome: {
+        operation_id: 900,
+        operation_status: 'on_hold',
+        operation_resumed: false,
+        resume_withheld_reason: 'other_blockers_open',
+        operation_still_held: true,
+        open_blockers: [
+          { id: 8, title: 'Fixture on order', category: 'tooling_missing', severity: 'high', status: 'open' },
+        ],
+      },
+    });
+    renderDetail();
+
+    await resolveViaDialog();
+
+    const toast = await screen.findByText(/STILL on hold/i);
+    expect(toast).toBeInTheDocument();
+    expectWarningToast(toast);
+    // It still says the blocker closed — the write DID succeed.
+    expect(toast.textContent).toContain('Resolved blocker "Material missing"');
+    // ...and it names what is still in the way, verbatim from the server.
+    expect(toast.textContent).toContain('Fixture on order');
+    // ...and BOTH ways off the hold, because naming only one describes half the
+    // exits: close the other blocker, or use the Clear Hold control Release 1 put
+    // on the operation's own row on this page.
+    expect(toast.textContent).toContain('Resolve that one too');
+    expect(toast.textContent).toContain('Clear Hold');
+    // Pinned to the SHARED sentence, not to a paraphrase: if the page ever grows
+    // its own copy of this wording, this fails rather than drifting quietly.
+    expect(toast.textContent).toContain(
+      stillHeldSentence('other_blockers_open', [
+        { id: 8, title: 'Fixture on order', category: 'tooling_missing', severity: 'high', status: 'open' },
+      ])
+    );
+    // Never the plain green line.
+    expect(screen.queryByText('Resolved blocker "Material missing"')).not.toBeInTheDocument();
+  });
+
+  it('counts and names EVERY blocker still in the way', async () => {
+    mockedApi.resolveWorkOrderBlocker.mockResolvedValue({
+      ...BLOCKER,
+      status: 'resolved',
+      operation_outcome: {
+        operation_id: 900,
+        operation_status: 'on_hold',
+        operation_resumed: false,
+        resume_withheld_reason: 'other_blockers_open',
+        operation_still_held: true,
+        open_blockers: [
+          { id: 8, title: 'Fixture on order', category: 'tooling_missing', severity: 'high', status: 'open' },
+          { id: 9, title: 'Awaiting MTR', category: 'material_missing', severity: 'high', status: 'acknowledged' },
+        ],
+      },
+    });
+    renderDetail();
+
+    await resolveViaDialog();
+
+    const toast = await screen.findByText(/STILL on hold/i);
+    expectWarningToast(toast);
+    expect(toast.textContent).toContain('2 other blockers are');
+    expect(toast.textContent).toContain('Fixture on order; Awaiting MTR');
+  });
+
+  it('warns when the hold cleared but the job did not go back on the board', async () => {
+    mockedApi.resolveWorkOrderBlocker.mockResolvedValue({
+      ...BLOCKER,
+      status: 'resolved',
+      operation_outcome: {
+        operation_id: 900,
+        operation_status: 'pending',
+        operation_resumed: true,
+        resume_withheld_reason: null,
+        operation_still_held: false,
+        open_blockers: [],
+      },
+    });
+    renderDetail();
+
+    await resolveViaDialog();
+
+    const toast = await screen.findByText(/did NOT go back on the board/i);
+    expectWarningToast(toast);
+    expect(toast.textContent).toContain('Resolved blocker "Material missing"');
+    expect(toast.textContent).not.toMatch(/still on hold/i);
+    // The SAME sentence the page's Clear Hold prints, from the shared
+    // `offTheBoardSentence` — the shortfall is one server fact, worded once.
+    expect(toast.textContent).toContain(offTheBoardSentence('The hold cleared, but the job'));
+  });
+
+  it('stays green when the operation genuinely came off hold', async () => {
+    mockedApi.resolveWorkOrderBlocker.mockResolvedValue({
+      ...BLOCKER,
+      status: 'resolved',
+      operation_outcome: {
+        operation_id: 900,
+        operation_status: 'ready',
+        operation_resumed: true,
+        resume_withheld_reason: null,
+        operation_still_held: false,
+        open_blockers: [],
+      },
+    });
+    renderDetail();
+
+    await resolveViaDialog();
+
+    const green = await screen.findByText('Resolved blocker "Material missing"');
+    expect(green).toBeInTheDocument();
+    expectSuccessToast(green);
+  });
+
+  it('stays green for a blocker that never held anything', async () => {
+    // `no_operation` is a WITHHELD REASON, but nothing was ever on hold. Warning
+    // here would be a new kind of dishonesty rather than a fix, so the reason
+    // name alone must never drive the warning.
+    mockedApi.resolveWorkOrderBlocker.mockResolvedValue({
+      ...BLOCKER,
+      status: 'resolved',
+      operation_outcome: {
+        operation_id: null,
+        operation_status: null,
+        operation_resumed: false,
+        resume_withheld_reason: 'no_operation',
+        operation_still_held: false,
+        open_blockers: [],
+      },
+    });
+    renderDetail();
+
+    await resolveViaDialog();
+
+    const green = await screen.findByText('Resolved blocker "Material missing"');
+    expect(green).toBeInTheDocument();
+    expectSuccessToast(green);
   });
 
   it('shows the server detail in an error toast when the resolve is refused (existing behavior)', async () => {
@@ -161,8 +352,6 @@ describe('WorkOrderDetail resolve-blocker toast', () => {
     expect(screen.queryByText(/resolved blocker/i)).not.toBeInTheDocument();
     // Wait for the rejection's `finally` to clear the pending state (the
     // dialog's Resolve re-enables) so the update lands inside act().
-    await waitFor(() =>
-      expect(within(dialog).getByRole('button', { name: /^resolve$/i })).toBeEnabled()
-    );
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: /^resolve$/i })).toBeEnabled());
   });
 });

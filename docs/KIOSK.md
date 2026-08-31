@@ -650,10 +650,10 @@ category label, with the category dropped from the line underneath so the panel 
 twice, plus one line saying a written reason exists.
 
 > **Known gap — the kiosk cannot CLEAR a blocker, only resume past one.** For an accidental hold
-> the better outcome is resolving the blocker: that resumes the operation as a side effect
-> (`_resume_operation_if_no_open_blockers`) **and** closes the record, leaving nothing diverging —
-> which is how the owner actually recovered from the incident that motivated this feature. Resuming
-> alone leaves a phantom blocker on the dashboard and the WO Blockers panel for someone to chase.
+> the better outcome is resolving the blocker: that closes the record **and** resumes the operation
+> as a side effect (`_resume_operation_if_no_open_blockers`) — which is how the owner actually
+> recovered from the incident that motivated this feature. Resuming alone leaves a phantom blocker
+> on the dashboard and the WO Blockers panel for someone to chase.
 > The kiosk ships resume-only because `POST /work-order-blockers/{id}/resolve` is unreachable from
 > **both** surfaces behind two independent gates: it requires **ADMIN/MANAGER/SUPERVISOR** (an
 > OPERATOR on the single-operator kiosk, which runs on their own session, gets 403), and
@@ -661,6 +661,19 @@ twice, plus one line saying a written reason exists.
 > crew-station token is 403 there *whatever role the badge holds*. Widening either is an RBAC /
 > security decision, not a frontend one. Until then the copy tells the operator the record stays
 > open and to ask a supervisor to clear it. Revisit if a shop-floor-fenced resolve ever lands.
+>
+> **That side effect is conditional, and the resolve response now says so** — read this before
+> telling an operator "a supervisor will clear it". The resume is withheld outright whenever another
+> OPEN/ACKNOWLEDGED blocker still names the operation (and when the blocker names no operation, when
+> the operation is not `ON_HOLD`, or when its row cannot be loaded), and when it does fire it
+> **restores rather than releases**, so it can land at `PENDING` exactly as above and leave the job
+> off the board. "Resolving closes the record and clears the hold" is therefore true of the ordinary
+> single-blocker case only: on a job held by two blockers, closing one changes nothing on the floor.
+> `POST /work-order-blockers/{id}/resolve` and `PUT /work-order-blockers/{id}` now carry
+> `operation_outcome` for that reason, and the Work Order page raises a `warning` instead of a green
+> toast when the operation is still held or came off hold into `PENDING` (see `docs/API.md` →
+> "Closing a blocker now SAYS what it did to the operation"). **Nothing about when the resume fires,
+> or where it lands, changed** — only what the caller is told.
 
 **Fold (2026-08-12, measured on the real pages; worst case — long blocker note AND the truncation
 banner showing):** every control clears both tablet orientations. The **crew** rows are now

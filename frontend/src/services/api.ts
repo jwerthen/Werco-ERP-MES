@@ -84,6 +84,7 @@ import {
   WorkOrderBlocker,
   WorkOrderBlockerInput,
   WorkOrderBlockerStatus,
+  WorkOrderBlockerWriteResult,
 } from '../types/aiForward';
 import { AIUsageSummaryResponse } from '../types/aiUsage';
 import { DisplayToken, DisplayTokenCreateInput, DisplayTokenIssued, SetupCodeResponse } from '../types/wallboard';
@@ -1624,16 +1625,22 @@ class ApiService {
     return response.data;
   }
 
+  /**
+   * Both write verbs return `operation_outcome` — what the write did to the
+   * blocker's OPERATION — because either one can resume it (dismiss runs the same
+   * side effect resolve does) and neither used to say so. Never report one of
+   * these as a plain success without asking `resolveBlockerOutcome` first.
+   */
   async updateWorkOrderBlocker(
     blockerId: number,
     data: Partial<Pick<WorkOrderBlocker, 'status' | 'severity' | 'assigned_to' | 'resolution_note'>>
-  ): Promise<WorkOrderBlocker> {
-    const response = await this.api.put<WorkOrderBlocker>(`/work-order-blockers/${blockerId}`, data);
+  ): Promise<WorkOrderBlockerWriteResult> {
+    const response = await this.api.put<WorkOrderBlockerWriteResult>(`/work-order-blockers/${blockerId}`, data);
     return response.data;
   }
 
-  async resolveWorkOrderBlocker(blockerId: number, resolutionNote?: string): Promise<WorkOrderBlocker> {
-    const response = await this.api.post<WorkOrderBlocker>(`/work-order-blockers/${blockerId}/resolve`, {
+  async resolveWorkOrderBlocker(blockerId: number, resolutionNote?: string): Promise<WorkOrderBlockerWriteResult> {
+    const response = await this.api.post<WorkOrderBlockerWriteResult>(`/work-order-blockers/${blockerId}/resolve`, {
       resolution_note: resolutionNote,
     });
     return response.data;

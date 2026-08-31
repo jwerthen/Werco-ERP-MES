@@ -56,7 +56,10 @@ import {
   holdReasonLabel,
   holdSeverityLabel,
   holdTitleText,
-  openBlockerLine,
+  namedOpenBlockers,
+  offTheBoardSentence,
+  resolveBlockerOutcome,
+  stillHeldSentence,
 } from '../components/kiosk/heldOperations';
 import { sortWorkCentersForLaserDispatch } from '../utils/laserWorkCenters';
 import {
@@ -1630,19 +1633,81 @@ export default function WorkOrderDetail() {
     }
   };
 
-  // Replaced the native prompt() note capture with the shared InputDialog. The
-  // Resolve button opens the dialog; submit resolves with the entered (trimmed,
-  // non-empty) note, non-optimistically — the dialog stays open and pending
-  // until the server answers, and closes only on success.
+  /**
+   * RESOLVE A BLOCKER -- and say what that did to the OPERATION.
+   *
+   * The bug this closes: resolving a blocker fired an unconditional green
+   * "Resolved blocker" toast. An owner cleared a blocker on a held laser nest,
+   * read the green toast, and the operation was still ON_HOLD -- because a second
+   * blocker still named it and the server withheld the resume. The 200 could not
+   * express that, so the page could not either.
+   *
+   * It can now: `operation_outcome` on the response accounts for the operation.
+   * Two of its three states earn `warning` -- the repo's documented "succeeded but
+   * did not do everything asked" variant:
+   *
+   * 1. `operation_still_held` -- a resume was OWED and withheld. The blocker IS
+   *    closed (green would not be a lie about the blocker), but the job is still
+   *    stopped, which is the thing the person actually came here to change.
+   * 2. resumed but `operation_status === 'pending'` -- the hold really lifted, and
+   *    the job still did not return to the dispatch board or the kiosk (both
+   *    surface READY work only). "Resolved" alone sends the shop looking for a
+   *    card that is not going to appear.
+   *
+   * `warning`, never `error`: the write SUCCEEDED. Claiming a failure would send
+   * someone hunting for a blocker that is, in fact, closed.
+   *
+   * The JUDGEMENT comes from the shared `resolveBlockerOutcome`, not from
+   * re-reading `operation_still_held` here -- the same discipline `clearHoldOutcome`
+   * enforces across the three screens that clear a hold. THE WORDS ARE SHARED TOO:
+   * `stillHeldSentence` and `offTheBoardSentence` live beside those verdicts in
+   * heldOperations.ts, and the second of them is the very sentence Clear Hold
+   * prints two handlers below -- one server fact, one explanation. Both shortfalls
+   * compose into ONE toast: two toasts for one click read as two things going
+   * wrong.
+   *
+   * A blocker that never held anything (no operation, or an operation that was not
+   * on hold) reports `fellShort: false` and keeps the plain success toast. Warning
+   * there would be a new kind of dishonesty, not a fix.
+   *
+   * Non-optimistic throughout, as before: the shared InputDialog stays open and
+   * pending until the server answers, and closes only on success.
+   */
   const handleResolveBlocker = async (note: string) => {
     const blocker = resolveBlockerTarget;
     if (!blocker || resolvingBlockerId !== null) return;
     setResolvingBlockerId(blocker.id);
     try {
-      await api.resolveWorkOrderBlocker(blocker.id, note);
+      const result = await api.resolveWorkOrderBlocker(blocker.id, note);
       await loadWorkOrder();
       setResolveBlockerTarget(null);
-      showToast('success', `Resolved blocker "${blocker.title}"`);
+
+      const {
+        stillHeld,
+        landedPending,
+        openBlockers: open,
+        withheldReason,
+        fellShort,
+      } = resolveBlockerOutcome(result);
+      if (!fellShort) {
+        showToast('success', `Resolved blocker "${blocker.title}"`);
+        return;
+      }
+      // Both sentences come from the shared vocabulary, not from prose typed
+      // here: `stillHeldSentence` is the one exhaustive reader of the server's
+      // closed reason list, and `offTheBoardSentence` is the SAME explanation
+      // Clear Hold prints two handlers below. One rule, one place -- a second
+      // copy is how one page ends up describing one server answer two ways.
+      //
+      // A LIST, though the two are mutually exclusive today: `operation_still_held`
+      // means the row is ON_HOLD after the call and `landedPending` requires a
+      // resume to have happened, so the server cannot report both. Collecting them
+      // means a server that someday can is reported in full rather than having one
+      // half silently dropped -- the failure mode this whole change exists to end.
+      const shortfalls: string[] = [];
+      if (stillHeld) shortfalls.push(stillHeldSentence(withheldReason, open));
+      if (landedPending) shortfalls.push(offTheBoardSentence('The hold cleared, but the job'));
+      showToast('warning', `Resolved blocker "${blocker.title}". ${shortfalls.join(' ')}`);
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to resolve blocker');
     } finally {
@@ -1709,16 +1774,16 @@ export default function WorkOrderDetail() {
       // is how three screens end up disagreeing about one server answer.
       const { landedPending, openBlockers: open, fellShort } = clearHoldOutcome(result);
       const shortfalls: string[] = [];
-      if (landedPending) {
-        shortfalls.push(
-          'It did NOT go back on the board \u2014 it is Pending again, so it will not show on the dispatch ' +
-            'board or at the kiosk until the work order is released and any earlier operations are finished.'
-        );
-      }
+      // `offTheBoardSentence` is shared with the resolve-a-blocker handler above:
+      // both verbs can leave a resume floored at PENDING, and that is ONE fact
+      // about the server, so it is worded in ONE place. The subject is the only
+      // difference the two call sites earn -- this toast has already named the
+      // operation, so it can say "It".
+      if (landedPending) shortfalls.push(offTheBoardSentence());
       if (open.length > 0) {
         shortfalls.push(
           `${open.length === 1 ? 'A blocker is' : `${open.length} blockers are`} still open ` +
-            `(${open.map(openBlockerLine).join('; ')}). Clearing a hold does not close a blocker \u2014 ` +
+            `(${namedOpenBlockers(open)}). Clearing a hold does not close a blocker \u2014 ` +
             'a supervisor or manager closes it in the Blockers panel.'
         );
       }

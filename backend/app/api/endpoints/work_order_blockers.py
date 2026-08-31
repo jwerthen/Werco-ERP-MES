@@ -10,19 +10,22 @@ from app.db.database import get_db
 from app.models.user import User, UserRole
 from app.models.work_order_blocker import WorkOrderBlocker
 from app.schemas.work_order_blocker import (
+    BlockerOperationOutcome,
+    OperationOpenBlocker,
     WorkOrderBlockerCreate,
     WorkOrderBlockerResolve,
     WorkOrderBlockerResponse,
     WorkOrderBlockerUpdate,
+    WorkOrderBlockerWriteResponse,
 )
 from app.services.audit_service import AuditService
-from app.services.work_order_blocker_service import WorkOrderBlockerService
+from app.services.work_order_blocker_service import BlockerResumeOutcome, WorkOrderBlockerService
 
 router = APIRouter()
 
 
-def _to_response(blocker: WorkOrderBlocker) -> WorkOrderBlockerResponse:
-    return WorkOrderBlockerResponse(
+def _response_fields(blocker: WorkOrderBlocker) -> dict:
+    return dict(
         id=blocker.id,
         company_id=blocker.company_id,
         work_order_id=blocker.work_order_id,
@@ -45,6 +48,56 @@ def _to_response(blocker: WorkOrderBlocker) -> WorkOrderBlockerResponse:
         work_order_number=blocker.work_order.work_order_number if blocker.work_order else None,
         operation_name=blocker.operation.name if blocker.operation else None,
         material_part_number=blocker.material_part.part_number if blocker.material_part else None,
+    )
+
+
+def _to_response(blocker: WorkOrderBlocker) -> WorkOrderBlockerResponse:
+    return WorkOrderBlockerResponse(**_response_fields(blocker))
+
+
+def _to_write_response(
+    blocker: WorkOrderBlocker, outcome: Optional[BlockerOperationOutcome]
+) -> WorkOrderBlockerWriteResponse:
+    """The blocker row every caller already got, plus what the write did to its operation."""
+    return WorkOrderBlockerWriteResponse(**_response_fields(blocker), operation_outcome=outcome)
+
+
+def _operation_outcome(resume: Optional[BlockerResumeOutcome]) -> Optional[BlockerOperationOutcome]:
+    """Turn the service's resume outcome into the wire shape. PURE READ, no writes.
+
+    ``None`` in, ``None`` out: the call did not leave the blocker RESOLVED or
+    DISMISSED, so no resume was attempted and there is nothing to account for.
+    That is a THIRD state, distinct from "attempted and withheld" -- see
+    ``WorkOrderBlockerWriteResponse``.
+
+    CALL THIS BEFORE ``db.commit()``. Every value here is already final (the
+    service flushed), and snapshotting them into plain Python now means the
+    response cannot depend on re-loading rows that ``commit()`` expires.
+
+    ``open_blockers`` deliberately reuses the resume payload's shape without its
+    two free-text-gate fields -- see ``OperationOpenBlocker`` for the verification
+    that the gate cannot apply on this router.
+    """
+    if resume is None:
+        return None
+    return BlockerOperationOutcome(
+        # Read off the BLOCKER, not the operation row: in the OPERATION_MISSING
+        # case the blocker still names an operation there is no row to ask.
+        operation_id=resume.operation_id,
+        operation_status=resume.operation_status,
+        operation_resumed=resume.resumed,
+        resume_withheld_reason=resume.withheld_reason,
+        operation_still_held=resume.operation_still_held,
+        open_blockers=[
+            OperationOpenBlocker(
+                id=other.id,
+                title=other.title,
+                category=other.category,
+                severity=other.severity,
+                status=other.status,
+            )
+            for other in resume.other_open_blockers
+        ],
     )
 
 
@@ -130,7 +183,7 @@ def create_work_order_blocker(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.put("/{blocker_id}", response_model=WorkOrderBlockerResponse)
+@router.put("/{blocker_id}", response_model=WorkOrderBlockerWriteResponse)
 def update_work_order_blocker(
     blocker_id: int,
     data: WorkOrderBlockerUpdate,
@@ -139,22 +192,31 @@ def update_work_order_blocker(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Acknowledge, assign, dismiss, or update a blocker without losing the original operator signal."""
+    """Acknowledge, assign, dismiss, or update a blocker without losing the original operator signal.
+
+    Carries ``operation_outcome`` for the same reason ``/resolve`` does, and it is
+    not a courtesy: DISMISSING a blocker runs the identical resume side effect
+    through the identical ``update_blocker`` body, so a caller of THIS verb could
+    be misled in exactly the same way. ``null`` on an acknowledge or an assign --
+    no resume was attempted there.
+    """
     service = WorkOrderBlockerService(db)
     try:
-        blocker = service.update_blocker(
+        blocker, resume = service.update_blocker_with_outcome(
             company_id=company_id, user=current_user, blocker_id=blocker_id, data=data, audit=audit
         )
+        # Snapshotted BEFORE the commit that expires these rows -- see _operation_outcome.
+        outcome = _operation_outcome(resume)
         db.commit()
         db.refresh(blocker)
         _broadcast_blocker(blocker, "work_order_blocker_updated")
-        return _to_response(blocker)
+        return _to_write_response(blocker, outcome)
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/{blocker_id}/resolve", response_model=WorkOrderBlockerResponse)
+@router.post("/{blocker_id}/resolve", response_model=WorkOrderBlockerWriteResponse)
 def resolve_work_order_blocker(
     blocker_id: int,
     data: WorkOrderBlockerResolve,
@@ -163,20 +225,32 @@ def resolve_work_order_blocker(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Resolve a blocker and release its operation if no other blockers remain."""
+    """Resolve a blocker and release its operation if no other blockers remain.
+
+    "IF NO OTHER BLOCKERS REMAIN" IS THE WHOLE PROBLEM, and this response now says
+    which way it went. A 200 here used to be indistinguishable between a resolve
+    that took the job off hold and one that left it exactly as it was, so the page
+    fired a green toast over an operation that was still ON_HOLD. Read
+    ``operation_outcome``: ``operation_still_held`` means a resume was owed and
+    withheld, and ``operation_resumed`` with ``operation_status == "pending"``
+    means the hold cleared but the job did NOT return to the dispatch board or the
+    kiosk (both surface READY only).
+    """
     service = WorkOrderBlockerService(db)
     try:
-        blocker = service.resolve_blocker(
+        blocker, resume = service.resolve_blocker_with_outcome(
             company_id=company_id,
             user=current_user,
             blocker_id=blocker_id,
             resolution_note=data.resolution_note,
             audit=audit,
         )
+        # Snapshotted BEFORE the commit that expires these rows -- see _operation_outcome.
+        outcome = _operation_outcome(resume)
         db.commit()
         db.refresh(blocker)
         _broadcast_blocker(blocker, "work_order_blocker_resolved")
-        return _to_response(blocker)
+        return _to_write_response(blocker, outcome)
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=404, detail=str(exc)) from exc
