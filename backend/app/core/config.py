@@ -384,6 +384,33 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("MAX_JSON_BODY_BYTES", "MAX_SANITIZED_JSON_BODY_BYTES"),
     )
 
+    # MCP (Model Context Protocol) door -- app/mcp, docs/MCP.md. OFF by default: with
+    # WERCO_MCP_HTTP_ENABLED false nothing is mounted and the API is byte-identical to
+    # a build without the package. When on, a Streamable HTTP endpoint is served at
+    # WERCO_MCP_HTTP_PATH that dispatches every tool call back INTO this app as the
+    # caller's own user (bearer JWT; same RBAC, tenancy and audit as the SPA). It is
+    # stateless by construction, so it is safe behind WEB_CONCURRENCY>1.
+    WERCO_MCP_HTTP_ENABLED: bool = False
+    WERCO_MCP_HTTP_PATH: str = "/mcp"
+    # Characters of one tool result's text before it is truncated with a note.
+    WERCO_MCP_MAX_RESULT_CHARS: int = 200_000
+    # Bytes of a binary response (PDF / XLSX / CSV) returned inline as a base64 blob;
+    # over it the tool answers "download it from the UI".
+    WERCO_MCP_MAX_BLOB_BYTES: int = 5_000_000
+    # Bytes of one MCP request envelope at the door. A nest PDF arrives base64-encoded
+    # INSIDE the JSON-RPC body, so MAX_JSON_BODY_BYTES is waived for the door path and
+    # this cap bounds it instead (413 over it); on stdio it bounds one decoded file.
+    WERCO_MCP_MAX_UPLOAD_BYTES: int = 25_000_000
+
+    @field_validator("WERCO_MCP_HTTP_PATH")
+    @classmethod
+    def validate_mcp_http_path(cls, v: str) -> str:
+        """An absolute, non-root path with no trailing slash (the door is an exact Route)."""
+        path = (v or "").strip().rstrip("/")
+        if not path.startswith("/") or path == "":
+            raise ValueError("WERCO_MCP_HTTP_PATH must be an absolute path such as /mcp")
+        return path
+
     # CORS - Include localhost for dev; production origins must be set via env var
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:8000"
     CORS_ALLOW_CREDENTIALS: bool = True

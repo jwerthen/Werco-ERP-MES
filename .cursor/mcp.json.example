@@ -1,0 +1,25 @@
+{
+  "_comment": "Copy to .cursor/mcp.json (git-ignored) and fill in the placeholders. Keep ONE of the two entries. See docs/MCP.md.",
+  "mcpServers": {
+    "werco-erp": {
+      "_comment": "Streamable HTTP door on the API host. Requires WERCO_MCP_HTTP_ENABLED=true on the server. The token is a normal 15-minute ERP access token for a real user (a dedicated Manager such as 'Werco Assistant' is recommended); refresh it with POST /api/v1/auth/refresh or log in again when calls start answering 401.",
+      "url": "https://<your-api-host>/mcp",
+      "headers": {
+        "Authorization": "Bearer <ERP_ACCESS_TOKEN>"
+      }
+    },
+    "werco-erp-stdio": {
+      "_comment": "Local bridge: Cursor spawns `python -m app.mcp`, which speaks MCP on stdio and calls the deployed API over HTTPS. Set EITHER an access + refresh token pair OR an email + password; the bridge refreshes / re-logs-in on 401 by itself. Leave WERCO_ERP_URL unset only to dispatch into a local database (dev).",
+      "command": "/absolute/path/to/Werco-ERP-MES/backend/.venv311/bin/python",
+      "args": ["-m", "app.mcp"],
+      "cwd": "/absolute/path/to/Werco-ERP-MES/backend",
+      "env": {
+        "WERCO_ERP_URL": "https://<your-api-host>",
+        "WERCO_ERP_EMAIL": "<assistant-user@yourshop.com>",
+        "WERCO_ERP_PASSWORD": "<password>",
+        "WERCO_ERP_TOKEN": "",
+        "WERCO_ERP_REFRESH_TOKEN": ""
+      }
+    }
+  }
+}

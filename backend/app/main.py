@@ -1,6 +1,6 @@
 # Werco ERP Main Application - v1.0.1
 import logging
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, Request, status
@@ -423,7 +423,17 @@ async def lifespan(app: FastAPI):
     # Seed quote configuration if needed (skip in tests to speed startup)
     if settings.ENVIRONMENT != "test":
         seed_quote_config_if_needed()
-    yield
+    # MCP HTTP door (app/mcp). The SDK's session manager runs in a task group that
+    # must live as long as the app, and Starlette never runs a sub-application's
+    # lifespan, so it is entered here. app.state.mcp_door is set by mount_mcp() at the
+    # bottom of this module ONLY when WERCO_MCP_HTTP_ENABLED is true; otherwise the
+    # stack below holds nothing and this is a no-op.
+    async with AsyncExitStack() as startup_stack:
+        mcp_door = getattr(app.state, "mcp_door", None)
+        if mcp_door is not None:
+            await startup_stack.enter_async_context(mcp_door.lifespan())
+            logger.info(f"MCP door serving at {settings.WERCO_MCP_HTTP_PATH}")
+        yield
     # Shutdown
     logger.info(f"Shutting down {settings.APP_NAME}...")
 
@@ -754,6 +764,15 @@ async def limit_json_body_size(request: Request, call_next):
     # middleware for them — this stays FIRST so neither gate below reads or rejects
     # them. Prefix match because the path carries {provider}.
     if request.url.path.startswith(f"{settings.API_V1_PREFIX}/webhooks/carriers/"):
+        return await call_next(request)
+
+    # The MCP door (app/mcp/http.py) carries file uploads base64-encoded INSIDE its
+    # JSON-RPC envelope, so this cap would refuse the same nest PDF the multipart route
+    # accepts. The door bounds its own body instead, with the SDK's
+    # RequestBodyLimitMiddleware at WERCO_MCP_MAX_UPLOAD_BYTES (413 over it, before
+    # parsing). Exact match: the door is a Route at that path, not a Mount, and the
+    # exemption exists only while the door is actually mounted.
+    if settings.WERCO_MCP_HTTP_ENABLED and request.url.path == settings.WERCO_MCP_HTTP_PATH:
         return await call_next(request)
 
     # JSON bodies only: multipart/UploadFile paths (every CSV/XLSX bulk import) are
@@ -1296,6 +1315,13 @@ app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 from app.api.websocket import router as websocket_router
 
 app.include_router(websocket_router, prefix=settings.API_V1_PREFIX, tags=["WebSocket"])
+
+# MCP door (app/mcp). Mounted AFTER every router so the tool catalog it derives from
+# app.openapi() sees the whole API. A no-op unless WERCO_MCP_HTTP_ENABLED is true (the
+# default is false); when mounted, the lifespan above enters its session manager.
+from app.mcp.http import mount_mcp
+
+mount_mcp(app)
 
 
 if __name__ == "__main__":
