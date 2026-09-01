@@ -1268,8 +1268,22 @@ class TestTheSkipEnvelope:
         assert response.status_code == status.HTTP_201_CREATED, response.text
         body = response.json()
 
-        # The SAME envelope keys the duplicate endpoint returns.
-        assert set(body) == {"work_order", "skipped_operations", "skipped_material_allocations"}
+        # A strict SUPERSET of the envelope the duplicate endpoint returns: every key the
+        # shared result view dereferences is still present and still means the same thing,
+        # with the batch pair beside them. Still an EXACT set, because a key quietly
+        # disappearing is what this assertion is really for -- the two skip lists are the
+        # only surface that names what a copy could not carry across.
+        assert set(body) == {
+            "work_order",
+            "skipped_operations",
+            "skipped_material_allocations",
+            "work_orders",
+            "created_count",
+        }
+        # A use with no ``count`` is a batch of one, on one code path: the singular field
+        # IS the list's only entry rather than a second serialization of the same row.
+        assert body["created_count"] == 1
+        assert body["work_orders"] == [body["work_order"]]
         assert body["skipped_operations"] == []
         assert body["skipped_material_allocations"] == [
             {

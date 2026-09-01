@@ -50,7 +50,12 @@ import { MemoryRouter } from 'react-router-dom';
 import WorkOrderTemplatesPanel from './WorkOrderTemplatesPanel';
 import api from '../../services/api';
 import { ToastProvider } from '../ui';
-import type { WorkOrderDuplicateResult, WorkOrderTemplate, WorkOrderTemplatePlan } from '../../types';
+import type {
+  WorkOrder,
+  WorkOrderTemplate,
+  WorkOrderTemplatePlan,
+  WorkOrderTemplateUseResult,
+} from '../../types';
 
 jest.mock('../../services/api', () => ({
   __esModule: true,
@@ -150,24 +155,33 @@ const REASONLESS_TEMPLATE = makeTemplate({
   plan: makePlan({ available: false, unavailable_reason: null }),
 });
 
-const ENVELOPE: WorkOrderDuplicateResult = {
-  work_order: {
-    id: 501,
-    version: 1,
-    work_order_number: 'WO-20260825-002',
-    part_id: 10,
-    work_order_type: 'production',
-    quantity_ordered: 12,
-    quantity_complete: 0,
-    quantity_scrapped: 0,
-    status: 'draft',
-    priority: 3,
-    estimated_hours: 0,
-    actual_hours: 0,
-    created_at: '2026-08-25T12:00:00Z',
-    updated_at: '2026-08-25T12:00:00Z',
-    operations: [],
-  },
+const CREATED_WORK_ORDER: WorkOrder = {
+  id: 501,
+  version: 1,
+  work_order_number: 'WO-20260825-002',
+  part_id: 10,
+  work_order_type: 'production',
+  quantity_ordered: 12,
+  quantity_complete: 0,
+  quantity_scrapped: 0,
+  status: 'draft',
+  priority: 3,
+  estimated_hours: 0,
+  actual_hours: 0,
+  created_at: '2026-08-25T12:00:00Z',
+  updated_at: '2026-08-25T12:00:00Z',
+  operations: [],
+};
+
+/**
+ * The USE envelope — a STRICT SUPERSET of the duplicate one (the server schema
+ * subclasses it), so `work_orders[0]` IS `work_order` and a single use reports
+ * `created_count: 1` rather than omitting the fields.
+ */
+const ENVELOPE: WorkOrderTemplateUseResult = {
+  work_order: CREATED_WORK_ORDER,
+  created_count: 1,
+  work_orders: [CREATED_WORK_ORDER],
   skipped_operations: [],
   skipped_material_allocations: [],
 };

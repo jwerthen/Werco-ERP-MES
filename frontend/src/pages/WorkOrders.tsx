@@ -50,6 +50,7 @@ import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
 import DuplicateWorkOrderModal from '../components/workorders/DuplicateWorkOrderModal';
 import SaveAsTemplateModal from '../components/workorders/SaveAsTemplateModal';
+import { createdWorkOrders } from '../components/workorders/UseTemplateModal';
 import WorkOrderTemplatesPanel from '../components/workorders/WorkOrderTemplatesPanel';
 
 const priorityConfig: Record<number, { bg: string; text: string; label: string }> = {
@@ -1420,9 +1421,26 @@ export default function WorkOrders() {
         {pageHeader}
         {tabStrip}
         <WorkOrderTemplatesPanel
-          // A template's output is a DRAFT nobody has reviewed, so the hand-off
-          // is the same as Duplicate's: land on the new work order.
-          onUsed={(result) => navigate(`/work-orders/${result.work_order.id}`)}
+          // ONE copy: a template's output is a DRAFT nobody has reviewed, so the
+          // hand-off is the same as Duplicate's — land on the new work order.
+          //
+          // SEVERAL: there is nowhere single to go. Five drafts have five
+          // numbers, and picking one to navigate to would silently make the
+          // other four the ones the planner did not see. The dialog is the
+          // surface that names them all (its number → Unit # table); this side
+          // just refreshes the list behind it, so switching to All work orders
+          // shows the new drafts instead of a set that predates them.
+          onUsed={(result) => {
+            // The single/batch fallback lives with the envelope it reads, not
+            // here: `work_orders[0]` IS `work_order`, and a second copy of that
+            // rule is a second place for it to be got wrong.
+            const created = createdWorkOrders(result);
+            if (created.length === 1) {
+              navigate(`/work-orders/${created[0].id}`);
+              return;
+            }
+            void loadWorkOrders();
+          }}
           // A template whose source work order was deleted still WORKS (it reads the
           // plan through the tombstone), so the panel's note about it is context, not
           // a remedy — but "where did that job go?" is a real question and the Deleted

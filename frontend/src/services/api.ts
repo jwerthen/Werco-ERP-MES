@@ -47,6 +47,7 @@ import {
   WorkOrderTemplateListResult,
   WorkOrderTemplateUpdatePayload,
   WorkOrderTemplateUsePayload,
+  WorkOrderTemplateUseResult,
   InventoryTransaction,
   InventoryTransactionParams,
   ResumeOperationResult,
@@ -1120,26 +1121,38 @@ class ApiService {
   }
 
   /**
-   * Run the saved plan again: a new work order number, a new due date, **DRAFT**.
+   * Run the saved plan again — ONE new work order, or several, each with its own
+   * number and its own copy of the plan. New number(s), a new due date, **DRAFT**.
    *
-   * Returns the very same `WorkOrderDuplicateResult` envelope
-   * `duplicateWorkOrder` does — the skip lists are the point, and both dialogs
-   * render them through one shared view.
+   * Returns a STRICT SUPERSET of the `WorkOrderDuplicateResult` envelope
+   * `duplicateWorkOrder` returns — the skip lists are the point, and both dialogs
+   * render them through one shared view — plus `created_count` / `work_orders`
+   * for the batch. `work_orders[0]` is `work_order`.
    *
-   * Both body fields are optional. `due_date` is sent as an explicit `null` when
-   * blank rather than omitted: unscheduled is a decision, and the source's date is
-   * never inherited.
+   * Every body field is optional, and the omit-vs-null discipline here is
+   * load-bearing rather than tidy:
+   *
+   *  - `due_date` is sent as an explicit `null` when blank rather than omitted:
+   *    unscheduled is a decision, and the source's date is never inherited.
+   *  - `quantity_ordered` is OMITTED when undefined, not nulled. Omitted is what
+   *    lets the server resolve the template's default and then the source work
+   *    order's quantity; `null` would fail its `gt=0` validator instead of
+   *    falling through to that resolution.
+   *  - `count` is OMITTED when it is 1 and `unit_numbers` when the list is
+   *    empty, so a single use puts EXACTLY the bytes on the wire it always has.
+   *    The body is `extra="forbid"`, and the one-at-a-time path is the one every
+   *    existing test and every deployed client already exercises: it should not
+   *    start carrying new keys because a batch feature exists beside it.
    */
   async useWorkOrderTemplate(
     id: number,
     data: WorkOrderTemplateUsePayload = {}
-  ): Promise<WorkOrderDuplicateResult> {
+  ): Promise<WorkOrderTemplateUseResult> {
     const body: WorkOrderTemplateUsePayload = { due_date: data.due_date ?? null };
-    // Omitted, not null: the server resolves the quantity from the template's
-    // default and then the source work order, and `null` would fail its `gt=0`
-    // validator instead of falling through to that resolution.
     if (data.quantity_ordered !== undefined) body.quantity_ordered = data.quantity_ordered;
-    const response = await this.api.post<WorkOrderDuplicateResult>(`/work-order-templates/${id}/use`, body);
+    if (data.count !== undefined && data.count !== 1) body.count = data.count;
+    if (data.unit_numbers !== undefined && data.unit_numbers.length > 0) body.unit_numbers = data.unit_numbers;
+    const response = await this.api.post<WorkOrderTemplateUseResult>(`/work-order-templates/${id}/use`, body);
     return response.data;
   }
 

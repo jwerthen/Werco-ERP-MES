@@ -680,12 +680,58 @@ export interface WorkOrderTemplateUpdatePayload {
 }
 
 /**
- * Body for `POST /work-order-templates/{id}/use`. BOTH fields are optional — that
+ * Body for `POST /work-order-templates/{id}/use`. EVERY field is optional — that
  * is what makes the click-once case click-once — and extra fields are forbidden.
+ *
+ * `count` is how many SEPARATE work orders to create, each with its own number
+ * and its own copy of the plan. `quantity_ordered` is then the quantity of EACH
+ * one, not a total to divide between them: a weld assembly is built one unit per
+ * work order, which is the whole reason this field exists. A nest-bearing
+ * template refuses `count > 1` (409) — a laser job's quantity is DEFINED as the
+ * sum of its nests' planned runs, so "more of it" means more runs, not more work
+ * orders.
+ *
+ * `unit_numbers` is one entry per created work order, IN CREATION ORDER, so
+ * `unit_numbers[0]` lands on `work_orders[0]`. Its length must equal `count` or
+ * the server refuses 422; `null` (or a blank string, which the server trims to
+ * null) is a legal entry for a work order that has no unit yet, so a gap in the
+ * planner's list stays expressible. Repeated non-blank values are refused —
+ * a unit number identifies one physical build — but only WITHIN the request:
+ * `work_orders.unit_number` carries no unique constraint, because a rework work
+ * order legitimately re-uses the unit it is reworking.
  */
 export interface WorkOrderTemplateUsePayload {
   quantity_ordered?: number;
   due_date?: string | null;
+  count?: number;
+  unit_numbers?: (string | null)[];
+}
+
+/**
+ * `POST /work-order-templates/{id}/use`.
+ *
+ * A STRICT SUPERSET of the duplicate envelope, mirroring the server schema,
+ * which subclasses `WorkOrderDuplicateResponse` for the same reason: every
+ * existing reader of `result.work_order` keeps compiling and keeps being right.
+ * `work_orders[0]` IS `work_order` — the batch did not invent a second shape,
+ * it added the rest of the list beside the first one.
+ *
+ * `skipped_operations` / `skipped_material_allocations` on the envelope are the
+ * UNION across every copy, deduped by source id: the copies run the same plan,
+ * so an omission is a property of the PLAN and applies to all of them. A caller
+ * rendering them for a batch must say so rather than let them read as news about
+ * the first work order alone.
+ *
+ * Both new fields are REQUIRED here because the server stamps them for a single
+ * use too — one code path, so `created_count` is 1 and `work_orders` has one
+ * entry rather than the fields being absent. Readers still guard on the list
+ * being non-empty and fall back to `work_order`, which costs nothing and keeps
+ * a truncated or hand-built envelope from blanking the result view.
+ */
+export interface WorkOrderTemplateUseResult extends WorkOrderDuplicateResult {
+  created_count: number;
+  /** Creation order, so it lines up with the `unit_numbers` that were sent. */
+  work_orders: WorkOrder[];
 }
 
 export interface LaserNestPackagePreview {

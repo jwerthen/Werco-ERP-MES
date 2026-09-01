@@ -11,6 +11,7 @@ from app.core.validation import (
     Money,
     MoneySmall,
     OperationNumber,
+    UnitNumber,
 )
 from app.models.work_order import OperationStatus, WorkOrderStatus, WorkOrderType
 from app.schemas.base import UTCModel
@@ -662,7 +663,13 @@ class WorkOrderBase(UTCModel):
     # everywhere and rendered only when set, so a work order without one looks exactly
     # as it did before migration 083. NOT related to ``serial_numbers`` below, which is
     # the per-unit LIST that switches a work order into per-serial step capture.
-    unit_number: Optional[str] = Field(None, max_length=50, description="Unit # this work order builds")
+    #
+    # ``UnitNumber`` (core.validation) carries the String(50) cap AND the trim-to-NULL
+    # rule, so a blank never reaches the column. ``WorkOrderResponse`` inherits this
+    # base, which means a LEGACY row that already holds ``""`` also serialises as null
+    # -- the same normalisation the wallboard's ``wo.unit_number or None`` was written
+    # to do by hand.
+    unit_number: Optional[UnitNumber] = Field(None, description="Unit # this work order builds")
     notes: Optional[str] = Field(None, max_length=2000)
     special_instructions: Optional[str] = Field(None, max_length=2000)
     # 081. Defaults TRUE here, which is the CREATE-side default: a new work order is a
@@ -774,7 +781,13 @@ class WorkOrderUpdate(BaseModel):
     due_date: Optional[date] = None
     customer_name: Optional[str] = Field(None, max_length=255)
     customer_po: Optional[str] = Field(None, max_length=50)
-    unit_number: Optional[str] = Field(None, max_length=50)
+    # Trim-to-NULL via ``UnitNumber``, and this is the site the rule was written for:
+    # ``update_work_order`` applies the body through a blind ``setattr`` loop over
+    # ``model_dump(exclude_unset=True)``, so clearing the field in the UI -- which sends
+    # ``""``, not ``null`` -- used to persist an empty string. ``""`` is still an
+    # explicitly-set key, so it still reaches the loop and still CLEARS the column; the
+    # only difference is that it now writes NULL, which is what every reader expects.
+    unit_number: Optional[UnitNumber] = None
     notes: Optional[str] = Field(None, max_length=2000)
     special_instructions: Optional[str] = Field(None, max_length=2000)
     quantity_complete: Optional[Decimal] = Field(None, ge=Decimal("0"))

@@ -1,8 +1,8 @@
 # Work Order Templates — a named catalog of jobs the shop re-runs
 
-**Date:** 2026-08-25 · **Amended:** 2026-08-27 — a template whose source work order was deleted now **reads through the tombstone and still works** (owner decision; see [A deleted source does not stop a template](#a-deleted-source-does-not-stop-a-template)). Anything you read elsewhere claiming it is flagged unavailable and refused 409 predates that amendment.
+**Date:** 2026-08-25 · **Amended:** 2026-08-27 — a template whose source work order was deleted now **reads through the tombstone and still works** (owner decision; see [A deleted source does not stop a template](#a-deleted-source-does-not-stop-a-template)). Anything you read elsewhere claiming it is flagged unavailable and refused 409 predates that amendment. · **Amended:** 2026-09-01 — one use can create **up to 20 separate DRAFT work orders**, each with its own Unit #, in one all-or-nothing call (see [Running several at once](#running-several-at-once--one-unit-per-work-order)). Anything claiming `…/use` creates exactly one work order, or returns the `WorkOrderDuplicateResponse` envelope unchanged, predates that amendment.
 **Status:** shipped on `feat/work-order-templates` (`0bfda8b`) — backend (migration `087`, one new table, one new router) plus the Templates tab on `/work-orders`
-**Feature:** A named, searchable list of the jobs this shop runs over and over. Picking one produces a new **DRAFT** work order with the same plan — through the *existing* duplicate engine, with the *existing* role gate, and reaching no dispatch board until a planner releases it.
+**Feature:** A named, searchable list of the jobs this shop runs over and over. Picking one produces a new **DRAFT** work order with the same plan — or several, one per unit, each with its own number and its own Unit # — through the *existing* duplicate engine, with the *existing* role gate, and reaching no dispatch board until a planner releases it.
 
 Code: `backend/app/models/work_order_template.py` · `backend/app/services/work_order_template_service.py` · `backend/app/api/endpoints/work_order_templates.py` · `backend/app/schemas/work_order_template.py` · `backend/alembic/versions/087_work_order_templates.py`. Each carries a long docstring arguing its own decisions; this document is the operator- and planner-facing view of the same argument.
 
@@ -126,21 +126,63 @@ All three non-positive is a **422** naming the template and the source, *not* a 
 
 > **Always quote the stored quantity off the RESPONSE, never off the form.** The response envelope carries the work order the server actually wrote. Reading back the value the user typed is how a planner ends up told they ordered 3 when the server stored 21. The audit row records `requested_quantity` alongside the stored `quantity` only when the two differ, which is the same key and the same condition the duplicate service uses.
 
+## Running several at once — one unit per work order
+
+A weld assembly is built **one unit per work order**: its own number, its own traveler, its own labor and its own quality record, and its own **Unit #**. So "make five of them" is five work orders, not one work order with a quantity of five — those are different plans, and only the first can be reported against per unit. `count` on the use request creates that many **separate** DRAFT work orders, each a full copy of the plan, each with its own number.
+
+- **`quantity_ordered` is the quantity of EACH work order, never a total to divide.** It is resolved once for the whole batch by the rules above and is not scaled by `count`. (The dialog guards the trap this creates: raising the count re-prefills the quantity to 1, but only while the planner has not typed in that field themselves, and the batch line states the outcome in pieces — *"5 draft work orders, quantity 1 each — 5 pieces in total, one work order number per unit."* — before the click. An auto-set nobody asked for is only honest if it is visible.)
+- **The cap is 20** (`MAX_TEMPLATE_USE_COUNT`, a module constant, not a setting; **422** above it). Every copy writes `2 + nests + ties` audit rows, and the audit chain's advisory lock is **global across tenants** and held for the transaction's life, so a batch of hundreds would stall every other company's writes while it ran. Twenty rows is also the shape of the work — a long form. Two hundred is a spreadsheet import, which is a different feature with a different failure mode.
+- **One due date for the whole batch.** Per-unit dates were considered and deliberately not built: every unit in a batch is promised together, and a batch that needed staggered dates is several batches.
+- **A nest-bearing template refuses `count > 1` with a 409**, raised before anything is written and probed through the same live `summary_for_one` the catalog renders, so the button's disclosure and the endpoint's refusal cannot disagree. A laser work order's quantity **is** the sum of its nests' `planned_runs`, so five copies would be five work orders each claiming the same sheets — the message says so and names the remedy that actually produces more parts: raise the nests' planned runs on one draft.
+
+### Why all-or-nothing, and not the importers' partial-success convention
+
+The Import Center reports "37 rows loaded, 3 refused" because its N rows are **N different inputs**, each independently valid or not: the three that failed are three specific spreadsheet lines with three specific problems, and the 37 that landed are 37 facts nobody wants to re-enter.
+
+A batch here is the opposite shape: **N repetitions of ONE input.** Every copy reads the same source work order through the same copy engine with the same quantity and the same due date, so every refusal the engine raises — a retired produced part, a process-sheet family with no released revision, the source's own data — **fails identically on every copy**. There is no such thing as "the third one failed": either the plan can be copied or it cannot. A partial batch would therefore never be a useful partial result, only a half-run form the planner has to reconcile by hand against the work-order list, with the unit numbers they pasted now offset against the drafts that exist.
+
+So the whole loop runs inside the router's **single** `atomic_transaction` — the module holds exactly one, and it wraps the loop rather than each copy, because `atomic_transaction` is not re-entrant. `created_count` always equals the requested `count`; a partial batch is never returned. When `count > 1`, the `IntegrityError` 409 says so explicitly — *"Nothing was created — the whole batch was rolled back."* — because the safe-sounding guess (the drafts before the failure survived) is the wrong one, and a planner acting on it hunts for work orders that do not exist.
+
+> **The numbers come out sequential for a reason that lives in another module.** `generate_work_order_number` picks the next number by reading the highest existing one, and the session runs `autoflush=False`, so an unflushed predecessor would be invisible and every copy in the batch would mint the **same** number. It works only because `_copy_header` does `db.add()` + `db.flush()` before returning. The advisory lock does not save this — it is re-entrant, so it gives no protection between two calls inside one transaction. That property belongs to the duplicate service but is relied on here, so it is pinned by a test in the batch suite.
+
+### Unit numbers are pasted, never generated
+
+`unit_numbers` is a list the planner supplies — **one entry per work order, in creation order**, so `unit_numbers[0]` lands on `work_orders[0]`. Entries are trimmed; a blank entry (or an explicit `null`) stores **NULL**, so a gap is expressible — the third of five units may not be known yet. Omit the list and every draft lands without one, exactly as before.
+
+**There is deliberately no generator, no auto-increment and no fill-down.** The owner was asked directly: real unit numbers are not a trailing digit that steps by one, they come off the customer's own scheme. A control that invented them would put a plausible **wrong** number onto a physical build, and on the kiosk, the dispatch board and the TV wall a fabricated unit number is indistinguishable from one somebody typed — which is the single failure the Unit # exists to prevent. Do not infer a pattern from any one example. The planner pastes the column they already have.
+
+Two **422**s guard the list, and both are also checked in the dialog so a mis-pasted column costs no round trip:
+
+- **Length must equal `count`.** The list is positional, so a list one entry short would either drop a unit or shift every unit after the gap onto the wrong job — and both are invisible afterwards, because the drafts look correct and the wrong build identity travels to the floor.
+- **No non-blank value may repeat** within the request, compared trimmed and case-insensitively. Two work orders in one batch claiming unit `2410048` is a typo in a form the planner just filled in, correctable before anything is written. Blanks never collide: two work orders with no unit yet is an ordinary state.
+
+**Duplicates against EXISTING work orders are not checked** — not here, not in the service, not anywhere. `work_orders.unit_number` carries a plain index and **no unique constraint** precisely because a rework or replacement work order legitimately re-uses the unit it is rebuilding, so a uniqueness gate would refuse the case the column was designed for.
+
+The unit is applied by the **template service, after the copy returns** — never by the copy engine. `_copy_header` still deliberately does not carry `unit_number` across (a duplicate is the *next* unit, not the same one), that omission is pinned by a single test class, and the batch does not become a back door around it: the copy lands with no unit, and the planner's value is written afterwards as an *input* rather than an inheritance. A draft that gets no unit is not written a second time at all — assigning `None` over `None` would still emit an `UPDATE` and bump the row's `version`, so the click-once path stays byte-identical to its pre-batch behavior.
+
+### `batch_id` — what makes five drafts one action
+
+Every `USE_TEMPLATE` audit row gains `batch_id` (a `uuid4().hex` minted **once per request**), `batch_size`, `batch_index` (1-based) and `unit_number`. All four are stamped for a **single** use as well, so there is one code path and one shape to read rather than keys that appear only sometimes.
+
+`batch_id` is the correlator: without it, five rows a few milliseconds apart are not distinguishable from five separate clicks, and "was this batch of five one decision or five?" is exactly the question an auditor asks about five work orders that look alike. `unit_number` is on the row because it is the one field of the new work order the template path supplies that the copy engine does not — nothing else in the chain records who set it.
+
 ## Due date always starts blank
 
 `due_date` is optional and is **never inherited from the source**. The source's due date belongs to the run that already happened; carrying it forward would make the new job overdue the instant it exists — red on the dispatch board, and counted against OTD — for a promise nobody made. `null` means unscheduled, which reads as "not promised yet" everywhere, where a stale date reads as "late".
 
 Like `WorkOrderDuplicateRequest` and unlike `WorkOrderCreate`, the field carries **no "not in the past" validator**: a template is most often used to re-run something that is already late.
 
-`must_ship_by` is not carried either — that refusal lives in the duplicate service, where it belongs: it is the *original* order's promise and it outranks `due_date` in OTD/OTIF scoring.
+`must_ship_by` is not carried either — that refusal lives in the duplicate service, where it belongs: it is the *original* order's promise and it outranks `due_date` in OTD/OTIF scoring. One date covers the whole batch; see [Running several at once](#running-several-at-once--one-unit-per-work-order).
 
 ## The skip envelope — and why a skipped tie is safety information
 
-`POST /work-order-templates/{id}/use` returns **201** with the **exact same `WorkOrderDuplicateResponse` envelope** `POST /work-orders/{id}/duplicate` returns:
+`POST /work-order-templates/{id}/use` returns **201** with `WorkOrderTemplateUseResponse`, a **strict superset of the `WorkOrderDuplicateResponse` envelope** `POST /work-orders/{id}/duplicate` returns — it *subclasses* it:
 
 ```json
 {
-  "work_order": { "…": "the same shape GET /work-orders/{id} returns" },
+  "work_order": { "…": "the FIRST created draft — the same shape GET /work-orders/{id} returns" },
+  "work_orders": [ { "…": "every created draft, in creation order" } ],
+  "created_count": 1,
   "skipped_operations": [
     {"source_operation_id": 812, "operation_number": "10", "sequence": 10, "reason": "laser_nest_deleted"}
   ],
@@ -150,7 +192,9 @@ Like `WorkOrderDuplicateRequest` and unlike `WorkOrderCreate`, the field carries
 }
 ```
 
-Reusing the envelope is not tidiness. It means the skip lists reach the **same result view** the Duplicate dialog already renders, so the two paths cannot report an omission differently, and a client that already handles one handles the other.
+Keeping the singular half is not tidiness, and subclassing rather than replacing is a **compatibility decision**: the skip lists reach the **same result view** the Duplicate dialog already renders — a view that dereferences the singular `work_order` — so a list-only envelope would not merely change a shape, it would fail to type-check against the client that renders it. **`work_orders[0]` IS `work_order`**: the same serialized object, not a second copy of the row. Both new fields are present for a single use too (`created_count: 1`, a one-entry list), so there is one shape rather than keys that appear only sometimes; a client may still guard on the list being non-empty and fall back to the singular field, which costs nothing and keeps a truncated envelope from blanking the result view.
+
+**On a batch, both skip lists are the deduplicated UNION across the copies** — deduped by `source_operation_id` / `source_allocation_id`, first occurrence winning so the order stays the source's own sequence order. Every copy reads the **same** source work order, so an omission the source causes is reported by all of them; listing it once per copy would read as five separate missing material ties when one row was left behind, which is the same class of error as reporting none. A client rendering the report for a batch must say the omissions apply to **every** draft — read without that line, the list describes only the one work order it names. The per-work-order `USE_TEMPLATE` audit rows carry **that copy's own** skips, not the union: a row that names one work order must describe that work order.
 
 **Both lists empty is the "clean copy" signal. A non-empty list is not an error** — the work order was created and is a valid draft — **but the draft is missing something the source had, and the planner has to be told.** For a material tie, spell the consequence out: a skipped tie means the new job carries **no demand** for that material, so **no shortage is ever raised**, the work runs, the sheet is physically consumed, and **stock is never deducted** — until an inventory count disagrees, months later, with nothing in the record explaining why. That is strictly worse than a loud failure, and it is why the skip is surfaced in two channels (the response *and* the template's `USE_TEMPLATE` audit row, from one `model_dump()` of the same objects) rather than logged.
 
@@ -166,7 +210,7 @@ Not copied, as decisions rather than oversights:
 
 | Omitted | Why |
 |---|---|
-| `unit_number` | Identity, not history. A template run is the **next** unit, not the same one — two work orders both claiming to build unit 2410048 would put that claim on the kiosk, the dispatch board and the TV wall. The planner types the new unit on the draft. |
+| `unit_number` | Identity, not history. A template run is the **next** unit, not the same one — two work orders both claiming to build unit 2410048 would put that claim on the kiosk, the dispatch board and the TV wall. The copy engine still never carries it; the planner **supplies** it instead, per draft, through the use request's `unit_numbers` list (or types it on the draft afterwards). See [Unit numbers are pasted, never generated](#unit-numbers-are-pasted-never-generated). |
 | `parent_work_order_id` | The result is an **independent** work order. Re-attaching it to the source's assembly parent would add a second laser child against demand the first already satisfied, and the parent's rollup would count both. |
 | `must_ship_by` | The original order's promise; it outranks `due_date` in OTD/OTIF. Carrying it would silently override the due date just supplied. |
 | `run_order` | A manager's dispatch ranking for one machine's board, not part of the plan. A 40-nest template arriving pre-ranked would displace the sequence already set at that laser. |
@@ -199,9 +243,9 @@ Every write goes through `AuditService` (invariant 2) and nothing here commits �
 | `POST /work-order-templates` | `log_create` on `work_order_template`, `extra_data` naming `source_work_order_id` / `source_work_order_number` / `default_quantity` |
 | `PUT /work-order-templates/{id}` | `log_update` with before/after `name` / `notes` / `default_quantity` |
 | `DELETE /work-order-templates/{id}` | `log_delete` (soft), `extra_data.name_released_for_reuse = true` so a chain reader can tell a later template of the same name from this one |
-| `POST /work-order-templates/{id}/use` | **Two** rows: the duplicate service's own work-order `log_create` (which names the source work order), **plus** a `USE_TEMPLATE` row against the *template* naming the work order it produced, the quantity stored, the operation / nest / tie counts, and both skip lists |
+| `POST /work-order-templates/{id}/use` | **Two rows per created work order**: the duplicate service's own work-order `log_create` (which names the source work order), **plus** a `USE_TEMPLATE` row against the *template* naming the work order it produced, the quantity stored, the operation / nest / tie counts, that copy's own skip lists, the `unit_number` it was given, and the batch keys `batch_id` / `batch_size` / `batch_index` |
 
-The second `USE_TEMPLATE` row is the only place the fact that a **catalog entry** — rather than a planner browsing the list — produced this job exists. It is also what makes *"how often do we actually run this template"* answerable from the chain instead of from nothing.
+The second `USE_TEMPLATE` row is the only place the fact that a **catalog entry** — rather than a planner browsing the list — produced this job exists. It is also what makes *"how often do we actually run this template"* answerable from the chain instead of from nothing. A batch of five writes five of them, keyed together by one `batch_id`; see [`batch_id` — what makes five drafts one action](#batch_id--what-makes-five-drafts-one-action).
 
 ## API surface
 
@@ -214,7 +258,7 @@ Prefix `/api/v1/work-order-templates`. **Every verb, reads included, requires AD
 | POST | `""` | `{source_work_order_id, name, notes?, default_quantity?}` → **201**. **404** source not live in company; **409** duplicate live name |
 | PUT | `/{id}` | `{name?, notes?, default_quantity?}`, `extra="forbid"`. Explicit `null` **clears** `notes` / `default_quantity`; an omitted key leaves it alone |
 | DELETE | `/{id}` | Soft delete → **200** `{message, id}`. Name freed immediately; a second delete is **404** |
-| POST | `/{id}/use` | `{quantity_ordered?, due_date?}` → **201** `WorkOrderDuplicateResponse` |
+| POST | `/{id}/use` | `{quantity_ordered?, due_date?, count?, unit_numbers?}`, `extra="forbid"` → **201** `WorkOrderTemplateUseResponse` (the duplicate envelope plus `created_count` / `work_orders`). `count` 1–20 creates that many separate drafts, all-or-nothing; **409** on `count > 1` for a nest-bearing template; **422** on `count` over the cap, or a `unit_numbers` list whose length ≠ `count` or that repeats a non-blank value |
 
 `source_work_order_id` is deliberately **absent from the update schema**. Re-pointing a template at a different work order under the same name silently changes what every future click produces, with the only thing anyone reads unchanged. Save a new template and delete the old one — both halves are then on the chain.
 
@@ -223,6 +267,10 @@ Prefix `/api/v1/work-order-templates`. **Every verb, reads included, requires AD
 Templates are a **tab on `/work-orders`** (`?tab=templates`), not a separate route: they are a way of creating work orders, and burying them behind their own nav entry is how a catalog stops being used. A tab is also the only shape that *works*: `/work-orders/templates` would be swallowed by the `/work-orders/:id` route in `App.tsx` and resolve as a work order whose id is the word "templates". The tab title is registered in `utils/routeMeta.ts` under the query key `'/work-orders?tab=templates'`. "Save as template" appears on the work-order list row actions and on the WorkOrder detail action bar; a "New from template" button sits in the page header. **Every control is gated on the existing `work_orders:edit` permission**, which maps to exactly ADMIN / MANAGER / SUPERVISOR (plus PLATFORM_ADMIN, which `require_role` admits everywhere) — so a hidden button and a refused call agree, which is the standing rule for nav/route gating.
 
 The result of a use renders through the **same** skip view the Duplicate dialog uses — one shared renderer, so the two paths cannot describe an omission differently.
+
+**The Use dialog carries the batch controls**: a count field (disabled, with the reason on it, for a nest-bearing template — the same lock the quantity field already carries, because they are one rule) and a unit-number box, one per line, in order. A pasted spreadsheet column's single trailing newline is dropped, so a correctly pasted list of five is five entries and not six; leaving the box empty means *no list at all*, which is how "add the units later" is expressed rather than N blank units. A blank line is sent as `null`, never `""`.
+
+**A batch has nowhere single to navigate, so it does not.** One copy hands off and the caller lands on the new draft, as before. Several copies stay in the dialog and render the **work order number → Unit # table**, with a copy-to-clipboard for whatever the shop tracks units in — that mapping exists nowhere else in the app, and the planner's next physical act is writing those numbers onto travelers. Closing a batch result still fires the hand-off, because for a batch it is a **list refresh** rather than a navigation: the drafts exist either way, and a caller that never hears about them shows a stale list. The single-copy rule is untouched — dismissing a *partial* single copy does not hand off, because nothing should navigate out from under a list of omissions the planner just declined to follow.
 
 Two client rules worth repeating because they are correctness, not styling: quote the stored quantity off the **response**, and render an unknown `unavailable_reason` or skip `reason` **verbatim** rather than dropping the row. A third, since 2026-08-27: **`source_work_order_deleted` is disclosure, never a gate** — do not disable Use, dim the row, or hide the plan counts on it.
 
@@ -235,7 +283,12 @@ Two client rules worth repeating because they are correctness, not styling: quot
 - **Do not put the `is_deleted` filter back on `resolve_source_work_order`** "for invariant-3 consistency", and do not add an `ON DELETE` to `source_work_order_id`. The bare FK is what guarantees a missing source can only ever be a tombstone.
 - **Do not add a restore verb** "for symmetry" — re-saving from the same work order is the undo, and it is one click.
 - **Do not "align" the template gate with anything looser than the duplicate endpoint's trio.** A template that could route around a gate a planner would have hit by hand is a one-click hole in the create path.
-- **Do not remove `_assert_landed_as_draft`** because coverage says it never fires.
+- **Do not remove `_assert_landed_as_draft`** because coverage says it never fires. It runs **per copy** — a batch that landed one RELEASED work order among four drafts is exactly what it exists to make impossible.
+- **Do not add a unit-number generator, auto-increment or fill-down.** Owner decision; see [Unit numbers are pasted, never generated](#unit-numbers-are-pasted-never-generated).
+- **Do not make the batch partially succeed** "like the importers do". The N items are N repetitions of one input, so every refusal fails identically on every copy; see [Why all-or-nothing](#why-all-or-nothing-and-not-the-importers-partial-success-convention).
+- **Do not wrap each copy in its own `atomic_transaction`.** It is not re-entrant, and the module holds exactly one, around the loop.
+- **Do not check `unit_numbers` against existing work orders.** There is no unique constraint, on purpose — a rework work order re-uses the unit it is reworking.
+- **Do not "simplify" the use envelope down to `work_orders`.** The shared result view dereferences the singular `work_order`; the superset is what keeps it compiling and correct.
 - **Do not read `plan.*` as stored data.** It is computed per read. A soft-deleted source still yields a **full** summary with `available: true` and `source_work_order_deleted: true`; only an *unresolvable* source gives `available: false` with everything else null/zero.
 
 ## Not built (and why)
@@ -244,3 +297,6 @@ Two client rules worth repeating because they are correctness, not styling: quot
 - **A `template_id` FK on `work_orders`.** The `USE_TEMPLATE` audit row already carries the lineage, and a column would be a second, mutable copy of a fact the tamper-evident chain already holds.
 - **A validity gate at save time.** A job whose part is currently retired, or whose process-sheet family has no released revision, can still be catalogued. Refusing to *save* would block cataloguing a job that will be perfectly fine next month, and the refusal would name a condition the planner cannot see from the save dialog. Both refusals land at **use** time, where they are actionable.
 - **Templates in the kiosk / on the dispatch board.** Nothing on the floor reads this table, and nothing should: a template is not work.
+- **Per-unit due dates on a batch.** One date for the whole batch in v1: every unit in a batch is promised together, and a batch that needs staggered dates is several batches.
+- **A unit-number generator.** Owner decision, not a deferral — real unit numbers are not a trailing digit that steps by one, and inventing one puts a plausible wrong build identity on the floor.
+- **A batch above 20, or a `count` setting.** A hard module constant. Past that the shape is a spreadsheet import with a different failure mode, and the audit chain's global lock makes a long batch every other tenant's problem.

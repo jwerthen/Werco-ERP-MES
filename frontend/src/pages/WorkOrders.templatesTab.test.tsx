@@ -114,10 +114,15 @@ const template: WorkOrderTemplate = {
   },
 };
 
-/** Exposes the live URL search string so param round-trips are assertable. */
+/** Exposes the live URL so param round-trips AND navigations are assertable. */
 function LocationProbe() {
   const location = useLocation();
-  return <div data-testid="location-search">{location.search}</div>;
+  return (
+    <>
+      <div data-testid="location-search">{location.search}</div>
+      <div data-testid="location-pathname">{location.pathname}</div>
+    </>
+  );
 }
 
 function renderAt(url: string) {
@@ -130,6 +135,7 @@ function renderAt(url: string) {
 }
 
 const locationSearch = () => screen.getByTestId('location-search').textContent;
+const locationPathname = () => screen.getByTestId('location-pathname').textContent;
 
 /**
  * The work-order row, as ALL its renderings. DataTable mounts the desktop table
@@ -250,5 +256,86 @@ describe('WorkOrders: the tab is gated on work_orders:edit', () => {
 
     expect(await findWorkOrderRow()).not.toHaveLength(0);
     expect(mockedApi.listWorkOrderTemplates).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Where a template's output goes, which is TWO answers rather than one.
+ *
+ * ONE copy has a destination and keeps the Duplicate dialog's hand-off: land on
+ * the new draft, because nobody has reviewed it yet and reviewing it is the whole
+ * point of this door.
+ *
+ * SEVERAL have no single destination. Five drafts have five numbers, and picking
+ * one to navigate to would silently make the other four the ones the planner did
+ * not see — so the page refreshes the list instead and lets the dialog, which is
+ * the only surface that names them all, stay up.
+ */
+describe('WorkOrders: where a template use hands off to', () => {
+  const draft = {
+    id: 501,
+    version: 1,
+    work_order_number: 'WO-20260901-001',
+    part_id: 10,
+    work_order_type: 'production',
+    quantity_ordered: 1,
+    quantity_complete: 0,
+    quantity_scrapped: 0,
+    status: 'draft' as const,
+    priority: 3,
+    estimated_hours: 0,
+    actual_hours: 0,
+    created_at: '2026-09-01T12:00:00Z',
+    updated_at: '2026-09-01T12:00:00Z',
+    operations: [],
+  };
+  const second = { ...draft, id: 502, work_order_number: 'WO-20260901-002' };
+
+  async function openTheUseDialog() {
+    renderAt('/work-orders?tab=templates');
+    await screen.findByText('Bracket brake set');
+    await userEvent.click(screen.getByRole('button', { name: 'Use template Bracket brake set' }));
+    await screen.findByText('Use template — Bracket brake set');
+  }
+
+  it('navigates to the new draft when ONE was created', async () => {
+    mockedApi.useWorkOrderTemplate.mockResolvedValue({
+      work_order: draft,
+      created_count: 1,
+      work_orders: [draft],
+      skipped_operations: [],
+      skipped_material_allocations: [],
+    });
+    await openTheUseDialog();
+
+    await userEvent.click(screen.getByRole('button', { name: /Create draft work order/i }));
+
+    await waitFor(() => expect(locationPathname()).toBe('/work-orders/501'));
+  });
+
+  it('stays put and REFRESHES the list when several were created', async () => {
+    mockedApi.useWorkOrderTemplate.mockResolvedValue({
+      work_order: draft,
+      created_count: 2,
+      work_orders: [draft, second],
+      skipped_operations: [],
+      skipped_material_allocations: [],
+    });
+    await openTheUseDialog();
+    const listReadsBefore = mockedApi.getWorkOrders.mock.calls.length;
+
+    await userEvent.clear(screen.getByLabelText('Work orders to create'));
+    await userEvent.type(screen.getByLabelText('Work orders to create'), '2');
+    await userEvent.click(screen.getByRole('button', { name: /Create 2 draft work orders/i }));
+
+    // The dialog holds the number -> Unit # table the planner is about to write on
+    // paper, so the hand-off is the "Done" click rather than the submit.
+    await screen.findByTestId('use-template-batch-table');
+    await userEvent.click(screen.getByRole('button', { name: 'Done' }));
+
+    // Never onto one of the two: the other would be the one nobody saw.
+    await waitFor(() => expect(mockedApi.getWorkOrders.mock.calls.length).toBeGreaterThan(listReadsBefore));
+    expect(locationPathname()).toBe('/work-orders');
+    expect(locationSearch()).toBe('?tab=templates');
   });
 });

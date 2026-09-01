@@ -367,24 +367,30 @@ describe('WorkOrderTemplatesPanel: rename and delete are server-gated', () => {
 describe('WorkOrderTemplatesPanel: using a template hands off rather than navigating itself', () => {
   it('opens the Use dialog and reports the created draft to the caller', async () => {
     mockApi.listWorkOrderTemplates.mockResolvedValue(list([makeTemplate()]));
+    const created = {
+      id: 501,
+      version: 1,
+      work_order_number: 'WO-20260825-002',
+      part_id: 10,
+      work_order_type: 'production' as const,
+      quantity_ordered: 12,
+      quantity_complete: 0,
+      quantity_scrapped: 0,
+      status: 'draft' as const,
+      priority: 3,
+      estimated_hours: 0,
+      actual_hours: 0,
+      created_at: '2026-08-25T12:00:00Z',
+      updated_at: '2026-08-25T12:00:00Z',
+      operations: [],
+    };
+    // The USE envelope is a STRICT SUPERSET of the duplicate one, and
+    // `work_orders[0]` IS `work_order` — a single use stamps the batch fields
+    // too, so there is one code path rather than two shapes.
     const envelope = {
-      work_order: {
-        id: 501,
-        version: 1,
-        work_order_number: 'WO-20260825-002',
-        part_id: 10,
-        work_order_type: 'production' as const,
-        quantity_ordered: 12,
-        quantity_complete: 0,
-        quantity_scrapped: 0,
-        status: 'draft' as const,
-        priority: 3,
-        estimated_hours: 0,
-        actual_hours: 0,
-        created_at: '2026-08-25T12:00:00Z',
-        updated_at: '2026-08-25T12:00:00Z',
-        operations: [],
-      },
+      work_order: created,
+      created_count: 1,
+      work_orders: [created],
       skipped_operations: [],
       skipped_material_allocations: [],
     };
