@@ -423,8 +423,9 @@ needs change, that is where to start.
 
 The **Unit #** is the build identity of a one-unit-per-work-order job — the weld assemblies, which
 run one unit at a time. It is a **first-class field on the work order** (`work_orders.unit_number`,
-migration `083`), typed on the work-order create form or edited later from the work-order detail
-page, and it is **not a sixth guidance field**: it rides the operator payloads beside
+migration `083`), typed on the work-order create form, supplied per draft by the work-order
+template batch (`unit_numbers` on `POST /work-order-templates/{id}/use`), or edited later from the
+work-order detail page, and it is **not a sixth guidance field**: it rides the operator payloads beside
 `work_order_number`, **outside** `_job_guidance_fields`, whose five keys and whose recorded
 2026-08-14 station disclosure are unchanged.
 

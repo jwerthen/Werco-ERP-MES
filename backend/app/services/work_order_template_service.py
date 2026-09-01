@@ -76,13 +76,48 @@ name is gone. ``available`` now means the much narrower "the source row could no
 resolved at all", which the FK makes near-unreachable and which is kept anyway: a
 defensive branch that can still answer is better than one that was deleted.
 
+SEVERAL DRAFTS FROM ONE TEMPLATE, EACH ITS OWN UNIT
+---------------------------------------------------
+:func:`use_template` takes a ``count`` and creates that many SEPARATE work orders, each
+with its own number and its own optional ``unit_number``. It is not a quantity feature:
+a weld assembly is built one unit per work order, so "five of these" is five work
+orders at the SAME quantity, never one work order at five.
+
+Three properties of the batch are decisions, not implementation details:
+
+* **It is one transaction, all-or-nothing.** ``duplicate_work_order`` flushes and never
+  commits, and ``atomic_transaction`` is not re-entrant, so the ROUTER's single
+  ``with atomic_transaction(db):`` wraps the whole LOOP — never each copy. A batch that
+  failed on the fourth draft and left three behind would leave the planner reconciling
+  a half-run form against a work order list, which is worse than repeating the entry.
+* **The numbers stay sequential inside that one transaction only because
+  ``_copy_header`` does ``db.add()`` + ``db.flush()`` before returning.** The session
+  runs ``autoflush=False`` and ``generate_work_order_number`` picks the next number by
+  reading the highest existing one, so an unflushed predecessor would be invisible and
+  every copy in the batch would mint the SAME number. The advisory lock does not save
+  this: it is re-entrant, so it gives no protection between two calls inside one
+  transaction. That property belongs to another module, so it is pinned by a test here.
+* **A nest-bearing template refuses ``count > 1`` (409).** A laser work order's quantity
+  is DEFINED as the sum of its nests' planned runs, so "five copies" is the wrong shape
+  for the ask — more of that job means more runs on the nests, on one work order.
+
+**Unit numbers are supplied, never generated.** The planner types or pastes one per row
+and blanks are legal (they store NULL). There is no auto-increment and no fill-down: the
+owner was asked, and real unit numbers do not walk a trailing digit. A fabricated unit
+number is indistinguishable, on the kiosk and the TV wall, from one somebody typed.
+
 TENANCY, AUDIT, ATOMICITY
 -------------------------
 Every read is company-scoped through ``tenant_query`` (invariant 1). Every write goes
-through ``AuditService`` (invariant 2) — including USE, which writes a row against
-the template naming the work order it produced, so "which template made this job" and
-"how often is this template run" are both answerable from the chain. Nothing here
-commits; the router wraps each write in ``atomic_transaction``.
+through ``AuditService`` (invariant 2) — including USE, which writes ONE row PER CREATED
+WORK ORDER against the template naming the work order it produced, so "which template
+made this job" and "how often is this template run" are both answerable from the chain.
+The batch keys those rows together with ``batch_id`` / ``batch_size`` / ``batch_index``,
+and stamps them for a single use too, so there is one code path rather than a special
+case that only the batch exercises. A draft that is given a Unit # gets a SECOND row,
+scoped to the WORK ORDER, because the copy engine's CREATE snapshot is taken before the
+stamp — see :func:`_apply_unit_number` for why the template-scoped row does not cover it.
+Nothing here commits; the router wraps each write in ``atomic_transaction``.
 """
 
 from __future__ import annotations
@@ -90,6 +125,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
+from uuid import uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import and_, func
@@ -102,6 +138,7 @@ from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
 from app.models.work_order_template import WorkOrderTemplate
+from app.schemas.work_order import WorkOrderDuplicateSkippedAllocation, WorkOrderDuplicateSkippedOperation
 from app.services.audit_service import AuditService
 from app.services.material_tie_part_gate import part_is_tieable_material
 from app.services.work_order_duplicate_service import DuplicateResult, duplicate_work_order
@@ -119,6 +156,18 @@ from app.services.work_order_duplicate_service import DuplicateResult, duplicate
 # row that escaped the FK somehow). Kept rather than deleted, because a branch that can
 # still answer beats one that was removed on the argument that it cannot fire.
 UNAVAILABLE_SOURCE_MISSING = "source_work_order_missing"
+
+# The 409 a nest-bearing template answers when asked for more than one copy. Kept beside
+# the probe that raises it, in the shape of the other refusals in this system: it names
+# the template, says what the shape mismatch IS, and ends with the action that actually
+# gets the planner what they wanted. "More of a laser job" is more runs on its nests, on
+# ONE work order -- five copies of a 21-nest package would be 105 nest operations across
+# five jobs for a quantity the shop expressed as a run count.
+NEST_BEARING_BATCH_REFUSAL = (
+    "Template '{name}' cuts sheets: its quantity is the sum of its nests' planned runs, so running more of "
+    "it means more runs on the nests, not more work orders. Create one draft and raise the nests' planned "
+    "runs on it."
+)
 
 
 @dataclass
@@ -175,12 +224,92 @@ class TemplatePlanSummary:
         return self.nest_count > 0
 
 
+def union_skipped_operations(
+    duplicates: list[DuplicateResult],
+) -> list[WorkOrderDuplicateSkippedOperation]:
+    """Every source operation the batch left behind, reported ONCE.
+
+    Deduplicated by ``source_operation_id``, and the key is the point. Every copy in a
+    batch reads the SAME source work order, so a source operation whose laser nest is
+    soft-deleted is skipped by all of them and would otherwise appear five times for one
+    omission. A skip list is safety information the planner acts on — "five operations
+    were dropped" when one was is the same class of error as reporting none.
+
+    First occurrence wins and order is preserved, so the list reads in the source's own
+    sequence order (``_copy_operations`` walks by ``sequence``, and every copy walks it
+    identically).
+    """
+    seen: set[int] = set()
+    merged: list[WorkOrderDuplicateSkippedOperation] = []
+    for result in duplicates:
+        for entry in result.skipped_operations:
+            if entry.source_operation_id in seen:
+                continue
+            seen.add(entry.source_operation_id)
+            merged.append(entry)
+    return merged
+
+
+def union_skipped_allocations(
+    duplicates: list[DuplicateResult],
+) -> list[WorkOrderDuplicateSkippedAllocation]:
+    """Every source material tie the batch left behind, reported ONCE.
+
+    The allocation twin of :func:`union_skipped_operations`, deduplicated by
+    ``source_allocation_id`` for the same reason. This is the list with the worst
+    failure mode behind it: a skipped tie means each draft carries NO demand for that
+    material, so no shortage is raised, the work runs, and stock is never deducted.
+    Reporting it once per copy would bury that in repetition; reporting it not at all
+    would be silent.
+    """
+    seen: set[int] = set()
+    merged: list[WorkOrderDuplicateSkippedAllocation] = []
+    for result in duplicates:
+        for entry in result.skipped_allocations:
+            if entry.source_allocation_id in seen:
+                continue
+            seen.add(entry.source_allocation_id)
+            merged.append(entry)
+    return merged
+
+
 @dataclass
 class TemplateUseResult:
-    """One use of a template: the duplicate's own result, plus which template ran it."""
+    """One use of a template: every duplicate it produced, plus which template ran it.
+
+    ``duplicates`` is a LIST even for the ordinary one-click case, so there is a single
+    code path rather than a batch special case beside a singular one — the shape that
+    let the office and floor sequencing gates drift apart in this system once already.
+    It is in CREATION ORDER, which is also work-order-number order.
+
+    ``batch_id`` is minted once per request and stamped on every ``USE_TEMPLATE`` audit
+    row, including a batch of one. It is what makes "these five drafts were one action"
+    answerable from the chain, where five independent rows minutes apart are not
+    distinguishable from five separate clicks.
+    """
 
     template: WorkOrderTemplate
-    duplicate: DuplicateResult
+    duplicates: list[DuplicateResult]
+    batch_id: str
+
+    @property
+    def created_count(self) -> int:
+        return len(self.duplicates)
+
+    @property
+    def work_order_ids(self) -> list[int]:
+        """The created work orders' ids, in creation order."""
+        return [result.work_order.id for result in self.duplicates]
+
+    @property
+    def skipped_operations(self) -> list[WorkOrderDuplicateSkippedOperation]:
+        """The batch's skipped operations, deduped — see :func:`union_skipped_operations`."""
+        return union_skipped_operations(self.duplicates)
+
+    @property
+    def skipped_allocations(self) -> list[WorkOrderDuplicateSkippedAllocation]:
+        """The batch's skipped material ties, deduped — see :func:`union_skipped_allocations`."""
+        return union_skipped_allocations(self.duplicates)
 
 
 # --------------------------------------------------------------------------- #
@@ -784,6 +913,125 @@ def _assert_landed_as_draft(work_order: WorkOrder, template: WorkOrderTemplate) 
     )
 
 
+def _apply_unit_number(
+    db: Session,
+    work_order: WorkOrder,
+    raw: Optional[str],
+    *,
+    audit: AuditService,
+) -> Optional[str]:
+    """Stamp one created draft's Unit #, trimmed, blank stored as NULL. Returns the value.
+
+    **Applied HERE rather than in the copy engine, and that is load-bearing.**
+    ``work_order_duplicate_service._copy_header`` deliberately does NOT carry
+    ``unit_number`` across, because a duplicate is the NEXT unit and not the same one —
+    carrying it would mint two work orders both claiming to build unit 2410048 and put
+    that claim on the kiosk, the dispatch board and the TV wall. That omission is pinned
+    by ``TestUnitNumberIsNotCarried``, which is the only thing pinning it. So the batch
+    does not relax it: the copy still lands with no unit, and the unit the PLANNER
+    supplied is written afterwards, here, where it is an input rather than an inheritance.
+
+    Trimmed and blank-to-NULL, matching ``core.validation.UnitNumber`` at the request
+    boundary. Restated rather than assumed because this function takes a raw ``str`` and
+    a service must not depend on a caller's schema for a storage invariant.
+
+    The row was already flushed by ``_copy_header``, so an assignment here issues an
+    UPDATE and moves the new work order's ``version`` (invariant 4: ``WorkOrder`` maps
+    ``version_id_col``). Harmless — the row is seconds old, still DRAFT, and nobody
+    holds a version for it; the endpoint re-reads every created work order after the
+    commit, so the version the caller is handed is the one that is stored.
+
+    Which is why the no-op is SKIPPED rather than written. SQLAlchemy records an
+    attribute set as history without comparing values, so assigning ``None`` over the
+    ``None`` ``_copy_header`` left would still emit an UPDATE and still bump the
+    version. Guarding it keeps the click-once path — no ``unit_numbers`` at all — byte
+    identical to its pre-batch behavior, which is worth more than the two lines: it
+    means the existing verb writes exactly the rows it always wrote.
+
+    **The stamp writes its OWN work-order-scoped audit row, and it is not redundant with
+    the copy engine's CREATE row — do not delete it.** ``AuditService.log_create``
+    snapshots the model EAGERLY (``_model_to_dict``), and ``duplicate_work_order`` takes
+    that snapshot before this function runs, so the work order's CREATE row is written
+    with ``unit_number`` unset. Without the row below, the ONLY record of the value being
+    set lives in ``extra_data`` on a ``work_order_template``-scoped USE_TEMPLATE row —
+    which the natural audit query, ``resource_type='work_order' AND resource_id=N`` (the
+    one the Audit Log page builds), never returns. An auditor would read "created with no
+    unit, never changed" against a traveler, kiosk card and TV tile all displaying
+    2410048. Unit # is the build identity, so that gap is an AS9100D traceability defect,
+    not a cosmetic one. The row is also the shape ``PUT /work-orders/{id}`` already writes
+    for this same column, so the two writers of ``unit_number`` land the fact in the same
+    place instead of disagreeing about where it lives.
+
+    Written INSIDE this function rather than beside its call site so the stamp and the
+    record of the stamp cannot drift apart at a future second caller — the same
+    one-audit-row-per-side-effect coupling ``cancel_allocations_for_operations`` uses in
+    the nest-removal path. It fires only when a NON-NULL value was actually stored: the
+    skipped no-op writes nothing, which is what keeps the click-once path byte identical.
+    """
+    value = (raw or "").strip() or None
+    if work_order.unit_number == value:
+        return value
+
+    work_order.unit_number = value
+    db.flush()
+
+    if value is not None:
+        audit.log_update(
+            resource_type="work_order",
+            resource_id=work_order.id,
+            resource_identifier=work_order.work_order_number,
+            # The literal pre-stamp state rather than a snapshot of the model: the copy
+            # engine never carries ``unit_number``, so the value this row supersedes is
+            # always NULL, and a dict keeps the diff to the one field that moved.
+            old_values={"unit_number": None},
+            new_values={"unit_number": value},
+            description=(
+                f"Unit number {value} assigned to work order {work_order.work_order_number} "
+                "on creation from a work order template"
+            ),
+            extra_data={"reason": "work_order_template_use"},
+        )
+
+    return value
+
+
+def _assert_batch_shape_allowed(
+    db: Session,
+    *,
+    template: WorkOrderTemplate,
+    count: int,
+    company_id: int,
+) -> None:
+    """Refuse ``count > 1`` on a nest-bearing template (409), before anything is written.
+
+    A laser work order's ``quantity_ordered`` is DEFINED as the sum of its nests'
+    planned runs (``laser_nest_service._recompute_child_quantity_ordered``), and
+    ``duplicate_work_order`` re-derives it on every copy. So "five of this template" is
+    not five times the work: it is five work orders each carrying the same 21 nests at
+    the same run counts — 105 nest operations for a quantity the shop expresses as a run
+    count on ONE job. The remedy in the message is the one that actually produces more
+    parts.
+
+    There is a cost argument underneath it too. Each copy writes 2 + n_nests + n_ties
+    audit rows, and the audit chain's advisory lock is GLOBAL across tenants and held
+    for the transaction's life, so a five-copy nest batch would serialise every other
+    company's writes behind it for the duration.
+
+    Probed through :func:`summary_for_one` — the SAME live summary the catalog renders —
+    so the button's disclosure and the endpoint's refusal cannot disagree about whether
+    a template carries nests. Only run when ``count > 1``: it costs five queries, and
+    the one-click path must not pay for a gate that cannot fire.
+
+    An UNRESOLVABLE source summarises as ``available=False`` with ``nest_count = 0``, so
+    it falls through here rather than being refused for the wrong reason —
+    :func:`use_template` has already raised its own 409 for that case by this point.
+    """
+    if count <= 1:
+        return
+    if summary_for_one(db, template, company_id).nest_bearing:
+        raise HTTPException(status_code=409, detail=NEST_BEARING_BATCH_REFUSAL.format(name=template.name))
+
+
 def use_template(
     db: Session,
     *,
@@ -793,11 +1041,25 @@ def use_template(
     company_id: int,
     user_id: int,
     audit: AuditService,
+    count: int = 1,
+    unit_numbers: Optional[list[Optional[str]]] = None,
 ) -> TemplateUseResult:
-    """Create a new DRAFT work order from ``template``. The copy engine does the work.
+    """Create ``count`` DRAFT work orders from ``template``. The copy engine does the work.
+
+    ``count`` defaults to 1, so every existing caller keeps its exact behavior. Above 1
+    it produces that many SEPARATE work orders, each with its own number, each a full
+    copy of the plan — never one work order at a multiplied quantity. That is the shape
+    of the ask: a weld assembly is built one unit per work order.
+
+    ``unit_numbers``, when given, is one entry per created work order in creation order;
+    the request schema has already checked the length and refused a repeat inside the
+    batch. Entries are trimmed and a blank stores NULL, so a gap is expressible — the
+    third of five units may not be known yet. Omit it and every draft lands without one,
+    exactly as before. Nothing here generates a unit number (module docstring).
 
     ``quantity_ordered`` is OPTIONAL, which is what makes the click-once case
-    click-once. Resolution order — first positive value wins:
+    click-once, and it is the quantity of EACH work order rather than a total to split.
+    Resolved ONCE for the whole batch. Resolution order — first positive value wins:
 
     1. the caller's value, when they supplied one;
     2. ``template.default_quantity``, the number the planner saved with the template;
@@ -830,11 +1092,30 @@ def use_template(
     deleted, it copies the object it is handed, and its own ``is_deleted`` predicates
     are about PARTS and LASER NESTS rather than the source work order.
 
-    Raises 409 only when the source row cannot be resolved AT ALL, which the ``NOT
-    NULL`` FK makes near-unreachable, and propagates every refusal
-    ``duplicate_work_order`` raises untouched. Flushes but never commits — wrap the
-    call in ``atomic_transaction(db)``.
+    Raises 409 when the source row cannot be resolved AT ALL (which the ``NOT NULL`` FK
+    makes near-unreachable) and when ``count > 1`` on a nest-bearing template — both
+    BEFORE the first mutation, so a refusal leaves nothing behind. Every refusal
+    ``duplicate_work_order`` raises propagates untouched. Flushes but never commits;
+    the caller wraps the WHOLE loop in ONE ``atomic_transaction(db)``, never each
+    iteration — ``atomic_transaction`` is not re-entrant, and an all-or-nothing batch is
+    the point (module docstring).
+
+    A ``unit_numbers`` list whose length is not exactly ``count`` raises ``ValueError``
+    here, before anything is read or written. Over HTTP that is unreachable —
+    ``WorkOrderTemplateUseRequest`` refuses it 422 with a message the planner can act on —
+    but this function is exported in ``__all__``, and the list is POSITIONAL, so a short
+    list reaching the loop would raise ``IndexError`` mid-batch (a 500 on a half-built
+    transaction) while a long one would silently drop the tail. Both are the misalignment
+    the schema validator exists to prevent; a direct caller gets the same refusal rather
+    than a worse version of the same bug.
     """
+    if unit_numbers is not None and len(unit_numbers) != count:
+        raise ValueError(
+            f"use_template received {len(unit_numbers)} unit numbers for count={count}: unit_numbers is "
+            "positional and must hold exactly one entry per work order (None for a work order whose unit "
+            "is not known yet), or be omitted entirely"
+        )
+
     source = resolve_source_work_order(db, template.source_work_order_id, company_id)
     if source is None:
         raise HTTPException(
@@ -846,65 +1127,107 @@ def use_template(
             ),
         )
 
+    # Both gates run before the first write: the shape refusal, then the quantity one.
+    _assert_batch_shape_allowed(db, template=template, count=count, company_id=company_id)
     effective_quantity = _resolve_quantity(template, source, quantity_ordered)
 
-    result = duplicate_work_order(
-        db,
-        source=source,
-        quantity_ordered=effective_quantity,
-        due_date=due_date,
-        company_id=company_id,
-        user_id=user_id,
-        audit=audit,
-    )
+    # Minted ONCE for the whole request, and stamped on a batch of one as well, so the
+    # chain has a single shape to read rather than a key that appears only sometimes.
+    batch_id = uuid4().hex
 
-    # The promise this whole feature rests on, checked where it is relied upon.
-    _assert_landed_as_draft(result.work_order, template)
+    duplicates: list[DuplicateResult] = []
+    for index in range(count):
+        # Each iteration is a full, independent copy of the source plan. The source is
+        # re-read by nothing here -- ``duplicate_work_order`` scopes every read to
+        # ``source.id`` and the rows it writes belong to the NEW work order -- so the
+        # second copy sees exactly what the first one saw. What it MUST see is the first
+        # copy's header row, and it does: ``_copy_header`` flushes before returning, so
+        # ``generate_work_order_number``'s "highest number so far" read finds it even
+        # though the session runs autoflush=False. The advisory lock does not provide
+        # that; it is re-entrant and gives no protection inside one transaction.
+        result = duplicate_work_order(
+            db,
+            source=source,
+            quantity_ordered=effective_quantity,
+            due_date=due_date,
+            company_id=company_id,
+            user_id=user_id,
+            audit=audit,
+        )
 
-    # A second row, against the TEMPLATE rather than the work order. The duplicate
-    # service already wrote the work order's own CREATE row naming its source work
-    # order; this one names the TEMPLATE, which is the only place the fact that a
-    # catalog entry (rather than a planner browsing the list) produced this job
-    # exists. It is also what makes "how often do we run this template" answerable
-    # from the chain instead of from nothing.
-    audit.log(
-        action="USE_TEMPLATE",
-        resource_type="work_order_template",
-        resource_id=template.id,
-        resource_identifier=template.name,
-        description=(
-            f"Created work order {result.work_order.work_order_number} as a draft from template " f"'{template.name}'"
-        ),
-        extra_data={
-            "source": "work_order_template_use",
-            "template_id": template.id,
-            "template_name": template.name,
-            "source_work_order_id": source.id,
-            "source_work_order_number": source.work_order_number,
-            "created_work_order_id": result.work_order.id,
-            "created_work_order_number": result.work_order.work_order_number,
-            "created_work_order_status": WorkOrderStatus.DRAFT.value,
-            "quantity": float(result.work_order.quantity_ordered),
-            # Recorded only when the two differ, i.e. a nest-bearing template whose
-            # quantity was derived from its runs rather than taken from the request.
-            # Same key and same condition the duplicate service uses.
-            **(
-                {"requested_quantity": effective_quantity}
-                if float(result.work_order.quantity_ordered) != effective_quantity
-                else {}
+        # The promise this whole feature rests on, checked where it is relied upon --
+        # per copy, because a batch that landed one RELEASED work order among four
+        # drafts is exactly the failure this assertion exists to make impossible.
+        _assert_landed_as_draft(result.work_order, template)
+
+        # The planner's value, applied AFTER the copy: ``_copy_header`` deliberately does
+        # not carry ``unit_number`` and this must not become a back door around that.
+        unit_number = _apply_unit_number(
+            db,
+            result.work_order,
+            unit_numbers[index] if unit_numbers is not None else None,
+            audit=audit,
+        )
+
+        # A second row, against the TEMPLATE rather than the work order -- ONE PER
+        # CREATED WORK ORDER. The duplicate service already wrote each work order's own
+        # CREATE row naming its source work order; this one names the TEMPLATE, which is
+        # the only place the fact that a catalog entry (rather than a planner browsing
+        # the list) produced this job exists. It is also what makes "how often do we run
+        # this template" answerable from the chain instead of from nothing.
+        audit.log(
+            action="USE_TEMPLATE",
+            resource_type="work_order_template",
+            resource_id=template.id,
+            resource_identifier=template.name,
+            description=(
+                f"Created work order {result.work_order.work_order_number} as a draft from template "
+                f"'{template.name}'"
             ),
-            "operation_count": result.operation_count,
-            "laser_nest_count": result.nest_count,
-            "material_allocation_count": result.allocation_count,
-            # The same omissions the response envelope carries, on the chain too --
-            # ``model_dump()`` of the very objects the endpoint returns, so the two
-            # can never describe a skip differently.
-            "skipped_material_allocations": [entry.model_dump() for entry in result.skipped_allocations],
-            "skipped_operations": [entry.model_dump() for entry in result.skipped_operations],
-        },
-    )
+            extra_data={
+                "source": "work_order_template_use",
+                "template_id": template.id,
+                "template_name": template.name,
+                "source_work_order_id": source.id,
+                "source_work_order_number": source.work_order_number,
+                "created_work_order_id": result.work_order.id,
+                "created_work_order_number": result.work_order.work_order_number,
+                "created_work_order_status": WorkOrderStatus.DRAFT.value,
+                "quantity": float(result.work_order.quantity_ordered),
+                # The build identity this draft was given, or null. On the chain because
+                # it is the one field of the new work order the TEMPLATE path supplies
+                # that the copy engine does not, so nothing else records who set it.
+                "unit_number": unit_number,
+                # Which action this row belongs to, how big it was, and where in it this
+                # draft sits (1-based). Stamped for a single use too -- one code path --
+                # so a reader never has to infer "these were one click" from timestamps.
+                "batch_id": batch_id,
+                "batch_size": count,
+                "batch_index": index + 1,
+                # Recorded only when the two differ, i.e. a nest-bearing template whose
+                # quantity was derived from its runs rather than taken from the request.
+                # Same key and same condition the duplicate service uses.
+                **(
+                    {"requested_quantity": effective_quantity}
+                    if float(result.work_order.quantity_ordered) != effective_quantity
+                    else {}
+                ),
+                "operation_count": result.operation_count,
+                "laser_nest_count": result.nest_count,
+                "material_allocation_count": result.allocation_count,
+                # The same omissions the response envelope carries, on the chain too --
+                # ``model_dump()`` of the very objects the endpoint returns, so the two
+                # can never describe a skip differently. THIS COPY's skips, not the
+                # batch's deduplicated union: a per-work-order row must describe the work
+                # order it names, and the union is a presentation of the batch.
+                "skipped_material_allocations": [entry.model_dump() for entry in result.skipped_allocations],
+                "skipped_operations": [entry.model_dump() for entry in result.skipped_operations],
+            },
+        )
 
-    return TemplateUseResult(template=template, duplicate=result)
+        duplicates.append(result)
+
+    return TemplateUseResult(template=template, duplicates=duplicates, batch_id=batch_id)
 
 
 def _resolve_quantity(
@@ -952,6 +1275,7 @@ def summary_for_one(db: Session, template: WorkOrderTemplate, company_id: int) -
 
 
 __all__ = [
+    "NEST_BEARING_BATCH_REFUSAL",
     "UNAVAILABLE_SOURCE_MISSING",
     "TemplatePlanSummary",
     "TemplateUseResult",
@@ -963,6 +1287,8 @@ __all__ = [
     "resolve_catalogable_work_order",
     "resolve_source_work_order",
     "summary_for_one",
+    "union_skipped_allocations",
+    "union_skipped_operations",
     "update_template",
     "use_template",
     "_live_template_or_404",

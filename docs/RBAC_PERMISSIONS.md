@@ -85,7 +85,7 @@ tier, that tier stands — this rule is a floor, never a loosening.
 | Tie / edit / untie material | ✓ | ✓ | ✓ | | | | |
 | View work order templates | ✓ | ✓ | ✓ | | | | |
 | Save / rename / delete a work order template | ✓ | ✓ | ✓ | | | | |
-| Use a work order template (creates a DRAFT WO) | ✓ | ✓ | ✓ | | | | |
+| Use a work order template (creates DRAFT WOs — up to 20 per call) | ✓ | ✓ | ✓ | | | | |
 
 > **Delete — code now matches the matrix (Admin + Manager).** `DELETE /api/v1/work-orders/{id}`
 > (`app/api/endpoints/work_orders.py`) was previously gated **stricter than this matrix** —
@@ -568,7 +568,12 @@ tier, that tier stands — this rule is a floor, never a loosening.
 > a capability.** A template is a name plus a pointer at an existing work order; using one calls the
 > duplicate service against that work order, so it can only ever mint a work order the caller could
 > already have minted by hand — with the same refusals and landing in **DRAFT**, off every
-> dispatch board until somebody with **Release** releases it.
+> dispatch board until somebody with **Release** releases it. Since 2026-09-01 one call may mint up
+> to **20** of them (`count`, with an optional `unit_numbers` list); that is a batch of the same act,
+> **not a new capability** — same verb, same `require_role([ADMIN, MANAGER, SUPERVISOR])`, no new
+> endpoint, no new permission, and every copy still lands DRAFT. The cap is a server-side module
+> constant (422 above it), so the batch size is not something a role can raise. See `docs/API.md` →
+> Work Orders → "Work order templates".
 >
 > Note the shape of the **View** row: unlike work-order **View** (every role), reading the catalog is
 > restricted to the same three roles. That is deliberate rather than an oversight to "fix" — the

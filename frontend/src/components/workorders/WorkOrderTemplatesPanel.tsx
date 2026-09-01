@@ -81,14 +81,19 @@ import { formatCentralDate } from '../../utils/centralTime';
 import { serverErrorDetail } from './copyPlanSkips';
 import UseTemplateModal, { templateUnavailableSentence } from './UseTemplateModal';
 import { TEMPLATE_NAME_MAX_LENGTH } from './SaveAsTemplateModal';
-import type { WorkOrderDuplicateResult, WorkOrderTemplate } from '../../types';
+import type { WorkOrderTemplate, WorkOrderTemplateUseResult } from '../../types';
 
 export interface WorkOrderTemplatesPanelProps {
   /**
-   * Where a created draft goes. The panel does not navigate itself — the same
+   * Where the created draft(s) go. The panel does not navigate itself — the same
    * split the Duplicate dialog uses, so the hand-off shape stays one thing.
+   *
+   * The envelope is the template one, a strict superset of the duplicate
+   * envelope: one use can create SEVERAL work orders, so the caller must branch
+   * on `work_orders` rather than assume `work_order` is the only one. There is
+   * no single destination for a batch.
    */
-  onUsed: (result: WorkOrderDuplicateResult) => void;
+  onUsed: (result: WorkOrderTemplateUseResult) => void;
   /**
    * Does this user hold the admin/manager (+superuser) tier that
    * `GET /work-orders/?deleted_only=true` and `POST /work-orders/{id}/restore` admit?

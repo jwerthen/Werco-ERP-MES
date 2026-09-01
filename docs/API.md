@@ -690,7 +690,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 | GET | `/work-orders/` | List all work orders (`skip` ≥ 0, `limit` 1–5000 default 100 — the standard list tier, see [Pagination](#pagination)). `deleted_only=true` returns **only** this company's soft-deleted work orders — the restore view, **Admin / Manager**, and the only read in the API that can see one; see "Seeing a deleted work order" below | Yes (`deleted_only=true`: Admin / Manager) |
 | POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) and the optional `unit_number` (≤ 50 chars — see "Unit #" below) | Yes |
 | GET | `/work-orders/{id}` | Get work order by ID | Yes |
-| PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below) | Admin / Manager / Supervisor |
+| PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below) | Admin / Manager / Supervisor |
 | DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it) | Admin / Manager |
 | POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below. Reached from Work Orders → **Deleted** (`deleted_only=true` above) | Admin / Manager |
 | POST | `/work-orders/{id}/release` | Release to production | Yes |
@@ -1633,13 +1633,32 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > `String(50)`, nullable and indexed (migration `083`), naming the **unit this work order builds** —
 > the weld assemblies, which run one unit at a time. It rides `WorkOrderBase` (so `POST
 > /work-orders/` accepts it and every work-order response returns it), `WorkOrderUpdate` (so `PUT
-> /work-orders/{id}` sets, changes, or **clears** it — `unit_number: null` clears; that endpoint
-> applies the body through a blind `setattr`, so an explicit `""` is stored as an empty string
-> rather than NULL, and the work-order detail editor sends `null` for a blank field),
+> /work-orders/{id}` sets, changes, or **clears** it — `unit_number: null` clears, and so does an
+> explicit `""`, which the work-order detail editor never sends but a hand-built client might),
 > and `WorkOrderSummary`
 > (so `GET /work-orders/` list rows carry it). Editing is the ordinary header update: Admin /
 > Manager / Supervisor, `version`-gated, and audited through the generic `log_update` field diff —
 > there is no verb of its own and no new permission.
+>
+> - **Trimmed, and a blank stores NULL.** The cap and that rule are one reusable annotated type,
+>   `core.validation.UnitNumber`, used by `WorkOrderBase`, `WorkOrderUpdate` and the template batch's
+>   `unit_numbers` list (the same consolidation `OperationNumber` had). `"  2410048  "` stores as
+>   `2410048`; `""` and `"   "` store as **NULL**, not an empty string. `PUT /work-orders/{id}`
+>   applies its body through a blind `setattr` loop, so before this an explicit `""` persisted an
+>   empty string — a row that reads as "has a unit number" to a presence test and as blank to a
+>   renderer, which is what the wallboard's defensive `wo.unit_number or None` was working around.
+>   `max_length` is checked against the **untrimmed** value, so a 51-character string that would trim
+>   to 50 is a 422 rather than being silently stored.
+> - **A legacy `""` row normalizes on the way out of the detail shapes only.** `WorkOrderResponse`
+>   inherits `WorkOrderBase`, so a row that already holds `""` serializes as `null`. `WorkOrderSummary`
+>   (the `GET /work-orders/` list rows) declares its own `Optional[str]` with no validator, so such a
+>   row still reads back `""` there. Nothing was backfilled — the column is forward-only, as with
+>   `operation_number`.
+> - **Three writers, not two.** `POST /work-orders/`, `PUT /work-orders/{id}`, and — since the
+>   template batch — `POST /work-order-templates/{id}/use` via its `unit_numbers` list, which stamps
+>   one per created draft. The copy engine still never carries a unit number across (see "Duplicating
+>   a work order" below); the template service applies the planner's value *after* the copy returns,
+>   so the omission it is pinned on is untouched.
 >
 > - **Exactly one unit per work order, shown whenever it is filled in.** No per-part flag, no company
 >   setting, and nothing requires one at release. A work order that carries none is `null` everywhere
@@ -1797,10 +1816,12 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > this shop re-runs. A template is a **name plus a pointer**, never a stored plan: one row carries a
 > name, an optional note, an optional default quantity, and the id of the work order whose plan it
 > stands for. `POST …/{id}/use` hands that work order to the **same copy engine**
-> `POST /work-orders/{id}/duplicate` uses, so everything the section above decides holds here
-> byte-for-byte — the plan is copied, the production record is left behind, and the result lands
-> **DRAFT** with **PENDING** operations. A template adds a name and a lookup; it adds **no
-> authority**: every verb, reads included, is `require_role([ADMIN, MANAGER, SUPERVISOR])` — the
+> `POST /work-orders/{id}/duplicate` uses — once, or up to **20** times in one all-or-nothing call
+> (`count`, each copy its own work order and its own optional `unit_number`) — so everything the
+> section above decides holds here byte-for-byte: the plan is copied, the production record is left
+> behind, and every result lands **DRAFT** with **PENDING** operations. A template adds a name and a
+> lookup; it adds **no authority**: every verb, reads included, is
+> `require_role([ADMIN, MANAGER, SUPERVISOR])` — the
 > duplicate endpoint's own trio — and every refusal the copy engine raises reaches the caller
 > untouched. Full runbook: [docs/WORK_ORDER_TEMPLATES.md](WORK_ORDER_TEMPLATES.md).
 >
@@ -1811,7 +1832,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > | POST | `/work-order-templates` | Save a work order's plan under a name. Body `{source_work_order_id, name, notes?, default_quantity?}`; **201**. **The source work order is not modified** | Admin / Manager / Supervisor |
 > | PUT | `/work-order-templates/{id}` | Rename / re-note / re-default. Body `{name?, notes?, default_quantity?}`, `extra="forbid"`. An explicit `null` **clears** `notes` / `default_quantity`; an omitted key leaves it alone (`model_fields_set`) | Admin / Manager / Supervisor |
 > | DELETE | `/work-order-templates/{id}` | Soft delete → **200** `{message, id}`. The name is freed immediately; a second delete is **404** | Admin / Manager / Supervisor |
-> | POST | `/work-order-templates/{id}/use` | Create a new **DRAFT** work order from the template. Body `{quantity_ordered?, due_date?}` — **both optional**, `extra="forbid"`; **201** returning the **`WorkOrderDuplicateResponse` envelope** | Admin / Manager / Supervisor |
+> | POST | `/work-order-templates/{id}/use` | Create **one or more** new **DRAFT** work orders from the template. Body `{quantity_ordered?, due_date?, count?, unit_numbers?}` — **all optional**, `extra="forbid"`; **201** returning the **`WorkOrderTemplateUseResponse` envelope** (a strict superset of `WorkOrderDuplicateResponse`) | Admin / Manager / Supervisor |
 >
 > **`plan` is computed on every read, never stored.** Each template response carries
 > `plan: {available, unavailable_reason, source_work_order_deleted, source_work_order_number,
@@ -1877,14 +1898,72 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > validator: a template is most often used to re-run something already late. `must_ship_by` is not
 > carried either.
 >
-> **`POST …/use` returns the SAME envelope as `POST /work-orders/{id}/duplicate`** — `work_order` plus
-> `skipped_operations` / `skipped_material_allocations`, same entry shapes and the same open reason
-> vocabulary (see "Duplicating a work order" above). That is deliberate, not tidiness: the skip lists
-> reach the same result view the Duplicate dialog already renders, so the two paths cannot describe an
-> omission differently. Both lists empty is the "clean copy" signal; a non-empty list is **not** an
-> error, but the draft is missing something the source had — **a skipped material tie means the new
-> job carries no demand for that material, so no shortage is raised, the work runs, and stock is never
-> deducted.**
+> **`count` creates that many SEPARATE work orders (1–20), not one bigger one.** A weld assembly is
+> built one unit per work order — its own number, its own traveler, its own labor and quality record —
+> so "five of these" is five DRAFT work orders each carrying a full copy of the plan, each at the
+> **same** `quantity_ordered`. **`quantity_ordered` is the quantity of EACH work order, never a total
+> to divide**; the server resolves it once for the whole batch and does not scale it by `count`.
+> Omitting `count` (or sending `1`) leaves the endpoint byte-identical to its pre-batch behavior. Above
+> **20** is a **422** — the cap is a module constant (`MAX_TEMPLATE_USE_COUNT`), not a setting, because
+> every copy writes `2 + nests + ties` audit rows behind the audit chain's **global, cross-tenant**
+> advisory lock held for the transaction's life.
+>
+> **`unit_numbers` is a list the planner supplies — one entry per created work order, in creation
+> order.** `unit_numbers[0]` lands on `work_orders[0]`. Entries are trimmed and a blank or
+> whitespace-only entry (or an explicit `null`) stores **NULL**, so a gap is expressible — the third of
+> five units may not be known yet. Omit the key entirely and every draft lands without one. It is legal
+> on a single use too — `count` 1 with a one-entry list — so a template run can land with its Unit #
+> already on it without a follow-up `PUT` (the app's own dialog only shows the box for a batch, and
+> omits the key otherwise, so a single use puts exactly the bytes on the wire it always has).
+> **Nothing generates or increments a unit number**: real unit numbers come off the customer's own
+> scheme, and a fabricated one is indistinguishable on
+> the kiosk, the dispatch board and the TV wall from one somebody typed. Two **422**s guard the list —
+> its length must equal `count`, and no non-blank value may repeat (compared trimmed and
+> case-insensitively). **Duplicates against EXISTING work orders are deliberately not checked**, here
+> or anywhere: `work_orders.unit_number` carries a plain index and **no unique constraint**, because a
+> rework work order legitimately re-uses the unit it is rebuilding.
+>
+> **`POST …/use` returns a strict SUPERSET of the `POST /work-orders/{id}/duplicate` envelope** —
+> `work_order` plus `skipped_operations` / `skipped_material_allocations`, same entry shapes and the
+> same open reason vocabulary (see "Duplicating a work order" above), **plus `created_count` and
+> `work_orders`**:
+>
+> ```json
+> {
+>   "work_order": { "…": "the FIRST created draft — the same shape GET /work-orders/{id} returns" },
+>   "work_orders": [ { "…": "every created draft, in creation order" } ],
+>   "created_count": 5,
+>   "skipped_operations": [],
+>   "skipped_material_allocations": []
+> }
+> ```
+>
+> `WorkOrderTemplateUseResponse` **subclasses** `WorkOrderDuplicateResponse`, which is a compatibility
+> decision rather than a stylistic one: the shared result view dereferences the **singular**
+> `work_order`, so a list-only envelope would not merely change a shape, it would fail to type-check
+> against the client that renders it. **`work_orders[0]` IS `work_order`** — the same serialized
+> object, not a second copy of the row — and both new fields are present for a single use too
+> (`created_count: 1`, a one-entry list), so there is one shape rather than keys that appear only
+> sometimes. `work_orders` is in creation order, which is also work-order-number order.
+>
+> Reusing the singular half is deliberate, not tidiness: the skip lists reach the same result view the
+> Duplicate dialog already renders, so the two paths cannot describe an omission differently. **On a
+> batch both skip lists are the deduplicated UNION across the copies** — deduped by
+> `source_operation_id` / `source_allocation_id`, because every copy reads the **same** source work
+> order, so an omission the source causes is reported once rather than once per copy (five entries for
+> one missing tie reads as five missing ties). A client rendering them for a batch must say the
+> omissions apply to **every** draft. Both lists empty is the "clean copy" signal; a non-empty list is
+> **not** an error, but the drafts are missing something the source had — **a skipped material tie
+> means the new job carries no demand for that material, so no shortage is raised, the work runs, and
+> stock is never deducted.**
+>
+> **The batch is ALL-OR-NOTHING.** The whole loop runs inside the router's single
+> `atomic_transaction` — there is exactly one in the module and it wraps the loop, never each copy
+> (`atomic_transaction` is not re-entrant) — so every created work order, its operations, nests, ties
+> and all `USE_TEMPLATE` rows commit together or not at all. A partial batch is never returned, and
+> `created_count` always equals `count`. When `count > 1`, the `IntegrityError` 409 detail ends with
+> **"Nothing was created — the whole batch was rolled back."**, because the safe guess (the drafts
+> before the failure survived) is the wrong one.
 >
 > **Refusals — nothing is written in any of these cases:**
 >
@@ -1893,8 +1972,9 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > | **404** | The template is not live in the active company (a cross-tenant or soft-deleted id is indistinguishable from one that never existed), or — on `POST` — the `source_work_order_id` is not live in the active company |
 > | **409** | On `POST` / `PUT`, another **live** template in this company already holds the name. Compared **case-insensitively**, deliberately stricter than the byte-wise unique index: two names differing only in case are indistinguishable in a picker. The partial index is the backstop for the concurrent-save race the probe cannot close, and returns the same 409 rather than a 500 |
 > | **409** | On `…/use`, the source work order row cannot be **resolved at all** (`plan.available = false`). A merely **soft-deleted** source is *not* this case and is used normally — see above |
-> | **409** | On `…/use`, every refusal the copy engine raises, untouched — a **retired produced part**, `PROCESS_SHEET_UNAVAILABLE` (structured `code`) for a process-sheet family with no released revision, and an `IntegrityError` on the generated data |
-> | **422** | On `…/use`, no positive quantity is resolvable from the request, the template's default, or the source work order |
+> | **409** | On `…/use`, `count > 1` on a **nest-bearing** template (`plan.nest_count > 0`). A laser job's quantity **is** the sum of its nests' `planned_runs`, so five copies would be five work orders each claiming the same sheets. The message names the template and ends with the remedy that actually produces more parts: *"Create one draft and raise the nests' planned runs on it."* Probed through the same live `summary_for_one` the catalog renders, and only when `count > 1`, so the one-click path pays nothing for a gate that cannot fire |
+> | **409** | On `…/use`, every refusal the copy engine raises, untouched — a **retired produced part**, `PROCESS_SHEET_UNAVAILABLE` (structured `code`) for a process-sheet family with no released revision, and an `IntegrityError` on the generated data (whose detail gains the batch rollback sentence when `count > 1`) |
+> | **422** | On `…/use`, no positive quantity is resolvable from the request, the template's default, or the source work order; `count` above **20**; `unit_numbers` whose length is not exactly `count`; or a non-blank unit number repeated **within** the request |
 >
 > **The name is freed the moment a template is deleted.** Uniqueness is enforced by a **partial**
 > unique index — `uq_work_order_templates_company_name_live`, `UNIQUE (company_id, name) WHERE NOT
@@ -1919,13 +1999,20 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > every extracted row in the wizard. Templates are the draft door.
 >
 > **Audit.** `POST` / `PUT` / `DELETE` write the usual `log_create` / `log_update` / `log_delete` rows
-> against `work_order_template` (the delete records `name_released_for_reuse`). `…/use` writes
-> **two**: the copy engine's own work-order `log_create` naming the source work order, plus a
-> `USE_TEMPLATE` row against the **template** naming the work order it produced, the stored quantity,
-> the operation / nest / tie counts and both skip lists — the only place the fact that a *catalog
-> entry* produced this job exists, and what makes "how often do we run this template" answerable.
-> Every write is wrapped in `atomic_transaction`, so the work order, its operations, nests, ties and
-> every audit row commit together or not at all.
+> against `work_order_template` (the delete records `name_released_for_reuse`). `…/use` writes **two
+> rows per created work order**: the copy engine's own work-order `log_create` naming the source work
+> order, plus a `USE_TEMPLATE` row against the **template** naming the work order it produced, the
+> stored quantity, the operation / nest / tie counts and that copy's own skip lists (**not** the
+> envelope's deduplicated union — a per-work-order row must describe the work order it names) — the
+> only place the fact that a *catalog entry* produced this job exists, and what makes "how often do we
+> run this template" answerable. Each `USE_TEMPLATE` row also carries **`unit_number`** (the build
+> identity this draft was given, or `null` — the one field the template path supplies that the copy
+> engine does not, so nothing else records who set it) and the batch correlators **`batch_id`** (a
+> `uuid4().hex` minted once per request), **`batch_size`** and **`batch_index`** (1-based). All four
+> are stamped for a **single** use as well, so there is one code path and one shape to read: five rows
+> minutes apart are otherwise indistinguishable from five separate clicks. Every write is wrapped in
+> `atomic_transaction`, so every created work order, its operations, nests, ties and every audit row
+> commit together or not at all.
 
 > **Material ties (`/work-orders/{id}/material-allocations`).** The optional tie between a work order
 > (or one of its operations) and a **material** part — what makes stock deplete as work completes.

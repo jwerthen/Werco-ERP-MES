@@ -10,25 +10,42 @@ are the interesting part:
   be the beginning of a second copy engine.
 * **No status.** A template has none. What it produces always lands ``DRAFT``.
 
-``POST /work-order-templates/{id}/use`` deliberately returns the EXISTING
-``WorkOrderDuplicateResponse`` envelope rather than a new one, so the skip lists a
-planner must see reach the same result view the Duplicate dialog already renders. See
-that schema's docstring before treating the envelope as a formality.
+``POST /work-order-templates/{id}/use`` returns
+:class:`WorkOrderTemplateUseResponse`, which SUBCLASSES the existing
+``WorkOrderDuplicateResponse`` rather than replacing it, so the skip lists a planner
+must see reach the same result view the Duplicate dialog already renders. See that
+schema's docstring before treating the envelope as a formality, and this one's before
+"simplifying" the batch envelope down to its list.
 """
 
 from datetime import date, datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from app.core.time_utils import to_utc_iso
+from app.core.validation import UnitNumber
 from app.schemas.base import UTCModel
+from app.schemas.work_order import WorkOrderDuplicateResponse, WorkOrderResponse
 
 # Matches ``WorkOrderTemplate.name``'s ``String(120)``. Stated here as well so an
 # over-long name is a 422 naming the field rather than a database error naming a
 # column.
 TEMPLATE_NAME_MAX_LENGTH = 120
+
+# How many DRAFT work orders one ``POST /{id}/use`` may create. A cap rather than an
+# open count, and 20 rather than a round 100, because the batch is ONE transaction and
+# each copy is not cheap: it writes a header, its operations and their re-snapshotted
+# process-sheet steps, any nests, any material ties, plus 2 + n audit rows -- and every
+# audit row is serialised behind the audit chain's GLOBAL advisory lock, which is held
+# across tenants for the life of the transaction. A batch of hundreds would stall every
+# other company's writes while it ran.
+#
+# It is also the shape of the work: a weld assembly is one unit per work order and the
+# planner types one unit number per row. Twenty rows is a long form; two hundred is a
+# spreadsheet import, which is a different feature with a different failure mode.
+MAX_TEMPLATE_USE_COUNT = 20
 
 
 class WorkOrderTemplateCreate(BaseModel):
@@ -113,21 +130,35 @@ class WorkOrderTemplateUpdate(BaseModel):
 
 
 class WorkOrderTemplateUseRequest(BaseModel):
-    """Body for ``POST /work-order-templates/{id}/use`` — create a new DRAFT work order.
+    """Body for ``POST /work-order-templates/{id}/use`` — create DRAFT work orders.
 
-    Both fields are optional, which is what makes the click-once case click-once.
+    Every field is optional, which is what makes the click-once case click-once: an
+    empty body still means "one draft, quantity from the template, no due date".
 
     ``quantity_ordered`` resolves to the first POSITIVE value of: this field, the
     template's ``default_quantity``, the source work order's ``quantity_ordered``. All
     three non-positive is a 422 rather than a fabricated 1 — a quantity of one on a job
-    that should have run fifty is a plan nobody approved.
+    that should have run fifty is a plan nobody approved. It is the quantity of EACH
+    work order, never a total to divide: a weld assembly is built one unit per work
+    order, so "five of these" means five work orders of the same quantity, not one
+    quantity split five ways.
 
     ``due_date`` is never inherited from the source. Null means unscheduled, which
     reads as "not promised yet" everywhere; carrying the source's date forward would
     make the new job overdue the moment it exists, on the dispatch board and in OTD,
     for a promise nobody made. Like ``WorkOrderDuplicateRequest`` and unlike
     ``WorkOrderCreate``, it carries NO "not in the past" validator: a template is most
-    often used to re-run something already late.
+    often used to re-run something already late. **One date for the whole batch** —
+    per-unit dates were considered and deliberately not built for v1; every unit in a
+    batch is promised together, and a batch that needed staggered dates would be
+    several batches.
+
+    ``unit_numbers`` is a LIST THE PLANNER SUPPLIES, one entry per work order, in
+    creation order. There is deliberately **no generator, no auto-increment and no
+    fill-down**: the owner was asked directly, and real unit numbers are not a trailing
+    digit that walks. Inventing the second one from the first would put a fabricated
+    build identity on the kiosk, the dispatch board and the TV wall, where it is
+    indistinguishable from one somebody typed.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -135,15 +166,123 @@ class WorkOrderTemplateUseRequest(BaseModel):
     quantity_ordered: Optional[Decimal] = Field(
         None,
         gt=Decimal("0"),
-        description="Quantity for the NEW work order. Omit to use the template's default, or the "
-        "source work order's quantity. For a nest-bearing template this does NOT rescale the copied "
-        "nests: each keeps its own planned_runs and the stored quantity is DERIVED from their sum, so "
-        "read it back from the response rather than assuming this value was stored.",
+        description="Quantity for EACH new work order — not a total to split across the batch. Omit to use "
+        "the template's default, or the source work order's quantity. For a nest-bearing template this does "
+        "NOT rescale the copied nests: each keeps its own planned_runs and the stored quantity is DERIVED "
+        "from their sum, so read it back from the response rather than assuming this value was stored.",
     )
     due_date: Optional[date] = Field(
         None,
-        description="Due date for the new work order, or null to leave it unscheduled. The source's due "
-        "date and its must_ship_by promise are never carried.",
+        description="Due date for every work order in the batch, or null to leave them unscheduled. The "
+        "source's due date and its must_ship_by promise are never carried.",
+    )
+    count: int = Field(
+        1,
+        ge=1,
+        le=MAX_TEMPLATE_USE_COUNT,
+        description=(
+            "How many separate DRAFT work orders to create, each with its own work order number. "
+            f"1-{MAX_TEMPLATE_USE_COUNT}; above that is a 422. A count above 1 is refused 409 on a "
+            "nest-bearing template, whose quantity is the sum of its nests' planned runs."
+        ),
+    )
+    unit_numbers: Optional[List[Optional[UnitNumber]]] = Field(
+        None,
+        description=(
+            "One unit number per created work order, in creation order. Omit to leave every draft "
+            "without one. Values are trimmed, and a blank or whitespace-only entry stores as null so a "
+            "gap in the list is expressible — the third of five units may not be known yet. Must hold "
+            "exactly `count` entries when present."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _unit_numbers_line_up_with_count(self) -> "WorkOrderTemplateUseRequest":
+        """One unit number per work order, and no two work orders claiming the same unit.
+
+        The length check is what stops a silent misalignment. The list is positional —
+        entry 3 becomes the third work order's unit — so a list one entry short would
+        otherwise either drop a unit or, worse, shift every unit after the gap onto the
+        wrong job. Both are invisible afterwards: the drafts look correct, and the
+        wrong build identity travels to the kiosk and the TV wall.
+
+        The duplicate check is scoped to the BATCH and compares trimmed values
+        case-insensitively (the entries are already trimmed, and blanks are already
+        ``None``, by ``UnitNumber``). Two work orders in one batch claiming unit
+        ``2410048`` is a typo in a form the planner just filled in, and it is
+        correctable before anything is written.
+
+        **Duplicates against EXISTING work orders are deliberately NOT checked**, here
+        or in the service. ``work_orders.unit_number`` carries a plain index and no
+        unique constraint precisely because a rework or replacement work order
+        legitimately re-uses the unit it is rebuilding, so a uniqueness gate here would
+        refuse the case the column was designed for.
+        """
+        if self.unit_numbers is None:
+            return self
+
+        if len(self.unit_numbers) != self.count:
+            raise ValueError(
+                f"unit_numbers has {len(self.unit_numbers)} entries but count is {self.count}: send exactly "
+                "one entry per work order (null for a work order whose unit is not known yet), or omit "
+                "unit_numbers entirely"
+            )
+
+        first_seen: dict[str, int] = {}
+        for position, value in enumerate(self.unit_numbers, start=1):
+            if value is None:
+                continue
+            key = value.lower()
+            if key in first_seen:
+                raise ValueError(
+                    f"unit_numbers repeats '{value}' at entries {first_seen[key]} and {position}: each work "
+                    "order in a batch builds a different unit. Leave an entry blank if its unit number is "
+                    "not known yet"
+                )
+            first_seen[key] = position
+        return self
+
+
+class WorkOrderTemplateUseResponse(WorkOrderDuplicateResponse):
+    """``POST /work-order-templates/{id}/use``: every draft the batch created.
+
+    **A strict SUPERSET of the duplicate envelope, by subclassing it**, and that is a
+    compatibility decision rather than a stylistic one. The result view this endpoint
+    shares with the Duplicate dialog dereferences the SINGULAR ``work_order`` — the
+    stored-quantity note and the skip report both read it directly — so an envelope
+    that carried only ``work_orders`` would not merely change a shape, it would fail to
+    type-check against the client that renders it. Subclassing means the existing
+    fields keep their existing meaning and the batch fields are additive, so a client
+    that has not been updated still shows the first draft and its skips correctly.
+
+    ``work_orders[0]`` IS ``work_order``. The singular field is the batch's first
+    element, not a summary of it and not a separate copy.
+
+    ``skipped_operations`` / ``skipped_material_allocations`` are the UNION across every
+    copy in the batch, deduplicated by ``source_operation_id`` /
+    ``source_allocation_id``. Every copy reads the SAME source work order, so an
+    omission the source causes is reported identically by all of them; listing it once
+    per copy would read as five separate missing material ties rather than one, which is
+    the opposite of what a skip list is for. Deduplicating by the SOURCE row's id is
+    what makes "reported once" mean "omitted once" — the thing that was left behind is
+    a row on the source, and it was left behind once no matter how many drafts were cut
+    from it.
+    """
+
+    created_count: int = Field(
+        ...,
+        description="How many DRAFT work orders this call created. Always equals len(work_orders), and "
+        "equals the request's count — the batch is all-or-nothing, so a partial batch is never returned.",
+    )
+    work_orders: List[WorkOrderResponse] = Field(
+        # REQUIRED, not ``default_factory=list``: the docstring above makes
+        # "work_orders[0] IS work_order" load-bearing, and a defaulted empty list is a
+        # constructible envelope that states a singular work order and no batch
+        # containing it — the one shape the promise forbids. Required means the schema
+        # enforces what it documents instead of trusting every call site to pass it.
+        ...,
+        description="Every created work order, in creation order (so their work order numbers ascend). "
+        "work_orders[0] is the same object as work_order.",
     )
 
 

@@ -1,7 +1,7 @@
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Optional
 
-from pydantic import Field
+from pydantic import AfterValidator, Field
 
 # ============================================================================
 # ANNOTATED TYPES (Reusable validators)
@@ -37,6 +37,46 @@ DescriptionLong = Annotated[
 # Widening this REQUIRES widening both columns in the same migration.
 OperationNumber = Annotated[
     str, Field(max_length=20, description="Operation identifier: max 20 chars (the String(20) column width)")
+]
+
+
+def _unit_number_or_none(value: str) -> Optional[str]:
+    """Trim a Unit #, and turn a blank one into ``None`` rather than storing ``""``.
+
+    ``PUT /work-orders/{id}`` applies its body through a blind ``setattr`` loop, so
+    without this a planner clearing the field in the UI (which sends ``""``, not
+    ``null``) persisted an EMPTY STRING where every reader expects NULL. That row then
+    reads as "has a unit number" to anything doing a presence test, and as "" to
+    anything rendering it -- which is why the wallboard already carries a defensive
+    ``wo.unit_number or None`` and search a ``.strip()``. Normalising at the write
+    door is the fix those two are working around.
+
+    Blank must collapse to NULL rather than be REFUSED, because clearing the field is a
+    legitimate correction: a unit typed onto the wrong work order is already on the
+    kiosk and the TV wall, so it has to be removable, not merely overwritable.
+    """
+    trimmed = value.strip()
+    return trimmed or None
+
+
+# Build identity of a one-unit-per-work-order job (``work_orders.unit_number``, migration
+# 083). The 50 is the COLUMN WIDTH -- ``String(50)`` -- not a style preference, and it is
+# declared here once because it was previously restated at every schema that carries the
+# field; a third restatement (the template BATCH list, one unit number per created draft)
+# is what made consolidating it worth doing. Widening this REQUIRES widening the column in
+# the same migration.
+#
+# ``AfterValidator`` rather than ``BeforeValidator`` is load-bearing at every use site,
+# all of which are ``Optional[UnitNumber]``: ``Optional[X]`` compiles to a NULLABLE schema
+# that checks for ``None`` BEFORE delegating to the inner str schema, so a before-validator
+# returning ``None`` would then be re-validated as a string and fail. After-validator
+# output is not re-validated, which is what lets blank collapse to NULL. The consequence to
+# know: ``max_length`` is checked against the UNTRIMMED value, so a 51-character string
+# that would trim to 50 is refused rather than silently stored.
+UnitNumber = Annotated[
+    str,
+    Field(max_length=50, description="Unit #: max 50 chars (the String(50) column width); blank stores as NULL"),
+    AfterValidator(_unit_number_or_none),
 ]
 
 Money = Annotated[Decimal, Field(ge=0, description="Currency: non-negative decimal")]

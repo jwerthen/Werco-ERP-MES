@@ -51,11 +51,11 @@ import api from '../../services/api';
 import { ToastProvider } from '../ui';
 import type {
   WorkOrder,
-  WorkOrderDuplicateResult,
   WorkOrderDuplicateSkippedAllocation,
   WorkOrderDuplicateSkippedOperation,
   WorkOrderTemplate,
   WorkOrderTemplatePlan,
+  WorkOrderTemplateUseResult,
 } from '../../types';
 
 jest.mock('../../services/api', () => ({
@@ -116,12 +116,23 @@ const makeWorkOrder = (overrides: Partial<WorkOrder> = {}): WorkOrder => ({
   ...overrides,
 });
 
-const makeResult = (overrides: Partial<WorkOrderDuplicateResult> = {}): WorkOrderDuplicateResult => ({
-  work_order: makeWorkOrder(),
-  skipped_operations: [],
-  skipped_material_allocations: [],
-  ...overrides,
-});
+/**
+ * The USE envelope — a STRICT SUPERSET of the duplicate one, mirroring the
+ * server schema that subclasses it. `work_orders` is derived from `work_order`
+ * so a fixture can never assert the two disagree in a way the server would never
+ * send: `work_orders[0]` IS `work_order`.
+ */
+const makeResult = (overrides: Partial<WorkOrderTemplateUseResult> = {}): WorkOrderTemplateUseResult => {
+  const workOrder = overrides.work_order ?? makeWorkOrder();
+  return {
+    work_order: workOrder,
+    created_count: 1,
+    work_orders: [workOrder],
+    skipped_operations: [],
+    skipped_material_allocations: [],
+    ...overrides,
+  };
+};
 
 const skippedTie = (
   overrides: Partial<WorkOrderDuplicateSkippedAllocation> = {}
@@ -166,7 +177,7 @@ const dismissButton = () => screen.getByRole('button', { name: 'Dismiss' });
 const goToCopyButton = () => screen.getByRole('button', { name: /^Go to / });
 
 /** Submit a use the server answers PARTIALLY, and wait for the result view. */
-async function submitPartialCopy(result: WorkOrderDuplicateResult, template = makeTemplate()) {
+async function submitPartialCopy(result: WorkOrderTemplateUseResult, template = makeTemplate()) {
   mockApi.useWorkOrderTemplate.mockResolvedValue(result);
   const rendered = renderModal({ template });
   await userEvent.click(createButton());
@@ -321,7 +332,7 @@ describe('UseTemplateModal: a clean copy stays one click', () => {
 });
 
 describe('UseTemplateModal: a partial copy stops the flow', () => {
-  const partial = (overrides: Partial<WorkOrderDuplicateResult> = {}) =>
+  const partial = (overrides: Partial<WorkOrderTemplateUseResult> = {}) =>
     makeResult({ skipped_material_allocations: [skippedTie()], ...overrides });
 
   it('swaps the form for a RESULT view naming the new work order', async () => {
@@ -426,7 +437,7 @@ describe('UseTemplateModal: a partial copy stops the flow', () => {
     await userEvent.click(goToCopyButton());
 
     expect(onUsed).toHaveBeenCalledTimes(1);
-    const [passed] = onUsed.mock.calls[0] as [WorkOrderDuplicateResult];
+    const [passed] = onUsed.mock.calls[0] as [WorkOrderTemplateUseResult];
     expect(passed.work_order.id).toBe(501);
     expect(passed.skipped_material_allocations).toHaveLength(1);
     expect(calls).toEqual(['used', 'closed']);
@@ -501,9 +512,9 @@ describe('UseTemplateModal: server-gated, therefore non-optimistic', () => {
   });
 
   it('disables Cancel and refuses Escape while the write is in flight', async () => {
-    let resolve!: (result: WorkOrderDuplicateResult) => void;
+    let resolve!: (result: WorkOrderTemplateUseResult) => void;
     mockApi.useWorkOrderTemplate.mockReturnValue(
-      new Promise<WorkOrderDuplicateResult>((r) => {
+      new Promise<WorkOrderTemplateUseResult>((r) => {
         resolve = r;
       })
     );

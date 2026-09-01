@@ -9,6 +9,13 @@ template points at — the SAME copy engine ``POST /work-orders/{id}/duplicate``
 So the result is a new work order in ``DRAFT`` with ``PENDING`` operations, exactly as
 if a planner had found last month's job and pressed Duplicate.
 
+It can do that ``count`` times in one call, producing that many SEPARATE drafts each
+with its own number and its own ``unit_number`` — the weld-assembly shape, one unit per
+work order. The batch is ONE unit of work: this module holds exactly ONE
+``with atomic_transaction(db):``, and it wraps the LOOP rather than each copy, because
+``atomic_transaction`` is not re-entrant and a batch that half-succeeded would leave a
+planner reconciling a form against a work-order list.
+
 THE TWO PROPERTIES WORTH READING BEFORE CHANGING ANYTHING HERE
 --------------------------------------------------------------
 **1. A template adds a name, not authority.** The role gate on every verb is the
@@ -56,7 +63,7 @@ from app.models.laser_nest import LaserNest
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.models.work_order_template import WorkOrderTemplate
-from app.schemas.work_order import WorkOrderDuplicateResponse, WorkOrderResponse
+from app.schemas.work_order import WorkOrderResponse
 from app.schemas.work_order_template import (
     WorkOrderTemplateCreate,
     WorkOrderTemplateListResponse,
@@ -64,6 +71,7 @@ from app.schemas.work_order_template import (
     WorkOrderTemplateResponse,
     WorkOrderTemplateUpdate,
     WorkOrderTemplateUseRequest,
+    WorkOrderTemplateUseResponse,
 )
 from app.services import work_order_template_service as templates
 from app.services.audit_service import AuditService
@@ -336,9 +344,9 @@ def delete_work_order_template(
 
 @router.post(
     "/{template_id}/use",
-    response_model=WorkOrderDuplicateResponse,
+    response_model=WorkOrderTemplateUseResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Create a new DRAFT work order from a template",
+    summary="Create one or more DRAFT work orders from a template",
 )
 def use_work_order_template(
     template_id: int,
@@ -356,19 +364,30 @@ def use_work_order_template(
     planned runs, material/thickness/sheet, the SHARED drawing reference), OPEN
     material ties with their lot pins cleared, and process-sheet steps re-snapshotted
     from each family's currently-released revision. What the last run actually did
-    stays with the source: quantities, actual hours, clocks, lot/serial, unit number,
+    stays with the source: quantities, actual hours, clocks, lot/serial,
     ``parent_work_order_id``, ``must_ship_by``, dispatch rank.
 
-    **Nothing reaches the floor.** The new work order is DRAFT and its operations are
-    PENDING, so it contributes zero rows to ``/dispatch`` and to the kiosk queue until
-    somebody releases it — which is the difference between this door and Import Nest
-    Package, and the reason the feature exists.
+    **``count`` creates that many SEPARATE work orders** (1-20), each with its own
+    number, each a full copy of the plan at the SAME ``quantity_ordered`` — not one work
+    order at a multiplied quantity. ``unit_numbers`` gives each of them its own build
+    identity, one entry per work order in creation order, blanks allowed. The unit
+    number is the ONE field this path supplies that the copy engine deliberately does
+    not carry from the source (a duplicate is the next unit, not the same one), so it is
+    an input here rather than an inheritance.
 
-    The response is the SAME envelope ``POST /work-orders/{id}/duplicate`` returns:
-    ``work_order`` plus ``skipped_operations`` / ``skipped_material_allocations``. Both
-    lists are normally empty; when they are not, the draft is valid but MISSING
-    something the source had, and the planner has to be told — a skipped material tie
-    that nobody surfaces means the job runs and stock is never deducted.
+    **Nothing reaches the floor.** Every created work order is DRAFT and its operations
+    are PENDING, so it contributes zero rows to ``/dispatch`` and to the kiosk queue
+    until somebody releases it — which is the difference between this door and Import
+    Nest Package, and the reason the feature exists.
+
+    The response is a strict SUPERSET of the ``POST /work-orders/{id}/duplicate``
+    envelope: ``work_order`` (the FIRST created draft) and the two skip lists as before,
+    plus ``work_orders`` and ``created_count``. ``work_orders[0]`` is ``work_order``.
+    Both skip lists are the deduplicated union across the batch — every copy reads the
+    same source, so an omission is reported once, not once per copy. They are normally
+    empty; when they are not, the drafts are valid but MISSING something the source had,
+    and the planner has to be told — a skipped material tie that nobody surfaces means
+    the job runs and stock is never deducted.
 
     **A soft-deleted source work order is used normally** — that refusal was removed by
     owner decision, because a template is a catalog entry and must not stop working
@@ -378,20 +397,27 @@ def use_work_order_template(
     **404** when the template is not live in this company.
     **409** when the source work order row cannot be resolved at all (near-unreachable:
     ``source_work_order_id`` is NOT NULL with an FK, and the hard-delete verb refuses
-    rather than orphaning a template), when the source's produced part has been
+    rather than orphaning a template), when ``count > 1`` on a NEST-BEARING template (a
+    laser job's quantity is the sum of its nests' planned runs, so more of it is more
+    runs rather than more work orders), when the source's produced part has been
     retired, when an operation's process-sheet family has no released revision
     (structured detail, ``code: PROCESS_SHEET_UNAVAILABLE``), or on a constraint fault
-    in the generated data. Nothing is written in any of those cases.
+    in the generated data. **Nothing is written in any of those cases, batch included.**
     **422** when no positive quantity can be resolved from the request, the template's
-    default, or the source work order.
+    default, or the source work order; when ``count`` is above the cap; and when
+    ``unit_numbers`` does not hold exactly ``count`` entries or repeats a non-blank one.
     """
     template = templates._live_template_or_404(db, template_id, company_id)
 
     try:
-        # ONE unit of work: the new work order, its operations, nest package, nests,
-        # material ties, the template's USE audit row and every row the copy writes
-        # commit together or not at all. A header without its nests is a plan nobody
-        # approved.
+        # ONE unit of work for the WHOLE BATCH: every created work order, its
+        # operations, nest package, nests, material ties, the template's USE audit rows
+        # and every row the copies write commit together or not at all. A header without
+        # its nests is a plan nobody approved -- and three drafts of a five-draft batch
+        # is a form the planner has to reconcile by hand against the work order list.
+        #
+        # This is the module's ONLY atomic_transaction and it wraps the LOOP, never each
+        # copy: atomic_transaction is not re-entrant.
         with atomic_transaction(db):
             result = templates.use_template(
                 db,
@@ -401,12 +427,14 @@ def use_work_order_template(
                 company_id=company_id,
                 user_id=current_user.id,
                 audit=audit,
+                count=payload.count,
+                unit_numbers=payload.unit_numbers,
             )
-            new_work_order_id = result.duplicate.work_order.id
+            new_work_order_ids = result.work_order_ids
             # Read the skips off the result INSIDE the block: the objects survive the
             # commit, but these lists are the only record of them outside the chain.
-            skipped_operations = list(result.duplicate.skipped_operations)
-            skipped_material_allocations = list(result.duplicate.skipped_allocations)
+            skipped_operations = list(result.skipped_operations)
+            skipped_material_allocations = list(result.skipped_allocations)
     except IntegrityError as exc:
         # Same handling and the same reasoning as the duplicate endpoint: a
         # uniqueness/constraint fault must not surface as a 500 on a poisoned session,
@@ -414,47 +442,83 @@ def use_work_order_template(
         # race is transient; the rest are properties of the source and fail identically
         # every time.
         logger.warning("Work order template use failed on a constraint error (template %s): %s", template_id, exc)
-        raise HTTPException(
-            status_code=409,
-            detail="Could not create a work order from this template; a generated record conflicts with an "
+        detail = (
+            "Could not create a work order from this template; a generated record conflicts with an "
             "existing one. If it fails the same way again, the work order this template was saved from has "
-            "data that cannot be copied — check its nests and material ties.",
-        ) from exc
-
-    work_order = (
-        db.query(WorkOrder)
-        .options(
-            joinedload(WorkOrder.part),
-            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.component_part),
-            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.work_center),
-            selectinload(WorkOrder.operations)
-            .selectinload(WorkOrderOperation.laser_nest)
-            .selectinload(LaserNest.document),
+            "data that cannot be copied — check its nests and material ties."
         )
-        .filter(WorkOrder.id == new_work_order_id, WorkOrder.company_id == company_id)
-        .first()
-    )
-    _enrich(work_order, db=db, company_id=company_id)
+        if payload.count > 1:
+            # Say it explicitly for a batch. Without this the planner has to guess
+            # whether the drafts before the failing one survived, and the safe guess
+            # (they did) is the wrong one -- they would then hunt for work orders that
+            # do not exist, or worse, not re-run the batch.
+            detail += " Nothing was created — the whole batch was rolled back."
+        raise HTTPException(status_code=409, detail=detail) from exc
 
-    # The same broadcast ``POST /work-orders`` and ``POST /work-orders/{id}/duplicate``
-    # emit. Without it a template-created draft is invisible on every OTHER open
-    # session's Work Orders list until someone reloads, while a duplicate appears --
-    # an unexplained divergence in a pair that is otherwise deliberately identical.
-    safe_broadcast(
-        broadcast_dashboard_update,
-        {
-            "event": "work_order_created",
-            "work_order_id": work_order.id,
-            "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
-        },
-        company_id=company_id,
-    )
+    # ONE query for the whole batch, not one per work order: this is the same eager-load
+    # set the single-draft path used, and a per-id read would be the PERF-4 N+1 shape at
+    # 20 drafts each carrying its operations, work centers and nest documents.
+    created_by_id = {
+        work_order.id: work_order
+        for work_order in (
+            db.query(WorkOrder)
+            .options(
+                joinedload(WorkOrder.part),
+                selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.component_part),
+                selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.work_center),
+                selectinload(WorkOrder.operations)
+                .selectinload(WorkOrderOperation.laser_nest)
+                .selectinload(LaserNest.document),
+            )
+            .filter(WorkOrder.id.in_(new_work_order_ids), WorkOrder.company_id == company_id)
+            .all()
+        )
+    }
+    missing = [work_order_id for work_order_id in new_work_order_ids if work_order_id not in created_by_id]
+    if missing:
+        # Unreachable short of a concurrent hard delete of a row this request committed
+        # moments ago. Raised rather than silently dropped: an envelope reporting four
+        # of five drafts would send the planner looking for the fifth, when what
+        # actually needs finding is whatever removed it.
+        raise RuntimeError(
+            f"Work order template {template_id} committed work orders {missing} that could not be read "
+            f"back in company {company_id}"
+        )
+    # Creation order (= work-order-number order), taken from the ids rather than from
+    # the query, whose row order is not guaranteed by an IN filter.
+    created = [created_by_id[work_order_id] for work_order_id in new_work_order_ids]
 
-    return WorkOrderDuplicateResponse(
-        # ``model_validate`` rather than handing the ORM object straight in, matching
-        # the duplicate endpoint line-for-line -- the two "identical envelope" paths
-        # should read identically, not merely behave the same via from_attributes.
-        work_order=WorkOrderResponse.model_validate(work_order),
+    for work_order in created:
+        _enrich(work_order, db=db, company_id=company_id)
+
+        # The same broadcast ``POST /work-orders`` and ``POST /work-orders/{id}/duplicate``
+        # emit, ONE PER CREATED WORK ORDER. Without it a template-created draft is
+        # invisible on every OTHER open session's Work Orders list until someone reloads,
+        # while a duplicate appears -- an unexplained divergence in a pair that is
+        # otherwise deliberately identical. Per work order rather than one batch event
+        # because the listener keys on ``work_order_id``; a single event would refresh
+        # one row of five.
+        safe_broadcast(
+            broadcast_dashboard_update,
+            {
+                "event": "work_order_created",
+                "work_order_id": work_order.id,
+                "status": work_order.status.value if hasattr(work_order.status, "value") else work_order.status,
+            },
+            company_id=company_id,
+        )
+
+    # ``model_validate`` rather than handing the ORM objects straight in, matching the
+    # duplicate endpoint line-for-line -- the two "identical envelope" paths should read
+    # identically, not merely behave the same via from_attributes.
+    serialized = [WorkOrderResponse.model_validate(work_order) for work_order in created]
+    return WorkOrderTemplateUseResponse(
+        # The SAME object, not a second serialization of the same row: the singular
+        # field is the batch's first element by construction, so the two can never
+        # disagree for a client reading one and ignoring the other.
+        work_order=serialized[0],
+        work_orders=serialized,
+        created_count=len(serialized),
         skipped_operations=skipped_operations,
         skipped_material_allocations=skipped_material_allocations,
     )

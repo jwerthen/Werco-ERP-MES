@@ -8,20 +8,29 @@
  * the SPC failure mode (CLAUDE.md → type-check), and it is how the duplicate
  * envelope once shipped as "undefined created as a draft" with a green suite.
  *
- * Four contracts are pinned here, and each has a way of going wrong quietly:
+ * Six contracts are pinned here, and each has a way of going wrong quietly:
  *
  *  1. **`GET /work-order-templates` returns an ENVELOPE**, `{ templates, total }`.
  *     Unwrapping it to a bare array would compile and render an empty catalog.
- *  2. **`POST /{id}/use` returns the DUPLICATE envelope**, not a bare work order —
- *     the skip lists are safety information (a skipped material tie means the new
- *     job carries no demand for that material: no shortage shows, the nests run,
- *     stock is never deducted).
+ *  2. **`POST /{id}/use` returns a STRICT SUPERSET of the duplicate envelope**, not
+ *     a bare work order — the skip lists are safety information (a skipped material
+ *     tie means the new job carries no demand for that material: no shortage shows,
+ *     the nests run, stock is never deducted) — plus `created_count` /
+ *     `work_orders` for a batch, with `work_orders[0]` the same row as
+ *     `work_order`.
  *  3. **`use` omits `quantity_ordered` rather than sending null** when the caller
  *     has none. Omitted is what lets the server resolve the template's default and
  *     then the source work order's own quantity; a fabricated number would be a
  *     plan nobody approved.
  *  4. **`use` sends an explicit `due_date: null`** when blank. Unscheduled is a
  *     decision — the source's date is never inherited.
+ *  5. **`use` omits `count` and `unit_numbers` for a SINGLE use.** The server body
+ *     is `extra="forbid"`, and the one-at-a-time path is what every deployed client
+ *     already exercises: it must not start carrying new keys because a batch
+ *     feature exists beside it.
+ *  6. **`use` sends the unit list POSITIONALLY, nulls included.** A null entry is
+ *     "this work order has no unit yet"; compacting it out would shift every unit
+ *     after it onto the wrong job.
  *
  * axios is mocked at the module boundary (same pattern as api.spc.test.ts).
  */
@@ -86,27 +95,38 @@ const template = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-/** The `WorkOrderDuplicateResponse` envelope `POST /{id}/use` answers with. */
+/**
+ * The envelope `POST /{id}/use` answers with — a STRICT SUPERSET of the duplicate
+ * one, mirroring the server schema that SUBCLASSES it. `work_orders[0]` IS
+ * `work_order`, and `created_count` equals the list length. Both are stamped for a
+ * SINGLE use too, so there is one shape to read rather than keys that appear only
+ * sometimes — and a fixture that let the singular field and the list disagree would
+ * let a component test pass against a shape the server never sends.
+ */
+const useWorkOrder = {
+  id: 501,
+  version: 1,
+  work_order_number: 'WO-20260825-002',
+  part_id: 10,
+  work_order_type: 'laser_cutting',
+  quantity_ordered: 63,
+  quantity_complete: 0,
+  quantity_scrapped: 0,
+  status: 'draft',
+  priority: 3,
+  estimated_hours: 0,
+  actual_hours: 0,
+  estimated_cost: 0,
+  actual_cost: 0,
+  created_at: '2026-08-25T12:00:00Z',
+  updated_at: '2026-08-25T12:00:00Z',
+  operations: [],
+};
+
 const useEnvelope = (overrides: Record<string, unknown> = {}) => ({
-  work_order: {
-    id: 501,
-    version: 1,
-    work_order_number: 'WO-20260825-002',
-    part_id: 10,
-    work_order_type: 'laser_cutting',
-    quantity_ordered: 63,
-    quantity_complete: 0,
-    quantity_scrapped: 0,
-    status: 'draft',
-    priority: 3,
-    estimated_hours: 0,
-    actual_hours: 0,
-    estimated_cost: 0,
-    actual_cost: 0,
-    created_at: '2026-08-25T12:00:00Z',
-    updated_at: '2026-08-25T12:00:00Z',
-    operations: [],
-  },
+  work_order: useWorkOrder,
+  created_count: 1,
+  work_orders: [useWorkOrder],
   skipped_operations: [],
   skipped_material_allocations: [],
   ...overrides,
@@ -288,6 +308,45 @@ describe('api.useWorkOrderTemplate: the request', () => {
       quantity_ordered: 25,
     });
   });
+
+  it('OMITS count and unit_numbers for a single use, whatever the caller passes', async () => {
+    // The server body is `extra="forbid"`, and this is the path every deployed
+    // client already exercises: it must not start carrying new keys because a
+    // batch feature exists beside it. `count: 1` and an EMPTY list are both the
+    // absence of a batch, so both are omitted rather than serialized.
+    mockPost.mockResolvedValue(ok(useEnvelope(), 201));
+
+    await api.useWorkOrderTemplate(7, { quantity_ordered: 25, count: 1, unit_numbers: [] });
+
+    expect(mockPost).toHaveBeenCalledWith('/work-order-templates/7/use', {
+      due_date: null,
+      quantity_ordered: 25,
+    });
+    const [, body] = mockPost.mock.calls[0] as [string, Record<string, unknown>];
+    expect('count' in body).toBe(false);
+    expect('unit_numbers' in body).toBe(false);
+  });
+
+  it('sends the count and the positional unit list for a batch, nulls included', async () => {
+    // A null entry is "this work order has no unit yet", which the server stores
+    // as NULL — it is not a hole to be compacted out, because the list is
+    // POSITIONAL and dropping it would shift every unit after it onto the wrong
+    // job.
+    mockPost.mockResolvedValue(ok(useEnvelope(), 201));
+
+    await api.useWorkOrderTemplate(7, {
+      quantity_ordered: 1,
+      count: 3,
+      unit_numbers: ['2410048', null, 'K-9812'],
+    });
+
+    expect(mockPost).toHaveBeenCalledWith('/work-order-templates/7/use', {
+      due_date: null,
+      quantity_ordered: 1,
+      count: 3,
+      unit_numbers: ['2410048', null, 'K-9812'],
+    });
+  });
 });
 
 describe('api.useWorkOrderTemplate: the envelope reaches the caller intact', () => {
@@ -301,6 +360,23 @@ describe('api.useWorkOrderTemplate: the envelope reaches the caller intact', () 
     expect(result).toHaveProperty('skipped_material_allocations');
     // A bare work order would carry these at the top level instead.
     expect(result).not.toHaveProperty('work_order_number');
+  });
+
+  it('carries the batch fields, with work_orders[0] the same row as work_order', async () => {
+    // A caller reading the singular field and one reading the list must never be
+    // looking at two different work orders — the server builds the envelope from
+    // one serialization, and the client type says so.
+    const second = { ...useWorkOrder, id: 502, work_order_number: 'WO-20260825-003' };
+    mockPost.mockResolvedValue(ok(useEnvelope({ created_count: 2, work_orders: [useWorkOrder, second] }), 201));
+
+    const result = await api.useWorkOrderTemplate(7, { count: 2 });
+
+    expect(result.created_count).toBe(2);
+    expect(result.work_orders.map(workOrder => workOrder.work_order_number)).toEqual([
+      'WO-20260825-002',
+      'WO-20260825-003',
+    ]);
+    expect(result.work_orders[0].id).toBe(result.work_order.id);
   });
 
   it('carries the new DRAFT work order through under `work_order`', async () => {
@@ -329,10 +405,7 @@ describe('api.useWorkOrderTemplate: the envelope reaches the caller intact', () 
       reason: 'part_not_available',
     };
     mockPost.mockResolvedValue(
-      ok(
-        useEnvelope({ skipped_operations: [skippedOperation], skipped_material_allocations: [skippedTie] }),
-        201
-      )
+      ok(useEnvelope({ skipped_operations: [skippedOperation], skipped_material_allocations: [skippedTie] }), 201)
     );
 
     const result = await api.useWorkOrderTemplate(7);
