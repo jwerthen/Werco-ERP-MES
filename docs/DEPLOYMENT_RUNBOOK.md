@@ -68,6 +68,29 @@ curl https://werco-api-production.up.railway.app/health/ready
 | `ALLOWED_HOSTS` | HTTP `Host`-header allowlist. Default `*` disables validation; lock to your real hostnames in prod. On Railway **must** include `healthcheck.railway.app` and `localhost` (health-check probes) or the deploy fails its health check — see [Trusted Hosts](ENVIRONMENT_VARIABLES.md#trusted-hosts-http-host-header) | Recommended |
 | `ENVIRONMENT` | production/staging/development | Yes |
 | `SENTRY_DSN` | Error tracking | Recommended |
+| `WERCO_MCP_HTTP_ENABLED` | Serve the API to agents as MCP tools at `/mcp` (see [Enabling the MCP door](#enabling-the-mcp-door-optional)). Default `false` = nothing mounted | Optional |
+
+### Enabling the MCP door (optional)
+
+[docs/MCP.md](MCP.md). **No new service** — the door is a route on the existing backend service.
+
+1. Set `WERCO_MCP_HTTP_ENABLED=true` on the **backend** Railway service (`railway variables set
+   WERCO_MCP_HTTP_ENABLED=true --service werco-api`); leave `WERCO_MCP_HTTP_PATH` at its default
+   `/mcp` unless the path is taken. Redeploy (a variable change triggers one).
+2. It is **stateless by construction**, so the existing `uvicorn --workers ${WEB_CONCURRENCY:-2}`
+   command in `backend/Dockerfile` needs no change and no sticky sessions: every `POST /mcp` is
+   self-contained, and consecutive calls may land on different workers.
+3. Verify: `curl -s -o /dev/null -w "%{http_code}\n" -X POST https://<api-host>/mcp` must answer
+   **401** (the door is up and refusing an unauthenticated caller); before the change it answers
+   **404**. The startup log line `MCP door serving at /mcp` confirms the lifespan armed it. A
+   **503** `MCP door is not running` means the route is mounted but the lifespan never ran.
+4. Hand agents a real user's access token (a dedicated Manager such as *Werco Assistant* is
+   recommended); no server-side secret is involved. Tokens are the normal 15-minute ones.
+
+Turning it off is the same variable set back to `false` plus a redeploy; nothing else is left
+behind. The caps (`WERCO_MCP_MAX_UPLOAD_BYTES` 25 MB envelope, `WERCO_MCP_MAX_RESULT_CHARS`,
+`WERCO_MCP_MAX_BLOB_BYTES`) are documented in
+[ENVIRONMENT_VARIABLES.md → MCP](ENVIRONMENT_VARIABLES.md#mcp-model-context-protocol-door-and-bridge).
 
 ---
 
@@ -698,6 +721,9 @@ LOG_LEVEL=INFO
 # Optional
 REDIS_URL=redis://...
 ANTHROPIC_API_KEY=...
+# MCP door for agents (docs/MCP.md) — off unless set; no new service, stateless behind
+# WEB_CONCURRENCY=2. See docs/ENVIRONMENT_VARIABLES.md#mcp-model-context-protocol-door-and-bridge
+WERCO_MCP_HTTP_ENABLED=false
 ```
 
 ### Railway CLI Commands

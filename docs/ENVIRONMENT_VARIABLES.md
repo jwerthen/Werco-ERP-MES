@@ -182,6 +182,50 @@ they skip this middleware entirely so their HMAC signature verifies against raw 
 > allocate, roughly linearly — the *quadratic* cost this warning used to carry was `bleach.clean`,
 > which no longer runs. Prefer splitting an oversized import over widening the cap globally.
 
+### MCP (Model Context Protocol) door and bridge
+
+`backend/app/mcp/` serves the API to agents (Cursor, Claude Code, bots) as MCP tools — every tool
+call dispatches back into this app **as the caller's own user** (bearer JWT; same RBAC, tenancy
+and audit as the web app). See [docs/MCP.md](MCP.md). Two groups of variables: the **server**
+settings below live in `Settings` and govern the Streamable HTTP door mounted on the API; the
+**client** variables further down are read only by the stdio bridge (`python -m app.mcp`) on the
+machine that runs it and are never part of the server's configuration.
+
+**Server (`app/core/config.py`)**
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `WERCO_MCP_HTTP_ENABLED` | No | `false` | Mount the MCP door on the API. **Off by default** — with `false` nothing is mounted and the API is byte-identical to a build without the package. When `true`, a stateless Streamable HTTP endpoint is served at `WERCO_MCP_HTTP_PATH`; it is safe behind `WEB_CONCURRENCY>1` because no session state lives in a worker |
+| `WERCO_MCP_HTTP_PATH` | No | `/mcp` | Where the door is served. Must be an absolute path; a trailing slash is stripped and `/` is refused at startup. The door is an exact `Route` at this path (not a `Mount`), so only this exact path is exempt from `MAX_JSON_BODY_BYTES` and from the outer default rate limit |
+| `WERCO_MCP_MAX_RESULT_CHARS` | No | `200000` | Characters of one tool result's text before it is truncated with a `[truncated: N of M chars …]` note (the structured payload is replaced by a marker when that happens) |
+| `WERCO_MCP_MAX_BLOB_BYTES` | No | `5000000` | Bytes of a binary response (PDF / XLSX / CSV attachment) returned inline as a base64 blob; over it the tool answers with an error telling the caller to download the file from the UI |
+| `WERCO_MCP_MAX_UPLOAD_BYTES` | No | `25000000` | Bytes of one MCP request envelope at the door — a nest PDF rides base64-encoded **inside** the JSON-RPC body, so `MAX_JSON_BODY_BYTES` is waived on the door path and this cap bounds it instead (**413** over it, before parsing). On the stdio bridge it bounds one decoded file argument |
+
+The door waives the app's **outer** default rate limit on its own path (registered with the
+limiter's `exempt` mechanism) and keeps the **inner** route hit, keyed on the MCP caller's IP, so an
+agent is limited exactly like the SPA rather than at half rate. Per-path limits on the inner routes
+(the table above) still apply.
+
+**Client — the stdio bridge (`python -m app.mcp`)**
+
+Read by `app/mcp/__main__.py` and `app/mcp/auth.py` only; not `Settings`, not the server. Set them
+in the agent's launch config (`.cursor/mcp.json.example`), never in the server's `.env`. Names only
+here — never paste a token or password into a committed file.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `WERCO_ERP_URL` | No | — | Base URL of the deployed API (`https://<api-host>`, trailing slash stripped). **Set → REMOTE mode**: tools go over HTTPS to that deployment, and any *missing* `DATABASE_URL` / `SECRET_KEY` / `REFRESH_TOKEN_SECRET_KEY` / `ENVIRONMENT` / `RATE_LIMIT_ENABLED` is defaulted to a placeholder that is never used (the catalog still needs `app.main` importable). **Unset → IN-PROCESS mode**: tools dispatch into the local app object and the real environment (a `DATABASE_URL`, the real `SECRET_KEY`) is required — dev only |
+| `WERCO_ERP_TOKEN` | No* | — | A static ERP **access** token (15-minute lifetime). Used first when set |
+| `WERCO_ERP_REFRESH_TOKEN` | No* | — | A refresh token; on a 401 the bridge calls `POST /auth/refresh`, rotates the pair in memory, and retries the call once. A refresh token the server rejects is forgotten so the next attempt falls through to login |
+| `WERCO_ERP_EMAIL` / `WERCO_ERP_PASSWORD` | No* | — | Login credentials; the bridge logs in through `POST /auth/login` at first use and re-logs-in after a 401 when no refresh token works. A dedicated Manager user (e.g. *Werco Assistant*) is recommended so agent writes are attributable |
+| `WERCO_MCP_TRANSPORT` | No | `stdio` | `stdio` (what agents spawn) or `http` (a **dev-only** local Streamable HTTP server; same as `--transport http`) |
+| `WERCO_MCP_HOST` / `WERCO_MCP_PORT` | No | `127.0.0.1` / `8765` | Bind address of the dev HTTP transport only |
+| `LOG_LEVEL` | No | `INFO` | The bridge logs to **stderr** only (stdout is the MCP wire); this is the usual app variable, honoured here too |
+
+\* At least one credential kind is needed for tool calls to succeed; with none set the bridge
+starts, logs a warning, and answers every call with a 401-shaped error. `--print-catalog` needs no
+credentials and no `WERCO_ERP_URL`.
+
 ### CORS (Cross-Origin Resource Sharing)
 
 | Variable | Required | Default | Description |
@@ -909,4 +953,12 @@ A JSON body exceeded `MAX_JSON_BODY_BYTES` (default 256 KB; the old
 (above roughly 1300 line items). Raise the value on the backend service — but read the sizing note
 under [Request Body Size](#request-body-size-json) first, and prefer splitting the import. File
 uploads are **not** affected by this setting; a 413 on an upload is that endpoint's own cap (20 MB
-QMS standards, 50 MB `LASER_UPLOAD_MAX_BYTES`).
+QMS standards, 50 MB `LASER_UPLOAD_MAX_BYTES`). A 413 from the **MCP door** (`/mcp`) is a different
+cap — `WERCO_MCP_MAX_UPLOAD_BYTES` (default 25 MB) on the whole JSON-RPC envelope; see
+[MCP](#mcp-model-context-protocol-door-and-bridge).
+
+### Every MCP tool call answers 401
+On the HTTP door the caller's access token is missing, expired (15 min) or kiosk-scoped — the
+client must send a fresh one. On the stdio bridge no `WERCO_ERP_TOKEN` / `WERCO_ERP_REFRESH_TOKEN` /
+`WERCO_ERP_EMAIL`+`WERCO_ERP_PASSWORD` is set, or the login/refresh failed; the bridge logs
+`Credentials configured: …` on stderr at startup. See [docs/MCP.md → Troubleshooting](MCP.md#13-troubleshooting).

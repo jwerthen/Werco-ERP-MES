@@ -9114,6 +9114,43 @@ log. `unconfigured` means every enqueue will fail and no background job or cron 
 | 502 | Bad Gateway — upstream AI-service failure on an AI endpoint (e.g. `/copilot/chat?stream=false`) |
 | 503 | Service Unavailable — an AI endpoint was called but the AI features are not configured (`ANTHROPIC_API_KEY` unset) |
 
+## MCP door (`/mcp`)
+
+The API can also be driven as **MCP tools** (Model Context Protocol) by an agent — Cursor, Claude
+Code, a chat bot. The door is served **on the API host** at `WERCO_MCP_HTTP_PATH` (default `/mcp`)
+and is **off by default** (`WERCO_MCP_HTTP_ENABLED=false` mounts nothing; the API is byte-identical
+to a build without it). It is not an endpoint of this REST reference and does not appear in the
+OpenAPI document; it is documented in full in [docs/MCP.md](MCP.md).
+
+What matters from this file's point of view:
+
+- **Every tool call is one of the requests documented here**, dispatched in-process into the same
+  routers with the caller's own bearer token. The router is the boundary: the same `require_role`
+  gates, tenant scoping, audit rows, optimistic-locking 409s and per-endpoint size caps apply, and a
+  401/403/409/422 comes back verbatim as an `is_error` tool result carrying the server's `detail`.
+- **The catalog is this API.** 663 tools are generated from `app.openapi()` at startup — every
+  secured operation except the `Authentication`, `Carrier Webhooks` and `Error Logging` tags and
+  the unauthenticated health/station-login routes — plus 13 fixed-name convenience tools that
+  shadow 14 raw routes (`POST /work-orders/`, `POST /work-orders/{id}/release`, the two nest-package
+  imports, `GET /search/`, …) to enforce agent rules the routes do not: create/duplicate always land
+  DRAFT, release is a separate explicit tool, a nest-package import is set back to DRAFT unless asked
+  otherwise, operation names that are file names are refused. **Route docstrings feed the tool
+  descriptions** — keep their first paragraph accurate.
+- **Protocol:** Streamable HTTP, stateless, plain JSON responses; `POST /mcp` with
+  `Accept: application/json, text/event-stream` and `Authorization: Bearer <access token>`. No
+  bearer, an expired or non-`access` token, or a kiosk-scoped token → **401** with
+  `WWW-Authenticate` at the door, before any JSON-RPC is parsed. A request before the app's lifespan
+  is entered → **503**.
+- **Limits:** the door path is exempt from `MAX_JSON_BODY_BYTES` (a file upload rides base64 inside
+  the JSON-RPC envelope) and bounded by `WERCO_MCP_MAX_UPLOAD_BYTES` (25 MB, **413** over it)
+  instead; it is exempt from the **outer** default rate limit on its own path while the **inner**
+  route hit is kept and keyed on the caller's IP, so an agent is limited exactly like the SPA (see
+  [Rate Limiting](#rate-limiting)). Tool results are capped at `WERCO_MCP_MAX_RESULT_CHARS` of text
+  and `WERCO_MCP_MAX_BLOB_BYTES` of binary.
+
+Settings: [ENVIRONMENT_VARIABLES.md → MCP](ENVIRONMENT_VARIABLES.md#mcp-model-context-protocol-door-and-bridge).
+Access model: [RBAC_PERMISSIONS.md → MCP / agent access](RBAC_PERMISSIONS.md#mcp--agent-access).
+
 ## Interactive Documentation
 
 When the backend is running **outside production**, visit:

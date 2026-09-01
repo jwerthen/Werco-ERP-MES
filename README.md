@@ -68,6 +68,7 @@ Cross-cutting platform properties:
 - **Realtime** — WebSocket push for live shop-floor activity and dashboard updates.
 - **Tamper-evident audit** — the `audit_log` table is append-only at the database layer (triggers refuse `UPDATE`/`DELETE`) and carries a SHA-256 hash chain (`sequence_number`, `previous_hash`, `integrity_hash`); state changes flow through `AuditService`. The chain is on by default and pausable via `AUDIT_HASH_CHAIN_ENABLED` (the triggers are not). (Known gap: the interactive user-management and work-center endpoints do not yet emit audit entries — their bulk-import endpoints do — see Compliance below.)
 - **Auth** — JWT, ~15-min access token, ~7-day rotating refresh, ~7-day session cap (`SESSION_ABSOLUTE_TIMEOUT_HOURS`, default 168h — it restarts on every refresh, so it bounds an *idle* window rather than total session life); account lockout after 5 failed password attempts (the email/password login path). Password policy is ≥ 12 characters plus a weak-password blocklist — no character-class rules (NIST SP 800-63B §5.1.1.2).
+- **Agent access (MCP)** — `backend/app/mcp/` serves the API to agents (Cursor, Claude Code, bots) as Model Context Protocol tools: 13 fixed-name convenience tools plus ~660 generated from the app's own OpenAPI document at startup, every call dispatched back through the real routers as the caller's user — same RBAC, tenancy and audit, no god token. A Streamable HTTP door at `/mcp` (off by default, `WERCO_MCP_HTTP_ENABLED`) and a stdio bridge (`python -m app.mcp`). See [docs/MCP.md](docs/MCP.md).
 
 ## Tech stack
 
@@ -77,6 +78,7 @@ Cross-cutting platform properties:
 | ORM / DB | SQLAlchemy 2.0, Alembic 1.18, PostgreSQL (Supabase), psycopg2 |
 | Validation | Pydantic 2.12 + pydantic-settings |
 | Auth / security | python-jose (JWT), passlib + bcrypt, slowapi (rate limiting) |
+| Agent access | `mcp` 2.1.1 (Model Context Protocol SDK), jsonschema |
 | Background jobs | Redis 7, ARQ, croniter |
 | Realtime | websockets |
 | AI / LLM | Anthropic Claude (`anthropic` SDK) — Haiku / Sonnet / Opus tiers |
@@ -169,6 +171,7 @@ See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**, **[docs/DEPLOYMENT_RUNBOOK.md]
 |----------|----------------|
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Local dev setup, the `create_all` → `stamp` → `upgrade` bootstrap path |
 | [docs/API.md](docs/API.md) | REST endpoint reference (OpenAPI lives at `/api/docs`) |
+| [docs/MCP.md](docs/MCP.md) | The API as MCP tools for agents: HTTP door / stdio bridge, JWT auth, page → tool program map, naming rules, DRAFT guarantees, result shapes, troubleshooting |
 | [docs/RBAC_PERMISSIONS.md](docs/RBAC_PERMISSIONS.md) | The 8-role permission model |
 | [docs/ENVIRONMENT_VARIABLES.md](docs/ENVIRONMENT_VARIABLES.md) | All config and secrets |
 | [docs/EXCEL_MIGRATION_RUNBOOK.md](docs/EXCEL_MIGRATION_RUNBOOK.md) | Go-live migration off Excel: load order, dry-run discipline, rehearsals, cutover checklist |
