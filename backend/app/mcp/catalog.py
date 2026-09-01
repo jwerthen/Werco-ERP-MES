@@ -486,6 +486,36 @@ def catalog_tags(spec: Mapping[str, Any]) -> Set[str]:
     return tags
 
 
+def uncovered_tags(
+    spec: Mapping[str, Any],
+    tools: Sequence[GeneratedTool],
+    *,
+    shadowed: Iterable[Tuple[str, str]] = (),
+    excluded_tags: Iterable[str] = EXCLUDED_TAGS,
+) -> Set[str]:
+    """Tags in the document that NO tool reaches: the "a new router shipped and MCP is blind" guard.
+
+    A tag is covered when a generated tool carries it or when one of its operations
+    is in ``shadowed`` (a convenience tool stands in for that route -- ``Global
+    Search`` has exactly one operation and it is shadowed). ``excluded_tags`` are the
+    deliberate, named omissions. Anything left over is a router whose operations
+    yielded no tool -- typically because none of them declares ``security`` -- and
+    the fix is either a ``security`` block on the routes or an explicit entry in
+    ``EXCLUDED_TAGS``, never silence.
+    """
+    covered: Set[str] = {tool.tag for tool in tools}
+    shadowed_set = set(shadowed)
+    for path, path_item in (spec.get("paths") or {}).items():
+        if not isinstance(path_item, dict):
+            continue
+        for method in HTTP_METHODS:
+            operation = path_item.get(method)
+            if isinstance(operation, dict) and (method.upper(), str(path)) in shadowed_set:
+                covered.update(str(tag) for tag in (operation.get("tags") or []))
+    excluded = set(excluded_tags)
+    return {tag for tag in catalog_tags(spec) if tag not in covered and tag not in excluded}
+
+
 def catalog_summary(tools: Sequence[GeneratedTool]) -> List[Dict[str, Any]]:
     """The JSON ``--print-catalog`` prints: one compact row per generated tool."""
     return [
