@@ -1,9 +1,16 @@
+import re
 from pathlib import Path
 from typing import List, Optional
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
-from pydantic import AliasChoices, Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings
+
+# The ``limits`` library's rate-string grammar (``<count> [per|/] [<n>] <unit>[s]``), used to
+# refuse an unparseable WERCO_MCP_HTTP_RATE_LIMIT at boot rather than fail open at request time.
+_RATE_LIMIT_STRING = re.compile(
+    r"^\d+\s*(?:/|per)\s*(?:\d+\s*)?(?:second|minute|hour|day|month|year)s?$", re.IGNORECASE
+)
 
 # Release stamp shipped INSIDE the deployed artifact. CI writes the commit SHA here
 # immediately before `railway up` uploads backend/ (see .github/workflows/ci-cd.yml), and
@@ -401,15 +408,50 @@ class Settings(BaseSettings):
     # INSIDE the JSON-RPC body, so MAX_JSON_BODY_BYTES is waived for the door path and
     # this cap bounds it instead (413 over it); on stdio it bounds one decoded file.
     WERCO_MCP_MAX_UPLOAD_BYTES: int = 25_000_000
+    # Per-IP ceiling on the door PATH itself (enforced by main.py's per-path resolver).
+    # The door is exempt from the DEFAULT limit so a tool call is charged exactly once,
+    # on the inner route it dispatches -- byte-identical to the SPA. Without this the
+    # requests that dispatch nothing inward (tools/list at ~0.5 MB of JSON per call,
+    # initialize, schema-rejected calls, unauthenticated 401 probes) would have no
+    # ceiling at all. Kept ABOVE the 100/60 s default so it never binds a tool call.
+    WERCO_MCP_HTTP_RATE_LIMIT: str = "300/minute"
 
     @field_validator("WERCO_MCP_HTTP_PATH")
     @classmethod
-    def validate_mcp_http_path(cls, v: str) -> str:
-        """An absolute, non-root path with no trailing slash (the door is an exact Route)."""
+    def validate_mcp_http_path(cls, v: str, info: ValidationInfo) -> str:
+        """An absolute, non-root path with no trailing slash (the door is an exact Route).
+
+        Also refuses the prefixes the app already owns -- the API (``API_V1_PREFIX``
+        and the rest of ``/api``, where the docs live), ``/health`` and ``/docs`` --
+        because ``main.py`` waives ``MAX_JSON_BODY_BYTES`` for the door by path
+        string alone: a door configured onto an existing API route would never be
+        reached (the router matches first) while that route lost its JSON cap.
+        ``app.mcp.http.refuse_occupied_path`` re-checks against the live route table.
+        """
         path = (v or "").strip().rstrip("/")
         if not path.startswith("/") or path == "":
             raise ValueError("WERCO_MCP_HTTP_PATH must be an absolute path such as /mcp")
+        api_prefix = str(info.data.get("API_V1_PREFIX") or "/api/v1").rstrip("/")
+        reserved = {"/api", "/health", "/docs", api_prefix}
+        if any(path == root or path.startswith(root + "/") for root in reserved):
+            raise ValueError(
+                f"WERCO_MCP_HTTP_PATH must not sit under {', '.join(sorted(reserved))}: those paths belong to the "
+                "API, its docs and the health probes (got " + repr(path) + ")"
+            )
         return path
+
+    @field_validator("WERCO_MCP_HTTP_RATE_LIMIT")
+    @classmethod
+    def validate_mcp_http_rate_limit(cls, v: str) -> str:
+        """A ``limits``-grammar rate string (``300/minute``, ``10 per 5 seconds``); refused at boot otherwise.
+
+        The per-path middleware fails OPEN when a limit string cannot be parsed, so a
+        typo here would silently remove the door's only ceiling -- refuse it up front.
+        """
+        value = (v or "").strip()
+        if not _RATE_LIMIT_STRING.match(value):
+            raise ValueError("WERCO_MCP_HTTP_RATE_LIMIT must look like '300/minute' or '10 per 5 seconds'")
+        return value
 
     # CORS - Include localhost for dev; production origins must be set via env var
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:8000"

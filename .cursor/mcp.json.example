@@ -9,11 +9,12 @@
       }
     },
     "werco-erp-stdio": {
-      "_comment": "Local bridge: Cursor spawns `python -m app.mcp`, which speaks MCP on stdio and calls the deployed API over HTTPS. Set EITHER an access + refresh token pair OR an email + password; the bridge refreshes / re-logs-in on 401 by itself. Leave WERCO_ERP_URL unset only to dispatch into a local database (dev).",
+      "_comment": "Local bridge: Cursor spawns `python -m app.mcp`, which speaks MCP on stdio and calls the deployed API over HTTPS. Set EITHER an access + refresh token pair OR an email + password; the bridge refreshes / re-logs-in on 401 by itself. Leave WERCO_ERP_URL unset only to dispatch into a local database (dev). PYTHONPATH is what lets `-m app.mcp` import the `app` package; `cwd` is kept for clients that honour it but is not part of Cursor's documented schema.",
       "command": "/absolute/path/to/Werco-ERP-MES/backend/.venv311/bin/python",
       "args": ["-m", "app.mcp"],
       "cwd": "/absolute/path/to/Werco-ERP-MES/backend",
       "env": {
+        "PYTHONPATH": "/absolute/path/to/Werco-ERP-MES/backend",
         "WERCO_ERP_URL": "https://<your-api-host>",
         "WERCO_ERP_EMAIL": "<assistant-user@yourshop.com>",
         "WERCO_ERP_PASSWORD": "<password>",

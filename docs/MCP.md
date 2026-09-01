@@ -2,17 +2,17 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **676 tools** — 13 hand-written *convenience* tools plus
-**663 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **674 tools** — 15 hand-written *convenience* tools plus
+**659 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app.
 
 This is the runbook: how to run it, how to authenticate, what the tools are called, which rules
 the convenience tools enforce, what a result looks like, and what to do when a call fails.
 
 **Counts and names in this file come from `python -m app.mcp --print-catalog` on the commit that
-shipped the package** (13 + 663 tools, 14 shadowed raw operations, 65 tags in the OpenAPI
-document, 61 of them in the catalog). Generated names are derived, not curated — re-run the
-command after adding a router before quoting a name in a prompt.
+shipped the package** (15 + 659 tools, 16 shadowed raw operations, 2 excluded cutover loaders,
+65 tags in the OpenAPI document, 61 of them in the catalog). Generated names are derived, not
+curated — re-run the command after adding a router before quoting a name in a prompt.
 
 ---
 
@@ -61,11 +61,12 @@ command after adding a router before quoting a name in a prompt.
 backend/app/mcp/
   naming.py       pure: operationId -> function name, tag slugs, collision policy, 64-char fit
   catalog.py      pure: app.openapi() -> GeneratedTool list ($ref inlining, param/body mapping,
-                  descriptions, annotations, EXCLUDED_TAGS, catalog_tags, catalog_summary)
+                  descriptions, annotations, EXCLUDED_TAGS / EXCLUDED_OPERATIONS / PUBLIC_OPERATIONS,
+                  the two coverage guards uncovered_tags + unaccounted_operations, catalog_summary)
   results.py      pure: HTTP outcome -> CallToolResult (JSON/text/blob, caps, error shape)
   auth.py         AuthContext; TokenSource (static -> refresh -> password login); ErpTokenVerifier
   executor.py     InProcessExecutor (httpx.ASGITransport into app) / RemoteExecutor (HTTPS)
-  convenience.py  the 13 hand-written tools + SHADOWED_OPERATIONS (14 raw routes they replace)
+  convenience.py  the 15 hand-written tools + SHADOWED_OPERATIONS (16 raw routes they replace)
   server.py       build_server(): registry, per-call auth, jsonschema validation, dispatch
   http.py         McpDoor + mount_mcp(app): the Streamable HTTP door at WERCO_MCP_HTTP_PATH
   __main__.py     python -m app.mcp: stdio bridge, dev HTTP server, --print-catalog
@@ -100,20 +101,21 @@ default**. With `WERCO_MCP_HTTP_ENABLED=false` `mount_mcp(app)` returns `None` a
 the API is byte-identical to a build without the package.
 
 ```bash
-WERCO_MCP_HTTP_ENABLED=true      # the only switch needed
-WERCO_MCP_HTTP_PATH=/mcp         # absolute path, trailing slash stripped, "/" refused
+WERCO_MCP_HTTP_ENABLED=true          # the only switch needed
+WERCO_MCP_HTTP_PATH=/mcp             # absolute path; "/", /api/*, /health/* and /docs/* refused
+WERCO_MCP_HTTP_RATE_LIMIT=300/minute # per-IP ceiling on the door path itself (see the table)
 ```
 
 What you get when it is on (all in `app/mcp/http.py` and `app/main.py`):
 
 | Property | Detail |
 |---|---|
-| Route | A Starlette **`Route` at the exact path**, not a `Mount` (`Mount` answers a bare `POST /mcp` with a 307 to `/mcp/`, which MCP clients do not follow). Hidden from the OpenAPI schema. |
+| Route | A Starlette **`Route` at the exact path**, not a `Mount` (`Mount` answers a bare `POST /mcp` with a 307 to `/mcp/`, which MCP clients do not follow). Hidden from the OpenAPI schema. **`GET` → 405 `Allow: POST`**: a stateless door has no server-push stream to open, and answering it up front keeps the app's `GZipMiddleware` from holding an SSE response's headers for the transport's first 15 s keepalive. The path is refused at boot under `/api`, `/health` and `/docs`, and `mount_mcp` fails the boot if any existing route already serves it — a door on an occupied path would never be reached while `main.py` waived the JSON body cap for that route by path string. |
 | Session model | **Stateless** (`stateless=True`, one transport per POST, no session id) with plain JSON responses (`json_response=True`). Railway runs `uvicorn --workers ${WEB_CONCURRENCY:-2}`; a session pinned to one worker's memory would break on the next request. Clients send `Accept: application/json, text/event-stream` and may call `tools/list` / `tools/call` without a prior `initialize`. |
 | Auth at the door | `AuthenticationMiddleware(BearerAuthBackend(ErpTokenVerifier))` → `AuthContextMiddleware` → `RequireAuthMiddleware`. No bearer, an invalid/expired token, a non-`access` token or a **kiosk-scoped** token → one clean **401 + `WWW-Authenticate`** before any JSON-RPC is parsed. (The chain is assembled by hand: in mcp 2.1.1 `Server.streamable_http_app(token_verifier=…)` only installs the backend that consults the verifier when a full OAuth `AuthSettings` is also passed.) |
 | Auth per call | `server.resolve_auth` re-reads the `Authorization` header on every `tools/call`, re-verifies it, and forwards the request's `client.host` and `Host` to the executor. Auth is resolved **before** argument validation on purpose. |
 | Body cap | The app's `MAX_JSON_BODY_BYTES` (256 KB) is **waived for exactly this path** (exact match, only while the door is enabled). A nest PDF arrives base64-encoded *inside* the JSON-RPC envelope, so the SDK's `RequestBodyLimitMiddleware` bounds it at **`WERCO_MCP_MAX_UPLOAD_BYTES`** (default 25 MB) instead — **413** over it, before parsing. |
-| Rate limit | The door is registered with the app limiter's `exempt` mechanism, so the **outer** default limit (100/60 s per IP) is waived on `/mcp`; the **inner** route hit is kept and keyed on the MCP caller's IP, so an agent is limited exactly like the SPA rather than at half rate. Per-path limits on the inner routes (e.g. the laser preview/import 10/min) still apply. |
+| Rate limit | **Two tiers.** The door is registered with the app limiter's `exempt` mechanism, so the **default** limit (100/60 s per IP) is waived on `/mcp` and a tool call is charged **once**, on the **inner** route it dispatches — keyed on the MCP caller's IP, exactly like the SPA rather than at half rate; per-path limits on the inner routes (e.g. the laser preview/import 10/min) still apply. The door **path** then carries its own ceiling, `WERCO_MCP_HTTP_RATE_LIMIT` (default 300/minute per IP, enforced by the app's per-path limiter, kept above the default so it never binds a tool call): it bounds the requests that dispatch nothing inward and would otherwise be unmetered — `tools/list` (~0.5 MB of JSON per call), `initialize`, schema-rejected calls and unauthenticated 401 probes. |
 | DNS-rebinding guard | The SDK's own guard is off (`TransportSecuritySettings(enable_dns_rebinding_protection=False)`); Host/Origin pinning is the app's job (`TrustedHostMiddleware`, CSRF). |
 | Lifespan | The SDK's session manager runs in a task group that must outlive every request, and Starlette never runs a sub-app's lifespan, so `main.py`'s own `lifespan` enters `app.state.mcp_door.lifespan()`. Each entry builds a fresh session manager (the SDK allows one `run()` per instance — that is what lets the test suite re-enter it per `TestClient`). A request to the door before the lifespan is entered gets **503** `MCP door is not running`. |
 
@@ -167,7 +169,7 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 13, "generated": 663, "shadowed": 14}
+ "counts": {"convenience": 15, "generated": 659, "shadowed": 16}
 }
 ```
 
@@ -190,11 +192,21 @@ the URL and header go is the client's business; the server side needs nothing el
 }
 ```
 
-**Claude Code** — the same door, registered from the CLI:
+**Claude Code** — either the door, registered from the CLI:
 
 ```bash
 claude mcp add --transport http werco-erp https://<your-api-host>/mcp \
   --header "Authorization: Bearer <ERP_ACCESS_TOKEN>"
+```
+
+or the stdio bridge, which manages token refresh itself (§4):
+
+```bash
+claude mcp add werco-erp \
+  -e PYTHONPATH=/absolute/path/to/Werco-ERP-MES/backend \
+  -e WERCO_ERP_URL=https://<your-api-host> \
+  -e WERCO_ERP_EMAIL=<assistant-user@yourshop.com> -e WERCO_ERP_PASSWORD=<password> \
+  -- /absolute/path/to/Werco-ERP-MES/backend/.venv311/bin/python -m app.mcp
 ```
 
 **stdio bridge (Cursor spawns the process; works for any client that launches a command):**
@@ -207,6 +219,7 @@ claude mcp add --transport http werco-erp https://<your-api-host>/mcp \
       "args": ["-m", "app.mcp"],
       "cwd": "/absolute/path/to/Werco-ERP-MES/backend",
       "env": {
+        "PYTHONPATH": "/absolute/path/to/Werco-ERP-MES/backend",
         "WERCO_ERP_URL": "https://<your-api-host>",
         "WERCO_ERP_EMAIL": "<assistant-user@yourshop.com>",
         "WERCO_ERP_PASSWORD": "<password>"
@@ -215,6 +228,10 @@ claude mcp add --transport http werco-erp https://<your-api-host>/mcp \
   }
 }
 ```
+
+`PYTHONPATH` is what lets `python -m app.mcp` import the `app` package from wherever the client
+starts the process; `cwd` is kept for clients that honour it, but it is not part of Cursor's
+documented `command` / `args` / `env` schema, so do not rely on it alone.
 
 The HTTP door and the bridge expose the **same catalog**; pick the HTTP entry when the door is
 enabled on the server, the stdio entry when it is not (or when you want the bridge to manage token
@@ -264,7 +281,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `SetupWizard` (`/setup`) | Setup & Readiness | `get_setup_health`, `get_part_readiness` |
 | `WorkOrders` (`/work-orders`) | Work Orders, Work Order Templates | `work_orders_list_work_orders`, `get_work_order_by_number`, `update_work_order_priority`, `delete_work_order`, `restore_work_order`, `list_work_order_templates`, `use_work_order_template` |
 | `WorkOrderNew` (`/work-orders/new`) | Work Orders, Parts, Bill of Materials, Routing, Customers, Setup & Readiness, Work Centers | `create_work_order`★, `preview_work_order_operations`, `get_routing_by_part`, `list_customer_names`, `get_part_readiness`, `list_work_centers`★ |
-| `WorkOrderDetail` (`/work-orders/:id`) | Work Orders, Work Order Materials, Laser Nests, Work Order Blockers, Documents, Shop Floor | `get_work_order`★, `add_operation`★, `release_work_order`★, `duplicate_work_order`★, `work_orders_update_work_order`, `work_orders_start_work_order`, `work_orders_complete_work_order`, `work_orders_complete_operation`, `create_manual_laser_nest`, `update_laser_nest`, `delete_laser_nest`, `list_material_allocations`, `create_work_order_blocker`, `attach_document_to_work_order` |
+| `WorkOrderDetail` (`/work-orders/:id`) | Work Orders, Work Order Materials, Laser Nests, Work Order Blockers, Documents, Shop Floor | `get_work_order`★, `add_operation`★, `update_work_order`★, `release_work_order`★, `duplicate_work_order`★, `add_laser_nest`★, `work_orders_start_work_order`, `work_orders_complete_work_order`, `work_orders_complete_operation`, `work_orders_update_operation`, `update_laser_nest`, `delete_laser_nest`, `list_material_allocations`, `create_work_order_blocker`, `attach_document_to_work_order` |
 | `ShopFloor` (`/shop-floor`) | Shop Floor, Work Order Blockers, Work Centers, Work Orders | `get_shop_floor_dashboard`★, `get_all_operations`, `get_active_shop_users`, `list_work_order_blockers`, `resolve_work_order_blocker` |
 | `ShopFloorSimple` (`/shop-floor/operations`) | Shop Floor, Scanner, Work Centers, Work Orders | `get_all_operations`, `shop_floor_start_operation`, `shop_floor_complete_operation`, `put_operation_on_hold`, `resume_operation`, `lookup_barcode`, `resolve_action` |
 | `OperatorKiosk` (`/kiosk`) | Shop Floor | `clock_in`, `clock_out`, `get_my_active_job`, `get_work_center_queue`, `get_operation_steps`, `record_operation_step`, `report_operation_production`, `shop_floor_complete_operation` — under the caller's own user token (kiosk badge tokens are refused) |
@@ -318,7 +335,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `PrintPackingSlip` (`/print/packing-slip/:id`) | Shipping | `get_shipment` |
 | `PrintShippingLabel` (`/print/shipping-label/:id`) | Shipping, Documents | `get_shipment`, `download_document` |
 | `PrintBadges` (`/print/badges`) | Users | `list_users` |
-| `ImportCenter` (`/import-center`) | Import Kit, Purchasing, Users, Work Orders | `get_import_templates`, `download_import_template`, `import_open_purchase_orders`, `import_open_work_orders`, `import_users_csv` |
+| `ImportCenter` (`/import-center`) | Import Kit, Purchasing, Users, Work Orders | `get_import_templates`, `download_import_template`, `import_users_csv` — the two Excel-cutover loaders (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import`) are deliberately **not** tools (§6.1) |
 | `Users` (`/users`) | Users | `list_users`, `create_user`, `update_user`, `deactivate_user`, `reset_user_password`, `approve_user`, `unlock_user` |
 | `AuditLog` (`/audit-log`) | Audit | `list_audit_logs`, `get_audit_summary`, `verify_audit_integrity`, `get_integrity_status` |
 | `VisitorLog` (`/visitor-log`) | Visitor Logs | `list_visitors`, `manual_entry`, `sign_out`, `export_visitors_csv`, `create_station`, `revoke_station` |
@@ -340,10 +357,25 @@ Coverage: 73 page files; 68 map to at least one catalog tool. The five that do n
 
 Every operation in `app.openapi()` that **declares `security`** and carries none of the
 `EXCLUDED_TAGS` — `Authentication`, `Carrier Webhooks`, `Error Logging`, its router-level twin
-`errors`, and `WebSocket` (listed for completeness; WebSocket routes never appear in OpenAPI). A
-route with no `security` block (station logins, `register-public`, `reset-database`, the four
-untagged `/health*` probes) is not a user action and is not a tool. On the shipping commit: 703
-operations, 686 secured, 677 candidates, 14 shadowed (§8) → **663 generated tools**.
+`errors`, and `WebSocket` (listed for completeness; WebSocket routes never appear in OpenAPI) —
+minus two further, named sets:
+
+- **`PUBLIC_OPERATIONS`** — the 17 routes with no `security` block (station logins,
+  `register-public`, `reset-database`, the credential exchanges, the carrier webhook, the browser
+  error beacon, the four untagged `/health*` probes). None is a user action and none is a tool.
+  They are listed **by name** rather than skipped silently, so a new route that forgets its
+  `security` dependency — even under a tag that already has tools — fails the coverage guard
+  (`catalog.unaccounted_operations`, §14) until it is either secured or named there.
+- **`EXCLUDED_OPERATIONS`** — the two Excel-cutover loaders, `POST /work-orders/import` and
+  `POST /purchasing/purchase-orders/import` (`migration_import_service`). They record a *past*
+  system's state rather than perform a user action: the work-order loader mints work orders
+  RELEASED / IN_PROGRESS with operations READY / COMPLETE on no labor evidence, the PO loader
+  mints purchase orders SENT — exactly the side door around "create lands DRAFT, release is
+  explicit" (§9) and "never fake shop-floor time" that the convenience tools exist to close.
+  They stay an Import Center action for an admin at cutover (`EXCEL_MIGRATION_RUNBOOK.md`).
+
+On the shipping commit: 703 operations, 686 secured, 677 candidates, 16 shadowed (§8), 2 excluded
+→ **659 generated tools**.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 
@@ -368,8 +400,11 @@ operations, 686 secured, 677 candidates, 14 shadowed (§8) → **663 generated t
    transport and regardless of what is shadowed.
 6. **≤ 64 characters**, matching `^[a-zA-Z0-9_-]{1,64}$` (SDK-enforced on the wire): the tag slug
    is trimmed first, then the name. Longest name today: `preventive_maintenance_complete_work_order`
-   (42). Two members colliding under one tag, or a truncation that folds two names together, raises
-   at build time — a catalog with an ambiguous name is worse than no catalog.
+   (42). The policy is **total**: two members colliding under one tag, or a truncation that folds two
+   names together, get a deterministic numeric suffix (`_2`, `_3`, … in sorted-key order) rather
+   than raising — the catalog is built at import of `app.main`, and a naming nicety must never keep
+   the API from booting. No live name needs the suffix today; `tests/test_mcp_catalog.py` pins that,
+   so a suffixed name is noticed in CI rather than in a prompt.
 
 **The consequence to remember:** a generated name can **shift** the day a collision appears —
 `list_work_orders` is `work_orders_list_work_orders` today only because the maintenance router also
@@ -380,7 +415,13 @@ prompts on them, and re-run `--print-catalog` after adding a router.
 
 One JSON object per tool, `$ref`s fully inlined (MCP clients receive a self-contained
 `inputSchema`; cycles and depth > 12 degrade to a described stub rather than failing the catalog).
-Pydantic's auto-`title`s are stripped; `description`, `enum`, `default`, `format`, `minimum` etc. are kept.
+Pydantic's auto-`title` **keyword** is stripped; a body **field** named `title` (NCRs, CARs, ECOs,
+complaints, process sheets, QMS clauses and evidence, maintenance work orders, AI recommendations,
+document uploads — 17 routes, 10 of which require it) is kept, and `default` / `example` / `enum` /
+`const` values are copied as opaque data. `description`, `enum`, `default`, `format`, `minimum`
+etc. are kept. Every schema is **`additionalProperties: false`**: a misspelled argument
+(`serach`) is a 422 that names it, never a silently dropped filter that returns the *unfiltered*
+result with `isError: false`.
 
 | OpenAPI | Tool argument |
 |---|---|
@@ -409,21 +450,25 @@ function name containing `delete`/`void`/`cancel`/`purge`/`reset`/`hard`; `idemp
 
 ## 7. The convenience tools (fixed names)
 
-Thirteen hand-written tools, listed **first** in `tools/list` (then the generated catalog sorted by
+Fifteen hand-written tools, listed **first** in `tools/list` (then the generated catalog sorted by
 name). Each one reaches data exactly like a generated tool — an HTTP request through the executor
 as the caller — and each **shadows** the raw route(s) it fronts (§8), so there is exactly one door
-to those routes and the rules below cannot be bypassed by calling the raw twin.
+to those routes and the rules below cannot be bypassed by calling the raw twin. Every convenience
+schema is `additionalProperties: false` (§6.3): an argument the table does not list is refused
+with a 422 that names it, never accepted-and-ignored.
 
 | Tool | Route(s) | Arguments | Behaviour |
 |---|---|---|---|
 | `search` | `GET /search/` | `q` (required, 1–100 chars), `limit` (1–50, default 20), `types` (comma-separated) | Global search |
 | `list_work_centers` | `GET /work-centers/` | `name` (case-insensitive substring over name **and** code), `active_only` (default `true`) | Fetches with `limit=5000` and filters client-side; returns `id`, `code`, `name`, `type`, `is_active` |
-| `create_work_order` | `POST /work-orders/` | `part_id`, `quantity_ordered` (required); `work_order_type`, `parent_work_order_id`, `priority`, `due_date`, `customer_name`, `customer_po`, `unit_number`, `notes`, `special_instructions`, `sequential_operations`, `serial_numbers`, `auto_routing` (query, default `true`), `status` (**ignored**) | See [DRAFT guarantees](#9-draft-guarantees). Refuses `work_order_type: "laser_cutting"` **before** calling, with the API's own wording |
-| `add_operation` | `POST /work-orders/{id}/operations` | `work_order_id`, `name`, `work_center` (required; **int id or name/code string**); `sequence` (10–990, multiple of 10); passthrough `operation_number`, `description`, `setup_instructions`, `run_instructions`, `setup_time_hours`, `run_time_hours`, `run_time_per_piece`, `requires_inspection`, `inspection_type`, `component_part_id`, `component_quantity`, `operation_group` | **Name guard** (below). Work center by name: exact match on name or code → substring → refuses **404** on none, **409** naming the candidates on more than one ("Pass the id"). `sequence` omitted → `GET /work-orders/{id}` and use the next multiple of 10 after the current maximum (10 on an empty plan). Not for laser WOs (the route refuses 400) |
-| `get_work_order` | `GET /work-orders/{id}` or `/work-orders/by-number/{n}` | `work_order_id` **or** `work_order_number` | Full `WorkOrderResponse`: operations, nests (`operations[].laser_nest`), status, `version` |
-| `duplicate_work_order` | `POST /work-orders/{id}/duplicate` | `work_order_id` (required), `quantity_ordered`, `due_date` | Copies the *plan* onto a new DRAFT (`WORK_ORDER_TEMPLATES.md` / duplicate service); post-checks DRAFT |
-| `release_work_order` | `POST /work-orders/{id}/release` | `work_order_id` | Explicit only; the route refuses anything not DRAFT |
-| `import_laser_nest_package` | `POST /work-orders/laser-nest-packages/standalone/import` or `POST /work-orders/{id}/laser-nest-packages/import` | `work_order_id` (omit for standalone), `file` `{filename, content_base64, content_type?}` **or** `source_path`, `rows` (list → sent as the JSON string the route expects, or a string), `work_center_id`, `due_date` (standalone only), `sheet_match_provenance`, `release` (default `false`) | See [Nest import demotion](#10-nest-import-demotion) |
+| `create_work_order` | `POST /work-orders/` | `part_id`, `quantity_ordered` (required); `work_order_type`, `parent_work_order_id`, `priority`, `due_date`, `customer_name`, `customer_po`, `unit_number`, `notes`, `special_instructions`, `sequential_operations`, `serial_numbers`, `auto_routing` (query, default `true`). **No `status` argument** — passing one is a 422 | See [DRAFT guarantees](#9-draft-guarantees). Refuses `work_order_type: "laser_cutting"` **before** calling, with the API's own wording |
+| `add_operation` | `POST /work-orders/{id}/operations` | `work_order_id`, `name`, `work_center` (required; **int id or name/code string**); `sequence` (10–990, multiple of 10); passthrough `operation_number`, `description`, `setup_instructions`, `run_instructions`, `setup_time_hours`, `run_time_hours`, `run_time_per_piece`, `requires_inspection`, `inspection_type`, `component_part_id`, `component_quantity`, `operation_group`. `quantity` is accepted by the schema only to be **refused 422 with an explanation** | **Name guard** (below). Work center by name: exact match on name or code → substring → refuses **404** on none, **409** naming the candidates on more than one ("Pass the id"). `sequence` omitted → `GET /work-orders/{id}` and use the next multiple of 10 after the current maximum (10 on an empty plan). **An operation has no quantity of its own** — it runs the work order's `quantity_ordered`; `component_quantity` is the BOM component demand for the step (the per-operation piece target on a batch job), not an operation quantity, so the spec's `quantity` is not aliased to it. Not for laser WOs (the route refuses 400) |
+| `get_work_order` | `GET /work-orders/{id}` or `/work-orders/by-number/{n}` | `work_order_id` **or** `work_order_number` (percent-encoded into the path, so `../` or `?` cannot steer the call onto another route) | Full `WorkOrderResponse`: operations, nests (`operations[].laser_nest`), status, `version` |
+| `update_work_order` | `PUT /work-orders/{id}` | `work_order_id`, `version` (required); `quantity_ordered`, `priority`, `status`, `sequential_operations`, `due_date`, `customer_name`, `customer_po`, `unit_number`, `notes`, `special_instructions`, `quantity_complete`, `quantity_scrapped`, `scrap_reason` — every `WorkOrderUpdate` field, pinned to the route's own schema by a catalog test | The header edit verb, version-gated (409 when stale). **`status` accepts `draft` / `on_hold` / `cancelled` only**: `released` and `in_progress` are refused **422** naming the real verbs (`release_work_order`, `work_orders_start_work_order`) — the route's blind `setattr` would accept them with no `released_at` / `released_by` and no operation promotion; `complete` / `closed` are refused by the route itself. `status: "draft"` is how a released-but-unstarted job is put back (the nest tools use the same PUT) |
+| `duplicate_work_order` | `POST /work-orders/{id}/duplicate` | `work_order_id`, `quantity_ordered` (both required — the route requires the quantity; a laser job ignores it and derives its own from the copied nests), `due_date` | Copies the *plan* onto a new DRAFT (`WORK_ORDER_TEMPLATES.md` / duplicate service); post-checks DRAFT |
+| `release_work_order` | `POST /work-orders/{id}/release` | `work_order_id` | Explicit only; the route refuses anything not DRAFT. The **only** tool that releases work |
+| `import_laser_nest_package` | `POST /work-orders/laser-nest-packages/standalone/import` or `POST /work-orders/{id}/laser-nest-packages/import` | `work_order_id` (omit for standalone), `file` `{filename, content_base64, content_type?}` **or** `source_path`, `rows` (list → sent as the JSON string the route expects, or a string), `work_center_id`, `due_date` (standalone only), `sheet_match_provenance`, `release` (default `false`) | See [Nest import demotion](#10-nest-import-demotion). Returns `{import, work_order, demoted_to_draft, operations_returned_to_pending, note}` |
+| `add_laser_nest` | `POST /work-orders/{id}/laser-nests/manual` | `work_order_id`, `cnc_number`, `planned_runs` (required); `nest_name`, `material`, `thickness`, `sheet_size`, `work_center_id`, `material_part_id`, `qty_per_run` (the route's `LaserNestManualCreate`, pinned by a catalog test); `release` (default `false`) | Keys one nest by hand onto an assembly parent (its laser child is found-or-created by the route) or a laser WO. The route **force-sets the laser WO RELEASED** with the new nest READY; the tool applies §10 to it — a **new** laser WO, or one that was **DRAFT before the call**, comes back DRAFT with PENDING operations; a job already on the floor (released / in progress / on hold before the call) is **never taken off it** (`demoted_to_draft: false` + a `note`). Refuses **409** a job whose nests came from a package import (§10 rule 1, the other direction). Returns `{nest, work_order, demoted_to_draft, ...}` |
 | `get_shop_floor_dashboard` | `GET /shop-floor/dashboard` (+ `GET /shop-floor/dispatch-board`) | `include_dispatch_board` (default `false`) | With the flag: `{"dashboard": …, "dispatch_board": …}` |
 | `list_inventory` | `GET /inventory/` or `GET /inventory/summary` | `summary` (default `false`), `part_id`, `warehouse`, `location_code`, `has_quantity` (default `true`), `limit` (default 200, max 10000), `offset` | `summary=true` → per-part totals |
 | `list_purchase_orders` | `GET /purchasing/purchase-orders` | `status`, `vendor_id`, `deleted_only`, `limit` (default 200), `offset` | |
@@ -440,17 +485,19 @@ contains `/` or `\`, ends with `.dxf` / `.dwg` / `.nc` / `.pdf` (case-insensitiv
 
 ## 8. Shadowed raw operations
 
-These 14 `(METHOD, path)` pairs are **dropped from the generated catalog**; the convenience tool is
+These 16 `(METHOD, path)` pairs are **dropped from the generated catalog**; the convenience tool is
 the only door to them (`convenience.SHADOWED_OPERATIONS`):
 
 | Raw operation | Replaced by |
 |---|---|
 | `POST /api/v1/work-orders/` | `create_work_order` |
+| `PUT /api/v1/work-orders/{work_order_id}` | `update_work_order` |
 | `POST /api/v1/work-orders/{work_order_id}/duplicate` | `duplicate_work_order` |
 | `POST /api/v1/work-orders/{work_order_id}/release` | `release_work_order` |
 | `POST /api/v1/work-orders/{work_order_id}/operations` | `add_operation` |
 | `POST /api/v1/work-orders/laser-nest-packages/standalone/import` | `import_laser_nest_package` |
 | `POST /api/v1/work-orders/{work_order_id}/laser-nest-packages/import` | `import_laser_nest_package` |
+| `POST /api/v1/work-orders/{work_order_id}/laser-nests/manual` | `add_laser_nest` |
 | `GET /api/v1/search/` | `search` |
 | `GET /api/v1/work-centers/` | `list_work_centers` |
 | `GET /api/v1/work-orders/{work_order_id}` | `get_work_order` |
@@ -461,10 +508,11 @@ the only door to them (`convenience.SHADOWED_OPERATIONS`):
 | `GET /api/v1/parts/` | `list_parts` |
 
 Every other operation stays generated — including the neighbours of the shadowed ones
-(`work_orders_update_work_order`, `work_orders_start_work_order`, `preview_laser_nest_package_import`,
-`get_work_order_by_number`, `get_inventory_summary`, `get_purchase_order`, …). Adding a convenience
-tool whose route is *not* in the shadow set is a build error (`build_registry` refuses a duplicate
-name) rather than a silent win.
+(`work_orders_start_work_order`, `work_orders_update_operation`, `preview_laser_nest_package_import`,
+`get_work_order_by_number`, `update_laser_nest`, `get_inventory_summary`, `get_purchase_order`, …) —
+except the two cutover loaders in `EXCLUDED_OPERATIONS` (§6.1), which have no tool and no
+replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
+(`build_registry` refuses a duplicate name) rather than a silent win.
 
 ---
 
@@ -482,38 +530,78 @@ name) rather than a silent win.
   `work_order.status` the same way and reports the payload under `duplicate` if not).
 - **`release_work_order` is the only release.** Nothing else in the package moves a work order to
   RELEASED — not creation, not duplication, not template use (`use_work_order_template` is a
-  generated tool over a route that itself lands DRAFT). The nest import is the one route that is
-  *born* RELEASED, and §10 is how the tool handles it.
+  generated tool over a route that itself lands DRAFT), and not the header update: the generic
+  `PUT /work-orders/{id}` is shadowed by `update_work_order`, which refuses `status: released` and
+  `status: in_progress` (422 naming `release_work_order` / `work_orders_start_work_order`) because
+  the route's blind `setattr` would accept them with no `released_at` / `released_by` and no
+  operation promotion — a release the audit trail could not attribute. The two Excel-cutover
+  loaders that mint work orders RELEASED / IN_PROGRESS outright are not tools (§6.1). The nest
+  routes are the ones *born* RELEASED, and §10 is how the tools handle them.
 
 ---
 
 ## 10. Nest import demotion
 
-The application's nest-package import creates the laser work order **RELEASED** — that is what the
-planners' import button means. `import_laser_nest_package` keeps that route and adds three rules:
+The application's nest-package import creates the laser work order **RELEASED, with its nest
+operations READY** — that is what the planners' import button means — and the manual-nest route
+force-sets the laser work order it lands on the same way. `import_laser_nest_package` and
+`add_laser_nest` keep those routes and add four rules:
 
-1. **Manual-nest mixing is refused before the upload.** With a `work_order_id`, the tool first
-   `GET`s the target and looks at `operations[].laser_nest`: a nest with `cnc_file_name` **null** was
-   keyed by hand. If any exist → **409** naming them ("A package import REPLACES every nest on the
-   job … Import into a fresh standalone laser work order instead"). `WorkOrderResponse` has no
-   top-level `laser_nests` field; the per-operation view is the one the SPA renders too.
-2. **Demote to DRAFT after a successful import, unless `release=true`.** The route's response
-   carries `child_work_order` (a full `WorkOrderResponse`, RELEASED, `work_order_type='laser_cutting'`).
-   The tool immediately issues `PUT /work-orders/{child.id}` with
-   `{"version": child.version, "status": "draft"}` — the ordinary, audited, version-gated update
-   verb — and returns `{"import": <raw import response>, "work_order": <post-demote WO>, "demoted_to_draft": true}`.
-   With `release=true` it returns `{"import": …, "work_order": child, "demoted_to_draft": false}` and
-   leaves it on the floor's board.
-3. **A failed demote is loud.** If the `PUT` fails (409 on a concurrent edit, 403, …) the result is
-   `is_error` with the PUT's status and a message beginning **`IMPORT SUCCEEDED, BUT work order … is
-   still RELEASED`**, and the `import` / `work_order` payloads under `extra` — the work order exists
-   and is released; put it back to DRAFT from the UI or with `work_orders_update_work_order`
-   (`work_order_id`, `version`, `status: "draft"`).
+1. **Manual nests and a package import are never mixed on one job — in either direction, and the
+   check reads the LASER work order.** A production parent carries no nests of its own: they live
+   on its laser child, and `WorkOrderResponse` has no pointer to that child, so with a
+   `work_order_id` the tool `GET`s the target and, for a production parent, finds the live
+   `laser_cutting` child through the work-order list (`parent_work_order_id` = the parent, narrowed
+   by the parent's part number) before looking at `operations[].laser_nest`. A nest with
+   `cnc_file_name` **null** was keyed by hand. `import_laser_nest_package` refuses **409** naming
+   the manual nests when any exist ("A package import REPLACES every nest on the job … Import into
+   a fresh standalone laser work order instead"); `add_laser_nest` refuses **409** when the job's
+   nests came from a package import (`cnc_file_name` set), because the next import would replace
+   the hand-keyed nest silently. Both refusals run before anything is uploaded or written.
+2. **Demote to DRAFT after a successful import, unless `release=true` — header AND operations.**
+   The route's response carries `child_work_order` (a full `WorkOrderResponse`, RELEASED,
+   `work_order_type='laser_cutting'`, operations READY). The tool issues
+   `PUT /work-orders/{child.id}` `{"version": child.version, "status": "draft"}` — the ordinary,
+   audited, version-gated update verb — and **then** `PUT /work-orders/operations/{id}`
+   `{"version", "status": "pending"}` for every READY operation, in that order: the app's
+   reconcile-on-read promotes the PENDING operations of a RELEASED work order but never those of a
+   DRAFT one, so a read between the two steps cannot race the demote back. The second step is not
+   optional: a DRAFT header alone is **not** a draft — the dispatch board and the kiosk queue
+   filter on terminal statuses only, so READY nests would stay on the board and be startable by
+   badge, an operator start would flip the job to IN_PROGRESS with no release ever recorded, and
+   the planner's later `release_work_order` would be refused. The result is
+   `{"import": <raw import response>, "work_order": <re-read WO>, "demoted_to_draft": true,
+   "operations_returned_to_pending": N, "note": …}`; the `note` discloses what the demote cannot
+   undo — `released_at` / `released_by` still carry the stamp the route wrote, and
+   `release_work_order` re-stamps them when the planner releases. With `release=true` the tool
+   returns `{"import": …, "work_order": child, "demoted_to_draft": false}` and leaves the job on
+   the floor's board.
+3. **`add_laser_nest` applies the same demote only to a job that was not on the floor.** The route
+   force-sets the laser work order RELEASED whether it minted it or not, so the tool records the
+   laser work order's status *before* the call: a **new** child, or one that was **DRAFT**, comes
+   back DRAFT with PENDING operations exactly as in rule 2; a job that was released / in progress /
+   on hold before the nest was added is left as the route set it (`demoted_to_draft: false` plus a
+   `note` saying why) — adding a nest to a running job must never take the job off the floor.
+4. **A failed demote is loud.** If the header `PUT` fails (409 on a concurrent edit, 403, …) the
+   result is `is_error` with the PUT's status and a message beginning **`IMPORT SUCCEEDED, BUT work
+   order … is still RELEASED`** (`NEST ADDED, BUT …` from `add_laser_nest`), with the `import` /
+   `nest` / `work_order` payloads under `extra` — the work order exists and is released; put it
+   back to DRAFT from the UI or with `update_work_order` (`work_order_id`, `version`,
+   `status: "draft"`). If the header landed but an operation `PUT` failed, the message says exactly
+   that (**`… is DRAFT, BUT N of its operations are still READY`**, naming them with the route's
+   own detail) and `operations_returned_to_pending` counts the ones that did land.
 
 Either `file` or `source_path` is required (422 otherwise). `rows` given as a list is serialised to
 the JSON string the multipart route expects; `due_date` is sent only on the standalone path.
 The upload decodes on the bridge side under `WERCO_MCP_MAX_UPLOAD_BYTES` (413-shaped tool error
 over it) and is then subject to the route's own `LASER_UPLOAD_MAX_BYTES` (50 MB).
+
+**What this is not.** The demote is the owner's rule for the *MCP* layer; it does not close the
+application's own gap that `PUT /shop-floor/operations/{id}/start` accepts an operation whose work
+order is DRAFT and flips the job to IN_PROGRESS with no work-order status-change audit row. With
+the operations at PENDING the kiosk and the dispatch board no longer show them, which is what makes
+the DRAFT real from the floor's side; a 409 on a DRAFT parent in that shop-floor route would close
+the hole for every path, and is an owner decision rather than something made here.
 
 ---
 
@@ -523,7 +611,8 @@ over it) and is then subject to the route's own `LASER_UPLOAD_MAX_BYTES` (50 MB)
 
 | HTTP outcome | `CallToolResult` |
 |---|---|
-| **≥ 400** | `is_error: true`; `structured_content` = `{"status": <code>, "detail": <server detail, verbatim>, "method": …, "path": …}` and the same JSON as text. A 422 `detail` is FastAPI's list of pydantic errors; a 409 is the domain's own sentence. **Never rewritten.** Non-JSON error bodies are quoted as text, bounded at 8000 chars |
+| **≥ 400** | `is_error: true`; `structured_content` = `{"status": <code>, "detail": <server detail, verbatim>, "method": …, "path": …}` and the same JSON as text. A 422 `detail` is FastAPI's list of pydantic errors; a 409 is the domain's own sentence. **Never rewritten.** Error bodies are bounded at 8000 chars: non-JSON text is cut with an ellipsis, and a pathological JSON `detail` (hundreds of pydantic errors) becomes `{"truncated": true, "chars": M, "preview": …}` — under the cap, which is every error an agent will actually meet, nothing is touched |
+| **3xx** | `is_error: true`, `{"status": 307, "detail": "Redirect to <Location> (redirects are never followed; call the exact route path).", …}`. Neither executor follows redirects, so a trailing-slash 307 with an empty body must never read as a completed action |
 | **204 / empty 2xx** | `{"ok": true, "status": <code>}` |
 | **2xx JSON** | `structured_content` = the parsed JSON (a non-object — list, number — is wrapped as `{"result": …}`); `content` = the same, pretty-printed, **capped at `WERCO_MCP_MAX_RESULT_CHARS`** (default 200 000) with a trailing `[truncated: N of M chars — narrow with limit/skip or filters]`. When truncated, `structured_content` is replaced by `{"truncated": true, "chars": M, "status": …}` so the client is never handed the payload twice |
 | **2xx `text/*`** | The text, same cap; `structured_content` = `{"status", "text"}` (or the truncation marker) |
@@ -544,27 +633,40 @@ Argument names below are the real ones from the catalog. Every step is one `tool
 answers exactly as it would the web app, so a Supervisor sees the same 403s a Supervisor sees in
 the UI.
 
-### 12.1 Plan a job and put it on the floor (Manager)
+### 12.1 Plan a press-brake + plate-roll job and put it on the floor (Manager)
 
 ```text
 list_work_centers        {"name": "brake"}
   → [{"id": 7, "code": "PB-01", "name": "Press Brake 1", "type": "press_brake", "is_active": true}]
+list_work_centers        {"name": "roll"}
+  → [{"id": 9, "code": "PR-01", "name": "Plate Roll", "type": "rolling", "is_active": true}]
+list_work_centers        {"name": "weld"}
+  → [{"id": 11, "code": "WLD-01", "name": "Weld Bay 1", "type": "welding", "is_active": true}]
 
-create_work_order        {"part_id": 412, "quantity_ordered": 25, "due_date": "2026-09-19",
-                          "customer_po": "PO-88121", "status": "released"}
+create_work_order        {"part_id": 412, "quantity_ordered": 1, "due_date": "2026-09-19",
+                          "customer_po": "PO-88121"}
   → {... "id": 913, "work_order_number": "WO-20260901-004", "status": "draft", "version": 0, ...}
-     (status "released" was ignored — see §9)
+     (there is no status argument — passing one is a 422; the job is DRAFT until released, §9)
 
-add_operation            {"work_order_id": 913, "name": "Laser", "work_center": "Ermaksan"}
-  → operation 10 on the Ermaksan (name resolved by unique substring)
-add_operation            {"work_order_id": 913, "name": "Brake", "work_center": 7}
-  → operation 20 (sequence defaulted to the next multiple of 10)
+add_operation            {"work_order_id": 913, "name": "Brake", "work_center": "Press Brake 1"}
+  → operation 10 (sequence defaulted to the first multiple of 10)
+add_operation            {"work_order_id": 913, "name": "Roll", "work_center": 9}
+  → operation 20
+add_operation            {"work_order_id": 913, "name": "Weld", "work_center": "weld"}
+  → operation 30 (name resolved by unique substring)
+add_operation            {"work_order_id": 913, "name": "Deburr", "work_center": 7}
+  → operation 40
 add_operation            {"work_order_id": 913, "name": "Bracket_Rev_C.dxf", "work_center": 7}
   → is_error 422: "Refusing operation name 'Bracket_Rev_C.dxf': it looks like a CNC/drawing
      file export. Use a short shop-floor step such as 'Laser', 'Brake', 'Weld' or 'Deburr'."
+add_operation            {"work_order_id": 913, "name": "Weld", "work_center": 11, "quantity": 25}
+  → is_error 422: "add_operation takes no `quantity`: an operation has no quantity of its own …"
 
 get_work_order           {"work_order_number": "WO-20260901-004"}
-  → status "draft", operations [10 Laser, 20 Brake], version 0
+  → status "draft", operations [10 Brake, 20 Roll, 30 Weld, 40 Deburr], version 0
+
+duplicate_work_order     {"work_order_id": 913, "quantity_ordered": 1}
+  → {"work_order": {"id": 914, "status": "draft", ...}}     # a second unit is its own DRAFT job
 
 release_work_order       {"work_order_id": 913}
   → status "released"; operation 10 is READY on the dispatch board
@@ -576,9 +678,10 @@ release_work_order       {"work_order_id": 913}
 search                   {"q": "housing", "types": "work_orders", "limit": 5}
 duplicate_work_order     {"work_order_id": 640, "quantity_ordered": 10, "due_date": "2026-09-30"}
   → {"work_order": {... "status": "draft" ...}, skipped material ties listed in the response}
-work_orders_update_work_order
-                         {"work_order_id": 921, "version": 0, "priority": 2, "customer_po": "PO-88140"}
+update_work_order        {"work_order_id": 921, "version": 0, "priority": 2, "customer_po": "PO-88140"}
   → version 1 (send the current version or the route answers 409)
+update_work_order        {"work_order_id": 921, "version": 1, "status": "released"}
+  → is_error 422: "status 'released' is not written through update_work_order: use release_work_order …"
 release_work_order       {"work_order_id": 921}
 ```
 
@@ -588,19 +691,28 @@ release_work_order       {"work_order_id": 921}
 import_laser_nest_package
   {"file": {"filename": "nest-2026-09-01.pdf", "content_base64": "<base64>", "content_type": "application/pdf"},
    "work_center_id": 3, "due_date": "2026-09-12"}
-  → {"import": {... "child_work_order": {"id": 930, "status": "released", ...}},
-     "work_order": {"id": 930, "status": "draft", "version": 1, "work_order_type": "laser_cutting", ...},
-     "demoted_to_draft": true}
+  → {"import": {... "child_work_order": {"id": 930, "status": "released",
+                                          "operations": [{"sequence": 10, "status": "ready", ...}, ...]}},
+     "work_order": {"id": 930, "status": "draft", "version": 1, "work_order_type": "laser_cutting",
+                    "operations": [{"sequence": 10, "status": "pending", ...}, ...]},
+     "demoted_to_draft": true, "operations_returned_to_pending": 12,
+     "note": "released_at / released_by still carry the stamp the route wrote …"}
 
 get_work_order           {"work_order_id": 930}
-  → nests under operations[].laser_nest (cnc_file_name set = imported)
+  → nests under operations[].laser_nest (cnc_file_name set = imported); nothing on the dispatch board
 
 release_work_order       {"work_order_id": 930}        # when the planner is happy with it
+
+add_laser_nest           {"work_order_id": 640, "cnc_number": "P-4471", "planned_runs": 3}
+  → on a DRAFT assembly parent: its laser child is created, and handed back DRAFT with the nest PENDING
+     {"nest": {"id": 77, "cnc_number": "P-4471", ...}, "work_order": {"id": 931, "status": "draft", ...},
+      "demoted_to_draft": true, "operations_returned_to_pending": 1, "note": "released_at …"}
 ```
 
-Pointing the same call at a job that already carries a hand-keyed nest
-(`{"work_order_id": 905, ...}`) is refused with a 409 **before** the upload; a nest package and
-manual nests are never mixed on one job.
+Pointing the import at a job that already carries a hand-keyed nest — or at the assembly parent
+whose laser child does (`{"work_order_id": 905, ...}`) — is refused with a 409 **before** the
+upload, and `add_laser_nest` on a job whose nests came from a package import is refused the same
+way: a nest package and manual nests are never mixed on one job.
 
 ### 12.4 Morning read-only sweep (any role — reads are tenant-scoped, not role-gated)
 
@@ -618,6 +730,32 @@ export_work_orders       {"format": "xlsx", "start_date": "2026-08-01"}
     over WERCO_MCP_MAX_BLOB_BYTES
 ```
 
+### 12.5 Raise a purchase order without receiving it (Manager)
+
+```text
+list_vendors             {"active_only": true}
+  → [{"id": 18, "code": "VND-018", "name": "Metals Supply Co", "is_approved": true, ...}, ...]
+search                   {"q": "A36 plate", "types": "parts", "limit": 5}
+  → part 2207 "PLATE-A36-0.250"
+
+create_purchase_order    {"vendor_id": 18, "required_date": "2026-09-15", "ship_to": "Dock 2",
+                          "lines": [{"part_id": 2207, "quantity_ordered": 40, "unit_price": 86.50}]}
+  → {"id": 512, "po_number": "PO-2026-0512", "status": "draft", "total": 3460.0, "version": 0, ...}
+     (one audit CREATE row for the PO, as the route documents)
+add_po_line              {"po_id": 512, "part_id": 2211, "quantity_ordered": 10, "unit_price": 12.00}
+  → line 2 added and the PO totals rolled (a CREATE row for the line, an UPDATE row for the PO)
+get_purchase_order       {"po_id": 512}
+  → status "draft", 2 lines, every line's quantity_received 0
+send_purchase_order      {"po_id": 512}
+  → status "sent": issued to the vendor, still nothing received
+```
+
+No receiving verb is called. Booking material against the PO is `receive_material` (Receiving &
+Inspection), a separate deliberate step that creates the receipt, the lot and the stock movement —
+the PO stays open, and `list_purchase_orders {"status": "sent"}` shows it waiting on the dock.
+A Viewer or Operator running the same session gets `403 Insufficient permissions` on
+`create_purchase_order`, exactly as in the Purchasing page.
+
 Shop-floor time is never faked: `clock_in {"work_order_id", "operation_id", "work_center_id"}`,
 `report_operation_production {"operation_id", "quantity_complete_delta"}`,
 `clock_out {"time_entry_id", "quantity_produced"}` and
@@ -634,14 +772,18 @@ real gates (a complete with zero labor recorded is refused 400, exactly as at th
 | Tool result `{"status": 401, "detail": "No ERP credentials configured for this bridge…"}` | stdio bridge started with none of `WERCO_ERP_TOKEN` / `WERCO_ERP_REFRESH_TOKEN` / `WERCO_ERP_EMAIL`+`WERCO_ERP_PASSWORD` | Set one; the bridge logs `Credentials configured: …` on stderr at startup |
 | Tool result `{"status": 401, "detail": "Could not obtain an ERP access token…"}` | Refresh and login both failed (wrong password, locked account, login rate limit 5/min) | Check the account in the UI; wait out the limit |
 | `{"status": 403, "detail": "Insufficient permissions"}` | The user's role does not allow that route (`require_role`) — the SPA would refuse too | Use a user with the right role; nothing in MCP can widen it |
-| `{"status": 409, ...}` on `work_orders_update_work_order` | Stale `version` (optimistic locking) | `get_work_order` → resend with the current `version` |
+| `{"status": 409, ...}` on `update_work_order` | Stale `version` (optimistic locking) | `get_work_order` → resend with the current `version` |
+| `{"status": 422, ...}` from `update_work_order` naming `release_work_order` / `work_orders_start_work_order` | `status: released` or `in_progress` was written through the header update | Call the named verb; the header update never releases or starts work (§9) |
+| `{"status": 422, ...}` `"Additional properties are not allowed ('serach' was unexpected)"` | A misspelled argument — every schema is strict (§6.3) | Fix the argument name; nothing was dispatched |
 | `{"status": 409, ...}` from `add_operation` naming several work centers | Ambiguous `work_center` string | Pass the `id` (from `list_work_centers`) or a more specific name |
 | `{"status": 409, ...}` from `import_laser_nest_package` naming nests | Target already carries manually entered nests | Import into a fresh standalone WO (omit `work_order_id`) |
 | `{"status": 409, ...}` from `release_work_order` | The WO is not DRAFT | Nothing to do — it is already released or is terminal |
 | HTTP **413** from `/mcp` | The JSON-RPC envelope (a base64 file inside it) is over `WERCO_MCP_MAX_UPLOAD_BYTES` (25 MB) | Smaller file, or raise the setting on the server |
 | Tool result `{"status": 413, "detail": "File … exceeds the …-byte MCP upload cap."}` | Same cap, decoded on the bridge side | As above |
 | `{"status": 413, ...}` with the route's own message | The inner route's cap (50 MB `LASER_UPLOAD_MAX_BYTES`, 20 MB QMS PDFs) or, for a plain JSON tool, `MAX_JSON_BODY_BYTES` (256 KB) on the inner request | Split the payload — [API.md → Request Size Limits](API.md#request-size-limits) |
-| `{"status": 429, "detail": "Rate limit exceeded: …"}` | The inner route's per-IP limit (100/60 s default, stricter per-path limits on auth, scanner and nest preview/import) | Slow down; on the door the caller's IP is the key, on a remote bridge the bridge host's IP is, on an in-process bridge it is `127.0.0.1` |
+| `{"status": 429, "detail": "Rate limit exceeded: …"}` (a tool result) | The inner route's per-IP limit (100/60 s default, stricter per-path limits on auth, scanner and nest preview/import) — one charge per tool call, exactly like the SPA | Slow down; on the door the caller's IP is the key, on a remote bridge the bridge host's IP is, on an in-process bridge it is `127.0.0.1` |
+| HTTP **429** from `/mcp` itself | The door path's own ceiling, `WERCO_MCP_HTTP_RATE_LIMIT` (300/minute per IP by default): `tools/list`, `initialize`, schema-rejected calls and unauthenticated probes never reach an inner route, so this is the only limit that counts them (§3.1) | Stop re-listing the catalog on every turn (cache it); raise the setting if a shop legitimately runs many agents behind one NAT address |
+| HTTP **405** from `GET /mcp` | The door is stateless and has no server-push stream to open | Nothing to do — clients POST; the TypeScript SDK treats 405 as "no push stream" |
 | HTTP **503** `MCP door is not running` | The app served the route before/without entering its lifespan | Run the app through its lifespan (uvicorn does); in tests open a `TestClient` context |
 | `{"status": 0, "detail": "ConnectError: …"}` / `ReadTimeout` | Remote bridge cannot reach `WERCO_ERP_URL`, or a long import exceeded 120 s | Check the URL / TLS; retry |
 | `{"status": 404, "detail": "Unknown tool …"}` | A generated name shifted after a router was added (§6.2), or a typo | `tools/list` / `--print-catalog`; anchor prompts on the convenience names |
@@ -654,20 +796,39 @@ real gates (a complete with zero labor recorded is refused 400, exactly as at th
 ## 14. Settings and files
 
 - Server settings (`app/core/config.py`): `WERCO_MCP_HTTP_ENABLED`, `WERCO_MCP_HTTP_PATH`,
-  `WERCO_MCP_MAX_RESULT_CHARS`, `WERCO_MCP_MAX_BLOB_BYTES`, `WERCO_MCP_MAX_UPLOAD_BYTES`. Client-side
-  bridge variables (read by `app/mcp/__main__.py` / `auth.py`, **not** `Settings`): `WERCO_ERP_URL`,
-  `WERCO_ERP_TOKEN`, `WERCO_ERP_REFRESH_TOKEN`, `WERCO_ERP_EMAIL`, `WERCO_ERP_PASSWORD`,
-  `WERCO_MCP_TRANSPORT`, `WERCO_MCP_HOST`, `WERCO_MCP_PORT`. Tables in
-  [ENVIRONMENT_VARIABLES.md → MCP](ENVIRONMENT_VARIABLES.md#mcp-model-context-protocol-door-and-bridge).
+  `WERCO_MCP_HTTP_RATE_LIMIT`, `WERCO_MCP_MAX_RESULT_CHARS`, `WERCO_MCP_MAX_BLOB_BYTES`,
+  `WERCO_MCP_MAX_UPLOAD_BYTES`. Client-side bridge variables (read by `app/mcp/__main__.py` /
+  `auth.py`, **not** `Settings`): `WERCO_ERP_URL`, `WERCO_ERP_TOKEN`, `WERCO_ERP_REFRESH_TOKEN`,
+  `WERCO_ERP_EMAIL`, `WERCO_ERP_PASSWORD`, `WERCO_MCP_TRANSPORT`, `WERCO_MCP_HOST`, `WERCO_MCP_PORT`.
+  Tables in [ENVIRONMENT_VARIABLES.md → MCP](ENVIRONMENT_VARIABLES.md#mcp-model-context-protocol-door-and-bridge).
 - Dependency: `mcp==2.1.1` (`backend/requirements.txt`; transitives `mcp-types`, `httpx2`,
   `sse-starlette`, `jsonschema`, `anyio`).
-- Tests: `backend/tests/test_mcp_smoke.py` — catalog builds from the live `app.openapi()` with > 600
-  generated tools, unique and wire-valid names, the shadow set disjoint from the catalog, collisions
-  prefixed (`routing_add_operation` stays prefixed even though its Work Orders twin is shadowed), an
-  in-memory client creating a DRAFT work order through the real router as the manager, a no-token
-  call answered 401, and the mounted door exempt from the outer rate limit. `catalog.catalog_tags()`
-  + `EXCLUDED_TAGS` are the two halves of the per-tag coverage guard (every tag outside the exclusion
-  set must have ≥ 1 tool — the CI trip-wire for "a new router shipped and MCP is blind").
+- Tests (all in the default `pytest tests/` run, so in CI's required "Backend Tests" job):
+  - `backend/tests/test_mcp_catalog.py` (no DB) — membership against the live `app.openapi()` (every
+    secured, unshadowed, unexcluded operation is exactly one tool; `PUBLIC_OPERATIONS` names exactly
+    the unsecured routes; `EXCLUDED_OPERATIONS` are the two loaders), names (unique, wire-valid,
+    ≤ 64, collisions prefixed, the numeric-suffix fallback proven on synthetic input and unused on
+    the live catalog), schemas (`$ref`-free, `additionalProperties: false`, every JSON body's
+    property set equal to the document's — the `title` field included), and the two convenience
+    schemas that front a route (`update_work_order`, `add_laser_nest`) pinned to that route's own
+    property set.
+  - `backend/tests/test_mcp_coverage.py` — the CI trip-wire for "a new router shipped and MCP is
+    blind": `catalog.uncovered_tags` per tag (with the shadow credit granted only for a tag a
+    convenience tool claims) **and** `catalog.unaccounted_operations` per route, plus the live
+    route table (every `app/api/endpoints/` module owns a wired route, no `/api/v1` route hides from
+    the document), each guard also proven on synthetic documents so an empty result is a finding.
+  - `backend/tests/test_mcp_server.py` — the owner's rules on database rows over the SDK's
+    in-memory transport: DRAFT create with `status` refused, the name guard and the `quantity`
+    refusal, `update_work_order` refusing `released` / `in_progress`, the nest import demoting header
+    and operations (and the parent-addressed manual-nest check reading the laser child), the real
+    `add_laser_nest` route on a DRAFT parent and on a running job, tenant scoping, the result shapes
+    (truncation, blob, 3xx, bounded error detail).
+  - `backend/tests/test_mcp_http_door.py` — the door at the wire: 401 + `WWW-Authenticate` for no /
+    garbage / kiosk / refresh / display / signin / station tokens, `GET` → 405, the operator 403 and
+    manager DRAFT through the door, both body caps, the default-limit exemption with the inner hit
+    kept and the door's own path ceiling, the reserved-path and occupied-path refusals.
+  - `backend/tests/test_mcp_remote_executor.py` — the stdio bridge's HTTPS side over a
+    `MockTransport`: refresh-on-401, password login, wire hygiene.
 - Related: [API.md → MCP door](API.md#mcp-door-mcp), [RBAC_PERMISSIONS.md → MCP / agent access](RBAC_PERMISSIONS.md#mcp--agent-access),
   [DEPLOYMENT_RUNBOOK.md → Enabling the MCP door](DEPLOYMENT_RUNBOOK.md#enabling-the-mcp-door-optional),
   `.cursor/mcp.json.example`, `backend/.env.example`.

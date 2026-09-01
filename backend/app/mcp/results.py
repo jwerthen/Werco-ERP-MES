@@ -86,15 +86,31 @@ def extract_detail(result: ExecResult) -> Any:
                 payload = result.json()
             except ValueError:
                 payload = None
-            if isinstance(payload, dict) and "detail" in payload:
-                return payload["detail"]
             if payload is not None:
-                return payload
+                detail = payload["detail"] if isinstance(payload, dict) and "detail" in payload else payload
+                return _bounded_detail(detail)
         text = result.text()
         if len(text) > MAX_ERROR_DETAIL_CHARS:
             text = text[:MAX_ERROR_DETAIL_CHARS] + "…"
         return text
     return f"HTTP {result.status}"
+
+
+def _bounded_detail(detail: Any) -> Any:
+    """A JSON ``detail`` verbatim -- unless it is pathologically large, then a marker.
+
+    The text branch above has always been capped at ``MAX_ERROR_DETAIL_CHARS``; a
+    JSON error body (a 422 with hundreds of pydantic errors, a big non-``detail``
+    payload) is quoted into the agent's context all the same, so it gets the same
+    cap. Under the cap nothing is touched -- the rule that the server's words are
+    never rewritten holds for every error an agent will actually meet.
+    """
+    if isinstance(detail, str):
+        return detail if len(detail) <= MAX_ERROR_DETAIL_CHARS else detail[:MAX_ERROR_DETAIL_CHARS] + "…"
+    dumped = _dumps(detail)
+    if len(dumped) <= MAX_ERROR_DETAIL_CHARS:
+        return detail
+    return {"truncated": True, "chars": len(dumped), "preview": dumped[:MAX_ERROR_DETAIL_CHARS] + "…"}
 
 
 def error_result(
@@ -148,6 +164,8 @@ def build_tool_result(
     """Shape an HTTP outcome into the MCP result the client sees.
 
     - >= 400: ``is_error`` with the server's ``status`` and verbatim ``detail``.
+    - 3xx: ``is_error`` naming the ``Location``. Neither executor follows redirects,
+      so a 307 (FastAPI's trailing-slash redirect, say) must never read as success.
     - 204 / empty 2xx: ``{"ok": true, "status": N}``.
     - 2xx JSON: parsed into ``structured_content`` (non-objects wrapped as
       ``{"result": ...}``) and pretty-printed text, capped at ``max_chars`` with a
@@ -159,6 +177,15 @@ def build_tool_result(
     """
     if result.status >= 400:
         return error_result(status=result.status, detail=extract_detail(result), method=method, path=path)
+
+    if 300 <= result.status < 400:
+        location = result.headers.get("location") or "<no Location header>"
+        return error_result(
+            status=result.status,
+            detail=f"Redirect to {location} (redirects are never followed; call the exact route path).",
+            method=method,
+            path=path,
+        )
 
     if result.status == 204 or not result.content:
         payload = {"ok": True, "status": result.status}
@@ -189,10 +216,11 @@ def _truncate(text: str, max_chars: int) -> tuple[str, bool]:
 
 def _json_result(parsed: Any, *, status: int, max_chars: int) -> types.CallToolResult:
     text = _dumps(parsed)
+    total = len(text)  # measured once: the oversized payload is never serialised twice
     text, truncated = _truncate(text, max_chars)
     structured: Dict[str, Any]
     if truncated:
-        structured = {"truncated": True, "chars": len(_dumps(parsed)), "status": status}
+        structured = {"truncated": True, "chars": total, "status": status}
     else:
         structured = _as_object(parsed)
     return types.CallToolResult(

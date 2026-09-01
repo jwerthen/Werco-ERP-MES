@@ -125,14 +125,42 @@ class TestAuthAtTheDoor:
         )
         assert response.status_code == 200
 
-    def test_refresh_and_display_tokens_are_not_access_tokens(self, door_client, test_user):
-        from app.core.security import create_refresh_token
+    def test_refresh_display_signin_and_station_tokens_are_not_access_tokens(self, door_client, test_user):
+        """Every non-``access`` token the app mints is a real, well-formed JWT -- and still refused."""
+        from datetime import datetime, timedelta
 
-        refresh = create_refresh_token(subject=test_user.id, company_id=test_user.company_id)
-        response = door_client.post(
-            DOOR, json=_rpc("tools/list"), headers={**ACCEPT, "Authorization": f"Bearer {refresh}"}
+        from app.core.security import (
+            create_display_token,
+            create_kiosk_token,
+            create_refresh_token,
+            create_signin_token,
         )
-        assert response.status_code == 401
+
+        # create_refresh_token returns (token, session_id, expiry): the TOKEN is what goes on the wire.
+        refresh, _session_id, _expires = create_refresh_token(subject=test_user.id, company_id=test_user.company_id)
+        company = test_user.company_id
+        tokens = {
+            "refresh": refresh,
+            "display": create_display_token("jti-1", company, "TV", expires_at=datetime.utcnow() + timedelta(days=1)),
+            "signin": create_signin_token(1, company, "Lobby"),
+            "kiosk-station": create_kiosk_token(1, company, "Station 1"),
+        }
+        for kind, token in tokens.items():
+            assert token.count(".") == 2, f"{kind}: a real three-segment JWT, not a repr"
+            response = door_client.post(
+                DOOR, json=_rpc("tools/list"), headers={**ACCEPT, "Authorization": f"Bearer {token}"}
+            )
+            assert response.status_code == 401, kind
+            assert "www-authenticate" in response.headers, kind
+
+
+class TestDoorMethods:
+    def test_get_is_405_because_a_stateless_door_has_no_push_stream(self, door_client, manager_headers):
+        response = door_client.get(DOOR, headers=_auth(manager_headers))
+        assert response.status_code == 405
+        assert response.headers["allow"] == "POST"
+        # ...and it answers that way with or without a bearer: nothing to open, nothing to guard.
+        assert door_client.get(DOOR, headers=ACCEPT).status_code == 405
 
 
 class TestCallsThroughTheDoor:
@@ -165,7 +193,7 @@ class TestCallsThroughTheDoor:
     ):
         response = door_client.post(
             DOOR,
-            json=_call("create_work_order", {"part_id": test_part.id, "quantity_ordered": 2, "status": "released"}),
+            json=_call("create_work_order", {"part_id": test_part.id, "quantity_ordered": 2}),
             headers=_auth(manager_headers),
         )
         assert response.status_code == 200
@@ -226,12 +254,16 @@ class TestRateLimitExemption:
         assert _should_exempt(app.state.limiter, handler)
         assert "app.mcp.http.mcp_door" in app.state.limiter._exempt_routes
 
-    def test_outer_hit_is_waived_and_inner_hit_is_kept(self, door_client, manager_headers, test_work_order):
-        """slowapi keys the default limit on ``LIMITER/<ip>/<path>/...`` in its storage.
+    def test_default_hit_is_waived_inner_hit_is_kept_and_the_door_path_is_metered_separately(
+        self, door_client, manager_headers, test_work_order
+    ):
+        """slowapi keys the default limit on ``LIMITER/<ip>/<path>/...`` in its storage and the
+        per-path middleware on ``LIMITER/path-limit/<path>/<ip>/...``.
 
-        After a tool call through the door the storage must hold the INNER route's
-        key (the real API request, keyed like the SPA's) and NO key for the door
-        path itself -- one hit per call, not two.
+        After tool calls through the door the storage must hold the INNER route's key
+        (the real API request, keyed like the SPA's, one hit per call -- not two) and
+        the door's own key ONLY under the ``path-limit`` namespace: the default limit
+        is waived on the door, the door ceiling is not.
         """
         storage = getattr(app.state.limiter, "_storage", None)
         counters = getattr(storage, "storage", None)
@@ -250,7 +282,30 @@ class TestRateLimitExemption:
         inner = [key for key in keys if f"/api/v1/work-orders/{test_work_order.id}" in key]
         assert inner, keys
         assert counters[inner[0]] == 3, "the inner route is charged once per tool call"
-        assert not [key for key in keys if f"/{DOOR.strip('/')}/" in key or key.endswith(DOOR)], keys
+        door_keys = [key for key in keys if DOOR in key]
+        assert door_keys and all("path-limit" in key for key in door_keys), keys
+        assert counters[door_keys[0]] == 3, "the door ceiling counts every door request"
+        assert settings.WERCO_MCP_HTTP_RATE_LIMIT.replace("/", "/1/") in door_keys[0], door_keys
+
+    def test_door_path_has_its_own_ceiling_for_requests_that_dispatch_nothing(
+        self, door_client, monkeypatch, manager_headers
+    ):
+        """Unauthenticated probes and tools/list never reach an inner route; the door ceiling bounds them."""
+        monkeypatch.setattr(settings, "WERCO_MCP_HTTP_RATE_LIMIT", "5/minute")
+        counters = app.state.limiter._storage.storage
+        counters.clear()
+        try:
+            statuses = [door_client.post(DOOR, json=_rpc("tools/list"), headers=ACCEPT).status_code for _ in range(5)]
+            assert statuses == [401] * 5
+            sixth = door_client.post(DOOR, json=_rpc("tools/list"), headers=ACCEPT)
+            assert sixth.status_code == 429
+            assert sixth.json()["detail"].startswith("Rate limit exceeded")
+            # Authenticated door traffic shares the same per-IP bucket.
+            listed = door_client.post(DOOR, json=_rpc("tools/list"), headers=_auth(manager_headers))
+            assert listed.status_code == 429
+            assert any("path-limit" in key and DOOR in key for key in counters), list(counters)
+        finally:
+            counters.clear()
 
 
 class TestDisabledByDefault:
@@ -260,3 +315,67 @@ class TestDisabledByDefault:
         assert not hasattr(app.state, "mcp_door")
         response = client.post(DOOR, json=_rpc("tools/list"), headers=_auth(manager_headers))
         assert response.status_code == 404
+
+
+class TestDoorPathConfiguration:
+    """A door configured onto a path the app already owns would never be reached, while
+    ``main.py`` waived the JSON body cap for that path by string: refused twice, at
+    settings validation and again at mount against the live route table."""
+
+    @staticmethod
+    def _settings(**overrides: str):
+        import os
+        from unittest import mock
+
+        from app.core.config import Settings
+
+        env = {"SECRET_KEY": "a" * 64, "REFRESH_TOKEN_SECRET_KEY": "b" * 64, **overrides}
+        with mock.patch.dict(os.environ, env, clear=True):
+            return Settings()
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/api/v1/purchasing/purchase-orders",
+            "/api/v1",
+            "/api/docs",
+            "/api",
+            "/health",
+            "/health/live",
+            "/docs/x",
+            "/",
+        ],
+    )
+    def test_reserved_paths_are_refused_at_boot(self, path):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            self._settings(WERCO_MCP_HTTP_PATH=path)
+
+    def test_a_free_path_is_normalised(self):
+        assert self._settings(WERCO_MCP_HTTP_PATH="/agent/").WERCO_MCP_HTTP_PATH == "/agent"
+        assert self._settings().WERCO_MCP_HTTP_RATE_LIMIT == "300/minute"
+
+    @pytest.mark.parametrize("value", ["300/minute", "10 per 5 seconds", "1000/hour", "5/second"])
+    def test_rate_limit_strings_in_the_limits_grammar_are_accepted(self, value):
+        assert self._settings(WERCO_MCP_HTTP_RATE_LIMIT=value).WERCO_MCP_HTTP_RATE_LIMIT == value
+
+    @pytest.mark.parametrize("value", ["fast", "300", "300/fortnight", "", "minute/300"])
+    def test_unparseable_rate_limit_strings_are_refused_rather_than_failing_open(self, value):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            self._settings(WERCO_MCP_HTTP_RATE_LIMIT=value)
+
+    def test_mount_refuses_a_path_an_existing_route_already_serves(self, monkeypatch):
+        from app.mcp.http import refuse_occupied_path
+
+        monkeypatch.setattr(settings, "WERCO_MCP_HTTP_ENABLED", True)
+        monkeypatch.setattr(settings, "WERCO_MCP_HTTP_PATH", "/health")  # bypasses the validator on purpose
+        with pytest.raises(RuntimeError, match="already served"):
+            mount_mcp(app)
+        assert not hasattr(app.state, "mcp_door")
+        # A path with the same shape as an API route (different method) is occupied too.
+        with pytest.raises(RuntimeError):
+            refuse_occupied_path(app, "/api/v1/work-orders/")
+        refuse_occupied_path(app, DOOR)  # the default is free

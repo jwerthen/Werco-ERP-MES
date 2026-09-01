@@ -196,15 +196,17 @@ machine that runs it and are never part of the server's configuration.
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `WERCO_MCP_HTTP_ENABLED` | No | `false` | Mount the MCP door on the API. **Off by default** — with `false` nothing is mounted and the API is byte-identical to a build without the package. When `true`, a stateless Streamable HTTP endpoint is served at `WERCO_MCP_HTTP_PATH`; it is safe behind `WEB_CONCURRENCY>1` because no session state lives in a worker |
-| `WERCO_MCP_HTTP_PATH` | No | `/mcp` | Where the door is served. Must be an absolute path; a trailing slash is stripped and `/` is refused at startup. The door is an exact `Route` at this path (not a `Mount`), so only this exact path is exempt from `MAX_JSON_BODY_BYTES` and from the outer default rate limit |
+| `WERCO_MCP_HTTP_PATH` | No | `/mcp` | Where the door is served. Must be an absolute path; a trailing slash is stripped, and `/`, anything under `/api` (the API and its docs), `/health` and `/docs` are refused at startup — a door configured onto an existing route would never be reached while that route lost its JSON cap; `mount_mcp` re-checks the live route table and fails the boot if the path is already served. The door is an exact `Route` at this path (not a `Mount`), so only this exact path is exempt from `MAX_JSON_BODY_BYTES` and from the outer default rate limit |
+| `WERCO_MCP_HTTP_RATE_LIMIT` | No | `300/minute` | Per-IP ceiling on the door **path** itself, enforced by the per-path limiter (`limits` grammar: `300/minute`, `10 per 5 seconds`; an unparseable value is refused at startup because the per-path middleware fails open). The door is exempt from the default limit so a tool call is charged once, on the inner route it dispatches; this bounds the requests that dispatch nothing inward (`tools/list`, `initialize`, rejected calls, unauthenticated 401 probes). Keep it above the default limit so it never binds a tool call |
 | `WERCO_MCP_MAX_RESULT_CHARS` | No | `200000` | Characters of one tool result's text before it is truncated with a `[truncated: N of M chars …]` note (the structured payload is replaced by a marker when that happens) |
 | `WERCO_MCP_MAX_BLOB_BYTES` | No | `5000000` | Bytes of a binary response (PDF / XLSX / CSV attachment) returned inline as a base64 blob; over it the tool answers with an error telling the caller to download the file from the UI |
 | `WERCO_MCP_MAX_UPLOAD_BYTES` | No | `25000000` | Bytes of one MCP request envelope at the door — a nest PDF rides base64-encoded **inside** the JSON-RPC body, so `MAX_JSON_BODY_BYTES` is waived on the door path and this cap bounds it instead (**413** over it, before parsing). On the stdio bridge it bounds one decoded file argument |
 
-The door waives the app's **outer** default rate limit on its own path (registered with the
-limiter's `exempt` mechanism) and keeps the **inner** route hit, keyed on the MCP caller's IP, so an
-agent is limited exactly like the SPA rather than at half rate. Per-path limits on the inner routes
-(the table above) still apply.
+Rate limiting is two-tier. The door waives the app's **default** limit on its own path (registered
+with the limiter's `exempt` mechanism) and keeps the **inner** route hit, keyed on the MCP caller's
+IP, so a tool call is charged once and exactly like the SPA rather than at half rate; per-path limits
+on the inner routes (the table above) still apply. The door **path** then carries its own ceiling,
+`WERCO_MCP_HTTP_RATE_LIMIT`, for the requests that never reach an inner route.
 
 **Client — the stdio bridge (`python -m app.mcp`)**
 

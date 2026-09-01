@@ -74,16 +74,23 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-async def _serve_stdio(server: Any, wire: IO[str]) -> None:
+async def _serve_stdio(server: Any, wire: IO[str], executor: Any) -> None:
     import anyio
     from mcp.server.stdio import stdio_server
 
-    async with stdio_server(stdout=anyio.wrap_file(wire)) as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+    try:
+        async with stdio_server(stdout=anyio.wrap_file(wire)) as (read_stream, write_stream):
+            await server.run(read_stream, write_stream, server.create_initialization_options())
+    finally:
+        # The remote executor holds a pooled httpx client for the whole session; release it
+        # on the way out rather than leaving it to garbage collection at loop teardown.
+        await executor.aclose()
 
 
-def _serve_http(server: Any, *, host: str, port: int, verifier: Any, max_body: int) -> None:
+def _serve_http(server: Any, *, host: str, port: int, verifier: Any, max_body: int, executor: Any) -> None:
     """DEV ONLY: a local Streamable HTTP endpoint at ``settings.WERCO_MCP_HTTP_PATH``."""
+    from contextlib import asynccontextmanager
+
     import uvicorn
     from starlette.applications import Starlette
     from starlette.routing import Route
@@ -92,10 +99,16 @@ def _serve_http(server: Any, *, host: str, port: int, verifier: Any, max_body: i
     from app.mcp.http import McpDoor
 
     door = McpDoor(server, verifier=verifier, max_request_body_size=max_body)
-    starlette_app = Starlette(
-        routes=[Route(settings.WERCO_MCP_HTTP_PATH, endpoint=door)],
-        lifespan=lambda _app: door.lifespan(),
-    )
+
+    @asynccontextmanager
+    async def lifespan(_app: Any) -> Any:
+        try:
+            async with door.lifespan():
+                yield
+        finally:
+            await executor.aclose()
+
+    starlette_app = Starlette(routes=[Route(settings.WERCO_MCP_HTTP_PATH, endpoint=door)], lifespan=lifespan)
     logging.getLogger(__name__).info("MCP dev HTTP server on http://%s:%s%s", host, port, settings.WERCO_MCP_HTTP_PATH)
     uvicorn.run(starlette_app, host=host, port=port, log_level="info")
 
@@ -192,10 +205,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         host = args.host or os.environ.get(ENV_HOST) or "127.0.0.1"
         port = args.port or int(os.environ.get(ENV_PORT) or "8765")
         verifier: Any = _RemoteBearerPassthrough() if remote_url else ErpTokenVerifier()
-        _serve_http(server, host=host, port=port, verifier=verifier, max_body=settings.WERCO_MCP_MAX_UPLOAD_BYTES)
+        _serve_http(
+            server,
+            host=host,
+            port=port,
+            verifier=verifier,
+            max_body=settings.WERCO_MCP_MAX_UPLOAD_BYTES,
+            executor=executor,
+        )
         return 0
 
-    asyncio.run(_serve_stdio(server, wire))
+    asyncio.run(_serve_stdio(server, wire, executor))
     return 0
 
 

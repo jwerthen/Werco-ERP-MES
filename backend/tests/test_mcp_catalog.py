@@ -17,25 +17,30 @@ rule rather than "something in 663 tools changed".
 from __future__ import annotations
 
 import copy
-from typing import Any, Dict, Iterator, List, Set
+import re
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Set
 
 import pytest
 
 from app.main import app
 from app.mcp.catalog import (
+    EXCLUDED_OPERATIONS,
     EXCLUDED_TAGS,
     JSON_CONTENT_TYPE,
     MAX_DESCRIPTION_CHARS,
     MULTIPART_CONTENT_TYPE,
+    PUBLIC_OPERATIONS,
     GeneratedTool,
     build_catalog,
     build_tool,
     catalog_summary,
     catalog_tags,
+    iter_operations,
     iter_secured_operations,
     resolve_schema,
+    unaccounted_operations,
 )
-from app.mcp.convenience import CONVENIENCE_TOOL_NAMES, SHADOWED_OPERATIONS
+from app.mcp.convenience import CONVENIENCE_TOOL_NAMES, CONVENIENCE_TOOLS, SHADOWED_OPERATIONS, ConvenienceTool
 from app.mcp.naming import (
     MAX_TOOL_NAME_LENGTH,
     TOOL_NAME_PATTERN,
@@ -47,9 +52,38 @@ from app.mcp.naming import (
 
 pytestmark = pytest.mark.unit
 
-# ~703 operations, 686 secured, minus 4 excluded-tag groups and 14 shadowed routes.
-# A drop below this means a whole router (or its ``security`` declarations) vanished.
+# ~703 operations, 686 secured, minus 4 excluded-tag groups, 16 shadowed routes and the 2
+# excluded cutover loaders. A drop below this means a whole router (or its ``security``
+# declarations) vanished.
 MIN_GENERATED_TOOLS = 600
+
+
+def _convenience(name: str) -> ConvenienceTool:
+    return next(tool for tool in CONVENIENCE_TOOLS if tool.name == name)
+
+
+def _raw_body_properties(spec: Mapping[str, Any], operation: Mapping[str, Any]) -> Optional[Set[str]]:
+    """The property names of an operation's JSON body straight from the document (one level of $ref)."""
+    content = ((operation.get("requestBody") or {}).get("content") or {}).get(JSON_CONTENT_TYPE)
+    if not content:
+        return None
+    components = spec["components"]["schemas"]
+
+    def deref(schema: Any) -> Any:
+        while isinstance(schema, dict) and "$ref" in schema:
+            schema = components[schema["$ref"].rsplit("/", 1)[-1]]
+        return schema
+
+    schema = deref(content.get("schema") or {})
+    if isinstance(schema.get("properties"), dict):
+        return set(schema["properties"])
+    for combinator in ("anyOf", "oneOf"):
+        branches = [
+            deref(b) for b in schema.get(combinator) or [] if not (isinstance(b, dict) and b.get("type") == "null")
+        ]
+        if len(branches) == 1 and isinstance(branches[0].get("properties"), dict):
+            return set(branches[0]["properties"])
+    return None
 
 
 @pytest.fixture(scope="module")
@@ -78,20 +112,40 @@ def _walk(value: Any) -> Iterator[Any]:
 
 class TestMembership:
     def test_every_secured_unshadowed_operation_is_exactly_one_tool(self, spec, catalog):
-        expected: Set[tuple] = {(method, path) for method, path, _op, _params in iter_secured_operations(spec)} - set(
-            SHADOWED_OPERATIONS
+        expected: Set[tuple] = (
+            {(method, path) for method, path, _op, _params in iter_secured_operations(spec)}
+            - set(SHADOWED_OPERATIONS)
+            - set(EXCLUDED_OPERATIONS)
         )
         actual = [tool.key for tool in catalog]
         assert len(actual) == len(set(actual)), "one tool per (method, path)"
         assert set(actual) == expected
         assert len(catalog) > MIN_GENERATED_TOOLS
 
-    def test_shadowed_routes_have_no_generated_twin(self, catalog):
-        assert {tool.key for tool in catalog}.isdisjoint(SHADOWED_OPERATIONS)
-        # ...and every shadowed pair really is a secured route in the document, so the
-        # shadow list cannot silently rot into naming routes that no longer exist.
+    def test_shadowed_and_excluded_routes_have_no_generated_twin(self, catalog):
+        keys = {tool.key for tool in catalog}
+        assert keys.isdisjoint(SHADOWED_OPERATIONS)
+        assert keys.isdisjoint(EXCLUDED_OPERATIONS)
+        assert set(SHADOWED_OPERATIONS).isdisjoint(EXCLUDED_OPERATIONS)
+        # ...and every shadowed / excluded pair really is a secured route in the document,
+        # so neither list can silently rot into naming routes that no longer exist.
         secured = {(m, p) for m, p, _o, _pp in iter_secured_operations(app.openapi())}
         assert set(SHADOWED_OPERATIONS) <= secured
+        assert set(EXCLUDED_OPERATIONS) <= secured
+        # The excluded loaders are the two Excel-cutover routes and nothing else.
+        assert set(EXCLUDED_OPERATIONS) == {
+            ("POST", "/api/v1/work-orders/import"),
+            ("POST", "/api/v1/purchasing/purchase-orders/import"),
+        }
+
+    def test_public_operations_name_exactly_the_unsecured_routes(self, spec):
+        unsecured = {
+            (method, path) for method, path, operation in iter_operations(spec) if not operation.get("security")
+        }
+        assert unsecured == set(PUBLIC_OPERATIONS), "a new unsecured route must be named in PUBLIC_OPERATIONS"
+
+    def test_every_operation_in_the_document_is_accounted_for(self, spec, catalog):
+        assert unaccounted_operations(spec, catalog, shadowed=SHADOWED_OPERATIONS) == set()
 
     def test_excluded_tags_and_unsecured_routes_are_absent(self, spec, catalog):
         assert not [tool for tool in catalog if tool.tag in EXCLUDED_TAGS]
@@ -169,36 +223,80 @@ class TestNames:
         assert name.endswith(long_fn) and name.startswith("a_v")
         assert prefixed_tool_name("tag", "y" * 70) == "y" * 64
 
-    def test_assign_tool_names_refuses_ambiguity(self):
-        with pytest.raises(ValueError):
-            assign_tool_names({"a": ("list_items", "Parts"), "b": ("list_items", "Parts")})
+    def test_assign_tool_names_is_total_and_deterministic(self):
+        # Two entries under one tag with one function name: the policy suffixes the second
+        # (in sorted-key order) rather than raising -- build_door runs at import of
+        # app.main, and a naming nicety must not keep the API from booting.
+        expected = {"a": "parts_list_items", "b": "parts_list_items_2"}
+        assert assign_tool_names({"a": ("list_items", "Parts"), "b": ("list_items", "Parts")}) == expected
+        assert assign_tool_names({"b": ("list_items", "Parts"), "a": ("list_items", "Parts")}) == expected
+        # A 64-char fit that folds two names together is disambiguated inside the cap.
+        folded = assign_tool_names({"x": ("y" * 70 + "a", "T"), "z": ("y" * 70 + "b", "T")})
+        assert folded == {"x": "y" * 64, "z": "y" * 62 + "_2"}
+        assert all(TOOL_NAME_PATTERN.match(name) for name in folded.values())
+        # A suffix never lands on a name another entry already holds.
+        three = assign_tool_names({"a": ("x", "T"), "b": ("x", "T"), "c": ("x_2", "T")})
+        assert three == {"a": "t_x", "b": "t_x_2", "c": "x_2"}
         # A reserved bare name pushes a lone function onto the prefixed form.
         assert assign_tool_names({"a": ("search", "Global Search")}, reserved={"search"}) == {
             "a": "global_search_search"
         }
+
+    def test_no_live_name_needed_the_numeric_suffix(self, catalog):
+        assert not [tool.name for tool in catalog if re.search(r"_\d+$", tool.name)]
 
 
 # --------------------------------------------------------------------------- schemas
 
 
 class TestInputSchemas:
-    def test_no_ref_survives_anywhere(self, catalog):
+    def test_no_ref_survives_anywhere_and_every_schema_is_strict(self, catalog):
         for tool in catalog:
             for node in _walk(tool.input_schema):
                 if isinstance(node, dict):
                     assert "$ref" not in node, f"{tool.name}: unresolved $ref {node['$ref']}"
             assert tool.input_schema["type"] == "object"
             assert isinstance(tool.input_schema["properties"], dict)
+            assert tool.input_schema["additionalProperties"] is False, tool.name
+
+    def test_json_body_fields_are_all_present_including_one_named_title(self, spec, catalog):
+        """The tool's body property set equals the document's -- ``title`` included.
+
+        ``resolve_schema`` strips pydantic's auto-``title`` KEYWORD; 17 routes also have
+        a body FIELD called ``title`` (NCR, CAR, ECO, complaint, process sheet, QMS
+        clause / evidence, maintenance work order, AI recommendation, document upload)
+        and 10 of them require it, so a tool that lost the field could never succeed.
+        """
+        by_key = {tool.key: tool for tool in catalog}
+        checked = 0
+        for method, path, operation, _params in iter_secured_operations(spec):
+            tool = by_key.get((method, path))
+            if tool is None or tool.body_content_type != JSON_CONTENT_TYPE or tool.body_wrapped:
+                continue
+            raw = _raw_body_properties(spec, operation)
+            if raw is None:
+                continue
+            sent = {tool.body_property_map.get(name, name) for name in tool.body_properties}
+            assert sent == raw, tool.name
+            checked += 1
+        assert checked > 150, "the comparison must cover the bulk of the JSON-body tools"
+        ncr = by_key[("POST", "/api/v1/quality/ncr")]
+        assert "title" in ncr.body_properties and "title" in ncr.input_schema["properties"]
+        assert "title" in ncr.input_schema["required"]
+        assert "title" not in ncr.input_schema["properties"]["title"], "the keyword is stripped, the field is kept"
+        titled = [tool.name for tool in catalog if "title" in tool.body_properties]
+        assert len(titled) >= 16, titled
 
     def test_path_params_are_required_and_body_fields_are_merged(self, catalog):
-        update = next(tool for tool in catalog if tool.key == ("PUT", "/api/v1/work-orders/{work_order_id}"))
+        update = next(tool for tool in catalog if tool.key == ("PUT", "/api/v1/work-orders/operations/{operation_id}"))
+        assert update.name == "work_orders_update_operation"
         props = update.input_schema["properties"]
-        assert "work_order_id" in props and "version" in props and "status" in props
-        assert "work_order_id" in update.input_schema["required"]
+        assert "operation_id" in props and "version" in props and "status" in props
+        assert "operation_id" in update.input_schema["required"]
         assert "version" in update.input_schema["required"]
         assert update.body_content_type == JSON_CONTENT_TYPE
-        assert "version" in update.body_properties and "work_order_id" not in update.body_properties
-        assert update.path_params == ("work_order_id",)
+        assert "version" in update.body_properties and "operation_id" not in update.body_properties
+        assert update.path_params == ("operation_id",)
 
     def test_query_params_are_properties(self, catalog):
         listing = next(tool for tool in catalog if tool.key == ("GET", "/api/v1/work-orders/"))
@@ -355,6 +453,39 @@ class TestSyntheticMappingRules:
         assert "recursive" in node["properties"]["children"]["items"]["description"]
         assert "unavailable" in resolve_schema({"$ref": "#/components/schemas/Missing"}, components)["description"]
 
+    def test_a_body_property_named_title_survives_and_only_the_keyword_is_stripped(self):
+        components = {
+            "Ncr": {
+                "title": "Ncr",
+                "type": "object",
+                "properties": {
+                    "title": {"title": "Title", "type": "string", "default": {"title": "kept-as-data"}},
+                    "severity": {"title": "Severity", "type": "string", "enum": ["title", "minor"]},
+                },
+                "required": ["title"],
+            }
+        }
+        tool = build_tool(
+            "post",
+            "/api/v1/ncr",
+            _operation(
+                requestBody={
+                    "required": True,
+                    "content": {JSON_CONTENT_TYPE: {"schema": {"$ref": "#/components/schemas/Ncr"}}},
+                }
+            ),
+            name="create_ncr",
+            components=components,
+        )
+        props = tool.input_schema["properties"]
+        assert set(props) == {"title", "severity"}
+        assert "title" not in props["title"] and "title" not in props["severity"], "the keyword is gone"
+        assert props["title"]["default"] == {"title": "kept-as-data"}, "opaque data is never walked"
+        assert props["severity"]["enum"] == ["title", "minor"]
+        assert tool.body_properties == ("title", "severity")
+        assert tool.input_schema["required"] == ["title"]
+        assert tool.input_schema["additionalProperties"] is False
+
     def test_unsecured_and_excluded_operations_are_not_candidates(self):
         doc = {
             "paths": {
@@ -375,3 +506,44 @@ class TestSyntheticMappingRules:
         untouched = copy.deepcopy(doc)
         build_catalog(doc)
         assert doc == untouched, "the catalog builder must not mutate the document"
+
+    def test_excluded_operations_are_dropped_without_renaming_neighbours(self):
+        op_a = _operation(operationId="load_api_v1_a__post", tags=["Alpha"])
+        op_b = _operation(operationId="load_api_v1_b__post", tags=["Beta"])
+        doc = {"paths": {"/api/v1/a": {"post": op_a}, "/api/v1/b": {"post": op_b}}}
+        names = {tool.name for tool in build_catalog(doc, excluded_operations={("POST", "/api/v1/a")})}
+        assert names == {"beta_load"}
+
+
+# --------------------------------------------------------------------------- convenience schemas
+
+
+class TestConvenienceSchemasMirrorTheirRoutes:
+    """A hand-written schema that fronts a route must not drift from the route's own contract."""
+
+    @pytest.fixture(scope="class")
+    def unshadowed(self, spec) -> Dict[tuple, GeneratedTool]:
+        return {tool.key: tool for tool in build_catalog(spec, shadowed=())}
+
+    def test_update_work_order_forwards_every_work_order_update_field(self, unshadowed):
+        generated = unshadowed[("PUT", "/api/v1/work-orders/{work_order_id}")]
+        convenience = _convenience("update_work_order")
+        assert set(convenience.input_schema["properties"]) == set(generated.input_schema["properties"])
+        assert set(convenience.input_schema["required"]) == set(generated.input_schema["required"])
+
+    def test_add_laser_nest_mirrors_the_manual_nest_route_plus_release(self, unshadowed):
+        generated = unshadowed[("POST", "/api/v1/work-orders/{work_order_id}/laser-nests/manual")]
+        convenience = _convenience("add_laser_nest")
+        assert set(convenience.input_schema["properties"]) - {"release"} == set(generated.input_schema["properties"])
+        assert set(convenience.input_schema["required"]) == set(generated.input_schema["required"])
+
+    def test_every_convenience_schema_is_strict_and_claims_a_tag(self):
+        for tool in CONVENIENCE_TOOLS:
+            assert tool.input_schema["additionalProperties"] is False, tool.name
+            assert re.search(r"\[[^\]]+\]\s*$", tool.description), tool.name
+        assert "status" not in _convenience("create_work_order").input_schema["properties"]
+        assert set(_convenience("duplicate_work_order").input_schema["required"]) == {
+            "work_order_id",
+            "quantity_ordered",
+        }
+        assert "quantity" in _convenience("add_operation").input_schema["properties"]

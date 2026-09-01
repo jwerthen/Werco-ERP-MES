@@ -27,10 +27,11 @@ as on the tool text, so a tool that merely *said* "draft" would still fail:
 from __future__ import annotations
 
 import base64
+import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 import anyio
 import pytest
@@ -46,18 +47,19 @@ from app.mcp.convenience import (
     CONVENIENCE_TOOL_NAMES,
     CONVENIENCE_TOOLS,
     LASER_CUTTING_CREATE_REFUSAL,
+    OPERATION_HAS_NO_QUANTITY,
     SHADOWED_OPERATIONS,
     operation_name_rejection,
 )
 from app.mcp.executor import InProcessExecutor
-from app.mcp.results import ExecResult
+from app.mcp.results import MAX_ERROR_DETAIL_CHARS, ExecResult
 from app.mcp.server import ResultCaps, build_server
 from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.laser_nest import LaserNest, LaserNestPackage
 from app.models.part import Part
 from app.models.work_center import WorkCenter
-from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.schemas.work_order import WorkOrderResponse
 
 pytestmark = pytest.mark.api
@@ -77,13 +79,22 @@ def _bearer(headers: Dict[str, str]) -> str:
 
 @dataclass
 class RecordingExecutor:
-    """Wraps the real in-process executor and records every dispatch it is asked for."""
+    """Wraps the real in-process executor and records every dispatch it is asked for.
+
+    ``refuse`` lets one test answer a chosen (method, path) with a canned outcome
+    instead of dispatching it -- the way to make one step of a multi-call tool fail.
+    """
 
     inner: InProcessExecutor
     calls: List[Tuple[str, str]] = field(default_factory=list)
+    refuse: Optional[Callable[[str, str], Optional[ExecResult]]] = None
 
     async def request(self, **kwargs: Any) -> ExecResult:
         self.calls.append((kwargs["method"], kwargs["path"]))
+        if self.refuse is not None:
+            canned = self.refuse(kwargs["method"], kwargs["path"])
+            if canned is not None:
+                return canned
         return await self.inner.request(**kwargs)
 
     async def aclose(self) -> None:
@@ -236,14 +247,25 @@ class TestAuth:
 
 
 class TestWorkOrderLifecycle:
-    async def test_create_lands_draft_even_when_status_released_is_passed(
+    async def test_a_status_argument_on_create_is_refused_not_ignored(
+        self, client, db_session, manager_headers, test_part, catalog
+    ):
+        """There is no way to ask for a released work order: the argument does not exist,
+        and an unknown argument is a 422 that names it -- never one that looks honoured."""
+        server, executor = make_server(catalog, headers=manager_headers)
+        result = await call(
+            server, "create_work_order", {"part_id": test_part.id, "quantity_ordered": 5, "status": "released"}
+        )
+        assert result.is_error and result.structured_content["status"] == 422
+        assert any("status" in message for message in result.structured_content["detail"])
+        assert executor.calls == [] and db_session.query(WorkOrder).count() == 0
+
+    async def test_create_lands_draft_with_no_release_stamp(
         self, client, db_session, manager_headers, test_user, test_part, catalog
     ):
         server, executor = make_server(catalog, headers=manager_headers)
         result = await call(
-            server,
-            "create_work_order",
-            {"part_id": test_part.id, "quantity_ordered": 5, "status": "released", "priority": 2},
+            server, "create_work_order", {"part_id": test_part.id, "quantity_ordered": 5, "priority": 2}
         )
         assert not result.is_error, result.content
         created = result.structured_content
@@ -388,6 +410,16 @@ class TestWorkOrderLifecycle:
         assert ambiguous.is_error and ambiguous.structured_content["status"] == 409
         assert "2 work centers match" in ambiguous.structured_content["detail"]
 
+        # An operation has no quantity of its own: the spec's `quantity` is refused with the reason.
+        quantity = await call(
+            server,
+            "add_operation",
+            {"work_order_id": test_work_order.id, "name": "Weld", "work_center": test_work_center.id, "quantity": 25},
+        )
+        assert quantity.is_error and quantity.structured_content["status"] == 422
+        assert quantity.structured_content["detail"] == OPERATION_HAS_NO_QUANTITY
+        assert "component_quantity" in OPERATION_HAS_NO_QUANTITY
+
         unknown = await call(
             server, "add_operation", {"work_order_id": test_work_order.id, "name": "Weld", "work_center": "waterjet"}
         )
@@ -416,18 +448,154 @@ class TestWorkOrderLifecycle:
         none = await call(server, "list_work_centers", {"name": "no-such-machine"})
         assert none.structured_content["result"] == []
 
+    async def test_misspelled_arguments_are_refused_not_silently_dropped(
+        self, client, manager_headers, test_part, catalog
+    ):
+        """A typo'd filter must not hand back the UNFILTERED result with isError=false."""
+        server, executor = make_server(catalog, headers=manager_headers)
+        typo = await call(server, "list_parts", {"serach": test_part.part_number})
+        assert typo.is_error and typo.structured_content["status"] == 422
+        assert "serach" in " ".join(typo.structured_content["detail"])
+        generated = await call(server, "work_orders_list_work_orders", {"limti": 5})
+        assert generated.is_error and generated.structured_content["status"] == 422
+        assert "limti" in " ".join(generated.structured_content["detail"])
+        assert executor.calls == []
+
+    async def test_get_work_order_by_number_cannot_be_steered_onto_another_route(
+        self, client, manager_headers, catalog
+    ):
+        server, executor = make_server(catalog, headers=manager_headers)
+        result = await call(server, "get_work_order", {"work_order_number": "../../work-centers/"})
+        # Percent-encoded, the value stays ONE path segment: it matches no route at all
+        # (Starlette's own "Not Found"), never the work-center list the unencoded form reached.
+        assert result.is_error and result.structured_content["status"] == 404
+        assert result.structured_content["detail"] in ("Not Found", "Work order not found")
+        assert executor.calls == [("GET", "/api/v1/work-orders/by-number/..%2F..%2Fwork-centers%2F")]
+        probe = await call(server, "get_work_order", {"work_order_number": "../../inventory/?has_quantity=false"})
+        assert probe.is_error and probe.structured_content["status"] == 404
+
+    async def test_duplicate_requires_the_quantity_the_route_requires(
+        self, client, manager_headers, test_work_order, catalog
+    ):
+        server, executor = make_server(catalog, headers=manager_headers)
+        result = await call(server, "duplicate_work_order", {"work_order_id": test_work_order.id})
+        assert result.is_error and result.structured_content["status"] == 422
+        assert any("quantity_ordered" in message for message in result.structured_content["detail"])
+        assert executor.calls == []
+
+
+# --------------------------------------------------------------------------- update_work_order
+
+
+class TestUpdateWorkOrder:
+    async def test_status_released_and_in_progress_are_refused_before_any_request(
+        self, client, db_session, manager_headers, test_work_order, catalog
+    ):
+        """The generic PUT would release with no released_at / released_by and no promotion."""
+        server, executor = make_server(catalog, headers=manager_headers)
+        for status_value, verb in (("released", "release_work_order"), ("in_progress", "work_orders_start_work_order")):
+            result = await call(
+                server,
+                "update_work_order",
+                {"work_order_id": test_work_order.id, "version": test_work_order.version, "status": status_value},
+            )
+            assert result.is_error and result.structured_content["status"] == 422, status_value
+            assert verb in result.structured_content["detail"]
+        assert executor.calls == []
+        row = _row(db_session, test_work_order.id)
+        assert row.status == WorkOrderStatus.DRAFT and row.released_at is None
+        # The raw route is shadowed: the generated twin is not a tool at all.
+        gone = await call(server, "work_orders_update_work_order", {"work_order_id": test_work_order.id, "version": 0})
+        assert gone.is_error and gone.structured_content["status"] == 404
+
+    async def test_header_fields_are_forwarded_with_the_routes_version_gate(
+        self, client, db_session, manager_headers, test_work_order, catalog
+    ):
+        server, executor = make_server(catalog, headers=manager_headers)
+        original_version = test_work_order.version
+        stale = await call(
+            server, "update_work_order", {"work_order_id": test_work_order.id, "version": 999, "priority": 1}
+        )
+        assert stale.is_error and stale.structured_content["status"] == 409
+        assert "modified by someone else" in stale.structured_content["detail"]
+
+        fresh = await call(
+            server,
+            "update_work_order",
+            {"work_order_id": test_work_order.id, "version": original_version, "priority": 1, "notes": "rush"},
+        )
+        assert not fresh.is_error, fresh.content
+        row = _row(db_session, test_work_order.id)
+        assert row.priority == 1 and row.notes == "rush" and row.version == original_version + 1
+        assert executor.calls == [("PUT", f"/api/v1/work-orders/{test_work_order.id}")] * 2
+
+    async def test_status_draft_puts_a_released_job_back(
+        self, client, db_session, manager_headers, test_work_order, catalog
+    ):
+        server, _ = make_server(catalog, headers=manager_headers)
+        released = await call(server, "release_work_order", {"work_order_id": test_work_order.id})
+        assert not released.is_error, released.content
+        assert _row(db_session, test_work_order.id).status == WorkOrderStatus.RELEASED
+        result = await call(
+            server,
+            "update_work_order",
+            {"work_order_id": test_work_order.id, "version": released.structured_content["version"], "status": "draft"},
+        )
+        assert not result.is_error, result.content
+        assert _row(db_session, test_work_order.id).status == WorkOrderStatus.DRAFT
+
 
 # --------------------------------------------------------------------------- laser nest import
 
 
+def _add_nest_operation(
+    db, work_order: WorkOrder, work_center: WorkCenter, *, name: str, cnc_file_name: Optional[str]
+) -> WorkOrderOperation:
+    """One READY nest operation (+ package + nest row) on ``work_order`` -- the shape the import mints."""
+    sequence = 10 * (1 + len(db.query(WorkOrderOperation).filter_by(work_order_id=work_order.id).all()))
+    operation = WorkOrderOperation(
+        work_order_id=work_order.id,
+        work_center_id=work_center.id,
+        sequence=sequence,
+        name=name,
+        status=OperationStatus.READY,
+        company_id=work_order.company_id,
+    )
+    db.add(operation)
+    db.flush()
+    package = LaserNestPackage(
+        company_id=work_order.company_id,
+        child_work_order_id=work_order.id,
+        package_name="pkg",
+        import_status="imported",
+    )
+    db.add(package)
+    db.flush()
+    db.add(
+        LaserNest(
+            company_id=work_order.company_id,
+            package_id=package.id,
+            work_order_operation_id=operation.id,
+            nest_name=name,
+            cnc_file_name=cnc_file_name,
+            cnc_number="P100",
+            planned_runs=2,
+        )
+    )
+    db.flush()
+    return operation
+
+
 @pytest.fixture
-def fake_nest_import(monkeypatch):
+def fake_nest_import(monkeypatch, test_work_center):
     """Replace the shared import orchestrator with one that mints a RELEASED laser WO.
 
     Mirrors what the real ``_run_laser_nest_import`` returns (``child_work_order`` is
     a ``WorkOrderResponse`` JSON dump) and how it is born (RELEASED, part-less,
-    pooled). ``state.version_override`` lets one test hand the tool a stale version so
-    the demote PUT is refused 409.
+    pooled, its nest operations READY -- one is minted on a fresh child, and an
+    existing target's operations are set READY the way a rebuild leaves them).
+    ``state.version_override`` lets one test hand the tool a stale version so the
+    demote PUT is refused 409.
     """
     from app.api.endpoints import work_orders as work_orders_module
 
@@ -459,7 +627,6 @@ def fake_nest_import(monkeypatch):
         )
         if target_work_order is not None and target_work_order.work_order_type == "laser_cutting":
             child = target_work_order
-            child.status = WorkOrderStatus.RELEASED
         else:
             child = WorkOrder(
                 company_id=company_id,
@@ -476,6 +643,11 @@ def fake_nest_import(monkeypatch):
                 created_by=current_user.id,
             )
             db.add(child)
+            db.flush()
+            _add_nest_operation(db, child, test_work_center, name=f"NEST-{len(state.calls)}", cnc_file_name="n.lst")
+        child.status = WorkOrderStatus.RELEASED
+        for operation in db.query(WorkOrderOperation).filter_by(work_order_id=child.id).all():
+            operation.status = OperationStatus.READY
         db.commit()
         db.refresh(child)
         payload = WorkOrderResponse.model_validate(child).model_dump(mode="json")
@@ -487,12 +659,19 @@ def fake_nest_import(monkeypatch):
     return state
 
 
-def _seed_laser_work_order_with_nest(db_session, work_center: WorkCenter, *, cnc_file_name: Optional[str]) -> WorkOrder:
-    """A RELEASED laser WO carrying one nest -- manual (``cnc_file_name`` None) or imported."""
+def _seed_laser_work_order_with_nest(
+    db_session, work_center: WorkCenter, *, cnc_file_name: Optional[str], parent: Optional[WorkOrder] = None
+) -> WorkOrder:
+    """A RELEASED laser WO carrying one READY nest -- manual (``cnc_file_name`` None) or imported.
+
+    With ``parent`` it is that production work order's laser CHILD (same part, as the
+    app creates it), which is where a parent-addressed nest tool must look.
+    """
     work_order = WorkOrder(
         company_id=1,
         work_order_number=f"WO-LASER-{'MANUAL' if cnc_file_name is None else 'IMPORTED'}",
-        part_id=None,
+        part_id=parent.part_id if parent is not None else None,
+        parent_work_order_id=parent.id if parent is not None else None,
         work_order_type="laser_cutting",
         sequential_operations=False,
         quantity_ordered=2,
@@ -501,29 +680,28 @@ def _seed_laser_work_order_with_nest(db_session, work_center: WorkCenter, *, cnc
     )
     db_session.add(work_order)
     db_session.flush()
-    operation = WorkOrderOperation(
-        work_order_id=work_order.id, work_center_id=work_center.id, sequence=10, name="NEST-A", company_id=1
-    )
-    db_session.add(operation)
-    db_session.flush()
-    package = LaserNestPackage(
-        company_id=1, child_work_order_id=work_order.id, package_name="pkg", import_status="imported"
-    )
-    db_session.add(package)
-    db_session.flush()
-    db_session.add(
-        LaserNest(
-            company_id=1,
-            package_id=package.id,
-            work_order_operation_id=operation.id,
-            nest_name="NEST-A",
-            cnc_file_name=cnc_file_name,
-            cnc_number="P100",
-            planned_runs=2,
-        )
-    )
+    _add_nest_operation(db_session, work_order, work_center, name="NEST-A", cnc_file_name=cnc_file_name)
     db_session.commit()
     return work_order
+
+
+def _seed_laser_work_center(db_session) -> WorkCenter:
+    center = WorkCenter(
+        name="Ermaksan Fiber LASER", code="LASER-1", work_center_type="laser", is_active=True, company_id=1
+    )
+    db_session.add(center)
+    db_session.commit()
+    db_session.refresh(center)
+    return center
+
+
+def _laser_child_of(db_session, parent: WorkOrder) -> WorkOrder:
+    db_session.expire_all()
+    return (
+        db_session.query(WorkOrder)
+        .filter(WorkOrder.parent_work_order_id == parent.id, WorkOrder.work_order_type == "laser_cutting")
+        .one()
+    )
 
 
 class TestLaserNestImport:
@@ -547,11 +725,18 @@ class TestLaserNestImport:
         assert payload["import"]["child_work_order"]["status"] == "released", "the raw import evidence is kept"
         assert payload["work_order"]["status"] == "draft"
         assert payload["work_order"]["id"] == payload["import"]["child_work_order"]["id"]
+        assert payload["operations_returned_to_pending"] == 1
+        assert "released_at" in payload["note"], "the stamp the route wrote is disclosed, not hidden"
 
         row = _row(db_session, payload["work_order"]["id"])
         assert row.status == WorkOrderStatus.DRAFT
         assert row.work_order_type == "laser_cutting"
-        assert row.version == payload["import"]["child_work_order"]["version"] + 1, "the demote is a real PUT"
+        assert row.version >= payload["import"]["child_work_order"]["version"] + 1, "the demote is a real PUT"
+        # The header alone would leave the nest READY on the dispatch board: it is PENDING too.
+        [operation] = _operation_rows(db_session, row.id)
+        assert operation.status == OperationStatus.PENDING
+        assert payload["import"]["child_work_order"]["operations"][0]["status"] == "ready"
+        assert payload["work_order"]["operations"][0]["status"] == "pending"
 
         assert len(fake_nest_import.calls) == 1
         seen = fake_nest_import.calls[0]
@@ -561,7 +746,9 @@ class TestLaserNestImport:
         assert executor.calls == [
             ("POST", "/api/v1/work-orders/laser-nest-packages/standalone/import"),
             ("PUT", f"/api/v1/work-orders/{row.id}"),
-        ]
+            ("PUT", f"/api/v1/work-orders/operations/{operation.id}"),
+            ("GET", f"/api/v1/work-orders/{row.id}"),
+        ], "header first, then the operation, then a re-read"
 
     async def test_release_true_leaves_the_import_released(
         self, client, db_session, manager_headers, catalog, fake_nest_import
@@ -571,7 +758,9 @@ class TestLaserNestImport:
         assert not result.is_error, result.content
         assert result.structured_content["demoted_to_draft"] is False
         assert result.structured_content["work_order"]["status"] == "released"
-        assert _row(db_session, result.structured_content["work_order"]["id"]).status == WorkOrderStatus.RELEASED
+        row = _row(db_session, result.structured_content["work_order"]["id"])
+        assert row.status == WorkOrderStatus.RELEASED
+        assert [op.status for op in _operation_rows(db_session, row.id)] == [OperationStatus.READY]
         assert fake_nest_import.calls[0]["source_path"] == "/staged/pkg.zip"
         assert executor.calls == [("POST", "/api/v1/work-orders/laser-nest-packages/standalone/import")]
 
@@ -602,9 +791,62 @@ class TestLaserNestImport:
         assert fake_nest_import.calls[0]["target_id"] == target.id
         assert result.structured_content["demoted_to_draft"] is True
         assert _row(db_session, target.id).status == WorkOrderStatus.DRAFT
-        assert executor.calls[0] == ("GET", f"/api/v1/work-orders/{target.id}")
-        assert executor.calls[1] == ("POST", f"/api/v1/work-orders/{target.id}/laser-nest-packages/import")
-        assert executor.calls[2] == ("PUT", f"/api/v1/work-orders/{target.id}")
+        [operation] = _operation_rows(db_session, target.id)
+        assert operation.status == OperationStatus.PENDING
+        assert executor.calls == [
+            ("GET", f"/api/v1/work-orders/{target.id}"),
+            ("POST", f"/api/v1/work-orders/{target.id}/laser-nest-packages/import"),
+            ("PUT", f"/api/v1/work-orders/{target.id}"),
+            ("PUT", f"/api/v1/work-orders/operations/{operation.id}"),
+            ("GET", f"/api/v1/work-orders/{target.id}"),
+        ]
+
+    async def test_parent_target_checks_the_laser_child_for_manual_nests(
+        self, client, db_session, manager_headers, test_work_order, test_work_center, catalog, fake_nest_import
+    ):
+        """A production parent carries no nests itself: the rule-6 check must read its laser child."""
+        child = _seed_laser_work_order_with_nest(
+            db_session, test_work_center, cnc_file_name=None, parent=test_work_order
+        )
+        server, executor = make_server(catalog, headers=manager_headers)
+        result = await call(
+            server, "import_laser_nest_package", {"work_order_id": test_work_order.id, "source_path": "/staged/pkg.zip"}
+        )
+        assert result.is_error and result.structured_content["status"] == 409
+        detail = result.structured_content["detail"]
+        assert child.work_order_number in detail and "NEST-A" in detail and "manually entered" in detail
+        assert fake_nest_import.calls == [], "the orchestrator never ran, so the manual nest was not replaced"
+        assert executor.calls == [
+            ("GET", f"/api/v1/work-orders/{test_work_order.id}"),
+            ("GET", f"/api/v1/parts/{test_work_order.part_id}"),
+            ("GET", "/api/v1/work-orders/"),
+            ("GET", f"/api/v1/work-orders/{child.id}"),
+        ]
+        assert _row(db_session, child.id).status == WorkOrderStatus.RELEASED
+
+    async def test_failed_operation_demote_is_reported_loudly_with_the_draft_work_order(
+        self, client, db_session, manager_headers, catalog, fake_nest_import
+    ):
+        server, executor = make_server(catalog, headers=manager_headers)
+        executor.refuse = lambda method, path: (
+            ExecResult(
+                status=409,
+                content=b'{"detail": "Operation was modified by someone else. Refresh and try again."}',
+                content_type="application/json",
+            )
+            if method == "PUT" and "/operations/" in path
+            else None
+        )
+        result = await call(server, "import_laser_nest_package", {"source_path": "/staged/pkg.zip"})
+        assert result.is_error
+        payload = result.structured_content
+        assert payload["status"] == 409
+        assert "IMPORT SUCCEEDED" in payload["detail"] and "is DRAFT, BUT" in payload["detail"]
+        assert "still READY" in payload["detail"] and "modified by someone else" in payload["detail"]
+        assert payload["demoted_to_draft"] is True and payload["operations_returned_to_pending"] == 0
+        row = _row(db_session, payload["work_order"]["id"])
+        assert row.status == WorkOrderStatus.DRAFT, "the header demote landed and is reported as such"
+        assert [op.status for op in _operation_rows(db_session, row.id)] == [OperationStatus.READY]
 
     async def test_failed_demote_is_reported_loudly_with_the_released_work_order(
         self, client, db_session, manager_headers, catalog, fake_nest_import
@@ -651,6 +893,97 @@ class TestLaserNestImport:
         assert executor.calls == [] and fake_nest_import.calls == []
 
 
+# --------------------------------------------------------------------------- add_laser_nest (real route)
+
+
+class TestAddLaserNest:
+    async def test_nest_on_a_draft_parent_creates_the_child_and_hands_it_back_draft(
+        self, client, db_session, manager_headers, test_work_order, catalog
+    ):
+        """The route mints the laser child RELEASED with a READY nest; the tool hands back DRAFT + PENDING."""
+        laser = _seed_laser_work_center(db_session)
+        server, executor = make_server(catalog, headers=manager_headers)
+        result = await call(
+            server,
+            "add_laser_nest",
+            {"work_order_id": test_work_order.id, "cnc_number": "P1", "planned_runs": 2, "work_center_id": laser.id},
+        )
+        assert not result.is_error, result.content
+        payload = result.structured_content
+        assert payload["nest"]["cnc_number"] == "P1" and payload["nest"]["operation_status"] == "ready"
+        assert payload["demoted_to_draft"] is True and payload["operations_returned_to_pending"] == 1
+
+        child = _laser_child_of(db_session, test_work_order)
+        assert payload["work_order"]["id"] == child.id
+        assert child.status == WorkOrderStatus.DRAFT
+        assert [op.status for op in _operation_rows(db_session, child.id)] == [OperationStatus.PENDING]
+        assert db_session.query(LaserNest).filter(LaserNest.cnc_number == "P1").one().cnc_file_name is None
+        assert _row(db_session, test_work_order.id).status == WorkOrderStatus.DRAFT, "the parent is untouched"
+        assert ("POST", f"/api/v1/work-orders/{test_work_order.id}/laser-nests/manual") in executor.calls
+
+        # A second nest on the same parent: the child was DRAFT before, so it comes back DRAFT again.
+        again = await call(
+            server,
+            "add_laser_nest",
+            {"work_order_id": test_work_order.id, "cnc_number": "P2", "planned_runs": 1, "work_center_id": laser.id},
+        )
+        assert not again.is_error, again.content
+        assert again.structured_content["demoted_to_draft"] is True
+        assert _laser_child_of(db_session, test_work_order).status == WorkOrderStatus.DRAFT
+        assert [op.status for op in _operation_rows(db_session, child.id)] == [OperationStatus.PENDING] * 2
+
+    async def test_release_true_leaves_the_child_released(
+        self, client, db_session, manager_headers, test_work_order, catalog
+    ):
+        laser = _seed_laser_work_center(db_session)
+        server, _ = make_server(catalog, headers=manager_headers)
+        result = await call(
+            server,
+            "add_laser_nest",
+            {
+                "work_order_id": test_work_order.id,
+                "cnc_number": "P1",
+                "planned_runs": 2,
+                "work_center_id": laser.id,
+                "release": True,
+            },
+        )
+        assert not result.is_error, result.content
+        assert result.structured_content["demoted_to_draft"] is False
+        child = _laser_child_of(db_session, test_work_order)
+        assert child.status == WorkOrderStatus.RELEASED
+        assert [op.status for op in _operation_rows(db_session, child.id)] == [OperationStatus.READY]
+
+    async def test_a_job_already_on_the_floor_is_left_there(
+        self, client, db_session, manager_headers, test_work_center, catalog
+    ):
+        laser = _seed_laser_work_center(db_session)
+        job = _seed_laser_work_order_with_nest(db_session, test_work_center, cnc_file_name=None)
+        server, _ = make_server(catalog, headers=manager_headers)
+        result = await call(
+            server,
+            "add_laser_nest",
+            {"work_order_id": job.id, "cnc_number": "P2", "planned_runs": 1, "work_center_id": laser.id},
+        )
+        assert not result.is_error, result.content
+        payload = result.structured_content
+        assert payload["demoted_to_draft"] is False and "already 'released'" in payload["note"]
+        assert _row(db_session, job.id).status == WorkOrderStatus.RELEASED
+        assert len(_operation_rows(db_session, job.id)) == 2
+
+    async def test_refuses_a_job_whose_nests_came_from_a_package_import(
+        self, client, db_session, manager_headers, test_work_center, catalog
+    ):
+        job = _seed_laser_work_order_with_nest(db_session, test_work_center, cnc_file_name="nest_a.lst")
+        server, executor = make_server(catalog, headers=manager_headers)
+        result = await call(server, "add_laser_nest", {"work_order_id": job.id, "cnc_number": "P2", "planned_runs": 1})
+        assert result.is_error and result.structured_content["status"] == 409
+        detail = result.structured_content["detail"]
+        assert "package import" in detail and "NEST-A" in detail and "never mixed" in detail
+        assert executor.calls == [("GET", f"/api/v1/work-orders/{job.id}")]
+        assert db_session.query(LaserNest).count() == 1
+
+
 # --------------------------------------------------------------------------- generated tools
 
 
@@ -690,24 +1023,25 @@ class TestGeneratedTools:
         self, client, db_session, manager_headers, test_work_order, catalog
     ):
         server, executor = make_server(catalog, headers=manager_headers)
-        original_version = test_work_order.version
+        [operation] = _operation_rows(db_session, test_work_order.id)
+        original_version = operation.version
         stale = await call(
             server,
-            "work_orders_update_work_order",
-            {"work_order_id": test_work_order.id, "version": 999, "priority": 1},
+            "work_orders_update_operation",
+            {"operation_id": operation.id, "version": 999, "name": "Deburr"},
         )
         assert stale.is_error and stale.structured_content["status"] == 409
         assert "modified by someone else" in stale.structured_content["detail"]
 
         fresh = await call(
             server,
-            "work_orders_update_work_order",
-            {"work_order_id": test_work_order.id, "version": original_version, "priority": 1},
+            "work_orders_update_operation",
+            {"operation_id": operation.id, "version": original_version, "name": "Deburr"},
         )
         assert not fresh.is_error, fresh.content
-        row = _row(db_session, test_work_order.id)
-        assert row.priority == 1 and row.version == original_version + 1
-        assert executor.calls == [("PUT", f"/api/v1/work-orders/{test_work_order.id}")] * 2
+        [row] = _operation_rows(db_session, test_work_order.id)
+        assert row.name == "Deburr" and row.version == original_version + 1
+        assert executor.calls == [("PUT", f"/api/v1/work-orders/operations/{operation.id}")] * 2
 
     async def test_argument_validation_failure_is_a_422_result_with_a_helpful_message(
         self, client, db_session, manager_headers, test_part, catalog
@@ -781,6 +1115,39 @@ class TestResultShaping:
         server, _ = make_server(catalog, headers=manager_headers, executor=executor)
         result = await call(server, "work_orders_list_work_orders", {})
         assert not result.is_error and result.structured_content == {"ok": True, "status": 204}
+
+    async def test_a_redirect_is_an_error_not_a_completed_action(self, client, manager_headers, catalog):
+        """Neither executor follows redirects, so an empty-bodied 307 must never read as success."""
+        executor = CannedExecutor(
+            ExecResult(status=307, headers={"location": "/api/v1/work-orders/"}, content=b"", content_type="")
+        )
+        server, _ = make_server(catalog, headers=manager_headers, executor=executor)
+        result = await call(server, "work_orders_list_work_orders", {})
+        assert result.is_error and result.structured_content["status"] == 307
+        assert "Redirect to /api/v1/work-orders/" in result.structured_content["detail"]
+
+    async def test_a_pathological_json_error_body_is_bounded(self, client, manager_headers, catalog):
+        errors = [{"loc": ["body", index], "msg": "x" * 60, "type": "value_error"} for index in range(400)]
+        body = json.dumps({"detail": errors}).encode()
+        assert len(body) > MAX_ERROR_DETAIL_CHARS
+        executor = CannedExecutor(ExecResult(status=422, content=body, content_type="application/json"))
+        server, _ = make_server(catalog, headers=manager_headers, executor=executor)
+        result = await call(server, "work_orders_list_work_orders", {})
+        assert result.is_error and result.structured_content["status"] == 422
+        detail = result.structured_content["detail"]
+        assert detail["truncated"] is True and detail["chars"] > MAX_ERROR_DETAIL_CHARS
+        assert len(detail["preview"]) == MAX_ERROR_DETAIL_CHARS + 1 and detail["preview"].endswith("…")
+        # A normal-sized detail is still passed through verbatim.
+        small = CannedExecutor(
+            ExecResult(
+                status=409,
+                content=b'{"detail": "Only draft work orders can be released"}',
+                content_type="application/json",
+            )
+        )
+        server, _ = make_server(catalog, headers=manager_headers, executor=small)
+        result = await call(server, "work_orders_list_work_orders", {})
+        assert result.structured_content["detail"] == "Only draft work orders can be released"
 
     async def test_transport_failure_is_status_zero_naming_the_exception(self, client, manager_headers, catalog):
         executor = CannedExecutor(raises=RuntimeError("socket melted"))

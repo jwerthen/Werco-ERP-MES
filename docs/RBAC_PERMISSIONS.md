@@ -78,8 +78,12 @@ reach a service or the database, it cannot bypass `require_role`, and a 401/403 
 returned verbatim rather than worked around. Kiosk-scoped badge tokens, wallboard display tokens
 and station tokens are refused at the door because they are not user access tokens. The one thing
 the MCP layer *adds* is stricter, not looser: its hand-written tools force new and duplicated work
-orders to land DRAFT, keep release an explicit separate call, set an imported nest package back to
-DRAFT, and refuse operation names that are file names — see [MCP.md → DRAFT guarantees](MCP.md#9-draft-guarantees).
+orders to land DRAFT, keep release an explicit separate call (the header-update tool refuses
+`status: released` / `in_progress`, which the raw `PUT` would have accepted with no release stamp),
+set an imported or hand-keyed nest package back to DRAFT with its operations pending, never mix
+manual nests with a package import, and refuse operation names that are file names — see
+[MCP.md → DRAFT guarantees](MCP.md#9-draft-guarantees). The two Excel-cutover loaders are not
+tools at all.
 
 Operationally: give agents a **dedicated user** (a Manager named e.g. *Werco Assistant*, or a
 narrower role) so the audit trail attributes agent writes and the role can be tightened without

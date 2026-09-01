@@ -432,7 +432,10 @@ async def lifespan(app: FastAPI):
         mcp_door = getattr(app.state, "mcp_door", None)
         if mcp_door is not None:
             await startup_stack.enter_async_context(mcp_door.lifespan())
-            logger.info(f"MCP door serving at {settings.WERCO_MCP_HTTP_PATH}")
+            logger.info(
+                f"MCP door serving at {settings.WERCO_MCP_HTTP_PATH} "
+                f"(door ceiling {settings.WERCO_MCP_HTTP_RATE_LIMIT} per IP; tool calls are charged on the inner route)"
+            )
         yield
     # Shutdown
     logger.info(f"Shutting down {settings.APP_NAME}...")
@@ -913,8 +916,18 @@ if settings.RATE_LIMIT_ENABLED:
             the full endpoint path — these keys are complete routes, so a prefix
             match risked shadowing siblings (e.g. ``/login`` vs a future
             ``/login-sso``).
+
+            The MCP door (app/mcp/http.py) is exempt from the DEFAULT limit so a tool
+            call is charged once, on the inner route it dispatches; this per-path
+            ceiling is therefore the door path's ONLY limit, and it bounds the
+            requests that dispatch nothing inward (tools/list, initialize, rejected
+            calls, unauthenticated probes). Read from settings on every request so a
+            test can arm the door after import.
             """
-            return PATH_RATE_LIMITS.get(request.url.path)
+            path = request.url.path
+            if settings.WERCO_MCP_HTTP_ENABLED and path == settings.WERCO_MCP_HTTP_PATH:
+                return settings.WERCO_MCP_HTTP_RATE_LIMIT
+            return PATH_RATE_LIMITS.get(path)
 
         # Every limit below is keyed on the FORWARDED client IP, so it is only as
         # trustworthy as the edge-proxy configuration in front of this app. The

@@ -27,10 +27,19 @@ Why it is shaped the way it is:
   far over the app's 256 KB ``MAX_JSON_BODY_BYTES``; ``main.py`` exempts this path
   from that cap and the SDK's ``RequestBodyLimitMiddleware`` bounds it at
   ``WERCO_MCP_MAX_UPLOAD_BYTES`` instead (413 over it, before parsing).
-- The OUTER rate-limit hit is waived. A tool call served here costs the caller one
-  hit on this path plus one on the inner route; the inner hit is kept byte-identical
-  to the SPA's, and this path is registered with the app limiter's ``exempt`` so agents
-  are limited exactly like the SPA rather than at half rate.
+- Two-tier rate limiting. A tool call served here dispatches an inner request, and
+  that INNER hit is kept byte-identical to the SPA's (100/60 s per IP by default, plus
+  the per-path limits), so the door is registered with the app limiter's ``exempt``
+  and a tool call is charged once, not twice. The door PATH then carries its own
+  ceiling through ``main.py``'s per-path resolver -- ``WERCO_MCP_HTTP_RATE_LIMIT``,
+  300/minute by default, above the inner default so it never binds a tool call --
+  because ``tools/list`` (~0.5 MB of JSON per call), ``initialize``, schema-rejected
+  calls and unauthenticated 401 probes dispatch nothing inward and would otherwise have
+  no ceiling at all.
+- ``GET`` is 405. In stateless mode there is no server-push stream to open (the door
+  never writes to one), and the SDK's own stateless handler answers a GET the same
+  way; answering here also keeps the app's ``GZipMiddleware`` from holding an SSE
+  response's headers until the transport's first 15 s keepalive ping.
 - Lifespan. The SDK's session manager runs in a task group that must outlive every
   request, and Starlette never runs a sub-application's lifespan, so ``McpDoor.lifespan``
   is entered from ``main.py``'s own lifespan. Each entry builds a FRESH session manager
@@ -50,7 +59,8 @@ from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPASGIApp, StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.authentication import AuthenticationMiddleware
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Match
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.core.config import settings
@@ -114,6 +124,10 @@ class McpDoor:
         return self._app is not None
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") == "http" and scope.get("method") in ("GET", "HEAD"):
+            # Stateless: no push stream exists to open (see the module docstring).
+            await Response(status_code=405, headers={"Allow": "POST"})(scope, receive, send)
+            return
         app = self._app
         if app is None:
             response = JSONResponse(
@@ -150,8 +164,9 @@ def mount_mcp(app: Any) -> Optional[McpDoor]:
     if isinstance(existing, McpDoor):
         return existing
 
-    door = build_door(app)
     path = settings.WERCO_MCP_HTTP_PATH
+    refuse_occupied_path(app, path)
+    door = build_door(app)
     app.add_route(path, door, include_in_schema=False, name=DOOR_ROUTE_NAME)
 
     limiter = getattr(app.state, "limiter", None)
@@ -161,6 +176,27 @@ def mount_mcp(app: Any) -> Optional[McpDoor]:
 
     app.state.mcp_door = door
     return door
+
+
+def refuse_occupied_path(app: Any, path: str) -> None:
+    """Raise at boot if any existing route already answers ``path``.
+
+    Starlette matches routes in order, so a door added at a path an API route (or a
+    docs route, or a health probe) already owns would never be reached -- MCP would
+    silently not be served -- while ``main.py``'s ``MAX_JSON_BODY_BYTES`` exemption,
+    which keys on the path string alone, would waive the JSON cap for THAT route
+    instead. ``config.validate_mcp_http_path`` refuses the reserved prefixes up front;
+    this is the belt to that brace, checked against the live route table, and it
+    fails the deploy loudly rather than serving an uncapped write route.
+    """
+    probe: Scope = {"type": "http", "method": "POST", "path": path, "root_path": "", "headers": [], "query_string": b""}
+    for route in app.router.routes:
+        match, _child_scope = route.matches(probe)
+        if match is not Match.NONE:  # PARTIAL = same path, different method: still occupied
+            raise RuntimeError(
+                f"WERCO_MCP_HTTP_PATH={path!r} is already served by {route!r}; the MCP door needs a path no "
+                "route uses (the default /mcp is free)."
+            )
 
 
 def unmount_mcp(app: Any) -> None:

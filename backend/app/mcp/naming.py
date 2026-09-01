@@ -13,7 +13,7 @@ exactly that reason -- they are the stable handles an agent prompt can rely on.
 from __future__ import annotations
 
 import re
-from typing import Dict, Hashable, Iterable, Mapping, Tuple, TypeVar
+from typing import Dict, Hashable, Iterable, Mapping, Set, Tuple, TypeVar
 
 # MCP tool names must match this (SDK-enforced on the wire).
 TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
@@ -95,9 +95,12 @@ def assign_tool_names(entries: Mapping[K, Tuple[str, str]], *, reserved: Iterabl
     claim on the bare form: a lone ``search`` route would still surface as
     ``<tag>_search`` rather than fight the convenience tool for the name.
 
-    Raises ``ValueError`` if uniqueness cannot be achieved (two colliding entries
-    under the same tag, or a truncation that folds two names together): a catalog
-    with an ambiguous name is worse than no catalog.
+    The policy is TOTAL. A residual collision -- two entries under one tag with the
+    same function name, or a 64-char fit that folds two names together -- gets a
+    deterministic numeric suffix (``_2``, ``_3``, ...) in sorted-key order rather than
+    raising. ``build_door`` runs at import of ``app.main``, so a raise here with the
+    HTTP door enabled would keep the whole API from booting over a naming nicety;
+    ``tests/test_mcp_catalog.py`` is where a suffixed name is meant to be noticed.
     """
     reserved_names = set(reserved)
     members_by_function: Dict[str, int] = {}
@@ -111,11 +114,30 @@ def assign_tool_names(entries: Mapping[K, Tuple[str, str]], *, reserved: Iterabl
         else:
             names[key] = prefixed_tool_name(tag_slug(tag), function_name)
 
+    taken: Set[str] = set(names.values()) | reserved_names
     owners: Dict[str, K] = {}
+    for key in sorted(names, key=repr):
+        name = names[key]
+        if name not in owners:
+            owners[name] = key
+            continue
+        counter = 2
+        candidate = _suffixed_tool_name(name, counter)
+        while candidate in taken or candidate in owners:
+            counter += 1
+            candidate = _suffixed_tool_name(name, counter)
+        names[key] = candidate
+        owners[candidate] = key
+        taken.add(candidate)
+
     for key, name in names.items():
-        if not is_valid_tool_name(name):
+        if not is_valid_tool_name(name):  # unreachable after sanitisation; kept as the wire contract
             raise ValueError(f"Derived tool name {name!r} for {key!r} is not a valid MCP tool name")
-        if name in owners:
-            raise ValueError(f"Tool name {name!r} is claimed by both {owners[name]!r} and {key!r}")
-        owners[name] = key
     return names
+
+
+def _suffixed_tool_name(name: str, counter: int) -> str:
+    """``name`` + ``_<counter>``, still within the 64-char cap (the name gives way, never the suffix)."""
+    suffix = f"_{counter}"
+    base = name[: MAX_TOOL_NAME_LENGTH - len(suffix)].rstrip("_-") or "operation"
+    return f"{base}{suffix}"
