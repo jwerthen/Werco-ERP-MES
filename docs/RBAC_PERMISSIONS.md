@@ -66,17 +66,21 @@ tier, that tier stands — this rule is a floor, never a loosening.
 Agents reach the API through the MCP server in `backend/app/mcp/` ([docs/MCP.md](MCP.md)) —
 either the Streamable HTTP door at `/mcp` (off by default, `WERCO_MCP_HTTP_ENABLED`) or the stdio
 bridge `python -m app.mcp`. **Nothing in this document changes for them.** Every tool call is a
-real request dispatched through the same routers with a real user's access JWT: `get_current_user`
-resolves the user, tenancy comes from the token's active company, `require_role` decides, and every
+real request dispatched through the same routers with a real user's bearer — a 15-minute access JWT
+or a long-lived, Admin-issued **API token** bound to one user (see the API tokens callout under
+[Admin](#admin)): `get_current_user` resolves the user, tenancy comes from the token's active
+company (for an API token, the company pinned on its row), `require_role` decides, and every
 write is audited **as that user**. The matrix below is the matrix an agent gets — a Supervisor's
 agent sees exactly the 403s a Supervisor sees in the UI, bulk export stays Admin / Manager and
 audited, Users / Admin Settings / Audit reads stay server-gated, and the read-broad rule for domain
 reads applies unchanged.
 
-There is **no MCP identity, no MCP role and no MCP-only permission**: the package has no way to
-reach a service or the database, it cannot bypass `require_role`, and a 401/403 from the route is
-returned verbatim rather than worked around. Kiosk-scoped badge tokens, wallboard display tokens
-and station tokens are refused at the door because they are not user access tokens. The one thing
+There is **no MCP identity, no MCP role and no MCP-only permission**: the package reaches no
+service (its one database read is the door's API-token row check, which decides only whether the
+credential is still live — never what it may do), it cannot bypass `require_role`, and a 401/403
+from the route is returned verbatim rather than worked around. Kiosk-scoped badge tokens, wallboard
+display tokens and station tokens are refused at the door because they are not user credentials;
+an API token is accepted, as the one user it is bound to. The one thing
 the MCP layer *adds* is stricter, not looser: its hand-written tools force new and duplicated work
 orders to land DRAFT, keep release an explicit separate call (the header-update tool refuses
 `status: released` / `in_progress`, which the raw `PUT` would have accepted with no release stamp),
@@ -85,9 +89,12 @@ manual nests with a package import, and refuse operation names that are file nam
 [MCP.md → DRAFT guarantees](MCP.md#9-draft-guarantees). The two Excel-cutover loaders are not
 tools at all.
 
-Operationally: give agents a **dedicated user** (a Manager named e.g. *Werco Assistant*, or a
-narrower role) so the audit trail attributes agent writes and the role can be tightened without
-touching a person's account.
+Operationally: give agents a **dedicated user** (e.g. *Werco Assistant*, at the role the agent
+needs — the owner's assistant is an Admin; a Manager or a narrower role tightens what it can do) so
+the audit trail attributes agent writes and the role can be changed without touching a person's
+account — and hand it an **API token** (`POST /api-tokens/`, Admin only) rather than a 15-minute
+access token: same role, same audit attribution, revocable with a reason, and fenced from `/auth`
+and `/api-tokens` so it can never mint another credential.
 
 ## Permission Matrix
 
@@ -1948,6 +1955,7 @@ and writes an `EXPORT` audit row through `AuditService`:
 | AI egress kill switch (`PUT /companies/me/ai-egress`) | ✓ | | | | | | |
 | SMS egress kill switch (`PUT /companies/me/sms-egress`) | ✓ | | | | | | |
 | Wallboard display tokens (`/auth/display-token` issue/list/revoke + setup-code reissue) | ✓ | ✓ | | | | | |
+| API tokens for bots / MCP clients (`/api-tokens` issue/list/revoke) | ✓ | | | | | | |
 | Visitor sign-in stations (`/visitor-logs/stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
 | Crew kiosk stations (`/shop-floor/kiosk-stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
 | System | ✓ | | | | | | |
@@ -2066,6 +2074,26 @@ and writes an `EXPORT` audit row through `AuditService`:
 > Settings → Wallboard Displays and `/admin/settings` is AdminRoute-gated, so Managers can exercise
 > it only via direct API calls today. See [docs/API.md](API.md) → Authentication → Display tokens
 > and [docs/WALLBOARD.md](WALLBOARD.md).
+
+> **API tokens (`/api-tokens`).** Issue / list / revoke are enforced **in code** via
+> `require_role([ADMIN])` — Admin only, not Manager — and tenant-scoped to the active company
+> (`app/api/endpoints/api_tokens.py`); issuance and revocation each write tamper-evident `audit_log`
+> rows (an `api_token` row plus an `API_TOKEN_ISSUED` / `API_TOKEN_REVOKED` authentication event),
+> metadata only, never the token. **An API token is not a role**: it is bound to **one user** and
+> carries exactly that user's role — `require_role` decides on every route as it does for the SPA, a
+> Manager's token gets a Manager's 403s, and the active company is pinned to the `api_tokens` row
+> (never a JWT claim, never a platform admin's switched context). What it **cannot** do, whatever
+> the holder's role: reach any route under `/auth` or `/api-tokens` (**403** `"API token cannot
+> access this resource"` — no refresh, logout, company switch, display-token or kiosk-station verbs,
+> and never mint, list or revoke tokens, which is an Admin's interactive act even when the token
+> belongs to an Admin), or outlive revocation / expiry / user deactivation (the row is re-read on
+> every request: revoked or expired → **401** on the next call; a disabled holder → **403**). Only
+> Admins mint one, the target must be an active user of the same company (404 / 409 otherwise),
+> and the default lifetime is *never* — so give each agent a **dedicated account** at the role it
+> needs (see [MCP / agent access](#mcp--agent-access)) rather than a person's login, and revoke
+> with a reason when it is retired. No UI yet: `curl`, or the `create_api_token` /
+> `list_api_tokens` / `revoke_api_token` MCP tools with an interactive Admin JWT. See
+> [docs/API.md](API.md) → Authentication → API tokens.
 
 ## Backend Implementation
 

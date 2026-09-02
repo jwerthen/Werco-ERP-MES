@@ -2,16 +2,16 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **674 tools** — 15 hand-written *convenience* tools plus
-**659 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **677 tools** — 15 hand-written *convenience* tools plus
+**662 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app.
 
 This is the runbook: how to run it, how to authenticate, what the tools are called, which rules
 the convenience tools enforce, what a result looks like, and what to do when a call fails.
 
 **Counts and names in this file come from `python -m app.mcp --print-catalog` on the commit that
-shipped the package** (15 + 659 tools, 16 shadowed raw operations, 2 excluded cutover loaders,
-65 tags in the OpenAPI document, 61 of them in the catalog). Generated names are derived, not
+shipped API tokens** (15 + 662 tools, 16 shadowed raw operations, 2 excluded cutover loaders,
+66 tags in the OpenAPI document, 62 of them in the catalog). Generated names are derived, not
 curated — re-run the command after adding a router before quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
 quote against the live catalog, so a name that shifts fails CI instead of going stale here.
@@ -26,20 +26,21 @@ quote against the live catalog, so a name that shifts fails CI instead of going 
   process over `httpx.ASGITransport`, or over HTTPS to a deployed API — carrying the caller's own
   bearer token. The request passes the full middleware stack and the route's own dependencies
   (`get_current_user`, `get_current_company_id`, `require_role`, `get_audit_service`). **The router
-  is the RBAC, tenancy and audit boundary**; nothing in `app/mcp/` imports a service, builds a
-  user, or opens a database session.
+  is the RBAC, tenancy and audit boundary**; nothing in `app/mcp/` imports a service or builds a
+  user, and its one database read is the door's API-token row check (§4), which decides whether
+  a credential is still live and nothing else.
 - **OpenAPI as the catalog.** Generated tools are built from `app.openapi()` at startup — the same
   dict Swagger renders in non-production. A router that ships tomorrow is a tool tomorrow, with no
   list to update. (`app.openapi()` builds the document in process even in production, where the
   served `/api/openapi.json` route is deliberately disabled; the catalog does not re-enable it.)
-- **Reads broad, writes real.** 61 of the API's 65 tags are in. Data Export, Users, Audit,
+- **Reads broad, writes real.** 62 of the API's 66 tags are in. Data Export, Users, Audit,
   Admin Settings, Platform Administration and Company Management are included: their own
   `require_role` gates and audit rows are the control, not the catalog.
 
 **It is not:**
 
-- **A god token or a new role.** There is no MCP identity. Every call carries a real ERP user
-  access JWT; a 401 or 403 from the route is returned verbatim (`is_error=true`, body carries
+- **A god token or a new role.** There is no MCP identity. Every call carries a real ERP user's
+  bearer — an access JWT, or an API token bound to one user (§4); a 401 or 403 from the route is returned verbatim (`is_error=true`, body carries
   `status` and the server's `detail`). Nothing here widens exports, bypasses `require_role` or adds
   a permission — see [RBAC_PERMISSIONS.md → MCP / agent access](RBAC_PERMISSIONS.md#mcp--agent-access).
 - **A service-call shortcut.** Calling `services/` directly with a hand-built user would skip the
@@ -67,6 +68,7 @@ backend/app/mcp/
                   the two coverage guards uncovered_tags + unaccounted_operations, catalog_summary)
   results.py      pure: HTTP outcome -> CallToolResult (JSON/text/blob, caps, error shape)
   auth.py         AuthContext; TokenSource (static -> refresh -> password login); ErpTokenVerifier
+                  (an access JWT by signature, an API token by its api_tokens row)
   executor.py     InProcessExecutor (httpx.ASGITransport into app) / RemoteExecutor (HTTPS)
   convenience.py  the 15 hand-written tools + SHADOWED_OPERATIONS (16 raw routes they replace)
   server.py       build_server(): registry, per-call auth, jsonschema validation, dispatch
@@ -139,7 +141,11 @@ cd backend
 WERCO_ERP_URL=https://<api-host> WERCO_ERP_EMAIL=<assistant-user@yourshop.com> WERCO_ERP_PASSWORD=<password> \
   .venv311/bin/python -m app.mcp
 
-# Same, with a token pair instead of a password
+# Same, with a long-lived API token (the standing credential: never expires unless issued with a
+# lifetime, never 401s until an Admin revokes it -- no refresh, no login; §4)
+WERCO_ERP_URL=https://<api-host> WERCO_ERP_TOKEN=<api token> .venv311/bin/python -m app.mcp
+
+# Same, with a 15-minute access + refresh token pair (the bridge rotates it on 401)
 WERCO_ERP_URL=https://<api-host> WERCO_ERP_TOKEN=<access token> WERCO_ERP_REFRESH_TOKEN=<refresh token> \
   .venv311/bin/python -m app.mcp
 
@@ -171,7 +177,7 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 15, "generated": 659, "shadowed": 16}
+ "counts": {"convenience": 15, "generated": 662, "shadowed": 16}
 }
 ```
 
@@ -193,31 +199,35 @@ go is the client's business:
   "mcpServers": {
     "werco-erp": {
       "url": "https://<your-api-host>/mcp",
-      "headers": { "Authorization": "Bearer <ERP_ACCESS_TOKEN>" }
+      "headers": { "Authorization": "Bearer <ERP_API_TOKEN>" }
     }
   }
 }
 ```
 
-The token is a normal **15-minute** ERP access token for a real user — a dedicated Manager such as
-*Werco Assistant* is recommended (§4). When calls start answering 401, refresh it with
-`POST /api/v1/auth/refresh` or log in again: an HTTP client renews its own token; the stdio bridge
-below does it for you.
+The token is an **API token** — a long-lived, revocable bearer bound to one real user, minted by an
+Admin with `POST /api/v1/api-tokens/` ([API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients));
+a dedicated user such as *Werco Assistant* is recommended (§4). It never expires unless issued with
+a lifetime and never answers 401 until an Admin revokes it, so an HTTP client needs no refresh and
+no login. A normal **15-minute** access token works in the same header, but then the client must
+renew it itself (`POST /api/v1/auth/refresh`, or log in again) — the stdio bridge below does that
+for you; the door does not.
 
 **Claude Code** — either the door, registered from the CLI:
 
 ```bash
 claude mcp add --transport http werco-erp https://<your-api-host>/mcp \
-  --header "Authorization: Bearer <ERP_ACCESS_TOKEN>"
+  --header "Authorization: Bearer <ERP_API_TOKEN>"
 ```
 
-or the stdio bridge, which manages token refresh itself (§4):
+or the stdio bridge — with the same API token, or with a password login the bridge manages itself
+(§4):
 
 ```bash
 claude mcp add werco-erp \
   -e PYTHONPATH=/absolute/path/to/Werco-ERP-MES/backend \
   -e WERCO_ERP_URL=https://<your-api-host> \
-  -e WERCO_ERP_EMAIL=<assistant-user@yourshop.com> -e WERCO_ERP_PASSWORD=<password> \
+  -e WERCO_ERP_TOKEN=<ERP_API_TOKEN> \
   -- /absolute/path/to/Werco-ERP-MES/backend/.venv311/bin/python -m app.mcp
 ```
 
@@ -233,48 +243,64 @@ client runs `python -m app.mcp`, which speaks MCP on stdio and calls the deploye
       "env": {
         "PYTHONPATH": "/absolute/path/to/Werco-ERP-MES/backend",
         "WERCO_ERP_URL": "https://<your-api-host>",
-        "WERCO_ERP_EMAIL": "<assistant-user@yourshop.com>",
-        "WERCO_ERP_PASSWORD": "<password>"
+        "WERCO_ERP_TOKEN": "<ERP_API_TOKEN>"
       }
     }
   }
 }
 ```
 
-Credentials: set **either** `WERCO_ERP_EMAIL` + `WERCO_ERP_PASSWORD` (as above) **or** an access +
-refresh token pair, `WERCO_ERP_TOKEN` + `WERCO_ERP_REFRESH_TOKEN`; the bridge refreshes or re-logs-in
-on 401 by itself (§4). Leave `WERCO_ERP_URL` unset **only** to dispatch into a local database (dev,
+Credentials: set `WERCO_ERP_TOKEN` to an **API token** (as above — the standing credential, no
+refresh needed), **or** `WERCO_ERP_EMAIL` + `WERCO_ERP_PASSWORD`, **or** a 15-minute access +
+refresh token pair `WERCO_ERP_TOKEN` + `WERCO_ERP_REFRESH_TOKEN`; with the last two the bridge
+refreshes or re-logs-in on 401 by itself (§4). Leave `WERCO_ERP_URL` unset **only** to dispatch into a local database (dev,
 §3.2). `PYTHONPATH` is what lets `python -m app.mcp` import the `app` package from wherever the
 client starts the process, so no working directory is assumed: Cursor's documented schema is
 `command` / `args` / `env` only, and in remote mode the bridge reads no `.env` file (it sets its own
 placeholders, §3.2), so a `cwd` key would add nothing.
 
 The HTTP door and the bridge expose the **same catalog**; pick the HTTP entry when the door is
-enabled on the server, the stdio entry when it is not (or when you want the bridge to manage token
-refresh for you — §4).
+enabled on the server, the stdio entry when it is not (or when you want to log in with a password
+and let the bridge manage the session — §4).
 
 ---
 
 ## 4. Auth model
 
-**Every call is a real ERP user.** The token is a normal access JWT (`type=access`, **15 minutes**),
-verified by `app.core.security.verify_token` — the same function the routes use. Tenancy comes from
-the token's active company, `require_role` decides, and every write is audited as that user.
+**Every call is a real ERP user.** The bearer is one of two user credentials, and nothing else: a
+normal access JWT (`type=access`, **15 minutes**, verified by `app.core.security.verify_token` — the
+same function the routes use), or a long-lived **API token** (`type=api`, minted by an Admin with
+`POST /api/v1/api-tokens/`, bound to one user and anchored to an `api_tokens` row that
+`api_token_service.check_api_token` re-reads on every request — not revoked, not past the row's
+`expires_at`, claims equal to the row, user active). Either way the route authenticates it exactly
+as it would the SPA's request: tenancy comes from the token's active company (for an API token, the
+company pinned on its row), `require_role` decides, and every write is audited as that user. The
+API token is the credential to give a standing agent: it never expires unless issued with a
+lifetime, never 401s until revoked, and is fenced (**403** `"API token cannot access this
+resource"`) from every `/auth` and `/api-tokens` route — so it can never refresh, switch company,
+or mint, list or revoke tokens, including through the three tools that front those routes
+(`create_api_token`, `list_api_tokens`, `revoke_api_token`: Admin only, with an interactive JWT).
+Full reference: [API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients).
 
 | Surface | Where the token comes from | On 401 |
 |---|---|---|
-| HTTP door | The MCP request's `Authorization: Bearer …` header, checked at the door (`ErpTokenVerifier`) and again per call. | Passed through as-is. **HTTP callers must send a fresh access token themselves** — refresh with `POST /api/v1/auth/refresh` (`{"refresh_token": …}` → `{access_token, refresh_token, expires_in}`, rotating) or log in again with `POST /api/v1/auth/login` (form-encoded `username` + `password`). |
-| stdio bridge | `TokenSource.from_env` — `WERCO_ERP_TOKEN` (static access token), `WERCO_ERP_REFRESH_TOKEN`, `WERCO_ERP_EMAIL` + `WERCO_ERP_PASSWORD`. | **Precedence:** the static token is used first; when the ERP answers 401 the bridge tries the refresh token, then an email/password login, and surfaces the 401 when neither is configured or when both fail. Rotation is serialised with a lock (`/auth/refresh` rotates the refresh token; two concurrent refreshes would invalidate each other). A refresh token the server rejects (400/401/403) is forgotten so the next attempt goes straight to login. |
+| HTTP door | The MCP request's `Authorization: Bearer …` header, checked at the door (`ErpTokenVerifier`: an access token by signature, an API token by its row) and again per call. | Passed through as-is. With an **API token**, a 401 means an Admin revoked it (or it reached its issued lifetime, or its user was deactivated) — ask for a new one; nothing renews it. With an access token, **the caller must send a fresh one itself** — refresh with `POST /api/v1/auth/refresh` (`{"refresh_token": …}` → `{access_token, refresh_token, expires_in}`, rotating) or log in again with `POST /api/v1/auth/login` (form-encoded `username` + `password`). |
+| stdio bridge | `TokenSource.from_env` — `WERCO_ERP_TOKEN` (a static token: an **API token**, or an access token), `WERCO_ERP_REFRESH_TOKEN`, `WERCO_ERP_EMAIL` + `WERCO_ERP_PASSWORD`. | **Precedence:** the static token is used first; when the ERP answers 401 the bridge tries the refresh token, then an email/password login, and surfaces the 401 when neither is configured or when both fail. An API token never 401s until revoked, so with it alone the rotation path is simply never taken. Rotation is serialised with a lock (`/auth/refresh` rotates the refresh token; two concurrent refreshes would invalidate each other). A refresh token the server rejects (400/401/403) is forgotten so the next attempt goes straight to login. |
 
 Kiosk-scoped badge tokens (`scope == "kiosk"`) are refused at the door and in `resolve_auth`: they
 are path-fenced to the shop-floor routes and would 403 on almost every tool. Wallboard display
-tokens and station tokens are not access tokens and are refused for the same reason.
+tokens and station tokens are not user credentials and are refused for the same reason. An API
+token is accepted: the door runs its row check (`live_api_token_principal` — a short-lived session
+opened for that one read, the only place the package touches the database) and `resolve_auth`
+then accepts it by signature, because the dispatched route re-runs the same row check.
 
-**Recommended:** a dedicated user for agent work — a **Manager** named e.g. *Werco Assistant* —
-so the audit trail says which writes an agent made, and so the role can be narrowed (Supervisor,
-Viewer) without touching a person's account. No credentials, tokens or passwords are ever logged;
-the bridge logs only *which kinds* of credential are configured (`access-token`, `refresh-token`,
-`password-login`).
+**Recommended:** a dedicated user for agent work — e.g. *Werco Assistant*, at the role the agent
+needs (the owner's assistant is an **Admin**; a Manager, Supervisor or Viewer narrows what the
+agent can do) — holding an **API token** rather than a person's login, so the audit trail says which
+writes an agent made, and so the credential can be revoked with a reason, or the role changed,
+without touching a person's account. No credentials, tokens or passwords are ever logged; the
+bridge logs only *which kinds* of credential are configured (`access-token` — an API token counts
+as one, `refresh-token`, `password-login`).
 
 `POST /auth/login` is rate-limited at 5/min and `/auth/refresh` at 30/min per IP
 ([ENVIRONMENT_VARIABLES.md → Rate Limiting](ENVIRONMENT_VARIABLES.md#rate-limiting)); a bridge that
@@ -359,6 +385,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `AdminSettings` (`/admin/settings`) | Admin Settings, Users, Quote Calculator | `list_labor_rates`, `update_overhead_setting`, `get_role_permissions`, `update_role_permissions`, `admin_settings_list_machines`, `admin_settings_update_machine`, `get_audit_log`, `list_users` |
 | `PlatformOverview` (`/platform`) | Platform Administration | `platform_overview`, `list_companies`, `company_dashboard`, `browse_company_users` (platform admins only — the route decides) |
 | `CompanyRegister` (`/register-company`) | Company Management | `get_my_company`, `update_my_company`, `update_my_company_ai_egress`, `update_my_company_sms_egress` — the public registration form itself is unauthenticated and has no tool |
+| *(no page — Admin tooling, `curl` or these tools)* | API Tokens | `create_api_token`, `list_api_tokens`, `revoke_api_token` (Admin only; a call authenticated **by** an API token gets the route's 403 fence — §4) |
 | `Login` (`/login`), `Register` (`/register`) | Authentication | *No tool* — excluded on purpose; identity comes from the JWT (§4) |
 | `NotFound`, `Unauthorized` | — | No API calls |
 
@@ -390,8 +417,8 @@ minus two further, named sets:
   explicit" (§9) and "never fake shop-floor time" that the convenience tools exist to close.
   They stay an Import Center action for an admin at cutover (`EXCEL_MIGRATION_RUNBOOK.md`).
 
-On the shipping commit: 703 operations, 686 secured, 677 candidates, 16 shadowed (§8), 2 excluded
-→ **659 generated tools**.
+On the commit that shipped API tokens: 706 operations, 689 secured, 680 candidates, 16 shadowed
+(§8), 2 excluded → **662 generated tools**.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 
@@ -813,7 +840,8 @@ real gates (a complete with zero labor recorded is refused 400, exactly as at th
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| HTTP **401** with `WWW-Authenticate` from `/mcp` itself, before any tool | No bearer, or an expired / non-`access` / kiosk-scoped token at the door | Send a fresh 15-minute access token (`POST /auth/refresh` or `POST /auth/login`). HTTP callers renew their own tokens; only the stdio bridge refreshes for you |
+| HTTP **401** with `WWW-Authenticate` from `/mcp` itself, before any tool | No bearer; an expired access token; a revoked / expired API token (or one whose user was deactivated); a display / station / kiosk-scoped token | Give the agent an **API token** (`POST /api/v1/api-tokens/`, Admin) — it never 401s until revoked, so a 401 on one means an Admin revoked it: mint a new one. With a 15-minute access token, send a fresh one (`POST /auth/refresh` or `POST /auth/login`); HTTP callers renew their own, only the stdio bridge refreshes for you |
+| `{"status": 403, "detail": "API token cannot access this resource"}` | The call is authenticated by an API token and the tool fronts a `/auth` or `/api-tokens` route (`create_api_token`, `list_api_tokens`, `revoke_api_token`) | Token administration is an Admin's interactive act: use an Admin's interactive JWT (through the door or with `curl`). Nothing an API token holds changes this (§4) |
 | Tool result `{"status": 401, "detail": "No ERP credentials configured for this bridge…"}` | stdio bridge started with none of `WERCO_ERP_TOKEN` / `WERCO_ERP_REFRESH_TOKEN` / `WERCO_ERP_EMAIL`+`WERCO_ERP_PASSWORD` | Set one; the bridge logs `Credentials configured: …` on stderr at startup |
 | Tool result `{"status": 401, "detail": "Could not obtain an ERP access token…"}` | Refresh and login both failed (wrong password, locked account, login rate limit 5/min) | Check the account in the UI; wait out the limit |
 | `{"status": 403, "detail": "Insufficient permissions"}` | The user's role does not allow that route (`require_role`) — the SPA would refuse too | Use a user with the right role; nothing in MCP can widen it |
@@ -886,6 +914,21 @@ real gates (a complete with zero labor recorded is refused 400, exactly as at th
     subprocess whose stdout is exactly one JSON document, and a real `stdio_client` round trip
     against a dead ERP (full catalog listed, a status-0 transport error rather than a hang, and the
     "no credentials" 401 result).
-- Related: [API.md → MCP door](API.md#mcp-door-mcp), [RBAC_PERMISSIONS.md → MCP / agent access](RBAC_PERMISSIONS.md#mcp--agent-access),
+  - `backend/tests/test_api_tokens_smoke.py` — API tokens end to end: an Admin issues one (201,
+    shown once, audit rows without the plaintext), the holder acts on a normal route with the
+    `last_used_at` touch written once, the `/auth` + `/api-tokens` fence (403, and the 401s on
+    `/auth/refresh` and the badge mint), the user's role carried (a Manager's token 403 on an Admin
+    route), revoke → 401 on the next call and 409 on a second revoke, listing without secrets; then
+    the **HTTP door** with an API token — `tools/list`, a read as the holder, `create_api_token`
+    through the door answering the route's 403 fence, and a 401 at the door once revoked.
+  - `backend/tests/test_migration_088_api_tokens.py` — the `api_tokens` table: single head,
+    model/migration lock-step (columns, indexes, defaults), RLS Postgres-only, and the SQLite
+    upgrade / downgrade round trip.
+- API tokens (server side, no new setting): `app/api/endpoints/api_tokens.py`,
+  `app/services/api_token_service.py` (`check_api_token` is the one row check the door and
+  `get_current_user` share), `app/models/api_token.py`, migration `088_api_tokens`; the door half is
+  `app/mcp/auth.py` (`live_api_token_principal`, `ErpTokenVerifier`).
+- Related: [API.md → MCP door](API.md#mcp-door-mcp), [API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients),
+  [RBAC_PERMISSIONS.md → MCP / agent access](RBAC_PERMISSIONS.md#mcp--agent-access),
   [DEPLOYMENT_RUNBOOK.md → Enabling the MCP door](DEPLOYMENT_RUNBOOK.md#enabling-the-mcp-door-optional),
   `.cursor/mcp.json.example`, `backend/.env.example`.

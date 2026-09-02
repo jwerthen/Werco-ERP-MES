@@ -84,8 +84,12 @@ curl https://werco-api-production.up.railway.app/health/ready
    **401** (the door is up and refusing an unauthenticated caller); before the change it answers
    **404**. The startup log line `MCP door serving at /mcp` confirms the lifespan armed it. A
    **503** `MCP door is not running` means the route is mounted but the lifespan never ran.
-4. Hand agents a real user's access token (a dedicated Manager such as *Werco Assistant* is
-   recommended); no server-side secret is involved. Tokens are the normal 15-minute ones.
+4. Hand agents an **API token** for a dedicated user (e.g. *Werco Assistant*): an Admin mints it
+   with `POST /api/v1/api-tokens/` ([API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients)),
+   it never expires unless issued with a lifetime, and it is revoked with a reason. No server-side
+   secret and no new variable are involved — it is signed with the existing `SECRET_KEY`, so
+   rotating that key revokes every API token at once. A normal 15-minute access token also works,
+   but then the client must renew it itself.
 
 Turning it off is the same variable set back to `false` plus a redeploy; nothing else is left
 behind. The caps (`WERCO_MCP_MAX_UPLOAD_BYTES` 25 MB envelope, `WERCO_MCP_MAX_RESULT_CHARS`,

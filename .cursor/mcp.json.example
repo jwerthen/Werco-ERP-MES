@@ -3,7 +3,7 @@
     "werco-erp": {
       "url": "https://<your-api-host>/mcp",
       "headers": {
-        "Authorization": "Bearer <ERP_ACCESS_TOKEN>"
+        "Authorization": "Bearer <ERP_API_TOKEN>"
       }
     },
     "werco-erp-stdio": {
@@ -15,8 +15,7 @@
       "env": {
         "PYTHONPATH": "/absolute/path/to/Werco-ERP-MES/backend",
         "WERCO_ERP_URL": "https://<your-api-host>",
-        "WERCO_ERP_EMAIL": "<assistant-user@yourshop.com>",
-        "WERCO_ERP_PASSWORD": "<password>"
+        "WERCO_ERP_TOKEN": "<ERP_API_TOKEN>"
       }
     }
   }

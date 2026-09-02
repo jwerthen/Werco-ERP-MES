@@ -283,9 +283,10 @@ def get_display_or_user(
 
     SECURITY (A0.5): this is the ONLY dependency that honors display tokens,
     and it must only ever guard the read-only wallboard endpoint. Everywhere
-    else auth flows through ``get_current_user``/``verify_token``, which
-    reject any JWT whose ``type`` claim is not ``"access"`` — so a display
-    token presented to any other endpoint gets a 401.
+    else auth flows through ``get_current_user``, which accepts only
+    ``type == "access"`` JWTs and (through the ``api_tokens`` row check)
+    ``type == "api"`` API tokens — so a display token presented to any other
+    endpoint gets a 401.
 
     Display-token path checks, in order:
       1. signature + JWT expiry + ``type == "display"`` (``verify_display_token``)
@@ -367,9 +368,10 @@ def get_signin_principal(
     SECURITY (visitor sign-in): this dependency, alongside ``get_display_or_user``,
     is one of the only two that honor a non-``"access"`` JWT type, and it must
     only ever guard the two visitor write endpoints (sign-in / sign-out).
-    Everywhere else auth flows through ``get_current_user`` / ``verify_token``,
-    which reject any JWT whose ``type`` is not ``"access"`` — so a signin token
-    presented to any other endpoint gets a 401. ``get_display_or_user`` is left
+    Everywhere else auth flows through ``get_current_user``, which accepts only
+    ``type == "access"`` JWTs and (via the ``api_tokens`` row check) ``type ==
+    "api"`` API tokens — so a signin token presented to any other endpoint gets
+    a 401. ``get_display_or_user`` is left
     untouched (the read-only wallboard path stays uncontaminated).
 
     Station-token path checks, in order (the wallboard two-layer pattern):
@@ -445,9 +447,9 @@ def get_kiosk_or_user(
     ``get_display_or_user`` and ``get_signin_principal`` — is one of the only
     three that honor a non-``"access"`` JWT type, and it must only ever guard
     the read-only work-center-queue endpoint. Everywhere else auth flows
-    through ``get_current_user`` / ``verify_token``, which reject any JWT whose
-    ``type`` is not ``"access"`` — so a kiosk station token presented to any
-    other endpoint gets a 401. (The badge-token mint validates the station
+    through ``get_current_user``, which accepts only ``type == "access"`` JWTs
+    and (via the ``api_tokens`` row check) ``type == "api"`` API tokens — so a
+    kiosk station token presented to any other endpoint gets a 401. (The badge-token mint validates the station
     token itself against the same DB-row checks; it does not use this
     dependency's user branch.)
 
