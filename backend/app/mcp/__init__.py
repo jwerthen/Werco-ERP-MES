@@ -3,7 +3,9 @@
 The package turns the FastAPI application's OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user --
 the router is the RBAC / tenancy / audit boundary, so nothing here imports a service
-or touches the database. See ``docs/MCP.md``.
+or builds a user; the one database read is the HTTP door's API-token row check
+(``auth.live_api_token_principal``, the same ``check_api_token`` the routes run). See
+``docs/MCP.md``.
 
 Public surface:
 

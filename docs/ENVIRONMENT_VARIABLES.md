@@ -64,7 +64,7 @@ SUPABASE_DB_PASSWORD=<your-supabase-db-pass>
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `SECRET_KEY` | Yes* | - | JWT signing key. Must be at least 32 characters. Generate with: `python -c "import secrets; print(secrets.token_urlsafe(64))"` |
+| `SECRET_KEY` | Yes* | - | JWT signing key. Must be at least 32 characters. Generate with: `python -c "import secrets; print(secrets.token_urlsafe(64))"`. Also signs the display, signin, kiosk and long-lived **API** tokens — rotating it invalidates every API token at once (by design; re-mint them) |
 | `REFRESH_TOKEN_SECRET_KEY` | Yes* | - | Separate key for refresh tokens. Use different value from SECRET_KEY |
 | `ALGORITHM` | No | `HS256` | JWT algorithm. Options: HS256, HS384, HS512 |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | No | `15` | Access token lifetime in minutes |
@@ -217,9 +217,9 @@ here — never paste a token or password into a committed file.
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `WERCO_ERP_URL` | No | — | Base URL of the deployed API (`https://<api-host>`, trailing slash stripped). **Set → REMOTE mode**: tools go over HTTPS to that deployment, and any *missing* `DATABASE_URL` / `SECRET_KEY` / `REFRESH_TOKEN_SECRET_KEY` / `ENVIRONMENT` / `RATE_LIMIT_ENABLED` is defaulted to a placeholder that is never used (the catalog still needs `app.main` importable). **Unset → IN-PROCESS mode**: tools dispatch into the local app object and the real environment (a `DATABASE_URL`, the real `SECRET_KEY`) is required — dev only |
-| `WERCO_ERP_TOKEN` | No* | — | A static ERP **access** token (15-minute lifetime). Used first when set |
+| `WERCO_ERP_TOKEN` | No* | — | A static ERP bearer, used first when set: an **API token** (long-lived, revocable, Admin-minted via `POST /api-tokens/` — the recommended standing credential; it never 401s until revoked, so the refresh / login variables below are unnecessary with it) or a 15-minute **access** token |
 | `WERCO_ERP_REFRESH_TOKEN` | No* | — | A refresh token; on a 401 the bridge calls `POST /auth/refresh`, rotates the pair in memory, and retries the call once. A refresh token the server rejects is forgotten so the next attempt falls through to login |
-| `WERCO_ERP_EMAIL` / `WERCO_ERP_PASSWORD` | No* | — | Login credentials; the bridge logs in through `POST /auth/login` at first use and re-logs-in after a 401 when no refresh token works. A dedicated Manager user (e.g. *Werco Assistant*) is recommended so agent writes are attributable |
+| `WERCO_ERP_EMAIL` / `WERCO_ERP_PASSWORD` | No* | — | Login credentials; the bridge logs in through `POST /auth/login` at first use and re-logs-in after a 401 when no refresh token works. A dedicated user at the role the agent needs (e.g. *Werco Assistant* — the owner's assistant is an Admin) is recommended so agent writes are attributable |
 | `WERCO_MCP_TRANSPORT` | No | `stdio` | `stdio` (what agents spawn) or `http` (a **dev-only** local Streamable HTTP server; same as `--transport http`) |
 | `WERCO_MCP_HOST` / `WERCO_MCP_PORT` | No | `127.0.0.1` / `8765` | Bind address of the dev HTTP transport only |
 | `LOG_LEVEL` | No | `INFO` | The bridge logs to **stderr** only (stdout is the MCP wire); this is the usual app variable, honoured here too |
@@ -227,6 +227,15 @@ here — never paste a token or password into a committed file.
 \* At least one credential kind is needed for tool calls to succeed; with none set the bridge
 starts, logs a warning, and answers every call with a 401-shaped error. `--print-catalog` needs no
 credentials and no `WERCO_ERP_URL`.
+
+> **API tokens — no new variables.** The long-lived, per-user API tokens that agents present
+> ([API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients)) introduce **no new environment
+> variable**, server or client side: they are signed with the existing `SECRET_KEY` / `ALGORITHM`
+> (**Security** above — rotating `SECRET_KEY` therefore invalidates every API token at once, by
+> design), their lifetime and revocation live in the `api_tokens` table, and the `last_used_at`
+> touch interval (5 minutes) and the 3650-day lifetime cap are code constants
+> (`app/services/api_token_service.py`). On the client they go in `WERCO_ERP_TOKEN` (stdio bridge)
+> or the door's `Authorization` header.
 
 ### CORS (Cross-Origin Resource Sharing)
 
@@ -960,7 +969,9 @@ cap — `WERCO_MCP_MAX_UPLOAD_BYTES` (default 25 MB) on the whole JSON-RPC envel
 [MCP](#mcp-model-context-protocol-door-and-bridge).
 
 ### Every MCP tool call answers 401
-On the HTTP door the caller's access token is missing, expired (15 min) or kiosk-scoped — the
-client must send a fresh one. On the stdio bridge no `WERCO_ERP_TOKEN` / `WERCO_ERP_REFRESH_TOKEN` /
+On the HTTP door the caller's token is missing, an expired (15 min) access token, a **revoked or
+expired API token** (or one whose user was deactivated), or kiosk-scoped — the client must send a
+fresh one; for an API token that means an Admin mints a new one (`POST /api-tokens/`), nothing
+renews it. On the stdio bridge no `WERCO_ERP_TOKEN` / `WERCO_ERP_REFRESH_TOKEN` /
 `WERCO_ERP_EMAIL`+`WERCO_ERP_PASSWORD` is set, or the login/refresh failed; the bridge logs
 `Credentials configured: …` on stderr at startup. See [docs/MCP.md → Troubleshooting](MCP.md#13-troubleshooting).

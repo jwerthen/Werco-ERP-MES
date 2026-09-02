@@ -130,6 +130,59 @@ def verify_display_token(token: str) -> Optional[dict]:
         return None
 
 
+API_TOKEN_TYPE = "api"
+
+
+def create_api_token(jti: str, user_id: int, company_id: int, expires_at: Optional[datetime] = None) -> str:
+    """Create a long-lived, revocable API token bound to ONE real user.
+
+    The ``type`` claim is ``"api"`` -- NOT ``"access"`` -- so ``verify_token`` rejects
+    it; API tokens authenticate only through the dedicated branch in
+    ``app.api.deps.get_current_user``, which resolves the ``api_tokens`` row by
+    ``jti`` on EVERY request (``app.services.api_token_service.check_api_token``)
+    and treats the ROW, never these claims, as authoritative for the user, the
+    company, revocation and expiry.
+
+    ``exp`` is set ONLY when ``expires_at`` is given: the owner's default for a
+    standing bot credential is "never expires", and python-jose accepts a token
+    with no ``exp``. Rotating ``SECRET_KEY`` invalidates every API token at once
+    -- that is a feature, not a hazard.
+    """
+    to_encode: dict[str, Any] = {
+        "sub": f"api:{jti}",
+        "type": API_TOKEN_TYPE,
+        "jti": jti,
+        "user_id": user_id,
+        "company_id": company_id,
+        "iat": datetime.utcnow(),
+    }
+    if expires_at is not None:
+        to_encode["exp"] = expires_at
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def verify_api_token(token: str) -> Optional[dict]:
+    """Verify an API token's signature (+ ``exp`` when present) and ``type == "api"``.
+
+    Mirrors ``verify_display_token``: this is the SIGNATURE half only. The caller
+    MUST additionally run the ``api_tokens`` row checks (exists for ``jti``, not
+    revoked, not past the row's ``expires_at``, claims match the row, user
+    active) -- ``app.services.api_token_service.check_api_token`` is the one
+    function that does, for the API and the MCP door alike.
+    """
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        if payload.get("type") != API_TOKEN_TYPE:
+            return None
+        return {
+            "jti": payload.get("jti"),
+            "user_id": payload.get("user_id"),
+            "company_id": payload.get("company_id"),
+        }
+    except JWTError:
+        return None
+
+
 def create_signin_token(station_id: int, company_id: int, label: str, ttl_hours: int = 24) -> str:
     """Create a scope-limited token for an unattended visitor sign-in tablet.
 

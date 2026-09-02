@@ -20,6 +20,7 @@ from app.schemas.notification import (
     TestSMSResponse,
 )
 from app.schemas.user import validate_password_strength
+from app.services import api_token_service
 from app.services.audit_service import AuditService
 from app.services.import_service import ImportFileError, parse_import_file
 from app.services.notification_catalog import ALL_CHANNELS, CATALOG, CHANNEL_SMS, get_entry
@@ -927,11 +928,23 @@ def update_user(
     # log_update runs both sides through _model_to_dict, which drops
     # hashed_password/password, so no secret reaches the audit log.
     old_values = {c.key: getattr(user, c.key) for c in user.__table__.columns}
+    deactivating = update_data.get("is_active") is False and bool(user.is_active)
 
     for field, value in update_data.items():
         setattr(user, field, value)
 
     audit.log_update("user", user.id, user.employee_id, old_values=old_values, new_values=user)
+    if deactivating:
+        # Same rule as DELETE /users/{id}: losing is_active retires every live API
+        # token the user holds (audited), so a later is_active=true revives none.
+        api_token_service.revoke_api_tokens_for_user(
+            db,
+            company_id=company_id,
+            user_id=user.id,
+            revoked_by=current_user.id,
+            reason=api_token_service.DEACTIVATION_REVOKE_REASON,
+            audit=audit,
+        )
     db.commit()
     db.refresh(user)
     return user
@@ -1057,7 +1070,14 @@ def deactivate_user(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Deactivate a user (Admin only). The is_active change is audit-logged."""
+    """Deactivate a user (Admin only). The is_active change is audit-logged.
+
+    Every live API token the user holds is revoked in the same transaction
+    (reason ``user deactivated``, actor = this Admin, one ``API_TOKEN_REVOKED``
+    trail each) -- deactivation RETIRES a bot's credential, it never pauses it,
+    so a later reactivation restores the account and no token. The response
+    carries how many were revoked.
+    """
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot deactivate yourself")
 
@@ -1074,9 +1094,17 @@ def deactivate_user(
         "inactive",
         description=f"Deactivated user {user.employee_id}",
     )
+    revoked = api_token_service.revoke_api_tokens_for_user(
+        db,
+        company_id=company_id,
+        user_id=user.id,
+        revoked_by=current_user.id,
+        reason=api_token_service.DEACTIVATION_REVOKE_REASON,
+        audit=audit,
+    )
     db.commit()
 
-    return {"message": "User deactivated"}
+    return {"message": "User deactivated", "api_tokens_revoked": len(revoked)}
 
 
 @router.post("/{user_id}/activate")
@@ -1087,7 +1115,11 @@ def activate_user(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Reactivate a user (Admin only). The is_active change is audit-logged."""
+    """Reactivate a user (Admin only). The is_active change is audit-logged.
+
+    Restores the account, never a credential: the user's API tokens were revoked
+    at deactivation and stay revoked -- mint a new one if the bot is coming back.
+    """
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")

@@ -577,6 +577,116 @@ Include the token in the Authorization header:
 Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
 
+### API tokens (bots and MCP clients)
+
+Long-lived, revocable credentials for a **non-interactive** client — the *Werco Assistant* bot, an
+MCP client such as Cursor or Claude Code (see [MCP door](#mcp-door-mcp)) — presented instead of the
+15-minute access token. An API token is an HS256 JWT with `type="api"`, bound to **one real user**
+and anchored to a tenant-scoped `api_tokens` row that is looked up on **every** request
+(`app/services/api_token_service.py::check_api_token`). It authenticates everywhere a user access
+token does, **as that user**: `require_role` decides on every route exactly as for the SPA, tenancy
+is pinned to the row's company, and every write is audited as that user. There is no bot role and no
+bot permission — the token is exactly as powerful as the user it belongs to, and no more.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| POST | `/api-tokens/` | Issue a token for one user of this company. Body `{"user_id", "label", "expires_days"?}` (label 1–100 chars, whitespace-stripped; `expires_days` 1–3650, or omitted = **never expires** — the default for a standing bot) → **201** `ApiTokenIssueResponse`: the metadata listed on the GET row **plus the one-time `token`**. Target user not in this company → **404** (never a cross-tenant hint); target user disabled → **409**; target is a platform admin / superuser → **409** `"API tokens cannot be issued for platform administrators"`, whoever the issuer is | Admin |
+| GET | `/api-tokens/` | List this company's tokens, newest first — metadata only: `id, label, user_id, jti_prefix, expires_at, revoked, revoked_at, revoked_by, revoke_reason, last_used_at, created_by, created_at`. `?user_id=` narrows to one holder; `?include_revoked=true` adds revoked rows (the record of who held access) | Admin |
+| POST | `/api-tokens/{id}/revoke` | Revoke with a reason. Body `{"reason"}` (3–255 chars, whitespace-stripped) → **200** `ApiTokenResponse`. Unknown / cross-tenant id → **404**; already revoked → **409** (the first revocation's reason, actor and instant are the record and are never overwritten) | Admin |
+
+> **Shown once, never stored.** The raw JWT is returned only in the `token` field of the `POST`
+> response. Only its `jti` lands in the `api_tokens` row; the list response carries `jti_prefix`
+> (the first 8 characters) as a correlation handle, which mints nothing without `SECRET_KEY`. A lost
+> token cannot be recovered — revoke it and mint another.
+>
+> **Revocation is DB-authoritative and one-way.** `POST …/revoke` flips the row (`revoked`,
+> `revoked_at`, `revoked_by`, `revoke_reason`); rows are never deleted. Because the row is re-read on
+> every request, the holder is **401** on its very next call. Issuance and revocation each write two
+> tamper-evident `audit_log` rows — an `api_token` create / status-change row, and an
+> `API_TOKEN_ISSUED` / `API_TOKEN_REVOKED` row under `resource_type=authentication` keyed on the
+> token's **user** — all metadata only (label, user, `jti_prefix`, lifetime, reason). The plaintext
+> never appears in a log line, an audit row or an error message. **Every audit row written under an
+> API token carries a credential marker**: `extra_data.credential = {"kind": "api_token",
+> "api_token_id", "jti_prefix", "label"}`, folded in by `AuditService` on every `log_*` helper, so a
+> token's writes are attributed to the bound user (it acts *as* them) yet stay tellable from that
+> person's own interactive actions — and from each other's. An interactive write carries no such key.
+>
+> **Path fence.** A live API token is refused **403** `"API token cannot access this resource"` on
+> every route under `/api/v1/auth` and `/api/v1/api-tokens` that authenticates its bearer through
+> `get_current_user` — no logout, no company switch, no display-token or kiosk-station verbs, and it
+> can never mint, list or revoke tokens (an Admin's interactive act, even when the token belongs to an
+> Admin). The two `/auth` routes that read their credential some other way refuse it too, with a
+> **401**: `POST /auth/refresh` (an API token is not a refresh token) and `POST /auth/kiosk-badge-token`
+> (not a station token). So an API token can never become a session, a refresh token or another
+> token. A revoked or expired token is **401** everywhere, fenced paths included. The fence blocks the
+> **direct** verbs only — it is an intent boundary, not a privilege boundary: a token held by an
+> **Admin** is an Admin on every other route, so it can still create an interactive Admin
+> (`POST /users/`), reset a password or reactivate a user through `/users`, and that new identity can
+> log in and mint tokens. The real boundary is the bound user's role — give a bot the narrowest role
+> that does its job.
+>
+> **The row wins over the claims.** The `api_tokens` row — never the JWT — says who and which
+> company: the JWT's `user_id` / `company_id` must equal the row's or the token is refused, the active
+> company is pinned to the row's `company_id` (a platform admin's switched context never applies, and
+> `/auth/switch-company` is fenced), the context is never read-only, and the row's `expires_at`
+> governs even if the JWT carried a different `exp`. `last_used_at` is a liveness marker, not a hit
+> counter: it is touched at most once per **5 minutes**, through a conditional `UPDATE` committed
+> before any route logic runs. Shop-floor labor written by an API token is never stamped as the
+> kiosk channel — the client's declared channel (or none) is stored, exactly as for a desktop session.
+>
+> **Never a platform principal.** A superuser or `platform_admin` is waved through every `require_role`
+> gate and reaches `/platform/*`, which addresses other companies by explicit id — a row pin constrains
+> none of that. So no API token is ever bound to one: `POST /api-tokens/` refuses such a target with
+> **409** whoever the issuer is (mirroring the tenant user verbs, which refuse to *assign*
+> `platform_admin`), and the shared row check refuses such a holder at use (**401** on the route and at
+> the MCP door), so promoting a user after issue never widens a standing token — it stops it.
+>
+> **Rotating `SECRET_KEY` invalidates every API token at once** — they are signed with the same key
+> as access tokens. That is a feature (the emergency "revoke everything"), not a hazard; re-mint
+> afterwards. Nothing else expires them: no server restart, no password change, no refresh cycle.
+>
+> **No UI in this pass.** Tokens are minted with `curl` (below) or through the MCP tools
+> `create_api_token` / `list_api_tokens` / `revoke_api_token` with an Admin's interactive JWT.
+> Recommended: a **dedicated bot user** per agent (e.g. *Werco Assistant*) at the role the bot
+> actually needs, so the audit trail names the agent and retiring it — revoking the token, or
+> deactivating the user — touches no person's account. **Deactivation retires, it never pauses:**
+> `DELETE /users/{id}` and `PUT /users/{id}` with `is_active: false` revoke every live token the user
+> holds in the same transaction (reason `user deactivated`, actor = the deactivating Admin, one
+> `API_TOKEN_REVOKED` trail each; the `DELETE` response reports `api_tokens_revoked`), so
+> `POST /users/{id}/activate` restores the account and **no token** — mint a new one. A holder whose
+> `is_active` was cleared some other way still answers **403** `"User account is disabled"`.
+
+**Minting a token for the Werco Assistant user** — placeholders only; never paste a real token or
+password into a committed file:
+
+```bash
+API=https://<api-host>/api/v1
+
+# 1. Log in as an Admin (form-encoded, as the SPA does) and keep the 15-minute access token.
+ADMIN_JWT=$(curl -s -X POST "$API/auth/login" \
+  -d "username=<admin-email>" -d "password=<admin-password>" | jq -r .access_token)
+
+# 2. Find the bot user's id — a dedicated, active user of this company.
+curl -s "$API/users/" -H "Authorization: Bearer $ADMIN_JWT" \
+  | jq '.[] | select(.email == "<assistant-user@yourshop.com>") | .id'
+
+# 3. Mint. Omit expires_days for a token that never expires. The "token" field is shown ONCE.
+curl -s -X POST "$API/api-tokens/" \
+  -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" \
+  -d '{"user_id": <assistant-user-id>, "label": "Werco Assistant"}'
+# -> 201 {"id": ..., "label": "Werco Assistant", "user_id": ..., "jti_prefix": "...",
+#         "expires_at": null, "revoked": false, ..., "token": "<the API token - copy it now>"}
+
+# Later: list (metadata only), and revoke with a reason.
+curl -s "$API/api-tokens/?include_revoked=true" -H "Authorization: Bearer $ADMIN_JWT"
+curl -s -X POST "$API/api-tokens/<id>/revoke" \
+  -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" \
+  -d '{"reason": "Bot decommissioned"}'
+```
+
+The token then goes in the `Authorization: Bearer …` header of every request — the MCP door's
+header, or `WERCO_ERP_TOKEN` for the stdio bridge ([docs/MCP.md](MCP.md) → §3.3 / §4).
+
 ### Display tokens (TV wallboards)
 
 Scoped, revocable credentials for unattended shop-floor TVs (A0.5). A display token is a
@@ -7721,8 +7831,8 @@ records, targets) require **Admin / Manager / Supervisor**.
 |--------|----------|-------------|---------------|
 | GET | `/users/` | List all users | Admin / Manager |
 | POST | `/users/` | Create user | Admin |
-| PUT | `/users/{id}` | Update user | Admin |
-| DELETE | `/users/{id}` | Deactivate user (sets `is_active=false`; cannot deactivate yourself) | Admin |
+| PUT | `/users/{id}` | Update user. `is_active: false` also revokes every live API token the user holds (reason `user deactivated`, audited) — see [API tokens](#api-tokens-bots-and-mcp-clients) | Admin |
+| DELETE | `/users/{id}` | Deactivate user (sets `is_active=false`; cannot deactivate yourself). Revokes every live API token the user holds in the same transaction (reason `user deactivated`, one `API_TOKEN_REVOKED` audit trail each); the response carries `api_tokens_revoked`. Reactivation (`POST /users/{id}/activate`) restores the account, never a token | Admin |
 | POST | `/users/{id}/unlock` | Clear failed-login lockout | Admin |
 
 > **User writes are Admin-only; the list read is Admin / Manager.** `GET /users/` (and
@@ -9128,7 +9238,7 @@ What matters from this file's point of view:
   routers with the caller's own bearer token. The router is the boundary: the same `require_role`
   gates, tenant scoping, audit rows, optimistic-locking 409s and per-endpoint size caps apply, and a
   401/403/409/422 comes back verbatim as an `is_error` tool result carrying the server's `detail`.
-- **The catalog is this API.** 659 tools are generated from `app.openapi()` at startup — every
+- **The catalog is this API.** 662 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
   the two Excel-cutover loaders (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import`,
@@ -9142,9 +9252,14 @@ What matters from this file's point of view:
   operation names that are file names are refused. **Route docstrings feed the tool descriptions** —
   keep their first paragraph accurate.
 - **Protocol:** Streamable HTTP, stateless, plain JSON responses; `POST /mcp` with
-  `Accept: application/json, text/event-stream` and `Authorization: Bearer <access token>`. No
-  bearer, an expired or non-`access` token, or a kiosk-scoped token → **401** with
-  `WWW-Authenticate` at the door, before any JSON-RPC is parsed. `GET /mcp` → **405** (`Allow: POST`;
+  `Accept: application/json, text/event-stream` and `Authorization: Bearer <token>` — a user's
+  15-minute access token or, for a standing agent, a long-lived **API token**
+  ([Authentication → API tokens](#api-tokens-bots-and-mcp-clients)), whose `api_tokens` row is
+  checked at the door (`check_api_token` — the same row check `get_current_user` runs: not
+  revoked, not past the row's expiry, claims equal to the row, user active) and again on every
+  dispatched route. No bearer, an expired access token, a revoked / expired API token, a display
+  / station token, or a kiosk-scoped token → **401** with `WWW-Authenticate` at the door, before
+  any JSON-RPC is parsed. `GET /mcp` → **405** (`Allow: POST`;
   a stateless door has no server-push stream). A request before the app's lifespan is entered →
   **503**.
 - **Limits:** the door path is exempt from `MAX_JSON_BODY_BYTES` (a file upload rides base64 inside
@@ -9156,6 +9271,11 @@ What matters from this file's point of view:
   a tool call), which bounds the requests that dispatch nothing inward — `tools/list`, `initialize`,
   rejected calls and unauthenticated probes. Tool results are capped at `WERCO_MCP_MAX_RESULT_CHARS`
   of text and `WERCO_MCP_MAX_BLOB_BYTES` of binary.
+- **API tokens are tools too, and are fenced from themselves.** The `API Tokens` tag generates
+  `create_api_token`, `list_api_tokens` and `revoke_api_token` (Admin only, like the routes). A
+  call authenticated **by** an API token gets the route's **403** `"API token cannot access this
+  resource"` on all three — minting, listing and revoking are an Admin's interactive act, done with
+  an interactive Admin JWT through the door, or with `curl`.
 
 Settings: [ENVIRONMENT_VARIABLES.md → MCP](ENVIRONMENT_VARIABLES.md#mcp-model-context-protocol-door-and-bridge).
 Access model: [RBAC_PERMISSIONS.md → MCP / agent access](RBAC_PERMISSIONS.md#mcp--agent-access).

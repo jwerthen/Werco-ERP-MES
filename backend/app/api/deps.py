@@ -6,12 +6,20 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
-from app.core.security import verify_display_token, verify_kiosk_token, verify_signin_token, verify_token
+from app.core.config import settings
+from app.core.security import (
+    verify_api_token,
+    verify_display_token,
+    verify_kiosk_token,
+    verify_signin_token,
+    verify_token,
+)
 from app.db.database import get_db
 from app.models.display_token import DisplayToken
 from app.models.kiosk_station import KioskStation
 from app.models.signin_station import SigninStation
 from app.models.user import User, UserRole
+from app.services.api_token_service import resolve_api_token_user
 from app.services.audit_service import AuditService
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -70,6 +78,45 @@ def _is_read_only_exempt_path(path: str) -> bool:
     return path.endswith("/auth/logout") or "/auth/switch-company/" in path
 
 
+# Path fence for long-lived per-user API TOKENS (type=="api", minted by
+# POST /api-tokens/ for a bot or an MCP client). The token is honored everywhere a
+# user access token is, as that user, EXCEPT under these two prefixes: no refresh,
+# no logout, no kiosk-badge mint, no company switch, no register, no display-token
+# verbs -- and no minting, listing or revoking of API tokens, which is an Admin's
+# interactive act, never something a token can do to itself. 403 -- not 401 --
+# because the token IS valid; it just cannot reach this resource. Same prefix-test
+# style as the kiosk fence above. Derived from the mounted prefix
+# (``settings.API_V1_PREFIX``) rather than spelled out, so a re-mount can never
+# leave the fence pointing at paths nothing serves.
+_API_PREFIX = settings.API_V1_PREFIX.rstrip("/")
+API_TOKEN_DENIED_PREFIXES = (f"{_API_PREFIX}/auth", f"{_API_PREFIX}/api-tokens")
+# ``User._token_scope`` value for a request authenticated by an API token. Every
+# consumer of ``_token_scope`` tests ``== "kiosk"`` only, so "api" takes the desktop
+# branch (labor source = the client's declared channel, never KIOSK).
+API_TOKEN_SCOPE = "api"
+
+
+def _is_api_token_denied_path(path: str) -> bool:
+    """True when an API token must be refused on this path (see API_TOKEN_DENIED_PREFIXES)."""
+    for denied in API_TOKEN_DENIED_PREFIXES:
+        if path == denied or path.startswith(denied + "/"):
+            return True
+    return False
+
+
+def is_user_bearer(token: str) -> bool:
+    """Is this bearer a USER credential -- an access JWT or an API JWT -- by signature?
+
+    The three sibling principals (``get_display_or_user``, ``get_signin_principal``,
+    ``get_kiosk_or_user``) branch on this before delegating to ``get_current_user``,
+    which then applies the row checks and the API-token fence; a station/display
+    token is neither and falls through to its own branch. Signature only -- a
+    revoked API token is still a user bearer here and is refused (401) inside
+    ``get_current_user``, exactly where an expired access token is.
+    """
+    return verify_token(token) is not None or verify_api_token(token) is not None
+
+
 def get_current_user(
     request: Request,
     db: Session = Depends(get_db),
@@ -82,29 +129,66 @@ def get_current_user(
     )
 
     payload = verify_token(token)
+    api_token_record = None
     if payload is None:
-        raise credentials_exception
+        # Not an access token: an API token (type=="api") is the only other USER
+        # credential. resolve_api_token_user runs the ONE row check (signature,
+        # row by jti, not revoked, not past the ROW's expires_at, claims equal to
+        # the row, user in the row's company) and the throttled last_used_at
+        # touch; None is the same 401 a bad access token gets. The row -- never
+        # the JWT -- says who and which company; the fence says where.
+        resolved = resolve_api_token_user(db, token)
+        if resolved is None:
+            raise credentials_exception
+        user, api_token_record = resolved
+        if _is_api_token_denied_path(request.url.path):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="API token cannot access this resource",
+            )
+    else:
+        user_id = payload.get("user_id")
+        if user_id is None:
+            raise credentials_exception
 
-    user_id = payload.get("user_id")
-    if user_id is None:
-        raise credentials_exception
+        # Kiosk-scope path fence: a badge-minted operator token (scope=="kiosk") is
+        # only honored on the shop-floor paths (+ employee-logout). 403 — not 401 —
+        # everywhere else: the token IS valid, it just cannot reach this resource.
+        # Tokens without a scope claim skip this entirely.
+        if payload.get("scope") == "kiosk" and not _is_kiosk_scope_allowed_path(request.url.path):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Kiosk-scoped token cannot access this resource",
+            )
 
-    # Kiosk-scope path fence: a badge-minted operator token (scope=="kiosk") is
-    # only honored on the shop-floor paths (+ employee-logout). 403 — not 401 —
-    # everywhere else: the token IS valid, it just cannot reach this resource.
-    # Tokens without a scope claim skip this entirely.
-    if payload.get("scope") == "kiosk" and not _is_kiosk_scope_allowed_path(request.url.path):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Kiosk-scoped token cannot access this resource",
-        )
-
-    user = db.query(User).filter(User.id == int(user_id)).first()
-    if user is None:
-        raise credentials_exception
+        user = db.query(User).filter(User.id == int(user_id)).first()
+        if user is None:
+            raise credentials_exception
 
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account is disabled")
+
+    if api_token_record is not None:
+        # The ROW pins tenancy: never the user's current company, never a claim,
+        # and never a platform admin's switched context -- an API token cannot
+        # switch company (the fence refuses /auth/switch-company too). Never
+        # read-only, and scoped "api" so labor telemetry treats it as a desktop.
+        user._active_company_id = api_token_record.company_id
+        user._read_only_company_context = False
+        user._token_scope = API_TOKEN_SCOPE
+        # The credential marker ``AuditService`` folds into every row this
+        # request writes (``extra_data.credential``): a token's writes must be
+        # tellable from the bound user's own interactive ones, and from each
+        # other's -- ``last_used_at`` is a liveness marker, not a trail.
+        user._api_token_id = api_token_record.id
+        user._api_token_jti_prefix = api_token_record.jti_prefix
+        user._api_token_label = api_token_record.label
+        return user
+
+    # An interactive credential: clear the marker explicitly. The same ORM
+    # instance can serve more than one request (a shared identity map), and an
+    # unset marker is what tells ``AuditService`` this write was the person's own.
+    user._api_token_id = None
 
     # Attach active company context from JWT (may differ from user.company_id
     # when a platform admin switches to view another company)
@@ -215,9 +299,10 @@ def get_display_or_user(
 
     SECURITY (A0.5): this is the ONLY dependency that honors display tokens,
     and it must only ever guard the read-only wallboard endpoint. Everywhere
-    else auth flows through ``get_current_user``/``verify_token``, which
-    reject any JWT whose ``type`` claim is not ``"access"`` — so a display
-    token presented to any other endpoint gets a 401.
+    else auth flows through ``get_current_user``, which accepts only
+    ``type == "access"`` JWTs and (through the ``api_tokens`` row check)
+    ``type == "api"`` API tokens — so a display token presented to any other
+    endpoint gets a 401.
 
     Display-token path checks, in order:
       1. signature + JWT expiry + ``type == "display"`` (``verify_display_token``)
@@ -234,8 +319,9 @@ def get_display_or_user(
     )
 
     # Normal user token first — get_current_user applies the full user checks
-    # (active flag, platform-admin company context, read-only context).
-    if verify_token(token) is not None:
+    # (active flag, platform-admin company context, read-only context; for an
+    # API token, the row checks and the /auth + /api-tokens fence).
+    if is_user_bearer(token):
         user = get_current_user(request=request, db=db, token=token)
         # Customer names on the board are for the privileged office roles that
         # also provision displays; operators/quality/shipping/viewers previewing
@@ -298,9 +384,10 @@ def get_signin_principal(
     SECURITY (visitor sign-in): this dependency, alongside ``get_display_or_user``,
     is one of the only two that honor a non-``"access"`` JWT type, and it must
     only ever guard the two visitor write endpoints (sign-in / sign-out).
-    Everywhere else auth flows through ``get_current_user`` / ``verify_token``,
-    which reject any JWT whose ``type`` is not ``"access"`` — so a signin token
-    presented to any other endpoint gets a 401. ``get_display_or_user`` is left
+    Everywhere else auth flows through ``get_current_user``, which accepts only
+    ``type == "access"`` JWTs and (via the ``api_tokens`` row check) ``type ==
+    "api"`` API tokens — so a signin token presented to any other endpoint gets
+    a 401. ``get_display_or_user`` is left
     untouched (the read-only wallboard path stays uncontaminated).
 
     Station-token path checks, in order (the wallboard two-layer pattern):
@@ -318,8 +405,9 @@ def get_signin_principal(
     )
 
     # Normal staff token first — get_current_user applies the full user checks
-    # (active flag, platform-admin company context, read-only context).
-    if verify_token(token) is not None:
+    # (active flag, platform-admin company context, read-only context; for an
+    # API token, the row checks and the /auth + /api-tokens fence).
+    if is_user_bearer(token):
         user = get_current_user(request=request, db=db, token=token)
         return SigninPrincipal(company_id=user._active_company_id, kind="user", user=user)
 
@@ -375,9 +463,9 @@ def get_kiosk_or_user(
     ``get_display_or_user`` and ``get_signin_principal`` — is one of the only
     three that honor a non-``"access"`` JWT type, and it must only ever guard
     the read-only work-center-queue endpoint. Everywhere else auth flows
-    through ``get_current_user`` / ``verify_token``, which reject any JWT whose
-    ``type`` is not ``"access"`` — so a kiosk station token presented to any
-    other endpoint gets a 401. (The badge-token mint validates the station
+    through ``get_current_user``, which accepts only ``type == "access"`` JWTs
+    and (via the ``api_tokens`` row check) ``type == "api"`` API tokens — so a
+    kiosk station token presented to any other endpoint gets a 401. (The badge-token mint validates the station
     token itself against the same DB-row checks; it does not use this
     dependency's user branch.)
 
@@ -397,9 +485,10 @@ def get_kiosk_or_user(
     )
 
     # Normal user token first — get_current_user applies the full user checks
-    # (active flag, platform-admin company context, read-only context, and the
-    # kiosk-scope path fence for badge-minted operator tokens).
-    if verify_token(token) is not None:
+    # (active flag, platform-admin company context, read-only context, the
+    # kiosk-scope path fence for badge-minted operator tokens, and for an API
+    # token the row checks and the /auth + /api-tokens fence).
+    if is_user_bearer(token):
         user = get_current_user(request=request, db=db, token=token)
         return KioskReadPrincipal(company_id=user._active_company_id, kind="user", user=user)
 

@@ -7,16 +7,25 @@ comes from the token's active company, ``require_role`` decides, and audit rows 
 written as that user.
 
 - ``TokenSource`` is the stdio bridge's side: the token comes from the environment
-  (a static access token, a refresh token to rotate through ``POST /auth/refresh``,
-  or an email + password to log in through ``POST /auth/login``). Access tokens live
-  15 minutes, so a bridge that only held a static token would go dark mid-session;
-  refresh-on-401 is what keeps a long agent session alive without ever widening what
-  the token can do.
+  (a static token, a refresh token to rotate through ``POST /auth/refresh``, or an
+  email + password to log in through ``POST /auth/login``). Access tokens live 15
+  minutes, so a bridge that only held a static ACCESS token would go dark
+  mid-session; refresh-on-401 is what keeps a long agent session alive without ever
+  widening what the token can do. A static API TOKEN (``WERCO_ERP_TOKEN=<api token>``,
+  minted by ``POST /api-tokens/``) needs none of that: it never expires unless issued
+  with a lifetime, never 401s until an Admin revokes it, and the rotation path is
+  simply never taken.
 - ``ErpTokenVerifier`` is the HTTP door's side: the SDK's bearer middleware asks it
-  whether a token is acceptable BEFORE any JSON-RPC is parsed, so an expired or
-  kiosk-scoped token gets one clean 401 + ``WWW-Authenticate`` at the door instead of
-  ~650 identical tool errors. The routes still re-validate on every dispatch; the door
-  check is a courtesy, not the control.
+  whether a token is acceptable BEFORE any JSON-RPC is parsed, so an expired, revoked
+  or kiosk-scoped token gets one clean 401 + ``WWW-Authenticate`` at the door instead
+  of ~650 identical tool errors. An access token is accepted on its signature; an API
+  token is accepted only after the SAME row check ``get_current_user`` runs
+  (``api_token_service.check_api_token`` -- not revoked, not expired, claims equal to
+  the row, holder not a platform principal, user active), read through a short-lived
+  session opened for that purpose.
+  That read is the one place this package touches the database, and it is the
+  brief's own rule: one row check, shared, never a second copy. The routes still
+  re-validate on every dispatch; the door check is a courtesy, not the control.
 
 Nothing here logs a token or a password.
 """
@@ -28,10 +37,13 @@ import base64
 import json
 import os
 from dataclasses import dataclass
+from datetime import timezone
 from typing import Any, Mapping, Optional, Protocol
 
 from mcp.server.auth.provider import AccessToken
+from starlette.concurrency import run_in_threadpool
 
+from app.core.security import verify_api_token as _verify_erp_api_token
 from app.core.security import verify_token as _verify_erp_access_token
 from app.mcp.results import ExecResult
 
@@ -103,8 +115,56 @@ def access_token_claims(token: str) -> Optional[Mapping[str, Any]]:
     return claims
 
 
+def api_token_claims(token: str) -> Optional[Mapping[str, Any]]:
+    """The app's own SIGNATURE check for an API token (``type == "api"``) or None.
+
+    Signature only, like ``access_token_claims``: the row check that decides whether
+    the token is still LIVE is ``live_api_token_principal`` (the door) and
+    ``get_current_user`` (every dispatched route).
+    """
+    claims = _verify_erp_api_token(token)
+    if claims is None or not claims.get("jti") or not claims.get("user_id"):
+        return None
+    return claims
+
+
 def token_is_acceptable(token: str) -> bool:
-    return access_token_claims(token) is not None
+    """A user bearer by signature: an access JWT or an API JWT.
+
+    Cheap and read-free, which is why the per-call re-check in ``resolve_auth`` uses
+    it: the door already ran the row check on an API token, and the dispatched route
+    runs it again through ``get_current_user``.
+    """
+    return access_token_claims(token) is not None or api_token_claims(token) is not None
+
+
+def live_api_token_principal(token: str) -> Optional[tuple[int, Optional[int]]]:
+    """``(user_id, expires_at as epoch seconds or None)`` for a LIVE API token, else None.
+
+    Runs ``api_token_service.check_api_token`` -- the ONE row check shared with
+    ``get_current_user`` -- in a short-lived session opened here and closed before
+    returning, plus the door's own ``is_active`` decision (a disabled user is a 401 at
+    the door: there is no user to name a 403 to). Blocking; the verifier runs it in a
+    worker thread. Imports are local so ``python -m app.mcp`` can still set its
+    environment placeholders before ``app.core.config`` is imported (see
+    ``app.mcp.__init__``).
+    """
+    from app.db.database import SessionLocal
+    from app.services.api_token_service import check_api_token
+
+    db = SessionLocal()
+    try:
+        resolved = check_api_token(db, token)
+        if resolved is None:
+            return None
+        user, record = resolved
+        if not user.is_active:
+            return None
+        expires_at = record.expires_at
+        epoch = int(expires_at.replace(tzinfo=timezone.utc).timestamp()) if expires_at is not None else None
+        return int(user.id), epoch
+    finally:
+        db.close()
 
 
 def unverified_expiry(token: str) -> Optional[int]:
@@ -127,18 +187,30 @@ def unverified_expiry(token: str) -> Optional[int]:
 
 
 class ErpTokenVerifier:
-    """``mcp.server.auth.provider.TokenVerifier`` backed by the app's ``verify_token``."""
+    """``mcp.server.auth.provider.TokenVerifier`` backed by the app's own token checks.
+
+    An access token is accepted on its signature (the routes re-validate); an API
+    token is accepted only when its row is live -- the same check the routes run --
+    and its ``expires_at`` is the ROW's, so a revoked or expired token is one clean
+    401 at the door.
+    """
 
     async def verify_token(self, token: str) -> Optional[AccessToken]:
         claims = access_token_claims(token)
-        if claims is None:
+        if claims is not None:
+            return AccessToken(
+                token=token,
+                client_id=str(claims["user_id"]),
+                scopes=[],
+                expires_at=unverified_expiry(token),
+            )
+        if api_token_claims(token) is None:
             return None
-        return AccessToken(
-            token=token,
-            client_id=str(claims["user_id"]),
-            scopes=[],
-            expires_at=unverified_expiry(token),
-        )
+        principal = await run_in_threadpool(live_api_token_principal, token)
+        if principal is None:
+            return None
+        user_id, expires_at = principal
+        return AccessToken(token=token, client_id=str(user_id), scopes=[], expires_at=expires_at)
 
 
 class TokenSource:
