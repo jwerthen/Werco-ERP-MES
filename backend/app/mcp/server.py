@@ -163,7 +163,8 @@ async def resolve_auth(
         if verify_bearer and not token_is_acceptable(token):
             return error_result(
                 status=401,
-                detail="Invalid, expired or kiosk-scoped access token. Obtain a fresh ERP access token and retry.",
+                detail="Invalid, expired, revoked or kiosk-scoped token. Present a live ERP access token or API token "
+                "and retry.",
             )
         client = getattr(request, "client", None)
         client_host = getattr(client, "host", None) or "127.0.0.1"

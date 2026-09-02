@@ -5,6 +5,7 @@ from app.api.endpoints import (
     ai_learning,
     ai_usage,
     analytics,
+    api_tokens,
     audit,
     auth,
     bom,
@@ -105,6 +106,7 @@ api_router.include_router(reports.router, prefix="/reports", tags=["Reports"])
 api_router.include_router(shipping.router, prefix="/shipping", tags=["Shipping"])
 api_router.include_router(quotes.router, prefix="/quotes", tags=["Quotes"])
 api_router.include_router(users.router, prefix="/users", tags=["Users"])
+api_router.include_router(api_tokens.router, prefix="/api-tokens", tags=["API Tokens"])
 api_router.include_router(customers.router, prefix="/customers", tags=["Customers"])
 api_router.include_router(calibration.router, prefix="/calibration", tags=["Calibration"])
 api_router.include_router(scanner.router, prefix="/scanner", tags=["Scanner"])

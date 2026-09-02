@@ -103,3 +103,14 @@ class ApiToken(Base, TenantMixin):
     user = relationship("User", foreign_keys=[user_id])
     creator = relationship("User", foreign_keys=[created_by])
     revoker = relationship("User", foreign_keys=[revoked_by])
+
+    # The list response's correlation handle: enough of the jti to tell two
+    # tokens apart in a listing and an audit row, never enough to matter --
+    # the jti is not the secret (the signature is), and it mints nothing
+    # without SECRET_KEY. NOT a column; the migration lock-step test sees
+    # columns and indexes only.
+    JTI_PREFIX_LENGTH = 8
+
+    @property
+    def jti_prefix(self) -> str:
+        return (self.jti or "")[: self.JTI_PREFIX_LENGTH]
