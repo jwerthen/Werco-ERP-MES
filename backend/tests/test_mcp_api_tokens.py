@@ -288,6 +288,15 @@ class TestVerifier:
         db_session.refresh(row)
         assert row.last_used_at is None, "the door check is a pure read; only a dispatched route touches"
 
+        # The shared check refuses a holder promoted to a platform principal -- at the door too.
+        test_user.is_superuser = True
+        db_session.commit()
+        assert await ErpTokenVerifier().verify_token(token) is None, "a platform principal never rides an API token"
+        assert live_api_token_principal(token) is None
+        test_user.is_superuser = False
+        db_session.commit()
+        assert await ErpTokenVerifier().verify_token(token) is not None
+
         _revoke(client, admin_headers, token_id)
         assert token_is_acceptable(token) is True, "signature-only, by design; the row check is what refuses"
         assert await ErpTokenVerifier().verify_token(token) is None

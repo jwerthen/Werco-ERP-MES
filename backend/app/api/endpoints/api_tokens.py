@@ -8,9 +8,13 @@ pinned to the row's company, and a revoke takes effect on the holder's very
 next request. Minting, listing and revoking are an Admin's interactive act:
 an API token is path-fenced (403) from this router and from ``/auth``, so a
 token can never mint, list or revoke tokens, refresh, log out or switch
-company. The service (``app.services.api_token_service``) audits issuance and
-revocation with metadata only -- the plaintext token is returned exactly once
-and never stored.
+company -- the direct verbs; an Admin-held token is still an Admin on
+``/users``, so the bound user's role is the real boundary. No token is ever
+bound to a platform admin / superuser (409 at mint, refused at use), and
+deactivating a token's user revokes it. The service
+(``app.services.api_token_service``) audits issuance and revocation with
+metadata only -- the plaintext token is returned exactly once and never
+stored -- and every write a token makes carries an audit marker naming it.
 """
 
 from typing import Optional
@@ -52,8 +56,11 @@ def create_api_token(
     could not do from the SPA, it never switches company, and it is refused
     (403) on every ``/auth`` and ``/api-tokens`` route. Omit ``expires_days``
     for a token that never expires (the default for a standing bot); the
-    target must belong to this company (404 otherwise) and be active (409).
-    Issuance is audited; a dedicated bot user account is recommended.
+    target must belong to this company (404 otherwise), be active (409) and
+    not be a platform admin / superuser (409 -- no token ever acts as one).
+    Issuance is audited, every write the token makes carries an audit marker
+    naming it, and deactivating its user revokes it; a dedicated bot user
+    account is recommended.
     """
     record, token = api_token_service.issue_api_token(
         db,

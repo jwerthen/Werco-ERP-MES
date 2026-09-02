@@ -21,7 +21,8 @@ written as that user.
   of ~650 identical tool errors. An access token is accepted on its signature; an API
   token is accepted only after the SAME row check ``get_current_user`` runs
   (``api_token_service.check_api_token`` -- not revoked, not expired, claims equal to
-  the row, user active), read through a short-lived session opened for that purpose.
+  the row, holder not a platform principal, user active), read through a short-lived
+  session opened for that purpose.
   That read is the one place this package touches the database, and it is the
   brief's own rule: one row check, shared, never a second copy. The routes still
   re-validate on every dispatch; the door check is a courtesy, not the control.

@@ -24,12 +24,29 @@ Two functions matter for security, and the split between them is deliberate:
   any route logic (the session holds nothing else), with a conditional UPDATE
   so two workers racing the same token write once.
 
+Two more rules, both enforced here so they have one copy:
+
+- **Never a platform principal.** A superuser or a ``PLATFORM_ADMIN`` is waved
+  through every ``require_role`` gate and reaches ``/platform/*``, which
+  addresses other companies by explicit id -- a row pin constrains none of
+  that. So :func:`issue_api_token` refuses such a target (**409**, whoever the
+  issuer is) and :func:`check_api_token` refuses such a holder at USE, so a
+  promotion after issue can never widen a standing token. This mirrors the
+  tenant user verbs, which refuse to *assign* ``platform_admin``.
+- **Revocation is a conditional write.** The flip carries ``revoked = false``
+  in its ``WHERE`` (:func:`_flip_revoked`), so two revokers -- concurrent, or
+  one holding a stale identity-mapped row -- can never both write: the first
+  revocation's reason, actor and instant are the record, the second gets 409.
+
 Every function that changes state owns its unit of work (commits at the end)
 and writes the audit rows BEFORE that commit so the state change and its trail
-land atomically (``AuditService`` only flushes). Nothing here logs, audits or
-raises the token's plaintext -- only metadata and the first eight characters
-of the ``jti`` (the list response's correlation handle; the ``jti`` alone
-mints nothing without ``SECRET_KEY``).
+land atomically (``AuditService`` only flushes). The one exception is
+:func:`revoke_api_tokens_for_user`, the deactivation sweep: it flushes and
+leaves the commit to the user verb that called it, so the account's status
+flip and its token revocations land in one transaction. Nothing here logs,
+audits or raises the token's plaintext -- only metadata and the first eight
+characters of the ``jti`` (the list response's correlation handle; the ``jti``
+alone mints nothing without ``SECRET_KEY``).
 """
 
 from __future__ import annotations
@@ -48,7 +65,8 @@ from app.core.security import create_api_token, verify_api_token
 from app.core.time_utils import to_utc_iso
 from app.db.tenant_filter import tenant_query
 from app.models.api_token import ApiToken
-from app.models.user import User
+from app.models.user import User, UserRole
+from app.schemas.api_token import MAX_API_TOKEN_EXPIRES_DAYS
 from app.services.audit_service import AuditService
 
 logger = logging.getLogger(__name__)
@@ -59,10 +77,23 @@ API_TOKEN_RESOURCE_TYPE = "api_token"
 # sits beside LOGIN_SUCCESS / TOKEN_REFRESHED in an authentication query.
 AUTH_EVENT_ISSUED = "API_TOKEN_ISSUED"
 AUTH_EVENT_REVOKED = "API_TOKEN_REVOKED"
-# ``expires_days`` upper bound (ten years); ``None`` is the owner's default -- never.
-MAX_API_TOKEN_EXPIRES_DAYS = 3650
+# ``expires_days`` upper bound (ten years; ``None`` is the owner's default -- never)
+# is the SCHEMA's constant, imported above: the wire bound and the defensive
+# re-check below (for MCP / direct service callers) can never drift apart.
 # ``last_used_at`` is a coarse liveness marker, not a hit counter.
 LAST_USED_TOUCH_INTERVAL = timedelta(minutes=5)
+PLATFORM_PRINCIPAL_DETAIL = "API tokens cannot be issued for platform administrators"
+# The reason stamped on every token the deactivation sweep revokes.
+DEACTIVATION_REVOKE_REASON = "user deactivated"
+
+
+def is_platform_principal(user: User) -> bool:
+    """A superuser or a ``PLATFORM_ADMIN``: the two things ``require_role`` waves through unconditionally.
+
+    An API token must never act as one (see the module docstring); checked at
+    mint (:func:`issue_api_token`) AND at use (:func:`check_api_token`).
+    """
+    return bool(user.is_superuser) or user.role == UserRole.PLATFORM_ADMIN
 
 
 # --------------------------------------------------------------------------- auth path
@@ -80,6 +111,8 @@ def check_api_token(db: Session, token: str, *, now: Optional[datetime] = None) 
       5. the JWT's ``user_id`` / ``company_id`` equal the row's (the row is
          authoritative; a forged claim can never widen tenancy)
       6. the user exists and belongs to the row's company
+      7. the user is not a platform principal (superuser / ``PLATFORM_ADMIN``):
+         a holder promoted after issue is refused, never widened
     Pure read: no touch, no audit, no commit. ``is_active`` is the CALLER's
     decision -- see the module docstring.
     """
@@ -100,6 +133,8 @@ def check_api_token(db: Session, token: str, *, now: Optional[datetime] = None) 
 
     user = db.query(User).filter(User.id == record.user_id).first()
     if user is None or user.company_id != record.company_id:
+        return None
+    if is_platform_principal(user):
         return None
     return user, record
 
@@ -193,20 +228,24 @@ def issue_api_token(
     """Create an ``api_tokens`` row + the matching JWT. Returns ``(record, jwt)``.
 
     The target user must belong to ``company_id`` (**404** otherwise -- never a
-    cross-tenant hint) and be active (**409**). ``expires_days`` ``None`` means
+    cross-tenant hint), must not be a platform principal (**409** -- a superuser
+    or ``PLATFORM_ADMIN`` bypasses every role gate, so no tenant path may bind a
+    standing credential to one) and be active (**409**). ``expires_days`` ``None`` means
     the row's ``expires_at`` is NULL (never expires); otherwise 1..3650. The
     JWT is returned exactly once and is never persisted; the audit row and the
     ``API_TOKEN_ISSUED`` auth event carry metadata only.
     """
     if expires_days is not None and not 1 <= expires_days <= MAX_API_TOKEN_EXPIRES_DAYS:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"expires_days must be between 1 and {MAX_API_TOKEN_EXPIRES_DAYS}, or omitted for a token that never expires",
         )
 
     target = tenant_query(db, User, company_id).filter(User.id == user_id).first()
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if is_platform_principal(target):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=PLATFORM_PRINCIPAL_DETAIL)
     if not target.is_active:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -265,6 +304,44 @@ def list_api_tokens(
     return query.order_by(ApiToken.created_at.desc(), ApiToken.id.desc()).all()
 
 
+def _flip_revoked(db: Session, record: ApiToken, *, revoked_by: int, reason: str, now: datetime) -> bool:
+    """The one-way flip as a CONDITIONAL ``UPDATE`` -- ``revoked = false`` in the ``WHERE``.
+
+    The object a caller just checked may be a stale-but-unexpired identity-map
+    copy, and under READ COMMITTED two revokers can both read ``revoked = false``
+    before either commits; an unconditional write would let the second silently
+    replace the first's reason, actor and instant. With the predicate exactly one
+    revoker ever writes -- the other gets ``False`` and must refuse. ``record`` is
+    refreshed afterwards so it reads what the table now holds, either way.
+    """
+    updated = (
+        db.query(ApiToken)
+        .filter(ApiToken.id == record.id, ApiToken.company_id == record.company_id, ApiToken.revoked.is_(False))
+        .update(
+            {"revoked": True, "revoked_at": now, "revoked_by": revoked_by, "revoke_reason": reason},
+            synchronize_session=False,
+        )
+    )
+    db.refresh(record)
+    return updated == 1
+
+
+def _audit_revocation(audit: AuditService, record: ApiToken, holder: Optional[User], reason: str) -> None:
+    """The status-change row + ``API_TOKEN_REVOKED`` event one revocation writes (metadata only)."""
+    holder_email = holder.email if holder is not None else f"user {record.user_id}"
+    audit.log_status_change(
+        resource_type=API_TOKEN_RESOURCE_TYPE,
+        resource_id=record.id,
+        resource_identifier=record.label,
+        old_status="active",
+        new_status="revoked",
+        description=f"Revoked API token '{record.label}' for {holder_email}: {reason}",
+        extra_data={"reason": reason, "user_id": record.user_id, "jti_prefix": record.jti_prefix},
+    )
+    if holder is not None:
+        _log_auth_event(audit, AUTH_EVENT_REVOKED, user=holder, record=record, extra={"reason": reason})
+
+
 def revoke_api_token(
     db: Session,
     *,
@@ -278,35 +355,72 @@ def revoke_api_token(
 
     Revocation is a status flip, never a delete -- the row stays as the record
     of who held access. One-way: the FIRST revocation's reason, actor and
-    instant are the record, so a second call refuses rather than overwrites.
+    instant are the record, so a second call refuses rather than overwrites --
+    and that holds under concurrency too: the lookup is ``populate_existing``
+    (a stale identity-map copy is re-read from the table) under a row lock
+    (``with_for_update``, a no-op on SQLite), and the flip itself is the
+    conditional ``UPDATE`` of :func:`_flip_revoked`, so a second revoker whose
+    read predates the first's commit gets the same 409 rather than the write.
     The auth path re-reads the row on every request, so the holder is 401 on
     its very next call.
     """
-    record = tenant_query(db, ApiToken, company_id).filter(ApiToken.id == token_id).first()
+    record = (
+        tenant_query(db, ApiToken, company_id)
+        .filter(ApiToken.id == token_id)
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API token not found")
     if record.revoked:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="API token is already revoked")
-
-    now = datetime.utcnow()
-    record.revoked = True
-    record.revoked_at = now
-    record.revoked_by = revoked_by
-    record.revoke_reason = reason
+    if not _flip_revoked(db, record, revoked_by=revoked_by, reason=reason, now=datetime.utcnow()):
+        # Lost the race to another revoker: their write is the record.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="API token is already revoked")
 
     holder = db.query(User).filter(User.id == record.user_id).first()
-    holder_email = holder.email if holder is not None else f"user {record.user_id}"
-    audit.log_status_change(
-        resource_type=API_TOKEN_RESOURCE_TYPE,
-        resource_id=record.id,
-        resource_identifier=record.label,
-        old_status="active",
-        new_status="revoked",
-        description=f"Revoked API token '{record.label}' for {holder_email}: {reason}",
-        extra_data={"reason": reason, "user_id": record.user_id, "jti_prefix": record.jti_prefix},
-    )
-    if holder is not None:
-        _log_auth_event(audit, AUTH_EVENT_REVOKED, user=holder, record=record, extra={"reason": reason})
+    _audit_revocation(audit, record, holder, reason)
     db.commit()
     db.refresh(record)
     return record
+
+
+def revoke_api_tokens_for_user(
+    db: Session,
+    *,
+    company_id: int,
+    user_id: int,
+    revoked_by: int,
+    reason: str,
+    audit: AuditService,
+) -> List[ApiToken]:
+    """Revoke every live token ``user_id`` holds in ``company_id`` -- the deactivation sweep.
+
+    Called by the user-deactivation verbs so a disabled holder's tokens are
+    RETIRED, not paused: without it they stayed ``revoked = false`` and a later
+    reactivation silently re-armed a credential whose plaintext lives on a bot
+    host nobody controls. Each token gets the same status-change row and
+    ``API_TOKEN_REVOKED`` event a manual revoke writes, actor = the deactivating
+    Admin. Flushes but does NOT commit (see the module docstring) -- the user's
+    status flip and its token revocations are one transaction. Returns the
+    tokens this call revoked; one a concurrent revoker beat it to is skipped.
+    """
+    holder = tenant_query(db, User, company_id).filter(User.id == user_id).first()
+    records = (
+        tenant_query(db, ApiToken, company_id)
+        .filter(ApiToken.user_id == user_id, ApiToken.revoked.is_(False))
+        .order_by(ApiToken.id)
+        .populate_existing()
+        .with_for_update()
+        .all()
+    )
+    now = datetime.utcnow()
+    revoked: List[ApiToken] = []
+    for record in records:
+        if not _flip_revoked(db, record, revoked_by=revoked_by, reason=reason, now=now):
+            continue
+        _audit_revocation(audit, record, holder, reason)
+        revoked.append(record)
+    db.flush()
+    return revoked

@@ -2087,13 +2087,27 @@ and writes an `EXPORT` audit row through `AuditService`:
 > access this resource"` — no refresh, logout, company switch, display-token or kiosk-station verbs,
 > and never mint, list or revoke tokens, which is an Admin's interactive act even when the token
 > belongs to an Admin), or outlive revocation / expiry / user deactivation (the row is re-read on
-> every request: revoked or expired → **401** on the next call; a disabled holder → **403**). Only
-> Admins mint one, the target must be an active user of the same company (404 / 409 otherwise),
-> and the default lifetime is *never* — so give each agent a **dedicated account** at the role it
-> needs (see [MCP / agent access](#mcp--agent-access)) rather than a person's login, and revoke
-> with a reason when it is retired. No UI yet: `curl`, or the `create_api_token` /
-> `list_api_tokens` / `revoke_api_token` MCP tools with an interactive Admin JWT. See
-> [docs/API.md](API.md) → Authentication → API tokens.
+> every request: revoked or expired → **401** on the next call; deactivating the holder through
+> `DELETE /users/{id}` or `PUT /users/{id}` `is_active: false` **revokes** every token it holds in
+> the same transaction — reason `user deactivated`, audited `API_TOKEN_REVOKED` — so reactivation
+> restores the account and no token; a holder disabled some other way → **403**). That fence is an
+> intent boundary, not a privilege boundary: an **Admin**-held token is still an Admin on `/users`,
+> so it can create an interactive Admin, reset a password or reactivate a user — the bound user's
+> role is the real boundary, so give a bot the narrowest role that does its job. **Never a platform
+> principal**: a superuser / `platform_admin` bypasses every `require_role` gate and reaches
+> `/platform/*` by explicit company id, so `POST /api-tokens/` refuses such a target (**409**,
+> whoever the issuer is — the same line the tenant user verbs hold by refusing to *assign*
+> `platform_admin`) and the row check refuses such a holder at use, so a later promotion stops a
+> standing token rather than widening it. **Every audit row written under an API token carries
+> `extra_data.credential`** (`kind: api_token`, `api_token_id`, `jti_prefix`, `label`), folded in by
+> `AuditService`, so a token's writes are attributed to the bound user yet tellable from that
+> person's own interactive actions and from each other's. Only Admins mint one, the target must be
+> an active, non-platform user of the same company (404 / 409 otherwise), and the default lifetime
+> is *never* — so give each agent a **dedicated account** at the role it needs (see
+> [MCP / agent access](#mcp--agent-access)) rather than a person's login, and revoke with a reason
+> when it is retired. No UI yet: `curl`, or the `create_api_token` / `list_api_tokens` /
+> `revoke_api_token` MCP tools with an interactive Admin JWT. See [docs/API.md](API.md) →
+> Authentication → API tokens.
 
 ## Backend Implementation
 

@@ -590,7 +590,7 @@ bot permission — the token is exactly as powerful as the user it belongs to, a
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| POST | `/api-tokens/` | Issue a token for one user of this company. Body `{"user_id", "label", "expires_days"?}` (label 1–100 chars, whitespace-stripped; `expires_days` 1–3650, or omitted = **never expires** — the default for a standing bot) → **201** `ApiTokenIssueResponse`: the metadata listed on the GET row **plus the one-time `token`**. Target user not in this company → **404** (never a cross-tenant hint); target user disabled → **409** | Admin |
+| POST | `/api-tokens/` | Issue a token for one user of this company. Body `{"user_id", "label", "expires_days"?}` (label 1–100 chars, whitespace-stripped; `expires_days` 1–3650, or omitted = **never expires** — the default for a standing bot) → **201** `ApiTokenIssueResponse`: the metadata listed on the GET row **plus the one-time `token`**. Target user not in this company → **404** (never a cross-tenant hint); target user disabled → **409**; target is a platform admin / superuser → **409** `"API tokens cannot be issued for platform administrators"`, whoever the issuer is | Admin |
 | GET | `/api-tokens/` | List this company's tokens, newest first — metadata only: `id, label, user_id, jti_prefix, expires_at, revoked, revoked_at, revoked_by, revoke_reason, last_used_at, created_by, created_at`. `?user_id=` narrows to one holder; `?include_revoked=true` adds revoked rows (the record of who held access) | Admin |
 | POST | `/api-tokens/{id}/revoke` | Revoke with a reason. Body `{"reason"}` (3–255 chars, whitespace-stripped) → **200** `ApiTokenResponse`. Unknown / cross-tenant id → **404**; already revoked → **409** (the first revocation's reason, actor and instant are the record and are never overwritten) | Admin |
 
@@ -605,7 +605,11 @@ bot permission — the token is exactly as powerful as the user it belongs to, a
 > tamper-evident `audit_log` rows — an `api_token` create / status-change row, and an
 > `API_TOKEN_ISSUED` / `API_TOKEN_REVOKED` row under `resource_type=authentication` keyed on the
 > token's **user** — all metadata only (label, user, `jti_prefix`, lifetime, reason). The plaintext
-> never appears in a log line, an audit row or an error message.
+> never appears in a log line, an audit row or an error message. **Every audit row written under an
+> API token carries a credential marker**: `extra_data.credential = {"kind": "api_token",
+> "api_token_id", "jti_prefix", "label"}`, folded in by `AuditService` on every `log_*` helper, so a
+> token's writes are attributed to the bound user (it acts *as* them) yet stay tellable from that
+> person's own interactive actions — and from each other's. An interactive write carries no such key.
 >
 > **Path fence.** A live API token is refused **403** `"API token cannot access this resource"` on
 > every route under `/api/v1/auth` and `/api/v1/api-tokens` that authenticates its bearer through
@@ -614,7 +618,12 @@ bot permission — the token is exactly as powerful as the user it belongs to, a
 > Admin). The two `/auth` routes that read their credential some other way refuse it too, with a
 > **401**: `POST /auth/refresh` (an API token is not a refresh token) and `POST /auth/kiosk-badge-token`
 > (not a station token). So an API token can never become a session, a refresh token or another
-> token. A revoked or expired token is **401** everywhere, fenced paths included.
+> token. A revoked or expired token is **401** everywhere, fenced paths included. The fence blocks the
+> **direct** verbs only — it is an intent boundary, not a privilege boundary: a token held by an
+> **Admin** is an Admin on every other route, so it can still create an interactive Admin
+> (`POST /users/`), reset a password or reactivate a user through `/users`, and that new identity can
+> log in and mint tokens. The real boundary is the bound user's role — give a bot the narrowest role
+> that does its job.
 >
 > **The row wins over the claims.** The `api_tokens` row — never the JWT — says who and which
 > company: the JWT's `user_id` / `company_id` must equal the row's or the token is refused, the active
@@ -625,6 +634,13 @@ bot permission — the token is exactly as powerful as the user it belongs to, a
 > before any route logic runs. Shop-floor labor written by an API token is never stamped as the
 > kiosk channel — the client's declared channel (or none) is stored, exactly as for a desktop session.
 >
+> **Never a platform principal.** A superuser or `platform_admin` is waved through every `require_role`
+> gate and reaches `/platform/*`, which addresses other companies by explicit id — a row pin constrains
+> none of that. So no API token is ever bound to one: `POST /api-tokens/` refuses such a target with
+> **409** whoever the issuer is (mirroring the tenant user verbs, which refuse to *assign*
+> `platform_admin`), and the shared row check refuses such a holder at use (**401** on the route and at
+> the MCP door), so promoting a user after issue never widens a standing token — it stops it.
+>
 > **Rotating `SECRET_KEY` invalidates every API token at once** — they are signed with the same key
 > as access tokens. That is a feature (the emergency "revoke everything"), not a hazard; re-mint
 > afterwards. Nothing else expires them: no server restart, no password change, no refresh cycle.
@@ -633,8 +649,12 @@ bot permission — the token is exactly as powerful as the user it belongs to, a
 > `create_api_token` / `list_api_tokens` / `revoke_api_token` with an Admin's interactive JWT.
 > Recommended: a **dedicated bot user** per agent (e.g. *Werco Assistant*) at the role the bot
 > actually needs, so the audit trail names the agent and retiring it — revoking the token, or
-> deactivating the user (a disabled holder's token answers **403** `"User account is disabled"`) —
-> touches no person's account.
+> deactivating the user — touches no person's account. **Deactivation retires, it never pauses:**
+> `DELETE /users/{id}` and `PUT /users/{id}` with `is_active: false` revoke every live token the user
+> holds in the same transaction (reason `user deactivated`, actor = the deactivating Admin, one
+> `API_TOKEN_REVOKED` trail each; the `DELETE` response reports `api_tokens_revoked`), so
+> `POST /users/{id}/activate` restores the account and **no token** — mint a new one. A holder whose
+> `is_active` was cleared some other way still answers **403** `"User account is disabled"`.
 
 **Minting a token for the Werco Assistant user** — placeholders only; never paste a real token or
 password into a committed file:
@@ -7811,8 +7831,8 @@ records, targets) require **Admin / Manager / Supervisor**.
 |--------|----------|-------------|---------------|
 | GET | `/users/` | List all users | Admin / Manager |
 | POST | `/users/` | Create user | Admin |
-| PUT | `/users/{id}` | Update user | Admin |
-| DELETE | `/users/{id}` | Deactivate user (sets `is_active=false`; cannot deactivate yourself) | Admin |
+| PUT | `/users/{id}` | Update user. `is_active: false` also revokes every live API token the user holds (reason `user deactivated`, audited) — see [API tokens](#api-tokens-bots-and-mcp-clients) | Admin |
+| DELETE | `/users/{id}` | Deactivate user (sets `is_active=false`; cannot deactivate yourself). Revokes every live API token the user holds in the same transaction (reason `user deactivated`, one `API_TOKEN_REVOKED` audit trail each); the response carries `api_tokens_revoked`. Reactivation (`POST /users/{id}/activate`) restores the account, never a token | Admin |
 | POST | `/users/{id}/unlock` | Clear failed-login lockout | Admin |
 
 > **User writes are Admin-only; the list read is Admin / Manager.** `GET /users/` (and

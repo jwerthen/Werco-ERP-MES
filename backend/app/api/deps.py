@@ -6,6 +6,7 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.security import (
     verify_api_token,
     verify_display_token,
@@ -84,8 +85,11 @@ def _is_read_only_exempt_path(path: str) -> bool:
 # verbs -- and no minting, listing or revoking of API tokens, which is an Admin's
 # interactive act, never something a token can do to itself. 403 -- not 401 --
 # because the token IS valid; it just cannot reach this resource. Same prefix-test
-# style as the kiosk fence above.
-API_TOKEN_DENIED_PREFIXES = ("/api/v1/auth", "/api/v1/api-tokens")
+# style as the kiosk fence above. Derived from the mounted prefix
+# (``settings.API_V1_PREFIX``) rather than spelled out, so a re-mount can never
+# leave the fence pointing at paths nothing serves.
+_API_PREFIX = settings.API_V1_PREFIX.rstrip("/")
+API_TOKEN_DENIED_PREFIXES = (f"{_API_PREFIX}/auth", f"{_API_PREFIX}/api-tokens")
 # ``User._token_scope`` value for a request authenticated by an API token. Every
 # consumer of ``_token_scope`` tests ``== "kiosk"`` only, so "api" takes the desktop
 # branch (labor source = the client's declared channel, never KIOSK).
@@ -172,7 +176,19 @@ def get_current_user(
         user._active_company_id = api_token_record.company_id
         user._read_only_company_context = False
         user._token_scope = API_TOKEN_SCOPE
+        # The credential marker ``AuditService`` folds into every row this
+        # request writes (``extra_data.credential``): a token's writes must be
+        # tellable from the bound user's own interactive ones, and from each
+        # other's -- ``last_used_at`` is a liveness marker, not a trail.
+        user._api_token_id = api_token_record.id
+        user._api_token_jti_prefix = api_token_record.jti_prefix
+        user._api_token_label = api_token_record.label
         return user
+
+    # An interactive credential: clear the marker explicitly. The same ORM
+    # instance can serve more than one request (a shared identity map), and an
+    # unset marker is what tells ``AuditService`` this write was the person's own.
+    user._api_token_id = None
 
     # Attach active company context from JWT (may differ from user.company_id
     # when a platform admin switches to view another company)

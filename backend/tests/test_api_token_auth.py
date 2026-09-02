@@ -21,6 +21,7 @@ it, the comparison is bound to a bare boolean first.
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -31,10 +32,17 @@ from sqlalchemy.orm import Session
 from starlette.requests import Request
 
 from app.api import deps
-from app.api.deps import API_TOKEN_SCOPE, _is_api_token_denied_path, get_current_user, is_user_bearer
+from app.api.deps import (
+    API_TOKEN_DENIED_PREFIXES,
+    API_TOKEN_SCOPE,
+    _is_api_token_denied_path,
+    get_current_user,
+    is_user_bearer,
+)
 from app.core.config import settings
 from app.core.security import create_access_token, create_api_token, create_display_token
 from app.models.api_token import ApiToken
+from app.models.audit_log import AuditLog
 from app.models.part import Part
 from app.models.time_entry import TimeEntry, TimeEntrySource
 from app.models.user import User
@@ -43,6 +51,7 @@ from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.services import api_token_service
 from app.services.api_token_service import LAST_USED_TOUCH_INTERVAL, touch_api_token_last_used
+from app.services.audit_service import AuditService
 
 pytestmark = pytest.mark.api
 
@@ -120,25 +129,53 @@ class TestResolvesTheUser:
         _id, admin_api = _issue(client, admin_headers, admin_user)
         assert client.get(ADMIN_ONLY_URL, headers=_bearer(admin_api)).status_code == 200
 
-    def test_a_write_is_attributed_to_the_tokens_user(
+    def test_a_write_is_attributed_to_the_tokens_user_and_marked_as_the_tokens(
         self, client: TestClient, db_session: Session, manager_token, test_user: User
     ):
-        _id, token = manager_token
-        response = client.post(
-            PARTS_URL,
-            json={
-                "part_number": "API-TOKEN-PART-1",
-                "name": "Made by the bot",
-                "part_type": "manufactured",
-                "unit_of_measure": "each",
-            },
-            headers=_bearer(token),
-        )
-        assert response.status_code in (200, 201), response.text
-        row = db_session.query(Part).filter(Part.part_number == "API-TOKEN-PART-1").one()
-        assert row.company_id == 1
-        if hasattr(row, "created_by"):
-            assert row.created_by in (None, test_user.id)
+        """The audit row names the bound user AND carries the credential marker; an interactive write does not.
+
+        Without the marker a token's writes were indistinguishable from the person's
+        own -- a non-repudiation gap on quality records (an Admin can mint a token for
+        a human inspector). ``extra_data.credential`` answers "which credential did this".
+        """
+        token_id, token = manager_token
+        api_row = db_session.get(ApiToken, token_id)
+
+        def _create(part_number: str, headers: dict) -> AuditLog:
+            response = client.post(
+                PARTS_URL,
+                json={
+                    "part_number": part_number,
+                    "name": "Made through the seam under test",
+                    "part_type": "manufactured",
+                    "unit_of_measure": "each",
+                },
+                headers=headers,
+            )
+            assert response.status_code in (200, 201), response.text
+            part = db_session.query(Part).filter(Part.part_number == part_number).one()
+            assert part.company_id == 1
+            return (
+                db_session.query(AuditLog)
+                .filter(AuditLog.resource_type == "part", AuditLog.resource_id == part.id, AuditLog.action == "CREATE")
+                .one()
+            )
+
+        by_token = _create("API-TOKEN-PART-1", _bearer(token))
+        assert by_token.user_id == test_user.id, "attributed to the bound user, exactly as the SPA would be"
+        assert by_token.extra_data[AuditService.CREDENTIAL_KEY] == {
+            "kind": "api_token",
+            "api_token_id": token_id,
+            "jti_prefix": api_row.jti_prefix,
+            "label": api_row.label,
+        }
+        marker_text = json.dumps(by_token.extra_data)
+        assert (token not in marker_text) is True and (api_row.jti not in marker_text) is True
+
+        # The same person, interactively, on the SAME ORM instance: no marker.
+        by_person = _create("API-TOKEN-PART-2", _bearer(create_access_token(subject=test_user.id, company_id=1)))
+        assert by_person.user_id == test_user.id
+        assert AuditService.CREDENTIAL_KEY not in (by_person.extra_data or {})
 
     def test_pins_active_company_to_the_row_never_read_only_scope_api(
         self, client: TestClient, db_session: Session, manager_token, test_user: User
@@ -151,23 +188,27 @@ class TestResolvesTheUser:
         assert user._read_only_company_context is False
         assert user._token_scope == API_TOKEN_SCOPE == "api"
         assert deps.get_current_company_id(user) == 1
+        assert user._api_token_id == token_id, "the credential marker AuditService folds into every row"
 
-    def test_platform_admins_switched_context_cannot_ride_an_api_token(
+        # The same instance serving an interactive credential next: the marker is cleared.
+        again = get_current_user(
+            _request_for(PARTS_URL), db=db_session, token=create_access_token(subject=test_user.id, company_id=1)
+        )
+        assert again is user and again._api_token_id is None
+
+    def test_platform_principals_never_hold_or_ride_an_api_token(
         self, client: TestClient, db_session: Session, admin_headers: dict, admin_user: User
     ):
-        """An access token can carry a switched company_id; an API token's company is the ROW's."""
+        """An access token can carry a switched company_id; an API token's company is the ROW's --
+        and a superuser / PLATFORM_ADMIN holds no API token at all (409 at mint, 401 at use):
+        ``require_role`` waves those principals through every gate and ``/platform/*`` addresses
+        other companies by explicit id, which no row pin constrains."""
         from tests.test_api_tokens import seed_second_company
 
         seed_second_company(db_session)
-        admin_user.is_superuser = True
-        db_session.commit()
-        _id, token = _issue(client, admin_headers, admin_user)
+        _id, token = _issue(client, admin_headers, admin_user)  # a plain tenant Admin: fine
         row = db_session.query(ApiToken).one()
         assert row.company_id == 1
-
-        # A platform admin's ACCESS token may be minted for company 2; the API token never is.
-        switched = create_access_token(subject=admin_user.id, company_id=2)
-        assert get_current_user(_request_for(PARTS_URL), db=db_session, token=switched)._active_company_id == 2
         assert get_current_user(_request_for(PARTS_URL), db=db_session, token=token)._active_company_id == 1
         forged = jwt.encode(
             {"sub": f"api:{row.jti}", "type": "api", "jti": row.jti, "user_id": admin_user.id, "company_id": 2},
@@ -177,6 +218,21 @@ class TestResolvesTheUser:
         with pytest.raises(HTTPException) as excinfo:
             get_current_user(_request_for(PARTS_URL), db=db_session, token=forged)
         assert excinfo.value.status_code == 401
+
+        # Promote the holder: their ACCESS token may switch company; the standing token is refused.
+        admin_user.is_superuser = True
+        db_session.commit()
+        switched = create_access_token(subject=admin_user.id, company_id=2)
+        assert get_current_user(_request_for(PARTS_URL), db=db_session, token=switched)._active_company_id == 2
+        with pytest.raises(HTTPException) as excinfo:
+            get_current_user(_request_for(PARTS_URL), db=db_session, token=token)
+        assert excinfo.value.status_code == 401, "refused, never widened"
+        assert client.get(PARTS_URL, headers=_bearer(token)).status_code == 401
+        refused = client.post(
+            API_TOKENS_URL, json={"user_id": admin_user.id, "label": "for the superuser"}, headers=admin_headers
+        )
+        assert refused.status_code == 409
+        assert db_session.query(ApiToken).count() == 1
 
 
 # --------------------------------------------------------------------------- fence
@@ -202,6 +258,12 @@ class TestFence:
     )
     def test_denied_path_predicate(self, path: str, expected: bool):
         assert _is_api_token_denied_path(path) is expected
+
+    def test_denied_prefixes_derive_from_the_mounted_api_prefix(self):
+        """The fence follows ``settings.API_V1_PREFIX`` -- a re-mount can never leave it inert."""
+        prefix = settings.API_V1_PREFIX.rstrip("/")
+        assert API_TOKEN_DENIED_PREFIXES == (f"{prefix}/auth", f"{prefix}/api-tokens")
+        assert settings.API_V1_PREFIX == "/api/v1", "the docs, the SPA client and the MCP door all spell this prefix"
 
     def test_fence_is_403_before_body_validation(self, client: TestClient, admin_headers: dict, manager_token):
         token_id, token = manager_token

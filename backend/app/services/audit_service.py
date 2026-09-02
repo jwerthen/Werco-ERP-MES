@@ -207,6 +207,15 @@ class AuditService:
         "system": "system",
     }
 
+    # ``extra_data`` key under which every row written on a request that was
+    # authenticated by an API TOKEN carries the credential marker
+    # ``{"kind": "api_token", "api_token_id", "jti_prefix", "label"}``. A token's
+    # writes are attributed to the bound user (correct -- it acts AS them) and
+    # would otherwise be indistinguishable from that person's own interactive
+    # actions, and from each other; the marker answers "which credential did
+    # this" on every row, through this service, never by a direct write.
+    CREDENTIAL_KEY = "credential"
+
     def __init__(
         self,
         db: Session,
@@ -222,6 +231,9 @@ class AuditService:
         self.company_id = self._resolve_company_id(user, company_id)
         self._ip_address = self._get_ip_address()
         self._user_agent = self._get_user_agent()
+        # Set only when ``get_current_user`` resolved the actor from an API token
+        # (``user._api_token_id``); None for every interactive / system actor.
+        self._credential = self._resolve_credential(user)
 
     @staticmethod
     def _resolve_company_id(user: Optional[User], explicit: Optional[int] = None) -> Optional[int]:
@@ -247,6 +259,25 @@ class AuditService:
         if active is not None:
             return active
         return getattr(user, "company_id", None)
+
+    @staticmethod
+    def _resolve_credential(user: Optional[User]) -> Optional[Dict[str, Any]]:
+        """The API-token marker for this actor, or None for an interactive / system actor."""
+        token_id = getattr(user, "_api_token_id", None) if user is not None else None
+        if token_id is None:
+            return None
+        return {
+            "kind": "api_token",
+            "api_token_id": token_id,
+            "jti_prefix": getattr(user, "_api_token_jti_prefix", None),
+            "label": getattr(user, "_api_token_label", None),
+        }
+
+    def _with_credential(self, extra_data: Optional[Dict]) -> Optional[Dict]:
+        """Fold the credential marker into a row's ``extra_data`` (the marker always wins the key)."""
+        if self._credential is None:
+            return extra_data
+        return {**(extra_data or {}), self.CREDENTIAL_KEY: dict(self._credential)}
 
     def _get_ip_address(self) -> Optional[str]:
         """Extract IP address from request."""
@@ -476,6 +507,11 @@ class AuditService:
         This method never propagates an audit failure to the caller.
         """
         try:
+            # Credential marker (API-token requests only) -- folded in here so
+            # every helper (log_create / log_update / log_delete /
+            # log_status_change / log) carries it.
+            extra_data = self._with_credential(extra_data)
+
             # Include correlation ID for request tracing
             correlation_id = get_correlation_id()
 

@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.security import create_api_token, verify_api_token, verify_token
+from app.db.database import SessionLocal
 from app.models.api_token import ApiToken
 from app.models.audit_log import AuditLog
 from app.models.company import Company
@@ -35,14 +36,19 @@ from app.services import api_token_service
 from app.services.api_token_service import (
     AUTH_EVENT_ISSUED,
     AUTH_EVENT_REVOKED,
+    DEACTIVATION_REVOKE_REASON,
     MAX_API_TOKEN_EXPIRES_DAYS,
+    PLATFORM_PRINCIPAL_DETAIL,
     check_api_token,
+    is_platform_principal,
 )
+from app.services.audit_service import AuditService
 
 pytestmark = pytest.mark.api
 
 API_TOKENS_URL = "/api/v1/api-tokens/"
 PARTS_URL = "/api/v1/parts/"
+USERS_URL = "/api/v1/users/"
 ADMIN_ONLY_URL = "/api/v1/admin/settings/materials"
 FENCE_DETAIL = "API token cannot access this resource"
 TEST_PASSWORD_HASH = "$2b$12$abcdefghijklmnopqrstuv"  # nosec B105 - not a real credential
@@ -252,6 +258,13 @@ class TestIssue:
             assert excinfo.value.status_code == 422
         assert db_session.query(ApiToken).count() == 0
 
+    def test_the_expires_bound_has_one_source(self):
+        """The service re-checks the SCHEMA's constant -- the two bounds cannot drift apart."""
+        from app.schemas.api_token import MAX_API_TOKEN_EXPIRES_DAYS as schema_bound
+
+        assert api_token_service.MAX_API_TOKEN_EXPIRES_DAYS is schema_bound
+        assert schema_bound == 3650
+
     @pytest.mark.parametrize(
         "payload",
         [
@@ -320,6 +333,62 @@ class TestIssue:
         assert "disabled" in response.json()["detail"]
         assert db_session.query(ApiToken).count() == 0
         assert db_session.query(AuditLog).filter(AuditLog.action == AUTH_EVENT_ISSUED).count() == 0
+
+    @pytest.mark.parametrize("how", ["superuser", "platform_admin"])
+    def test_platform_principal_target_is_409_no_row_no_event(
+        self, client: TestClient, db_session: Session, admin_headers: dict, test_user: User, how: str
+    ):
+        """A tenant Admin must never hold a standing credential that acts as a cross-tenant principal.
+
+        ``require_role`` waves a superuser / PLATFORM_ADMIN through every gate and
+        ``/platform/*`` addresses other companies by explicit id, so a token bound to
+        one would be a never-expiring escalation minted from a tenant path -- the very
+        thing every tenant user verb refuses to *assign*.
+        """
+        if how == "superuser":
+            test_user.is_superuser = True
+        else:
+            test_user.role = UserRole.PLATFORM_ADMIN
+        db_session.commit()
+        assert is_platform_principal(test_user) is True
+
+        response = _issue(client, admin_headers, test_user.id, label="escalation attempt")
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"] == PLATFORM_PRINCIPAL_DETAIL
+        assert db_session.query(ApiToken).count() == 0
+        assert db_session.query(AuditLog).filter(AuditLog.resource_type == "api_token").count() == 0
+        assert db_session.query(AuditLog).filter(AuditLog.action == AUTH_EVENT_ISSUED).count() == 0
+
+    def test_a_superuser_issuer_can_still_mint_for_an_ordinary_user(
+        self, client: TestClient, db_session: Session, admin_user: User, test_user: User
+    ):
+        """The rule is about the TARGET: the owner's superuser account minting for the bot user is fine."""
+        admin_user.is_superuser = True
+        db_session.commit()
+        response = _issue(client, headers_for(admin_user), test_user.id)
+        assert response.status_code == 201, response.text
+        assert response.json()["user_id"] == test_user.id
+
+    def test_a_holder_promoted_after_issue_is_refused_at_use(
+        self, client: TestClient, db_session: Session, admin_headers: dict, test_user: User
+    ):
+        """Checked at USE as well as at mint: a promotion never widens a standing token."""
+        issued = _issue(client, admin_headers, test_user.id).json()
+        api = _bearer(issued["token"])
+        assert client.get(PARTS_URL, headers=api).status_code == 200
+
+        test_user.is_superuser = True
+        db_session.commit()
+        assert check_api_token(db_session, issued["token"]) is None
+        refused = client.get(PARTS_URL, headers=api)
+        assert refused.status_code == 401
+        assert refused.json()["detail"] == "Could not validate credentials"
+
+        test_user.is_superuser = False
+        test_user.role = UserRole.PLATFORM_ADMIN
+        db_session.commit()
+        assert client.get(PARTS_URL, headers=api).status_code == 401
+        assert db_session.query(ApiToken).count() == 1, "refused, not revoked -- nothing wrote to the row"
 
 
 # --------------------------------------------------------------------------- list
@@ -452,6 +521,65 @@ class TestRevoke:
         assert revoked_events[0].extra_data["reason"] == "Bot decommissioned"
         assert _no_secret_in_audit(db_session, issued["token"], row.jti)
 
+    def test_a_second_revoker_holding_a_stale_row_gets_409_and_never_overwrites(
+        self, client: TestClient, db_session: Session, admin_headers: dict, admin_user: User, test_user: User
+    ):
+        """Two revokers, the second having read the row BEFORE the first committed.
+
+        Sessions B and C are second connections to the same shared-cache database
+        (the app's own ``SessionLocal``) with the row already in their identity maps
+        -- the stale-but-unexpired object the old ``if record.revoked`` check trusted,
+        and the interleaving READ COMMITTED produces on Postgres. Two guards, each
+        pinned: the public verb re-reads (``populate_existing``) and refuses; a
+        caller that skipped the re-read cannot write either, because the flip is a
+        conditional ``UPDATE``.
+        """
+        issued = _issue(client, admin_headers, test_user.id, label="Contended").json()
+        session_b, session_c = SessionLocal(), SessionLocal()
+        try:
+            stale_b = session_b.get(ApiToken, issued["id"])
+            stale_c = session_c.get(ApiToken, issued["id"])
+            assert stale_b is not None and stale_b.revoked is False
+            assert stale_c is not None and stale_c.revoked is False
+            admin_b = session_b.get(User, admin_user.id)
+
+            first = client.post(
+                _revoke_url(issued["id"]), json={"reason": "A: first revocation"}, headers=admin_headers
+            )
+            assert first.status_code == 200, first.text
+
+            # (1) the public verb: the stale copy is refreshed from the table, then 409.
+            with pytest.raises(HTTPException) as excinfo:
+                api_token_service.revoke_api_token(
+                    session_b,
+                    company_id=1,
+                    token_id=issued["id"],
+                    revoked_by=admin_user.id,
+                    reason="B: second revocation",
+                    audit=AuditService(session_b, admin_b),
+                )
+            assert excinfo.value.status_code == 409
+            assert stale_b.revoked is True and stale_b.revoke_reason == "A: first revocation"
+
+            # (2) the flip itself, on a copy nobody re-read: zero rows, and the record is untouched.
+            assert stale_c.revoked is False, "still the stale in-memory copy"
+            flipped = api_token_service._flip_revoked(
+                session_c, stale_c, revoked_by=admin_user.id, reason="C: stale writer", now=datetime.utcnow()
+            )
+            assert flipped is False
+            assert stale_c.revoked is True and stale_c.revoke_reason == "A: first revocation"
+            assert stale_c.revoked_by == admin_user.id
+        finally:
+            session_b.close()
+            session_c.close()
+
+        row = db_session.get(ApiToken, issued["id"])
+        db_session.refresh(row)
+        assert row.revoke_reason == "A: first revocation" and row.revoked_by == admin_user.id
+        rows = db_session.query(AuditLog).all()
+        assert len([r for r in rows if r.action == AUTH_EVENT_REVOKED]) == 1, "the losing revokers wrote nothing"
+        assert len([r for r in rows if r.resource_type == "api_token" and r.action != "CREATE"]) == 1
+
     def test_revoke_is_tenant_scoped_and_404_on_unknown(
         self, client: TestClient, db_session: Session, admin_headers: dict, test_user: User
     ):
@@ -565,6 +693,115 @@ class TestRowIsAuthoritative:
         test_user.company_id = 2
         db_session.commit()
         assert client.get(PARTS_URL, headers=api).status_code == 401, "the row's company no longer matches the user"
+
+
+# --------------------------------------------------------------------------- deactivation
+
+
+class TestDeactivation:
+    def test_deactivating_the_holder_revokes_every_live_token_and_reactivation_revives_nothing(
+        self,
+        client: TestClient,
+        db_session: Session,
+        admin_headers: dict,
+        admin_user: User,
+        test_user: User,
+        operator_user: User,
+    ):
+        """Deactivation RETIRES a credential, it never pauses it.
+
+        Before: ``DELETE /users/{id}`` left the tokens ``revoked = false`` (403 while
+        disabled, listed as live) and ``POST /users/{id}/activate`` silently re-armed
+        every one of them with no token-level trail.
+        """
+        first = _issue(client, admin_headers, test_user.id, label="Bot A").json()
+        second = _issue(client, admin_headers, test_user.id, label="Bot B").json()
+        other = _issue(client, admin_headers, operator_user.id, label="Someone else's").json()
+        assert client.get(PARTS_URL, headers=_bearer(first["token"])).status_code == 200
+
+        response = client.delete(f"{USERS_URL}{test_user.id}", headers=admin_headers)
+        assert response.status_code == 200, response.text
+        assert response.json() == {"message": "User deactivated", "api_tokens_revoked": 2}
+
+        for issued in (first, second):
+            row = db_session.get(ApiToken, issued["id"])
+            db_session.refresh(row)
+            assert row.revoked is True and row.revoked_at is not None
+            assert row.revoke_reason == DEACTIVATION_REVOKE_REASON and row.revoked_by == admin_user.id
+            refused = client.get(PARTS_URL, headers=_bearer(issued["token"]))
+            assert refused.status_code == 401, "revoked, not merely disabled"
+        untouched = db_session.get(ApiToken, other["id"])
+        db_session.refresh(untouched)
+        assert untouched.revoked is False
+        assert client.get(PARTS_URL, headers=_bearer(other["token"])).status_code == 200
+
+        rows = db_session.query(AuditLog).order_by(AuditLog.id).all()
+        status_rows = [r for r in rows if r.resource_type == "api_token" and r.action != "CREATE"]
+        assert sorted(r.resource_id for r in status_rows) == sorted([first["id"], second["id"]])
+        assert all(r.extra_data["reason"] == DEACTIVATION_REVOKE_REASON for r in status_rows)
+        assert all(r.user_id == admin_user.id for r in status_rows), "actor = the deactivating Admin"
+        events = [r for r in rows if r.action == AUTH_EVENT_REVOKED]
+        assert len(events) == 2 and all(e.resource_id == test_user.id for e in events)
+        user_rows = [r for r in rows if r.resource_type == "user" and r.resource_id == test_user.id]
+        assert len(user_rows) == 1, "the user's own status-change row is still written"
+        assert _no_secret_in_audit(db_session, first["token"], db_session.get(ApiToken, first["id"]).jti)
+
+        # Reactivation restores the account, never a token.
+        assert client.post(f"{USERS_URL}{test_user.id}/activate", headers=admin_headers).status_code == 200
+        db_session.refresh(test_user)
+        assert test_user.is_active is True
+        for issued in (first, second):
+            assert client.get(PARTS_URL, headers=_bearer(issued["token"])).status_code == 401
+        listed = client.get(
+            API_TOKENS_URL, params={"user_id": test_user.id, "include_revoked": "true"}, headers=admin_headers
+        ).json()["api_tokens"]
+        assert {t["id"]: t["revoked"] for t in listed} == {first["id"]: True, second["id"]: True}
+        live = client.get(API_TOKENS_URL, params={"user_id": test_user.id}, headers=admin_headers).json()
+        assert live["api_tokens"] == []
+
+    def test_put_is_active_false_revokes_too_and_a_holder_without_tokens_is_still_200(
+        self,
+        client: TestClient,
+        db_session: Session,
+        admin_headers: dict,
+        admin_user: User,
+        test_user: User,
+        operator_user: User,
+    ):
+        issued = _issue(client, admin_headers, test_user.id).json()
+        response = client.put(
+            f"{USERS_URL}{test_user.id}", json={"version": 1, "is_active": False}, headers=admin_headers
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["is_active"] is False
+        row = db_session.get(ApiToken, issued["id"])
+        db_session.refresh(row)
+        assert row.revoked is True and row.revoke_reason == DEACTIVATION_REVOKE_REASON
+        assert row.revoked_by == admin_user.id
+        assert client.get(PARTS_URL, headers=_bearer(issued["token"])).status_code == 401
+
+        # Bringing the account back through PUT revives nothing either.
+        response = client.put(
+            f"{USERS_URL}{test_user.id}", json={"version": 1, "is_active": True}, headers=admin_headers
+        )
+        assert response.status_code == 200, response.text
+        assert client.get(PARTS_URL, headers=_bearer(issued["token"])).status_code == 401
+        assert db_session.query(AuditLog).filter(AuditLog.action == AUTH_EVENT_REVOKED).count() == 1
+
+        # A PUT that does not flip is_active revokes nothing.
+        keep = _issue(client, admin_headers, test_user.id, label="kept").json()
+        assert (
+            client.put(
+                f"{USERS_URL}{test_user.id}", json={"version": 1, "department": "Ops"}, headers=admin_headers
+            ).status_code
+            == 200
+        )
+        assert client.get(PARTS_URL, headers=_bearer(keep["token"])).status_code == 200
+
+        # Deactivating a user who holds no token is the same verb, reporting zero.
+        response = client.delete(f"{USERS_URL}{operator_user.id}", headers=admin_headers)
+        assert response.status_code == 200, response.text
+        assert response.json() == {"message": "User deactivated", "api_tokens_revoked": 0}
 
 
 # --------------------------------------------------------------------------- end to end

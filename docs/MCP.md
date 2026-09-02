@@ -280,11 +280,16 @@ lifetime, never 401s until revoked, and is fenced (**403** `"API token cannot ac
 resource"`) from every `/auth` and `/api-tokens` route — so it can never refresh, switch company,
 or mint, list or revoke tokens, including through the three tools that front those routes
 (`create_api_token`, `list_api_tokens`, `revoke_api_token`: Admin only, with an interactive JWT).
+The fence blocks those direct verbs only: an **Admin**-held token is still an Admin on `/users`
+(`create_user`, `update_user`, `reset_user_password`), so the bound user's role is the real
+boundary. No token is ever bound to a superuser / `platform_admin` (409 at mint, refused at use),
+deactivating a token's user revokes it, and every audit row a token writes carries
+`extra_data.credential` naming the token.
 Full reference: [API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients).
 
 | Surface | Where the token comes from | On 401 |
 |---|---|---|
-| HTTP door | The MCP request's `Authorization: Bearer …` header, checked at the door (`ErpTokenVerifier`: an access token by signature, an API token by its row) and again per call. | Passed through as-is. With an **API token**, a 401 means an Admin revoked it (or it reached its issued lifetime, or its user was deactivated) — ask for a new one; nothing renews it. With an access token, **the caller must send a fresh one itself** — refresh with `POST /api/v1/auth/refresh` (`{"refresh_token": …}` → `{access_token, refresh_token, expires_in}`, rotating) or log in again with `POST /api/v1/auth/login` (form-encoded `username` + `password`). |
+| HTTP door | The MCP request's `Authorization: Bearer …` header, checked at the door (`ErpTokenVerifier`: an access token by signature, an API token by its row) and again per call. | Passed through as-is. With an **API token**, a 401 means an Admin revoked it (or it reached its issued lifetime, or its user was deactivated — which revokes it) — ask for a new one; nothing renews it. With an access token, **the caller must send a fresh one itself** — refresh with `POST /api/v1/auth/refresh` (`{"refresh_token": …}` → `{access_token, refresh_token, expires_in}`, rotating) or log in again with `POST /api/v1/auth/login` (form-encoded `username` + `password`). |
 | stdio bridge | `TokenSource.from_env` — `WERCO_ERP_TOKEN` (a static token: an **API token**, or an access token), `WERCO_ERP_REFRESH_TOKEN`, `WERCO_ERP_EMAIL` + `WERCO_ERP_PASSWORD`. | **Precedence:** the static token is used first; when the ERP answers 401 the bridge tries the refresh token, then an email/password login, and surfaces the 401 when neither is configured or when both fail. An API token never 401s until revoked, so with it alone the rotation path is simply never taken. Rotation is serialised with a lock (`/auth/refresh` rotates the refresh token; two concurrent refreshes would invalidate each other). A refresh token the server rejects (400/401/403) is forgotten so the next attempt goes straight to login. |
 
 Kiosk-scoped badge tokens (`scope == "kiosk"`) are refused at the door and in `resolve_auth`: they
@@ -840,7 +845,7 @@ real gates (a complete with zero labor recorded is refused 400, exactly as at th
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| HTTP **401** with `WWW-Authenticate` from `/mcp` itself, before any tool | No bearer; an expired access token; a revoked / expired API token (or one whose user was deactivated); a display / station / kiosk-scoped token | Give the agent an **API token** (`POST /api/v1/api-tokens/`, Admin) — it never 401s until revoked, so a 401 on one means an Admin revoked it: mint a new one. With a 15-minute access token, send a fresh one (`POST /auth/refresh` or `POST /auth/login`); HTTP callers renew their own, only the stdio bridge refreshes for you |
+| HTTP **401** with `WWW-Authenticate` from `/mcp` itself, before any tool | No bearer; an expired access token; a revoked / expired API token (deactivating its user revokes every token it held); a display / station / kiosk-scoped token | Give the agent an **API token** (`POST /api/v1/api-tokens/`, Admin) — it never 401s until revoked, so a 401 on one means an Admin revoked it: mint a new one. With a 15-minute access token, send a fresh one (`POST /auth/refresh` or `POST /auth/login`); HTTP callers renew their own, only the stdio bridge refreshes for you |
 | `{"status": 403, "detail": "API token cannot access this resource"}` | The call is authenticated by an API token and the tool fronts a `/auth` or `/api-tokens` route (`create_api_token`, `list_api_tokens`, `revoke_api_token`) | Token administration is an Admin's interactive act: use an Admin's interactive JWT (through the door or with `curl`). Nothing an API token holds changes this (§4) |
 | Tool result `{"status": 401, "detail": "No ERP credentials configured for this bridge…"}` | stdio bridge started with none of `WERCO_ERP_TOKEN` / `WERCO_ERP_REFRESH_TOKEN` / `WERCO_ERP_EMAIL`+`WERCO_ERP_PASSWORD` | Set one; the bridge logs `Credentials configured: …` on stderr at startup |
 | Tool result `{"status": 401, "detail": "Could not obtain an ERP access token…"}` | Refresh and login both failed (wrong password, locked account, login rate limit 5/min) | Check the account in the UI; wait out the limit |
@@ -914,13 +919,20 @@ real gates (a complete with zero labor recorded is refused 400, exactly as at th
     subprocess whose stdout is exactly one JSON document, and a real `stdio_client` round trip
     against a dead ERP (full catalog listed, a status-0 transport error rather than a hang, and the
     "no credentials" 401 result).
-  - `backend/tests/test_api_tokens_smoke.py` — API tokens end to end: an Admin issues one (201,
-    shown once, audit rows without the plaintext), the holder acts on a normal route with the
-    `last_used_at` touch written once, the `/auth` + `/api-tokens` fence (403, and the 401s on
-    `/auth/refresh` and the badge mint), the user's role carried (a Manager's token 403 on an Admin
-    route), revoke → 401 on the next call and 409 on a second revoke, listing without secrets; then
-    the **HTTP door** with an API token — `tools/list`, a read as the holder, `create_api_token`
-    through the door answering the route's 403 fence, and a 401 at the door once revoked.
+  - `backend/tests/test_api_tokens.py` — the Admin verbs and the row: issue (201, shown once, audit
+    rows without the plaintext, the platform-principal 409 at mint and the 401 at use for a holder
+    promoted later), list without secrets, revoke → 401 on the next call, 409 on a second revoke and
+    409 for a second revoker holding a stale row (the conditional-`UPDATE` guard), `expires_days`
+    bounds with one source, row-over-claims forgeries, and user deactivation revoking every live token.
+  - `backend/tests/test_api_token_auth.py` — the `get_current_user` seam: resolution and the user's
+    role, the `_active_company_id` pin, the `extra_data.credential` audit marker (present for a token,
+    absent for the same person interactively), the fence incl. the refresh / badge-mint 401s and its
+    derivation from `API_V1_PREFIX`, refusals (forged claims, wrong signature, unknown jti, wrong
+    type), the 5-minute `last_used_at` throttle, the three sibling principals, `TimeEntrySource` desktop.
+  - `backend/tests/test_mcp_api_tokens.py` — the HTTP door: accept, revoked / expired / disabled /
+    promoted holder → 401 at the door, `create_api_token` through the door answering the route's 403
+    fence vs an Admin JWT minting, `ErpTokenVerifier` sharing the row check, and the stdio bridge's
+    static-token path never refreshing.
   - `backend/tests/test_migration_088_api_tokens.py` — the `api_tokens` table: single head,
     model/migration lock-step (columns, indexes, defaults), RLS Postgres-only, and the SQLite
     upgrade / downgrade round trip.
