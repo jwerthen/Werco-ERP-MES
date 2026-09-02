@@ -101,6 +101,27 @@ or
 openssl rand -base64 32
 ```
 
+### MCP door (optional)
+
+The API can serve itself to agents as MCP tools at `/mcp` ([docs/MCP.md](MCP.md)). It is **off by
+default** and needs no new service, port or process — one variable on the backend:
+
+```env
+# Off by default. When true, a stateless Streamable HTTP endpoint is served at
+# WERCO_MCP_HTTP_PATH (/mcp) on the API itself; every tool call dispatches back
+# into this app as the caller's own user (bearer JWT, same RBAC/tenancy/audit).
+WERCO_MCP_HTTP_ENABLED=true
+WERCO_MCP_HTTP_PATH=/mcp
+```
+
+The door is stateless by construction (no session lives in a worker), so it is safe behind
+`uvicorn --workers N` / `WEB_CONCURRENCY=2` and behind a load balancer without sticky sessions.
+Callers authenticate with a normal 15-minute ERP access token; the proxy in front must pass the
+`Authorization` header through and allow request bodies up to `WERCO_MCP_MAX_UPLOAD_BYTES`
+(25 MB — a file upload rides base64-encoded inside the JSON-RPC envelope) on that path, e.g.
+`client_max_body_size 25m;` in the Nginx `location` that fronts it. All settings:
+[docs/ENVIRONMENT_VARIABLES.md → MCP](ENVIRONMENT_VARIABLES.md#mcp-model-context-protocol-door-and-bridge).
+
 ## Deployment Methods
 
 ### Option 1: Docker Compose (Simpler)
@@ -428,6 +449,7 @@ Create `/etc/logrotate.d/werco-erp`:
 2. **Multiple backend instances**: Use `gunicorn --workers N`
 3. **Session storage**: Use Redis for shared sessions
 4. **Database**: Use connection pooling, consider read replicas
+5. **MCP door** (if enabled): stateless — every `POST /mcp` is self-contained, so no sticky sessions and no shared session store are needed across workers or instances
 
 ### Vertical Scaling
 

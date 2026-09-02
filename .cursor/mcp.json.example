@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "werco-erp": {
+      "url": "https://<your-api-host>/mcp",
+      "headers": {
+        "Authorization": "Bearer <ERP_ACCESS_TOKEN>"
+      }
+    },
+    "werco-erp-stdio": {
+      "command": "/absolute/path/to/Werco-ERP-MES/backend/.venv311/bin/python",
+      "args": [
+        "-m",
+        "app.mcp"
+      ],
+      "env": {
+        "PYTHONPATH": "/absolute/path/to/Werco-ERP-MES/backend",
+        "WERCO_ERP_URL": "https://<your-api-host>",
+        "WERCO_ERP_EMAIL": "<assistant-user@yourshop.com>",
+        "WERCO_ERP_PASSWORD": "<password>"
+      }
+    }
+  }
+}

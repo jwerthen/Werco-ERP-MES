@@ -27,6 +27,8 @@ venv/
 *.swp
 *.swo
 *~
+# Cursor MCP config carries a real ERP token/password; commit only the .example.
+.cursor/mcp.json
 
 # OS
 .DS_Store

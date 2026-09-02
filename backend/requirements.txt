@@ -26,6 +26,10 @@ bcrypt==4.3.0
 python-multipart==0.0.31  # fixes CVE-2026-42561 (0.0.27) + PYSEC-2026-3036/3037 (0.0.30) + PYSEC-2026-3040 (0.0.31)
 python-dotenv==1.2.2
 httpx==0.28.1
+# MCP server (app/mcp, docs/MCP.md): the official Model Context Protocol SDK, pinned
+# exactly. Transitive: mcp-types (same version), httpx2, sse-starlette, jsonschema,
+# anyio. The Streamable HTTP door is OFF by default (WERCO_MCP_HTTP_ENABLED).
+mcp==2.1.1
 pytest==9.0.3
 pytest-asyncio==1.3.0
 boto3==1.42.44

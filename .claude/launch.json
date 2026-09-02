@@ -23,6 +23,15 @@
         "cd backend && .venv311/bin/uvicorn app.main:app --port 8000"
       ],
       "port": 8000
+    },
+    {
+      "name": "backend-mcp",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-c",
+        "cd backend && WERCO_MCP_HTTP_ENABLED=true .venv311/bin/uvicorn app.main:app --port 8001"
+      ],
+      "port": 8001
     }
   ]
 }
