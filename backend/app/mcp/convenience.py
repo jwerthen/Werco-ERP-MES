@@ -1096,7 +1096,7 @@ _LIST_PURCHASE_ORDERS_SCHEMA: Dict[str, Any] = {
     "properties": {
         "status": {
             "type": "string",
-            "description": "PO status filter (draft, submitted, approved, received, closed, cancelled).",
+            "description": "PO status filter (draft, pending_approval, approved, sent, partial, received, closed, cancelled).",
         },
         "vendor_id": {"type": "integer", "minimum": 1},
         "deleted_only": {
@@ -1122,7 +1122,7 @@ _LIST_NCRS_SCHEMA: Dict[str, Any] = {
     "properties": {
         "status": {
             "type": "string",
-            "description": "NCR status filter (open, under_review, disposition_pending, closed, ...).",
+            "description": "NCR status filter (open, under_review, pending_disposition, closed, void).",
         },
         "part_id": {"type": "integer", "minimum": 1},
         "skip": {"type": "integer", "minimum": 0, "default": 0},

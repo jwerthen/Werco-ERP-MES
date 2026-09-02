@@ -117,7 +117,7 @@ What you get when it is on (all in `app/mcp/http.py` and `app/main.py`):
 | Auth at the door | `AuthenticationMiddleware(BearerAuthBackend(ErpTokenVerifier))` → `AuthContextMiddleware` → `RequireAuthMiddleware`. No bearer, an invalid/expired token, a non-`access` token or a **kiosk-scoped** token → one clean **401 + `WWW-Authenticate`** before any JSON-RPC is parsed. (The chain is assembled by hand: in mcp 2.1.1 `Server.streamable_http_app(token_verifier=…)` only installs the backend that consults the verifier when a full OAuth `AuthSettings` is also passed.) |
 | Auth per call | `server.resolve_auth` re-reads the `Authorization` header on every `tools/call`, re-verifies it, and forwards the request's `client.host` and `Host` to the executor. Auth is resolved **before** argument validation on purpose. |
 | Body cap | The app's `MAX_JSON_BODY_BYTES` (256 KB) is **waived for exactly this path** (exact match, only while the door is enabled). A nest PDF arrives base64-encoded *inside* the JSON-RPC envelope, so the SDK's `RequestBodyLimitMiddleware` bounds it at **`WERCO_MCP_MAX_UPLOAD_BYTES`** (default 25 MB) instead — **413** over it, before parsing. |
-| Rate limit | **Two tiers.** The door is registered with the app limiter's `exempt` mechanism, so the **default** limit (100/60 s per IP) is waived on `/mcp` and a tool call is charged **once**, on the **inner** route it dispatches — keyed on the MCP caller's IP, exactly like the SPA rather than at half rate; per-path limits on the inner routes (e.g. the laser preview/import 10/min) still apply. The door **path** then carries its own ceiling, `WERCO_MCP_HTTP_RATE_LIMIT` (default 300/minute per IP, enforced by the app's per-path limiter, kept above the default so it never binds a tool call): it bounds the requests that dispatch nothing inward and would otherwise be unmetered — `tools/list` (~0.5 MB of JSON per call), `initialize`, schema-rejected calls and unauthenticated 401 probes. |
+| Rate limit | **Two tiers.** The door is registered with the app limiter's `exempt` mechanism, so the **default** limit (100/60 s per IP) is waived on `/mcp` and a tool call is charged **once**, on the **inner** route it dispatches — keyed on the MCP caller's IP, exactly like the SPA rather than at half rate; per-path limits on the inner routes (e.g. the standalone laser preview/import 10/min) still apply. The door **path** then carries its own ceiling, `WERCO_MCP_HTTP_RATE_LIMIT` (default 300/minute per IP, enforced by the app's per-path limiter, kept above the default so it never binds a tool call): it bounds the requests that dispatch nothing inward and would otherwise be unmetered — `tools/list` (~0.5 MB of JSON per call), `initialize`, schema-rejected calls and unauthenticated 401 probes. |
 | DNS-rebinding guard | The SDK's own guard is off (`TransportSecuritySettings(enable_dns_rebinding_protection=False)`); Host/Origin pinning is the app's job (`TrustedHostMiddleware`, CSRF). |
 | Lifespan | The SDK's session manager runs in a task group that must outlive every request, and Starlette never runs a sub-app's lifespan, so `main.py`'s own `lifespan` enters `app.state.mcp_door.lifespan()`. Each entry builds a fresh session manager (the SDK allows one `run()` per instance — that is what lets the test suite re-enter it per `TestClient`). A request to the door before the lifespan is entered gets **503** `MCP door is not running`. |
 
@@ -264,7 +264,7 @@ the token's active company, `require_role` decides, and every write is audited a
 | Surface | Where the token comes from | On 401 |
 |---|---|---|
 | HTTP door | The MCP request's `Authorization: Bearer …` header, checked at the door (`ErpTokenVerifier`) and again per call. | Passed through as-is. **HTTP callers must send a fresh access token themselves** — refresh with `POST /api/v1/auth/refresh` (`{"refresh_token": …}` → `{access_token, refresh_token, expires_in}`, rotating) or log in again with `POST /api/v1/auth/login` (form-encoded `username` + `password`). |
-| stdio bridge | `TokenSource.from_env` — `WERCO_ERP_TOKEN` (static access token), `WERCO_ERP_REFRESH_TOKEN`, `WERCO_ERP_EMAIL` + `WERCO_ERP_PASSWORD`. | **Precedence:** the static token is used first; when the ERP answers 401 the bridge tries the refresh token, then an email/password login, and surfaces the 401 only if neither is configured. Rotation is serialised with a lock (`/auth/refresh` rotates the refresh token; two concurrent refreshes would invalidate each other). A refresh token the server rejects (400/401/403) is forgotten so the next attempt goes straight to login. |
+| stdio bridge | `TokenSource.from_env` — `WERCO_ERP_TOKEN` (static access token), `WERCO_ERP_REFRESH_TOKEN`, `WERCO_ERP_EMAIL` + `WERCO_ERP_PASSWORD`. | **Precedence:** the static token is used first; when the ERP answers 401 the bridge tries the refresh token, then an email/password login, and surfaces the 401 when neither is configured or when both fail. Rotation is serialised with a lock (`/auth/refresh` rotates the refresh token; two concurrent refreshes would invalidate each other). A refresh token the server rejects (400/401/403) is forgotten so the next attempt goes straight to login. |
 
 Kiosk-scoped badge tokens (`scope == "kiosk"`) are refused at the door and in `resolve_auth`: they
 are path-fenced to the shop-floor routes and would 403 on almost every tool. Wallboard display
@@ -472,7 +472,7 @@ result with `isError: false`.
 | Query parameter | Top-level property (required per spec) |
 | JSON body that is an object | Its properties **merged at the top level**; the executor splits them back out. If a body field shares a name with a path/query parameter it is renamed `body_<x>` (no route needs this today) |
 | JSON body that is not an object (a bare array, a free-form dict, an optional model) | A single `body` property sent as-is, **described with the body schema's own title** so a free-form dict says what it is: `The request body (Cutting Speeds), sent as-is.` on `quote_calculator_create_machine`, `Sheet Pricing` on `quote_calculator_create_material`, `Operation Order` on `routing_reorder_operations`, `Permissions` on `update_role_permissions` |
-| Multipart / form | Form fields as properties; each file field is an object `{"filename": str, "content_base64": str, "content_type"?: str}` (a list of them for multi-file fields). 25 tools take files (`upload_document`, `import_parts_csv`, `create_rfq_package`, `analyze_dxf`, …). FastAPI 0.136 emits `{"type": "string", "contentMediaType": "application/octet-stream"}` for an `UploadFile`; the older `format: binary` is recognised too |
+| Multipart / form | Form fields as properties; each file field is an object `{"filename": str, "content_base64": str, "content_type"?: str}` (a list of them for multi-file fields). 23 tools take files (`upload_document`, `import_parts_csv`, `create_rfq_package`, `analyze_dxf`, …). FastAPI 0.136 emits `{"type": "string", "contentMediaType": "application/octet-stream"}` for an `UploadFile`; the older `format: binary` is recognised too |
 | Header / cookie parameter | Dropped — transport concerns the executor never forwards (the API has exactly one: `if-none-match` on `GET /shop-floor/dashboard`) |
 
 Arguments are validated against that schema with `jsonschema` before dispatch; a failure is a
@@ -563,9 +563,10 @@ replacement. Adding a convenience tool whose route is *not* in the shadow set is
 
 - **`create_work_order` always lands DRAFT.** The route has no `status` input — neither
   `WorkOrderBase` nor `WorkOrderCreate` declares one; the model column defaults `DRAFT` and pydantic
-  drops an extra `status` key — so the tool cannot "force" anything. It **strips `status` and
-  `operations`** from what it forwards (operations are added one at a time through `add_operation`
-  so each name passes the guard), and **post-checks** the response: a work order that came back in
+  drops an extra `status` key — so the tool cannot "force" anything. It **forwards only the
+  listed fields** (a `status` or `operations` argument is refused 422 by the strict schema before
+  the handler runs; the allowlist is a second fence — operations are added one at a time through
+  `add_operation` so each name passes the guard), and **post-checks** the response: a work order that came back in
   any status but `draft` is reported as a loud `is_error` (status 500) carrying the created work
   order in `work_order`. Unreachable against today's route; kept so a future route change cannot
   silently break the rule.
@@ -628,7 +629,8 @@ force-sets the laser work order it lands on the same way. `import_laser_nest_pac
 4. **A failed demote is loud.** If the header `PUT` fails (409 on a concurrent edit, 403, …) the
    result is `is_error` with the PUT's status and a message beginning **`IMPORT SUCCEEDED, BUT work
    order … is still RELEASED`** (`NEST ADDED, BUT …` from `add_laser_nest`), with the `import` /
-   `nest` / `work_order` payloads under `extra` — the work order exists and is released; put it
+   `nest` and `work_order` payloads (and `demoted_to_draft: false`) as top-level keys of the result
+   beside `status` and `detail` — the work order exists and is released; put it
    back to DRAFT from the UI or with `update_work_order` (`work_order_id`, `version`,
    `status: "draft"`). If the header landed but an operation `PUT` failed, the message says exactly
    that (**`… is DRAFT, BUT N of its operations are still READY`**, naming them with the route's
@@ -762,7 +764,7 @@ way: a nest package and manual nests are never mixed on one job.
 ```text
 get_shop_floor_dashboard {"include_dispatch_board": true}
 list_quality_ncrs        {"status": "open", "limit": 20}
-list_purchase_orders     {"status": "submitted", "limit": 50}
+list_purchase_orders     {"status": "sent", "limit": 50}
 list_inventory           {"summary": true, "limit": 200}
 get_low_stock_alerts     {"limit": 25}
 get_current_shortages    {}
@@ -824,7 +826,7 @@ real gates (a complete with zero labor recorded is refused 400, exactly as at th
 | HTTP **413** from `/mcp` | The JSON-RPC envelope (a base64 file inside it) is over `WERCO_MCP_MAX_UPLOAD_BYTES` (25 MB) | Smaller file, or raise the setting on the server |
 | Tool result `{"status": 413, "detail": "File … exceeds the …-byte MCP upload cap."}` | Same cap, decoded on the bridge side | As above |
 | `{"status": 413, ...}` with the route's own message | The inner route's cap (50 MB `LASER_UPLOAD_MAX_BYTES`, 20 MB QMS PDFs) or, for a plain JSON tool, `MAX_JSON_BODY_BYTES` (256 KB) on the inner request | Split the payload — [API.md → Request Size Limits](API.md#request-size-limits) |
-| `{"status": 429, "detail": "Rate limit exceeded: …"}` (a tool result) | The inner route's per-IP limit (100/60 s default, stricter per-path limits on auth, scanner and nest preview/import) — one charge per tool call, exactly like the SPA | Slow down; on the door the caller's IP is the key, on a remote bridge the bridge host's IP is, on an in-process bridge it is `127.0.0.1` |
+| `{"status": 429, "detail": "Rate limit exceeded: …"}` (a tool result) | The inner route's per-IP limit (100/60 s default, stricter per-path limits on auth, scanner and standalone nest preview/import) — one charge per tool call, exactly like the SPA | Slow down; on the door the caller's IP is the key, on a remote bridge the bridge host's IP is, on an in-process bridge it is `127.0.0.1` |
 | HTTP **429** from `/mcp` itself | The door path's own ceiling, `WERCO_MCP_HTTP_RATE_LIMIT` (300/minute per IP by default): `tools/list`, `initialize`, schema-rejected calls and unauthenticated probes never reach an inner route, so this is the only limit that counts them (§3.1) | Stop re-listing the catalog on every turn (cache it); raise the setting if a shop legitimately runs many agents behind one NAT address |
 | HTTP **405** from `GET /mcp` | The door is stateless and has no server-push stream to open | Nothing to do — clients POST; the TypeScript SDK treats 405 as "no push stream" |
 | HTTP **503** `MCP door is not running` | The app served the route before/without entering its lifespan | Run the app through its lifespan (uvicorn does); in tests open a `TestClient` context |

@@ -22,9 +22,13 @@ Subjects and rules -- one rule per surface, stated here so a red run says what t
   ``[a-z][a-z0-9_]{2,63}``, which already leaves out env-var names (upper-case), file
   paths and routes (``/``, ``.``) and anything containing a space -- is a TOOL-NAME CLAIM
   when it is a convenience name, the function name of a live secured route (what the
-  naming policy sees, shadowed or not), or carries a live tag slug as its prefix.
+  naming policy sees, shadowed or not), carries a live tag slug as its prefix, or ends in
+  ``_`` + a live function name (so a slug misspelled or invented in front of a real
+  function -- ``work_order_delete_work_order`` -- is still a claim, and still stale).
   Argument names, field names and status values are none of those, so they are not
-  claims. A ``tool {"arg": ...}`` span claims its first token. Every claim must be a
+  claims. By construction the rule cannot see an invented name that carries neither a
+  live slug nor a live function name (``frobnicate_widget``): there is nothing live to
+  anchor it to, and an allowlist would only move the staleness into the test. A ``tool {"arg": ...}`` span claims its first token. Every claim must be a
   live tool. This is exactly what catches the stale case: the function name
   ``delete_work_order`` is live, its bare tool is not.
 - The names the PACKAGE ITSELF quotes in prose -- the server instructions, every
@@ -100,7 +104,9 @@ class LiveNames:
         """Is ``token`` presented as a tool name, by the rule in the module docstring?"""
         if token in CONVENIENCE_TOOL_NAMES or token in self.function_names:
             return True
-        return any(token.startswith(slug + "_") and len(token) > len(slug) + 1 for slug in self.slugs)
+        if any(token.startswith(slug + "_") and len(token) > len(slug) + 1 for slug in self.slugs):
+            return True
+        return any(token.endswith("_" + name) for name in self.function_names)
 
     def stale(self, tokens: Iterable[str]) -> List[str]:
         """The tokens that claim to be tools and are not."""
