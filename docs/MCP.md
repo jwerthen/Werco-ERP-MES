@@ -880,6 +880,12 @@ real gates (a complete with zero labor recorded is refused 400, exactly as at th
     purpose), in `CLAUDE.md`'s `mcp/` bullet and in `API.md`'s MCP section exists in the live
     catalog; the names the package's own instructions and descriptions quote exist too; and
     `.cursor/mcp.json.example` is a bare `mcpServers` map with no comment keys.
+  - `backend/tests/test_mcp_cli.py` — the stdio bridge's process boundary: argument parsing,
+    the remote-mode placeholder environment (fills only what is missing, boots `Settings` without a
+    database), credential kinds logged without values, `--print-catalog` as a clean-environment
+    subprocess whose stdout is exactly one JSON document, and a real `stdio_client` round trip
+    against a dead ERP (full catalog listed, a status-0 transport error rather than a hang, and the
+    "no credentials" 401 result).
 - Related: [API.md → MCP door](API.md#mcp-door-mcp), [RBAC_PERMISSIONS.md → MCP / agent access](RBAC_PERMISSIONS.md#mcp--agent-access),
   [DEPLOYMENT_RUNBOOK.md → Enabling the MCP door](DEPLOYMENT_RUNBOOK.md#enabling-the-mcp-door-optional),
   `.cursor/mcp.json.example`, `backend/.env.example`.
