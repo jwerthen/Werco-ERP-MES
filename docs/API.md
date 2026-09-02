@@ -9129,7 +9129,7 @@ What matters from this file's point of view:
   gates, tenant scoping, audit rows, optimistic-locking 409s and per-endpoint size caps apply, and a
   401/403/409/422 comes back verbatim as an `is_error` tool result carrying the server's `detail`.
 - **The catalog is this API.** 659 tools are generated from `app.openapi()` at startup — every
-  secured operation except the `Authentication`, `Carrier Webhooks` and `Error Logging` tags, the
+  secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
   the two Excel-cutover loaders (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import`,
   `catalog.EXCLUDED_OPERATIONS`: they mint work orders RELEASED / IN_PROGRESS and POs SENT, a record

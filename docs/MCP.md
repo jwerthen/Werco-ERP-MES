@@ -230,7 +230,6 @@ client runs `python -m app.mcp`, which speaks MCP on stdio and calls the deploye
     "werco-erp-stdio": {
       "command": "/absolute/path/to/Werco-ERP-MES/backend/.venv311/bin/python",
       "args": ["-m", "app.mcp"],
-      "cwd": "/absolute/path/to/Werco-ERP-MES/backend",
       "env": {
         "PYTHONPATH": "/absolute/path/to/Werco-ERP-MES/backend",
         "WERCO_ERP_URL": "https://<your-api-host>",
@@ -246,8 +245,9 @@ Credentials: set **either** `WERCO_ERP_EMAIL` + `WERCO_ERP_PASSWORD` (as above) 
 refresh token pair, `WERCO_ERP_TOKEN` + `WERCO_ERP_REFRESH_TOKEN`; the bridge refreshes or re-logs-in
 on 401 by itself (§4). Leave `WERCO_ERP_URL` unset **only** to dispatch into a local database (dev,
 §3.2). `PYTHONPATH` is what lets `python -m app.mcp` import the `app` package from wherever the
-client starts the process; `cwd` is kept for clients that honour it, but it is not part of Cursor's
-documented `command` / `args` / `env` schema, so do not rely on it alone.
+client starts the process, so no working directory is assumed: Cursor's documented schema is
+`command` / `args` / `env` only, and in remote mode the bridge reads no `.env` file (it sets its own
+placeholders, §3.2), so a `cwd` key would add nothing.
 
 The HTTP door and the bridge expose the **same catalog**; pick the HTTP entry when the door is
 enabled on the server, the stdio entry when it is not (or when you want the bridge to manage token
