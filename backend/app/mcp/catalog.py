@@ -240,6 +240,43 @@ def _object_with_properties(schema: Any) -> Tuple[Optional[Dict[str, Any]], bool
     return None, False
 
 
+def _schema_title(schema: Any, components: Mapping[str, Any], *, depth: int = 0) -> Optional[str]:
+    """The ``title`` a RAW (unresolved) body schema carries, through a ``$ref`` or an optional wrapper.
+
+    ``resolve_schema`` strips the keyword, so this reads the document's own schema: the
+    title on the schema itself (``Cutting Speeds`` on an ``Optional[Dict]`` body,
+    ``Operation Order`` on a bare list), else the referenced component's title (or its
+    name), else the non-null branch of an ``anyOf`` / ``oneOf``. None when there is none.
+    """
+    if not isinstance(schema, dict) or depth > MAX_REF_DEPTH:
+        return None
+    title = schema.get("title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        name = ref[len(_REF_PREFIX) :] if ref.startswith(_REF_PREFIX) else ref
+        return _schema_title(components.get(name), components, depth=depth + 1) or name
+    branch = _non_null_branch(schema)
+    if branch is not None:
+        return _schema_title(branch, components, depth=depth + 1)
+    return None
+
+
+def wrapped_body_description(title: Optional[str], existing: Optional[str] = None) -> str:
+    """``"The request body (Cutting Speeds), sent as-is."`` -- the schema's title says what the dict IS.
+
+    A wrapped body is the one place the tool argument is an opaque ``body``; without the
+    title, ``quote_calculator_create_machine`` reads as "a dict". An existing description
+    on the schema is kept after the label.
+    """
+    label = f"The request body ({title}), sent as-is." if title else "The request body, sent as-is."
+    text = (existing or "").strip()
+    if text and text != label:
+        return f"{label} {text}"
+    return label
+
+
 def _file_kind(schema: Any) -> Optional[str]:
     """``"file"`` / ``"file_list"`` / None for a multipart property schema.
 
@@ -421,7 +458,10 @@ def build_tool(
                 input_name = _free_input_name(_WRAPPED_BODY_PROPERTY, properties)
                 wrapped = body_schema if isinstance(body_schema, dict) else {}
                 wrapped = dict(wrapped)
-                wrapped.setdefault("description", "The request body, sent as-is.")
+                # The title comes from the RAW schema: resolve_schema stripped the keyword.
+                wrapped["description"] = wrapped_body_description(
+                    _schema_title(raw_schema, components), wrapped.get("description")
+                )
                 properties[input_name] = wrapped
                 body_properties.append(input_name)
                 if body_required and _non_null_branch(body_schema if isinstance(body_schema, dict) else {}) is None:

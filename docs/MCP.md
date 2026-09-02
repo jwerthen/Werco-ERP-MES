@@ -13,6 +13,8 @@ the convenience tools enforce, what a result looks like, and what to do when a c
 shipped the package** (15 + 659 tools, 16 shadowed raw operations, 2 excluded cutover loaders,
 65 tags in the OpenAPI document, 61 of them in the catalog). Generated names are derived, not
 curated — re-run the command after adding a router before quoting a name in a prompt.
+`backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
+quote against the live catalog, so a name that shifts fails CI instead of going stale here.
 
 ---
 
@@ -175,11 +177,16 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
 
 ### 3.3 Client configuration
 
-The committed example is `.cursor/mcp.json.example` (copy to the git-ignored `.cursor/mcp.json`).
-Placeholders only — never commit a token or a password.
+The committed example is `.cursor/mcp.json.example`: copy it to the git-ignored `.cursor/mcp.json`,
+fill in the placeholders, and **keep ONE of its two entries** — they expose the same catalog; the
+HTTP entry needs the door enabled on the server, the stdio entry does not. The file is exactly
+Cursor's `mcpServers` map and nothing else: no comment keys, because Cursor's schema does not define
+them and some clients reject unknown keys, so the guidance lives here instead (a test holds the
+file to that shape). Placeholders only — never commit a token or a password.
 
-**Cursor / any Streamable-HTTP client (Grok Bot included)** — one URL plus a bearer header. Where
-the URL and header go is the client's business; the server side needs nothing else:
+**Cursor / any Streamable-HTTP client (Grok Bot included)** — one URL plus a bearer header. The
+server side needs `WERCO_MCP_HTTP_ENABLED=true` (§3.1) and nothing else; where the URL and header
+go is the client's business:
 
 ```json
 {
@@ -191,6 +198,11 @@ the URL and header go is the client's business; the server side needs nothing el
   }
 }
 ```
+
+The token is a normal **15-minute** ERP access token for a real user — a dedicated Manager such as
+*Werco Assistant* is recommended (§4). When calls start answering 401, refresh it with
+`POST /api/v1/auth/refresh` or log in again: an HTTP client renews its own token; the stdio bridge
+below does it for you.
 
 **Claude Code** — either the door, registered from the CLI:
 
@@ -209,7 +221,8 @@ claude mcp add werco-erp \
   -- /absolute/path/to/Werco-ERP-MES/backend/.venv311/bin/python -m app.mcp
 ```
 
-**stdio bridge (Cursor spawns the process; works for any client that launches a command):**
+**stdio bridge (Cursor spawns the process; works for any client that launches a command):** the
+client runs `python -m app.mcp`, which speaks MCP on stdio and calls the deployed API over HTTPS.
 
 ```json
 {
@@ -229,8 +242,11 @@ claude mcp add werco-erp \
 }
 ```
 
-`PYTHONPATH` is what lets `python -m app.mcp` import the `app` package from wherever the client
-starts the process; `cwd` is kept for clients that honour it, but it is not part of Cursor's
+Credentials: set **either** `WERCO_ERP_EMAIL` + `WERCO_ERP_PASSWORD` (as above) **or** an access +
+refresh token pair, `WERCO_ERP_TOKEN` + `WERCO_ERP_REFRESH_TOKEN`; the bridge refreshes or re-logs-in
+on 401 by itself (§4). Leave `WERCO_ERP_URL` unset **only** to dispatch into a local database (dev,
+§3.2). `PYTHONPATH` is what lets `python -m app.mcp` import the `app` package from wherever the
+client starts the process; `cwd` is kept for clients that honour it, but it is not part of Cursor's
 documented `command` / `args` / `env` schema, so do not rely on it alone.
 
 The HTTP door and the bridge expose the **same catalog**; pick the HTTP entry when the door is
@@ -279,11 +295,11 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `Notifications` (`/notifications`) | Notifications | `list_notifications`, `get_unread_count`, `mark_notification_read`, `mark_all_read` |
 | `MySettings` (`/settings`) | Users (self-service) | `get_current_user_info`, `get_my_notification_preferences`, `update_my_notification_preferences`, `update_my_phone`, `send_test_sms`, `change_own_password` |
 | `SetupWizard` (`/setup`) | Setup & Readiness | `get_setup_health`, `get_part_readiness` |
-| `WorkOrders` (`/work-orders`) | Work Orders, Work Order Templates | `work_orders_list_work_orders`, `get_work_order_by_number`, `update_work_order_priority`, `delete_work_order`, `restore_work_order`, `list_work_order_templates`, `use_work_order_template` |
+| `WorkOrders` (`/work-orders`) | Work Orders, Work Order Templates | `work_orders_list_work_orders`, `get_work_order_by_number`, `update_work_order_priority`, `work_orders_delete_work_order`, `work_orders_restore_work_order`, `list_work_order_templates`, `use_work_order_template` |
 | `WorkOrderNew` (`/work-orders/new`) | Work Orders, Parts, Bill of Materials, Routing, Customers, Setup & Readiness, Work Centers | `create_work_order`★, `preview_work_order_operations`, `get_routing_by_part`, `list_customer_names`, `get_part_readiness`, `list_work_centers`★ |
 | `WorkOrderDetail` (`/work-orders/:id`) | Work Orders, Work Order Materials, Laser Nests, Work Order Blockers, Documents, Shop Floor | `get_work_order`★, `add_operation`★, `update_work_order`★, `release_work_order`★, `duplicate_work_order`★, `add_laser_nest`★, `work_orders_start_work_order`, `work_orders_complete_work_order`, `work_orders_complete_operation`, `work_orders_update_operation`, `update_laser_nest`, `delete_laser_nest`, `list_material_allocations`, `create_work_order_blocker`, `attach_document_to_work_order` |
 | `ShopFloor` (`/shop-floor`) | Shop Floor, Work Order Blockers, Work Centers, Work Orders | `get_shop_floor_dashboard`★, `get_all_operations`, `get_active_shop_users`, `list_work_order_blockers`, `resolve_work_order_blocker` |
-| `ShopFloorSimple` (`/shop-floor/operations`) | Shop Floor, Scanner, Work Centers, Work Orders | `get_all_operations`, `shop_floor_start_operation`, `shop_floor_complete_operation`, `put_operation_on_hold`, `resume_operation`, `lookup_barcode`, `resolve_action` |
+| `ShopFloorSimple` (`/shop-floor/operations`) | Shop Floor, Scanner, Work Centers, Work Orders | `get_all_operations`, `shop_floor_start_operation`, `shop_floor_complete_operation`, `put_operation_on_hold`, `shop_floor_resume_operation`, `lookup_barcode`, `resolve_action` |
 | `OperatorKiosk` (`/kiosk`) | Shop Floor | `clock_in`, `clock_out`, `get_my_active_job`, `get_work_center_queue`, `get_operation_steps`, `record_operation_step`, `report_operation_production`, `shop_floor_complete_operation` — under the caller's own user token (kiosk badge tokens are refused) |
 | `CrewStationKiosk` (`/kiosk?station=`) | Shop Floor | Same routes as above; station administration is `create_kiosk_station`, `list_kiosk_stations`, `revoke_kiosk_station`, `reset_kiosk_station_pin`. The station PIN login itself is unauthenticated plumbing and is not a tool |
 | `DispatchBoard` (`/dispatch`) | Shop Floor, Work Orders | `get_dispatch_board`, `get_work_center_queue`, `set_work_center_run_order`, `update_work_order_priority` |
@@ -300,14 +316,14 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `PartEdit` (`/parts/:id/edit`) | Parts | `get_part`, `update_part`, `renumber_part`, `deactivate_part`, `activate_part` |
 | `BOM` (`/bom`) | Bill of Materials, Parts, Materials & Supplies | `list_boms`, `get_bom`, `create_bom`, `add_bom_item`, `release_bom`, `explode_bom`, `where_used` |
 | `BOMUomMismatches` (`/bom/uom-mismatches`) | Bill of Materials | `list_bom_uom_mismatches` |
-| `Routing` (`/routing`) | Routing, Parts, Process Sheets, Work Centers | `list_routings`, `create_routing`, `routing_add_operation`, `reorder_operations`, `release_routing`, `generate_routing_from_drawing` |
+| `Routing` (`/routing`) | Routing, Parts, Process Sheets, Work Centers | `list_routings`, `create_routing`, `routing_add_operation`, `routing_reorder_operations`, `release_routing`, `generate_routing_from_drawing` |
 | `ProcessSheets` (`/process-sheets`) | Process Sheets | `list_process_sheets`, `create_process_sheet`, `add_process_sheet_step`, `release_process_sheet`, `new_process_sheet_revision`, `obsolete_process_sheet` |
 | `EngineeringChanges` (`/engineering-changes`) | Engineering Change Orders | `list_ecos`, `create_eco`, `submit_eco`, `approve_eco`, `get_eco_dashboard`, `get_affected_items` |
 | `Documents` (`/documents`) | Documents, Parts | `list_documents`, `upload_document`, `download_document`, `list_document_types`, `delete_document` |
 | `CustomFields` (`/custom-fields`) | Custom Fields | `list_field_definitions`, `create_field_definition`, `set_custom_field_value`, `get_entity_custom_fields` |
 | `Warehouse` (`/warehouse`) | — hub that mounts the Inventory, Receiving and Shipping pages | see those three rows |
 | `Inventory` (`/inventory`) | Inventory, Parts | `list_inventory`★, `receive_inventory`, `adjust_inventory`, `transfer_inventory`, `list_transactions`, `preview_inventory_combine`, `combine_inventory`, `list_cycle_counts` |
-| `Materials` (`/materials`) | Materials & Supplies | `materials_supplies_list_materials`, `get_material`, `materials_supplies_create_material`, `materials_supplies_update_material`, `import_materials_csv` |
+| `Materials` (`/materials`) | Materials & Supplies | `materials_supplies_list_materials`, `materials_supplies_get_material`, `materials_supplies_create_material`, `materials_supplies_update_material`, `import_materials_csv` |
 | `Receiving` (`/receiving`) | Receiving & Inspection, Purchasing | `get_open_purchase_orders`, `receive_material`, `get_inspection_queue`, `inspect_receipt`, `correct_receipt`, `void_receipt`, `print_receiving_label` |
 | `Shipping` (`/shipping`) | Shipping | `get_ready_to_ship`, `create_shipment`, `mark_shipped`, `rate_shop`, `buy_label`, `get_tracking`, `issue_certificate_of_conformance` |
 | `MRP` (`/mrp`) | Material Requirements Planning | `create_mrp_run`, `get_latest_mrp_run`, `get_mrp_actions`, `get_current_shortages`, `process_mrp_action` |
@@ -340,7 +356,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `AuditLog` (`/audit-log`) | Audit | `list_audit_logs`, `get_audit_summary`, `verify_audit_integrity`, `get_integrity_status` |
 | `VisitorLog` (`/visitor-log`) | Visitor Logs | `list_visitors`, `manual_entry`, `sign_out`, `export_visitors_csv`, `create_station`, `revoke_station` |
 | `VisitorSignIn` (`/visitor-signin`) | Visitor Logs | `sign_in`, `sign_out` (under the caller's own role; the tablet's shared-PIN station login is unauthenticated plumbing and is not a tool) |
-| `AdminSettings` (`/admin/settings`) | Admin Settings, Users, Quote Calculator | `list_labor_rates`, `update_overhead_setting`, `get_role_permissions`, `update_role_permissions`, `admin_settings_list_machines`, `get_audit_log`, `list_users` |
+| `AdminSettings` (`/admin/settings`) | Admin Settings, Users, Quote Calculator | `list_labor_rates`, `update_overhead_setting`, `get_role_permissions`, `update_role_permissions`, `admin_settings_list_machines`, `admin_settings_update_machine`, `get_audit_log`, `list_users` |
 | `PlatformOverview` (`/platform`) | Platform Administration | `platform_overview`, `list_companies`, `company_dashboard`, `browse_company_users` (platform admins only — the route decides) |
 | `CompanyRegister` (`/register-company`) | Company Management | `get_my_company`, `update_my_company`, `update_my_company_ai_egress`, `update_my_company_sms_egress` — the public registration form itself is unauthenticated and has no tool |
 | `Login` (`/login`), `Register` (`/register`) | Authentication | *No tool* — excluded on purpose; identity comes from the JWT (§4) |
@@ -391,14 +407,36 @@ On the shipping commit: 703 operations, 686 secured, 677 candidates, 16 shadowed
    `statistical_process_control_get_dashboard` / `tool_fixture_management_get_dashboard`;
    `materials_supplies_list_materials` / `admin_settings_list_materials` / `quote_calculator_list_materials`;
    `reports_get_quality_metrics` / `analytics_bi_get_quality_metrics`.
-4. **Convenience names are reserved.** A lone generated function named `search` would surface as
+4. **The prefix propagates to the family.** Every function name has a *noun phrase*: the tokens
+   after the first (verb) token, with the last token singularized — `ies` → `y`; `es` dropped when
+   the stem ends in `sh` / `ch` / `x` / `s` / `z`, so `list_finishes` → `finish`; otherwise a
+   trailing `s` dropped, so `list_machines` → `machine` and `delete_work_order` → `work_order`; a
+   token ending in `ss` is left alone. Within one tag, the noun phrases of the collision-prefixed
+   functions form a set, and **every other function in that tag whose noun phrase is in the set is
+   prefixed with the tag slug too**, so a resource family reads as one family rather than two
+   prefixed and two bare members. Real examples: Admin Settings' `create_machine` / `list_machines`
+   collide with Quote Calculator's, so `admin_settings_update_machine` and
+   `admin_settings_delete_machine` are prefixed with them (and `admin_settings_update_finish` /
+   `admin_settings_delete_finish` beside `admin_settings_list_finishes`);
+   `materials_supplies_get_material` beside `materials_supplies_list_materials`;
+   `routing_delete_operation` / `routing_reorder_operations` beside `routing_add_operation`;
+   `shop_floor_resume_operation` beside `shop_floor_start_operation`;
+   `work_orders_delete_work_order` / `work_orders_restore_work_order` beside
+   `work_orders_start_work_order`. A **reserved** name (rule 5) does not seed propagation: every
+   generated function that carries a convenience name is shadowed by that tool, so there is no
+   visible split to repair, and seeding from it would prefix every `*_part`, `*_inventory` and
+   `*_work_center` tool. Propagation is a single pass — a reached member's noun phrase is already
+   in the set, so it can never widen it. Singularization is deliberately dumb and only has to be
+   consistent within a family; its one known miss is `clauses` → `claus` against `clause`, which
+   can only ever cost a propagation, never invent one.
+5. **Convenience names are reserved.** A lone generated function named `search` would surface as
    `<tag>_search` rather than fight the convenience tool for the name.
-5. **Names are assigned over the full secured set *before* shadowing.** Shadowing the Work Orders
+6. **Names are assigned over the full secured set *before* shadowing.** Shadowing the Work Orders
    `add_operation` / `get_work_order` / `create_work_order` does not hand the bare name to their
    twins: they stay `routing_add_operation`, `preventive_maintenance_get_work_order`,
    `preventive_maintenance_create_work_order`. A generated name is therefore the same on every
    transport and regardless of what is shadowed.
-6. **≤ 64 characters**, matching `^[a-zA-Z0-9_-]{1,64}$` (SDK-enforced on the wire): the tag slug
+7. **≤ 64 characters**, matching `^[a-zA-Z0-9_-]{1,64}$` (SDK-enforced on the wire): the tag slug
    is trimmed first, then the name. Longest name today: `preventive_maintenance_complete_work_order`
    (42). The policy is **total**: two members colliding under one tag, or a truncation that folds two
    names together, get a deterministic numeric suffix (`_2`, `_3`, … in sorted-key order) rather
@@ -406,10 +444,15 @@ On the shipping commit: 703 operations, 686 secured, 677 candidates, 16 shadowed
    the API from booting. No live name needs the suffix today; `tests/test_mcp_catalog.py` pins that,
    so a suffixed name is noticed in CI rather than in a prompt.
 
-**The consequence to remember:** a generated name can **shift** the day a collision appears —
-`list_work_orders` is `work_orders_list_work_orders` today only because the maintenance router also
-defines a `list_work_orders`; delete that twin and the Work Orders one would surface bare. Convenience tools (§7) have fixed names for exactly that reason; anchor
-prompts on them, and re-run `--print-catalog` after adding a router.
+**The consequence to remember:** a generated name can **shift** the day a collision appears — and
+not only its own. `list_work_orders` is `work_orders_list_work_orders` today only because the
+maintenance router also defines a `list_work_orders`; and `delete_work_order` is
+`work_orders_delete_work_order` although nobody else defines a `delete_work_order` — its *siblings*
+collide, and the family rule carries the prefix across. Delete the maintenance twins and both would
+surface bare again. Convenience tools (§7) have fixed names for exactly that reason; anchor prompts
+on them, and re-run `--print-catalog` after adding a router. `backend/tests/test_mcp_docs_names.py`
+holds this file, `CLAUDE.md` and `API.md` to the live catalog, so a shifted name turns CI red rather
+than leaving a stale runbook.
 
 ### 6.3 Input schema
 
@@ -428,7 +471,7 @@ result with `isError: false`.
 | Path parameter | Required top-level property |
 | Query parameter | Top-level property (required per spec) |
 | JSON body that is an object | Its properties **merged at the top level**; the executor splits them back out. If a body field shares a name with a path/query parameter it is renamed `body_<x>` (no route needs this today) |
-| JSON body that is not an object (a bare array, a free-form dict, an optional model) | A single `body` property sent as-is — `reorder_operations`, `update_role_permissions`, `quote_calculator_create_machine`, `quote_calculator_create_material` |
+| JSON body that is not an object (a bare array, a free-form dict, an optional model) | A single `body` property sent as-is, **described with the body schema's own title** so a free-form dict says what it is: `The request body (Cutting Speeds), sent as-is.` on `quote_calculator_create_machine`, `Sheet Pricing` on `quote_calculator_create_material`, `Operation Order` on `routing_reorder_operations`, `Permissions` on `update_role_permissions` |
 | Multipart / form | Form fields as properties; each file field is an object `{"filename": str, "content_base64": str, "content_type"?: str}` (a list of them for multi-file fields). 25 tools take files (`upload_document`, `import_parts_csv`, `create_rfq_package`, `analyze_dxf`, …). FastAPI 0.136 emits `{"type": "string", "contentMediaType": "application/octet-stream"}` for an `UploadFile`; the older `format: binary` is recognised too |
 | Header / cookie parameter | Dropped — transport concerns the executor never forwards (the API has exactly one: `if-none-match` on `GET /shop-floor/dashboard`) |
 
@@ -829,6 +872,12 @@ real gates (a complete with zero labor recorded is refused 400, exactly as at th
     kept and the door's own path ceiling, the reserved-path and occupied-path refusals.
   - `backend/tests/test_mcp_remote_executor.py` — the stdio bridge's HTTPS side over a
     `MockTransport`: refresh-on-401, password login, wire hygiene.
+  - `backend/tests/test_mcp_docs_names.py` — the docs-name guard: §7's table names exactly the
+    convenience tools; every representative tool in §5, every call in the §12 sessions, every
+    tool-name claim elsewhere in this file (§6.2 excepted — it discusses function names on
+    purpose), in `CLAUDE.md`'s `mcp/` bullet and in `API.md`'s MCP section exists in the live
+    catalog; the names the package's own instructions and descriptions quote exist too; and
+    `.cursor/mcp.json.example` is a bare `mcpServers` map with no comment keys.
 - Related: [API.md → MCP door](API.md#mcp-door-mcp), [RBAC_PERMISSIONS.md → MCP / agent access](RBAC_PERMISSIONS.md#mcp--agent-access),
   [DEPLOYMENT_RUNBOOK.md → Enabling the MCP door](DEPLOYMENT_RUNBOOK.md#enabling-the-mcp-door-optional),
   `.cursor/mcp.json.example`, `backend/.env.example`.

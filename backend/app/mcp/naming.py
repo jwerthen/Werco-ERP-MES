@@ -8,6 +8,52 @@ list to update. The price is that a name can SHIFT when a collision appears: a b
 ``start_operation`` becomes ``work_orders_start_operation`` the day a second router
 defines ``start_operation``. Convenience tools (``convenience.py``) have fixed names for
 exactly that reason -- they are the stable handles an agent prompt can rely on.
+
+THE NAMING RULE, in the order ``assign_tool_names`` applies it:
+
+1. The function name (``function_name_from_operation_id``) is used BARE when it is
+   unique across the catalog and not a reserved convenience name.
+2. A COLLISION -- two or more routers defining the same function name -- prefixes
+   EVERY member with its tag slug (``shop_floor_start_operation`` /
+   ``work_orders_start_operation``). None keeps the bare name.
+3. The prefix PROPAGATES TO THE FAMILY. Each function name has a NOUN PHRASE: the
+   tokens after the first (verb) token, with the last token singularized --
+   ``list_machines`` -> ``machine``, ``delete_work_order`` -> ``work_order``,
+   ``list_finishes`` -> ``finish``, ``get_material`` -> ``material``. Within one tag,
+   the noun phrases of the collision-prefixed functions form a set, and every OTHER
+   function in that tag whose noun phrase is in the set is prefixed with the tag slug
+   too. A resource family therefore reads as one family: Admin Settings has
+   ``admin_settings_list_machines`` / ``admin_settings_create_machine`` (collisions with
+   Quote Calculator) AND ``admin_settings_update_machine`` /
+   ``admin_settings_delete_machine`` (propagated), rather than two prefixed and two
+   bare members. Likewise ``materials_supplies_get_material``,
+   ``routing_delete_operation`` / ``routing_reorder_operations``,
+   ``shop_floor_resume_operation``, ``work_orders_delete_work_order`` /
+   ``work_orders_restore_work_order``. A reserved-name prefix (rule 4) does NOT seed
+   propagation: every generated function that carries a convenience name is shadowed
+   by that convenience tool, so there is no visible family split to repair, and
+   seeding from it would rename every ``*_part`` / ``*_inventory`` / ``*_work_center``
+   tool. Propagation is one pass: a propagated member's noun phrase is already in the
+   set by construction, so it can never widen the set further.
+4. A RESERVED name (a convenience tool's fixed name) pushes a lone generated function
+   onto the prefixed form.
+5. Names are fitted to 64 characters (slug trimmed first, then the name) and a residual
+   collision gets a deterministic numeric suffix rather than raising.
+
+Singularization (``singularize_token``) is deliberately dumb and only has to be
+CONSISTENT between the members of one family: ``ies`` -> ``y``; ``es`` stripped when the
+stem ends in ``sh`` / ``ch`` / ``x`` / ``s`` / ``z`` (``finishes`` -> ``finish``,
+``losses`` -> ``loss``); otherwise a trailing ``s`` stripped (``machines`` ->
+``machine``, ``orders`` -> ``order``), except that a token ending in ``ss`` is left
+alone (``process``, ``address`` are singular). Known false negative: ``clauses`` ->
+``claus`` while ``clause`` stays ``clause``, so a ``list_clauses`` collision would not
+reach ``create_clause``; that costs a missed propagation, never a wrong one.
+
+THE CONSEQUENCE: a generated name can shift not only when ITS OWN twin appears but
+when a SIBLING'S does -- ``delete_work_order`` became ``work_orders_delete_work_order``
+because the maintenance router defines ``list_work_orders`` / ``start_work_order``,
+not because anyone else defines ``delete_work_order``. Anchor prompts on the
+convenience tools; ``tests/test_mcp_docs_names.py`` is what keeps the docs honest.
 """
 
 from __future__ import annotations
@@ -82,6 +128,62 @@ def prefixed_tool_name(slug: str, function_name: str) -> str:
     return fit_tool_name(function_name)
 
 
+def singularize_token(token: str) -> str:
+    """The deliberately dumb singular of one name token (see the module docstring).
+
+    ``machines`` -> ``machine``, ``finishes`` -> ``finish``, ``entries`` -> ``entry``,
+    ``losses`` -> ``loss``, ``process`` -> ``process``, ``material`` -> ``material``.
+    """
+    if token.endswith("ies") and len(token) > 3:
+        return token[:-3] + "y"
+    if token.endswith("es") and len(token) > 2 and token[:-2].endswith(("sh", "ch", "x", "s", "z")):
+        return token[:-2]
+    if token.endswith("s") and not token.endswith("ss") and len(token) > 1:
+        return token[:-1]
+    return token
+
+
+def noun_phrase(function_name: str) -> str:
+    """The tokens after the first (verb) token, last one singularized; ``""`` for a one-token name.
+
+    ``list_work_orders`` -> ``work_order``, ``delete_machine`` -> ``machine``,
+    ``get_all_operations`` -> ``all_operation``, ``search`` -> ``""``.
+    """
+    tokens = [token for token in function_name.split("_") if token]
+    if len(tokens) < 2:
+        return ""
+    rest = tokens[1:]
+    rest[-1] = singularize_token(rest[-1])
+    return "_".join(rest)
+
+
+def family_prefixed_keys(entries: Mapping[K, Tuple[str, str]]) -> Set[K]:
+    """The keys the tag prefix reaches: the collisions themselves plus their family (rules 2 and 3).
+
+    A collision is a function name shared by two or more entries. Within each tag,
+    the noun phrases of that tag's colliding functions seed a set, and every entry
+    in the tag whose noun phrase is in the set is prefixed too. Reserved names are
+    not an input here (see the module docstring for why they do not seed).
+    """
+    members_by_function: Dict[str, int] = {}
+    for function_name, _tag in entries.values():
+        members_by_function[function_name] = members_by_function.get(function_name, 0) + 1
+    collided = {function_name for function_name, count in members_by_function.items() if count > 1}
+
+    family_nouns: Dict[str, Set[str]] = {}
+    for function_name, tag in entries.values():
+        if function_name in collided:
+            noun = noun_phrase(function_name)
+            if noun:
+                family_nouns.setdefault(tag, set()).add(noun)
+
+    prefixed: Set[K] = set()
+    for key, (function_name, tag) in entries.items():
+        if function_name in collided or noun_phrase(function_name) in family_nouns.get(tag, set()):
+            prefixed.add(key)
+    return prefixed
+
+
 def assign_tool_names(entries: Mapping[K, Tuple[str, str]], *, reserved: Iterable[str] = ()) -> Dict[K, str]:
     """Map every catalog entry to a unique tool name.
 
@@ -89,7 +191,9 @@ def assign_tool_names(entries: Mapping[K, Tuple[str, str]], *, reserved: Iterabl
     ``(function_name, tag)``. A function name that is unique across the catalog is
     used bare; when two or more entries share one, EVERY member of the collision
     gets ``<tag_slug>_<function_name>`` -- none of them keeps the bare name, so the
-    bare name never silently points at whichever router happened to sort first.
+    bare name never silently points at whichever router happened to sort first --
+    and the prefix propagates to the tag's siblings that share the collision's noun
+    phrase (``family_prefixed_keys``), so a resource family is prefixed as a whole.
 
     ``reserved`` names (the fixed convenience-tool names) count as an extra, standing
     claim on the bare form: a lone ``search`` route would still surface as
@@ -103,16 +207,14 @@ def assign_tool_names(entries: Mapping[K, Tuple[str, str]], *, reserved: Iterabl
     ``tests/test_mcp_catalog.py`` is where a suffixed name is meant to be noticed.
     """
     reserved_names = set(reserved)
-    members_by_function: Dict[str, int] = {}
-    for function_name, _tag in entries.values():
-        members_by_function[function_name] = members_by_function.get(function_name, 0) + 1
+    prefixed = family_prefixed_keys(entries)
 
     names: Dict[K, str] = {}
     for key, (function_name, tag) in entries.items():
-        if members_by_function[function_name] == 1 and function_name not in reserved_names:
-            names[key] = fit_tool_name(function_name)
-        else:
+        if key in prefixed or function_name in reserved_names:
             names[key] = prefixed_tool_name(tag_slug(tag), function_name)
+        else:
+            names[key] = fit_tool_name(function_name)
 
     taken: Set[str] = set(names.values()) | reserved_names
     owners: Dict[str, K] = {}
