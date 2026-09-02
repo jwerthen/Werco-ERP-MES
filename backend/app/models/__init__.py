@@ -1,6 +1,7 @@
 from .ai_learning import AICorrection, AIInteractionEvent, AIOutcome, AIRecommendation
 from .ai_usage import AIUsageEvent
 from .analytics import ReportTemplate
+from .api_token import ApiToken
 from .audit_log import AuditLog
 from .bom import BOM, BOMItem, BOMItemType
 from .calibration import CalibrationRecord, CalibrationStatus, Equipment
@@ -176,6 +177,7 @@ __all__ = [
     "AIRecommendation",
     "AIOutcome",
     "AIUsageEvent",
+    "ApiToken",
     "User",
     "UserRole",
     "WorkCenter",
