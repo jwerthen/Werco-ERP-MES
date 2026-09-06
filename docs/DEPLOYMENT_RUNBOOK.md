@@ -12,6 +12,14 @@
 > you ever deploy the worker by hand: it is deployed from the **repo root**, not `backend/`,
 > and it has **no healthcheck** (it serves no HTTP).
 
+> **Vercel frontend.** The ERP at `wercomfg.app` deploys to its existing Vercel
+> project; Material Nesting's `/nest` route is included in the updated frontend
+> build. This runbook's Railway
+> frontend commands and release checks apply to `werco-frontend` on Railway;
+> they do not establish that a build is serving on `wercomfg.app`. Use
+> [DEPLOYMENT.md → Existing Vercel frontend](DEPLOYMENT.md#existing-vercel-frontend-material-nesting)
+> for the native nesting feature's deployment scope and checks.
+
 ---
 
 ## Table of Contents

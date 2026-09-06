@@ -67,6 +67,7 @@ const Traceability = lazyWithRetry(() => import('./pages/Traceability'));
 const PrintPackingSlip = lazyWithRetry(() => import('./pages/PrintPackingSlip'));
 const PrintShippingLabel = lazyWithRetry(() => import('./pages/PrintShippingLabel'));
 const AuditLog = lazyWithRetry(() => import('./pages/AuditLog'));
+const MaterialNesting = lazyWithRetry(() => import('./pages/MaterialNesting'));
 const QuoteCalculator = lazyWithRetry(() => import('./pages/QuoteCalculator'));
 const EstimateWorkbench = lazyWithRetry(() => import('./pages/EstimateWorkbench'));
 const ShopData = lazyWithRetry(() => import('./pages/ShopData'));
@@ -145,6 +146,7 @@ const routeAccessRequirements: RouteAccessRequirement[] = [
   { prefix: '/qms-standards', permission: 'quality:view' },
   { prefix: '/supplier-scorecards', permission: 'purchasing:view' },
   { prefix: '/quotes', permission: 'purchasing:view' },
+  { prefix: '/nest', permission: 'purchasing:view' },
   { prefix: '/quote-calculator', permission: 'purchasing:view' },
   { prefix: '/estimate-workbench', permission: 'purchasing:view' },
   { prefix: '/shop-data', permission: 'purchasing:view' },
@@ -708,6 +710,9 @@ function AppRoutes() {
         </PrivateRoute>
       } />
       
+      <Route path="/nest" element={
+        <PrivateRoute><Layout><LazyRoute><MaterialNesting /></LazyRoute></Layout></PrivateRoute>
+      } />
       {/* Quotes */}
       <Route path="/rfq-packages/new" element={
         <PrivateRoute>

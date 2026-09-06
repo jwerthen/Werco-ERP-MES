@@ -124,6 +124,28 @@ Callers authenticate with a normal 15-minute ERP access token; the proxy in fron
 
 ## Deployment Methods
 
+### Existing Vercel frontend: Material Nesting
+
+Material Nesting's deployment target is the ERP frontend at
+[`https://wercomfg.app/nest`](https://wercomfg.app/nest). Deploy the updated
+`frontend/` build to the existing Vercel project that owns `wercomfg.app`; keep
+its current domain and project association. The feature needs no separate
+service, iframe, domain, backend deployment, migration, or environment variable.
+
+`frontend/vercel.json` already builds with `npm run build`, publishes `build/`,
+and rewrites SPA paths to `/index.html`, so opening or refreshing `/nest` uses
+the existing application router. Feature assets are bundled from
+`frontend/public/nest-assets/` and `frontend/src/features/nesting/`.
+
+After the normal frontend lint, type-check, tests, and production build pass,
+deploy through that existing Vercel project's release path. Verify `/nest`
+directly and from **Sales & Quoting → Material Nesting** as an allowed user;
+verify signed-out users reach login and a user without `purchasing:view` cannot
+open the workspace. Exercise a DXF import, comparison, and estimate save/reopen.
+Confirm another ERP page still renders correctly after leaving the workspace.
+The Railway frontend commands in [DEPLOYMENT_RUNBOOK.md](DEPLOYMENT_RUNBOOK.md)
+target the separate Railway service and do not publish this Vercel domain.
+
 ### Option 1: Docker Compose (Simpler)
 
 1. **Use the production compose file with Supabase configured:**

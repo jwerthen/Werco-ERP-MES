@@ -63,6 +63,7 @@ export const routeTitles: Record<string, string> = {
 
   // Sales & Quoting
   '/rfq-packages/new': 'AI RFQ Quote',
+  '/nest': 'Material Nesting',
   '/quote-calculator': 'Quote Calculator',
   '/estimate-workbench': 'Estimate Workbench',
   '/shop-data': 'Shop Data',

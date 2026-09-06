@@ -27,7 +27,7 @@
  */
 
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { getPermissionsForRole } from '../utils/permissions';
 
@@ -49,6 +49,7 @@ jest.mock('./GlobalSearch', () => ({
 
 // --- Hooks / services with side effects stubbed out. ---------------------
 jest.mock('../hooks/useWebSocket', () => ({ __esModule: true, useWebSocket: () => ({}) }));
+jest.mock('../hooks/useScrollRestoration', () => ({ useScrollRestoration: () => undefined }));
 jest.mock('../hooks/useKeyboardShortcuts', () => ({
   __esModule: true,
   useKeyboardShortcuts: () => undefined,
@@ -190,5 +191,21 @@ describe('Layout sidebar — permission-gated nav item', () => {
       .map((p) => (p.textContent || '').trim())
       .filter((t) => SECTION_HEADERS.includes(t));
     expect(rendered.sort()).toEqual([...SECTION_HEADERS].sort());
+  });
+});
+
+describe('Material Nesting navigation', () => {
+  afterEach(() => {
+    mockUser.value = null;
+  });
+
+  it.each(['admin', 'manager', 'supervisor', 'viewer'])('offers the authenticated nesting route to %s with purchasing:view', (role) => {
+    renderLayout(role, '/nest');
+    expect(within(sidebar()).getByRole('link', { name: 'Material Nesting' })).toHaveAttribute('href', '/nest');
+  });
+
+  it.each(['operator', 'quality', 'shipping'])('hides Material Nesting from %s without purchasing:view', (role) => {
+    renderLayout(role, '/nest');
+    expect(within(sidebar()).queryByRole('link', { name: 'Material Nesting' })).not.toBeInTheDocument();
   });
 });
