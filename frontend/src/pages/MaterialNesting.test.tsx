@@ -127,7 +127,15 @@ describe('Material Nesting inside the ERP shadow host', () => {
     expect(dialog.getRootNode()).toBe(shadow);
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(ui.getByRole('button', { name: 'Compare sheets' })).toBeDisabled();
-    await ui.findByRole('dialog', { name: 'DXF import results' }, { timeout: 10000 });
+    // Each file yields and updates progress. Repeating a failing role query
+    // formats the entire workspace DOM on every update, delaying those yields
+    // on coverage-instrumented CI. Wait on the small existing dialog instead,
+    // then check its accessible role and name once the import has completed.
+    await waitFor(
+      () => expect(dialog.querySelector('[data-slot="dialog-title"]')?.textContent).toBe('DXF import results'),
+      { container: dialog, timeout: 30000 }
+    );
+    expect(ui.getByRole('dialog', { name: 'DXF import results' })).toBe(dialog);
     expect(within(dialog).getByRole('status')).toHaveTextContent('100 imported');
     expect(within(dialog).getByRole('status')).toHaveTextContent('0 skipped');
     expect(within(dialog).getByRole('status')).toHaveTextContent('100 designs added');
@@ -160,7 +168,7 @@ describe('Material Nesting inside the ERP shadow host', () => {
     expect(comparison.recommendedId).toBeTruthy();
     expect(comparison.results.every(result => result.complete && result.nest?.placements.length === 128)).toBe(true);
     expect(mockShowToast).toHaveBeenCalledWith('success', '100 files imported · 100 designs added.');
-  }, 15000);
+  }, 60000);
 
   it('rejects a 101-file selection before reading or changing the estimate', async () => {
     const { mount, ui } = mountWorkspace();
