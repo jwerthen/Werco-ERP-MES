@@ -1,0 +1,51 @@
+import React, { useCallback, useState } from 'react';
+import { createPortal } from 'react-dom';
+import NestingWorkspace from '../features/nesting/NestingWorkspace';
+import { NestingPortalContext } from '../features/nesting/PortalContext';
+import styles from '../features/nesting/nesting.css?inline';
+import { useAuth } from '../context/AuthContext';
+import { useCompany } from '../context/CompanyContext';
+import { readNestingDraft, readNestingSavedSignature, writeNestingDraft } from '../features/nesting/draft';
+import type { Quote } from '../features/nesting/lib/quoting';
+
+/** A normal authenticated ERP route; only its presentation is isolated. */
+export default function MaterialNesting() {
+  const { user } = useAuth();
+  const { currentCompany } = useCompany();
+  const owner = `${user?.id}:${currentCompany?.id ?? user?.company_id}`;
+  const preserveDraft = useCallback(
+    (quote: Quote, savedSignature: string) => writeNestingDraft(owner, quote, savedSignature),
+    [owner]
+  );
+  const [target, setTarget] = useState<HTMLElement | null>(null);
+  const attach = useCallback((host: HTMLDivElement | null) => {
+    if (!host) return;
+    const shadow = host.shadowRoot ?? host.attachShadow({ mode: 'open' });
+    let mount = shadow.querySelector<HTMLElement>('[data-nesting-mount]');
+    if (!mount) {
+      const sheet = document.createElement('style');
+      sheet.textContent = styles;
+      mount = document.createElement('div');
+      mount.dataset.nestingMount = '';
+      shadow.append(sheet, mount);
+    }
+    setTarget(mount);
+  }, []);
+
+  return (
+    <div ref={attach} data-testid="material-nesting-host">
+      {target &&
+        createPortal(
+          <NestingPortalContext.Provider value={target}>
+            <NestingWorkspace
+              key={owner}
+              initialQuote={readNestingDraft(owner)}
+              initialSavedSignature={readNestingSavedSignature(owner)}
+              onDraftChange={preserveDraft}
+            />
+          </NestingPortalContext.Provider>,
+          target
+        )}
+    </div>
+  );
+}

@@ -29,6 +29,13 @@ describe('getRouteTitle', () => {
     expect(getRouteTitle(loc('/'))).toBe('Dashboard');
   });
 
+  it('titles the native Material Nesting route consistently with navigation', () => {
+    expect(getRouteTitle(loc('/nest'))).toBe('Material Nesting');
+    expect(getRouteTitle(loc('/nest', '?source=quotes'))).toBe('Material Nesting');
+    expect(formatTabTitle(getRouteTitle(loc('/nest')))).toBe('Material Nesting · Werco ERP');
+    expect(getBreadcrumbParent('/nest')).toBeNull();
+  });
+
   it('resolves the BOM unit-mismatch sub-route ahead of the bare /bom title', () => {
     expect(getRouteTitle(loc('/bom'))).toBe('Bill of Materials');
     expect(getRouteTitle(loc('/bom/uom-mismatches'))).toBe('BOM Unit Mismatches');

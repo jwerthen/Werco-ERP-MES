@@ -1275,6 +1275,20 @@ and `/api-tokens` so it can never mint another credential.
 > the button calls the update endpoint, so it must match the update endpoint. See `docs/API.md` →
 > Purchasing → *Restoring a vendor returns the record, not the approval*.
 
+### Material Nesting
+
+**Sales & Quoting → Material Nesting** (`/nest`) requires a signed-in ERP user and
+`purchasing:view` on both the sidebar link and the direct route, matching Quote
+Calculator. Admin, Manager, Supervisor, and Viewer have access; Platform Admin
+and the existing superuser override also pass. Operator, Quality, and Shipping
+do not have this permission.
+
+All permitted users can edit the current browser estimate, compare sheets, and
+download or reopen local estimate files. These are client-side calculations and
+downloads; they create no ERP quote, purchase order, inventory transaction, work
+order, or audit record. There is no new backend permission, endpoint, or bulk
+data export grant. See [MATERIAL_NESTING.md](MATERIAL_NESTING.md).
+
 ### Receiving
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
