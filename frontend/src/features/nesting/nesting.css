@@ -170,6 +170,8 @@ a:focus-visible {
 }
 .nav-row {
   display: flex;
+  min-width: 0;
+  flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
   padding: 8px 30px 0;
@@ -182,6 +184,7 @@ a:focus-visible {
   height: 48px;
 }
 .nav-row [data-slot='tabs-list'] {
+  flex-shrink: 0;
   height: 48px;
   padding: 0;
 }
@@ -198,10 +201,15 @@ a:focus-visible {
 }
 .job-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 20px;
   padding: 28px 30px;
+}
+.job-heading > div:first-child {
+  flex: 1;
+  min-width: 0;
 }
 .eyebrow {
   font-size: 12px;
@@ -402,7 +410,7 @@ h2 {
 }
 .nest-svg {
   width: 100%;
-  min-width: 400px;
+  min-width: 0;
   max-height: 630px;
 }
 .settings-panel > label {
@@ -747,7 +755,7 @@ h2 {
   font-size: 12px;
   white-space: nowrap;
 }
-.settings-:host {
+.settings-body {
   padding: 0 15px;
 }
 .field-label {
@@ -1149,6 +1157,7 @@ h2 {
   background: #1e293b !important;
   color: #f1f5f9 !important;
   border: 1px solid #334155 !important;
+  width: calc(100vw - 32px);
   max-width: 500px !important;
   padding: 28px !important;
   max-height: 90vh;
@@ -1268,7 +1277,7 @@ input[type='number'] {
   .settings-panel > .panel-heading {
     grid-column: 1/-1;
   }
-  .settings-:host {
+  .settings-body {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0 15px;
@@ -1359,6 +1368,7 @@ input[type='number'] {
   }
   .heading-actions {
     width: 100%;
+    flex-wrap: wrap;
   }
   .heading-actions .compact {
     font-size: 12px;
@@ -1380,14 +1390,14 @@ input[type='number'] {
   .settings-panel {
     display: block;
   }
-  .settings-:host {
+  .settings-body {
     display: block;
   }
   .canvas-wrap {
     min-height: 300px;
   }
   .canvas-wrap svg {
-    min-width: 400px;
+    min-width: 0;
   }
   .canvas-tools > span {
     display: block;
@@ -1615,7 +1625,7 @@ input[type='number'] {
 .quote-app .quote-settings > .note {
   margin-top: 5px;
 }
-.quote-settings .settings-:host {
+.quote-settings .settings-body {
   padding-bottom: 10px;
 }
 .stock-manager {
@@ -1911,7 +1921,7 @@ input[type='number'] {
   .quote-settings .inline-error {
     grid-column: 1/-1;
   }
-  .quote-settings .settings-:host {
+  .quote-settings .settings-body {
     padding-bottom: 20px;
   }
   .order-banner {
@@ -1973,7 +1983,7 @@ input[type='number'] {
   .quote-settings {
     display: block;
   }
-  .quote-settings .settings-:host {
+  .quote-settings .settings-body {
     display: block;
   }
   .comparison-section {
@@ -2219,6 +2229,24 @@ input[type='number'] {
   min-width: 0;
   --font-inter: Inter, Arial, sans-serif;
   --font-jetbrains-mono: 'JetBrains Mono', monospace;
+}
+
+@container nesting (max-width: 500px) {
+  .nav-row [data-slot='tabs-list'] {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    width: 100%;
+    height: auto;
+  }
+  .quote-app .nav-row [data-slot='tabs-trigger'] {
+    min-width: 0;
+    min-height: 52px;
+    height: auto;
+    padding: 9px 6px;
+    font-size: 12px;
+    white-space: normal;
+    text-align: center;
+  }
 }
 .app-shell {
   min-height: 65vh;
