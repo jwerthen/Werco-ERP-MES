@@ -1,3 +1,4 @@
+import { PageHeader, RecordHeader } from '../components/ui/PageHeader';
 import React, { useEffect, useMemo, useState } from 'react';
 import api from '../services/api';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -491,21 +492,28 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
     );
   };
 
+  const pageHeader = (
+    <PageHeader
+      title="Shipping"
+      level={embedded ? 2 : 1}
+      description="Allocate completed quantities, arrange shipments, and follow delivery progress"
+    />
+  );
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
+      <div className="space-y-6">
+        {pageHeader}
+        <div role="status" className="flex items-center justify-center gap-3 h-64 text-slate-400">
+          <div aria-hidden="true" className="animate-spin rounded-full h-8 w-8 border-b-2 border-werco-primary" />
+          Loading shipping…
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
-      {!embedded && (
-        <div className="flex justify-between items-center">
-          <h1 className="text-2xl font-bold text-white">Shipping</h1>
-        </div>
-      )}
+      {pageHeader}
 
       {loadError && <ErrorState message="Could not load shipping data." onRetry={loadData} />}
 
@@ -729,10 +737,17 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
         size="md"
       >
         <div className="space-y-4">
-          <h2 className="text-lg font-semibold">Pending shipment {editTarget?.shipment_number}</h2>
-          <p>
-            {editTarget?.work_order_number} · {editTarget?.part_number} · {editTarget?.customer_name}
-          </p>
+          <RecordHeader
+            title={`Pending shipment ${editTarget?.shipment_number || ''}`}
+            closeLabel="Close pending shipment"
+            closeDisabled={saving}
+            onClose={() => setEditTarget(null)}
+            fields={[
+              { label: 'Work order', value: editTarget?.work_order_number },
+              { label: 'Part', value: editTarget?.part_number },
+              { label: 'Ship to', value: editTarget?.ship_to_name || editTarget?.customer_name },
+            ]}
+          />
           <FormField label="Quantity allocated">
             {field => (
               <input
@@ -754,8 +769,8 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
               {editError}
             </p>
           )}
-          <div className="flex justify-end gap-3">
-            <Button variant="secondary" disabled={saving} onClick={() => savePendingShipment(true)}>
+          <div className="flex flex-wrap justify-end gap-3">
+            <Button variant="danger" disabled={saving} onClick={() => savePendingShipment(true)}>
               Cancel shipment
             </Button>
             <Button disabled={saving} onClick={() => savePendingShipment()}>
@@ -779,19 +794,25 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
       {/* Create Shipment Modal (legacy / manual path -- still supported) */}
       <Modal
         open={showCreateModal && !!selectedWO}
-        onClose={() => setShowCreateModal(false)}
+        onClose={() => {
+          if (!saving) setShowCreateModal(false);
+        }}
         size="md"
         closeOnBackdrop={false}
       >
         {selectedWO && (
           <>
-            <h3 className="text-lg font-semibold mb-4">Create Shipment (Manual)</h3>
-            <div className="bg-fd-sunken border border-fd-line rounded-sm p-3 mb-4">
-              <p className="font-medium">{selectedWO.work_order_number}</p>
-              <p className="text-sm text-slate-400">
-                {selectedWO.part_number} - {selectedWO.part_name}
-              </p>
-            </div>
+            <RecordHeader
+              title="Create Shipment (Manual)"
+              closeLabel="Close manual shipment"
+              closeDisabled={saving}
+              onClose={() => setShowCreateModal(false)}
+              fields={[
+                { label: 'Work order', value: selectedWO.work_order_number },
+                { label: 'Part', value: selectedWO.part_number },
+                { label: 'Description', value: selectedWO.part_name },
+              ]}
+            />
             <form onSubmit={handleCreate} className="space-y-4">
               <p className="text-sm text-slate-400">
                 {selectedWO.quantity_remaining ?? selectedWO.quantity_complete} available;{' '}
@@ -896,8 +917,8 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
                   />
                 )}
               </FormField>
-              <div className="flex justify-end gap-3 pt-4 border-t">
-                <Button variant="secondary" onClick={() => setShowCreateModal(false)}>
+              <div className="flex flex-wrap justify-end gap-3 pt-4 border-t">
+                <Button variant="secondary" disabled={saving} onClick={() => setShowCreateModal(false)}>
                   Cancel
                 </Button>
                 <Button type="submit" disabled={saving}>

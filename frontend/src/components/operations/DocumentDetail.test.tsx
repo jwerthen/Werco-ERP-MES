@@ -85,3 +85,26 @@ test('changing to an unavailable revision clears the old record and offers retry
   await waitFor(() => expect(mocked.getDocument).toHaveBeenLastCalledWith(99));
   expect(await screen.findByTitle('Preview Fixture drawing revision B')).toBeInTheDocument();
 });
+
+test('document close is available during a failed load and does not mutate a revision', async () => {
+  mocked.getDocument.mockRejectedValueOnce({ response: { data: { detail: 'Document not found' } } });
+  render(view());
+  expect(screen.getByRole('button', { name: 'Close document' })).toBeEnabled();
+  await screen.findByText('Document not found');
+  fireEvent.click(screen.getByRole('button', { name: 'Close document' }));
+  expect(props.onClose).toHaveBeenCalledTimes(1);
+  expect(mocked.uploadDocument).not.toHaveBeenCalled();
+});
+
+test('document close preserves the existing unsaved revision guard', async () => {
+  const confirm = jest.spyOn(window, 'confirm').mockReturnValue(false);
+  render(view());
+  await screen.findByTitle('Preview Fixture drawing revision B');
+  fireEvent.click(screen.getByRole('button', { name: 'Upload new revision' }));
+  fireEvent.change(screen.getByLabelText(/New revision/), { target: { value: 'C' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Close document' }));
+  expect(confirm).toHaveBeenCalled();
+  expect(props.onClose).not.toHaveBeenCalled();
+  expect(screen.getByLabelText(/New revision/)).toHaveValue('C');
+  confirm.mockRestore();
+});

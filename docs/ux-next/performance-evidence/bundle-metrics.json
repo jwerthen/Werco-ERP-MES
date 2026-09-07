@@ -1,0 +1,356 @@
+[
+  {
+    "build": "baseline-build",
+    "entry": {
+      "files": [
+        "assets/headless-C3DayD0I.js",
+        "assets/icons-C9NcBtPH.js",
+        "assets/index-DcuGEPJC.js",
+        "assets/react-B1rr2kLU.js"
+      ],
+      "minified_bytes": 819794,
+      "gzip_bytes": 228221
+    },
+    "routes": {
+      "src/pages/WorkOrders.tsx": {
+        "initial_navigation": {
+          "files": [
+            "assets/ComboBox-DiqVNzKQ.js",
+            "assets/DataTable-CaaQZZp2.js",
+            "assets/InputDialog-DnPgGdRk.js",
+            "assets/SaveAsTemplateModal-BP56dMBL.js",
+            "assets/UnitBadge-uoF9vhwI.js",
+            "assets/WorkOrders-C0tPXgUt.js",
+            "assets/catalogGroups-BSnYBvDZ.js",
+            "assets/csv-CC_MtgeY.js",
+            "assets/headless-C3DayD0I.js",
+            "assets/icons-C9NcBtPH.js",
+            "assets/index-DcuGEPJC.js",
+            "assets/materialTie-B2M4hsvM.js",
+            "assets/priority-CGvTM11G.js",
+            "assets/react-B1rr2kLU.js",
+            "assets/useDebouncedValue-CnE3dFqZ.js",
+            "assets/useOptimisticMutation-BfWy4nxP.js"
+          ],
+          "minified_bytes": 941508,
+          "gzip_bytes": 268212
+        },
+        "incremental_after_app": {
+          "files": [
+            "assets/ComboBox-DiqVNzKQ.js",
+            "assets/DataTable-CaaQZZp2.js",
+            "assets/InputDialog-DnPgGdRk.js",
+            "assets/SaveAsTemplateModal-BP56dMBL.js",
+            "assets/UnitBadge-uoF9vhwI.js",
+            "assets/WorkOrders-C0tPXgUt.js",
+            "assets/catalogGroups-BSnYBvDZ.js",
+            "assets/csv-CC_MtgeY.js",
+            "assets/materialTie-B2M4hsvM.js",
+            "assets/priority-CGvTM11G.js",
+            "assets/useDebouncedValue-CnE3dFqZ.js",
+            "assets/useOptimisticMutation-BfWy4nxP.js"
+          ],
+          "minified_bytes": 121714,
+          "gzip_bytes": 39991
+        },
+        "dynamic_features": []
+      },
+      "src/pages/Scheduling.tsx": {
+        "initial_navigation": {
+          "files": [
+            "assets/KioskQueueCard-Cw4NJ53D.js",
+            "assets/Scheduling-DpQbwCqp.js",
+            "assets/UnitBadge-uoF9vhwI.js",
+            "assets/headless-C3DayD0I.js",
+            "assets/icons-C9NcBtPH.js",
+            "assets/index-DcuGEPJC.js",
+            "assets/kioskConstants-CUvx_ZTl.js",
+            "assets/priority-CGvTM11G.js",
+            "assets/react-B1rr2kLU.js"
+          ],
+          "minified_bytes": 868694,
+          "gzip_bytes": 242777
+        },
+        "incremental_after_app": {
+          "files": [
+            "assets/KioskQueueCard-Cw4NJ53D.js",
+            "assets/Scheduling-DpQbwCqp.js",
+            "assets/UnitBadge-uoF9vhwI.js",
+            "assets/kioskConstants-CUvx_ZTl.js",
+            "assets/priority-CGvTM11G.js"
+          ],
+          "minified_bytes": 48900,
+          "gzip_bytes": 14556
+        },
+        "dynamic_features": []
+      }
+    }
+  },
+  {
+    "build": "before-build",
+    "entry": {
+      "files": [
+        "assets/headless-C3DayD0I.js",
+        "assets/icons-C9NcBtPH.js",
+        "assets/index-BG4qggfB.js",
+        "assets/react-B1rr2kLU.js"
+      ],
+      "minified_bytes": 820978,
+      "gzip_bytes": 228560
+    },
+    "routes": {
+      "src/pages/WorkOrders.tsx": {
+        "initial_navigation": {
+          "files": [
+            "assets/ComboBox-DZBlypJv.js",
+            "assets/DataTable-BsVxmCWb.js",
+            "assets/InputDialog-j2eKeSNI.js",
+            "assets/SaveAsTemplateModal-Bojox18K.js",
+            "assets/TableWorkspaceControls-Dcm8e7os.js",
+            "assets/UnitBadge-DsyEr--l.js",
+            "assets/WorkOrders-DZLkCRl5.js",
+            "assets/catalogGroups-BSnYBvDZ.js",
+            "assets/csv-CC_MtgeY.js",
+            "assets/headless-C3DayD0I.js",
+            "assets/icons-C9NcBtPH.js",
+            "assets/index-BG4qggfB.js",
+            "assets/materialTie-B2M4hsvM.js",
+            "assets/priority-CGvTM11G.js",
+            "assets/react-B1rr2kLU.js",
+            "assets/useDebouncedValue-CnE3dFqZ.js",
+            "assets/useOptimisticMutation-BynvhijB.js",
+            "assets/useWorkspaceRecords-BBQp4Xsh.js"
+          ],
+          "minified_bytes": 952043,
+          "gzip_bytes": 272121
+        },
+        "incremental_after_app": {
+          "files": [
+            "assets/ComboBox-DZBlypJv.js",
+            "assets/DataTable-BsVxmCWb.js",
+            "assets/InputDialog-j2eKeSNI.js",
+            "assets/SaveAsTemplateModal-Bojox18K.js",
+            "assets/TableWorkspaceControls-Dcm8e7os.js",
+            "assets/UnitBadge-DsyEr--l.js",
+            "assets/WorkOrders-DZLkCRl5.js",
+            "assets/catalogGroups-BSnYBvDZ.js",
+            "assets/csv-CC_MtgeY.js",
+            "assets/materialTie-B2M4hsvM.js",
+            "assets/priority-CGvTM11G.js",
+            "assets/useDebouncedValue-CnE3dFqZ.js",
+            "assets/useOptimisticMutation-BynvhijB.js",
+            "assets/useWorkspaceRecords-BBQp4Xsh.js"
+          ],
+          "minified_bytes": 131065,
+          "gzip_bytes": 43561
+        },
+        "dynamic_features": []
+      },
+      "src/pages/Scheduling.tsx": {
+        "initial_navigation": {
+          "files": [
+            "assets/KioskQueueCard-B2hIxwMB.js",
+            "assets/Scheduling-RdNi9tKn.js",
+            "assets/UnitBadge-DsyEr--l.js",
+            "assets/headless-C3DayD0I.js",
+            "assets/icons-C9NcBtPH.js",
+            "assets/index-BG4qggfB.js",
+            "assets/kioskConstants-CUvx_ZTl.js",
+            "assets/priority-CGvTM11G.js",
+            "assets/react-B1rr2kLU.js"
+          ],
+          "minified_bytes": 876819,
+          "gzip_bytes": 245009
+        },
+        "incremental_after_app": {
+          "files": [
+            "assets/KioskQueueCard-B2hIxwMB.js",
+            "assets/Scheduling-RdNi9tKn.js",
+            "assets/UnitBadge-DsyEr--l.js",
+            "assets/kioskConstants-CUvx_ZTl.js",
+            "assets/priority-CGvTM11G.js"
+          ],
+          "minified_bytes": 55841,
+          "gzip_bytes": 16449
+        },
+        "dynamic_features": []
+      }
+    }
+  },
+  {
+    "build": "after-build",
+    "entry": {
+      "files": [
+        "assets/headless-C3DayD0I.js",
+        "assets/icons-Bw7-K8lR.js",
+        "assets/index-kpqAsd5B.js",
+        "assets/react-B1rr2kLU.js"
+      ],
+      "minified_bytes": 821025,
+      "gzip_bytes": 228562
+    },
+    "routes": {
+      "src/pages/WorkOrders.tsx": {
+        "initial_navigation": {
+          "files": [
+            "assets/DataTable-fFe8eQN7.js",
+            "assets/InputDialog-CoSpFWTm.js",
+            "assets/SaveAsTemplateModal-B9vSYCca.js",
+            "assets/TableWorkspaceControls-aKoqgfQS.js",
+            "assets/UnitBadge-BQB92cV4.js",
+            "assets/WorkOrders-8jTNIlYS.js",
+            "assets/csv-CC_MtgeY.js",
+            "assets/headless-C3DayD0I.js",
+            "assets/icons-Bw7-K8lR.js",
+            "assets/index-kpqAsd5B.js",
+            "assets/priority-CGvTM11G.js",
+            "assets/react-B1rr2kLU.js",
+            "assets/useDebouncedValue-CnE3dFqZ.js",
+            "assets/useOptimisticMutation-B8fhmCjE.js",
+            "assets/useWorkspaceRecords-pMv-6_xu.js"
+          ],
+          "minified_bytes": 910131,
+          "gzip_bytes": 257853
+        },
+        "incremental_after_app": {
+          "files": [
+            "assets/DataTable-fFe8eQN7.js",
+            "assets/InputDialog-CoSpFWTm.js",
+            "assets/SaveAsTemplateModal-B9vSYCca.js",
+            "assets/TableWorkspaceControls-aKoqgfQS.js",
+            "assets/UnitBadge-BQB92cV4.js",
+            "assets/WorkOrders-8jTNIlYS.js",
+            "assets/csv-CC_MtgeY.js",
+            "assets/priority-CGvTM11G.js",
+            "assets/useDebouncedValue-CnE3dFqZ.js",
+            "assets/useOptimisticMutation-B8fhmCjE.js",
+            "assets/useWorkspaceRecords-pMv-6_xu.js"
+          ],
+          "minified_bytes": 89106,
+          "gzip_bytes": 29291
+        },
+        "dynamic_features": [
+          "assets/LaserNestImportWizard-CN6MzytC.js",
+          "assets/LaserNestImportWizard-CN6MzytC.js"
+        ]
+      },
+      "src/pages/Scheduling.tsx": {
+        "initial_navigation": {
+          "files": [
+            "assets/KioskQueueCard-DyMxheHO.js",
+            "assets/Scheduling-B2iCNUdw.js",
+            "assets/UnitBadge-BQB92cV4.js",
+            "assets/headless-C3DayD0I.js",
+            "assets/icons-Bw7-K8lR.js",
+            "assets/index-kpqAsd5B.js",
+            "assets/kioskConstants-CUvx_ZTl.js",
+            "assets/priority-CGvTM11G.js",
+            "assets/react-B1rr2kLU.js"
+          ],
+          "minified_bytes": 876866,
+          "gzip_bytes": 245014
+        },
+        "incremental_after_app": {
+          "files": [
+            "assets/KioskQueueCard-DyMxheHO.js",
+            "assets/Scheduling-B2iCNUdw.js",
+            "assets/UnitBadge-BQB92cV4.js",
+            "assets/kioskConstants-CUvx_ZTl.js",
+            "assets/priority-CGvTM11G.js"
+          ],
+          "minified_bytes": 55841,
+          "gzip_bytes": 16452
+        },
+        "dynamic_features": []
+      }
+    }
+  },
+  {
+    "build": "responsive-build",
+    "entry": {
+      "files": [
+        "assets/headless-C3DayD0I.js",
+        "assets/icons-Bw7-K8lR.js",
+        "assets/index-BtD9HN4j.js",
+        "assets/react-B1rr2kLU.js"
+      ],
+      "minified_bytes": 821025,
+      "gzip_bytes": 228575
+    },
+    "routes": {
+      "src/pages/WorkOrders.tsx": {
+        "initial_navigation": {
+          "files": [
+            "assets/DataTable-DyJN2cHw.js",
+            "assets/InputDialog-C30V8ccp.js",
+            "assets/SaveAsTemplateModal-CzZhrABQ.js",
+            "assets/TableWorkspaceControls-BDMjkXn0.js",
+            "assets/UnitBadge-DSZA9t73.js",
+            "assets/WorkOrders-Ba9x-ac7.js",
+            "assets/csv-CC_MtgeY.js",
+            "assets/headless-C3DayD0I.js",
+            "assets/icons-Bw7-K8lR.js",
+            "assets/index-BtD9HN4j.js",
+            "assets/priority-CGvTM11G.js",
+            "assets/react-B1rr2kLU.js",
+            "assets/useDebouncedValue-CnE3dFqZ.js",
+            "assets/useOptimisticMutation-BhnifVAL.js",
+            "assets/useWorkspaceRecords-Dw9tTAGR.js"
+          ],
+          "minified_bytes": 910734,
+          "gzip_bytes": 258070
+        },
+        "incremental_after_app": {
+          "files": [
+            "assets/DataTable-DyJN2cHw.js",
+            "assets/InputDialog-C30V8ccp.js",
+            "assets/SaveAsTemplateModal-CzZhrABQ.js",
+            "assets/TableWorkspaceControls-BDMjkXn0.js",
+            "assets/UnitBadge-DSZA9t73.js",
+            "assets/WorkOrders-Ba9x-ac7.js",
+            "assets/csv-CC_MtgeY.js",
+            "assets/priority-CGvTM11G.js",
+            "assets/useDebouncedValue-CnE3dFqZ.js",
+            "assets/useOptimisticMutation-BhnifVAL.js",
+            "assets/useWorkspaceRecords-Dw9tTAGR.js"
+          ],
+          "minified_bytes": 89709,
+          "gzip_bytes": 29495
+        },
+        "dynamic_features": [
+          "assets/LaserNestImportWizard-CACWDy4W.js",
+          "assets/LaserNestImportWizard-CACWDy4W.js"
+        ]
+      },
+      "src/pages/Scheduling.tsx": {
+        "initial_navigation": {
+          "files": [
+            "assets/KioskQueueCard-3G0YBl0U.js",
+            "assets/Scheduling-Di9p_him.js",
+            "assets/UnitBadge-DSZA9t73.js",
+            "assets/headless-C3DayD0I.js",
+            "assets/icons-Bw7-K8lR.js",
+            "assets/index-BtD9HN4j.js",
+            "assets/kioskConstants-CUvx_ZTl.js",
+            "assets/priority-CGvTM11G.js",
+            "assets/react-B1rr2kLU.js"
+          ],
+          "minified_bytes": 876866,
+          "gzip_bytes": 245028
+        },
+        "incremental_after_app": {
+          "files": [
+            "assets/KioskQueueCard-3G0YBl0U.js",
+            "assets/Scheduling-Di9p_him.js",
+            "assets/UnitBadge-DSZA9t73.js",
+            "assets/kioskConstants-CUvx_ZTl.js",
+            "assets/priority-CGvTM11G.js"
+          ],
+          "minified_bytes": 55841,
+          "gzip_bytes": 16453
+        },
+        "dynamic_features": []
+      }
+    }
+  }
+]

@@ -219,6 +219,60 @@ const CACHE_TTL = 5 * 60 * 1000;
 const importTimeout = (dryRun: boolean): number => (dryRun ? 120_000 : 600_000);
 
 class ApiService {
+  async previewDocumentDelivery(entityType: import('../types/documentDelivery').DeliveryEntity, entityId: number, newAttempt = false): Promise<import('../types/documentDelivery').DocumentDelivery> {
+    return (await this.api.post('/document-deliveries/preview', { entity_type: entityType, entity_id: entityId, new_attempt: newAttempt })).data;
+  }
+
+  async listDocumentDeliveries(entityType: import('../types/documentDelivery').DeliveryEntity, entityId: number): Promise<import('../types/documentDelivery').DocumentDelivery[]> {
+    return (await this.api.get('/document-deliveries', { params: { entity_type: entityType, entity_id: entityId } })).data;
+  }
+
+  async sendDocumentDelivery(id: number, data: import('../types/documentDelivery').DocumentDeliverySend): Promise<import('../types/documentDelivery').DocumentDelivery> {
+    return (await this.api.post(`/document-deliveries/${id}/send`, data)).data;
+  }
+
+  async getDocumentDeliveryAttachment(id: number): Promise<Blob> {
+    return (await this.api.get(`/document-deliveries/${id}/attachment`, { responseType: 'blob' })).data;
+  }
+
+  async reconcileDocumentDelivery(id: number, data: { expected_version: number; outcome: 'accepted' | 'failed'; verification_note: string }): Promise<import('../types/documentDelivery').DocumentDelivery> {
+    return (await this.api.post(`/document-deliveries/${id}/reconcile`, data)).data;
+  }
+  async previewSchedulingImpact(data: import('../types/schedulingImpact').SchedulingImpactRequest): Promise<import('../types/schedulingImpact').SchedulingImpactResponse> {
+    return (await this.api.post('/scheduling/impact-preview', data)).data;
+  }
+
+  async applySchedulingImpact(planToken: string): Promise<import('../types/schedulingImpact').SchedulingImpactApplyResponse> {
+    return (await this.api.post('/scheduling/impact-apply', { plan_token: planToken })).data;
+  }
+  async getOperationalInbox(): Promise<import('../types/operationsInbox').OperationalInboxResponse> {
+    return (await this.api.get('/operations-inbox/')).data;
+  }
+
+  async updateOperationalInbox(source: import('../types/operationsInbox').OperationalSource, id: number, data: import('../types/operationsInbox').OperationalInboxUpdate): Promise<import('../types/operationsInbox').OperationalInboxItem> {
+    return (await this.api.patch(`/operations-inbox/${source}/${id}`, data)).data;
+  }
+  async listWorkspaceRecords<T = Record<string, unknown>>(namespace: string, kind: 'view' | 'draft' = 'view'): Promise<import('../types/workspace').WorkspaceRecord<T>[]> {
+    const response = await this.api.get(`/user-workspaces/${encodeURIComponent(namespace)}`, { params: { kind } });
+    return response.data;
+  }
+
+  async saveWorkspaceRecord<T>(namespace: string, key: string, value: import('../types/workspace').WorkspaceWrite<T>): Promise<import('../types/workspace').WorkspaceRecord<T>> {
+    const response = await this.api.put(`/user-workspaces/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}`, value);
+    return response.data;
+  }
+
+  async deleteWorkspaceRecord(namespace: string, key: string, kind: 'view' | 'draft', version: number): Promise<void> {
+    await this.api.delete(`/user-workspaces/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}`, { params: { kind, version } });
+  }
+
+  async getMRPSupplyReview(actionId: number) {
+    return (await this.api.get(`/mrp/actions/${actionId}/supply-review`)).data;
+  }
+
+  async createMRPSupplyDraft(actionId: number, payload: unknown) {
+    return (await this.api.post(`/mrp/actions/${actionId}/supply-draft`, payload)).data;
+  }
   private api: AxiosInstance;
   private token: string | null = null;
   private refreshToken: string | null = null;

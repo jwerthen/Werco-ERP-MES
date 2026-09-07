@@ -1,3 +1,4 @@
+jest.mock('../context/AuthContext', () => ({ useAuth: () => ({ user: { id: 1, company_id: 1, role: 'admin', is_superuser: false } }) }));
 /**
  * Quotes — convert-to-work-order confirm (the INFO-variant ConfirmDialog shape).
  *

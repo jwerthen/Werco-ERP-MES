@@ -10,13 +10,15 @@ Calculates material requirements based on:
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Tuple
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+from app.db.locks import acquire_generator_lock
 from app.models.bom import BOM, BOMItemType
 from app.models.inventory import InventoryItem
 from app.models.mrp import MRPAction, MRPRequirement, MRPRun, MRPRunStatus, PlanningAction
 from app.models.part import Part, is_material_supply_part_type
+from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine
 from app.models.work_order import WorkOrder, WorkOrderStatus
 
 
@@ -92,18 +94,49 @@ class MRPService:
         # that are already being manufactured. COMPLETE WOs are excluded -- their
         # output is received into InventoryItem on completion (Batch 6 / INV-1), so it
         # is already counted in on_hand; counting it here too would double it.
-        # (Open PO-line supply could be added to this same figure later.)
+        # Explicit MRP draft supply also counts to avoid duplicate recommendations.
         on_order_rows = (
             self.db.query(WorkOrder.quantity_ordered, WorkOrder.quantity_complete)
             .filter(
                 WorkOrder.company_id == self.company_id,
                 WorkOrder.part_id == part_id,
-                WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS]),
+                WorkOrder.is_deleted == False,
+                or_(
+                    WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS]),
+                    (WorkOrder.status == WorkOrderStatus.DRAFT)
+                    & WorkOrder.id.in_(
+                        self.db.query(MRPAction.result_wo_id).filter(MRPAction.company_id == self.company_id)
+                    ),
+                ),
             )
             .all()
         )
         on_order = sum(max(0.0, float(ordered or 0) - float(complete or 0)) for ordered, complete in on_order_rows)
 
+        # Firm PO supply plus explicitly reviewed MRP drafts cover the shortage.
+        # Draft documents remain unissued, but must not be recommended twice.
+        po_rows = (
+            self.db.query(PurchaseOrderLine.quantity_ordered, PurchaseOrderLine.quantity_received)
+            .join(PurchaseOrder, PurchaseOrder.id == PurchaseOrderLine.purchase_order_id)
+            .filter(
+                PurchaseOrder.company_id == self.company_id,
+                PurchaseOrderLine.company_id == self.company_id,
+                PurchaseOrderLine.part_id == part_id,
+                PurchaseOrderLine.is_closed == False,
+                PurchaseOrder.is_deleted == False,
+                or_(
+                    PurchaseOrder.status.in_(
+                        [POStatus.PENDING_APPROVAL, POStatus.APPROVED, POStatus.SENT, POStatus.PARTIAL]
+                    ),
+                    (PurchaseOrder.status == POStatus.DRAFT)
+                    & PurchaseOrder.id.in_(
+                        self.db.query(MRPAction.result_po_id).filter(MRPAction.company_id == self.company_id)
+                    ),
+                ),
+            )
+            .all()
+        )
+        on_order += sum(max(0.0, float(ordered or 0) - float(received or 0)) for ordered, received in po_rows)
         return float(on_hand_result), float(allocated_result), float(on_order)
 
     def get_work_order_requirements(self, horizon_end: date, include_allocated: bool = True) -> List[Dict]:
@@ -115,6 +148,7 @@ class MRPService:
             self.db.query(WorkOrder)
             .filter(
                 WorkOrder.company_id == self.company_id,
+                WorkOrder.is_deleted == False,
                 WorkOrder.status.in_([WorkOrderStatus.DRAFT, WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS]),
                 WorkOrder.due_date <= horizon_end,
             )
@@ -358,6 +392,8 @@ class MRPService:
     ) -> MRPRun:
         """Execute a full MRP run"""
 
+        # Serialize published runs against reviewed draft creation for this tenant.
+        acquire_generator_lock(self.db, "mrp_planning", self.company_id)
         # Create MRP run record (scoped to this tenant)
         mrp_run = MRPRun(
             company_id=self.company_id,

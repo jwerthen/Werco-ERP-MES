@@ -1,3 +1,4 @@
+import { PageHeader } from '../components/ui/PageHeader';
 import React from 'react';
 import { tabKeyboard } from '../components/operations/tabKeyboard';
 import { useSearchParams } from 'react-router-dom';
@@ -30,11 +31,7 @@ export default function Warehouse() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-white">Warehouse</h1>
-        <p className="text-sm text-slate-400 mt-1">Inventory, receiving, and shipping &mdash; all in one place</p>
-      </div>
+      <PageHeader title="Warehouse" description="Inventory, receiving, and shipping in one place" />
 
       {/* Tab Navigation */}
       <div className="border-b border-slate-700">

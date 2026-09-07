@@ -1,3 +1,4 @@
+import { PageHeader } from '../components/ui/PageHeader';
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { addDays } from 'date-fns';
@@ -423,56 +424,63 @@ export default function Dashboard() {
     return 'Open';
   };
 
-  if (loading) {
-    return <SkeletonDashboard />;
-  }
-
-  if (error && !data) {
-    return <ErrorState title="Error loading dashboard" message={error} onRetry={() => loadDashboard(true)} />;
-  }
-
-  return (
-    <div className="space-y-4">
-      {/* Page header */}
-      <div className="page-header">
-        <div>
-          <div className="flex items-center gap-3">
-            <h1 className="page-title">Dashboard</h1>
-            {/* Data changed indicator */}
-            {dataChanged && (
-              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-fd-green/15 text-emerald-300 animate-pulse">
-                Updated
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <p className="page-subtitle">Shop activity, staffing, and job progress · refreshes every 30 seconds</p>
-            {/* Refresh indicator */}
-            {isRefreshing && <ArrowPathIcon className="h-4 w-4 text-slate-500 animate-spin" />}
-            {lastUpdated && !isRefreshing && (
-              <span className="text-xs text-slate-500">
-                Checked {formatCentralTime(lastUpdated, { timeZoneName: 'short' })}
-              </span>
-            )}
-          </div>
-        </div>
-        <div className="page-actions">
-          {/* Manual refresh button */}
+  const pageHeader = (
+    <PageHeader
+      title="Dashboard"
+      description="Shop activity, staffing, and job progress · refreshes every 30 seconds"
+      metadata={
+        <>
+          {dataChanged && <span className="rounded-full bg-fd-green/15 px-2 py-0.5 text-emerald-300">Updated</span>}
+          {isRefreshing ? (
+            <span role="status">Refreshing dashboard…</span>
+          ) : (
+            lastUpdated && <span>Checked {formatCentralTime(lastUpdated, { timeZoneName: 'short' })}</span>
+          )}
+        </>
+      }
+      actions={
+        <>
           <button
             onClick={handleManualRefresh}
-            disabled={isRefreshing}
+            disabled={loading || isRefreshing}
             className="btn-ghost btn-sm"
             title="Refresh dashboard"
             aria-label="Refresh dashboard"
           >
-            <ArrowPathIcon className={`h-5 w-5 ${isRefreshing ? 'animate-spin' : ''}`} />
+            <ArrowPathIcon aria-hidden="true" className={`h-5 w-5 ${isRefreshing ? 'animate-spin' : ''}`} />
           </button>
           <Link to="/shop-floor" className="btn-primary">
-            <WrenchScrewdriverIcon className="h-5 w-5 mr-2" />
+            <WrenchScrewdriverIcon aria-hidden="true" className="h-5 w-5 mr-2" />
             Shop Floor
           </Link>
-        </div>
+        </>
+      }
+    />
+  );
+  if (loading) {
+    return (
+      <div className="space-y-4">
+        {pageHeader}
+        <p role="status" className="sr-only">
+          Loading dashboard…
+        </p>
+        <SkeletonDashboard />
       </div>
+    );
+  }
+
+  if (error && !data) {
+    return (
+      <div className="space-y-4">
+        {pageHeader}
+        <ErrorState title="Error loading dashboard" message={error} onRetry={() => loadDashboard(true)} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {pageHeader}
 
       {error && (
         <div role="alert" className="rounded border border-amber-500/40 bg-amber-500/10 p-3 text-amber-200">

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import api from '../../services/api';
 import useUnsavedChanges from '../../hooks/useUnsavedChanges';
+import { RecordHeader } from '../ui/PageHeader';
 import { Modal } from '../ui/Modal';
 import { Button, ErrorState, FormField } from '../ui';
 export default function DocumentDetail({
@@ -111,30 +112,37 @@ export default function DocumentDetail({
       setUploading(false);
     }
   };
+  const close = () => {
+    if (!uploading && confirmDiscard()) onClose();
+  };
   return (
-    <Modal
-      open
-      ariaLabel="Document preview and revision history"
-      onClose={() => {
-        if (!uploading && confirmDiscard()) onClose();
-      }}
-      size="2xl"
-      closeOnBackdrop={false}
-    >
-      <h2 className="text-lg font-semibold mb-3">{record?.title || 'Document'}</h2>
+    <Modal open ariaLabel="Document preview and revision history" onClose={close} size="2xl" closeOnBackdrop={false}>
+      <RecordHeader
+        title={record?.title || 'Document'}
+        closeLabel="Close document"
+        onClose={close}
+        closeDisabled={uploading}
+        fields={
+          record
+            ? [
+                { label: 'Document', value: record.document_number },
+                { label: 'Revision', value: record.revision },
+                { label: 'Status', value: record.status },
+                { label: 'File', value: record.file_name },
+              ]
+            : undefined
+        }
+      />
       {loading ? (
         <p role="status">Loading document and revision history…</p>
       ) : !record ? (
         <ErrorState message={error} onRetry={() => setAttempt(n => n + 1)} />
       ) : (
         <div className="space-y-4">
-          <p>
-            {record.document_number} · Revision {record.revision} · {record.status}
-          </p>
-          <p className="whitespace-pre-wrap">{record.description}</p>
-          <div className="flex gap-3">
+          <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{record.description}</p>
+          <div className="flex min-w-0 flex-wrap gap-3">
             <Button variant="secondary" onClick={download}>
-              Download {record.file_name}
+              Download file
             </Button>
             {revisions.length > 0 && revisions[0].id !== id ? (
               <Button variant="secondary" onClick={() => selectRevision(revisions[0].id)}>
@@ -188,7 +196,7 @@ export default function DocumentDetail({
                   {doc.id === id ? ' (viewing)' : ''}
                 </button>
                 <p className="text-xs text-slate-400">{doc.created_at}</p>
-                <p className="whitespace-pre-wrap">{doc.revision_notes || 'Initial upload'}</p>
+                <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{doc.revision_notes || 'Initial upload'}</p>
               </li>
             ))}
           </ul>

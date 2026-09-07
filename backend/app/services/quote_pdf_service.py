@@ -49,6 +49,7 @@ def build_customer_quote_pdf(
         leftMargin=36,
         rightMargin=36,
         title=f"Quote {quote_number}",
+        invariant=1,
     )
     styles = getSampleStyleSheet()
     story: List[Any] = []
@@ -78,7 +79,7 @@ def build_customer_quote_pdf(
     for line in line_summaries:
         table_rows.append(
             [
-                line.get("part_display") or "-",
+                Paragraph(pdf_escape(line.get("part_display") or "-"), styles["Normal"]),
                 str(line.get("qty") or 1),
                 line.get("material") or "TBD",
                 line.get("thickness") or "TBD",
@@ -87,7 +88,7 @@ def build_customer_quote_pdf(
             ]
         )
 
-    table = Table(table_rows, repeatRows=1)
+    table = Table(table_rows, repeatRows=1, colWidths=[205, 40, 65, 60, 65, 105])
     table.setStyle(
         TableStyle(
             [

@@ -80,6 +80,8 @@ export interface DataTableGroupBy<T> {
 
 export interface DataTableProps<T> {
   columns: Array<DataTableColumn<T>>;
+  /** Keep hidden columns available as sort keys for a saved table layout. */
+  sortColumns?: Array<DataTableColumn<T>>;
   data: T[];
   rowKey: (row: T) => string | number;
   onRowClick?: (row: T) => void;
@@ -88,6 +90,8 @@ export interface DataTableProps<T> {
   onRetry?: () => void;
   empty?: DataTableEmpty;
   defaultSort?: { key: string; dir: SortDir };
+  sort?: { key: string; dir: SortDir } | null;
+  onSortChange?: (sort: { key: string; dir: SortDir } | null) => void;
   /** Client-side page size. Ignored when `serverPagination` is set. */
   pageSize?: number;
   serverPagination?: DataTableServerPagination;
@@ -203,6 +207,7 @@ export function buildCsv<T>(columns: Array<DataTableColumn<T>>, rows: T[]): stri
 
 export function DataTable<T>({
   columns,
+  sortColumns,
   data,
   rowKey,
   onRowClick,
@@ -211,6 +216,8 @@ export function DataTable<T>({
   onRetry,
   empty,
   defaultSort,
+  sort: controlledSort,
+  onSortChange,
   pageSize,
   serverPagination,
   groupBy,
@@ -223,16 +230,17 @@ export function DataTable<T>({
   mobileCards,
   rowClassName,
 }: DataTableProps<T>) {
-  const [sort, setSort] = useState<{ key: string; dir: SortDir } | null>(
+  const [localSort, setLocalSort] = useState<{ key: string; dir: SortDir } | null>(
     defaultSort ?? null
   );
+  const sort = controlledSort === undefined ? localSort : controlledSort;
   const [clientPage, setClientPage] = useState(1);
 
   const columnByKey = useMemo(() => {
     const map = new Map<string, DataTableColumn<T>>();
-    columns.forEach((c) => map.set(c.key, c));
+    (sortColumns || columns).forEach((c) => map.set(c.key, c));
     return map;
-  }, [columns]);
+  }, [columns, sortColumns]);
 
   // Pure sort applied to an arbitrary row set (never mutates its input).
   const sortRows = useCallback(
@@ -295,13 +303,12 @@ export function DataTable<T>({
   const handleSort = useCallback(
     (key: string) => {
       setClientPage(1);
-      setSort((prev) => {
-        if (!prev || prev.key !== key) return { key, dir: 'asc' };
-        if (prev.dir === 'asc') return { key, dir: 'desc' };
-        return null; // asc → desc → none
-      });
+      const next = !sort || sort.key !== key ? { key, dir: 'asc' as const }
+        : sort.dir === 'asc' ? { key, dir: 'desc' as const } : null;
+      setLocalSort(next);
+      onSortChange?.(next);
     },
-    []
+    [sort, onSortChange]
   );
 
   // ---- Selection ----

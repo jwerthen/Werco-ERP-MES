@@ -1,3 +1,5 @@
+import { useTableWorkspace } from '../hooks/useTableWorkspace';
+import { TableWorkspaceControls } from '../components/ui/TableWorkspaceControls';
 import { getPriorityClasses, getPriorityLabel } from '../utils/priority';
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
@@ -48,7 +50,8 @@ import {
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
-import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
+import LaserNestImportWizard from '../components/laser/LazyLaserNestImportWizard';
+import { ResponsiveViews } from '../components/ui/ResponsiveViews';
 import DuplicateWorkOrderModal from '../components/workorders/DuplicateWorkOrderModal';
 import SaveAsTemplateModal from '../components/workorders/SaveAsTemplateModal';
 import { createdWorkOrders } from '../components/workorders/UseTemplateModal';
@@ -1243,6 +1246,18 @@ export default function WorkOrders() {
     ]
   );
 
+  const workspace = useTableWorkspace('work-orders', 'orders', workOrderColumns,
+    { search, status: statusFilter, customer: customerFilter, scope: dashboardScope || '', cots: hideCOTS ? '' : '1', group: groupBy === 'none' ? '' : groupBy },
+    filters => {
+      setSearch(typeof filters.search === 'string' ? filters.search : '');
+      const next = new URLSearchParams(searchParams);
+      for (const key of ['status', 'customer', 'scope', 'cots', 'group']) {
+        const value = filters[key];
+        if (typeof value === 'string' && value) next.set(key, value); else next.delete(key);
+      }
+      setSearchParams(next);
+    }, { key: 'priority', dir: 'asc' });
+
   const customers = useMemo(() => {
     const unique = new Set(workOrders.map(wo => wo.customer_name).filter(Boolean));
     return Array.from(unique).sort() as string[];
@@ -1363,7 +1378,7 @@ export default function WorkOrders() {
         )}
 
       </div>
-      {canImportNests && (
+      {canImportNests && nestWizardOpen && (
         <LaserNestImportWizard
           open={nestWizardOpen}
           onClose={() => setNestWizardOpen(false)}
@@ -1698,6 +1713,8 @@ export default function WorkOrders() {
         </div>
       </div>
 
+      <TableWorkspaceControls workspace={workspace} />
+
       {/* Work Orders List */}
       {loadError && workOrders.length === 0 ? (
         <ErrorState
@@ -1719,9 +1736,11 @@ export default function WorkOrders() {
                   </span>
                 </div>
               </div>
+              <ResponsiveViews
+                desktop={
               <div className="hidden lg:block">
                 <DataTable
-                  columns={buildWorkOrderColumns({
+                  columns={workspace.displayColumns(buildWorkOrderColumns({
                     hideColumn: groupBy === 'customer' ? 'customer' : groupBy === 'part' ? 'part' : undefined,
                     onDelete: canDeleteWorkOrders ? handleDelete : undefined,
                     onDuplicate: canDuplicateWorkOrders ? handleDuplicate : undefined,
@@ -1730,7 +1749,8 @@ export default function WorkOrders() {
                     releasingIds,
                     deletePending,
                     dueDateEdit: dueDateCellOptions,
-                  })}
+                  }))}
+                  {...workspace.tableProps}
                   data={orders}
                   rowKey={(wo) => wo.id}
                   onRowClick={(wo) => navigate(`/work-orders/${wo.id}`)}
@@ -1738,8 +1758,10 @@ export default function WorkOrders() {
                   csvExport={{ filename: `work-orders-${groupCsvSlug(groupName)}` }}
                 />
               </div>
+                }
+                mobile={
               <WorkOrderMobileList
-                workOrders={orders}
+                workOrders={workspace.sortRows(orders)}
                 onDelete={canDeleteWorkOrders ? handleDelete : undefined}
                 onDuplicate={canDuplicateWorkOrders ? handleDuplicate : undefined}
                 onSaveTemplate={canEditWorkOrders ? handleSaveTemplate : undefined}
@@ -1747,6 +1769,8 @@ export default function WorkOrders() {
                 releasingIds={releasingIds}
                 deletePending={deletePending}
                 className="lg:hidden p-3"
+              />
+                }
               />
             </div>
           ))}
@@ -1759,9 +1783,12 @@ export default function WorkOrders() {
             <WorkOrdersEmptyState />
           ) : (
             <>
+              <ResponsiveViews
+                desktop={
               <div className="hidden lg:block">
                 <DataTable
-                  columns={workOrderColumns}
+                  columns={workspace.displayColumns(workOrderColumns)}
+                  {...workspace.tableProps}
                   data={filteredWorkOrders}
                   rowKey={(wo) => wo.id}
                   onRowClick={(wo) => navigate(`/work-orders/${wo.id}`)}
@@ -1770,9 +1797,10 @@ export default function WorkOrders() {
                   csvExport={{ filename: 'work-orders' }}
                 />
               </div>
-
+                }
+                mobile={
               <WorkOrderMobileList
-                workOrders={filteredWorkOrders}
+                workOrders={workspace.sortRows(filteredWorkOrders)}
                 onDelete={canDeleteWorkOrders ? handleDelete : undefined}
                 onDuplicate={canDuplicateWorkOrders ? handleDuplicate : undefined}
                 onSaveTemplate={canEditWorkOrders ? handleSaveTemplate : undefined}
@@ -1780,6 +1808,8 @@ export default function WorkOrders() {
                 releasingIds={releasingIds}
                 deletePending={deletePending}
                 className="lg:hidden"
+              />
+                }
               />
             </>
           )}
@@ -2073,4 +2103,3 @@ const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder:
     </article>
   );
 });
-

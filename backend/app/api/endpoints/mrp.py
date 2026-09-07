@@ -1,25 +1,98 @@
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.time_utils import to_utc_iso
-from app.db.database import get_db
+from app.db.database import atomic_transaction, get_db
 from app.models.mrp import MRPAction, MRPRequirement, MRPRun, MRPRunStatus, PlanningAction
+from app.models.purchasing import PurchaseOrder
 from app.models.user import User, UserRole
+from app.models.work_order import WorkOrder
 from app.schemas.mrp import (
     MRPActionResponse,
     MRPRequirementResponse,
     MRPRunCreate,
     MRPRunDetail,
     MRPRunResponse,
+    MRPSupplyDraftRequest,
+    MRPSupplyDraftResponse,
     PartSummary,
     ProcessActionResponse,
 )
+from app.services.audit_service import AuditService
 from app.services.mrp_service import MRPService
+from app.services.mrp_supply_service import MRPSupplyService
 
 router = APIRouter()
+
+
+def _supply_result(db: Session, action: MRPAction, company_id: int):
+    """Resolve tenant-scoped new and legacy auto-draft associations."""
+    if action.result_po_id:
+        record = (
+            db.query(PurchaseOrder)
+            .filter(PurchaseOrder.id == action.result_po_id, PurchaseOrder.company_id == company_id)
+            .first()
+        )
+        if record:
+            return dict(
+                action_id=action.id,
+                mrp_run_id=action.mrp_run_id,
+                kind="purchase_order",
+                id=record.id,
+                number=record.po_number,
+                url=f"/purchasing?po={record.id}",
+                status=record.status.value,
+            )
+    if action.result_wo_id:
+        record = (
+            db.query(WorkOrder).filter(WorkOrder.id == action.result_wo_id, WorkOrder.company_id == company_id).first()
+        )
+        if record:
+            return dict(
+                action_id=action.id,
+                mrp_run_id=action.mrp_run_id,
+                kind="work_order",
+                id=record.id,
+                number=record.work_order_number,
+                url=f"/work-orders/{record.id}",
+                status=record.status.value,
+            )
+    return None
+
+
+@router.get("/actions/{action_id}/supply-review")
+def review_supply_draft(
+    action_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Revalidate current shortage and preview a supply draft without writing."""
+    return MRPSupplyService(db, company_id).review(action_id)
+
+
+@router.post("/actions/{action_id}/supply-draft", response_model=MRPSupplyDraftResponse)
+def create_supply_draft(
+    action_id: int,
+    payload: MRPSupplyDraftRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Create an unissued draft and durable source/retry association atomically."""
+    try:
+        with atomic_transaction(db):
+            result = MRPSupplyService(db, company_id).create(action_id, payload, current_user, audit)
+    except IntegrityError as exc:
+        raise HTTPException(
+            409, "A supply draft conflicts with an existing record. Reload the review to open any existing draft."
+        ) from exc
+    return result
 
 
 @router.get("/runs", response_model=List[MRPRunResponse])
@@ -74,7 +147,7 @@ def get_latest_mrp_run(
     run = (
         db.query(MRPRun)
         .filter(MRPRun.company_id == company_id, MRPRun.status == MRPRunStatus.COMPLETE)
-        .order_by(MRPRun.completed_at.desc())
+        .order_by(MRPRun.completed_at.desc(), MRPRun.id.desc())
         .first()
     )
 
@@ -158,7 +231,8 @@ def get_mrp_run(
             reference_number=action.reference_number,
             is_processed=action.is_processed,
             processed_at=action.processed_at,
-            result_reference=action.result_reference,
+            result_reference=(_supply_result(db, action, company_id) or {}).get("number"),
+            supply_draft=_supply_result(db, action, company_id),
             notes=action.notes,
         )
         actions.append(action_response)
@@ -233,7 +307,8 @@ def get_mrp_actions(
                 reference_number=action.reference_number,
                 is_processed=action.is_processed,
                 processed_at=action.processed_at,
-                result_reference=action.result_reference,
+                result_reference=(_supply_result(db, action, company_id) or {}).get("number"),
+                supply_draft=_supply_result(db, action, company_id),
                 notes=action.notes,
             )
         )
@@ -252,7 +327,7 @@ def get_current_shortages(
     latest_run = (
         db.query(MRPRun)
         .filter(MRPRun.company_id == company_id, MRPRun.status == MRPRunStatus.COMPLETE)
-        .order_by(MRPRun.completed_at.desc())
+        .order_by(MRPRun.completed_at.desc(), MRPRun.id.desc())
         .first()
     )
 
@@ -265,6 +340,7 @@ def get_current_shortages(
         .options(joinedload(MRPAction.part))
         .filter(
             MRPAction.mrp_run_id == latest_run.id,
+            MRPAction.company_id == company_id,
             MRPAction.is_processed == False,
             MRPAction.action_type.in_([PlanningAction.ORDER, PlanningAction.MANUFACTURE, PlanningAction.EXPEDITE]),
         )
@@ -277,6 +353,7 @@ def get_current_shortages(
         shortages.append(
             {
                 "action_id": action.id,
+                "supply_draft": _supply_result(db, action, company_id),
                 "part_id": action.part_id,
                 "part_number": action.part.part_number if action.part else None,
                 "part_name": action.part.name if action.part else None,
@@ -307,10 +384,7 @@ def process_mrp_action(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """
-    Mark an MRP action as processed.
-    In a full implementation, this would create the actual WO or PO.
-    """
+    """Mark a recommendation reviewed, independently of supply draft creation."""
     action = db.query(MRPAction).filter(MRPAction.id == action_id, MRPAction.company_id == company_id).first()
     if not action:
         raise HTTPException(status_code=404, detail="Action not found")
@@ -327,16 +401,11 @@ def process_mrp_action(
     if notes:
         action.notes = (action.notes or "") + f"\nProcessed: {notes}"
 
-    # In a full implementation, we would:
-    # - For ORDER actions: Create a Purchase Order
-    # - For MANUFACTURE actions: Create a Work Order
-    # For now, we just mark it processed
-
     db.commit()
 
     return ProcessActionResponse(
         success=True,
-        message=f"Action marked as processed. Create {action.action_type.value} manually.",
+        message="Recommendation marked reviewed. No supply document was created by this action.",
         created_reference=None,
     )
 
@@ -352,6 +421,9 @@ def delete_mrp_run(
     run = db.query(MRPRun).filter(MRPRun.id == run_id, MRPRun.company_id == company_id).first()
     if not run:
         raise HTTPException(status_code=404, detail="MRP run not found")
+
+    if any(action.result_po_id or action.result_wo_id for action in run.actions):
+        raise HTTPException(409, "This run is linked to supply documents and must be retained for traceability.")
 
     db.delete(run)
     db.commit()

@@ -32,6 +32,7 @@ import {
 import { Modal } from '../components/ui/Modal';
 import { Button, EmptyState, ErrorState, FormField, statusVariant, useToast } from '../components/ui';
 import type { StatusVariant } from '../components/ui';
+import type { SchedulingImpactRequest, SchedulingImpactResponse } from '../types/schedulingImpact';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
 interface WorkCenter {
@@ -214,6 +215,13 @@ export default function Scheduling() {
     setPendingJobIds(new Set(pendingJobsRef.current));
   };
   const bulkPendingRef = useRef(false);
+  const impactPendingRef = useRef(false);
+  const [impactRequest, setImpactRequest] = useState<SchedulingImpactRequest | null>(null);
+  const [impactPlan, setImpactPlan] = useState<SchedulingImpactResponse | null>(null);
+  const [impactPending, setImpactPending] = useState<'preview' | 'apply' | null>(null);
+  const [impactError, setImpactError] = useState<string | null>(null);
+  const [impactStale, setImpactStale] = useState(false);
+  const [impactUnconfirmed, setImpactUnconfirmed] = useState(false);
   const [bulkResults, setBulkResults] = useState<Array<{ number: string; result: string }>>([]);
   const retryBulkRef = useRef<(() => Promise<void>) | null>(null);
   const [bulkActionRunning, setBulkActionRunning] = useState<string | null>(null);
@@ -240,7 +248,6 @@ export default function Scheduling() {
   const [inlineEditDate, setInlineEditDate] = useState('');
 
   // Auto-schedule state
-  const [runningAutoSchedule, setRunningAutoSchedule] = useState(false);
 
   // Search and filter
   const [searchQuery, setSearchQuery] = useState('');
@@ -310,6 +317,11 @@ export default function Scheduling() {
   const selectedQueueJobs = useMemo(
     () => scheduleQueue.filter((job) => selectedWorkOrderIds.has(job.work_order_id)),
     [scheduleQueue, selectedWorkOrderIds]
+  );
+
+  const selectedVisibleQueueJobs = useMemo(
+    () => filteredQueueRows.filter(job => selectedWorkOrderIds.has(job.work_order_id)),
+    [filteredQueueRows, selectedWorkOrderIds]
   );
 
   useEffect(() => {
@@ -652,38 +664,103 @@ export default function Scheduling() {
     } finally { endJob(job.work_order_id); }
   };
 
-  const handleAutoScheduleAll = async () => {
-    if (bulkPendingRef.current || pendingJobsRef.current.size > 0) return;
-    const unscheduledIds = scheduleQueue
-      .filter((job) => !job.scheduled_start)
-      .map((job) => job.work_order_id);
-
-    if (unscheduledIds.length === 0) {
-      showToast('info', 'No unscheduled work orders to schedule.');
+  const requestImpactPreview = async (request: SchedulingImpactRequest, refresh = false) => {
+    if (impactPendingRef.current || pendingJobsRef.current.size > 0 || (bulkPendingRef.current && !refresh)) return;
+    if (!request.work_order_ids.length) {
+      showToast('info', 'Select at least one visible work order first.');
       return;
     }
-
+    if (request.work_order_ids.length > 50) {
+      showToast('error', 'Review up to 50 work orders at a time. Narrow the visible selection.');
+      return;
+    }
+    if (request.action === 'shift' && (!request.shift_days || Math.abs(request.shift_days) > 30)) {
+      showToast('error', 'Choose a shift from −30 to 30 days, excluding zero.');
+      return;
+    }
     bulkPendingRef.current = true;
-    setRunningAutoSchedule(true);
+    impactPendingRef.current = true;
+    setImpactRequest(request);
+    setImpactPending('preview');
+    setImpactPlan(null);
+    setImpactError(null);
+    setImpactStale(false);
+    setImpactUnconfirmed(false);
     try {
-      const result = await api.bulkScheduleEarliest(unscheduledIds, { forward_schedule: true });
-      const failures = new Map<number, string>((result.errors || []).map((row: {work_order_id: number; error: string}) => [row.work_order_id, row.error]));
-      setBulkResults(unscheduledIds.map(id => ({ number: jobs.find(job => job.work_order_id === id)?.work_order_number || String(id), result: failures.get(id) || 'Scheduled' })));
-      const failedJobs = jobs.filter(job => failures.has(job.work_order_id));
-      setSelectedWorkOrderIds(new Set(failedJobs.map(job => job.work_order_id)));
-      retryBulkRef.current = failedJobs.length ? () => runBulkAction('earliest', async job => { await api.scheduleWorkOrderEarliest(job.work_order_id, { work_center_id: job.work_center_id, forward_schedule: true }); return 'success'; }, failedJobs) : null;
-      await loadData();
-      showToast(
-        result.scheduled_count > 0 ? (result.error_count > 0 ? 'info' : 'success') : 'error',
-        `Auto-scheduled ${result.scheduled_count} work orders. ${result.error_count} errors.`,
-      );
+      setImpactPlan(await api.previewSchedulingImpact(request));
     } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Auto-schedule failed');
+      setImpactError(
+        err.response?.data?.detail ||
+          'Could not load the impact preview. No scheduling changes were requested. Try again.'
+      );
     } finally {
-      bulkPendingRef.current = false;
-      setRunningAutoSchedule(false);
+      impactPendingRef.current = false;
+      setImpactPending(null);
     }
   };
+
+  const closeImpactPreview = () => {
+    if (impactPendingRef.current) return;
+    if (impactUnconfirmed || impactStale) void loadData();
+    bulkPendingRef.current = false;
+    setImpactRequest(null);
+    setImpactPlan(null);
+    setImpactError(null);
+  };
+
+  const applyImpactPlan = async () => {
+    if (impactPendingRef.current || !impactPlan?.plan_token || impactStale) return;
+    impactPendingRef.current = true;
+    setImpactPending('apply');
+    setImpactError(null);
+    try {
+      const result = await api.applySchedulingImpact(impactPlan.plan_token);
+      const applied = new Set(result.applied_work_order_ids);
+      setBulkResults(
+        impactPlan.jobs.map(job => ({
+          number: job.work_order_number,
+          result: applied.has(job.work_order_id)
+            ? result.already_applied
+              ? 'Reviewed plan already applied'
+              : 'Reviewed plan applied'
+            : `${job.outcome === 'blocked' ? 'Blocked' : 'Skipped'}: ${job.reason}`,
+        }))
+      );
+      // Remove only the reviewed successes; hidden selections and blocked jobs survive.
+      setSelectedWorkOrderIds(
+        previous =>
+          new Set([
+            ...Array.from(previous).filter(id => !applied.has(id)),
+            ...impactPlan.jobs.filter(job => !applied.has(job.work_order_id)).map(job => job.work_order_id),
+          ])
+      );
+      retryBulkRef.current = null;
+      await loadData();
+      setImpactRequest(null);
+      setImpactPlan(null);
+      setImpactUnconfirmed(false);
+      bulkPendingRef.current = false;
+      showToast('success', result.message);
+    } catch (err: any) {
+      const stale = err.response?.status === 409;
+      setImpactStale(stale);
+      setImpactUnconfirmed(!stale);
+      setImpactError(
+        err.response?.data?.detail ||
+          'The result could not be confirmed. Retry this same reviewed plan to check or finish it without shifting dates twice.'
+      );
+      if (stale) await loadData();
+    } finally {
+      impactPendingRef.current = false;
+      setImpactPending(null);
+    }
+  };
+
+  const handleAutoScheduleAll = () =>
+    requestImpactPreview({
+      action: 'earliest',
+      work_order_ids: filteredQueueRows.filter(job => !job.scheduled_start).map(job => job.work_order_id),
+    });
 
   const handleScheduleEarliest = async (job: ScheduledJob) => {
     if (!beginJob(job.work_order_id)) return;
@@ -800,35 +877,18 @@ export default function Scheduling() {
     });
   };
 
-  const handleBulkShiftDates = async () => {
-    if (bulkShiftDays === 0) {
-      showToast('error', 'Shift days cannot be zero.');
-      return;
-    }
-    await runBulkAction('shift', async (job) => {
-      if (!job.scheduled_start) {
-        return 'skipped';
-      }
-      const scheduledStart = toCentralCalendarDate(job.scheduled_start);
-      if (!scheduledStart) {
-        return 'skipped';
-      }
-      const shiftedDate = addCalendarDays(scheduledStart, bulkShiftDays);
-      await api.scheduleWorkOrder(job.work_order_id, {
-        scheduled_start: getCentralDateStamp(shiftedDate),
-        work_center_id: job.work_center_id,
-      });
-      return 'success';
+  const handleBulkShiftDates = () =>
+    requestImpactPreview({
+      action: 'shift',
+      shift_days: bulkShiftDays,
+      work_order_ids: selectedVisibleQueueJobs.map(job => job.work_order_id),
     });
-  };
 
-  const handleBulkScheduleEarliest = async () => {
-    await runBulkAction('earliest', async job => {
-      if (job.scheduled_start) return 'skipped';
-      await api.scheduleWorkOrderEarliest(job.work_order_id, { work_center_id: job.work_center_id, forward_schedule: true });
-      return 'success';
+  const handleBulkScheduleEarliest = () =>
+    requestImpactPreview({
+      action: 'earliest',
+      work_order_ids: selectedVisibleQueueJobs.map(job => job.work_order_id),
     });
-  };
 
   const toggleRowSelection = (workOrderId: number) => {
     setSelectedWorkOrderIds((previous) => {
@@ -917,13 +977,13 @@ export default function Scheduling() {
         <div className="flex items-center gap-2">
           <Button
             onClick={handleAutoScheduleAll}
-            disabled={runningAutoSchedule}
+            disabled={!!impactRequest || !!bulkActionRunning || pendingJobIds.size > 0}
             size="sm"
             className="flex items-center disabled:opacity-50"
             title="Auto-schedule all unscheduled work orders to their earliest available capacity"
           >
             <BoltIcon className="h-4 w-4 mr-1" />
-            {runningAutoSchedule ? 'Scheduling...' : 'Auto-Schedule All'}
+            Preview Visible Unscheduled
           </Button>
           <div className="flex items-center gap-0.5 border-l border-slate-700 pl-2 ml-1">
             <button onClick={() => navigateWeek(-1)} className="p-1.5 hover:bg-slate-800 rounded-md transition-colors">
@@ -1353,6 +1413,7 @@ export default function Scheduling() {
               </div>
             )}
           </div>
+          <p className="text-xs text-slate-400 mb-2">Date previews include {selectedVisibleQueueJobs.length} selected visible jobs. Jobs hidden by filters are excluded from date changes.</p>
           <div className="grid grid-cols-1 xl:grid-cols-4 gap-2">
             {canEditPriority && (
               <div className="flex gap-2">
@@ -1415,7 +1476,7 @@ export default function Scheduling() {
                 disabled={bulkActionRunning !== null}
                 onClick={handleBulkShiftDates}
               >
-                Shift Dates
+                Preview Shift Dates
               </Button>
             </div>
             <Button
@@ -1424,7 +1485,7 @@ export default function Scheduling() {
               onClick={handleBulkScheduleEarliest}
             >
               <BoltIcon className="h-4 w-4 mr-1" />
-              Schedule Selected Earliest
+              Preview Selected Earliest
             </Button>
           </div>
         </div>
@@ -1630,6 +1691,204 @@ export default function Scheduling() {
           <span className="w-4 h-1.5 rounded-full bg-red-500/100 ml-1" /> &gt;100%
         </div>
       </div>
+
+      <Modal
+        open={!!impactRequest}
+        onClose={closeImpactPreview}
+        size="5xl"
+        closeOnBackdrop={!impactPending}
+        closeOnEscape={!impactPending}
+        ariaLabel="Review scheduling impact"
+      >
+        <div className="space-y-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-semibold">Review scheduling impact</h2>
+              <p className="text-sm text-slate-300 mt-1">
+                {impactRequest?.action === 'shift'
+                  ? `Shift scheduled remaining operations by ${impactRequest.shift_days} ${Math.abs(impactRequest.shift_days || 0) === 1 ? 'day' : 'days'}, preserving their spacing.`
+                  : 'Schedule remaining operations at the earliest available capacity, in the visible queue order.'}
+              </p>
+              <p className="text-xs text-slate-400 mt-1">
+                No changes are saved until you apply this reviewed plan. Dates use the manufacturing calendar in Central
+                time. Capacity uses the existing daily-hours estimate; delivery dates are projections.
+              </p>
+            </div>
+            <button
+              className="p-1 text-slate-400 hover:text-slate-200 disabled:opacity-50"
+              aria-label="Close impact preview"
+              disabled={!!impactPending}
+              onClick={closeImpactPreview}
+            >
+              <XMarkIcon className="h-5 w-5" />
+            </button>
+          </div>
+          {impactPending === 'preview' && <p role="status">Calculating operation dates and capacity impact…</p>}
+          {impactError && (
+            <div
+              role="alert"
+              className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200"
+            >
+              {impactError}
+              {impactStale && (
+                <p className="mt-2">
+                  The schedule has been refreshed. Review a new preview before applying. If an earlier response was
+                  lost, check the new before dates to confirm what was saved.
+                </p>
+              )}
+            </div>
+          )}
+          {impactPlan && (
+            <>
+              <div
+                className="flex flex-wrap gap-x-5 gap-y-2 rounded-lg bg-slate-800 p-3 text-sm"
+                aria-label="Impact summary"
+              >
+                <span>
+                  <strong>{impactPlan.summary.changed_jobs}</strong> of {impactPlan.summary.selected_jobs} jobs change
+                </span>
+                <span>
+                  <strong>{impactPlan.summary.changed_operations}</strong> operations change
+                </span>
+                <span>
+                  <strong>{impactPlan.summary.blocked_jobs}</strong> blocked ·{' '}
+                  <strong>{impactPlan.summary.skipped_jobs}</strong> skipped
+                </span>
+                <span className={impactPlan.summary.late_jobs ? 'text-amber-200' : ''}>
+                  <strong>{impactPlan.summary.late_jobs}</strong> projected late
+                </span>
+                <span className={impactPlan.summary.overloaded_days ? 'text-amber-200' : ''}>
+                  <strong>{impactPlan.summary.overloaded_days}</strong> affected center-days overloaded
+                </span>
+              </div>
+              <section aria-label="Operation date changes" className="space-y-3">
+                {impactPlan.jobs.map(job => (
+                  <div key={job.work_order_id} className="rounded-lg border border-slate-700 p-3">
+                    <div className="flex flex-wrap justify-between gap-2">
+                      <h3 className="font-semibold">
+                        {job.work_order_number}{' '}
+                        <span className="text-xs font-normal text-slate-400">{job.outcome}</span>
+                      </h3>
+                      <p className="text-sm text-slate-300">
+                        Due {job.due_date ? formatCentralDate(job.due_date) : 'not set'} · Finish{' '}
+                        {job.before_finish ? formatCentralDate(job.before_finish) : 'unknown'} →{' '}
+                        {job.after_finish ? formatCentralDate(job.after_finish) : 'unknown'}
+                        {job.late_days !== null && (
+                          <span className={job.late_days > 0 ? 'text-amber-200' : 'text-emerald-300'}>
+                            {' '}
+                            ·{' '}
+                            {job.late_days > 0
+                              ? `${job.late_days} ${job.late_days === 1 ? 'day' : 'days'} late (was ${job.before_late_days ?? 'unknown'})`
+                              : 'On time'}
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                    {job.reason && <p className="mt-2 text-sm text-amber-200">{job.reason}</p>}
+                    {job.operations.length > 0 && (
+                      <div className="overflow-x-auto mt-2">
+                        <table className="min-w-[560px] w-full text-sm">
+                          <thead className="text-left text-slate-400">
+                            <tr>
+                              <th className="py-2 pr-3">Operation / center</th>
+                              <th className="py-2 pr-3">Before</th>
+                              <th className="py-2">After</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {job.operations.map(op => (
+                              <tr key={op.operation_id} className="border-t border-slate-700">
+                                <td className="py-2 pr-3">
+                                  {op.operation_number} {op.operation_name}
+                                  <div className="text-xs text-slate-400">
+                                    {op.work_center_code}
+                                    {op.before_status !== op.after_status &&
+                                      ` · ${op.before_status} → ${op.after_status}`}
+                                  </div>
+                                </td>
+                                <td className="py-2 pr-3">
+                                  {op.before_start
+                                    ? `${formatCentralDate(op.before_start.slice(0, 10))} – ${formatCentralDate((op.before_end || op.before_start).slice(0, 10))}`
+                                    : 'Unscheduled'}
+                                </td>
+                                <td className="py-2">
+                                  {formatCentralDate(op.after_start.slice(0, 10))} –{' '}
+                                  {formatCentralDate(op.after_end.slice(0, 10))}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </section>
+              <section aria-label="Capacity impact">
+                <h3 className="font-semibold">Affected capacity and other jobs</h3>
+                {impactPlan.capacity.length === 0 ? (
+                  <p className="text-sm text-slate-400 mt-1">No affected daily load exceeds capacity.</p>
+                ) : (
+                  <ul className="space-y-2 mt-2">
+                    {impactPlan.capacity.map(row => (
+                      <li
+                        key={`${row.work_center_id}-${row.date}`}
+                        className="rounded-lg border border-slate-700 p-3 text-sm"
+                      >
+                        <strong>
+                          {row.work_center_code} · {formatCentralDate(row.date)}
+                        </strong>
+                        <p>
+                          {row.before_hours}h → {row.after_hours}h against {row.capacity_hours}h capacity ·{' '}
+                          <span className={row.overload_hours > 0 ? 'text-amber-200' : 'text-emerald-300'}>
+                            {row.overload_hours > 0 ? `${row.overload_hours}h overload` : 'Overload resolved'}
+                          </span>
+                        </p>
+                        <p className="text-slate-400">
+                          Jobs on this date after the change:{' '}
+                          {row.affected_jobs.map(job => job.work_order_number).join(', ') || 'none'}
+                        </p>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+              <p className="text-xs text-slate-400">
+                Preview expires{' '}
+                {formatInCentralTime(impactPlan.expires_at, {
+                  month: 'short',
+                  day: 'numeric',
+                  hour: 'numeric',
+                  minute: '2-digit',
+                })}
+                . Changes to these jobs or shared capacity require a new review. Blocked and skipped jobs keep their
+                dates.
+              </p>
+            </>
+          )}
+          <div className="flex flex-wrap justify-end gap-2 border-t border-slate-700 pt-4">
+            <Button variant="secondary" onClick={closeImpactPreview} disabled={!!impactPending}>
+              Cancel
+            </Button>
+            {impactRequest && !impactUnconfirmed && (
+              <Button
+                variant="secondary"
+                onClick={() => requestImpactPreview(impactRequest, true)}
+                disabled={!!impactPending}
+              >
+                {impactPlan ? 'Regenerate preview' : 'Retry preview'}
+              </Button>
+            )}
+            <Button onClick={applyImpactPlan} disabled={!!impactPending || !impactPlan?.plan_token || impactStale}>
+              {impactPending === 'apply'
+                ? 'Applying reviewed plan…'
+                : impactUnconfirmed
+                  ? 'Retry reviewed plan'
+                  : 'Apply reviewed plan'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Schedule Modal */}
       <Modal

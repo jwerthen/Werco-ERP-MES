@@ -16,6 +16,7 @@ from app.api.endpoints import (
     custom_fields,
     customer_complaints,
     customers,
+    document_deliveries,
     documents,
     downtime,
     dxf_parser,
@@ -34,6 +35,7 @@ from app.api.endpoints import (
     notifications,
     oee,
     operational_events,
+    operations_inbox,
     operator_certifications,
     parts,
     platform,
@@ -60,6 +62,7 @@ from app.api.endpoints import (
     supplier_scorecards,
     tool_management,
     traceability,
+    user_workspaces,
     users,
     visitor_logs,
     work_centers,
@@ -70,6 +73,9 @@ from app.api.endpoints import (
 )
 
 api_router = APIRouter()
+api_router.include_router(document_deliveries.router, prefix="/document-deliveries", tags=["Document Deliveries"])
+api_router.include_router(operations_inbox.router, prefix="/operations-inbox", tags=["Operations Inbox"])
+api_router.include_router(user_workspaces.router, prefix="/user-workspaces", tags=["User Workspaces"])
 
 api_router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 api_router.include_router(ai_learning.router, prefix="/ai", tags=["AI Learning"])

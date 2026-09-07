@@ -18,6 +18,8 @@ jest.mock('../services/api', () => ({
   __esModule: true,
   default: {
     getSetupHealth: jest.fn(),
+    getOperationalInbox: jest.fn(),
+    updateOperationalInbox: jest.fn(),
     getAIRecommendations: jest.fn(),
     acceptAIRecommendation: jest.fn(),
     dismissAIRecommendation: jest.fn(),
@@ -27,6 +29,14 @@ jest.mock('../services/api', () => ({
 }));
 
 const mockApi = api as jest.Mocked<typeof api>;
+beforeEach(() => {
+  mockApi.getOperationalInbox.mockResolvedValue({
+    items: [],
+    assignees: [],
+    checked_at: '2026-09-07T12:00:00Z',
+    truncated_sources: [],
+  });
+});
 
 const makeRecommendation = (overrides: Partial<AIRecommendation>): AIRecommendation => ({
   id: 1,
@@ -202,7 +212,11 @@ it('counts featured recommendations in Open Actions consistently across filter v
   );
   renderInbox();
   await screen.findByRole('region', { name: 'Top 3 today' });
-  expect(within(screen.getByRole('button', { name: /Open Actions/ })).getByText('4')).toBeInTheDocument();
+  expect(
+    within(screen.getByRole('button', { name: /Recommendation & setup actions/ })).getByText('4')
+  ).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'AI' }));
-  expect(within(screen.getByRole('button', { name: /Open Actions/ })).getByText('4')).toBeInTheDocument();
+  expect(
+    within(screen.getByRole('button', { name: /Recommendation & setup actions/ })).getByText('4')
+  ).toBeInTheDocument();
 });

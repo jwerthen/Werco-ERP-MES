@@ -381,7 +381,7 @@ describe('Dashboard work-order drill-down scope', () => {
     expect(screen.queryByRole('link', { name: 'WO-1002' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'WO-DONE' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Clear dashboard filter' }));
-    expect(await screen.findAllByRole('link', { name: 'WO-1002' })).toHaveLength(2);
+    expect(await screen.findAllByRole('link', { name: 'WO-1002' })).toHaveLength(1); // Only the active responsive list mounts.
     expect(locationSearch()).toBe('?cots=1');
   });
 });

@@ -187,22 +187,21 @@ test.describe('User Menu', () => {
   });
 
   test('user menu shows user info', async ({ page }) => {
-    const userMenu = page.locator('button[title="Sign out"]').first();
-    
-    if (await userMenu.isVisible({ timeout: 5000 }).catch(() => false)) {
-      await userMenu.click();
-      
-      // Should show user info
-      await expect(userMenu).toBeVisible();
-    }
+    // The sidebar displays identity directly; Sign out performs logout rather
+    // than opening an account menu. Clicking it here tested the wrong action.
+    const displayName = await page.evaluate(() => {
+      const user = JSON.parse(sessionStorage.getItem('user') || 'null');
+      return [user?.first_name, user?.last_name].filter(Boolean).join(' ');
+    });
+    expect(displayName).not.toBe('');
+    await expect(page.locator('aside').getByText(displayName, { exact: true })).toBeVisible();
+    await expect(page).not.toHaveURL(/\/login(?:\?|$)/);
   });
 
   test('user menu has logout option', async ({ page }) => {
-    const userMenu = page.locator('button[title="Sign out"]').first();
-    
-    if (await userMenu.isVisible({ timeout: 5000 }).catch(() => false)) {
-      await expect(userMenu).toBeVisible();
-    }
+    const signOut = page.locator('button[title="Sign out"]').first();
+    await expect(signOut).toBeVisible();
+    await expect(signOut).toBeEnabled();
   });
 });
 
