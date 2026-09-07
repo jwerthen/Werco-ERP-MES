@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -185,6 +185,8 @@ def list_notification_logs(
     limit: int = Query(25, ge=1, le=100),
     status: Optional[str] = Query(None, pattern="^(sent|failed)$"),
     mine_only: bool = True,
+    channel: Optional[str] = Query(None, pattern="^(email|sms)$"),
+    delivery_id: Optional[int] = Query(None, gt=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
@@ -195,9 +197,21 @@ def list_notification_logs(
     if mine_only or current_user.role not in {UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR}:
         query = query.filter(NotificationLog.user_id == current_user.id)
 
+    if channel:
+        query = query.filter(NotificationLog.channel == channel)
+    if delivery_id:
+        query = query.filter(NotificationLog.id == delivery_id)
+
     if status == "sent":
         query = query.filter(NotificationLog.sent == True)
     elif status == "failed":
-        query = query.filter(NotificationLog.sent == False)
+        query = query.filter(NotificationLog.sent == False).filter(
+            (NotificationLog.provider_status.is_(None))
+            | (NotificationLog.provider_status.notin_(['queued', 'sending', 'retrying']))
+            | (
+                (NotificationLog.provider_status == 'sending')
+                & (NotificationLog.sent_at < datetime.utcnow() - timedelta(minutes=10))
+            )
+        )
 
     return query.order_by(NotificationLog.sent_at.desc(), NotificationLog.id.desc()).limit(limit).all()

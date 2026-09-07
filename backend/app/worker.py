@@ -61,11 +61,31 @@ REDIS_TARGET = assert_redis_configured("arq worker")
 # ============================================================================
 
 
-async def send_email_job(ctx, to: str, subject: str, body: str, template: str = None, context: dict = None):
+async def send_email_job(
+    ctx,
+    to: str,
+    subject: str,
+    body: str,
+    template: str = None,
+    context: dict = None,
+    notification_log_id: int = None,
+    company_id: int = None,
+    user_id: int = None,
+):
     """Send email job"""
     from app.jobs.email_jobs import send_email_task
 
-    return await send_email_task(to, subject, body, template, context)
+    return await send_email_task(
+        to,
+        subject,
+        body,
+        template,
+        context,
+        notification_log_id=notification_log_id,
+        company_id=company_id,
+        user_id=user_id,
+        job_try=ctx.get('job_try', 1),
+    )
 
 
 async def send_sms_job(
@@ -178,6 +198,17 @@ async def cleanup_old_logs_job(ctx):
     from app.jobs.maintenance_jobs import cleanup_old_logs_task
 
     return await cleanup_old_logs_task()
+
+
+async def cleanup_runtime_metrics_job(ctx):
+    """Remove anonymous performance samples older than 30 days."""
+    from app.db.session import SessionLocal
+    from app.services.runtime_metric_service import prune_runtime_metrics
+
+    with SessionLocal() as db:
+        deleted = prune_runtime_metrics(db)
+        db.commit()
+    return {"runtime_metric_samples_deleted": deleted}
 
 
 async def archive_aged_audit_logs_job(ctx):
@@ -351,6 +382,7 @@ ALL_CRON_JOBS: List[CronJob] = [
     cron(check_quote_expiring_job, hour=9, minute=0),  # 9 AM daily -- sends email
     cron(aggregate_ai_learning_job, hour=5, minute=30),  # 5:30 AM daily -- WRITES recommendations/events
     cron(run_oee_auto_calc_job, hour=2, minute=30),  # 2:30 AM daily (yesterday's OEE, Lean Phase 1)
+    cron(cleanup_runtime_metrics_job, hour=2, minute=15),
     cron(cleanup_old_logs_job, weekday=0, hour=2, minute=0),  # Sunday 2 AM -- physical DELETEs (not audit)
     cron(archive_aged_audit_logs_job, day=1, hour=3, minute=0),  # 1st of month, 3 AM -- needs a durable volume
     cron(poll_tracking_job, minute={0, 30}),  # every 30 min (tracking poll fallback) -- carrier egress
@@ -700,6 +732,7 @@ class WorkerSettings:
         send_daily_digest_job,
         check_calibrations_job,
         cleanup_old_logs_job,
+        cleanup_runtime_metrics_job,
         archive_aged_audit_logs_job,
         check_late_work_orders_job,
         check_low_stock_job,

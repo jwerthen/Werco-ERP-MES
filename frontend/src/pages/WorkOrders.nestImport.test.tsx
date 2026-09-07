@@ -1,3 +1,4 @@
+import { workOrderBrowseFixture } from '../testUtils/workOrderBrowseFixture';
 /**
  * Standalone laser-nest import from the Work Orders list, plus part-less
  * (part_id NULL) laser WO row rendering.
@@ -32,7 +33,7 @@ jest.mock('react-router-dom', () => ({
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {
-    getWorkOrders: jest.fn(),
+    browseWorkOrders: jest.fn(),
     deleteWorkOrder: jest.fn(),
     releaseWorkOrder: jest.fn(),
     previewLaserNestPackageStandalone: jest.fn(),
@@ -64,6 +65,7 @@ jest.mock('../services/realtime', () => ({
   buildWsUrl: () => 'ws://localhost/ws/test',
 }));
 
+const mockRows = jest.fn();
 const mockedApi = api as jest.Mocked<typeof api>;
 
 const productionWorkOrder = {
@@ -134,8 +136,14 @@ async function getDesktopTable(): Promise<HTMLElement> {
 describe('WorkOrders — part-less standalone laser WO row', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockedApi.browseWorkOrders.mockImplementation(async params => {
+      const sourceParams: Record<string,string> = {};
+      if (params?.status) sourceParams.status = params.status;
+      if (params?.search) sourceParams.search = params.search;
+      return workOrderBrowseFixture(await mockRows(sourceParams), params);
+    });
     mockUser = { id: 1, role: 'admin', is_superuser: true };
-    mockedApi.getWorkOrders.mockResolvedValue([productionWorkOrder, standaloneLaserWorkOrder]);
+    mockRows.mockResolvedValue([productionWorkOrder, standaloneLaserWorkOrder]);
   });
 
   it('renders the laser WO with a "Nest package" label instead of blank part cells', async () => {
@@ -157,8 +165,14 @@ describe('WorkOrders — part-less standalone laser WO row', () => {
 describe('WorkOrders — standalone Import Nest Package action', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockedApi.browseWorkOrders.mockImplementation(async params => {
+      const sourceParams: Record<string,string> = {};
+      if (params?.status) sourceParams.status = params.status;
+      if (params?.search) sourceParams.search = params.search;
+      return workOrderBrowseFixture(await mockRows(sourceParams), params);
+    });
     mockUser = { id: 1, role: 'admin', is_superuser: true };
-    mockedApi.getWorkOrders.mockResolvedValue([productionWorkOrder]);
+    mockRows.mockResolvedValue([productionWorkOrder]);
     mockedApi.previewLaserNestPackageStandalone.mockResolvedValue(preview);
     mockedApi.importLaserNestPackageStandalone.mockResolvedValue({
       package: preview,

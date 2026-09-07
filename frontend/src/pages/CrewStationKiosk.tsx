@@ -29,6 +29,8 @@ import {
   SignalSlashIcon,
 } from '@heroicons/react/24/solid';
 import * as kioskClient from '../services/kioskStationClient';
+import ProductionRecoveryNotice from '../components/kiosk/ProductionRecoveryNotice';
+import { useProductionReportRequest } from '../components/kiosk/useProductionReportRequest';
 import { KioskApiError } from '../services/kioskStationClient';
 import { getKioskStationId } from '../utils/kiosk';
 import { useKioskIdleLogout } from '../hooks/useKioskIdleLogout';
@@ -250,6 +252,8 @@ export default function CrewStationKiosk() {
   const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [view, setView] = useState<CrewView>({ name: 'board' });
   const [busy, setBusy] = useState(false);
+  const reportRequest = useProductionReportRequest('kiosk_production_unconfirmed_crew');
+  const [recoveryBadge, setRecoveryBadge] = useState<'keyed' | 'one-tap' | null>(null);
   const [holdReason, setHoldReason] = useState<string | null>(null);
   const [joinEntryType, setJoinEntryType] = useState<'run' | 'setup'>('run');
   const [badgeError, setBadgeError] = useState<string | null>(null);
@@ -403,6 +407,7 @@ export default function CrewStationKiosk() {
   const [operatorStale, setOperatorStale] = useState(false);
 
   const oneTap = useOneTapPieces({
+    storageKey: 'kiosk_onetap_pending_crew',
     binding: oneTapBinding,
     canPost: online && !operatorStale,
     // Addressed by the delta's OWN binding — the object the hook's guard just
@@ -410,7 +415,7 @@ export default function CrewStationKiosk() {
     // defect from the other side: between a ref assignment and the render that
     // follows it, a due timer can flush with the old key satisfying the guard
     // while the new token and operation do the sending.
-    post: (pieces, { keepalive, binding: sending }) => {
+    post: (pieces, { keepalive, binding: sending, requestId }) => {
       const { token, operationId } = sending.target;
       if (!token) {
         return Promise.reject(
@@ -421,7 +426,7 @@ export default function CrewStationKiosk() {
         .reportProduction(
           token,
           operationId,
-          { quantity_complete_delta: pieces, quantity_scrapped_delta: 0, source: KIOSK_SOURCE },
+          { request_id: requestId, quantity_complete_delta: pieces, quantity_scrapped_delta: 0, source: KIOSK_SOURCE },
           { keepalive }
         )
         .then(() => undefined);
@@ -694,7 +699,7 @@ export default function CrewStationKiosk() {
   // sheet directly. Exactly one enabled capture exists at a time — this one is
   // only live on the board (sub-views and the complete modal own it otherwise).
   useBadgeCapture({
-    enabled: hasToken && view.name === 'board' && !busy,
+    enabled: hasToken && view.name === 'board' && !busy && !recoveryBadge,
     value: boardBadgeBuffer,
     onValueChange: setBoardBadgeBuffer,
     onSubmit: (raw) => {
@@ -770,19 +775,19 @@ export default function CrewStationKiosk() {
         const operator: OperatorSession = { token: minted.access_token, user: minted.user };
         if (resume) {
           const { good, scrap, reason, reasonCodeId } = resume;
-          await kioskClient.reportProduction(operator.token, operationId, {
+          const reportResult = await reportRequest.submit(operator.user.id, operationId, {
             quantity_complete_delta: good,
             quantity_scrapped_delta: scrap,
             scrap_reason: scrap > 0 && reason ? reason : undefined,
             scrap_reason_code_id: scrap > 0 && reasonCodeId != null ? reasonCodeId : undefined,
             source: KIOSK_SOURCE,
-          });
+          }, data => kioskClient.reportProduction(operator.token, operationId, data));
           const newTally = formatCrewTally({
             quantity_complete: Number(item.quantity_complete || 0) + good,
             quantity_ordered: item.quantity_ordered,
             quantity_scrapped: Number(item.quantity_scrapped || 0) + scrap,
           });
-          showToast('success', `Saved by ${minted.user.full_name} — crew total now ${newTally}`);
+          showToast('success', (reportResult as { replayed?: boolean })?.replayed ? 'Original report confirmed. Refreshing the crew count.' : `Saved by ${minted.user.full_name} — crew total now ${newTally}`);
         }
         // Bind the lane LAST, and only once the token has proved itself on the
         // resume post: a parked one-tap delta un-parks the moment `operatorStale`
@@ -795,6 +800,7 @@ export default function CrewStationKiosk() {
         // adoption, and this scan cannot consent on another operator's behalf.
         setOneTapBinding({
           key: `user:${minted.user.id}|op:${operationId}`,
+          identity: { operatorId: minted.user.id, operationId },
           label: `${minted.user.full_name} · ${crewJobLabel(item)}`,
           target: { token: operator.token, operationId },
         });
@@ -809,7 +815,7 @@ export default function CrewStationKiosk() {
         setBusy(false);
       }
     },
-    [view, findItem, mutationsBlocked, showToast, bumpAndRefresh]
+    [view, findItem, mutationsBlocked, reportRequest, showToast, bumpAndRefresh]
   );
 
   /**
@@ -824,19 +830,19 @@ export default function CrewStationKiosk() {
       const { operator, operationId } = view;
       setBusy(true);
       try {
-        await kioskClient.reportProduction(operator.token, operationId, {
+        const reportResult = await reportRequest.submit(operator.user.id, operationId, {
           quantity_complete_delta: good,
           quantity_scrapped_delta: scrap,
           scrap_reason: scrap > 0 && reason ? reason : undefined,
           scrap_reason_code_id: scrap > 0 && reasonCodeId != null ? reasonCodeId : undefined,
           source: KIOSK_SOURCE,
-        });
+        }, data => kioskClient.reportProduction(operator.token, operationId, data));
         const newTally = formatCrewTally({
           quantity_complete: Number(item.quantity_complete || 0) + good,
           quantity_ordered: item.quantity_ordered,
           quantity_scrapped: Number(item.quantity_scrapped || 0) + scrap,
         });
-        showToast('success', `Saved by ${operator.user.full_name} — crew total now ${newTally}`);
+        showToast('success', (reportResult as { replayed?: boolean })?.replayed ? 'Original report confirmed. Refreshing the crew count.' : `Saved by ${operator.user.full_name} — crew total now ${newTally}`);
         setView({ name: 'job', operationId });
         await bumpAndRefresh();
       } catch (err) {
@@ -859,7 +865,7 @@ export default function CrewStationKiosk() {
         setBusy(false);
       }
     },
-    [view, findItem, mutationsBlocked, showToast, bumpAndRefresh]
+    [view, findItem, mutationsBlocked, reportRequest, showToast, bumpAndRefresh]
   );
 
   /** CORRECT OVER-COUNT — badge-signature scan walks back the entered quantity. */
@@ -909,13 +915,14 @@ export default function CrewStationKiosk() {
       try {
         minted = await kioskClient.mintBadgeToken(badgeId);
         if (good > 0 || scrap > 0) {
-          await kioskClient.reportProduction(minted.access_token, item.operation_id, {
+          const productionToken = minted.access_token;
+          await reportRequest.submit(minted.user.id, item.operation_id, {
             quantity_complete_delta: good,
             quantity_scrapped_delta: scrap,
             scrap_reason: scrap > 0 && reason ? reason : undefined,
             scrap_reason_code_id: scrap > 0 && reasonCodeId != null ? reasonCodeId : undefined,
             source: KIOSK_SOURCE,
-          });
+          }, data => kioskClient.reportProduction(productionToken, item.operation_id, data));
           produced = true;
         }
         const res = await kioskClient.completeOperation(minted.access_token, item.operation_id, {
@@ -973,7 +980,7 @@ export default function CrewStationKiosk() {
         setBusy(false);
       }
     },
-    [view, findItem, mutationsBlocked, showToast, bumpAndRefresh, resetToBoard]
+    [view, findItem, mutationsBlocked, reportRequest, showToast, bumpAndRefresh, resetToBoard]
   );
 
   /** STEPS — badge scan gates entry; records are made in the scanned operator's name. */
@@ -1415,6 +1422,21 @@ export default function CrewStationKiosk() {
         />
       ) : (
       <main className="mx-auto w-full max-w-5xl flex-1 space-y-5 px-4 py-5">
+        <ProductionRecoveryNotice report={reportRequest.unconfirmed} busy={mutationsBlocked} onRetry={() => { setBadgeError(null); setRecoveryBadge('keyed'); }} />
+        {oneTap.recovery && (oneTap.uncertain || oneTap.phase === 'orphaned') && <div role="alert" className="rounded border border-fd-amber p-4"><p>{oneTap.pendingLabel} · {oneTap.recovery.pieces} pieces need confirmation.</p><button type="button" className="btn-secondary mt-2" disabled={mutationsBlocked} onClick={() => { setBadgeError(null); setRecoveryBadge('one-tap'); }}>Check original pieces</button></div>}
+        {recoveryBadge && <section aria-label="Confirm original production report" className="rounded border border-fd-line p-4">
+          <BadgeScanPanel busy={busy} blocked={mutationsBlocked} error={badgeError} idPrefix="crew-production-recovery" prompt="Original operator: scan badge to check report" onCancel={() => setRecoveryBadge(null)} onBadge={async badgeId => {
+            if (busy) return;
+            setBusy(true); setBadgeError(null);
+            try {
+              const minted = await kioskClient.mintBadgeToken(badgeId);
+              if (recoveryBadge === 'keyed') await reportRequest.retry(minted.user.id, (operationId, body) => kioskClient.reportProduction(minted.access_token, operationId, body));
+              else await oneTap.recover?.(minted.user.id, (operationId, pieces, requestId) => kioskClient.reportProduction(minted.access_token, operationId, { request_id: requestId, quantity_complete_delta: pieces, quantity_scrapped_delta: 0, source: KIOSK_SOURCE }));
+              setRecoveryBadge(null); showToast('success', 'Original production report confirmed. Refreshing crew counts.'); await bumpAndRefresh();
+            } catch (err) { setBadgeError(kioskErrorMessage(err, 'Could not confirm the original report. Try again.')); }
+            finally { setBusy(false); }
+          }} />
+        </section>}
         {/* CREW BOARD — kept mounted behind the resume confirm so the operator
             can check the overlay against the held card they just tapped. */}
         {(view.name === 'board' || view.name === 'resumeConfirm') && (

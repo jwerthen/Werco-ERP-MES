@@ -43,3 +43,24 @@ class WorkspaceResponse(BaseModel):
     data: Dict[str, Any]
     version: int
     updated_at: datetime
+
+
+class TeamTableData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    table: str = Field(min_length=1, max_length=60, pattern=r"^[a-zA-Z0-9_-]+$")
+    layout: Dict[str, Any]
+    filters: Dict[str, str]
+
+
+class TeamWorkspaceWrite(WorkspaceWrite):
+    kind: Literal["view"] = "view"
+
+    @field_validator("data")
+    @classmethod
+    def table_configuration_only(cls, value: dict) -> dict:
+        return TeamTableData.model_validate(value).model_dump()
+
+
+class TeamWorkspaceList(BaseModel):
+    items: list[WorkspaceResponse]
+    can_manage: bool

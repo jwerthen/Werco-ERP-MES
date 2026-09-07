@@ -153,3 +153,24 @@ class MRPSupplyDraftResponse(BaseModel):
     quantity: float
     status: str
     replayed: bool = False
+
+
+class MRPPurchaseBatchLine(BaseModel):
+    action_id: int = Field(gt=0)
+    review_token: str = Field(min_length=64, max_length=64)
+    quantity: MoneySmall = Field(gt=0)
+    due_date: date
+    vendor_id: int = Field(gt=0)
+    unit_price: Money = Field(default=0, ge=0)
+    notes: str = Field(default="", max_length=350)
+
+
+class MRPPurchaseBatchRequest(BaseModel):
+    request_key: str = Field(min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    lines: List[MRPPurchaseBatchLine] = Field(min_length=1, max_length=25)
+
+
+class MRPPurchaseBatchResponse(BaseModel):
+    drafts: List[MRPSupplyDraftResponse]
+    purchase_orders: List[dict]
+    replayed: bool = False

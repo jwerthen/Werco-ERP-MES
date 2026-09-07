@@ -17,7 +17,7 @@ test('saved work-order views restore filters and layout across a reload', async 
   await page.goto('/work-orders?status=on_hold');
   await expect(page.getByLabel('Saved views', { exact: true })).toBeEnabled();
   await expect(page.getByLabel('Status filter', { exact: true })).toHaveValue('on_hold');
-  await page.getByLabel('Saved views', { exact: true }).selectOption({ label: name });
+  await page.getByLabel('Saved views', { exact: true }).selectOption({ label: `${name} · Private` });
   await page.getByRole('button', { name: 'Apply view', exact: true }).click();
   await expect(page.getByLabel('Status filter', { exact: true })).toHaveValue('released');
   await page.getByRole('button', { name: 'Table options', exact: true }).click();

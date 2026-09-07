@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import type { UserRole } from '../types';
@@ -30,12 +30,13 @@ import {
 import CarrierIntegrationsTab from '../components/admin/CarrierIntegrationsTab';
 import PrintIntegrationsTab from '../components/admin/PrintIntegrationsTab';
 import AIUsageTab from '../components/admin/AIUsageTab';
+import RuntimeMetricsTab from '../components/admin/RuntimeMetricsTab';
 import AIEgressTab from '../components/admin/AIEgressTab';
 import SmsEgressTab from '../components/admin/SmsEgressTab';
 import DisplayTokensTab from '../components/admin/DisplayTokensTab';
 import { ConfirmDialog, EmptyState, ErrorState, FormField, useToast } from '../components/ui';
 
-type TabKey = 'materials' | 'machines' | 'finishes' | 'labor' | 'workcenters' | 'workcentertypes' | 'services' | 'overhead' | 'employees' | 'roles' | 'carriers' | 'printing' | 'aiusage' | 'aiprivacy' | 'smsprivacy' | 'displays' | 'audit';
+type TabKey = 'materials' | 'machines' | 'finishes' | 'labor' | 'workcenters' | 'workcentertypes' | 'services' | 'overhead' | 'employees' | 'roles' | 'carriers' | 'printing' | 'performance' | 'aiusage' | 'aiprivacy' | 'smsprivacy' | 'displays' | 'audit';
 
 const MATERIAL_CATEGORIES = ['steel', 'stainless', 'aluminum', 'brass', 'copper', 'titanium', 'plastic', 'other'];
 const MACHINE_TYPES = ['cnc_mill_3axis', 'cnc_mill_4axis', 'cnc_mill_5axis', 'cnc_lathe', 'laser_fiber', 'laser_co2', 'plasma', 'waterjet', 'press_brake', 'punch_press'];
@@ -55,6 +56,7 @@ const tabs: { key: TabKey; label: string; icon: React.ComponentType<any> }[] = [
   { key: 'roles', label: 'Roles & Permissions', icon: ShieldCheckIcon },
   { key: 'carriers', label: 'Carriers / Integrations', icon: GlobeAltIcon },
   { key: 'printing', label: 'Label Printing', icon: PrinterIcon },
+  { key: 'performance', label: 'App Performance', icon: ClockIcon },
   { key: 'aiusage', label: 'AI Usage & Cost', icon: CpuChipIcon },
   { key: 'aiprivacy', label: 'AI Privacy', icon: ShieldCheckIcon },
   { key: 'smsprivacy', label: 'SMS Privacy', icon: ChatBubbleLeftRightIcon },
@@ -107,6 +109,21 @@ export default function AdminSettings() {
   })();
   const { showToast } = useToast();
   const [activeTab, setActiveTab] = useState<TabKey>(initialTab);
+  const tabNavigationRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const revealActiveTab = () => {
+      const navigation = tabNavigationRef.current;
+      const active = navigation?.querySelector('[aria-current="page"]');
+      if (!navigation || !active) return;
+      const bounds = navigation.getBoundingClientRect();
+      const selected = active.getBoundingClientRect();
+      if (selected.right > bounds.right) navigation.scrollLeft += selected.right - bounds.right;
+      else if (selected.left < bounds.left) navigation.scrollLeft += selected.left - bounds.left;
+    };
+    revealActiveTab();
+    window.addEventListener('resize', revealActiveTab);
+    return () => window.removeEventListener('resize', revealActiveTab);
+  }, [activeTab]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [showInactive, setShowInactive] = useState(false);
@@ -361,10 +378,11 @@ export default function AdminSettings() {
 
       {/* Tabs */}
       <div className="border-b border-surface-200">
-        <nav className="flex gap-1 overflow-x-auto pb-px">
+        <nav ref={tabNavigationRef} aria-label="Settings sections" className="flex gap-1 overflow-x-auto pb-px">
           {tabs.map(tab => (
             <button
               key={tab.key}
+              aria-current={activeTab === tab.key ? 'page' : undefined}
               onClick={() => setActiveTab(tab.key)}
               className={`
                 flex items-center gap-2 px-4 py-3 text-sm font-medium whitespace-nowrap border-b-2 transition-colors
@@ -384,7 +402,7 @@ export default function AdminSettings() {
       {/* Tab content */}
       <div className="card">
         {/* Show inactive toggle (not for configuration-only tabs) */}
-        {!['overhead', 'audit', 'workcentertypes', 'roles', 'carriers', 'printing', 'aiusage', 'aiprivacy', 'smsprivacy', 'displays'].includes(activeTab) && (
+        {!['overhead', 'audit', 'workcentertypes', 'roles', 'carriers', 'printing', 'performance', 'aiusage', 'aiprivacy', 'smsprivacy', 'displays'].includes(activeTab) && (
           <div className="flex items-center justify-between mb-4 pb-4 border-b border-surface-200">
             <label className="flex items-center gap-2 cursor-pointer">
               <input
@@ -421,7 +439,7 @@ export default function AdminSettings() {
           <div className="flex items-center justify-center py-12">
             <div className="spinner h-8 w-8"></div>
           </div>
-        ) : loadError && !['carriers', 'printing', 'aiusage', 'aiprivacy', 'smsprivacy', 'displays'].includes(activeTab) ? (
+        ) : loadError && !['carriers', 'printing', 'performance', 'aiusage', 'aiprivacy', 'smsprivacy', 'displays'].includes(activeTab) ? (
           <ErrorState
             message="Could not load this settings tab."
             onRetry={() => loadTabData(activeTab)}
@@ -457,6 +475,7 @@ export default function AdminSettings() {
             {activeTab === 'roles' && rolePermissions && <RolePermissionsManager data={rolePermissions} onUpdate={() => loadTabData('roles')} />}
             {activeTab === 'carriers' && <CarrierIntegrationsTab />}
             {activeTab === 'printing' && <PrintIntegrationsTab />}
+            {activeTab === 'performance' && <RuntimeMetricsTab />}
             {activeTab === 'aiusage' && <AIUsageTab />}
             {activeTab === 'aiprivacy' && <AIEgressTab />}
             {activeTab === 'smsprivacy' && <SmsEgressTab />}

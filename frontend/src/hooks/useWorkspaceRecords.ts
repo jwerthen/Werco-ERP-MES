@@ -18,14 +18,20 @@ export function workspaceError(error: unknown, fallback: string): string {
   return typeof detail === 'string' ? detail : fallback;
 }
 
-export function useWorkspaceRecords<T>(namespace: string, kind: WorkspaceKind) {
+export function useWorkspaceRecords<T>(namespace: string, kind: WorkspaceKind, team = false) {
   const [, render] = useState(0);
   const identity = workspaceIdentity();
-  const scope = `${identity}:${namespace}:${kind}`;
+  const scope = `${identity}:${namespace}:${kind}:${team ? 'team' : 'private'}`;
   const currentScope = useRef(scope);
   currentScope.current = scope;
   const request = useRef(0);
-  const [state, setState] = useState<{ scope: string; rows: WorkspaceRecord<T>[]; loading: boolean; error: string }>({
+  const [state, setState] = useState<{
+    scope: string;
+    rows: WorkspaceRecord<T>[];
+    loading: boolean;
+    error: string;
+    canManage?: boolean;
+  }>({
     scope,
     rows: [],
     loading: !!identity,
@@ -48,9 +54,16 @@ export function useWorkspaceRecords<T>(namespace: string, kind: WorkspaceKind) {
     }
     setState(previous => ({ scope, rows: previous.scope === scope ? previous.rows : [], loading: true, error: '' }));
     try {
-      const rows = await api.listWorkspaceRecords<T>(namespace, kind);
+      const teamResult = team ? await api.listTeamWorkspaceRecords<T>(namespace) : null;
+      const rows = team ? teamResult?.items : await api.listWorkspaceRecords<T>(namespace, kind);
       if (request.current === seq && currentScope.current === scope && identity === workspaceIdentity())
-        setState({ scope, rows: Array.isArray(rows) ? rows : [], loading: false, error: '' });
+        setState({
+          scope,
+          rows: Array.isArray(rows) ? rows : [],
+          loading: false,
+          error: '',
+          canManage: teamResult?.can_manage,
+        });
       return rows || [];
     } catch (error) {
       if (request.current === seq && currentScope.current === scope && identity === workspaceIdentity())
@@ -61,7 +74,7 @@ export function useWorkspaceRecords<T>(namespace: string, kind: WorkspaceKind) {
         }));
       throw error;
     }
-  }, [identity, scope, namespace, kind]);
+  }, [identity, scope, namespace, kind, team]);
   useEffect(() => {
     void reload().catch(() => undefined);
     return () => {
@@ -71,7 +84,9 @@ export function useWorkspaceRecords<T>(namespace: string, kind: WorkspaceKind) {
   const save = useCallback(
     async (key: string, name: string, data: T, version: number) => {
       if (!identity || identity !== workspaceIdentity()) throw new Error('Your session changed. Reload this page.');
-      const row = await api.saveWorkspaceRecord(namespace, key, { kind, name, data, version });
+      const row = team
+        ? await api.saveTeamWorkspaceRecord(namespace, key, { kind: 'view', name, data, version })
+        : await api.saveWorkspaceRecord(namespace, key, { kind, name, data, version });
       if (currentScope.current === scope && identity === workspaceIdentity()) {
         ++request.current;
         setState(previous =>
@@ -82,12 +97,13 @@ export function useWorkspaceRecords<T>(namespace: string, kind: WorkspaceKind) {
       }
       return row;
     },
-    [identity, scope, namespace, kind]
+    [identity, scope, namespace, kind, team]
   );
   const remove = useCallback(
     async (row: WorkspaceRecord<T>) => {
       if (!identity || identity !== workspaceIdentity()) throw new Error('Your session changed. Reload this page.');
-      await api.deleteWorkspaceRecord(namespace, row.key, kind, row.version);
+      if (team) await api.deleteTeamWorkspaceRecord(namespace, row.key, row.version);
+      else await api.deleteWorkspaceRecord(namespace, row.key, kind, row.version);
       if (currentScope.current === scope && identity === workspaceIdentity()) {
         ++request.current;
         setState(previous => ({
@@ -97,11 +113,12 @@ export function useWorkspaceRecords<T>(namespace: string, kind: WorkspaceKind) {
         }));
       }
     },
-    [identity, scope, namespace, kind]
+    [identity, scope, namespace, kind, team]
   );
   return {
     identity,
     scope,
+    canManage: state.scope === scope && !!state.canManage,
     rows: state.scope === scope ? state.rows : [],
     loading: state.scope === scope ? state.loading : !!identity,
     error: state.scope === scope ? state.error : '',

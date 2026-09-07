@@ -45,13 +45,30 @@ export function useTableWorkspace<T>(
   defaultSort: TableLayout['sort'] = null
 ) {
   const records = useWorkspaceRecords<TableView>(namespace, 'view');
+  const team = useWorkspaceRecords<TableView>(namespace, 'view', true);
+  const allViews = [
+    ...records.rows.map(row => ({ ...row, visibility: 'private' as const })),
+    ...team.rows.map(row => ({ ...row, key: `team:${row.key}`, visibility: 'team' as const })),
+  ];
+  const findView = (key: string) => allViews.find(row => row.key === key && row.data.table === table);
+  const canEditView = (key: string) => findView(key)?.visibility === 'private' || team.canManage;
   const [layout, setLayout] = useState<TableLayout>(() => normalizeLayout(undefined, columns, defaultSort));
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const loaded = useRef('');
   const edited = useRef(false);
   const identity = `${records.scope}:${table}`;
+  const activeIdentity = useRef(identity);
+  activeIdentity.current = identity;
+  const safeMessage = (value: string) => {
+    if (activeIdentity.current === identity) setMessage(value);
+  };
+  useEffect(() => {
+    busyRef.current = false;
+    setBusy(false);
+  }, [identity]);
   const currentKey = `${table}-layout`;
   const current = records.rows.find(row => row.key === currentKey);
   const values = useRef({ columns, defaultSort });
@@ -82,16 +99,21 @@ export function useTableWorkspace<T>(
       .map(key => source.find(column => column.key === key))
       .filter((column): column is DataTableColumn<T> => !!column);
   const run = async (action: () => Promise<void>) => {
-    if (busy) return;
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
     setError('');
     setMessage('');
     try {
       await action();
     } catch (reason) {
-      setError(workspaceError(reason, 'Could not save this view. Retry when connected.'));
+      if (activeIdentity.current === identity)
+        setError(workspaceError(reason, 'Could not save this view. Retry when connected.'));
     } finally {
-      setBusy(false);
+      if (activeIdentity.current === identity) {
+        busyRef.current = false;
+        setBusy(false);
+      }
     }
   };
   return {
@@ -100,11 +122,13 @@ export function useTableWorkspace<T>(
     change,
     displayColumns,
     busy,
-    error: error || records.error,
-    loading: records.loading,
+    error: error || records.error || team.error,
+    loading: records.loading || team.loading,
+    canManageTeam: team.canManage,
+    canEditView,
     enabled: !!records.identity,
     message,
-    views: records.rows.filter(row => row.data?.table === table && row.key !== currentKey),
+    views: allViews.filter(row => row.data?.table === table && row.key !== currentKey),
     tableProps: {
       dense: normalized.dense,
       sort: normalized.sort,
@@ -132,16 +156,18 @@ export function useTableWorkspace<T>(
       });
     },
     apply: (key: string) => {
-      const row = records.rows.find(item => item.key === key);
+      const row = findView(key);
       if (!row || row.data?.table !== table) return;
       change(normalizeLayout(row.data.layout, columns, defaultSort));
       applyFilters(row.data.filters || {});
-      setMessage(`Applied “${row.name}”.`);
+      safeMessage(`Applied “${row.name}”.`);
     },
-    saveView: (name: string) =>
+    saveView: (name: string, visibility: 'private' | 'team' = 'private', savedFilters = filters) =>
       run(async () => {
+        if (visibility === 'team' && !team.canManage) throw new Error('Only managers can change team views.');
+        const target = visibility === 'team' ? team : records;
         if (
-          records.rows.some(
+          target.rows.some(
             row =>
               row.data?.table === table &&
               row.key !== currentKey &&
@@ -152,15 +178,21 @@ export function useTableWorkspace<T>(
           return;
         }
         const key = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        await records.save(`${table}-${key}`, name, { table, layout: normalized, filters }, 0);
-        setMessage('View saved to your account.');
+        await target.save(`${table}-${key}`, name, { table, layout: normalized, filters: savedFilters }, 0);
+        safeMessage(visibility === 'team' ? 'Team view saved.' : 'View saved to your account.');
       }),
     updateView: (key: string) =>
       run(async () => {
-        const row = records.rows.find(item => item.key === key && item.data?.table === table);
+        const row = findView(key);
         if (row) {
-          await records.save(row.key, row.name, { table, layout: normalized, filters }, row.version);
-          setMessage('Saved view updated.');
+          if (!canEditView(key)) throw new Error('Only managers can change team views.');
+          await (row.visibility === 'team' ? team : records).save(
+            row.key.replace(/^team:/, ''),
+            row.name,
+            { table, layout: normalized, filters },
+            row.version
+          );
+          safeMessage('Saved view updated.');
         }
       }),
     saveLayout: () =>
@@ -171,20 +203,21 @@ export function useTableWorkspace<T>(
           { table, layout: normalized, filters: {} },
           current?.version || 0
         );
-        setMessage('Layout saved for your next visit.');
+        safeMessage('Layout saved for your next visit.');
       }),
     remove: (key: string) =>
       run(async () => {
-        const row = records.rows.find(item => item.key === key);
+        const row = findView(key);
         if (row) {
-          await records.remove(row);
-          setMessage('Saved view removed.');
+          if (!canEditView(key)) throw new Error('Only managers can change team views.');
+          await (row.visibility === 'team' ? team : records).remove({ ...row, key: row.key.replace(/^team:/, '') });
+          safeMessage('Saved view removed.');
         }
       }),
     reload: () =>
       run(async () => {
-        await records.reload();
-        setMessage('Saved views reloaded. Your current layout is unchanged.');
+        await Promise.all([records.reload(), team.reload()]);
+        safeMessage('Saved views reloaded. Your current layout is unchanged.');
       }),
     reset: () => change(normalizeLayout(undefined, columns, defaultSort)),
   };

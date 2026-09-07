@@ -27,6 +27,8 @@ import api from '../services/api';
 import { ToastProvider } from './ui/Toast';
 import { NotificationItem } from '../types/notification';
 
+jest.mock('./BackgroundEmailActivity', () => ({ __esModule: true, default: () => null }));
+
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {
@@ -57,7 +59,14 @@ const makeItem = (overrides: Partial<NotificationItem>): NotificationItem => ({
 
 const page = (items: NotificationItem[]) => ({
   items,
-  pagination: { page: 1, page_size: 20, total_count: items.length, total_pages: 1, has_next: false, has_previous: false },
+  pagination: {
+    page: 1,
+    page_size: 20,
+    total_count: items.length,
+    total_pages: 1,
+    has_next: false,
+    has_previous: false,
+  },
 });
 
 function LocationProbe() {
@@ -98,7 +107,7 @@ const renderInRouter = (ui: React.ReactNode) =>
           <Route path="*" element={<div data-testid="not-found">Page not found</div>} />
         </Routes>
       </ToastProvider>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
 
 const landedAt = () => screen.getByTestId('location').textContent;
@@ -210,7 +219,7 @@ describe('Notifications inbox page', () => {
 
       await waitFor(() => expect(landedAt()).toBe(link));
       expect(screen.queryByTestId('not-found')).not.toBeInTheDocument();
-    },
+    }
   );
 
   test('a row with no link marks read but does not navigate', async () => {

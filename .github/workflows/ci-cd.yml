@@ -450,6 +450,21 @@ jobs:
       url: ${{ vars.PRODUCTION_URL }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Skip superseded production releases before any mutation
+        id: release_head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          if [ "$main_sha" = "$GITHUB_SHA" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "Superseded release: a newer main commit owns production. No services will be changed."
+          fi
 
       # PINNED. An unpinned CLI in a deploy path is a silent breakage waiting for a
       # release: this job's success contract is a STRING -- the "Build Logs:" line the
@@ -469,6 +484,7 @@ jobs:
       # pin fixes the CLI, not its two floating runtime deps (node-fetch, tar); a global
       # npm install has no lockfile, so that residue is accepted.
       - name: Install Railway CLI
+        if: steps.release_head.outputs.current == 'true'
         run: npm install -g @railway/cli@5.41.2
 
       # Stamp the commit SHA into the artifact BEFORE it is uploaded. app/core/config.py
@@ -487,6 +503,7 @@ jobs:
       # `railway up` honors .gitignore when selecting files to upload: keep backend/RELEASE
       # OUT of .gitignore or this silently stops shipping.
       - name: Stamp release SHA into the backend artifact
+        if: steps.release_head.outputs.current == 'true'
         run: |
           printf '%s' "$GITHUB_SHA" > backend/RELEASE
           echo "Stamped backend/RELEASE = $(cat backend/RELEASE)"
@@ -502,6 +519,7 @@ jobs:
       # shipping) and must NOT be committed (a committed SHA would go stale and keep
       # reporting the wrong commit -- worse than reporting none).
       - name: Stamp release SHA into the frontend artifact
+        if: steps.release_head.outputs.current == 'true'
         run: |
           printf '%s' "$GITHUB_SHA" > frontend/public/release.txt
           echo "Stamped frontend/public/release.txt = $(cat frontend/public/release.txt)"
@@ -532,6 +550,7 @@ jobs:
       # "Build Logs:" is printed on stdout, so merging stderr in can only ADD lines to
       # what the grep sees.
       - name: Deploy Backend to Production
+        if: steps.release_head.outputs.current == 'true'
         continue-on-error: true
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
@@ -541,6 +560,7 @@ jobs:
           railway up --service werco-api . --path-as-root --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}" 2>&1 | tee "$RUNNER_TEMP/deploy-backend.log"
 
       - name: Confirm Railway accepted the backend upload
+        if: steps.release_head.outputs.current == 'true'
         # Fails FAST on the one thing the CLI's exit status was genuinely good for: a bad
         # token or project ID means no build is ever created, and without this the job
         # would instead sit in the release poll below for its full timeout before saying
@@ -564,6 +584,7 @@ jobs:
       # that the new frontend needs, so migration/startup and the exact release
       # must be verified before any frontend (or worker) upload can proceed.
       - name: Verify backend is serving this commit
+        if: steps.release_head.outputs.current == 'true'
         env:
           PRODUCTION_API_URL: ${{ vars.PRODUCTION_API_URL }}
         run: |
@@ -574,6 +595,7 @@ jobs:
             --expect "${GITHUB_SHA}"
 
       - name: Deploy Frontend to Production
+        if: steps.release_head.outputs.current == 'true'
         continue-on-error: true
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
@@ -583,6 +605,7 @@ jobs:
           railway up --service werco-frontend . --path-as-root --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}" 2>&1 | tee "$RUNNER_TEMP/deploy-frontend.log"
 
       - name: Confirm Railway accepted the frontend upload
+        if: steps.release_head.outputs.current == 'true'
         run: |
           log="$RUNNER_TEMP/deploy-frontend.log"
           if [ ! -s "$log" ]; then
@@ -609,7 +632,7 @@ jobs:
       # healthcheckPath) instead of backend/railway.toml (healthcheckPath="/health", which
       # an arq worker can never satisfy). See the repo-root railway.toml header.
       - name: Deploy Worker to Production
-        if: vars.DEPLOY_WORKER_PRODUCTION == 'true'
+        if: steps.release_head.outputs.current == 'true' && (vars.DEPLOY_WORKER_PRODUCTION == 'true')
         continue-on-error: true
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
@@ -623,7 +646,7 @@ jobs:
       # above so it stays skipped, rather than failing on a missing log, while the worker
       # deploy is still gated off.
       - name: Confirm Railway accepted the worker upload
-        if: vars.DEPLOY_WORKER_PRODUCTION == 'true'
+        if: steps.release_head.outputs.current == 'true' && (vars.DEPLOY_WORKER_PRODUCTION == 'true')
         run: |
           log="$RUNNER_TEMP/deploy-worker.log"
           if [ ! -s "$log" ]; then
@@ -642,6 +665,7 @@ jobs:
       # by checking the frontend artifact's SHA (a plain HTTP 200 is insufficient
       # because nginx's SPA fallback serves index.html for a missing marker).
       - name: Verify frontend is serving this commit
+        if: steps.release_head.outputs.current == 'true'
         env:
           PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
         run: |
@@ -651,6 +675,7 @@ jobs:
             --expect "${GITHUB_SHA}"
 
       - name: Verify Production Config
+        if: steps.release_head.outputs.current == 'true'
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         # verify_launch imports app.core.config, so it needs the backend deps
@@ -663,8 +688,22 @@ jobs:
           python3 -m pip install -q -r requirements.txt
           railway run --no-local --service werco-api --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}" python3 -m scripts.verify_launch
 
+      - name: Promote the public Vercel website after the API gate
+        if: steps.release_head.outputs.current == 'true'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+          VERCEL_TEAM_ID: ${{ vars.VERCEL_TEAM_ID }}
+          PUBLIC_APP_URL: ${{ vars.PUBLIC_APP_URL }}
+          PRODUCTION_API_URL: ${{ vars.PRODUCTION_API_URL }}
+        run: |
+          python3 .github/scripts/promote_vercel.py \
+            --sha "$GITHUB_SHA" --project "$VERCEL_PROJECT_ID" --team "$VERCEL_TEAM_ID" \
+            --api-url "$PRODUCTION_API_URL" --public-url "$PUBLIC_APP_URL" --apply
+
       - name: Create GitHub Release
-        if: success()
+        if: steps.release_head.outputs.current == 'true' && (success())
         # The archived actions/create-release@v1 stopped working when GitHub
         # runners flipped the default action runtime Node 20 -> Node 24
         # (2026-07-10, run 29124478242: healthy deploy marked red by this step
@@ -702,7 +741,7 @@ jobs:
       # logs are world-readable. That redaction is an extra layer, not a replacement for
       # GitHub's own masking of RAILWAY_TOKEN / RAILWAY_PROJECT_ID, which still applies.
       - name: Diagnose the Railway failure
-        if: failure()
+        if: steps.release_head.outputs.current == 'true' && (failure())
         continue-on-error: true
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}

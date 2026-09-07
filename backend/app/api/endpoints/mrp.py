@@ -13,6 +13,8 @@ from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
 from app.schemas.mrp import (
     MRPActionResponse,
+    MRPPurchaseBatchRequest,
+    MRPPurchaseBatchResponse,
     MRPRequirementResponse,
     MRPRunCreate,
     MRPRunDetail,
@@ -23,6 +25,7 @@ from app.schemas.mrp import (
     ProcessActionResponse,
 )
 from app.services.audit_service import AuditService
+from app.services.mrp_purchase_batch_service import MRPPurchaseBatchService
 from app.services.mrp_service import MRPService
 from app.services.mrp_supply_service import MRPSupplyService
 
@@ -93,6 +96,35 @@ def create_supply_draft(
             409, "A supply draft conflicts with an existing record. Reload the review to open any existing draft."
         ) from exc
     return result
+
+
+@router.get("/purchase-batch/review")
+def review_mrp_purchase_batch(
+    action_ids: List[int] = Query(min_length=1, max_length=25),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Review selected purchase recommendations without creating or issuing supply."""
+    return MRPPurchaseBatchService(db, company_id).review_batch(action_ids)
+
+
+@router.post("/purchase-batch/drafts", response_model=MRPPurchaseBatchResponse)
+def create_mrp_purchase_batch(
+    payload: MRPPurchaseBatchRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Atomically create one unissued purchase order per reviewed supplier."""
+    try:
+        with atomic_transaction(db):
+            return MRPPurchaseBatchService(db, company_id).create_batch(payload, current_user, audit)
+    except IntegrityError as exc:
+        raise HTTPException(
+            409, "A selected recommendation already has supply. Refresh MRP before creating a batch."
+        ) from exc
 
 
 @router.get("/runs", response_model=List[MRPRunResponse])
@@ -357,6 +389,7 @@ def get_current_shortages(
                 "part_id": action.part_id,
                 "part_number": action.part.part_number if action.part else None,
                 "part_name": action.part.name if action.part else None,
+                "part_type": action.part.part_type.value if action.part else None,
                 "action_type": action.action_type.value,
                 "quantity": action.quantity,
                 "required_date": action.required_date.isoformat(),

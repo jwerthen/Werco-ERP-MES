@@ -1,3 +1,4 @@
+import { workOrderBrowseFixture } from '../testUtils/workOrderBrowseFixture';
 /**
  * WorkOrders — the Deleted tab (the soft-delete archive) and Restore.
  *
@@ -57,6 +58,7 @@ jest.mock('../services/api', () => ({
   __esModule: true,
   default: {
     getWorkOrders: jest.fn(),
+    browseWorkOrders: jest.fn(),
     deleteWorkOrder: jest.fn(),
     releaseWorkOrder: jest.fn(),
     restoreWorkOrder: jest.fn(),
@@ -251,6 +253,7 @@ async function openRestoreDialog(workOrderNumber: string): Promise<HTMLElement> 
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockedApi.browseWorkOrders.mockImplementation(async params => workOrderBrowseFixture(await mockedApi.getWorkOrders({}), params));
   mockUser.current = { id: 1, role: 'admin', is_superuser: false };
   deletedRows = [deletedComplete, deletedDraft];
   mockedApi.getWorkOrders.mockImplementation(async (params?: { deleted_only?: boolean }) =>

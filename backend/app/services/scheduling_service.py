@@ -20,6 +20,12 @@ from app.core.cache import invalidate_work_centers_cache
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
+from app.services.scheduling_projection import (
+    _build_daily_load_for_work_center,
+    _project_work_order_schedule,
+    _projection_daily_load,
+)
+from app.services.working_calendar_service import load_working_calendars, working_hours
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +70,7 @@ class SchedulingService:
         self.db = db
         self.company_id = company_id
         self.capacity_map: Dict[int, WorkCenterCapacity] = {}
+        self.calendars = {}
 
     def run_scheduling(
         self,
@@ -150,6 +157,10 @@ class SchedulingService:
 
     def _initialize_capacity(self, work_centers: List[WorkCenter], horizon_days: int):
         """Initialize capacity tracking for work centers"""
+        for company in {wc.company_id for wc in work_centers}:
+            self.calendars.update(
+                load_working_calendars(self.db, company, [wc.id for wc in work_centers if wc.company_id == company])
+            )
         for wc in work_centers:
             self.capacity_map[wc.id] = WorkCenterCapacity(
                 work_center_id=wc.id, hours_per_day=wc.capacity_hours_per_day or 8.0, daily_load={}  # Default 8 hours
@@ -162,7 +173,6 @@ class SchedulingService:
             op_query = self.db.query(WorkOrderOperation).filter(
                 WorkOrderOperation.work_center_id == wc.id,
                 WorkOrderOperation.scheduled_start != None,
-                WorkOrderOperation.scheduled_start >= start_date,
                 WorkOrderOperation.scheduled_start <= end_date,
                 WorkOrderOperation.status != OperationStatus.COMPLETE,
             )
@@ -171,8 +181,16 @@ class SchedulingService:
             scheduled_ops = op_query.all()
 
             # Populate daily load from existing schedule
-            for op in scheduled_ops:
-                self._add_to_capacity(wc.id, op.scheduled_start, (op.setup_time_hours or 0) + (op.run_time_hours or 0))
+            if self.calendars.get(wc.id, {}).get("version", 0) > 0:
+                self.capacity_map[wc.id].daily_load = _build_daily_load_for_work_center(
+                    scheduled_ops, self.calendars, zero_estimate_hours=1
+                )
+            else:
+                for op in scheduled_ops:
+                    if op.scheduled_start.date() >= start_date:
+                        self._add_to_capacity(
+                            wc.id, op.scheduled_start, (op.setup_time_hours or 0) + (op.run_time_hours or 0)
+                        )
 
     def _get_operations_to_schedule(
         self, work_center_ids: List[int] = None, work_order_ids: List[int] = None
@@ -249,6 +267,47 @@ class SchedulingService:
 
         # Check for predecessor operations (sequence dependencies)
         earliest_start = self._get_earliest_start_date(operation)
+
+        if self.calendars.get(work_center_id, {}).get("version", 0) > 0:
+            horizon = date.today() + timedelta(days=horizon_days)
+            candidate = max(earliest_start, date.today())
+            while candidate <= horizon:
+                try:
+                    projection = _project_work_order_schedule(
+                        [operation],
+                        operation,
+                        candidate,
+                        work_center_id,
+                        False,
+                        self.calendars,
+                        minimum_hours=hours_needed,
+                    )[0]
+                except ValueError as error:
+                    return {"success": False, "reason": str(error)}
+                if projection["scheduled_end"] > horizon:
+                    break
+                load = _projection_daily_load(projection, self.calendars)
+                capacity = self.capacity_map[work_center_id]
+                if all(
+                    capacity.daily_load.get(day, 0) + hours
+                    <= working_hours(self.calendars, work_center_id, day) + 0.000001
+                    for day, hours in load.items()
+                ):
+                    operation.scheduled_start = projection["scheduled_start"]
+                    operation.scheduled_end = projection["scheduled_end"]
+                    for day, hours in load.items():
+                        self._add_to_capacity(work_center_id, day, hours)
+                    return {
+                        "success": True,
+                        "operation_id": operation.id,
+                        "work_order": operation.work_order.work_order_number,
+                        "operation": operation.operation_number,
+                        "scheduled_start": operation.scheduled_start.isoformat(),
+                        "scheduled_end": operation.scheduled_end.isoformat(),
+                        "hours": hours_needed,
+                    }
+                candidate += timedelta(days=1)
+            return {"success": False, "reason": f"No available working capacity in {horizon_days}-day horizon"}
 
         # Find available capacity
         scheduled_date = self._find_available_capacity(work_center_id, hours_needed, earliest_start, horizon_days)
@@ -399,10 +458,34 @@ class SchedulingService:
         business_days = self._count_business_days(start_date, end_date)
         scheduled_hours = self._get_scheduled_hours_by_work_center(start_date, end_date, [wc.id for wc in work_centers])
 
+        for company in {wc.company_id for wc in work_centers}:
+            self.calendars.update(
+                load_working_calendars(self.db, company, [wc.id for wc in work_centers if wc.company_id == company])
+            )
         availability_rates = {}
         for wc in work_centers:
             available_hours = (wc.capacity_hours_per_day or 8.0) * business_days
             used_hours = scheduled_hours.get(wc.id, 0)
+            if self.calendars.get(wc.id, {}).get("version", 0) > 0:
+                available_hours = sum(
+                    working_hours(self.calendars, wc.id, start_date + timedelta(days=i))
+                    for i in range(horizon_days + 1)
+                )
+                ops = (
+                    self.db.query(WorkOrderOperation)
+                    .filter(
+                        WorkOrderOperation.company_id == wc.company_id,
+                        WorkOrderOperation.work_center_id == wc.id,
+                        WorkOrderOperation.status != OperationStatus.COMPLETE,
+                        WorkOrderOperation.scheduled_start.isnot(None),
+                    )
+                    .all()
+                )
+                used_hours = sum(
+                    hours
+                    for day, hours in _build_daily_load_for_work_center(ops, self.calendars).items()
+                    if start_date <= day <= end_date
+                )
 
             if available_hours <= 0:
                 availability = 0.0
@@ -443,13 +526,14 @@ class SchedulingService:
 
         while current <= end_date:
             used_hours = capacity.daily_load.get(current, 0)
-            utilization_pct = (used_hours / capacity.hours_per_day * 100) if capacity.hours_per_day > 0 else 0
+            hours = working_hours(self.calendars, work_center_id, current, capacity.hours_per_day)
+            utilization_pct = (used_hours / hours * 100) if hours > 0 else 0
 
             result.append(
                 {
                     "date": current.isoformat(),
                     "used_hours": used_hours,
-                    "available_hours": capacity.hours_per_day,
+                    "available_hours": hours,
                     "utilization_pct": round(utilization_pct, 1),
                 }
             )
@@ -475,15 +559,16 @@ class SchedulingService:
                 continue
 
             for date_key, used_hours in capacity.daily_load.items():
-                if used_hours > capacity.hours_per_day:
+                hours = working_hours(self.calendars, wc_id, date_key, capacity.hours_per_day)
+                if used_hours > hours:
                     conflicts.append(
                         {
                             "work_center_id": wc_id,
                             "date": date_key.isoformat(),
                             "used_hours": used_hours,
-                            "capacity_hours": capacity.hours_per_day,
-                            "overload_hours": used_hours - capacity.hours_per_day,
-                            "utilization_pct": round(used_hours / capacity.hours_per_day * 100, 1),
+                            "capacity_hours": hours,
+                            "overload_hours": used_hours - hours,
+                            "utilization_pct": round(used_hours / hours * 100, 1) if hours else 0,
                         }
                     )
 

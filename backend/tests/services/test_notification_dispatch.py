@@ -420,13 +420,8 @@ def test_a_placeholder_address_is_not_enqueued_and_its_row_says_so(db_session: S
         assert len(_notifs_for(db_session, user.id)) == 1
 
 
-def test_a_real_address_is_enqueued_and_logged_exactly_as_before(db_session: Session, monkeypatch):
-    """The regression half: for an ordinary address nothing about this leg changed.
-
-    ``sent=True`` still records the ENQUEUE (not confirmed SMTP delivery) and ``error``
-    stays NULL, and the row still links to the in-app row created in the same pass -- the
-    ``notification_id`` linkage is easy to drop when a branch is threaded through here.
-    """
+def test_a_real_address_is_queued_with_a_durable_unconfirmed_delivery_log(db_session: Session, monkeypatch):
+    """Enqueue is unconfirmed; the worker must settle this exact tenant-scoped row."""
     email_spy = _patch_no_redis(monkeypatch)
     user = _make_user(db_session, company_id=1, email="ordinary@wercomfg.com")
 
@@ -437,7 +432,10 @@ def test_a_real_address_is_enqueued_and_logged_exactly_as_before(db_session: Ses
     assert email_spy.await_args.kwargs["to"] == "ordinary@wercomfg.com"
 
     (row,) = _logs_for(db_session, user.id)
-    assert row.sent is True
+    assert row.sent is False and row.provider_status == 'queued'
+    assert email_spy.await_args.kwargs['notification_log_id'] == row.id
+    assert email_spy.await_args.kwargs['company_id'] == user.company_id
+    assert email_spy.await_args.kwargs['user_id'] == user.id
     assert row.error is None
     (inbox,) = _notifs_for(db_session, user.id)
     assert row.notification_id == inbox.id
@@ -531,7 +529,17 @@ def test_mandatory_email_falls_back_to_in_app_when_the_address_is_a_placeholder(
     db_session.flush()
 
     assert created == 1, "a muted badge-only recipient must still get the in-app row"
-    (inbox,) = db_session.query(Notification).filter(Notification.user_id == badge_only.id).all()
+    (inbox,) = (
+        db_session.query(Notification)
+        .filter(Notification.user_id == badge_only.id, Notification.event_key == 'account.locked')
+        .all()
+    )
+    assert (
+        db_session.query(Notification)
+        .filter(Notification.user_id == badge_only.id, Notification.event_key == 'email.delivery_failed')
+        .count()
+        == 1
+    )
     assert inbox.event_key == "account.locked"
 
     # EMAIL is deliberately NOT removed from the channel set: the undeliverable row is the
@@ -561,7 +569,7 @@ def test_the_fallback_leaves_a_deliverable_mandatory_email_recipient_alone(db_se
     assert created == 0, "a deliverable recipient's muted in_app preference must be honored"
     assert db_session.query(Notification).filter(Notification.user_id == admin.id).count() == 0
     (log,) = _logs_for(db_session, admin.id)
-    assert log.sent is True and log.error is None
+    assert log.sent is False and log.provider_status == 'queued' and log.error is None
     assert log.notification_id is None
     assert email_spy.await_count == 1
     assert email_spy.await_args.kwargs["to"] == "admin@wercomfg.com"

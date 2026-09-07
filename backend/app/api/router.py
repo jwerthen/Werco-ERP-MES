@@ -51,6 +51,7 @@ from app.api.endpoints import (
     reports,
     rfq_quotes,
     routing,
+    runtime_metrics,
     scanner,
     scheduling,
     scrap_reasons,
@@ -150,3 +151,5 @@ api_router.include_router(setup.router, prefix="/setup", tags=["Setup & Readines
 api_router.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
 api_router.include_router(visitor_logs.router, prefix="/visitor-logs", tags=["Visitor Logs"])
 api_router.include_router(errors.router, tags=["Error Logging"])
+
+api_router.include_router(runtime_metrics.router, prefix="/runtime-metrics", tags=["Browser Performance"])

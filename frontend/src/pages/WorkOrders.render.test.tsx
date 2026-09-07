@@ -1,3 +1,4 @@
+import { workOrderBrowseFixture } from '../testUtils/workOrderBrowseFixture';
 /**
  * FEPERF-5 — WorkOrders list render-correctness regression.
  *
@@ -29,7 +30,7 @@ jest.mock('react-router-dom', () => ({
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {
-    getWorkOrders: jest.fn(),
+    browseWorkOrders: jest.fn(),
     deleteWorkOrder: jest.fn(),
     releaseWorkOrder: jest.fn(),
     // The Duplicate row action mounts DuplicateWorkOrderModal, which resolves
@@ -61,6 +62,7 @@ jest.mock('../services/realtime', () => ({
   buildWsUrl: () => 'ws://localhost/ws/test',
 }));
 
+const mockRows = jest.fn();
 const mockedApi = api as jest.Mocked<typeof api>;
 
 const draftWorkOrder = {
@@ -122,8 +124,14 @@ async function getDesktopTable(): Promise<HTMLElement> {
 describe('FEPERF-5: WorkOrders list renders rows correctly after memo refactor', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockedApi.browseWorkOrders.mockImplementation(async params => {
+      const sourceParams: Record<string,string> = {};
+      if (params?.status) sourceParams.status = params.status;
+      if (params?.search) sourceParams.search = params.search;
+      return workOrderBrowseFixture(await mockRows(sourceParams), params);
+    });
     mockAuthUser = { ...mockDefaultUser };
-    mockedApi.getWorkOrders.mockResolvedValue([draftWorkOrder, inProgressWorkOrder]);
+    mockRows.mockResolvedValue([draftWorkOrder, inProgressWorkOrder]);
     mockedApi.releaseWorkOrder.mockResolvedValue({});
     mockedApi.deleteWorkOrder.mockResolvedValue({});
   });
@@ -203,8 +211,14 @@ describe('FEPERF-5: WorkOrders list renders rows correctly after memo refactor',
 describe('WorkOrders row actions: Duplicate is gated on work_orders:edit', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockedApi.browseWorkOrders.mockImplementation(async params => {
+      const sourceParams: Record<string,string> = {};
+      if (params?.status) sourceParams.status = params.status;
+      if (params?.search) sourceParams.search = params.search;
+      return workOrderBrowseFixture(await mockRows(sourceParams), params);
+    });
     mockAuthUser = { ...mockDefaultUser };
-    mockedApi.getWorkOrders.mockResolvedValue([draftWorkOrder, inProgressWorkOrder]);
+    mockRows.mockResolvedValue([draftWorkOrder, inProgressWorkOrder]);
     mockedApi.releaseWorkOrder.mockResolvedValue({});
     mockedApi.deleteWorkOrder.mockResolvedValue({});
     mockedApi.getWorkOrder.mockResolvedValue({

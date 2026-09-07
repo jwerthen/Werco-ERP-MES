@@ -4,8 +4,10 @@ import './index.css';
 import './styles/accessibility.css';
 import './styles/print.css';
 import App from './App';
+import { startRuntimeMetrics } from './utils/runtimeMetrics';
 
 document.documentElement.setAttribute('data-theme', 'werco');
+startRuntimeMetrics();
 
 const root = ReactDOM.createRoot(document.getElementById('root') as HTMLElement);
 

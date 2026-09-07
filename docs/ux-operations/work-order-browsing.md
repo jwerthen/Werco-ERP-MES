@@ -1,0 +1,25 @@
+# Bounded work-order browsing
+
+The Work Orders screen now reads 50-record windows from `GET /api/v1/work-orders/browse`. It no longer walks the legacy list in 500-record batches before rendering. Existing `getWorkOrders` consumers and the deleted archive keep their original endpoint.
+
+The server applies status, literal text search, customer, COTS visibility, overdue/due-today scope, sort direction, and group ordering before selecting a window. Every result includes the full filtered total and KPI counts, customer choices, and full counts for groups represented in that window. Group cards say how many orders are loaded from the group. Search joins include WO/customer/PO/lot/unit/part identity; SQL wildcard characters are treated literally. Date scopes use the existing Work Orders screen's Central-time contract.
+
+Desktop uses Previous/Next pages and exports only the loaded page. Mobile starts with 50 rows and explicitly loads 50 more. Filters or sort reset the window. Background refresh uses batches of at most four requests and replaces only already-requested windows, keeps the loaded range, and drops stale results from earlier filters/accounts. Duplicate load clicks are guarded. A failed refresh keeps the last successful window with a durable retry message. Switching back to desktop reduces an expanded mobile range to one page. Group exports say “Export loaded rows.”
+
+Text search and existing filter/group deep links survive navigation. Rapid filter changes merge pending query updates, and committed Back/Forward navigation restores the previous query. Saved private or team views restore the same filters and sort. Customer options stay available during a pending filter change. Inline date editing cancels when its row leaves the result; failed deletion cannot reinsert a row into another query/page, and a confirmed deletion refreshes authoritative counts. Mobile header and card actions wrap so Details and destructive controls remain visible at 390px.
+
+## Read contract and limits
+
+The new endpoint is a pure read of persisted work-order status. It computes operation progress for its bounded result, but does not reconcile completion or post inventory effects merely because someone opens the list. Legacy list/detail reconciliation and write workflows are unchanged. Counts describe the persisted population when queried; this is a live list, not a transaction snapshot spanning multiple page requests.
+
+Pagination uses stable ordered offsets with an ID tiebreaker, supporting previous-page navigation and group sorting. The new company/live/priority/due/ID index supports the default order. Arbitrary text searches and deep offsets can still require scanning; no production latency or concurrency claim is made. The API caps rows at 100 and customer choices at 1,000, with an explicit truncation flag. It does not truncate matching totals.
+
+## Acceptance evidence
+
+- Backend: [browse API tests](../../backend/tests/api/test_work_order_browse.py) verify 123 tied records across three windows, exact totals/group counts, sorting, literal search, tenant/status/deletion/COTS/date filters, obsolete-page recovery, permission revocation, and absence of write SQL.
+- Frontend: [request-state tests](../../frontend/src/hooks/useWorkOrderBrowse.test.ts), existing WorkOrders page regression suites, and [DataTable tests](../../frontend/src/components/ui/DataTable.test.tsx) cover bounded requests, mobile increment/refresh, stale account/filter responses, failed next-page retry, independent server sort and pending pagers. Existing page interaction fixtures were adapted to the new response envelope; backend tests verify actual SQL behavior.
+- Isolated synthetic Chromium preview at 5178/API 8005: 125 fixture jobs loaded 50→100→125; customer filter reset to 50 of 80, descending sort began with `UX-BROWSE-079`, and team view creation/application succeeded. Desktop grouping shows 30 of 80 Alpha orders and 20 of 45 Beta orders on the second 50-row page; rapid clear/group changes and Back restore their correct populations. No page errors. The final mobile viewport check found document width 390 at viewport 390. Two initial width findings were fixed before final capture.
+- [Queued-query regression](../../frontend/src/hooks/useQueuedSearchParams.test.tsx) uses an actual data router with pending loaders to verify three rapid query updates and Back restoration. This addresses a reproduced browser race where clearing a customer immediately before grouping restored the old customer.
+- [Mobile team reader](screenshots/work-orders-mobile-team-reader.png) shows the scoped team view applied by an operator without edit/remove controls. Local scripts/logs are `/tmp/werco-browse-acceptance.mjs`, `/tmp/werco-browse-acceptance.log`, `/tmp/werco-browse-overflow.mjs`, and `/tmp/werco-browse-overflow.log`. All data is synthetic.
+
+Focused validation is recorded in [team workspaces](team-workspaces.md#focused-validation). [Desktop grouped page](screenshots/work-orders-desktop-groups.png) and [mobile saved view](screenshots/work-orders-mobile-team.png) supplement the browser assertions.

@@ -221,6 +221,7 @@ describe('OperatorKiosk — banking a pending delta', () => {
 
     await waitFor(() =>
       expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(31, {
+        request_id: expect.any(String),
         quantity_complete_delta: 3,
         quantity_scrapped_delta: 0,
         source: 'kiosk',
@@ -244,6 +245,7 @@ describe('OperatorKiosk — banking a pending delta', () => {
 
     await waitFor(() =>
       expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(31, {
+        request_id: expect.any(String),
         quantity_complete_delta: 2,
         quantity_scrapped_delta: 0,
         source: 'kiosk',
@@ -390,6 +392,7 @@ describe('OperatorKiosk — a parked delta may NEVER post against the next job',
 
     await waitFor(() => expect(productionCallOps()).toEqual([31, 31]));
     expect(mockedApi.reportOperationProduction).toHaveBeenLastCalledWith(31, {
+      request_id: expect.any(String),
       quantity_complete_delta: 2,
       quantity_scrapped_delta: 0,
       source: 'kiosk',

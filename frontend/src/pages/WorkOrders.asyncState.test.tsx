@@ -1,3 +1,4 @@
+import { workOrderBrowseFixture } from '../testUtils/workOrderBrowseFixture';
 /**
  * Batch 3 — async-state standardization (WorkOrders).
  *
@@ -32,7 +33,7 @@ import { ToastProvider } from '../components/ui/Toast';
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {
-    getWorkOrders: jest.fn(),
+    browseWorkOrders: jest.fn(),
     deleteWorkOrder: jest.fn(),
     releaseWorkOrder: jest.fn(),
   },
@@ -57,6 +58,7 @@ jest.mock('../services/realtime', () => ({
   buildWsUrl: () => 'ws://localhost/ws/test',
 }));
 
+const mockRows = jest.fn();
 const mockedApi = api as jest.Mocked<typeof api>;
 
 const sampleWorkOrder = {
@@ -97,6 +99,12 @@ function renderWorkOrdersWithToasts() {
 describe('WorkOrders async-state (Batch 3)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockedApi.browseWorkOrders.mockImplementation(async params => {
+      const sourceParams: Record<string,string> = {};
+      if (params?.status) sourceParams.status = params.status;
+      if (params?.search) sourceParams.search = params.search;
+      return workOrderBrowseFixture(await mockRows(sourceParams), params);
+    });
     mockedApi.releaseWorkOrder.mockResolvedValue({});
     mockedApi.deleteWorkOrder.mockResolvedValue({});
   });
@@ -107,7 +115,7 @@ describe('WorkOrders async-state (Batch 3)', () => {
 
   it('renders ErrorState on load failure and recovers content on Retry', async () => {
     // First load rejects → ErrorState; second (Retry) load resolves → rows.
-    mockedApi.getWorkOrders
+    mockRows
       .mockRejectedValueOnce(new Error('network down'))
       .mockResolvedValueOnce([sampleWorkOrder]);
 
@@ -118,7 +126,7 @@ describe('WorkOrders async-state (Batch 3)', () => {
     expect(within(alert).getByText('Could not load work orders.')).toBeInTheDocument();
     // No work-order content yet.
     expect(screen.queryByRole('link', { name: 'WO-1001' })).not.toBeInTheDocument();
-    expect(mockedApi.getWorkOrders).toHaveBeenCalledTimes(1);
+    expect(mockRows).toHaveBeenCalledTimes(1);
 
     // Click Retry → re-invokes the fetch.
     fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
@@ -128,11 +136,11 @@ describe('WorkOrders async-state (Batch 3)', () => {
       expect(screen.getAllByRole('link', { name: 'WO-1001' }).length).toBeGreaterThan(0);
     });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(mockedApi.getWorkOrders).toHaveBeenCalledTimes(2);
+    expect(mockRows).toHaveBeenCalledTimes(2);
   });
 
   it('renders EmptyState with its title when the fetch resolves to an empty list', async () => {
-    mockedApi.getWorkOrders.mockResolvedValue([]);
+    mockRows.mockResolvedValue([]);
 
     renderWorkOrders();
 
@@ -149,7 +157,7 @@ describe('WorkOrders async-state (Batch 3)', () => {
   });
 
   it('shows an error toast when a row delete mutation fails', async () => {
-    mockedApi.getWorkOrders.mockResolvedValue([sampleWorkOrder]);
+    mockRows.mockResolvedValue([sampleWorkOrder]);
     // Reject with the axios-shaped error the handler reads (err.response.data.detail).
     mockedApi.deleteWorkOrder.mockRejectedValueOnce({
       response: { data: { detail: 'Cannot delete a released work order' } },

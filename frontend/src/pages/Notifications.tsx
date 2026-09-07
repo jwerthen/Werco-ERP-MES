@@ -10,6 +10,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom';
 import { BellIcon, CheckIcon, Cog6ToothIcon } from '@heroicons/react/24/outline';
 import api from '../services/api';
+import BackgroundEmailActivity from '../components/BackgroundEmailActivity';
 import { useNotificationState } from '../hooks/useNotificationState';
 import { DataTable, DataTableColumn, StatusBadge, Button, useToast } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
@@ -355,6 +356,8 @@ export default function Notifications() {
           </div>
         </div>
       </div>
+
+      <BackgroundEmailActivity />
 
       {/* Server-paged inbox (offset/limit), desc(created_at). */}
       <DataTable<NotificationItem>

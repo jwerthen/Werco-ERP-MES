@@ -1,9 +1,16 @@
 import React, { useId, useState } from 'react';
 import { TableWorkspace } from '../../hooks/useTableWorkspace';
 
-export function TableWorkspaceControls<T>({ workspace: w }: { workspace: TableWorkspace<T> }) {
+export function TableWorkspaceControls<T>({
+  workspace: w,
+  tableOptions = true,
+}: {
+  workspace: TableWorkspace<T>;
+  tableOptions?: boolean;
+}) {
   const [selected, setSelected] = useState('');
   const [name, setName] = useState('');
+  const [visibility, setVisibility] = useState<'private' | 'team'>('private');
   const [removing, setRemoving] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [saveOpen, setSaveOpen] = useState(false);
@@ -33,6 +40,7 @@ export function TableWorkspaceControls<T>({ workspace: w }: { workspace: TableWo
           {w.views.map(row => (
             <option key={row.key} value={row.key}>
               {row.name}
+              {row.visibility === 'team' ? ' · Team' : ' · Private'}
             </option>
           ))}
         </select>
@@ -44,15 +52,17 @@ export function TableWorkspaceControls<T>({ workspace: w }: { workspace: TableWo
         >
           Apply view
         </button>
-        <button
-          type="button"
-          className="btn-secondary btn-sm"
-          aria-expanded={optionsOpen}
-          aria-controls={`${id}-options`}
-          onClick={() => setOptionsOpen(value => !value)}
-        >
-          Table options
-        </button>
+        {tableOptions && (
+          <button
+            type="button"
+            className="btn-secondary btn-sm"
+            aria-expanded={optionsOpen}
+            aria-controls={`${id}-options`}
+            onClick={() => setOptionsOpen(value => !value)}
+          >
+            Table options
+          </button>
+        )}
         <button
           type="button"
           className="btn-secondary btn-sm"
@@ -62,7 +72,7 @@ export function TableWorkspaceControls<T>({ workspace: w }: { workspace: TableWo
         >
           Save current view
         </button>
-        {hasSelection && (
+        {hasSelection && w.canEditView(selected) && (
           <>
             <button
               type="button"
@@ -162,7 +172,7 @@ export function TableWorkspaceControls<T>({ workspace: w }: { workspace: TableWo
           className="mt-3 flex flex-wrap gap-2 border-t border-fd-line pt-3"
           onSubmit={event => {
             event.preventDefault();
-            if (name.trim()) void w.saveView(name.trim());
+            if (name.trim()) void w.saveView(name.trim(), w.canManageTeam ? visibility : 'private');
           }}
         >
           <input
@@ -174,11 +184,26 @@ export function TableWorkspaceControls<T>({ workspace: w }: { workspace: TableWo
             placeholder="e.g. Open priority jobs"
             required
           />
+          {w.canManageTeam && (
+            <select
+              aria-label="View visibility"
+              className="input w-auto max-w-full"
+              value={visibility}
+              onChange={event => setVisibility(event.target.value as 'private' | 'team')}
+            >
+              <option value="private">Private — only me</option>
+              <option value="team">Team — permitted colleagues</option>
+            </select>
+          )}
           <button className="btn-primary btn-sm" disabled={locked || !name.trim()}>
             Save view
           </button>
           <span className="w-full text-xs text-surface-500">
-            Saves the current filters, sort, columns and row density to your account.
+            {tableOptions
+              ? 'Saves filters, sort, columns and row density.'
+              : 'Saves the current filters and view settings.'}{' '}
+            Team views are available to colleagues with access to this module; only managers can change them. Drafts
+            stay private.
           </span>
         </form>
       )}

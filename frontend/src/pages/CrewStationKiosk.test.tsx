@@ -269,6 +269,7 @@ describe('CrewStationKiosk', () => {
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
     await waitFor(() =>
       expect(mocked.reportProduction).toHaveBeenLastCalledWith('op-token-alice', 31, {
+        request_id: expect.any(String),
         quantity_complete_delta: 3,
         quantity_scrapped_delta: 0,
         scrap_reason: undefined,
@@ -387,6 +388,7 @@ describe('CrewStationKiosk', () => {
       })
     );
     expect(mocked.reportProduction).toHaveBeenCalledWith('op-token-alice', 31, {
+      request_id: expect.any(String),
       quantity_complete_delta: 13,
       quantity_scrapped_delta: 0,
       scrap_reason: undefined,
@@ -689,6 +691,7 @@ describe('CrewStationKiosk', () => {
       // and it reaches the server on the entry's own post — no second scan.
       await waitFor(() =>
         expect(mocked.reportProduction).toHaveBeenCalledWith('op-token-alice', 31, {
+          request_id: expect.any(String),
           quantity_complete_delta: 3,
           quantity_scrapped_delta: 1,
           scrap_reason: undefined,

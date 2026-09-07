@@ -59,6 +59,7 @@ class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
         Index("ix_work_orders_customer_name", "customer_name"),
         Index("ix_work_orders_actual_end", "actual_end"),
         Index("ix_work_orders_company_status", "company_id", "status"),
+        Index("ix_work_orders_company_live_priority_due", "company_id", "is_deleted", "priority", "due_date", "id"),
         Index("ix_work_orders_company_due_date", "company_id", "due_date"),
         # Lock-step with migration 080_restore_stamped_over_con (originally
         # migration 003, which the create_all+stamp bootstrap skipped). Names

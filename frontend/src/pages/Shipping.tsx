@@ -1,7 +1,10 @@
+import { useTableWorkspace } from '../hooks/useTableWorkspace';
+import { TableWorkspaceControls } from '../components/ui/TableWorkspaceControls';
 import { PageHeader, RecordHeader } from '../components/ui/PageHeader';
 import React, { useEffect, useMemo, useState } from 'react';
 import api from '../services/api';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link } from 'react-router-dom';
+import { useQueuedSearchParams } from '../hooks/useQueuedSearchParams';
 import { formatCentralDate } from '../utils/centralTime';
 import { useToast } from '../components/ui/Toast';
 import {
@@ -59,18 +62,17 @@ interface ReadyToShip {
 
 export default function Shipping({ embedded }: { embedded?: boolean }) {
   const { showToast } = useToast();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useQueuedSearchParams();
   const search = searchParams.get('shippingSearch') || '';
   const shippingStatus = searchParams.get('shippingStatus') || '';
   const shippingFrom = searchParams.get('shippingFrom') || '';
   const shippingTo = searchParams.get('shippingTo') || '';
   const [shipmentPage, setShipmentPage] = useState(0);
-  const updateShippingFilter = (key: string, value: string) => {
-    const next = new URLSearchParams(searchParams);
-    if (value) next.set(key, value);
-    else next.delete(key);
-    setSearchParams(next, { replace: true });
-  };
+  const updateShippingFilter = (key: string, value: string) => setSearchParams(previous => {
+    const next = new URLSearchParams(previous);
+    if (value) next.set(key, value); else next.delete(key);
+    return next;
+  }, { replace: true });
   useEffect(() => setShipmentPage(0), [search, shippingStatus, shippingFrom, shippingTo]);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
@@ -492,6 +494,19 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
     );
   };
 
+  const shippingFilters = { search, shippingStatus, shippingFrom, shippingTo };
+  const applyShippingFilters = (filters: Record<string, string>) => {
+    const next = new URLSearchParams(searchParams);
+    if (filters.search) next.set('shippingSearch', filters.search); else next.delete('shippingSearch');
+    for (const key of ['shippingStatus', 'shippingFrom', 'shippingTo']) {
+      if (filters[key]) next.set(key, filters[key]); else next.delete(key);
+    }
+    setShipmentPage(0);
+    setSearchParams(next);
+  };
+  const readyWorkspace = useTableWorkspace('shipping', 'ready', readyColumns, { search }, filters => updateShippingFilter('shippingSearch', filters.search || ''), { key: 'due', dir: 'asc' });
+  const shipmentWorkspace = useTableWorkspace('shipping', 'shipments', [{ key: 'shipment_number', header: 'Shipment' }], shippingFilters, applyShippingFilters);
+
   const pageHeader = (
     <PageHeader
       title="Shipping"
@@ -523,12 +538,7 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
             {...field}
             className="input"
             value={search}
-            onChange={e => {
-              const next = new URLSearchParams(searchParams);
-              if (e.target.value) next.set('shippingSearch', e.target.value);
-              else next.delete('shippingSearch');
-              setSearchParams(next, { replace: true });
-            }}
+            onChange={e => updateShippingFilter('shippingSearch', e.target.value)}
             placeholder="Shipment, work order, part, customer, or tracking number"
           />
         )}
@@ -537,8 +547,10 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
       {!loadError && (
         <div className="bg-fd-panel border border-fd-line rounded-sm p-3">
           <h2 className="text-lg font-semibold mb-4">Ready to Ship ({readyToShip.length})</h2>
+          <TableWorkspaceControls workspace={readyWorkspace} />
           <DataTable
-            columns={readyColumns}
+            columns={readyWorkspace.displayColumns(readyColumns)}
+            {...readyWorkspace.tableProps}
             data={readyToShip.filter(matchesSearch)}
             rowKey={wo => wo.work_order_id}
             defaultSort={{ key: 'due', dir: 'asc' }}
@@ -607,6 +619,7 @@ export default function Shipping({ embedded }: { embedded?: boolean }) {
               )}
             </FormField>
           </div>
+          <TableWorkspaceControls workspace={shipmentWorkspace} tableOptions={false} />
           <div className="flex justify-between items-center mb-3">
             <span className="text-sm text-slate-400">
               Page {currentShipmentPage + 1} of {shipmentPages} · {visibleShipments.length} matching shipments

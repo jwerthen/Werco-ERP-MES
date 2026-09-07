@@ -934,7 +934,9 @@ class TestCoordinatedProductionReleaseOrdering:
         assert backend_upload < receipt < backend_gate < min(dependent_uploads)
         gate = steps[backend_gate]
         assert not gate.get('continue-on-error')
-        assert not gate.get('if'), 'Do not conditionally skip API readiness before dependent uploads'
+        release_guard = "steps.release_head.outputs.current == 'true'"
+        assert gate.get('if') == release_guard
+        assert all(steps[i].get('if', '').startswith(release_guard) for i in dependent_uploads)
         assert '/health/detailed' in gate['run']
         assert '--json-path checks.application.release' in gate['run']
         assert '--expect "${GITHUB_SHA}"' in gate['run']
@@ -944,7 +946,7 @@ class TestCoordinatedProductionReleaseOrdering:
         workflow = _load_workflow('deploy-frontend-production.yml')
         job = workflow['jobs']['deploy-frontend']
         assert job['needs'] == 'classify'
-        assert job['if'] == "needs.classify.outputs.standalone == 'true'"
+        assert job['if'] == "github.ref == 'refs/heads/main' && needs.classify.outputs.standalone == 'true'"
         classify = workflow['jobs']['classify']
         assert classify['outputs']['standalone'] == '${{ steps.classify.outputs.standalone }}'
         checkout = next(step for step in classify['steps'] if step.get('uses', '').startswith('actions/checkout@'))

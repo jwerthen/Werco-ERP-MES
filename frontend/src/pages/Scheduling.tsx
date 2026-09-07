@@ -32,6 +32,7 @@ import {
 import { Modal } from '../components/ui/Modal';
 import { Button, EmptyState, ErrorState, FormField, statusVariant, useToast } from '../components/ui';
 import type { StatusVariant } from '../components/ui';
+import WorkingCalendarEditor from '../components/scheduling/WorkingCalendarEditor';
 import type { SchedulingImpactRequest, SchedulingImpactResponse } from '../types/schedulingImpact';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 
@@ -181,6 +182,7 @@ const priorityColors: Record<number, string> = {
 export default function Scheduling() {
   const { can } = usePermissions();
   const { showToast } = useToast();
+  const [calendarCenter, setCalendarCenter] = useState<WorkCenter | null>(null);
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [jobs, setJobs] = useState<ScheduledJob[]>([]);
   const [capacityHeatmap, setCapacityHeatmap] = useState<CapacityHeatmapResponse | null>(null);
@@ -373,7 +375,14 @@ export default function Scheduling() {
         api.getCapacityHeatmap(startDate, endDate),
       ]);
       setWorkCenters(wcRes);
-      setJobs(jobsRes);
+      // Scheduling stores date-level values in legacy DateTime columns. Keep
+      // their calendar date; interpreting midnight as a UTC instant shifts the
+      // reviewed day backward in Central time.
+      setJobs(jobsRes.map((job: ScheduledJob) => ({
+        ...job,
+        scheduled_start: job.scheduled_start?.split('T')[0],
+        scheduled_end: job.scheduled_end?.split('T')[0],
+      })));
       setCapacityHeatmap(heatmapRes);
     } catch (err) {
       console.error('Failed to load scheduling data:', err);
@@ -913,7 +922,7 @@ export default function Scheduling() {
 
 
   const capacityDayClass = (day: CapacityHeatmapDay) => {
-    if (day.utilization_pct > 100) return 'bg-red-500 text-white border-red-400';
+    if (day.overloaded || day.utilization_pct > 100) return 'bg-red-500 text-white border-red-400';
     if (day.utilization_pct >= 90) return 'bg-amber-500 text-slate-950 border-amber-300';
     if (day.utilization_pct >= 70) return 'bg-yellow-400 text-slate-950 border-yellow-200';
     if (day.scheduled_hours > 0) return 'bg-emerald-500 text-slate-950 border-emerald-300';
@@ -921,11 +930,11 @@ export default function Scheduling() {
   };
 
   const capacityStatusLabel = (day: CapacityHeatmapDay) => {
-    if (day.utilization_pct > 100) return 'Over capacity';
+    if (day.overloaded || day.utilization_pct > 100) return 'Over capacity';
     if (day.utilization_pct >= 90) return 'Near full';
     if (day.utilization_pct >= 70) return 'Busy';
     if (day.scheduled_hours > 0) return 'Scheduled';
-    return 'Open';
+    return day.capacity_hours === 0 ? 'Closed' : 'Open';
   };
 
   const handleCapacityDaySelect = (workCenterId: number, date: string) => {
@@ -967,14 +976,14 @@ export default function Scheduling() {
   return (
     <div className="space-y-3">
       {/* Page Header */}
-      <div className="flex justify-between items-center">
+      <div className="flex flex-wrap justify-between items-center gap-3">
         <div>
           <h1 className="text-2xl font-bold text-white">Production Schedule</h1>
           <p className="text-sm text-slate-400 mt-0.5">
             {formatCentralDate(visibleStart, { month: 'short', day: 'numeric', year: undefined })} &ndash; {formatCentralDate(visibleEnd)}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             onClick={handleAutoScheduleAll}
             disabled={!!impactRequest || !!bulkActionRunning || pendingJobIds.size > 0}
@@ -999,6 +1008,8 @@ export default function Scheduling() {
           </div>
         </div>
       </div>
+
+      {calendarCenter && <WorkingCalendarEditor center={calendarCenter} onClose={() => setCalendarCenter(null)} onSaved={() => { setImpactStale(true); void loadData(); }} />}
 
       {/* Load error */}
       {loadError && (
@@ -1126,17 +1137,17 @@ export default function Scheduling() {
                         className={`h-12 rounded border px-1 text-center transition hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-cyan-400 ${capacityDayClass(day)} ${
                           isFocused ? 'ring-2 ring-cyan-300 ring-offset-2 ring-offset-slate-900' : ''
                         }`}
-                        title={`${formatCentralDate(day.date, { year: undefined })} - ${statusLabel}: ${day.scheduled_hours.toFixed(1)}h scheduled of ${day.capacity_hours.toFixed(1)}h capacity (${Math.round(day.utilization_pct)}%)`}
+                        title={`${formatCentralDate(day.date, { year: undefined })} - ${statusLabel}: ${day.scheduled_hours.toFixed(1)}h scheduled of ${day.capacity_hours.toFixed(1)}h capacity (${day.capacity_hours === 0 ? (day.overloaded ? 'Over' : 'Closed') : `${Math.round(day.utilization_pct)}%`})`}
                         aria-label={`${machine.work_center_code} ${formatCentralDate(day.date, { year: undefined })}: ${statusLabel}, ${day.scheduled_hours.toFixed(1)} scheduled hours of ${day.capacity_hours.toFixed(1)} capacity hours`}
                       >
                         <span className="block text-[10px] font-semibold leading-4">
                           {formatInCentralTime(day.date, { weekday: 'short' })}
                         </span>
                         <span className="block text-[11px] font-bold leading-4 tabular-nums">
-                          {Math.round(day.utilization_pct)}%
+                          {day.capacity_hours === 0 ? (day.overloaded ? 'Over' : 'Closed') : `${Math.round(day.utilization_pct)}%`}
                         </span>
                         <span className="block truncate text-[9px] leading-3 opacity-80">
-                          {day.scheduled_hours > 0 ? `${day.scheduled_hours.toFixed(1)}h` : 'open'}
+                          {day.scheduled_hours > 0 ? `${day.scheduled_hours.toFixed(1)}h` : day.capacity_hours === 0 ? '0h capacity' : 'open'}
                         </span>
                       </button>
                     );
@@ -1175,7 +1186,7 @@ export default function Scheduling() {
                   capacityHeatmap?.work_centers?.forEach((wc) => {
                     const dayData = wc.days.find((d) => d.date === dateKey);
                     totalUsed += dayData?.scheduled_hours || 0;
-                    totalCapacity += wc.capacity_hours_per_day || 8;
+                    totalCapacity += dayData?.capacity_hours ?? 0;
                   });
                   const dayUtil = totalCapacity > 0 ? (totalUsed / totalCapacity) * 100 : 0;
                   return (
@@ -1222,6 +1233,7 @@ export default function Scheduling() {
                     >
                       <div className="font-medium text-sm">{wc.code}</div>
                       <div className="text-xs text-slate-400">{wc.name}</div>
+                      <button type="button" className="mt-1 text-xs text-fd-link hover:underline" onClick={() => setCalendarCenter(wc)} aria-label={`Working calendar for ${wc.code}`}>Working calendar</button>
                       {unscheduled.length > 0 && (
                         <div className="mt-1 text-xs text-orange-600">
                           {unscheduled.length} unscheduled
@@ -1706,12 +1718,12 @@ export default function Scheduling() {
               <h2 className="text-xl font-semibold">Review scheduling impact</h2>
               <p className="text-sm text-slate-300 mt-1">
                 {impactRequest?.action === 'shift'
-                  ? `Shift scheduled remaining operations by ${impactRequest.shift_days} ${Math.abs(impactRequest.shift_days || 0) === 1 ? 'day' : 'days'}, preserving their spacing.`
+                  ? `Shift scheduled remaining operations by ${impactRequest.shift_days} ${Math.abs(impactRequest.shift_days || 0) === 1 ? 'day' : 'days'}, then respect working days and operation sequence.`
                   : 'Schedule remaining operations at the earliest available capacity, in the visible queue order.'}
               </p>
               <p className="text-xs text-slate-400 mt-1">
                 No changes are saved until you apply this reviewed plan. Dates use the manufacturing calendar in Central
-                time. Capacity uses the existing daily-hours estimate; delivery dates are projections.
+                time. Capacity uses each center’s working calendar when configured; delivery dates are projections.
               </p>
             </div>
             <button

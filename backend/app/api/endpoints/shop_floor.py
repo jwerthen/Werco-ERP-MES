@@ -115,6 +115,7 @@ from app.services.operation_action_gates import (
 from app.services.operation_hold_view import HoldBlockerView, HoldContext
 from app.services.operational_event_service import OperationalEventService
 from app.services.operator_qualification_service import evaluate_and_record_operator_qualification
+from app.services.production_receipt_service import find_production_replay, record_production_receipt
 from app.services.production_reduction_service import (
     approved_produced_total,
     eligible_reduction_entries,
@@ -168,6 +169,13 @@ class OperationCompleteRequest(BaseModel):
 
 
 class ProductionReportRequest(BaseModel):
+    request_id: Optional[str] = Field(
+        None,
+        min_length=8,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9_:-]+$",
+        description="Stable ID for one report, reused unchanged on retries.",
+    )
     quantity_complete_delta: float = 0.0
     quantity_scrapped_delta: float = 0.0
     notes: Optional[str] = None
@@ -3849,6 +3857,10 @@ def report_operation_production(
     active time entry production counters, but does not close time or complete
     the operation automatically when the target quantity is reached.
     """
+    replay = find_production_replay(db, company_id, current_user.id, operation_id, production_data)
+    if replay is not None:
+        return replay
+
     operation = (
         db.query(WorkOrderOperation)
         .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
@@ -4085,6 +4097,27 @@ def report_operation_production(
         )
         ncr_payload = {"id": ncr.id, "ncr_number": ncr.ncr_number}
 
+    response = {
+        "message": "Production quantity added",
+        "operation": {
+            "id": operation.id,
+            "status": operation.status.value,
+            "quantity_complete": operation.quantity_complete,
+            "quantity_scrapped": operation.quantity_scrapped,
+            "quantity_ordered": target_qty,
+        },
+        "active_time_entry": {
+            "id": active_entry.id,
+            "quantity_produced": active_entry.quantity_produced,
+            "quantity_scrapped": active_entry.quantity_scrapped,
+            "clock_out": to_utc_iso(active_entry.clock_out),
+        },
+        # Scrap -> NCR: the NCR this report filed (open_ncr=true), else null. The
+        # kiosk success toast quotes the real ncr_number from here.
+        "ncr": ncr_payload,
+    }
+    record_production_receipt(db, company_id, current_user.id, operation_id, active_entry.id, production_data, response)
+
     try:
         db.commit()
     except StaleDataError as exc:
@@ -4128,25 +4161,7 @@ def report_operation_production(
         company_id=company_id,
     )
 
-    return {
-        "message": "Production quantity added",
-        "operation": {
-            "id": operation.id,
-            "status": operation.status.value,
-            "quantity_complete": operation.quantity_complete,
-            "quantity_scrapped": operation.quantity_scrapped,
-            "quantity_ordered": target_qty,
-        },
-        "active_time_entry": {
-            "id": active_entry.id,
-            "quantity_produced": active_entry.quantity_produced,
-            "quantity_scrapped": active_entry.quantity_scrapped,
-            "clock_out": to_utc_iso(active_entry.clock_out),
-        },
-        # Scrap -> NCR: the NCR this report filed (open_ncr=true), else null. The
-        # kiosk success toast quotes the real ncr_number from here.
-        "ncr": ncr_payload,
-    }
+    return response
 
 
 @router.post("/operations/{operation_id}/reduce-production")

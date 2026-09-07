@@ -12,7 +12,7 @@ from dataclasses import replace as dataclass_replace
 from datetime import date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Literal, Optional, Set
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
@@ -30,6 +30,7 @@ from app.api.deps import get_audit_service, get_current_company_id, get_current_
 # copy is a third place for the ``company_id`` predicate to go missing. ``bom.py`` imports
 # no endpoint module, so there is no cycle.
 from app.api.endpoints.bom import tenant_parts_by_id
+from app.api.endpoints.user_workspaces import require_workspace_access
 from app.core.cache import invalidate_work_centers_cache
 from app.core.realtime import safe_broadcast
 from app.core.time_utils import to_utc_iso
@@ -57,6 +58,7 @@ from app.schemas.work_order import (
     LaserNestManualCreate,
     LaserNestManualResponse,
     LaserNestPreviewRow,
+    WorkOrderBrowseResponse,
     WorkOrderCreate,
     WorkOrderDuplicateRequest,
     WorkOrderDuplicateResponse,
@@ -158,6 +160,7 @@ from app.services.sheet_stock_ai_resolver import resolve_ambiguous_sheet_matches
 from app.services.sheet_stock_matcher import STATUS_AMBIGUOUS, match_sheet_parts
 from app.services.storage_service import delete_ref
 from app.services.work_center_type_service import get_work_center_group
+from app.services.work_order_browse_service import browse_work_orders
 from app.services.work_order_duplicate_service import duplicate_work_order
 from app.services.work_order_state_service import (
     TERMINAL_WO_STATUSES,
@@ -1647,6 +1650,42 @@ def _build_confirmed_pdf_nests(package_dir: str, rows: list[LaserNestImportRow])
             )
         )
     return nests
+
+
+@router.get("/browse", response_model=WorkOrderBrowseResponse)
+def browse_orders(
+    response: Response,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    status: Optional[WorkOrderStatus] = None,
+    search: Optional[str] = Query(None, max_length=200),
+    customer: Optional[str] = Query(None, max_length=255),
+    hide_cots: bool = True,
+    scope: Optional[Literal["overdue", "due_today"]] = None,
+    sort: Literal["work_order_number", "part", "customer", "due_date", "priority", "status"] = "priority",
+    direction: Literal["asc", "desc"] = "asc",
+    group: Literal["none", "customer", "part", "status"] = "none",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Server-filtered page plus exact persisted-record counts; never reconciles on read."""
+    require_workspace_access(db, current_user, company_id, "work-orders")
+    response.headers["Cache-Control"] = "no-store"
+    return browse_work_orders(
+        db,
+        company_id,
+        skip=skip,
+        limit=limit,
+        status=status,
+        search=search,
+        customer=customer,
+        hide_cots=hide_cots,
+        scope=scope,
+        sort=sort,
+        direction=direction,
+        group=group,
+    )
 
 
 @router.get("/", response_model=List[WorkOrderSummary])

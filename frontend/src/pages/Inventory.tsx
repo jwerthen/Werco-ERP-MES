@@ -1,3 +1,5 @@
+import { useTableWorkspace } from '../hooks/useTableWorkspace';
+import { TableWorkspaceControls } from '../components/ui/TableWorkspaceControls';
 import { PageHeader } from '../components/ui/PageHeader';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useSearchParams } from 'react-router-dom';
@@ -674,6 +676,20 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       {pageHeader}
     </>
   );
+  const inventoryFilters = { search: filterText, group: groupFilter, low_stock: showLowStockOnly ? '1' : '' };
+  const applyInventoryFilters = (filters: Record<string, string>) => {
+    setFilterText(filters.search || '');
+    const group = filters.group === 'parts' || filters.group === 'materials' ? filters.group : 'all';
+    setGroupFilter(group);
+    setShowLowStockOnly(filters.low_stock === '1');
+    const next = new URLSearchParams(searchParams);
+    if (group === 'all') next.delete('group'); else next.set('group', group);
+    if (filters.low_stock === '1') next.set('filter', 'low_stock'); else next.delete('filter');
+    setSearchParams(next);
+  };
+  const summaryWorkspace = useTableWorkspace('inventory', 'summary', summaryColumns, inventoryFilters, applyInventoryFilters, { key: 'part', dir: 'asc' });
+  const detailWorkspace = useTableWorkspace('inventory', 'details', detailColumns, inventoryFilters, applyInventoryFilters, { key: 'part', dir: 'asc' });
+
   if (loading || loadError) {
     return (
       <div className="space-y-4">
@@ -854,11 +870,14 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         </nav>
       </div>
 
+      {activeTab === 'summary' && <TableWorkspaceControls workspace={summaryWorkspace} />}
+      {activeTab === 'details' && <TableWorkspaceControls workspace={detailWorkspace} />}
       {/* Tab Content */}
       <div>
         {activeTab === 'summary' && (
           <DataTable
-            columns={summaryColumns}
+            columns={summaryWorkspace.displayColumns(summaryColumns)}
+            {...summaryWorkspace.tableProps}
             data={filteredSummary}
             rowKey={item => item.part_id}
             defaultSort={{ key: 'part', dir: 'asc' }}
@@ -876,7 +895,8 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
 
         {activeTab === 'details' && (
           <DataTable
-            columns={detailColumns}
+            columns={detailWorkspace.displayColumns(detailColumns)}
+            {...detailWorkspace.tableProps}
             data={filteredInventory}
             rowKey={item => item.id}
             defaultSort={{ key: 'part', dir: 'asc' }}

@@ -61,6 +61,7 @@ from app.core.queue import enqueue_job, get_redis_pool
 from app.models.notification import DigestQueue, Notification, NotificationLog, NotificationPreference
 from app.models.user import User
 from app.services import notification_links as links
+from app.services.background_email_status import notify_background_email_failure
 from app.services.notification_catalog import (
     ALL_CHANNELS,
     CHANNEL_DIGEST,
@@ -577,33 +578,41 @@ async def _fan_out(
             # must be taken whether or not anything is enqueued, or a retry of this same
             # fan-out would write a second log row for the same recipient/channel.
             if await _dedup_reserve(entry.event_key, related_type, related_id, user.id, CHANNEL_EMAIL):
-                if email_deliverable:
-                    await _enqueue_email(
-                        user=user, title=title, body=body, link=link, template=template, context=context
-                    )
-                # DELIVERABLE case: sent=True records the ENQUEUE, not confirmed SMTP
-                # delivery. PR-3 FOLLOW-UP: the admin delivery-failure view (PR 3) needs the
-                # terminal outcome, so send_email_job should write back sent=False + error on
-                # final ARQ-retry exhaustion (thread notification_log_id through the job).
-                # Deferred with that consuming view; matches the pre-existing enqueue-time
-                # logging behavior.
-                # UNDELIVERABLE case: nothing was enqueued, so the row records exactly that --
-                # sent=False plus the reason in ``error`` (an existing nullable Text column).
-                db.add(
-                    NotificationLog(
-                        company_id=company_id,
-                        user_id=user.id,
-                        event_type=entry.event_key,
-                        channel=CHANNEL_EMAIL,
-                        subject=title,
-                        body=body,
-                        sent=email_deliverable,
-                        error=undeliverable_reason,
-                        related_type=related_type,
-                        related_id=related_id,
-                        notification_id=in_app_id,
-                    )
+                log = NotificationLog(
+                    company_id=company_id,
+                    user_id=user.id,
+                    event_type=entry.event_key,
+                    channel=CHANNEL_EMAIL,
+                    subject=title,
+                    body=body,
+                    sent=False,
+                    error=undeliverable_reason,
+                    provider_status='queued' if email_deliverable else 'failed',
+                    related_type=related_type,
+                    related_id=related_id,
+                    notification_id=in_app_id,
                 )
+                db.add(log)
+                db.flush()
+                if email_deliverable:
+                    try:
+                        await _enqueue_email(
+                            user=user,
+                            title=title,
+                            body=body,
+                            link=link,
+                            template=template,
+                            context=context,
+                            notification_log_id=log.id,
+                            company_id=company_id,
+                        )
+                    except Exception:
+                        # Preserve an honest visible failure even when Redis is down;
+                        # do not roll this log back or label enqueue as SMTP acceptance.
+                        log.provider_status = 'failed'
+                        log.error = 'Email could not be queued. No email was sent.'
+                        logger.warning('Could not enqueue notification email log %s', log.id)
+                notify_background_email_failure(db, log)
 
         # SMS leg (§3.4). Fires only when the user opted the SMS channel ON for an
         # SMS-ELIGIBLE event, the recurring-suppression window is clear, AND a phone is
@@ -732,6 +741,8 @@ async def _enqueue_email(
     link: Optional[str],
     template: Optional[str],
     context: Optional[Dict],
+    notification_log_id: Optional[int] = None,
+    company_id: Optional[int] = None,
 ) -> None:
     email_context = dict(context or {})
     email_context.setdefault("base_url", settings.FRONTEND_BASE_URL)
@@ -751,6 +762,10 @@ async def _enqueue_email(
         body=None,
         template=template or "notification",
         context=email_context,
+        notification_log_id=notification_log_id,
+        company_id=company_id,
+        user_id=user.id,
+        _defer_by=timedelta(seconds=5),
     )
 
 

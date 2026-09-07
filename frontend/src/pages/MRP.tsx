@@ -3,6 +3,7 @@ import api from '../services/api';
 import { Link, useSearchParams } from 'react-router-dom';
 import { usePermissions } from '../hooks/usePermissions';
 import MRPSupplyReview, { SupplyDraft } from './MRPSupplyReview';
+import MRPPurchaseBatchReview from './MRPPurchaseBatchReview';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import { EmptyState, ErrorState, useToast } from '../components/ui';
@@ -61,6 +62,7 @@ interface ShortagesSummary {
     part_id: number;
     part_number: string;
     part_name: string;
+    part_type?: string;
     action_type: string;
     quantity: number;
     required_date: string;
@@ -110,6 +112,8 @@ function ActionRow({
   onDraft,
   highlight,
   pending = false,
+  selected = false,
+  onSelect,
 }: {
   data: ActionRowData;
   onProcess?: (actionId: number) => void;
@@ -117,6 +121,8 @@ function ActionRow({
   /** Marks this action as also surfaced in the other panel (same actionId). */
   highlight?: boolean;
   pending?: boolean;
+  selected?: boolean;
+  onSelect?: (actionId: number) => void;
 }) {
   const config = actionTypeConfig[data.actionType] || actionTypeConfig.order;
   const Icon = config.icon;
@@ -127,6 +133,14 @@ function ActionRow({
         data.isProcessed ? 'opacity-60' : data.isExpedite ? 'bg-fd-red/10' : highlight ? 'bg-fd-blue/5' : ''
       }`}
     >
+      {onSelect && !data.supplyDraft && (
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={() => onSelect(data.actionId)}
+          aria-label={`Select ${data.partNumber} for purchase batch`}
+        />
+      )}
       <Icon className="h-4 w-4 flex-shrink-0 text-slate-400" />
       <div className="min-w-0 flex-1">
         <div className="font-medium truncate text-sm">{data.partNumber}</div>
@@ -181,6 +195,8 @@ export default function MRPPage() {
   const canPlan = ['admin', 'manager', 'supervisor'].includes(role || '');
   const [searchParams, setSearchParams] = useSearchParams();
   const [draftActionId, setDraftActionId] = useState<number | null>(null);
+  const [batchIds, setBatchIds] = useState<number[]>([]);
+  const [openBatchIds, setOpenBatchIds] = useState<number[] | null>(null);
   const [drafts, setDrafts] = useState<Record<number, SupplyDraft>>({});
   const [runs, setRuns] = useState<MRPRun[]>([]);
   const [shortages, setShortages] = useState<ShortagesSummary | null>(null);
@@ -207,6 +223,16 @@ export default function MRPPage() {
     loadData();
   }, []);
 
+  const toggleBatch = (id: number) => {
+    setBatchIds(previous =>
+      previous.includes(id)
+        ? previous.filter(value => value !== id)
+        : previous.length < 25
+          ? [...previous, id]
+          : previous
+    );
+  };
+
   const loadData = async () => {
     const requestId = ++dataRequestRef.current;
     setLoadError(false);
@@ -215,6 +241,13 @@ export default function MRPPage() {
       if (requestId !== dataRequestRef.current) return;
       setRuns(runsRes);
       setShortages(shortagesRes);
+      setBatchIds(previous =>
+        previous.filter(id =>
+          shortagesRes.shortages?.some(
+            (row: { action_id: number; supply_draft?: SupplyDraft | null }) => row.action_id === id && !row.supply_draft
+          )
+        )
+      );
     } catch (err) {
       console.error('Failed to load MRP data:', err);
       if (requestId === dataRequestRef.current) setLoadError(true);
@@ -449,6 +482,23 @@ export default function MRPPage() {
               </span>
             }
           >
+            {canPlan && (
+              <div className="flex flex-wrap items-center gap-3 border-b border-fd-line p-3 text-sm">
+                <span>Select up to 25 purchase recommendations to combine by supplier.</span>
+                <button
+                  className="btn-primary btn-sm"
+                  disabled={!batchIds.length}
+                  onClick={() => setOpenBatchIds([...batchIds])}
+                >
+                  Review {batchIds.length || ''} selected purchases
+                </button>
+                {batchIds.length > 0 && (
+                  <button className="btn-secondary btn-sm" onClick={() => setBatchIds([])}>
+                    Clear selection
+                  </button>
+                )}
+              </div>
+            )}
             <div className="divide-y divide-fd-line">
               {shortages.shortages.map(shortage => (
                 <ActionRow
@@ -469,6 +519,14 @@ export default function MRPPage() {
                   onProcess={canPlan ? processAction : undefined}
                   onDraft={canPlan ? setDraftActionId : undefined}
                   pending={reviewingIds.has(shortage.action_id)}
+                  selected={batchIds.includes(shortage.action_id)}
+                  onSelect={
+                    canPlan &&
+                    (shortage.action_type === 'order' ||
+                      ['purchased', 'raw_material', 'hardware', 'consumable'].includes(shortage.part_type || ''))
+                      ? toggleBatch
+                      : undefined
+                  }
                 />
               ))}
             </div>
@@ -605,6 +663,20 @@ export default function MRPPage() {
           )}
         </CockpitPanel>
       </div>
+      {openBatchIds && (
+        <MRPPurchaseBatchReview
+          actionIds={openBatchIds}
+          onClose={() => setOpenBatchIds(null)}
+          onCreated={result => {
+            setDrafts(previous => ({
+              ...previous,
+              ...Object.fromEntries(result.drafts.map(draft => [draft.action_id, draft])),
+            }));
+            setBatchIds([]);
+            void loadData();
+          }}
+        />
+      )}
       {draftActionId !== null && (
         <MRPSupplyReview
           key={draftActionId}

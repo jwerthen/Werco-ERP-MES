@@ -96,6 +96,7 @@ from .process_sheet import (
     StepType,
     WOOperationStep,
 )
+from .production_receipt import ProductionReceipt
 from .purchasing import (
     DefectType,
     InspectionMethod,
@@ -143,6 +144,7 @@ from .routing_learning import (
     RoutingOperationPattern,
     RoutingWorkCenterPreference,
 )
+from .runtime_metric import RuntimeMetricSample, RuntimeMetricSetting
 from .scrap_reason import ScrapCategory, ScrapReasonCode
 from .shipping import (
     CertificateOfConformance,
@@ -159,7 +161,7 @@ from .supplier_scorecard import ApprovedSupplierList, ScorecardPeriod, SupplierA
 from .time_entry import TimeEntry
 from .tool_management import Tool, ToolCheckout, ToolStatus, ToolType, ToolUsageLog
 from .user import User, UserRole
-from .user_workspace import UserWorkspaceRecord
+from .user_workspace import TeamWorkspaceRecord, UserWorkspaceRecord
 from .visitor_log import VisitorLog, VisitorPurpose, VisitorStatus
 from .webhook import Webhook, WebhookDelivery
 from .work_center import WorkCenter
@@ -172,11 +174,17 @@ from .work_order_blocker import (
 )
 from .work_order_material import AllocationSource, AllocationStatus, WorkOrderMaterialAllocation
 from .work_order_template import WorkOrderTemplate
+from .working_calendar import WorkingCalendar
 
 __all__ = [
+    "ProductionReceipt",
+    "RuntimeMetricSample",
+    "RuntimeMetricSetting",
+    "WorkingCalendar",
     "DocumentDelivery",
     "OperationalInboxState",
     "UserWorkspaceRecord",
+    "TeamWorkspaceRecord",
     "Company",
     "AIInteractionEvent",
     "AICorrection",

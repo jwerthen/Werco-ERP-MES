@@ -249,6 +249,7 @@ describe('CrewStationKiosk — REPORT PRODUCTION is badge-first', () => {
 
     await waitFor(() =>
       expect(mocked.reportProduction).toHaveBeenCalledWith('op-token-bob', 31, {
+        request_id: expect.any(String),
         quantity_complete_delta: 3,
         quantity_scrapped_delta: 0,
         scrap_reason: undefined,
@@ -344,7 +345,8 @@ describe('CrewStationKiosk — leaving the report screen BANKS the pending delta
       expect(mocked.reportProduction).toHaveBeenCalledWith(
         'op-token-bob',
         31,
-        { quantity_complete_delta: 3, quantity_scrapped_delta: 0, source: 'kiosk' },
+        {
+    request_id: expect.any(String), quantity_complete_delta: 3, quantity_scrapped_delta: 0, source: 'kiosk' },
         { keepalive: false }
       )
     );
@@ -368,7 +370,8 @@ describe('CrewStationKiosk — leaving the report screen BANKS the pending delta
       expect(mocked.reportProduction).toHaveBeenCalledWith(
         'op-token-bob',
         31,
-        { quantity_complete_delta: 2, quantity_scrapped_delta: 0, source: 'kiosk' },
+        {
+    request_id: expect.any(String), quantity_complete_delta: 2, quantity_scrapped_delta: 0, source: 'kiosk' },
         { keepalive: false }
       )
     );
@@ -519,7 +522,8 @@ describe('CrewStationKiosk — a parked delta may NEVER post under the next oper
       expect(mocked.reportProduction).toHaveBeenCalledWith(
         'op-token-bob',
         31,
-        { quantity_complete_delta: 2, quantity_scrapped_delta: 0, source: 'kiosk' },
+        {
+    request_id: expect.any(String), quantity_complete_delta: 2, quantity_scrapped_delta: 0, source: 'kiosk' },
         { keepalive: false }
       )
     );
@@ -587,4 +591,24 @@ describe('CrewStationKiosk — the stranded-pieces notice on the board', () => {
     expect(screen.queryByRole('button', { name: /dismiss/i })).not.toBeInTheDocument();
     expect(screen.queryByText(/Rosa Vega/)).not.toBeInTheDocument();
   });
+});
+
+test('an original report can be recovered by its badge after the job leaves the queue, and another badge cannot claim it', async () => {
+  const body = { request_id: 'reload-original-crew-001', quantity_complete_delta: 3, quantity_scrapped_delta: 1, scrap_reason: 'Porosity', source: 'kiosk' };
+  sessionStorage.setItem('kiosk_production_unconfirmed_crew', JSON.stringify({ operatorId: 11, operationId: 31, body }));
+  mocked.getQueue.mockResolvedValue({ queue: [], held: [] } as never);
+  mocked.mintBadgeToken.mockResolvedValueOnce(ANN_MINT as never).mockResolvedValueOnce(BOB_MINT as never);
+  mocked.reportProduction.mockResolvedValue({ replayed: true } as never);
+  renderKiosk();
+  fireEvent.click(await screen.findByRole('button', { name: 'Check original report' }));
+  const region = await screen.findByRole('region', { name: 'Confirm original production report' });
+  scanBadge('E022');
+  await waitFor(() => expect(within(region).getByRole('alert')).toHaveTextContent('original operator'));
+  expect(mocked.reportProduction).not.toHaveBeenCalled();
+  scanBadge('E011');
+  await waitFor(() => expect(mocked.reportProduction).toHaveBeenCalledWith('op-token-bob', 31, body));
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Check original report' })).not.toBeInTheDocument());
+  expect(sessionStorage.getItem('kiosk_production_unconfirmed_crew')).toBeNull();
+  expect(mocked.mintBadgeToken).toHaveBeenCalledTimes(2); // recovery panel exclusively owns the scanner
+  expect(mocked.getMyActiveJob).not.toHaveBeenCalled(); // board badge shortcut must stay disabled
 });

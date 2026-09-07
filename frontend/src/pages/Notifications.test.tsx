@@ -14,6 +14,8 @@ import Notifications from './Notifications';
 import api from '../services/api';
 import { NotificationItem, PaginationMeta } from '../types/notification';
 
+jest.mock('../components/BackgroundEmailActivity', () => ({ __esModule: true, default: () => null }));
+
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {

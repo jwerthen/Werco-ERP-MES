@@ -23,8 +23,13 @@ from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.schemas.scheduling import SchedulingImpactRequest
 from app.services.audit_service import AuditService
-from app.services.scheduling_projection import _build_daily_load_for_work_center, _project_work_order_schedule
+from app.services.scheduling_projection import (
+    _build_daily_load_for_work_center,
+    _project_work_order_schedule,
+    _projection_daily_load,
+)
 from app.services.scheduling_service import SchedulingService
+from app.services.working_calendar_service import load_working_calendars, working_hours
 
 TERMINAL = (WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED)
 PLAN_TTL_SECONDS = 600
@@ -81,9 +86,11 @@ class ScheduleState:
     centers: Dict[int, WorkCenter]
     orders: Dict[int, WorkOrder]
     operations: Dict[int, WorkOrderOperation]
+    calendars: dict
 
     def snapshot(self) -> dict:
         return {
+            "calendars": [self.calendars[key] for key in sorted(self.calendars)],
             "orders": [
                 {
                     "id": wo.id,
@@ -177,7 +184,13 @@ class SchedulingImpactService:
             .populate_existing()
             .all()
         )
-        return ScheduleState(ids, {wc.id: wc for wc in centers}, {wo.id: wo for wo in orders}, operations)
+        return ScheduleState(
+            ids,
+            {wc.id: wc for wc in centers},
+            {wo.id: wo for wo in orders},
+            operations,
+            load_working_calendars(self.db, self.company_id, center_ids),
+        )
 
     @staticmethod
     def _loads(state: ScheduleState, operations: dict) -> dict:
@@ -191,7 +204,7 @@ class SchedulingImpactService:
                 and not state.orders[op.work_order_id].is_deleted
                 and state.orders[op.work_order_id].status not in TERMINAL
             ]
-            loads[center_id] = _build_daily_load_for_work_center(eligible)
+            loads[center_id] = _build_daily_load_for_work_center(eligible, state.calendars)
         return loads
 
     def preview(self, request: SchedulingImpactRequest) -> dict:
@@ -250,16 +263,33 @@ class SchedulingImpactService:
                 )
                 continue
             if request.action == "shift":
-                projections = [
-                    {
-                        "operation": op,
-                        "scheduled_start": _day(op.scheduled_start) + timedelta(days=request.shift_days),
-                        "scheduled_end": _day(op.scheduled_end or op.scheduled_start)
-                        + timedelta(days=request.shift_days),
-                    }
-                    for op in remaining
-                    if op.scheduled_start
-                ]
+                projections = []
+                try:
+                    previous_end = None
+                    for op in remaining:
+                        if not op.scheduled_start:
+                            continue
+                        target = _day(op.scheduled_start) + timedelta(days=request.shift_days)
+                        if previous_end is not None:
+                            target = max(target, previous_end + timedelta(days=1))
+                        if state.calendars.get(op.work_center_id, {}).get("version", 0) == 0:
+                            projection = {
+                                "operation": op,
+                                "work_center_id": op.work_center_id,
+                                "scheduled_start": target,
+                                "scheduled_end": target
+                                + (_day(op.scheduled_end or op.scheduled_start) - _day(op.scheduled_start)),
+                                "hours": float(op.setup_time_hours or 0) + float(op.run_time_hours or 0),
+                            }
+                        else:
+                            projection = _project_work_order_schedule(
+                                [op], op, target, op.work_center_id, False, state.calendars
+                            )[0]
+                        previous_end = projection["scheduled_end"]
+                        projections.append(projection)
+                except ValueError as error:
+                    item.update(outcome="blocked", reason=str(error))
+                    continue
                 if not projections:
                     item.update(outcome="skipped", reason="No scheduled remaining operations to shift.")
                     continue
@@ -267,21 +297,25 @@ class SchedulingImpactService:
                 others = {key: op for key, op in simulated.items() if op.work_order_id != wo.id}
                 base_loads = self._loads(state, others)
                 projections = []
+                calendar_error = None
                 for offset in range(request.horizon_days):
-                    candidate = _project_work_order_schedule(
-                        ops, current, today + timedelta(days=offset), current.work_center_id, True
-                    )
+                    try:
+                        candidate = _project_work_order_schedule(
+                            ops, current, today + timedelta(days=offset), current.work_center_id, True, state.calendars
+                        )
+                    except ValueError as error:
+                        calendar_error = str(error)
+                        break
+                    if candidate[-1]["scheduled_end"] >= today + timedelta(days=request.horizon_days):
+                        break
                     candidate_loads = {key: dict(value) for key, value in base_loads.items()}
                     fits = True
                     for projection in candidate:
-                        op = projection["operation"]
-                        span = (projection["scheduled_end"] - projection["scheduled_start"]).days + 1
-                        hours = projection["hours"] / span
-                        capacity = max(0.1, float(state.centers[op.work_center_id].capacity_hours_per_day or 8))
-                        for day_offset in range(span):
-                            day = projection["scheduled_start"] + timedelta(days=day_offset)
-                            new_load = candidate_loads.setdefault(op.work_center_id, {}).get(day, 0) + hours
-                            candidate_loads[op.work_center_id][day] = new_load
+                        center_id = projection["work_center_id"]
+                        for day, hours in _projection_daily_load(projection, state.calendars).items():
+                            capacity = working_hours(state.calendars, center_id, day)
+                            new_load = candidate_loads.setdefault(center_id, {}).get(day, 0) + hours
+                            candidate_loads[center_id][day] = new_load
                             if new_load > capacity + 0.000001:
                                 fits = False
                     if fits:
@@ -290,7 +324,8 @@ class SchedulingImpactService:
                 if not projections:
                     item.update(
                         outcome="blocked",
-                        reason=f"No available capacity within {request.horizon_days} days. Adjust capacity or review a manual date.",
+                        reason=calendar_error
+                        or f"No available working capacity within {request.horizon_days} days. Adjust the calendar/capacity or review a manual date.",
                     )
                     continue
             for projection in projections:
@@ -343,7 +378,6 @@ class SchedulingImpactService:
         changed_centers = {row["work_center_id"] for row in changes}
         for center_id in sorted(changed_centers):
             wc = state.centers[center_id]
-            capacity = max(0.1, float(wc.capacity_hours_per_day or 8))
             touched_days = set()
             for change in changes:
                 if change["work_center_id"] != center_id:
@@ -356,6 +390,7 @@ class SchedulingImpactService:
                             start + timedelta(days=offset) for offset in range(max(0, (end - start).days) + 1)
                         )
             for day in sorted(touched_days):
+                capacity = working_hours(state.calendars, center_id, day)
                 old_hours = before_loads[center_id].get(day, 0)
                 new_hours = after_loads[center_id].get(day, 0)
                 if max(old_hours, new_hours) <= capacity + 0.000001:
