@@ -195,10 +195,21 @@ beforeEach(() => {
 
 test('renders the four cockpit panels after load', async () => {
   renderDashboard();
+  expect(screen.getByRole('heading', { level: 1, name: 'Dashboard' })).toBeInTheDocument();
+  expect(screen.getByText('Loading dashboard…')).toHaveAttribute('role', 'status');
   expect(await screen.findByText('Capacity Overview')).toBeInTheDocument();
   expect(screen.getByText('Live Shop Activity')).toBeInTheDocument();
   expect(screen.getByText('Work Center Status')).toBeInTheDocument();
   expect(screen.getByText('Signed In Right Now')).toBeInTheDocument();
+});
+
+test('an initial dashboard failure retains page identity and the shop-floor exit', async () => {
+  mockedApi.getDashboardWithCache.mockRejectedValueOnce(new Error('Network unavailable'));
+  renderDashboard();
+  await screen.findByRole('alert');
+  expect(screen.getByRole('heading', { level: 1, name: 'Dashboard' })).toBeInTheDocument();
+  expect(screen.getByRole('link', { name: 'Shop Floor' })).toHaveAttribute('href', '/shop-floor');
+  expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled();
 });
 
 test('de-dup: on-the-job operator renders as a presence chip, idle user as a row', async () => {

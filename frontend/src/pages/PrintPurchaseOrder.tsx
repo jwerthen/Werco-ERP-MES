@@ -202,7 +202,8 @@ export default function PrintPurchaseOrder() {
       </div>
 
       <div className="text-xs text-gray-600 mb-2">
-        Please acknowledge orders with price and delivery. Include PO number on invoices, B/L, bundles, cases, and packing lists.
+        Please acknowledge orders with price and delivery. Include PO number on invoices, B/L, bundles, cases, and
+        packing lists.
       </div>
 
       <table className="w-full border-collapse border text-sm mb-6">
@@ -217,14 +218,14 @@ export default function PrintPurchaseOrder() {
           </tr>
         </thead>
         <tbody>
-          {sortedGroups.map((group) => (
+          {sortedGroups.map(group => (
             <React.Fragment key={group}>
               <tr>
                 <td colSpan={6} className="border p-2 text-center text-xs italic">
                   {group === 'AS AVAILABLE' ? 'TO BE DELIVERED AS AVAILABLE' : `TO BE DELIVERED ON ${group}`}
                 </td>
               </tr>
-              {groupedLines[group].map((line) => {
+              {groupedLines[group].map(line => {
                 const ordered = parseFloat(line.quantity_ordered || '0');
                 const received = parseFloat(line.quantity_received || '0');
                 const backorder = Math.max(ordered - received, 0);
@@ -232,7 +233,7 @@ export default function PrintPurchaseOrder() {
                   <tr key={`${group}-${line.line_number}`}>
                     <td className="border p-2">{line.quantity_ordered}</td>
                     <td className="border p-2">{line.quantity_received}</td>
-                    <td className="border p-2">{backorder.toFixed(0)}</td>
+                    <td className="border p-2">{backorder.toLocaleString('en-US', { maximumFractionDigits: 4 })}</td>
                     <td className="border p-2">
                       <div className="font-medium">{line.part_number}</div>
                       <div className="text-xs text-gray-600">{line.part_name}</div>

@@ -24,6 +24,8 @@ import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import MRPPage from './MRP';
 
+jest.mock('../hooks/usePermissions', () => ({ usePermissions: () => ({ role: 'manager' }) }));
+
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {
@@ -157,12 +159,11 @@ describe('MRP cockpit: MiniStat strip + shared ActionRow de-dup', () => {
     });
 
     const both = document.querySelectorAll(`[data-action-id="${SHARED_ACTION_ID}"]`);
-    both.forEach((row) => {
+    both.forEach(row => {
       expect(within(row as HTMLElement).getByText('PN-SHORT-1')).toBeInTheDocument();
     });
   });
 });
-
 
 describe('MRP request scope and review semantics', () => {
   beforeEach(() => {
@@ -173,7 +174,12 @@ describe('MRP request scope and review semantics', () => {
   });
   it('marks reviewed with the server follow-up message and prevents duplicate review', async () => {
     let resolveReview!: (value: { message: string }) => void;
-    mockedApi.processMRPAction.mockImplementation(() => new Promise(resolve => { resolveReview = resolve; }));
+    mockedApi.processMRPAction.mockImplementation(
+      () =>
+        new Promise(resolve => {
+          resolveReview = resolve;
+        })
+    );
     renderMRP();
     const button = await screen.findByRole('button', { name: 'Mark reviewed' });
     fireEvent.click(button);
@@ -186,8 +192,15 @@ describe('MRP request scope and review semantics', () => {
   });
   it('ignores an older run response after a different run is selected', async () => {
     let resolveOld!: (value: typeof runActions) => void;
-    mockedApi.getMRPActions.mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve; }));
-    mockedApi.getMRPActions.mockResolvedValueOnce([{ ...runActions[0], id: 777, part: { ...runActions[0].part, part_number: 'CURRENT-RUN-PART' } }]);
+    mockedApi.getMRPActions.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          resolveOld = resolve;
+        })
+    );
+    mockedApi.getMRPActions.mockResolvedValueOnce([
+      { ...runActions[0], id: 777, part: { ...runActions[0].part, part_number: 'CURRENT-RUN-PART' } },
+    ]);
     renderMRP();
     fireEvent.click(await screen.findByRole('button', { name: /View MRP run MRP-2026-009/ }));
     fireEvent.click(screen.getByRole('button', { name: /View MRP run MRP-2026-008/ }));

@@ -1,3 +1,4 @@
+import { PageHeader } from '../components/ui/PageHeader';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
@@ -13,6 +14,15 @@ import {
   XMarkIcon,
 } from '@heroicons/react/24/outline';
 import api from '../services/api';
+import { ComboBox } from '../components/ui/ComboBox';
+import { Modal } from '../components/ui/Modal';
+import { useUnsavedChanges } from '../hooks/useUnsavedChanges';
+import {
+  OperationalInboxItem,
+  OperationalInboxResponse,
+  OperationalInboxUpdate,
+  OperationalSource,
+} from '../types/operationsInbox';
 import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { AISuggestionCard, ConfidenceBadge, FeedbackButtons, WhyThisSuggestion } from '../components/ai';
@@ -97,6 +107,362 @@ const getStoredDismissed = (key: string) => {
     return new Set<string>();
   }
 };
+
+const operationalLabels: Record<OperationalSource, string> = {
+  late_work_order: 'Late work order',
+  blocker: 'Work-order blocker',
+  low_stock: 'Low stock',
+  quality_ncr: 'Quality',
+  overdue_po_line: 'Overdue purchase order',
+  mrp_shortage: 'Projected material shortage',
+};
+
+/** Live source records are separate from optional local setup/recommendation dismissals. */
+export function OperationalQueue({ scope }: { scope: string }) {
+  const [params, setParams] = useSearchParams();
+  const [data, setData] = useState<OperationalInboxResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [actionError, setActionError] = useState('');
+  const [pending, setPending] = useState<string | null>(null);
+  const [editing, setEditing] = useState<OperationalInboxItem | null>(null);
+  const [owner, setOwner] = useState('');
+  const [nextAction, setNextAction] = useState('');
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(0);
+  const sequence = useRef(0);
+  const saving = useRef(false);
+  const activeScope = useRef(scope);
+  activeScope.current = scope;
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
+  const requestedOwner = params.get('operationsOwner');
+  const ownerFilter = requestedOwner === 'mine' || requestedOwner === 'unassigned' ? requestedOwner : 'all';
+  const snoozed = params.get('operationsView') === 'snoozed';
+  const userId = Number(scope.split(':').pop());
+  const dirty = !!editing && (owner !== String(editing.owner_id ?? '') || nextAction !== editing.next_action);
+  const { confirmDiscard, markSaved } = useUnsavedChanges(dirty);
+
+  const load = async () => {
+    const current = ++sequence.current;
+    setLoading(true);
+    setError('');
+    try {
+      const result = await api.getOperationalInbox();
+      if (current === sequence.current) setData(result);
+    } catch {
+      if (current === sequence.current)
+        setError(
+          'Operational issues could not be refreshed. Any issues below are last verified results; refresh before changing an action.'
+        );
+    } finally {
+      if (current === sequence.current) setLoading(false);
+    }
+  };
+  useEffect(() => {
+    setData(null);
+    setEditing(null);
+    setActionError('');
+    setPending(null);
+    saving.current = false;
+    void load();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible' && !saving.current && !editingRef.current) void load();
+    }, 60_000);
+    return () => {
+      ++sequence.current;
+      window.clearInterval(timer);
+    };
+  }, [scope]);
+
+  const setView = (key: string, value: string) => {
+    setPage(0);
+    setParams(previous => {
+      const next = new URLSearchParams(previous);
+      if (value === 'all' || value === 'active') next.delete(key);
+      else next.set(key, value);
+      return next;
+    });
+  };
+  const filtered = (data?.items ?? []).filter(item => {
+    if (Boolean(item.snoozed_until) !== snoozed) return false;
+    if (ownerFilter === 'mine' && item.owner_id !== userId) return false;
+    if (ownerFilter === 'unassigned' && item.owner_id !== null) return false;
+    return `${item.title} ${item.detail} ${item.owner_name ?? ''} ${item.next_action}`
+      .toLowerCase()
+      .includes(search.trim().toLowerCase());
+  });
+  const lastPage = Math.max(0, Math.ceil(filtered.length / 20) - 1);
+  const currentPage = Math.min(page, lastPage);
+  const visible = filtered.slice(currentPage * 20, currentPage * 20 + 20);
+  const stale = loading || !!error;
+
+  const update = async (
+    item: OperationalInboxItem,
+    patch: Omit<OperationalInboxUpdate, 'expected_version' | 'occurrence'>,
+    close = false
+  ) => {
+    if (saving.current || stale) return;
+    saving.current = true;
+    const mutationScope = scope;
+    setPending(item.key);
+    setActionError('');
+    ++sequence.current; // Invalidate a response begun before this mutation.
+    try {
+      const saved = await api.updateOperationalInbox(item.source_kind, item.source_id, {
+        ...patch,
+        expected_version: item.version,
+        occurrence: item.occurrence,
+      });
+      if (activeScope.current !== mutationScope) return;
+      setData(previous =>
+        previous ? { ...previous, items: previous.items.map(row => (row.key === saved.key ? saved : row)) } : previous
+      );
+      if (close) {
+        markSaved();
+        setEditing(null);
+      }
+    } catch (err: unknown) {
+      if (activeScope.current !== mutationScope) return;
+      const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      setActionError(
+        typeof detail === 'string' ? detail : 'Action was not saved. Your changes are retained. Refresh and retry.'
+      );
+    } finally {
+      if (activeScope.current === mutationScope) {
+        saving.current = false;
+        setPending(null);
+      }
+    }
+  };
+  const closeEdit = () => {
+    if (!pending && confirmDiscard()) setEditing(null);
+  };
+
+  return (
+    <section
+      aria-labelledby="operational-inbox-heading"
+      className="rounded-lg border border-fd-line bg-fd-panel p-4 space-y-4 min-w-0"
+    >
+      <div className="flex flex-wrap justify-between gap-3">
+        <div className="min-w-0">
+          <h2 id="operational-inbox-heading" className="text-xl font-semibold text-white">
+            Operations needing attention
+          </h2>
+          <p className="mt-1 text-sm text-fd-body">
+            Assign the next action here. Resolve the underlying issue in its workflow.
+          </p>
+          {data && (
+            <p className="text-xs text-fd-mute mt-1">
+              Last verified {formatDate(data.checked_at)} · {data.items.length} issues in the loaded scope
+            </p>
+          )}
+        </div>
+        <button className="btn-secondary" onClick={() => void load()} disabled={loading || !!pending}>
+          {' '}
+          {loading ? 'Refreshing operations…' : 'Refresh operations'}
+        </button>
+      </div>
+      {error && (
+        <p role="alert" className="text-sm text-amber-200">
+          {error}
+        </p>
+      )}
+      {!!data?.truncated_sources.length && (
+        <p role="status" className="text-sm text-amber-200">
+          Showing the newest 1,000 issues per category. Some categories have more records; open their source workflow
+          for the complete list. Counts describe only loaded issues.
+        </p>
+      )}
+      {actionError && !editing && (
+        <p role="alert" className="text-sm text-red-200">
+          {actionError}
+        </p>
+      )}
+      <div className="flex flex-wrap gap-2" aria-label="Operational assignment filters">
+        {(['all', 'mine', 'unassigned'] as const).map(value => (
+          <button
+            key={value}
+            aria-pressed={ownerFilter === value}
+            onClick={() => setView('operationsOwner', value)}
+            className="btn-secondary"
+          >
+            {value === 'all' ? 'Everyone' : value === 'mine' ? 'Mine' : 'Unassigned'}
+          </button>
+        ))}
+        <button aria-pressed={!snoozed} onClick={() => setView('operationsView', 'active')} className="btn-secondary">
+          Active issues
+        </button>
+        <button aria-pressed={snoozed} onClick={() => setView('operationsView', 'snoozed')} className="btn-secondary">
+          Snoozed
+        </button>
+      </div>
+      <input
+        aria-label="Search operational issues"
+        placeholder="Search operational issues…"
+        value={search}
+        onChange={event => {
+          setSearch(event.target.value);
+          setPage(0);
+        }}
+        className="input w-full"
+      />
+      {loading && !data ? (
+        <p role="status">Loading operational issues…</p>
+      ) : !data ? (
+        <p>Operational scope is unavailable. Refresh to try again.</p>
+      ) : visible.length === 0 ? (
+        <p className="text-fd-body">
+          No operational issues match this view{error ? '; current source results are unverified.' : '.'}
+        </p>
+      ) : (
+        <div className="space-y-3" aria-busy={loading}>
+          {visible.map(item => (
+            <article key={item.key} aria-label={item.title} className="rounded border border-fd-line p-3 min-w-0">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-fd-body">
+                <span>{operationalLabels[item.source_kind]}</span>
+                <span className={item.severity === 'high' ? 'text-red-200' : 'text-amber-200'}>
+                  {item.severity === 'high' ? 'High priority' : 'Needs review'}
+                </span>
+                {item.acknowledged && <span className="text-emerald-200">Acknowledged · issue remains active</span>}
+              </div>
+              <h3 className="font-semibold text-white mt-1 break-words">{item.title}</h3>
+              <p className="text-sm text-fd-body mt-1 break-words whitespace-pre-wrap">{item.detail}</p>
+              <dl className="text-sm mt-2 space-y-1">
+                <div>
+                  <dt className="inline text-fd-mute">Owner: </dt>
+                  <dd className="inline text-fd-body">{item.owner_name ?? 'Unassigned'}</dd>
+                </div>
+                <div>
+                  <dt className="inline text-fd-mute">Next action: </dt>
+                  <dd className="inline text-fd-body break-words">{item.next_action || item.suggested_action}</dd>
+                </div>
+              </dl>
+              {item.snoozed_until && (
+                <p className="text-xs text-amber-200 mt-2">
+                  Snoozed until {formatDate(item.snoozed_until)}. A changed issue returns automatically.
+                </p>
+              )}
+              <div className="flex flex-wrap gap-2 mt-3">
+                <Link to={item.href} className="btn-secondary">
+                  Open workflow
+                </Link>
+                {item.can_manage && (
+                  <>
+                    <button
+                      className="btn-secondary"
+                      disabled={stale || !!pending}
+                      onClick={() => {
+                        setEditing(item);
+                        setOwner(String(item.owner_id ?? ''));
+                        setNextAction(item.next_action);
+                        setActionError('');
+                      }}
+                    >
+                      Assign / next action
+                    </button>
+                    {!item.acknowledged && (
+                      <button
+                        className="btn-secondary"
+                        disabled={stale || !!pending}
+                        onClick={() => void update(item, { acknowledge: true })}
+                      >
+                        Acknowledge
+                      </button>
+                    )}
+                    <button
+                      className="btn-secondary"
+                      disabled={stale || !!pending}
+                      onClick={() => void update(item, { snooze_hours: item.snoozed_until ? 0 : 24 })}
+                    >
+                      {item.snoozed_until ? 'Return to active' : 'Snooze 24 hours'}
+                    </button>
+                  </>
+                )}
+                {pending === item.key && (
+                  <span role="status" className="text-sm text-fd-body self-center">
+                    Saving action…
+                  </span>
+                )}
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+      {data && (
+        <div className="flex flex-wrap items-center gap-3 text-sm text-fd-body">
+          <span>
+            {filtered.length} matching loaded issues · Page {currentPage + 1} of {lastPage + 1}
+          </span>
+          <button className="btn-secondary" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>
+            Previous issues
+          </button>
+          <button className="btn-secondary" disabled={currentPage >= lastPage} onClick={() => setPage(currentPage + 1)}>
+            Next issues
+          </button>
+        </div>
+      )}
+      <Modal open={!!editing} onClose={closeEdit} ariaLabelledBy="inbox-assignment-title" size="md">
+        <h2 id="inbox-assignment-title" className="text-xl font-semibold text-white">
+          Assign next action
+        </h2>
+        <p className="text-sm text-fd-body my-3">{editing?.title}</p>
+        {actionError && (
+          <p role="alert" className="text-red-200 mb-3">
+            {actionError}
+          </p>
+        )}
+        <form
+          onSubmit={event => {
+            event.preventDefault();
+            if (editing)
+              void update(editing, { owner_id: owner ? Number(owner) : null, next_action: nextAction }, true);
+          }}
+          className="space-y-4"
+        >
+          <div>
+            <label className="block text-sm mb-1" htmlFor="inbox-action-owner">
+              Owner
+            </label>
+            <ComboBox
+              id="inbox-action-owner"
+              value={owner}
+              onChange={setOwner}
+              emptyOptionLabel="Unassigned"
+              disabled={!!pending}
+              options={(data?.assignees ?? [])
+                .filter(user => editing && user.sources.includes(editing.source_kind))
+                .map(user => ({ value: String(user.id), label: user.name }))}
+            />
+          </div>
+          <div>
+            <label className="block text-sm mb-1" htmlFor="inbox-next-action">
+              Next action
+            </label>
+            <textarea
+              id="inbox-next-action"
+              value={nextAction}
+              onChange={event => setNextAction(event.target.value)}
+              maxLength={500}
+              rows={3}
+              disabled={!!pending}
+              className="input w-full"
+              placeholder={editing?.suggested_action}
+            />
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            <button type="button" className="btn-secondary" disabled={!!pending} onClick={closeEdit}>
+              Cancel
+            </button>
+            <button type="submit" className="btn-primary" disabled={!!pending || stale}>
+              {pending ? 'Saving…' : 'Save action'}
+            </button>
+          </div>
+        </form>
+      </Modal>
+    </section>
+  );
+}
 
 export default function ActionInbox() {
   const [params, setParams] = useSearchParams();
@@ -343,21 +709,20 @@ export default function ActionInbox() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-3">
-            <BellAlertIcon className="h-8 w-8 text-cyan-300" />
-            <h1 className="text-2xl font-bold text-white">Action Inbox</h1>
-          </div>
-          <p className="text-slate-400 mt-1">
-            A focused queue for AI recommendations, setup gaps, and master-data blockers.
-          </p>
-        </div>
-        <button onClick={loadInbox} className="btn-secondary flex items-center justify-center" disabled={loading}>
-          <ArrowPathIcon className={`h-5 w-5 mr-2 ${loading ? 'animate-spin' : ''}`} />
-          Refresh
-        </button>
-      </div>
+      <PageHeader
+        title="Action Inbox"
+        description="Operational issues, shared next actions, AI recommendations and setup gaps."
+        icon={<BellAlertIcon className="h-8 w-8 text-cyan-300" />}
+        actions={
+          <button onClick={loadInbox} className="btn-secondary" disabled={loading}>
+            <ArrowPathIcon aria-hidden="true" className={`h-5 w-5 mr-2 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+        }
+      />
+
+      <OperationalQueue scope={userScope} />
+      <h2 className="text-xl font-semibold text-white">Recommendations and setup</h2>
 
       {firstException && !loading && (
         <section
@@ -386,7 +751,7 @@ export default function ActionInbox() {
           icon={InboxIcon}
           iconBg="bg-fd-cyan/15"
           iconColor="text-fd-cyan"
-          label="Open Actions"
+          label="Recommendation & setup actions"
           value={hasLoaded ? openCount : 'Loading…'}
           subtitle={error || !aiAvailable ? 'Partial · unavailable sources' : 'Includes featured recommendations'}
           onClick={() => setFilter('open')}
@@ -512,7 +877,7 @@ export default function ActionInbox() {
               return (
                 <div
                   key={item.id}
-                  className="flex items-start justify-between gap-4 p-4 transition-colors hover:bg-slate-900/50"
+                  className="flex flex-col sm:flex-row items-start justify-between gap-4 p-4 transition-colors hover:bg-slate-900/50"
                 >
                   <div className="flex min-w-0 gap-3">
                     <div className={`mt-1 rounded-lg border p-2 ${severityStyles[item.severity]}`}>

@@ -1,5 +1,8 @@
 import React, { useEffect, useState, useRef } from 'react';
 import api from '../services/api';
+import { Link, useSearchParams } from 'react-router-dom';
+import { usePermissions } from '../hooks/usePermissions';
+import MRPSupplyReview, { SupplyDraft } from './MRPSupplyReview';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import { EmptyState, ErrorState, useToast } from '../components/ui';
@@ -44,6 +47,7 @@ interface MRPAction {
   suggested_order_date: string;
   is_processed: boolean;
   notes?: string;
+  supply_draft?: SupplyDraft | null;
 }
 
 interface ShortagesSummary {
@@ -63,6 +67,7 @@ interface ShortagesSummary {
     order_by_date: string;
     priority: number;
     is_expedite: boolean;
+    supply_draft?: SupplyDraft | null;
   }>;
 }
 
@@ -91,6 +96,7 @@ interface ActionRowData {
   orderByDate?: string;
   isProcessed: boolean;
   isExpedite?: boolean;
+  supplyDraft?: SupplyDraft | null;
 }
 
 /**
@@ -101,11 +107,13 @@ interface ActionRowData {
 function ActionRow({
   data,
   onProcess,
+  onDraft,
   highlight,
   pending = false,
 }: {
   data: ActionRowData;
   onProcess?: (actionId: number) => void;
+  onDraft?: (actionId: number) => void;
   /** Marks this action as also surfaced in the other panel (same actionId). */
   highlight?: boolean;
   pending?: boolean;
@@ -115,7 +123,7 @@ function ActionRow({
   return (
     <div
       data-action-id={data.actionId}
-      className={`flex items-center gap-2 px-2.5 py-2 min-w-0 ${
+      className={`flex flex-wrap items-center gap-2 px-2.5 py-2 min-w-0 ${
         data.isProcessed ? 'opacity-60' : data.isExpedite ? 'bg-fd-red/10' : highlight ? 'bg-fd-blue/5' : ''
       }`}
     >
@@ -135,7 +143,19 @@ function ActionRow({
           {data.orderByDate && <span>order {formatCentralDate(data.orderByDate, { year: undefined })}</span>}
         </div>
       </div>
-      <div className="flex-shrink-0 w-28 text-right">
+      <div className="flex-shrink-0 flex flex-col items-end gap-2">
+        {data.supplyDraft ? (
+          <Link className="text-blue-300 text-xs font-medium" to={data.supplyDraft.url}>
+            Open {data.supplyDraft.number} · {data.supplyDraft.status}
+          </Link>
+        ) : (
+          onDraft &&
+          ['order', 'manufacture', 'expedite'].includes(data.actionType) && (
+            <button className="btn-primary btn-sm text-xs" onClick={() => onDraft(data.actionId)}>
+              Review supply draft
+            </button>
+          )
+        )}
         {!data.isProcessed && onProcess ? (
           <button
             onClick={() => onProcess(data.actionId)}
@@ -157,6 +177,11 @@ function ActionRow({
 
 export default function MRPPage() {
   const { showToast } = useToast();
+  const { role } = usePermissions();
+  const canPlan = ['admin', 'manager', 'supervisor'].includes(role || '');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [draftActionId, setDraftActionId] = useState<number | null>(null);
+  const [drafts, setDrafts] = useState<Record<number, SupplyDraft>>({});
   const [runs, setRuns] = useState<MRPRun[]>([]);
   const [shortages, setShortages] = useState<ShortagesSummary | null>(null);
   const [loading, setLoading] = useState(true);
@@ -186,10 +211,7 @@ export default function MRPPage() {
     const requestId = ++dataRequestRef.current;
     setLoadError(false);
     try {
-      const [runsRes, shortagesRes] = await Promise.all([
-        api.getMRPRuns(),
-        api.getMRPShortages()
-      ]);
+      const [runsRes, shortagesRes] = await Promise.all([api.getMRPRuns(), api.getMRPShortages()]);
       if (requestId !== dataRequestRef.current) return;
       setRuns(runsRes);
       setShortages(shortagesRes);
@@ -209,7 +231,7 @@ export default function MRPPage() {
       const result = await api.runMRP({
         planning_horizon_days: horizonDays,
         include_safety_stock: includeSafetyStock,
-        include_allocated: true
+        include_allocated: true,
       });
       setRuns(previous => [result, ...previous]);
       await loadData(); // Refresh shortages
@@ -237,6 +259,28 @@ export default function MRPPage() {
     }
   };
 
+  const requestedRun = Number(searchParams.get('run'));
+  useEffect(() => {
+    if (!requestedRun || loading) return;
+    const sourceRun = runs.find(row => row.id === requestedRun);
+    if (sourceRun) void loadRunActions(sourceRun);
+    else {
+      let active = true;
+      api
+        .getMRPRun(requestedRun)
+        .then(run => {
+          if (active) void loadRunActions(run);
+        })
+        .catch(() => {
+          if (active) setReviewNotice('The linked MRP run could not be loaded.');
+        });
+      return () => {
+        active = false;
+      };
+    }
+    // The run ID in the URL owns selection, including Back/Forward and source links.
+  }, [requestedRun, runs, loading]);
+
   const processAction = async (actionId: number) => {
     if (reviewingRef.current.has(actionId)) return;
     reviewingRef.current.add(actionId);
@@ -244,8 +288,11 @@ export default function MRPPage() {
     try {
       const result = await api.processMRPAction(actionId);
       setReviewedIds(previous => new Set(previous).add(actionId));
-      setReviewNotice(result?.message || 'Marked reviewed. Create the required supply order or complete the recommended action separately.');
-      setRunActions((rows) => rows.map((row) => row.id === actionId ? { ...row, is_processed: true } : row));
+      setReviewNotice(
+        result?.message ||
+          'Marked reviewed. Create the required supply order or complete the recommended action separately.'
+      );
+      setRunActions(rows => rows.map(row => (row.id === actionId ? { ...row, is_processed: true } : row)));
       await loadData();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Could not mark action reviewed');
@@ -268,7 +315,7 @@ export default function MRPPage() {
   const expediteCount = shortages?.expedite_count ?? 0;
   // Stable cross-link: action_ids surfaced in the Shortages panel, so a selected
   // run's actions can be flagged where they overlap (by id, never by name).
-  const shortageActionIds = new Set((shortages?.shortages ?? []).map((s) => s.action_id));
+  const shortageActionIds = new Set((shortages?.shortages ?? []).map(s => s.action_id));
 
   return (
     <div className="space-y-4">
@@ -285,7 +332,7 @@ export default function MRPPage() {
               type="number"
               aria-label="Horizon (days)"
               value={horizonDays}
-              onChange={(e) => setHorizonDays(parseInt(e.target.value))}
+              onChange={e => setHorizonDays(parseInt(e.target.value))}
               className="input w-24 tabular-nums"
               min={7}
               max={365}
@@ -296,12 +343,16 @@ export default function MRPPage() {
               type="checkbox"
               aria-label="Safety Stock"
               checked={includeSafetyStock}
-              onChange={(e) => setIncludeSafetyStock(e.target.checked)}
+              onChange={e => setIncludeSafetyStock(e.target.checked)}
               className="mr-2"
             />
             <span className="text-sm">Safety Stock</span>
           </label>
-          <button onClick={runMRP} disabled={runningMRP || !Number.isFinite(horizonDays) || horizonDays < 7 || horizonDays > 365} className="btn-primary btn-sm flex items-center">
+          <button
+            onClick={runMRP}
+            disabled={!canPlan || runningMRP || !Number.isFinite(horizonDays) || horizonDays < 7 || horizonDays > 365}
+            className="btn-primary btn-sm flex items-center"
+          >
             {runningMRP ? (
               <>
                 <div className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full mr-2" />
@@ -317,6 +368,11 @@ export default function MRPPage() {
         </div>
       </div>
 
+      {!canPlan && (
+        <p className="text-sm text-slate-400">
+          A planner, supervisor, or administrator can run MRP and create supply drafts.
+        </p>
+      )}
       {/* KPI strip */}
       <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-5 gap-2">
         <MiniStat
@@ -361,13 +417,17 @@ export default function MRPPage() {
       </MiniStatStrip>
 
       <div className="card p-3 text-sm text-slate-300">
-        Reviewing a recommendation does not create a purchase order or work order. Complete the recommended supply action separately.
-        {reviewNotice && <p role="status" className="mt-2 text-amber-300">{reviewNotice}</p>}
+        Use Review supply draft to check the current shortage and create a linked PO or WO draft. Mark reviewed only
+        records your review; it does not create supply. Counts and row quantities are snapshots from the selected MRP
+        run.
+        {reviewNotice && (
+          <p role="status" className="mt-2 text-amber-300">
+            {reviewNotice}
+          </p>
+        )}
       </div>
       {/* Page-level load failure: surface an error + retry instead of a blank cockpit. */}
-      {loadError && (
-        <ErrorState message="Could not load MRP runs and shortages." onRetry={loadData} />
-      )}
+      {loadError && <ErrorState message="Could not load MRP runs and shortages." onRetry={loadData} />}
 
       {/* Cockpit grid: Shortages (wide) + Recent Runs (narrow), Run Details (wide) */}
       <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-12 gap-4 items-start">
@@ -390,7 +450,7 @@ export default function MRPPage() {
             }
           >
             <div className="divide-y divide-fd-line">
-              {shortages.shortages.map((shortage) => (
+              {shortages.shortages.map(shortage => (
                 <ActionRow
                   key={shortage.action_id}
                   data={{
@@ -404,8 +464,10 @@ export default function MRPPage() {
                     orderByDate: shortage.order_by_date,
                     isProcessed: reviewedIds.has(shortage.action_id),
                     isExpedite: shortage.is_expedite,
+                    supplyDraft: drafts[shortage.action_id] || shortage.supply_draft,
                   }}
-                  onProcess={processAction}
+                  onProcess={canPlan ? processAction : undefined}
+                  onDraft={canPlan ? setDraftActionId : undefined}
                   pending={reviewingIds.has(shortage.action_id)}
                 />
               ))}
@@ -413,8 +475,21 @@ export default function MRPPage() {
           </CockpitPanel>
         )}
 
-        {!loadError && shortages?.total_shortages === 0 && <div className="card p-4 xl:col-span-7"><h2 className="font-semibold">No shortages in this run</h2><p className="text-sm text-slate-400">Run {shortages.mrp_run_number} has no material shortage recommendations. Review its planning horizon before placing new orders.</p></div>}
-        {!loadError && !shortages?.mrp_run_id && <div className="card p-4 xl:col-span-7"><h2 className="font-semibold">No shortage analysis yet</h2><p className="text-sm text-slate-400">Run MRP to check material requirements for the selected horizon.</p></div>}
+        {!loadError && shortages?.total_shortages === 0 && (
+          <div className="card p-4 xl:col-span-7">
+            <h2 className="font-semibold">No shortages in this run</h2>
+            <p className="text-sm text-slate-400">
+              Run {shortages.mrp_run_number} has no material shortage recommendations. Review its planning horizon
+              before placing new orders.
+            </p>
+          </div>
+        )}
+        {!loadError && !shortages?.mrp_run_id && (
+          <div className="card p-4 xl:col-span-7">
+            <h2 className="font-semibold">No shortage analysis yet</h2>
+            <p className="text-sm text-slate-400">Run MRP to check material requirements for the selected horizon.</p>
+          </div>
+        )}
         {/* Recent Runs */}
         <CockpitPanel
           title="Recent MRP Runs"
@@ -422,11 +497,16 @@ export default function MRPPage() {
           footer={runs.length ? `${runs.length} runs` : undefined}
         >
           <div className="space-y-1.5">
-            {runs.map((run) => (
+            {runs.map(run => (
               <button
                 key={run.id}
                 aria-label={`View MRP run ${run.run_number}`}
-                onClick={() => loadRunActions(run)}
+                onClick={() => {
+                  const next = new URLSearchParams(searchParams);
+                  next.set('run', String(run.id));
+                  next.delete('action');
+                  setSearchParams(next);
+                }}
                 className={`w-full text-left p-2.5 rounded-sm border cursor-pointer transition-colors min-w-0 ${
                   selectedRun?.id === run.id
                     ? 'border-werco-primary bg-blue-500/10'
@@ -445,10 +525,10 @@ export default function MRPPage() {
                       run.status === 'complete'
                         ? 'bg-green-500/20 text-emerald-300'
                         : run.status === 'running'
-                        ? 'bg-blue-500/20 text-blue-300'
-                        : run.status === 'error'
-                        ? 'bg-red-500/20 text-red-300'
-                        : 'bg-slate-800/50 text-slate-100'
+                          ? 'bg-blue-500/20 text-blue-300'
+                          : run.status === 'error'
+                            ? 'bg-red-500/20 text-red-300'
+                            : 'bg-slate-800/50 text-slate-100'
                     }`}
                   >
                     {run.status}
@@ -466,7 +546,7 @@ export default function MRPPage() {
                 icon={BoltIcon}
                 title="No MRP runs yet"
                 description="Run MRP to analyze requirements and surface shortages."
-                action={{ label: 'Run MRP', onClick: runMRP }}
+                action={canPlan ? { label: 'Run MRP', onClick: runMRP } : undefined}
               />
             )}
           </div>
@@ -486,15 +566,14 @@ export default function MRPPage() {
               description="Select a run from Recent MRP Runs to view its actions."
             />
           ) : actionsLoading ? (
-            <p role="status" className="p-4">Loading actions for {selectedRun.run_number}…</p>
+            <p role="status" className="p-4">
+              Loading actions for {selectedRun.run_number}…
+            </p>
           ) : actionsError ? (
-            <ErrorState
-              message="Could not load actions for this run."
-              onRetry={() => loadRunActions(selectedRun)}
-            />
+            <ErrorState message="Could not load actions for this run." onRetry={() => loadRunActions(selectedRun)} />
           ) : (
             <div className="divide-y divide-fd-line">
-              {runActions.map((action) => (
+              {runActions.map(action => (
                 <ActionRow
                   key={action.id}
                   data={{
@@ -507,10 +586,12 @@ export default function MRPPage() {
                     requiredDate: action.required_date,
                     orderByDate: action.suggested_order_date,
                     isProcessed: action.is_processed || reviewedIds.has(action.id),
+                    supplyDraft: drafts[action.id] || action.supply_draft,
                   }}
-                  onProcess={processAction}
+                  onProcess={canPlan ? processAction : undefined}
+                  onDraft={canPlan ? setDraftActionId : undefined}
                   pending={reviewingIds.has(action.id)}
-                  highlight={shortageActionIds.has(action.id)}
+                  highlight={shortageActionIds.has(action.id) || Number(searchParams.get('action')) === action.id}
                 />
               ))}
               {runActions.length === 0 && (
@@ -524,6 +605,17 @@ export default function MRPPage() {
           )}
         </CockpitPanel>
       </div>
+      {draftActionId !== null && (
+        <MRPSupplyReview
+          key={draftActionId}
+          actionId={draftActionId}
+          onClose={() => setDraftActionId(null)}
+          onCreated={draft => {
+            setDrafts(previous => ({ ...previous, [draft.action_id]: draft }));
+            void loadData();
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -1,10 +1,10 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, Date, DateTime
+from sqlalchemy import Boolean, CheckConstraint, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
-from sqlalchemy.orm import relationship
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import relationship, synonym
 
 from app.db.database import Base
 from app.db.mixins import TenantMixin
@@ -125,6 +125,7 @@ class MRPAction(Base, TenantMixin):
 
     # Status
     processed = Column(Boolean, default=False)
+    is_processed = synonym("processed")
     processed_at = Column(DateTime, nullable=True)
     # Lineage FK mirrors migration 080 (originally 003; skipped by the
     # create_all+stamp bootstrap).
@@ -141,3 +142,30 @@ class MRPAction(Base, TenantMixin):
     # Relationships
     mrp_run = relationship("MRPRun", back_populates="actions")
     part = relationship("Part")
+
+
+class MRPSupplyLink(Base, TenantMixin):
+    """One reviewed supply draft per recommendation, with durable retry identity."""
+
+    __tablename__ = "mrp_supply_links"
+    __table_args__ = (
+        UniqueConstraint("company_id", "action_id", name="uq_mrp_supply_action"),
+        UniqueConstraint("company_id", "request_key", name="uq_mrp_supply_request"),
+        CheckConstraint(
+            "(purchase_order_id IS NOT NULL AND work_order_id IS NULL) OR "
+            "(purchase_order_id IS NULL AND work_order_id IS NOT NULL)",
+            name="ck_mrp_supply_one_document",
+        ),
+    )
+    id = Column(Integer, primary_key=True)
+    action_id = Column(Integer, ForeignKey("mrp_actions.id"), nullable=False)
+    request_key = Column(String(100), nullable=False)
+    request_hash = Column(String(64), nullable=False)
+    quantity = Column(Float, nullable=False)
+    purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True)
+    work_order_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    action = relationship("MRPAction")
+    purchase_order = relationship("PurchaseOrder")
+    work_order = relationship("WorkOrder")

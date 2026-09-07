@@ -18,14 +18,76 @@ from app.models.time_entry import TimeEntry
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
-from app.schemas.scheduling import LoadChartDataPoint, LoadChartRequest, SchedulingConflict, SchedulingRunRequest
+from app.schemas.scheduling import (
+    LoadChartDataPoint,
+    LoadChartRequest,
+    SchedulingConflict,
+    SchedulingImpactApplyRequest,
+    SchedulingImpactApplyResponse,
+    SchedulingImpactRequest,
+    SchedulingImpactResponse,
+    SchedulingRunRequest,
+)
 from app.services import dispatch_service
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
+from app.services.scheduling_impact_service import SchedulingImpactService
+from app.services.scheduling_projection import (
+    _build_daily_load_for_work_center,
+    _operation_total_hours,
+    _project_work_order_schedule,
+)
 from app.services.scheduling_service import SchedulingService
 from app.services.work_center_type_service import get_work_center_group
 
 router = APIRouter()
+
+
+@router.post("/impact-preview", response_model=SchedulingImpactResponse)
+def preview_scheduling_impact(
+    request: SchedulingImpactRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Calculate a signed proposal without changing schedules or creating preview records."""
+    return SchedulingImpactService(db, company_id, current_user.id).preview(request)
+
+
+@router.post("/impact-apply", response_model=SchedulingImpactApplyResponse)
+def apply_scheduling_impact(
+    request: SchedulingImpactApplyRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Apply exactly the reviewed signed plan, rejecting changed state before any write."""
+    result = SchedulingImpactService(db, company_id, current_user.id).apply(request.plan_token, audit)
+    if not result["already_applied"]:
+        for work_order_id in result["applied_work_order_ids"]:
+            safe_broadcast(
+                broadcast_work_order_update,
+                work_order_id,
+                {"event": "reviewed_schedule_applied"},
+                company_id=company_id,
+            )
+        safe_broadcast(broadcast_dashboard_update, {"event": "reviewed_schedule_applied"}, company_id=company_id)
+        center_ids = (
+            db.query(WorkOrderOperation.work_center_id)
+            .filter(
+                WorkOrderOperation.company_id == company_id,
+                WorkOrderOperation.work_order_id.in_(result["applied_work_order_ids"]),
+            )
+            .distinct()
+            .all()
+        )
+        for (center_id,) in center_ids:
+            safe_broadcast(
+                broadcast_shop_floor_update, center_id, {"event": "reviewed_schedule_applied"}, company_id=company_id
+            )
+
+    return result
 
 
 class ScheduleUpdate(BaseModel):
@@ -116,62 +178,6 @@ def _operation_audit_snapshot(operation: WorkOrderOperation) -> dict:
     }
 
 
-def _operation_total_hours(operation: WorkOrderOperation) -> float:
-    return max(0.0, float(operation.setup_time_hours or 0) + float(operation.run_time_hours or 0))
-
-
-def _days_needed_for_operation(operation: WorkOrderOperation) -> int:
-    total_hours = _operation_total_hours(operation)
-    return max(1, int(total_hours / 8) + (1 if total_hours % 8 > 0 else 0))
-
-
-def _project_work_order_schedule(
-    operations: List[WorkOrderOperation],
-    current_op: WorkOrderOperation,
-    scheduled_start: date,
-    work_center_id: Optional[int] = None,
-    forward_schedule: bool = False,
-) -> List[Dict[str, Any]]:
-    projected_ops = []
-    current_work_center_id = work_center_id or current_op.work_center_id
-    current_days = _days_needed_for_operation(current_op)
-    current_end = scheduled_start + timedelta(days=current_days - 1)
-    projected_ops.append(
-        {
-            "operation": current_op,
-            "work_center_id": current_work_center_id,
-            "scheduled_start": scheduled_start,
-            "scheduled_end": current_end,
-            "hours": _operation_total_hours(current_op),
-        }
-    )
-
-    if not forward_schedule:
-        return projected_ops
-
-    prev_end = current_end
-    for op in operations:
-        if op.sequence <= current_op.sequence:
-            continue
-        if op.status == OperationStatus.COMPLETE:
-            continue
-        op_start = prev_end + timedelta(days=1)
-        op_days = _days_needed_for_operation(op)
-        op_end = op_start + timedelta(days=op_days - 1)
-        projected_ops.append(
-            {
-                "operation": op,
-                "work_center_id": op.work_center_id,
-                "scheduled_start": op_start,
-                "scheduled_end": op_end,
-                "hours": _operation_total_hours(op),
-            }
-        )
-        prev_end = op_end
-
-    return projected_ops
-
-
 def _apply_work_order_schedule(
     work_order: WorkOrder,
     operations: List[WorkOrderOperation],
@@ -228,31 +234,6 @@ def _apply_work_order_schedule(
         "work_center_ids": list(work_center_ids),
         "scheduled_operations": scheduled_ops,
     }
-
-
-def _build_daily_load_for_work_center(
-    operations: List[WorkOrderOperation],
-) -> Dict[date, float]:
-    load_map: Dict[date, float] = {}
-    for op in operations:
-        if not op.scheduled_start:
-            continue
-        start_date = op.scheduled_start.date() if isinstance(op.scheduled_start, datetime) else op.scheduled_start
-        end_date = start_date
-        if op.scheduled_end:
-            end_date = op.scheduled_end.date() if isinstance(op.scheduled_end, datetime) else op.scheduled_end
-        if end_date < start_date:
-            end_date = start_date
-
-        span_days = (end_date - start_date).days + 1
-        total_hours = _operation_total_hours(op)
-        per_day_hours = total_hours / span_days if span_days > 0 else total_hours
-
-        current = start_date
-        while current <= end_date:
-            load_map[current] = load_map.get(current, 0.0) + per_day_hours
-            current += timedelta(days=1)
-    return load_map
 
 
 def _find_earliest_capacity_date(
@@ -538,9 +519,9 @@ def get_schedulable_work_orders(
                 # to the kiosk/board RUN chip; null when unranked/not queued.
                 # Advisory context on this cross-machine list, never a sort key.
                 "run_order": run_positions.get(current_op.id),
-                "status": wo.status.value if hasattr(wo.status, 'value') else wo.status,
+                "status": wo.status.value if hasattr(wo.status, "value") else wo.status,
                 "operation_status": (
-                    current_op.status.value if hasattr(current_op.status, 'value') else current_op.status
+                    current_op.status.value if hasattr(current_op.status, "value") else current_op.status
                 ),
                 "scheduled_start": current_op.scheduled_start.isoformat() if current_op.scheduled_start else None,
                 "scheduled_end": current_op.scheduled_end.isoformat() if current_op.scheduled_end else None,
@@ -601,7 +582,7 @@ def get_scheduled_jobs(
                 "part_number": wo.part.part_number if wo.part else "",
                 "part_name": wo.part.name if wo.part else "",
                 "work_center_id": op.work_center_id,
-                "status": op.status.value if hasattr(op.status, 'value') else op.status,
+                "status": op.status.value if hasattr(op.status, "value") else op.status,
                 "scheduled_start": op.scheduled_start.isoformat() if op.scheduled_start else None,
                 "scheduled_end": op.scheduled_end.isoformat() if op.scheduled_end else None,
                 "due_date": wo.due_date.isoformat() if wo.due_date else None,
@@ -1286,8 +1267,8 @@ def auto_schedule_operations(
 
     return {
         "message": f"Scheduled {results['scheduled_count']} operations",
-        "scheduled_count": results['scheduled_count'],
-        "conflicts": results['conflict_count'],
+        "scheduled_count": results["scheduled_count"],
+        "conflicts": results["conflict_count"],
     }
 
 

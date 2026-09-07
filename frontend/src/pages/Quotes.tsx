@@ -1,3 +1,8 @@
+import { PageHeader } from '../components/ui/PageHeader';
+import { DocumentDeliveryComposer } from '../components/DocumentDeliveryComposer';
+import { useAuth } from '../context/AuthContext';
+import { useResumableDraft } from '../hooks/useResumableDraft';
+import { DraftRecovery } from '../components/ui/DraftRecovery';
 import React, { useEffect, useRef, useState } from 'react';
 import api from '../services/api';
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
@@ -122,6 +127,9 @@ const quoteStatuses = ['open', 'all', 'draft', 'pending', 'sent', 'accepted', 'r
 
 export default function Quotes() {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const canEmail = !!user?.is_superuser || ['admin', 'manager', 'supervisor'].includes(user?.role || '');
+  const [emailQuoteId, setEmailQuoteId] = useState<number | null>(null);
   const location = useLocation();
   const calculatorDraft = location.state?.calculatorDraft as Partial<QuoteDraft> | undefined;
   const { showToast } = useToast();
@@ -137,7 +145,7 @@ export default function Quotes() {
   const [editId, setEditId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
-  const createRequestKey = useRef('');
+  const createRequestKey = useRef(crypto.randomUUID?.() || `quote-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const [recoveryQuote, setRecoveryQuote] = useState<{ id: number; number: string } | null>(null);
   const [formError, setFormError] = useState('');
   const [sendingIds, setSendingIds] = useState<Set<number>>(new Set());
@@ -159,6 +167,16 @@ export default function Quotes() {
   const [newQuote, setNewQuote] = useState<QuoteDraft>(() => ({ ...emptyDraft(), ...calculatorDraft }));
   const [initialDraft, setInitialDraft] = useState(() => JSON.stringify({ ...emptyDraft(), ...calculatorDraft }));
   const { confirmDiscard, markSaved } = useUnsavedChanges(showCreateModal && JSON.stringify(newQuote) !== initialDraft);
+  const recoveryValue = { quote: newQuote, requestKey: createRequestKey.current };
+  const quoteDraft = useResumableDraft({ namespace: 'quotes', value: recoveryValue,
+    dirty: JSON.stringify(newQuote) !== JSON.stringify(emptyDraft()), enabled: showCreateModal && !editId,
+    valid: (data: unknown): data is typeof recoveryValue => {
+      const saved = data as typeof recoveryValue | null;
+      return !!saved && typeof saved.requestKey === 'string' && !!saved.quote
+        && typeof saved.quote.customer_name === 'string' && Array.isArray(saved.quote.lines)
+        && saved.quote.lines.every(line => !!line && typeof line.description === 'string' && typeof line.quantity === 'number' && typeof line.unit_price === 'number');
+    }, restore: saved => { setNewQuote({ ...emptyDraft(), ...saved.quote }); createRequestKey.current = saved.requestKey; },
+  });
   const listRequest = useRef(0);
   const detailRequest = useRef(0);
   const status = quoteStatuses.includes(searchParams.get('status') || '') ? searchParams.get('status')! : 'open';
@@ -194,7 +212,7 @@ export default function Quotes() {
     if (calculatorDraft) navigate('/quote-calculator');
   };
   const openEditor = (quote?: Quote) => {
-    createRequestKey.current = '';
+    createRequestKey.current = crypto.randomUUID?.() || `quote-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setRecoveryQuote(null);
     const draft = quote
       ? {
@@ -294,6 +312,7 @@ export default function Quotes() {
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (savingRef.current) return;
+    if (quoteDraft.blocked) { setFormError('Resume or remove your saved draft before creating a quote.'); return; }
     if (
       !newQuote.customer_name.trim() ||
       newQuote.lines.length === 0 ||
@@ -319,6 +338,7 @@ export default function Quotes() {
       const result = editId
         ? await api.updateQuote(editId, { ...newQuote, valid_until: newQuote.valid_until || null })
         : await api.createQuote({ ...newQuote, request_key: createRequestKey.current });
+      if (!editId && !await quoteDraft.clear()) showToast('warning', 'Quote created, but the recovery draft could not be removed. Its request key will recover this quote if resumed.');
       // Mark clean before navigation; a successful save must not trigger the leave guard.
       markSaved();
       setInitialDraft(JSON.stringify(newQuote));
@@ -472,7 +492,8 @@ export default function Quotes() {
 
   // Row actions (Send / Convert / WO-created) — shared by table + mobile cards.
   const renderRowActions = (q: Quote) => (
-    <div className="flex justify-center gap-2">
+    <div className="flex flex-wrap justify-center gap-2">
+      {canEmail && <button type="button" className="text-fd-link hover:underline text-sm" aria-label={`Email ${q.quote_number}`} onClick={event => { event.stopPropagation(); setEmailQuoteId(q.id); }}>Email</button>}
       {['draft', 'pending'].includes(q.status) && (
         <button
           onClick={e => {
@@ -611,19 +632,17 @@ export default function Quotes() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap justify-between items-center gap-3">
-        <h1 className="text-2xl font-bold text-white">Quotes & Estimates</h1>
-        <div className="flex gap-2">
+      <PageHeader title="Quotes & Estimates" description="Prepare customer quotes and follow their progress into production." actions={<>
           <Button variant="secondary" onClick={() => navigate('/rfq-packages/new')} className="flex items-center">
             <SparklesIcon className="h-5 w-5 mr-2" />
             AI RFQ Quote
           </Button>
+          {quoteDraft.available && <Button variant="secondary" onClick={() => openEditor()}>Continue quote draft</Button>}
           <Button onClick={() => openEditor()} className="flex items-center">
             <PlusIcon className="h-5 w-5 mr-2" />
             New Quote
           </Button>
-        </div>
-      </div>
+      </>} />
 
       <div className="flex flex-wrap gap-3">
         <input
@@ -795,6 +814,7 @@ export default function Quotes() {
         />
       </div>
 
+      {emailQuoteId && <DocumentDeliveryComposer key={emailQuoteId} entityType="quote" entityId={emailQuoteId} canReconcile={!!user?.is_superuser || ['admin', 'manager'].includes(user?.role || '')} onClose={() => setEmailQuoteId(null)} onAccepted={() => void loadData()} />}
       {/* Create Quote Modal */}
       <Modal
         open={showCreateModal}
@@ -807,6 +827,7 @@ export default function Quotes() {
         <h3 id="quote-editor-title" className="text-lg font-semibold mb-4">
           {editId ? 'Edit quote draft' : 'Create Quote'}
         </h3>
+        <DraftRecovery draft={quoteDraft} />
         {calculatorDraft && (
           <p className="text-sm text-slate-300 mb-4">
             Calculation carried over. Select the business part and customer before saving; the original calculation is

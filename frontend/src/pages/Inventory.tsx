@@ -1,3 +1,4 @@
+import { PageHeader } from '../components/ui/PageHeader';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import api from '../services/api';
@@ -643,60 +644,55 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
     />
   );
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-werco-primary"></div>
-      </div>
-    );
-  }
-
-  if (loadError) {
-    return <ErrorState message="Could not load inventory data." onRetry={loadData} className="my-8" />;
-  }
-
-  return (
-    <div className="space-y-4">
-      {/* Breadcrumbs — Inventory › Part|Material Inventory; nothing on bare /inventory */}
-      {crumbParent && <Breadcrumbs crumbs={[crumbParent, { label: getRouteTitle(location) }]} />}
-      {!embedded && (
-        <div className="flex justify-between items-center">
-          <div>
-            <h1 className="text-2xl font-bold text-white">Inventory</h1>
-            <p className="text-sm text-slate-400 mt-1">Engineering parts, materials, and supplies in one place</p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Two numbers describing one physical material is a CATALOG
-                problem, not a counting one — it belongs beside Receive rather
-                than buried in an item's edit form, because the person who
-                notices it is looking at the on-hand list. */}
+  const pageHeader = (
+    <PageHeader
+      title="Inventory"
+      level={embedded ? 2 : 1}
+      description="Engineering parts, materials, and supplies in one place"
+      actions={
+        !loading &&
+        !loadError && (
+          <>
             {canCombine && (
               <Button variant="secondary" onClick={() => setShowCombineModal(true)}>
                 Combine SKUs…
               </Button>
             )}
             {canReceive && (
-              <button onClick={() => setShowReceiveModal(true)} className="btn-primary flex items-center">
-                <ArrowDownTrayIcon className="h-5 w-5 mr-2" /> Receive Inventory
-              </button>
+              <Button onClick={() => setShowReceiveModal(true)}>
+                <ArrowDownTrayIcon aria-hidden="true" className="h-5 w-5 mr-2 shrink-0" /> Receive Inventory
+              </Button>
             )}
+          </>
+        )
+      }
+    />
+  );
+  const pageContext = (
+    <>
+      {crumbParent && <Breadcrumbs crumbs={[crumbParent, { label: getRouteTitle(location) }]} />}
+      {pageHeader}
+    </>
+  );
+  if (loading || loadError) {
+    return (
+      <div className="space-y-4">
+        {pageContext}
+        {loading ? (
+          <div role="status" className="flex items-center justify-center gap-3 h-64 text-slate-400">
+            <div aria-hidden="true" className="animate-spin rounded-full h-8 w-8 border-b-2 border-werco-primary" />
+            Loading inventory…
           </div>
-        </div>
-      )}
-      {embedded && (canReceive || canCombine) && (
-        <div className="flex flex-wrap justify-end gap-2">
-          {canCombine && (
-            <Button variant="secondary" onClick={() => setShowCombineModal(true)}>
-              Combine SKUs…
-            </Button>
-          )}
-          {canReceive && (
-            <button onClick={() => setShowReceiveModal(true)} className="btn-primary flex items-center">
-              <ArrowDownTrayIcon className="h-5 w-5 mr-2" /> Receive Inventory
-            </button>
-          )}
-        </div>
-      )}
+        ) : (
+          <ErrorState message="Could not load inventory data." onRetry={loadData} className="my-8" />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {pageContext}
 
       {/* Summary Stats */}
       <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-4 gap-2">

@@ -18,7 +18,6 @@ from app.models.quote import Quote, QuoteLine, QuoteStatus
 from app.models.rfq_quote import QuoteEstimate, RfqPackage
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
-from app.services.quote_pdf_service import build_customer_quote_pdf
 
 router = APIRouter()
 
@@ -718,61 +717,9 @@ def generate_quote_pdf(
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
 
-    ai_estimate = _load_ai_estimate(db, quote.id)
-    line_summaries: List[Dict[str, Any]] = []
-    assumptions: List[Dict[str, Any]] = []
-    rfq_reference = None
-    lead_time_label = f"{quote.lead_time_days} business days" if quote.lead_time_days else None
+    from app.services.document_pdf_service import build_quote_document
 
-    if ai_estimate:
-        rfq_reference = ai_estimate.rfq_reference
-        assumptions = ai_estimate.assumptions
-        lead_time_label = ai_estimate.lead_time.get("label") or lead_time_label
-        line_summaries = [
-            {
-                "part_display": f"{line.part_number or '-'} - {line.part_name}",
-                "qty": line.quantity,
-                "material": line.material,
-                "thickness": line.thickness,
-                "finish": line.finish,
-                "part_total": line.part_total,
-            }
-            for line in ai_estimate.line_summaries
-        ]
-    else:
-        for line in quote.lines:
-            line_summaries.append(
-                {
-                    "part_display": (
-                        f"{line.part.part_number} - {line.description}" if line.part else line.description
-                    ),
-                    "qty": line.quantity,
-                    "material": None,
-                    "thickness": None,
-                    "finish": None,
-                    "part_total": line.line_total,
-                }
-            )
-
-    pdf_bytes = build_customer_quote_pdf(
-        quote_number=quote.quote_number,
-        revision=quote.revision or "A",
-        customer_name=quote.customer_name,
-        customer_contact=quote.customer_contact,
-        customer_email=quote.customer_email,
-        rfq_reference=rfq_reference,
-        quote_date=_format_date_for_pdf(quote.quote_date) or "",
-        valid_until=_format_date_for_pdf(quote.valid_until),
-        lead_time_label=lead_time_label,
-        total_amount=float(quote.total or 0),
-        line_summaries=line_summaries,
-        assumptions=assumptions,
-        exclusions=[
-            "Quote excludes taxes, freight, and duties unless stated otherwise.",
-            "Subject to drawing/specification review at order entry.",
-            "Operation-level cycle times are internal and not included in customer quote.",
-        ],
-    )
+    pdf_bytes = build_quote_document(db, quote, company_id)
 
     filename = f"{quote.quote_number}.pdf"
     return StreamingResponse(

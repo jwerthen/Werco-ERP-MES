@@ -138,16 +138,14 @@ test.describe('Work Order Lifecycle', () => {
 
   test('work order operations are displayed', async ({ page }) => {
     await page.goto('/work-orders');
-    
-    // Click first work order
-    const firstRow = page.locator('table tbody tr').first();
-    if (await firstRow.isVisible()) {
-      await firstRow.click();
-      await page.waitForURL(/\/work-orders\/\d+/);
-      
-      // Should show operations section
-      await expect(page.locator('text=/operations|routing|steps/i').first()).toBeVisible({ timeout: 5000 });
-    }
+
+    // Suspense also renders visible table rows. Wait for seeded record content
+    // before opening its link; the separate row-click test owns that affordance.
+    const row = await firstDataRow(page);
+    expect(row, 'The seeded database must contain a work order').not.toBeNull();
+    await row!.locator('a[href^="/work-orders/"]').first().click();
+    await page.waitForURL(/\/work-orders\/\d+/);
+    await expect(page.getByRole('heading', { name: 'Operations / Routing', exact: true })).toBeVisible();
   });
 });
 

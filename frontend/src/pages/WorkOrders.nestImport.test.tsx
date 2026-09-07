@@ -172,9 +172,9 @@ describe('WorkOrders — standalone Import Nest Package action', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /import nest package/i }));
 
-    // Wizard opens in standalone mode (pick step).
-    const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText(/creates a new released laser cutting work order/i)).toBeInTheDocument();
+    // Wait for the lazily loaded pick step, not its temporary loading dialog.
+    expect(await screen.findByText(/creates a new released laser cutting work order/i)).toBeInTheDocument();
+    const dialog = screen.getByRole('dialog');
 
     const zip = new File(['PK'], 'nests.zip', { type: 'application/zip' });
     fireEvent.change(within(dialog).getByLabelText(/zip package/i), { target: { files: [zip] } });

@@ -1,3 +1,9 @@
+import { PageHeader } from '../components/ui/PageHeader';
+import { DocumentDeliveryComposer } from '../components/DocumentDeliveryComposer';
+import { useResumableDraft } from '../hooks/useResumableDraft';
+import { DraftRecovery } from '../components/ui/DraftRecovery';
+import { useTableWorkspace } from '../hooks/useTableWorkspace';
+import { TableWorkspaceControls } from '../components/ui/TableWorkspaceControls';
 import React, { useEffect, useRef, useState } from 'react';
 import { tabKeyboard } from '../components/operations/tabKeyboard';
 import api from '../services/api';
@@ -195,6 +201,8 @@ export default function Purchasing() {
   // Soft-delete of POs and vendors is admin/manager only (DELETE endpoints use
   // require_role([ADMIN, MANAGER])); a superuser qualifies too.
   const canDeletePurchasing = user?.role === 'admin' || user?.role === 'manager' || !!user?.is_superuser;
+  // History and reviewed attachments remain readable when approval is removed.
+  const canViewEmail = canDeletePurchasing && hasPermission(user?.role, 'purchasing:view');
   // Restoring a soft-deleted PO tracks POST /purchasing/purchase-orders/{id}/restore
   // (require_role([ADMIN, MANAGER]); superuser qualifies) — today the same role set as
   // canDeletePurchasing, but a separate constant so a future change to either gate cannot
@@ -315,6 +323,7 @@ export default function Purchasing() {
   const [deleteVendorPending, setDeleteVendorPending] = useState(false);
   const [deleteVendorDocTarget, setDeleteVendorDocTarget] = useState<VendorDocument | null>(null);
   const [deleteVendorDocPending, setDeleteVendorDocPending] = useState(false);
+  const [emailPOId, setEmailPOId] = useState<number | null>(null);
   const [sendPOTarget, setSendPOTarget] = useState<PurchaseOrder | null>(null);
   const [sendPOPending, setSendPOPending] = useState(false);
 
@@ -333,6 +342,13 @@ export default function Purchasing() {
   // their blank shape on every (confirmed) close, so their snapshot is the
   // blank constant itself.
   const isPODirty = showPOModal && JSON.stringify(newPO) !== JSON.stringify(BLANK_PO);
+  const poDraft = useResumableDraft({ namespace: 'purchasing', value: newPO, dirty: isPODirty, enabled: showPOModal,
+    valid: (data: unknown): data is typeof newPO => {
+      const saved = data as typeof newPO | null;
+      return !!saved && typeof saved.vendor_id === 'number' && Array.isArray(saved.lines)
+        && saved.lines.every(line => !!line && typeof line.part_id === 'number' && typeof line.quantity_ordered === 'number' && typeof line.unit_price === 'number');
+    }, restore: saved => setNewPO({ ...BLANK_PO, ...saved }),
+  });
   const isVendorDirty = showVendorModal && JSON.stringify(newVendor) !== JSON.stringify(BLANK_VENDOR);
   const isEditVendorDirty =
     showEditVendorModal && JSON.stringify(editVendorForm) !== JSON.stringify(initialEditVendorForm);
@@ -935,6 +951,7 @@ export default function Purchasing() {
 
   const handleCreatePO = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (poDraft.blocked) { showToast('error', 'Resume or remove your saved draft before creating a purchase order.'); return; }
     if (!newPO.vendor_id || newPO.vendor_id <= 0) {
       showToast('error', 'Please select a vendor');
       return;
@@ -967,6 +984,7 @@ export default function Purchasing() {
         ...newPO,
         required_date: newPO.required_date || undefined,
       });
+      if (!await poDraft.clear()) showToast('warning', 'Purchase order created, but the recovery draft could not be removed. Check the order list before resuming it.');
       setShowPOModal(false);
       setNewPO(BLANK_PO);
       showToast('success', 'Purchase order created');
@@ -1190,6 +1208,7 @@ export default function Purchasing() {
           <button onClick={() => handlePrintPO(po.id)} className="text-surface-600 hover:text-werco-primary text-sm">
             Print
           </button>
+          {canViewEmail && <button onClick={() => setEmailPOId(po.id)} className="text-fd-link hover:underline text-sm" aria-label={`Email ${po.po_number}`}>Email</button>}
           {canSendPO && po.status === 'draft' && (
             <button onClick={() => handleSendPO(po)} className="text-werco-primary hover:underline text-sm">
               Mark as sent
@@ -1274,6 +1293,7 @@ export default function Purchasing() {
           <button onClick={() => handlePrintPO(po.id)} className="text-surface-600 hover:text-werco-primary text-sm">
             Print
           </button>
+          {canViewEmail && <button onClick={() => setEmailPOId(po.id)} className="text-fd-link hover:underline text-sm" aria-label={`Email ${po.po_number}`}>Email</button>}
           {canSendPO && po.status === 'draft' && (
             <button onClick={() => handleSendPO(po)} className="text-werco-primary hover:underline text-sm">
               Mark as sent
@@ -1549,6 +1569,17 @@ export default function Purchasing() {
     },
   ];
 
+  const poWorkspace = useTableWorkspace('purchasing', 'orders', poColumns,
+    { search: poSearch, poStatus: poStatusFilter }, filters => {
+      setPoSearch(typeof filters.search === 'string' ? filters.search : '');
+      const next = new URLSearchParams(searchParams);
+      for (const key of ['search', 'poStatus']) {
+        const value = filters[key];
+        if (typeof value === 'string' && value) next.set(key, value); else next.delete(key);
+      }
+      setSearchParams(next);
+    }, { key: 'po_number', dir: 'asc' });
+
   const renderInactiveVendorCard = (vendor: Vendor) => (
     <MobileDataCard
       title={vendor.name}
@@ -1633,23 +1664,21 @@ export default function Purchasing() {
       {detailPOId > 0 && (
         <PurchaseOrderDetail id={detailPOId} onClose={closePODetail} onSaved={loadData} onLoaded={onPODetailLoaded} />
       )}
-      <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-white">Purchasing</h1>
-        <div className="flex gap-2">
+      <PageHeader title="Purchasing" description="Review supplier orders, deliveries and vendor records." actions={<>
           {canCreateVendor && (
             <Button variant="secondary" onClick={() => setShowVendorModal(true)} className="flex items-center">
               <BuildingOfficeIcon className="h-5 w-5 mr-2" />
               New Vendor
             </Button>
           )}
+          {canCreatePO && poDraft.available && <Button variant="secondary" onClick={() => setShowPOModal(true)}>Continue PO draft</Button>}
           {canCreatePO && (
             <Button onClick={() => setShowPOModal(true)} className="flex items-center">
               <PlusIcon className="h-5 w-5 mr-2" />
               New PO
             </Button>
           )}
-        </div>
-      </div>
+      </>} />
 
       {/* KPI strip */}
       <MiniStatStrip className="grid grid-cols-2 gap-2">
@@ -1779,6 +1808,8 @@ export default function Purchasing() {
             </div>
           </div>
 
+          {poView === 'active' && <TableWorkspaceControls workspace={poWorkspace} />}
+
           {poView === 'deleted' ? (
             <>
               <div className="flex items-start gap-2 mb-4 px-3 py-2 rounded border border-amber-500/40 bg-amber-500/10 text-sm text-amber-200">
@@ -1818,7 +1849,8 @@ export default function Purchasing() {
             </>
           ) : (
             <DataTable
-              columns={poColumns}
+              columns={poWorkspace.displayColumns(poColumns)}
+              {...poWorkspace.tableProps}
               data={filteredPOs}
               loading={statusPOLoading}
               error={statusPOError}
@@ -2035,6 +2067,7 @@ export default function Purchasing() {
         </div>
       )}
 
+      {emailPOId && <DocumentDeliveryComposer key={emailPOId} entityType="purchase_order" entityId={emailPOId} canPrepare={canSendPO && canDeletePurchasing} canReconcile={canSendPO && canDeletePurchasing} onClose={() => setEmailPOId(null)} onAccepted={() => void loadData()} />}
       {/* Create PO Modal */}
       <Modal open={showPOModal} onClose={requestClosePOModal} size="2xl" closeOnBackdrop={false}>
         {actionError && (
@@ -2048,6 +2081,7 @@ export default function Purchasing() {
           </p>
         )}
         <h3 className="text-lg font-semibold mb-4">Create Purchase Order</h3>
+        <DraftRecovery draft={poDraft} />
         <form onSubmit={handleCreatePO} className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <FormField label="Vendor" required>

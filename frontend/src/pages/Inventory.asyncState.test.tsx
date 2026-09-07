@@ -62,11 +62,12 @@ const summary = [
 
 const parts = [{ id: 7, part_number: 'PN-700', name: 'Bracket', part_type: 'manufactured' }];
 
-const renderPage = () => render(
-  <MemoryRouter>
-    <InventoryPage />
-  </MemoryRouter>
-);
+const renderPage = () =>
+  render(
+    <MemoryRouter>
+      <InventoryPage />
+    </MemoryRouter>
+  );
 
 /** Resolve all five load endpoints with the given summary payload. */
 function mockLoadSuccess(summaryPayload: any[]) {
@@ -96,7 +97,11 @@ describe('Inventory async-state (Batch 3)', () => {
 
     renderPage();
 
+    expect(screen.getByRole('heading', { level: 1, name: 'Inventory' })).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Loading inventory');
+
     const alert = await screen.findByRole('alert');
+    expect(screen.getByRole('heading', { level: 1, name: 'Inventory' })).toBeInTheDocument();
     expect(within(alert).getByText('Could not load inventory data.')).toBeInTheDocument();
     // The cockpit KPI strip is not on screen during the error state.
     expect(screen.queryByText('Unique Items')).not.toBeInTheDocument();
@@ -120,13 +125,10 @@ describe('Inventory async-state (Batch 3)', () => {
     // DataTable.mobileCards renders a parallel mobile EmptyState (md:hidden), so
     // there are two in the jsdom DOM — scope to the desktop one (hidden md:block).
     const empties = await screen.findAllByTestId('empty-state');
-    const empty =
-      empties.find((el) => el.closest('.md\\:block') !== null) ?? empties[0];
+    const empty = empties.find(el => el.closest('.md\\:block') !== null) ?? empties[0];
     expect(within(empty).getByText('No inventory on hand')).toBeInTheDocument();
     // It offers the Receive Inventory CTA.
-    expect(
-      within(empty).getByRole('button', { name: 'Receive Inventory' })
-    ).toBeInTheDocument();
+    expect(within(empty).getByRole('button', { name: 'Receive Inventory' })).toBeInTheDocument();
     // A successful empty load is not an error.
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });

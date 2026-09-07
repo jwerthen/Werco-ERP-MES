@@ -18,6 +18,7 @@ from .customer_complaint import (
 )
 from .display_token import DisplayToken
 from .document import Document, DocumentType
+from .document_delivery import DocumentDelivery
 from .downtime import DowntimeCategory, DowntimeEvent, DowntimePlannedType, DowntimeReasonCode
 from .engineering_change import (
     ECOApproval,
@@ -72,10 +73,11 @@ from .maintenance import (
     MaintenanceType,
     MaintenanceWorkOrder,
 )
-from .mrp import MRPAction, MRPRequirement, MRPRun, MRPRunStatus, PlanningAction
+from .mrp import MRPAction, MRPRequirement, MRPRun, MRPRunStatus, MRPSupplyLink, PlanningAction
 from .notification import DigestQueue, Notification, NotificationLog, NotificationPreference
 from .oee import OEERecord, OEETarget
 from .operational_event import OperationalEvent
+from .operations_inbox import OperationalInboxState
 from .operator_certification import (
     CertificationStatus,
     CertificationType,
@@ -157,6 +159,7 @@ from .supplier_scorecard import ApprovedSupplierList, ScorecardPeriod, SupplierA
 from .time_entry import TimeEntry
 from .tool_management import Tool, ToolCheckout, ToolStatus, ToolType, ToolUsageLog
 from .user import User, UserRole
+from .user_workspace import UserWorkspaceRecord
 from .visitor_log import VisitorLog, VisitorPurpose, VisitorStatus
 from .webhook import Webhook, WebhookDelivery
 from .work_center import WorkCenter
@@ -171,6 +174,9 @@ from .work_order_material import AllocationSource, AllocationStatus, WorkOrderMa
 from .work_order_template import WorkOrderTemplate
 
 __all__ = [
+    "DocumentDelivery",
+    "OperationalInboxState",
+    "UserWorkspaceRecord",
     "Company",
     "AIInteractionEvent",
     "AICorrection",
@@ -227,6 +233,7 @@ __all__ = [
     "MRPRun",
     "MRPRequirement",
     "MRPAction",
+    "MRPSupplyLink",
     "MRPRunStatus",
     "PlanningAction",
     "CustomFieldDefinition",

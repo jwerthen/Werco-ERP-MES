@@ -1,0 +1,20 @@
+{
+  "baseline_commit": "0d89e19",
+  "worktree_branch": "codex/ux-workflow-improvements",
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "node": "v22.22.3",
+  "controlled_variants": {
+    "baseline-source": {
+      "work_orders_sha256": "7ac9b44ada79e7626405e7050ee5a6e93c3d71bd51d33a85efe1d0ddcfeeeb05"
+    },
+    "current-source": {
+      "work_orders_sha256": "faf2b78477ff239d580f300f1fdb77bc6a512f8dfc31cabe281e88b64371467a"
+    },
+    "after-source": {
+      "work_orders_sha256": "9216d95835a4465db960929ee6fe4a5ba384a0cdfbcc89413a40498f5b2f0686"
+    },
+    "responsive-source": {
+      "work_orders_sha256": "5a7f1e383cac85d167951478ea057777ae3642f187e2cc992e6527c99e910728"
+    }
+  }
+}

@@ -35,6 +35,14 @@ export const test = base.extend<{
   authenticatedPage: Page;
   adminPage: Page;
 }>({
+  // Workflow tests exercise the ERP against its seeded API. External web fonts
+  // are cosmetic and can hold document load open when the font host stalls.
+  // Keep these tests independent of that third-party service; the browser uses
+  // the app's declared fallback fonts and all UI assertions remain unchanged.
+  page: async ({ page }, use) => {
+    await page.route(/^https:\/\/fonts\.(googleapis|gstatic)\.com\//, route => route.abort());
+    await use(page);
+  },
   // Page with operator logged in
   authenticatedPage: async ({ page }, use) => {
     await loginAs(page, TEST_USERS.operator);

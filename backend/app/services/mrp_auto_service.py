@@ -11,6 +11,7 @@ from typing import Dict, List, Set
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.db.locks import acquire_generator_lock
 from app.models.mrp import MRPAction, PlanningAction
 from app.models.part import Part
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
@@ -66,8 +67,20 @@ class MRPAutoService:
             # No auto-processing in review mode
             return results
 
+        acquire_generator_lock(self.db, 'mrp_planning', self.company_id)
         for action in actions:
             try:
+                # Share the planner's transaction lock and recover current state so
+                # automatic jobs cannot recreate a reviewed/manual supply draft.
+                action = (
+                    self.db.query(MRPAction)
+                    .filter(MRPAction.id == action.id, MRPAction.company_id == self.company_id)
+                    .populate_existing()
+                    .with_for_update()
+                    .first()
+                )
+                if not action or action.processed or action.result_po_id or action.result_wo_id:
+                    continue
                 if action.action_type == PlanningAction.ORDER:
                     # Create purchase order
                     po = self._create_po_from_action(action, mode, user_id)

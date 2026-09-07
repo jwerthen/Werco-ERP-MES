@@ -1,3 +1,4 @@
+import { PageHeader } from '../components/ui/PageHeader';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { tabKeyboard } from '../components/operations/tabKeyboard';
 import { useSearchParams } from 'react-router-dom';
@@ -1375,31 +1376,39 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     />
   );
 
+  const pageHeader = (
+    <PageHeader
+      title="Receiving & Inspection"
+      level={embedded ? 2 : 1}
+      description="Receive purchase orders and review incoming inspection results"
+    />
+  );
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-4 border-werco-primary border-t-transparent"></div>
+      <div className="space-y-6">
+        {pageHeader}
+        <div role="status" className="flex items-center justify-center gap-3 h-64 text-slate-400">
+          <div
+            aria-hidden="true"
+            className="animate-spin rounded-full h-8 w-8 border-4 border-werco-primary border-t-transparent"
+          />
+          Loading receiving and inspection…
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      {!embedded && (
-        <div className="flex justify-between items-center">
-          <div>
-            <h1 className="text-3xl font-bold text-white">Receiving & Inspection</h1>
-            <p className="text-slate-400 mt-1">AS9100D compliant receiving and inspection workflow</p>
-          </div>
-        </div>
-      )}
+      {pageHeader}
 
       {/* Success/Error Messages */}
       {success && (
-        <div className="bg-green-500/10 border border-green-500/30 rounded-xl p-4 flex items-center gap-3">
+        <div className="bg-green-500/10 border border-green-500/30 rounded-xl p-4 flex flex-wrap items-center gap-3">
           <CheckCircleIcon className="h-5 w-5 text-green-600" />
-          <span className="text-emerald-300">{success}</span>
+          <span role="status" className="min-w-0 flex-1 text-emerald-300 [overflow-wrap:anywhere]">
+            {success}
+          </span>
           {canPrintLabel && lastReceiptId !== null && (
             <button
               onClick={() => handlePrintLabel(lastReceiptId)}
@@ -1413,10 +1422,17 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
         </div>
       )}
       {error && !showReceiveModal && !showInspectModal && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 flex items-center gap-3">
+        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 flex flex-wrap items-center gap-3">
           <ExclamationTriangleIcon className="h-5 w-5 text-red-600" />
-          <span className="text-red-300">{error}</span>
-          <button onClick={() => setError('')} className="ml-auto">
+          <span role="alert" className="min-w-0 flex-1 text-red-300 [overflow-wrap:anywhere]">
+            {error}
+          </span>
+          <button
+            type="button"
+            aria-label="Dismiss receiving error"
+            onClick={() => setError('')}
+            className="ml-auto p-2"
+          >
             <XMarkIcon className="h-5 w-5 text-red-600" />
           </button>
         </div>

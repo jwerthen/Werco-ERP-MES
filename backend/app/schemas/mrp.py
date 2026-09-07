@@ -1,8 +1,9 @@
 from datetime import date, datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from app.core.validation import Money, MoneySmall
 from app.models.mrp import MRPRunStatus, PlanningAction
 from app.schemas.base import UTCModel
 
@@ -78,6 +79,7 @@ class MRPActionResponse(UTCModel):
     is_processed: bool
     processed_at: Optional[datetime]
     result_reference: Optional[str]
+    supply_draft: Optional[dict] = None
     notes: Optional[str]
 
     class Config:
@@ -128,3 +130,26 @@ class ProcessActionResponse(BaseModel):
     success: bool
     message: str
     created_reference: Optional[str] = None  # WO or PO number
+
+
+class MRPSupplyDraftRequest(BaseModel):
+    request_key: str = Field(min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    review_token: str = Field(min_length=64, max_length=64)
+    quantity: MoneySmall = Field(gt=0)
+    due_date: date
+    vendor_id: Optional[int] = Field(None, gt=0)
+    unit_price: Money = Field(default=0, ge=0)
+    work_center_id: Optional[int] = Field(None, gt=0)
+    notes: str = Field(default="", max_length=1500)
+
+
+class MRPSupplyDraftResponse(BaseModel):
+    action_id: int
+    mrp_run_id: int
+    kind: Literal["purchase_order", "work_order"]
+    id: int
+    number: str
+    url: str
+    quantity: float
+    status: str
+    replayed: bool = False

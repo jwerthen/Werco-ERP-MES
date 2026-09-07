@@ -1,0 +1,56 @@
+{
+  "beforeOpen": [],
+  "viewports": [
+    {
+      "width": 1440,
+      "height": 1000,
+      "label": "desktop",
+      "overflow": {
+        "dialogClient": 1024,
+        "dialogScroll": 1024,
+        "bodyClient": 1440,
+        "bodyScroll": 1440
+      },
+      "painted": {
+        "width": 478,
+        "height": 619,
+        "cssWidth": 478,
+        "darkColorChannels": 34965
+      },
+      "axe": []
+    },
+    {
+      "width": 390,
+      "height": 844,
+      "label": "mobile",
+      "overflow": {
+        "dialogClient": 358,
+        "dialogScroll": 358,
+        "bodyClient": 390,
+        "bodyScroll": 390
+      },
+      "painted": {
+        "width": 308,
+        "height": 399,
+        "cssWidth": 308,
+        "darkColorChannels": 15653
+      },
+      "axe": []
+    }
+  ],
+  "pdfRequests": [
+    "pdfRenderer.ts",
+    "pdfjs-dist.js",
+    "pdf.worker.min.mjs",
+    "pdf.worker.min.mjs",
+    "pdf.worker.min.mjs"
+  ],
+  "pageErrors": [],
+  "environment": {
+    "frontend": "http://localhost:5176",
+    "backend": "http://localhost:8003",
+    "document": "Synthetic QA-QUOTE-001",
+    "smtp": "Unconfigured; no send attempted",
+    "checked_on": "2026-09-07"
+  }
+}

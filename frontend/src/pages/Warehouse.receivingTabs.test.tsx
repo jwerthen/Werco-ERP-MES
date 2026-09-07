@@ -64,6 +64,10 @@ test('nested Receiving tabs preserve outer warehouse selection, filters, reload 
       <Warehouse />
     </MemoryRouter>
   );
+  expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+  expect(screen.getByRole('heading', { level: 1, name: 'Warehouse' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { level: 2, name: 'Receiving & Inspection' })).toBeInTheDocument();
+  expect(screen.getByText('Loading receiving and inspection…')).toHaveAttribute('role', 'status');
   const queue = await screen.findByRole('tab', { name: /Inspection Queue/ });
   fireEvent.click(queue);
   expect(screen.getByLabelText('Current URL')).toHaveTextContent('tab=receiving');

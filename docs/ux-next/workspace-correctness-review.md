@@ -1,0 +1,14 @@
+# Workspace and draft correctness review
+
+Independent source and regression review, September 7, 2026. Reviewed the shared workspace API, owner-scoped query, schema limits, saved-view integration, draft lifecycle and recovery controls. Two reproducible draft-hook issues were corrected in [useResumableDraft](../../frontend/src/hooks/useResumableDraft.ts).
+
+| Reproduction | Correction | Regression evidence |
+| --- | --- | --- |
+| Save nonempty form input, then clear it back to its initial blank shape. The dirty flag became false and suppressed the next autosave, so an older value could reappear when resumed. | A draft that already exists also persists subsequent blank edits, with its observed version. A pristine form that has never saved still creates nothing automatically. This also handles blank edits made while the first save is pending. | Blank edit, pristine open, and blank-during-save tests. |
+| Close and reopen a PO/quote modal while its autosave response is pending. The generation changed, leaving busy true, and recovery could initialize before the completed row/version arrived. | Reset pending presentation for the new modal session and wait for the prior serialized write to publish its result before initializing recovery. The completed saved input is then offered for review. | Pending close/reopen test verifies enabled recovery and the returned draft; old-account response test verifies a new account receives only its own candidate. |
+
+Both initial reproductions failed against the previous hook. The final [hook tests](../../frontend/src/hooks/useResumableDraft.test.ts), plus existing workspace-record and table-workspace tests, pass: **21 tests across 3 suites**. Product/test TypeScript, owned ESLint, Prettier and diff checks pass. Existing backend ownership/CAS tests remain the source of evidence for API isolation; this review required no backend change.
+
+A real Chromium check used the synthetic manager account on localhost ports 8003/5176 at 390×844. It held a completed autosave response at the network boundary, closed and reopened the purchase-order modal, released the response, and resumed the saved note. It then erased the note, verified the server saved the blank field, reopened and resumed again, and confirmed the old note did not return. The dialog measured 358px client/scroll width with no runtime page errors. [Browser result](draft-race-browser-result.json). Only a private draft in the throwaway local fixture database was changed; no purchase order was created.
+
+The reviewed API enforces current authenticated user plus active company on every workspace query, and its existing tests cover read-only switched-company sessions. Client hooks discard late responses after account identity changes. Platform company switching retains the existing token/read-only/full-page-reload contract; this review does not claim a new client-side authorization boundary or exercised PostgreSQL contention.

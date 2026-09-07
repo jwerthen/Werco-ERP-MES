@@ -1,0 +1,214 @@
+{
+  "chunk_failure_probe": {
+    "build": "responsive-build",
+    "aborted": true,
+    "recovered_after_retry": false,
+    "recovered_after_reload": true
+  },
+  "environment": {
+    "browser": "145.0.7632.6",
+    "rows": 1000,
+    "samples": 5,
+    "viewport": "1440x1000",
+    "cpu_throttle": 4,
+    "network_mbps": 5,
+    "network_latency_ms": 20,
+    "synthetic_api_delay_ms": 30,
+    "note": "Controlled local lab; not field performance or a production backend benchmark."
+  },
+  "builds": [
+    {
+      "label": "baseline-build",
+      "medians": {
+        "ready_ms": 1587,
+        "filter_ms": 537,
+        "import_open_ms": 91,
+        "dom_nodes": 39392
+      },
+      "runs": [
+        {
+          "ready_ms": 1597,
+          "filter_ms": 537,
+          "import_open_ms": 93,
+          "dom_nodes": 39392,
+          "initial_js_files": 16,
+          "deferred_js_files": [],
+          "page_errors": []
+        },
+        {
+          "ready_ms": 1587,
+          "filter_ms": 541,
+          "import_open_ms": 92,
+          "dom_nodes": 39392,
+          "initial_js_files": 16,
+          "deferred_js_files": [],
+          "page_errors": []
+        },
+        {
+          "ready_ms": 1583,
+          "filter_ms": 523,
+          "import_open_ms": 91,
+          "dom_nodes": 39392,
+          "initial_js_files": 16,
+          "deferred_js_files": [],
+          "page_errors": []
+        },
+        {
+          "ready_ms": 1587,
+          "filter_ms": 527,
+          "import_open_ms": 88,
+          "dom_nodes": 39392,
+          "initial_js_files": 16,
+          "deferred_js_files": [],
+          "page_errors": []
+        },
+        {
+          "ready_ms": 1595,
+          "filter_ms": 539,
+          "import_open_ms": 91,
+          "dom_nodes": 39392,
+          "initial_js_files": 16,
+          "deferred_js_files": [],
+          "page_errors": []
+        }
+      ]
+    },
+    {
+      "label": "before-build",
+      "medians": {
+        "ready_ms": 1603,
+        "filter_ms": 531,
+        "import_open_ms": 89,
+        "dom_nodes": 39403
+      },
+      "runs": [
+        {
+          "ready_ms": 1592,
+          "filter_ms": 528,
+          "import_open_ms": 88,
+          "dom_nodes": 39403,
+          "initial_js_files": 18,
+          "deferred_js_files": [],
+          "page_errors": []
+        },
+        {
+          "ready_ms": 1606,
+          "filter_ms": 532,
+          "import_open_ms": 96,
+          "dom_nodes": 39403,
+          "initial_js_files": 18,
+          "deferred_js_files": [],
+          "page_errors": []
+        },
+        {
+          "ready_ms": 1601,
+          "filter_ms": 531,
+          "import_open_ms": 89,
+          "dom_nodes": 39403,
+          "initial_js_files": 18,
+          "deferred_js_files": [],
+          "page_errors": []
+        },
+        {
+          "ready_ms": 1619,
+          "filter_ms": 527,
+          "import_open_ms": 89,
+          "dom_nodes": 39403,
+          "initial_js_files": 18,
+          "deferred_js_files": [],
+          "page_errors": []
+        },
+        {
+          "ready_ms": 1603,
+          "filter_ms": 536,
+          "import_open_ms": 92,
+          "dom_nodes": 39403,
+          "initial_js_files": 18,
+          "deferred_js_files": [],
+          "page_errors": []
+        }
+      ]
+    },
+    {
+      "label": "responsive-build",
+      "medians": {
+        "ready_ms": 1575,
+        "filter_ms": 345,
+        "import_open_ms": 379,
+        "dom_nodes": 1399
+      },
+      "runs": [
+        {
+          "ready_ms": 1557,
+          "filter_ms": 345,
+          "import_open_ms": 379,
+          "dom_nodes": 1399,
+          "initial_js_files": 15,
+          "deferred_js_files": [
+            "/assets/LaserNestImportWizard-CACWDy4W.js",
+            "/assets/ComboBox-BR5RHOhq.js",
+            "/assets/materialTie-B2M4hsvM.js",
+            "/assets/catalogGroups-BSnYBvDZ.js"
+          ],
+          "page_errors": []
+        },
+        {
+          "ready_ms": 1580,
+          "filter_ms": 345,
+          "import_open_ms": 380,
+          "dom_nodes": 1399,
+          "initial_js_files": 15,
+          "deferred_js_files": [
+            "/assets/LaserNestImportWizard-CACWDy4W.js",
+            "/assets/ComboBox-BR5RHOhq.js",
+            "/assets/materialTie-B2M4hsvM.js",
+            "/assets/catalogGroups-BSnYBvDZ.js"
+          ],
+          "page_errors": []
+        },
+        {
+          "ready_ms": 1563,
+          "filter_ms": 345,
+          "import_open_ms": 379,
+          "dom_nodes": 1399,
+          "initial_js_files": 15,
+          "deferred_js_files": [
+            "/assets/LaserNestImportWizard-CACWDy4W.js",
+            "/assets/ComboBox-BR5RHOhq.js",
+            "/assets/catalogGroups-BSnYBvDZ.js",
+            "/assets/materialTie-B2M4hsvM.js"
+          ],
+          "page_errors": []
+        },
+        {
+          "ready_ms": 1577,
+          "filter_ms": 347,
+          "import_open_ms": 383,
+          "dom_nodes": 1399,
+          "initial_js_files": 15,
+          "deferred_js_files": [
+            "/assets/LaserNestImportWizard-CACWDy4W.js",
+            "/assets/ComboBox-BR5RHOhq.js",
+            "/assets/materialTie-B2M4hsvM.js",
+            "/assets/catalogGroups-BSnYBvDZ.js"
+          ],
+          "page_errors": []
+        },
+        {
+          "ready_ms": 1575,
+          "filter_ms": 338,
+          "import_open_ms": 377,
+          "dom_nodes": 1399,
+          "initial_js_files": 15,
+          "deferred_js_files": [
+            "/assets/LaserNestImportWizard-CACWDy4W.js",
+            "/assets/ComboBox-BR5RHOhq.js",
+            "/assets/materialTie-B2M4hsvM.js",
+            "/assets/catalogGroups-BSnYBvDZ.js"
+          ],
+          "page_errors": []
+        }
+      ]
+    }
+  ]
+}

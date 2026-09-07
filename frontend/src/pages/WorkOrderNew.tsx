@@ -1,3 +1,5 @@
+import { useResumableDraft } from '../hooks/useResumableDraft';
+import { DraftRecovery } from '../components/ui/DraftRecovery';
 import { PRIORITY_OPTIONS } from '../utils/priority';
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -196,6 +198,37 @@ export default function WorkOrderNew() {
     [form, initialForm, operations, serialsText]
   );
   const { confirmDiscard, markSaved } = useUnsavedChanges(isFormDirty);
+
+  const draftValue = { form, operations, operationsOverridden, showManualEntry, serialsText };
+  const draft = useResumableDraft({ namespace: 'work-orders', value: draftValue, dirty: isFormDirty,
+    enabled: true,
+    valid: (data: unknown): data is typeof draftValue => {
+      const saved = data as typeof draftValue | null;
+      return !!saved && !!saved.form && typeof saved.form.part_id === 'number'
+        && typeof saved.form.customer_name === 'string' && typeof saved.serialsText === 'string'
+        && Array.isArray(saved.operations) && saved.operations.every(op => !!op && typeof op.name === 'string' && typeof op.work_center_id === 'number');
+    },
+    restore: saved => {
+      const requestId = ++partRequestRef.current;
+      setLoadingRouting(false); setRoutingLoadError(''); setRouting(null);
+      setForm({ ...initialForm, ...saved.form }); setOperations(saved.operations);
+      // Restored operations are an explicit reviewed snapshot. Preserve removed
+      // operations instead of silently reloading today's released routing.
+      setOperationsOverridden(saved.operationsOverridden || saved.operations.length > 0); setShowManualEntry(saved.showManualEntry || saved.operations.length > 0);
+      setSerialsText(saved.serialsText); setCustomerSearch(saved.form.customer_name);
+      const part = parts.find(item => item.id === saved.form.part_id);
+      setPartSearch(part ? `${part.part_number} - ${part.name}` : `Part #${saved.form.part_id}`);
+      setPartReadiness(null);
+      if (saved.form.part_id) {
+        setLoadingRouting(true);
+        api.getPartReadiness(saved.form.part_id).then(readiness => {
+          if (requestId === partRequestRef.current) setPartReadiness(readiness);
+        }).catch(() => {
+          if (requestId === partRequestRef.current) setRoutingLoadError('Could not verify the restored part. Retry before creating the work order.');
+        }).finally(() => { if (requestId === partRequestRef.current) setLoadingRouting(false); });
+      }
+    },
+  });
 
   // Parsed serial lines (trimmed, blanks dropped) + the violations the server
   // would 422 on. Providing NO serials is always valid (serials are optional).
@@ -737,6 +770,7 @@ export default function WorkOrderNew() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (submitPendingRef.current || loadingRouting || routingLoadError) return;
+    if (draft.blocked) { showToast('error', 'Resume or remove your saved draft before creating a work order.'); return; }
     if (operationsOverridden && operations.length === 0) {
       showToast('error', 'Add at least one operation before creating this work order.');
       return;
@@ -819,6 +853,7 @@ export default function WorkOrderNew() {
       }
 
       const result = await api.createWorkOrder(payload);
+      if (!await draft.clear()) showToast('warning', 'Work order created, but the recovery draft could not be removed. Check the work order list before resuming it.');
       markSaved();
       navigate(`/work-orders/${result.id}`);
     } catch (err: any) {
@@ -868,6 +903,7 @@ export default function WorkOrderNew() {
       {woNewParent && <Breadcrumbs crumbs={[woNewParent, { label: 'New Work Order' }]} />}
       <h1 className="text-2xl font-bold text-white mb-6">New Work Order</h1>
 
+      <DraftRecovery draft={draft} />
       <form onSubmit={handleSubmit} className="space-y-6">
         {/* Basic Info Card */}
         <div className="card">

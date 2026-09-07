@@ -1,3 +1,5 @@
+import { useTableWorkspace } from '../hooks/useTableWorkspace';
+import { TableWorkspaceControls } from '../components/ui/TableWorkspaceControls';
 import React, { useEffect, useMemo, useState } from 'react';
 import { tabKeyboard } from '../components/operations/tabKeyboard';
 import { useSearchParams } from 'react-router-dom';
@@ -898,6 +900,25 @@ export default function QualityPage() {
     [canManageScrapCodes, togglingCodeId]
   );
 
+  const applyQualityFilters = (filters: Record<string, string>) => {
+    const next = new URLSearchParams(searchParams);
+    for (const key of ['search', 'filter']) {
+      const value = filters[key];
+      if (typeof value === 'string' && value) next.set(key, value); else next.delete(key);
+    }
+    setNcrStatusFilter(typeof filters.filter === 'string' ? filters.filter : '');
+    setSearchParams(next);
+  };
+  const qualityFilters = { search: searchParams.get('search') || '', filter: ncrStatusFilter };
+  const applyQualitySearch = (filters: Record<string, string>) => {
+    const next = new URLSearchParams(searchParams);
+    if (typeof filters.search === 'string' && filters.search) next.set('search', filters.search); else next.delete('search');
+    setSearchParams(next);
+  };
+  const ncrWorkspace = useTableWorkspace('quality', 'ncr', ncrColumns, qualityFilters, applyQualityFilters, { key: 'created_at', dir: 'desc' });
+  const carWorkspace = useTableWorkspace('quality', 'car', carColumns, { search: qualityFilters.search }, applyQualitySearch);
+  const faiWorkspace = useTableWorkspace('quality', 'fai', faiColumns, { search: qualityFilters.search }, applyQualitySearch);
+
   if (loadError) {
     return (
       <div className="space-y-6">
@@ -1007,8 +1028,8 @@ export default function QualityPage() {
         {/* NCR Tab */}
         {activeTab === 'ncr' && (
           <>
-            <div className="flex justify-between items-center mb-4">
-              <div className="flex items-center gap-4">
+            <div className="flex flex-wrap justify-between items-start gap-3 mb-4">
+              <div className="flex min-w-0 flex-wrap items-center gap-3">
                 <h2 className="text-lg font-semibold">Non-Conformance Reports</h2>
                 <select
                   value={ncrStatusFilter}
@@ -1051,8 +1072,10 @@ export default function QualityPage() {
                 <PlusIcon className="h-5 w-5 mr-1" /> New NCR
               </Button>
             </div>
+            <TableWorkspaceControls workspace={ncrWorkspace} />
             <DataTable
-              columns={ncrColumns}
+              columns={ncrWorkspace.displayColumns(ncrColumns)}
+              {...ncrWorkspace.tableProps}
               data={filteredNcrs.filter(
                 ncr =>
                   !searchParams.get('search') ||
@@ -1095,14 +1118,16 @@ export default function QualityPage() {
         {/* CAR Tab */}
         {activeTab === 'car' && (
           <>
-            <div className="flex justify-between items-center mb-4">
+            <div className="flex flex-wrap justify-between items-start gap-3 mb-4">
               <h2 className="text-lg font-semibold">Corrective Action Requests</h2>
               <Button onClick={() => setShowCARModal(true)} className="flex items-center">
                 <PlusIcon className="h-5 w-5 mr-1" /> New CAR
               </Button>
             </div>
+            <TableWorkspaceControls workspace={carWorkspace} />
             <DataTable
-              columns={carColumns}
+              columns={carWorkspace.displayColumns(carColumns)}
+              {...carWorkspace.tableProps}
               data={cars}
               rowKey={car => car.id}
               onRowClick={car => openQualityRecord('car', car.id)}
@@ -1151,14 +1176,16 @@ export default function QualityPage() {
         {/* FAI Tab */}
         {activeTab === 'fai' && (
           <>
-            <div className="flex justify-between items-center mb-4">
+            <div className="flex flex-wrap justify-between items-start gap-3 mb-4">
               <h2 className="text-lg font-semibold">First Article Inspections</h2>
               <Button onClick={() => setShowFAIModal(true)} className="flex items-center">
                 <PlusIcon className="h-5 w-5 mr-1" /> New FAI
               </Button>
             </div>
+            <TableWorkspaceControls workspace={faiWorkspace} />
             <DataTable
-              columns={faiColumns}
+              columns={faiWorkspace.displayColumns(faiColumns)}
+              {...faiWorkspace.tableProps}
               data={fais}
               rowKey={fai => fai.id}
               loading={loading}
@@ -1288,7 +1315,7 @@ export default function QualityPage() {
         closeOnBackdrop={false}
         ariaLabelledBy="scrap-code-modal-title"
       >
-        <div className="flex justify-between items-center mb-4">
+        <div className="flex flex-wrap justify-between items-start gap-3 mb-4">
           <h3 id="scrap-code-modal-title" className="text-lg font-semibold">
             {scrapCodeModal?.mode === 'edit' ? `Edit Scrap Code ${scrapCodeModal.code.code}` : 'New Scrap Reason Code'}
           </h3>
@@ -1523,7 +1550,7 @@ export default function QualityPage() {
 
       {/* NCR Modal */}
       <Modal open={showNCRModal} onClose={requestCloseNCRModal} size="lg" closeOnBackdrop={false}>
-        <div className="flex justify-between items-center mb-4">
+        <div className="flex flex-wrap justify-between items-start gap-3 mb-4">
           <h3 className="text-lg font-semibold">New Non-Conformance Report</h3>
           <button onClick={requestCloseNCRModal} aria-label="Close dialog">
             <XMarkIcon className="h-6 w-6" aria-hidden="true" />
@@ -1656,7 +1683,7 @@ export default function QualityPage() {
 
       {/* CAR Modal */}
       <Modal open={showCARModal} onClose={requestCloseCARModal} size="lg" closeOnBackdrop={false}>
-        <div className="flex justify-between items-center mb-4">
+        <div className="flex flex-wrap justify-between items-start gap-3 mb-4">
           <h3 className="text-lg font-semibold">New Corrective Action Request</h3>
           <button onClick={requestCloseCARModal} aria-label="Close dialog">
             <XMarkIcon className="h-6 w-6" aria-hidden="true" />
@@ -1735,7 +1762,7 @@ export default function QualityPage() {
 
       {/* FAI Modal */}
       <Modal open={showFAIModal} onClose={requestCloseFAIModal} size="lg" closeOnBackdrop={false}>
-        <div className="flex justify-between items-center mb-4">
+        <div className="flex flex-wrap justify-between items-start gap-3 mb-4">
           <h3 className="text-lg font-semibold">New First Article Inspection</h3>
           <button onClick={requestCloseFAIModal} aria-label="Close dialog">
             <XMarkIcon className="h-6 w-6" aria-hidden="true" />
