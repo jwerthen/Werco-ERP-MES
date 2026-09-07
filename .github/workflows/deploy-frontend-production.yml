@@ -9,11 +9,10 @@ on:
       - '.github/workflows/ci-cd.yml'
   workflow_dispatch:
 
-# Shared with ci-cd.yml's deploy-production job on purpose: BOTH workflows run
-# `railway up --service werco-frontend` on a push to main that touches frontend/**, and
-# Railway keeps one active deployment per service. Without a shared group they race, and
-# the loser's exact-SHA verification polls for a SHA that will never be live. A single
-# group serializes every production deploy in this repo, whichever workflow owns it.
+# Shared with ci-cd.yml's deploy-production job: frontend-only and manual releases
+# can still use this path. Changes that include backend code defer to the full
+# pipeline, which verifies the new API before publishing its dependent frontend.
+# Railway keeps one active deployment per service, so both paths stay serialized.
 #
 # cancel-in-progress flipped true -> false to match: killing an in-flight production
 # deploy mid-upload is worse than queueing behind it, and GitHub still cancels superseded
@@ -23,9 +22,49 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  classify:
+    name: Classify Frontend Release
+    runs-on: ubuntu-latest
+    outputs:
+      standalone: ${{ steps.classify.outputs.standalone }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Defer combined releases to the full pipeline
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          standalone=false
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            standalone=true
+          elif [ "$EVENT_NAME" = "push" ] &&
+               [[ "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ ]] &&
+               [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] &&
+               [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] &&
+               git cat-file -e "${BEFORE_SHA}^{commit}" &&
+               git cat-file -e "${HEAD_SHA}^{commit}"; then
+            # Compare the entire push, including deletions/renames. A missing base,
+            # unknown commit or failed diff safely leaves the full pipeline in charge.
+            if git diff --quiet --no-renames "$BEFORE_SHA" "$HEAD_SHA" -- backend/; then
+              standalone=true
+            fi
+          fi
+          printf 'standalone=%s\n' "$standalone" >> "$GITHUB_OUTPUT"
+          if [ "$standalone" = "true" ]; then
+            echo "Frontend-only or explicit manual release may use this workflow."
+          else
+            echo "Combined or unclassified release: the full CI/CD pipeline will deploy backend first."
+          fi
+
   deploy-frontend:
     name: Deploy Frontend (Railway Production)
     runs-on: ubuntu-latest
+    needs: classify
+    if: needs.classify.outputs.standalone == 'true'
     env:
       # Use explicit environment secrets to avoid stale fallback tokens.
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}

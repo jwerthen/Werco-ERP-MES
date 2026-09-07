@@ -516,8 +516,8 @@ jobs:
       #
       # So the exit status is demoted to advisory (still streamed here, still visible in
       # the UI as a distinct outcome) and the job is gated on two blocking steps instead:
-      # the upload receipt immediately below, and "Verify production is serving this
-      # commit", which polls the running service for the SHA stamped above. That gate is
+      # the upload receipt immediately below, and the blocking release-SHA checks,
+      # which poll the running services for the SHA stamped above. That gate is
       # strictly stronger than the exit status it replaces -- it cannot pass unless the
       # new image is actually serving traffic.
       #
@@ -559,6 +559,19 @@ jobs:
             exit 1
           fi
           echo "Railway accepted the backend upload and queued a build."
+
+      # A queued backend build is not a ready API. This release adds endpoints
+      # that the new frontend needs, so migration/startup and the exact release
+      # must be verified before any frontend (or worker) upload can proceed.
+      - name: Verify backend is serving this commit
+        env:
+          PRODUCTION_API_URL: ${{ vars.PRODUCTION_API_URL }}
+        run: |
+          python3 .github/scripts/verify_release.py \
+            --label backend \
+            --url "${PRODUCTION_API_URL}/health/detailed" \
+            --json-path checks.application.release \
+            --expect "${GITHUB_SHA}"
 
       - name: Deploy Frontend to Production
         continue-on-error: true
@@ -625,28 +638,13 @@ jobs:
           fi
           echo "Railway accepted the worker upload and queued a build."
 
-      # THE gate for this job, and the reason the deploy steps above can be advisory.
-      #
-      # What this replaced: a loop that curl'd /health and passed the moment anything
-      # answered. The OLD container answers /health perfectly, so the check proved the
-      # site was up and never that the deploy had landed -- it would have gone green
-      # throughout the 2026-08-04 incident had it been reached at all.
-      #
-      # Each poll compares the SHA baked into the artifact against the SHA this run
-      # deployed, so it can only pass once the new image is serving traffic. The frontend
-      # marker is compared by BODY, not status code: nginx's SPA fallback returns 200
-      # with index.html for a missing /release.txt, so a status check would pass when the
-      # marker was never deployed at all.
-      - name: Verify production is serving this commit
+      # Backend identity was verified before publishing dependent code. Finish
+      # by checking the frontend artifact's SHA (a plain HTTP 200 is insufficient
+      # because nginx's SPA fallback serves index.html for a missing marker).
+      - name: Verify frontend is serving this commit
         env:
-          PRODUCTION_API_URL: ${{ vars.PRODUCTION_API_URL }}
           PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
         run: |
-          python3 .github/scripts/verify_release.py \
-            --label backend \
-            --url "${PRODUCTION_API_URL}/health/detailed" \
-            --json-path checks.application.release \
-            --expect "${GITHUB_SHA}"
           python3 .github/scripts/verify_release.py \
             --label frontend \
             --url "${PRODUCTION_URL}/release.txt" \

@@ -48,6 +48,12 @@ Apply migration `089_quote_line_conversion` before `090_document_revision_chain`
 
 Quote replay protection is optional for older clients; the updated UI always supplies a stable request key during retries. Quote and PO reviewed edits use timestamps to detect stale forms. PostgreSQL row locks protect allocation/conversion paths; repository tests use SQLite plus PostgreSQL SQL compilation, so their results do not claim PostgreSQL contention testing.
 
-No deployment or remote push was performed. MRP supply creation and customer/vendor delivery remain manual steps, now named accurately. Account recovery uses administrator assistance because the app has no verified self-service recovery endpoint. These are explicit product behaviors, not hidden successful side effects.
+The validation above was completed locally before remote publication. The user subsequently authorized merging and pushing this work to main. Main triggers the repository's production pipeline; the Railway API image runs `alembic upgrade head` before starting the server, so migrations 089 and 090 ship with the backend.
+
+The Railway release ordering checks ensure a combined backend/frontend change uses the full pipeline, which verifies the new backend release before uploading the Railway frontend. Its standalone frontend path remains available for frontend-only changes and explicit manual runs. GitHub's main ruleset requires a pull request and five passing CI contexts before merge. The release-order regression set passed 111 tests, with YAML and embedded-shell syntax validation.
+
+The user-facing `wercomfg.app` domain is hosted by the existing Vercel project, separately from the Railway frontend. Railway release markers verify only Railway services; the Vercel domain must be checked independently after publication, as documented in [the deployment runbook](../DEPLOYMENT_RUNBOOK.md). This change does not alter that project's hosting settings or domain association.
+
+MRP supply creation and customer/vendor delivery remain manual steps, now named accurately. Account recovery uses administrator assistance because the app has no verified self-service recovery endpoint. These are explicit product behaviors, not hidden successful side effects.
 
 The app's existing large-bundle warning remains visible in the production build. No speed-up, full assistive-technology conformance, or exhaustive device/role coverage is claimed from these checks.
