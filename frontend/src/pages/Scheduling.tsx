@@ -2,7 +2,7 @@ import { getPriorityClasses, getPriorityLabel } from '../utils/priority';
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
-import { addDays, startOfWeek, isBefore, isAfter, isSameDay } from 'date-fns';
+import { isBefore, isAfter, isSameDay } from 'date-fns';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { usePermissions } from '../hooks/usePermissions';
@@ -154,6 +154,19 @@ const variantBarFill: Record<StatusVariant, string> = {
 
 const statusBarFill = (status: string): string => variantBarFill[statusVariant(status)];
 
+// Calendar-only dates use the shared noon-UTC anchor. Host-local midnight can
+// belong to the previous Central day (and DST can shift host-local additions).
+const addCalendarDays = (day: Date, count: number): Date => {
+  const next = new Date(day);
+  next.setUTCDate(next.getUTCDate() + count);
+  return next;
+};
+
+const getCurrentWeekStart = (): Date => {
+  const today = getCentralTodayDate();
+  return addCalendarDays(today, -((today.getUTCDay() + 6) % 7));
+};
+
 const priorityColors: Record<number, string> = {
   1: 'border-l-red-500',
   2: 'border-l-red-400',
@@ -172,7 +185,7 @@ export default function Scheduling() {
   const [capacityHeatmap, setCapacityHeatmap] = useState<CapacityHeatmapResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
-  const [weekStart, setWeekStart] = useState(startOfWeek(getCentralTodayDate(), { weekStartsOn: 1 }));
+  const [weekStart, setWeekStart] = useState(getCurrentWeekStart);
   const [daysToShow, setDaysToShow] = useState(7);
   const [selectedJob, setSelectedJob] = useState<ScheduledJob | null>(null);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
@@ -254,13 +267,13 @@ export default function Scheduling() {
   // Generate days for display: Monday-Saturday only (skip Sundays)
   const days = useMemo(
     () =>
-      Array.from({ length: daysToShow }, (_, i) => addDays(weekStart, i)).filter(
+      Array.from({ length: daysToShow }, (_, i) => addCalendarDays(weekStart, i)).filter(
         (day) => formatInCentralTime(day, { weekday: 'short' }) !== 'Sun'
       ),
     [daysToShow, weekStart]
   );
   const visibleStart = days[0] || weekStart;
-  const visibleEnd = days[days.length - 1] || addDays(weekStart, daysToShow - 1);
+  const visibleEnd = days[days.length - 1] || addCalendarDays(weekStart, daysToShow - 1);
   const todayStamp = getCentralTodayISODate();
 
   const openJobs = useMemo(() => jobs.filter((job) => job.status !== 'complete'), [jobs]);
@@ -800,7 +813,7 @@ export default function Scheduling() {
       if (!scheduledStart) {
         return 'skipped';
       }
-      const shiftedDate = addDays(scheduledStart, bulkShiftDays);
+      const shiftedDate = addCalendarDays(scheduledStart, bulkShiftDays);
       await api.scheduleWorkOrder(job.work_order_id, {
         scheduled_start: getCentralDateStamp(shiftedDate),
         work_center_id: job.work_center_id,
@@ -865,12 +878,12 @@ export default function Scheduling() {
   };
 
   const navigateWeek = (direction: number) => {
-    setWeekStart(addDays(weekStart, direction * 7));
+    setWeekStart(addCalendarDays(weekStart, direction * 7));
     setCapacityCellFocus(null);
   };
 
   const goToToday = () => {
-    setWeekStart(startOfWeek(getCentralTodayDate(), { weekStartsOn: 1 }));
+    setWeekStart(getCurrentWeekStart());
     setCapacityCellFocus(null);
   };
 

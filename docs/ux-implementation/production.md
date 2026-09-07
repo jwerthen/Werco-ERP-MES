@@ -24,6 +24,7 @@ Implemented in `codex/ux-audit-improvements`, based on origin/main `0a383b8`. Ve
 - The final approved-scope gap closure passed all Scheduling/WorkOrderDetail regressions: **16 suites / 174 tests**, including four new delay/failure/pending cases. Frontend TypeScript and lint passed after these changes. This is a supplement to the combined run, not an additive coverage total.
 - Isolated migration review found one Alembic head, `090_document_revision_chain`, following `089_quote_line_conversion` and `088_api_tokens`. Applying 089/090 to a scratch SQLite schema without their new fields produced zero Alembic model differences for quotes, quote lines and documents; both downgrades succeeded. QuoteLine's foreign-key name also matches migration 089 for metadata-created schemas. This does not claim a PostgreSQL migration rehearsal.
 - After the final foreign-key naming alignment, quote conversion and migration regressions passed **17 tests**; Black, isort and model mypy checks passed. The full backend run preceded this metadata-only correction and was not repeated.
+- PR CI exposed a Scheduling calendar anchor defect under UTC: host-midnight Monday was Sunday in Central time and disappeared from the board. Scheduling now preserves the shared noon-UTC calendar anchor for week/date movement. The two move regressions use a fixed Monday and verify the correctly dated cell and visible Monday label, retaining their pending/reconciliation assertions. All **9 Scheduling tests** passed with coverage instrumentation under `UTC`, `America/Chicago`, and `Pacific/Kiritimati` (UTC+14); source TypeScript and lint passed. These focused runs do not replace the full configured CI coverage gate.
 
 ## Practical limits
 
@@ -31,7 +32,9 @@ MRP review remains acknowledgement; the planner creates supply documents separat
 
 ## Shared navigation and quote review contributions
 
-PartEdit, PartsNew, BOMImportWizard and the new BOM line editor call the shared `markSaved()` after successful writes so deliberate save navigation can proceed while unsaved navigation remains guarded.
+PartEdit, PartsNew, BOMImportWizard, Process Sheets and the new BOM line editor call the shared `markSaved()` after successful writes so deliberate save navigation can proceed while unsaved navigation remains guarded.
+
+PR CI caught the Process Sheets integration: creation saved the record, but selecting its `?sheet=id` detail triggered the still-dirty form's leave guard. The form now clears that guard only after a successful create/update and before its selection callback. A regression with the real data router and unsaved provider failed before the fix and passes afterward; a refused-create regression verifies the title remains protected when navigation is cancelled. All 29 Process Sheets tests passed. The unchanged complete browser journey also passed against the isolated local pair, within the 67-pass/1-expected-skip full browser run recorded by the operations review.
 
 The quote review corrected tenant-scoped work-order number generation, nonproduction remaining-line status, stale list/detail associations and refusal to reopen partially converted quotes for line deletion. Quote updates reject stale reviewed timestamps; line-only edits advance the parent timestamp even when totals match. Quote detail eagerly loads work-order links. The expiration editor correction is implemented.
 

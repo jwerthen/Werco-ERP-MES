@@ -32,22 +32,29 @@ SQLite does not validate production row-lock contention; a PostgreSQL staging ex
 
 After the full backend run, the model's existing quote-line FK was given the same explicit constraint name as migration 089, allowing metadata-created schemas to follow the same downgrade path. This metadata-only correction passed 17 quote-conversion/migration tests plus model type/format checks. The full backend suite was not repeated for the constraint-name alignment.
 
+PR #265 subsequently passed the full GitHub backend gate at commit `4888c517a0c81680b63345d012ee79524be8d0bf`: **7,011 tests**, 27 warnings, **85.86% coverage**, 1,147.62 seconds. This includes the FK-name alignment and the additional release-order regressions.
+
 ## Frontend
 
 | Gate | Result |
 |---|---|
-| Combined Jest suite | **326 suites / 3,550 tests passed**, 30.786 seconds |
+| Combined Jest suite with CI coverage and UTC timezone | **326 suites / 3,552 tests passed**, 54.926 seconds |
+| Frontend coverage | 64.30% statements, 54.63% branches, 49.42% functions, 64.67% lines; repository thresholds passed |
 | Source and test TypeScript | Passed |
 | ESLint with zero warnings | Passed |
-| Production Vite build | Passed, 7.79 seconds |
+| Production Vite build | Passed, 3.45 seconds |
 
-The completed gate table includes the final Receiving history race, StrictMode calculator restoration, Scheduling duplicate-drop protection, work-order independent support loading and retained stale-content corrections. The Receiving and calculator regressions reproduced their observed browser failures before the corresponding fixes. The final full suite ran after frontend changes were frozen.
+The completed gate table includes the final Receiving history race, StrictMode calculator restoration, Scheduling duplicate-drop protection, work-order independent support loading and retained stale-content corrections. The Receiving and calculator regressions reproduced their observed browser failures before the corresponding fixes.
+
+PR CI exposed a Scheduling calendar bug under UTC: host-local week-start calculation could move Monday's Central date into Sunday and omit its jobs. The calendar now preserves its noon-UTC anchors when calculating week starts and moving days. Both affected tests use a fixed Monday and check the actual dated cell and header while retaining their pending-state and partial-failure assertions. All nine Scheduling regressions passed with coverage in UTC, America/Chicago and Pacific/Kiritimati (UTC+14), followed by the full coverage run and fresh type, lint and build checks reported above.
+
+The full browser run also exposed successful process-sheet creation being blocked by the unsaved-navigation guard. Sheet creation and update now mark the form saved only after a successful API response, before opening its detail. A regression using the real data router and guard reproduced the blocked URL before the fix; its companion test checks that failed creation remains dirty and retains the entered title. The unchanged complete process-sheet browser journey passes with the fix.
 
 Reproduction from `frontend/`:
 
 ```sh
 npm ci
-npm test -- --maxWorkers=4
+CI=true TZ=UTC npm test -- --coverage --watchAll=false --maxWorkers=2
 npm run type-check
 npm run lint -- --max-warnings=0
 npm run build

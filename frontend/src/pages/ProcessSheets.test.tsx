@@ -15,12 +15,28 @@
  */
 
 import React from 'react';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
+import { createMemoryRouter, MemoryRouter, Outlet, RouterProvider } from 'react-router-dom';
 import api from '../services/api';
 import ProcessSheetsPage from './ProcessSheets';
 import { ToastProvider } from '../components/ui';
 import { ProcessSheet, ProcessSheetListItem, ProcessSheetStep } from '../types/processSheet';
+import { UnsavedChangesProvider } from '../context/UnsavedChangesContext';
+
+// jsdom lacks Fetch Request. These data-router routes have no loaders or actions.
+class RouterRequest {
+  url: string;
+  signal?: AbortSignal;
+  method: string;
+  constructor(url: string, init: RequestInit = {}) {
+    this.url = url;
+    this.signal = init.signal ?? undefined;
+    this.method = init.method ?? 'GET';
+  }
+}
+beforeAll(() => {
+  global.Request = RouterRequest as unknown as typeof Request;
+});
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -134,6 +150,18 @@ function renderPage(initialEntry = '/process-sheets') {
   );
 }
 
+function renderGuardedPage() {
+  const router = createMemoryRouter([{
+    element: <ToastProvider><UnsavedChangesProvider><Outlet /></UnsavedChangesProvider></ToastProvider>,
+    children: [
+      { path: '/process-sheets', element: <ProcessSheetsPage /> },
+      { path: '/other', element: <p>Other page</p> },
+    ],
+  }], { initialEntries: ['/process-sheets'] });
+  render(<RouterProvider router={router} />);
+  return router;
+}
+
 describe('ProcessSheets page', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -150,6 +178,38 @@ describe('ProcessSheets page', () => {
 
   afterEach(() => {
     jest.restoreAllMocks();
+  });
+
+  it('opens the successfully created sheet without an unsaved-navigation prompt', async () => {
+    const created: ProcessSheet = { ...draftSheet, id: 3, title: 'New inspection', revision: 'A', steps: [] };
+    mockedApi.createProcessSheet.mockResolvedValue(created);
+    mockedApi.getProcessSheets.mockResolvedValueOnce(listItems).mockResolvedValue([...listItems, toListItem(created)]);
+    mockedApi.getProcessSheet.mockResolvedValue(created);
+    const router = renderGuardedPage();
+    fireEvent.click((await screen.findAllByRole('button', { name: 'New Process Sheet' }))[0]);
+    const form = screen.getByRole('dialog', { name: 'New Process Sheet' });
+    fireEvent.change(within(form).getByLabelText(/^Title/), { target: { value: created.title } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Create Sheet' }));
+    await waitFor(() => expect(mockedApi.createProcessSheet).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(router.state.location.search).toBe('?sheet=3'));
+    expect(await screen.findAllByRole('button', { name: 'Add Step' })).not.toHaveLength(0);
+    expect(screen.queryByRole('dialog', { name: 'Leave with unsaved changes?' })).not.toBeInTheDocument();
+  });
+
+  it('keeps refused sheet creation dirty and preserves its title when navigation is cancelled', async () => {
+    mockedApi.createProcessSheet.mockRejectedValue({ response: { data: { detail: 'Creation refused' } } });
+    const router = renderGuardedPage();
+    fireEvent.click((await screen.findAllByRole('button', { name: 'New Process Sheet' }))[0]);
+    const form = screen.getByRole('dialog', { name: 'New Process Sheet' });
+    fireEvent.change(within(form).getByLabelText(/^Title/), { target: { value: 'Keep this inspection' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Create Sheet' }));
+    expect(await screen.findByText('Creation refused')).toBeInTheDocument();
+    await act(async () => { await router.navigate('/other'); });
+    expect(screen.getByRole('dialog', { name: 'Leave with unsaved changes?' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Stay and keep editing' }));
+    expect(within(screen.getByRole('dialog', { name: 'New Process Sheet' })).getByLabelText(/^Title/)).toHaveValue('Keep this inspection');
+    expect(router.state.location.pathname).toBe('/process-sheets');
+    expect(router.state.location.search).toBe('');
   });
 
   // ---- list ---------------------------------------------------------------

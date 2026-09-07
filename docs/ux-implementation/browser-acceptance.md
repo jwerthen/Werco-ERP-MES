@@ -39,3 +39,11 @@ These are specific rendered samples, not an app-wide WCAG conformance claim. The
 6. Use full Chromium for the native PDF viewer; the smaller headless shell does not provide an equivalent PDF rendering surface. Restrict external requests while allowing local blob URLs and Chromium's built-in viewer resources.
 
 The automated tests additionally cover failure injection, repeated submission, reversed response order, stale edits, complete paginated history and role rules. Those cases are recorded in the [combined validation](validation.md) and domain reports. Screenshots do not independently prove all those contracts.
+
+## PR browser regression follow-up
+
+The initial PR run passed 65 tests, skipped one station-credential scenario, and timed out in the process-sheet journey after creating a sheet. The saved form had not cleared its unsaved state before opening the new sheet detail, so the leave confirmation blocked that navigation. The success path now clears the guard before navigation; the existing [complete process-sheet journey](../../frontend/e2e/process-sheets.spec.ts) passed without changing its steps or assertions.
+
+Separately, the [login fixture](../../frontend/e2e/fixtures.ts) now seeds onboarding completion for the actual authenticated user/company after the real UI login. The [fixture regression](../../frontend/e2e/fixtures.spec.ts) verifies that scoped completion, preserves another workspace/user's history, and exercises Dashboard-to-Work-Orders navigation. It failed against the former global-key helper before the correction.
+
+The final full Chromium suite ran against an isolated copy of the synthetic database on API port 8002 and Vite port 5175, with test rate limits disabled as in CI: **67 passed, 1 expected station-credential skip in 1.5 minutes**, one worker, no retries. The focused authentication/navigation/fixture slice passed **27 tests**. The edited E2E files also passed strict TypeScript compilation and Prettier checks. Production data and onboarding behavior were not changed by the fixture correction.

@@ -36,7 +36,7 @@ The work prioritizes correct business outcomes, recovery from failures, readable
 
 ## Verification
 
-The combined backend run passed **6,998 tests** with **85.86% coverage**. The final frontend run passed **326 suites / 3,550 tests**, both TypeScript checks, zero-warning lint and the production build. A final metadata-only FK naming alignment passed its 17 quote/migration regressions. Fresh-browser scenarios and measured mobile/color checks passed using synthetic local records.
+The combined local backend run passed **6,998 tests** with **85.86% coverage**; the subsequent GitHub backend gate, including FK-name alignment and additional release-order tests, passed **7,011 tests** at the same coverage. The final local frontend run passed **326 suites / 3,552 tests** with CI coverage enabled under UTC, both TypeScript checks, zero-warning lint and the production build. The complete local Playwright suite passed **67 tests**, with one expected station-credential skip. Fresh-browser scenarios and measured mobile/color checks passed using synthetic local records.
 
 Final combined results and browser measurements are recorded in [validation.md](validation.md) and [browser-acceptance.md](browser-acceptance.md). Domain reports retain targeted regression details; their overlapping counts must not be added together.
 

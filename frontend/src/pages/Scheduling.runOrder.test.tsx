@@ -21,7 +21,6 @@ import { MemoryRouter, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import Scheduling from './Scheduling';
 import { ToastProvider } from '../components/ui/Toast';
-import { getCentralDateStamp, getCentralTodayDate } from '../utils/centralTime';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -150,7 +149,8 @@ describe('Scheduling renders the server run order verbatim', () => {
   });
 
   it('guards a row-header machine move until saved state is reconciled', async () => {
-    const today = getCentralDateStamp(getCentralTodayDate());
+    jest.useFakeTimers().setSystemTime(new Date('2026-09-07T17:00:00Z'));
+    const today = '2026-09-07'; // A fixed Monday must be visible in every browser timezone.
     const scheduledJob = { ...serverOrderedJobs[0], scheduled_start: today, remaining_hours: 1 };
     mockedApi.getWorkCenters.mockResolvedValue([...workCenters, { id: 8, code: 'MILL-2', name: 'Mill 2', capacity_hours_per_day: 8 }] as never);
     mockedApi.getSchedulableWorkOrders.mockResolvedValue([scheduledJob] as never);
@@ -158,6 +158,11 @@ describe('Scheduling renders the server run order verbatim', () => {
     mockedApi.updateOperationWorkCenter.mockImplementation(() => new Promise(resolve => { resolveMove = () => resolve({} as never); }));
     renderScheduling();
     const card = await screen.findByRole('button', { name: /WO-7001/ });
+    const scheduledCell = card.closest('td') as HTMLTableCellElement;
+    expect(scheduledCell).toHaveAttribute('data-capacity-cell', `7-${today}`);
+    const dateHeader = within(card.closest('table')!).getAllByRole('columnheader')[scheduledCell.cellIndex];
+    expect(within(dateHeader).getByText('Mon')).toBeInTheDocument();
+    expect(within(dateHeader).getByText('7')).toBeInTheDocument();
     const target = screen.getByText('Mill 2').closest('td')!;
     const dataTransfer = { setData: jest.fn(), effectAllowed: '', dropEffect: '' };
     fireEvent.dragStart(card, { dataTransfer });
@@ -172,7 +177,8 @@ describe('Scheduling renders the server run order verbatim', () => {
   });
 
   it('keeps a named partial scheduling failure available after the machine assignment changes', async () => {
-    const today = getCentralDateStamp(getCentralTodayDate());
+    jest.useFakeTimers().setSystemTime(new Date('2026-09-07T17:00:00Z'));
+    const today = '2026-09-07';
     const scheduledJob = { ...serverOrderedJobs[0], scheduled_start: today, remaining_hours: 1 };
     mockedApi.getWorkCenters.mockResolvedValue([...workCenters, { id: 8, code: 'MILL-2', name: 'Mill 2', capacity_hours_per_day: 8 }] as never);
     mockedApi.getSchedulableWorkOrders.mockResolvedValueOnce([scheduledJob] as never)
@@ -181,9 +187,9 @@ describe('Scheduling renders the server run order verbatim', () => {
     mockedApi.scheduleWorkOrder.mockRejectedValue({ response: { data: { detail: 'Date is unavailable' } } });
     const { container } = renderScheduling();
     const card = await screen.findByRole('button', { name: /WO-7001/ });
+    expect(card.closest('td')).toHaveAttribute('data-capacity-cell', `7-${today}`);
     const target = container.querySelector(`[data-capacity-cell="8-${today}"]`)!;
     const dataTransfer = { setData: jest.fn(), effectAllowed: '', dropEffect: '' };
-    jest.useFakeTimers();
     fireEvent.dragStart(card, { dataTransfer });
     fireEvent.drop(target, { dataTransfer });
     const warning = await screen.findByText(/WO-7001: Date is unavailable.*machine move may already have succeeded/);
