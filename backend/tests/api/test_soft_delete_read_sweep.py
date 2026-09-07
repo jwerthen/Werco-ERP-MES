@@ -266,13 +266,9 @@ def test_customer_names_dropdown_excludes_soft_deleted_customers(client: TestCli
     customer picker. The sibling ``list_customers`` has always applied the
     predicate; this one did not.
 
-    The divergent state is reachable through the API, which is why this is a
-    real leak rather than a defence-in-depth nicety: ``DELETE /customers/{id}``
-    happens to set ``is_active=False`` alongside the soft delete, but
-    ``PUT /customers/{id}`` accepts ``is_active`` and carries **no**
-    ``is_deleted`` guard, so a deleted customer can be flipped back to active
-    while staying deleted -- and reappear in every dropdown. This test walks
-    exactly that path.
+    The partial-update endpoint now rejects deleted customers. Historical rows
+    can still carry is_active=True/is_deleted=True, so preserve that fixture
+    explicitly and assert the dropdown excludes it independently of the writer.
     """
     headers = headers_for(make_user(db_session, role=UserRole.ADMIN, company_id=1))
 
@@ -286,10 +282,16 @@ def test_customer_names_dropdown_excludes_soft_deleted_customers(client: TestCli
 
     assert client.delete(f"/api/v1/customers/{doomed_id}", headers=headers).status_code == status.HTTP_200_OK
 
-    # Re-activate the soft-deleted row: is_deleted stays True, is_active goes
-    # back to True. This is the state the missing predicate leaked.
+    # The writer now refuses tombstones; seed a historical divergent flag pair
+    # through the fixture ORM so the read predicate remains independently tested.
     reactivate = client.put(f"/api/v1/customers/{doomed_id}", headers=headers, json={"is_active": True})
-    assert reactivate.status_code == status.HTTP_200_OK, reactivate.text
+    assert reactivate.status_code == status.HTTP_404_NOT_FOUND, reactivate.text
+    from app.models.customer import Customer
+
+    historical = db_session.query(Customer).filter(Customer.id == doomed_id).one()
+    historical.is_active = True
+    assert historical.is_deleted is True
+    db_session.commit()
 
     names = client.get("/api/v1/customers/names", headers=headers)
     assert names.status_code == status.HTTP_200_OK, names.text

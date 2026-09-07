@@ -6,6 +6,7 @@ import { Button, ErrorState, FormField } from '../ui';
 import usePermissions from '../../hooks/usePermissions';
 import useUnsavedChanges from '../../hooks/useUnsavedChanges';
 import EntityPicker from './EntityPicker';
+import SupplierFollowup from './SupplierFollowup';
 
 export default function PurchaseOrderDetail({
   id,
@@ -24,10 +25,14 @@ export default function PurchaseOrderDetail({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [supplierDirty, setSupplierDirty] = useState(false);
+  const [supplierSaving, setSupplierSaving] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const { can } = usePermissions();
   const editable = record?.status === 'draft' && can('purchasing:create');
-  const { confirmDiscard, markSaved } = useUnsavedChanges(!!form && JSON.stringify(form) !== original);
+  const { confirmDiscard, markSaved } = useUnsavedChanges(
+    supplierDirty || (!!form && JSON.stringify(form) !== original)
+  );
   useEffect(() => {
     let active = true;
     setLoading(true);
@@ -69,7 +74,7 @@ export default function PurchaseOrderDetail({
     };
   }, [id, attempt]);
   const close = () => {
-    if (!saving && confirmDiscard()) onClose();
+    if (!saving && !supplierSaving && confirmDiscard()) onClose();
   };
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -142,6 +147,20 @@ export default function PurchaseOrderDetail({
               Print purchase order
             </Button>
           </div>
+          {['sent', 'partial'].includes(record.status) && (
+            <SupplierFollowup
+              key={record.id}
+              record={record}
+              canEdit={can('purchasing:create')}
+              onDirtyChange={setSupplierDirty}
+              onBusyChange={setSupplierSaving}
+              onReload={() => setAttempt(n => n + 1)}
+              onSaved={next => {
+                setRecord(next);
+                onLoaded(next);
+              }}
+            />
+          )}
           <fieldset disabled={!editable || saving} className="space-y-4">
             <div className="grid grid-cols-2 gap-3">
               {['required_date', 'expected_date', 'ship_to', 'shipping_method'].map(key => (
@@ -306,7 +325,7 @@ export default function PurchaseOrderDetail({
             </p>
           )}
           <div className="flex justify-end gap-3">
-            <Button variant="secondary" onClick={close} disabled={saving}>
+            <Button variant="secondary" onClick={close} disabled={saving || supplierSaving}>
               Close
             </Button>
             {editable && (

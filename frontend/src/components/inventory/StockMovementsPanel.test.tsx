@@ -172,3 +172,11 @@ describe('StockMovementsPanel', () => {
     expect(await screen.findAllByText('WO-9')).not.toHaveLength(0);
   });
 });
+
+test('job timeline drill-in scopes the first request and can clear the job filter', async () => {
+  mockedApi.getInventoryTransactions.mockResolvedValue([]);
+  render(<StockMovementsPanel initialWorkOrderId={42} />);
+  await waitFor(() => expect(mockedApi.getInventoryTransactions).toHaveBeenCalledWith(expect.objectContaining({ work_order_id: 42, offset: 0 })));
+  fireEvent.click(screen.getByRole('button', { name: /clear job filter/i }));
+  await waitFor(() => expect(mockedApi.getInventoryTransactions).toHaveBeenLastCalledWith(expect.not.objectContaining({ work_order_id: 42 })));
+});

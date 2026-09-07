@@ -10,7 +10,7 @@
 
 ## The three golden rules
 
-1. **Always validate first.** Every import on the Import Center page is a two-step flow: **Validate file (dry run)** → review the preview → **Commit import**. A dry run writes *nothing* to the database — not even audit entries — no matter what is in the file. Never commit a file you haven't just validated.
+1. **Always review before committing.** For the eight import types uploaded directly in Import Center, **Validate file (dry run)** saves an **Import receipt** with the input rows and validation results, plus an audit entry. It creates no business records. Review the ready rows, check **I reviewed the ready rows and authorize their import**, then choose **Commit ready rows**. BOMs and routings use their separate module wizards, described below.
 2. **Follow the load order.** Each step below creates the records the next step looks up. Loading out of order doesn't corrupt anything — the rows just fail with "not found" errors — but it wastes your time.
 3. **Excel is retired on a date, not gradually.** After cutover, paper travelers may *mirror* the system during the transition period, but the Excel workbooks may not be updated again. A spreadsheet that keeps changing after go-live becomes a second source of truth, and then nobody trusts either one.
 
@@ -22,37 +22,39 @@
 - **Templates:** every direct-import type has a **Download template (.xlsx)** button in the Import Center. Each template has:
   - an **Import** sheet — the styled header row plus one *guidance row* whose cells start with `# `. Guidance rows are skipped automatically on import; you can leave them in or delete them.
   - an **Examples** sheet with realistic filled-in rows. The importer never reads this sheet, so the examples can't be imported by accident.
-- **Headers:** column names are matched case-insensitively and spaces/dashes become underscores (`Part Number` = `part_number`). Extra columns the importer doesn't know are ignored. If two columns collapse to the *same* name (e.g. `Part Number` and `part-number`), the whole file is rejected so data can't silently merge.
+- **Headers:** column names are matched case-insensitively and spaces/dashes become underscores (`Part Number` = `part_number`). Extra columns are ignored when creating business records, but non-password columns can remain in the saved review and correction download; include only the inputs you need. If two columns collapse to the *same* name (e.g. `Part Number` and `part-number`), the whole file is rejected so data can't silently merge.
 - **Guidance rows vs. real data:** only a `#` **followed by a space** marks a skipped row. A part number like `#10-32X1/2` is real data and imports normally.
 - **Limits:** 10 MB per file, 10,000 data rows per file, 256 columns (columns beyond the 256th are ignored). Split bigger files and import in batches.
 - **Blank rows:** blank rows anywhere in the file are fine — but a run of **more than 1,000 consecutive blank rows** is treated as the *end of the data*. If real rows exist below such a gap, the file is refused with an error naming the row (never silently truncated): delete the blank rows — actually **delete the rows** in Excel, don't just clear the cells — or re-save as CSV, then try again. This bounding is also why a workbook with a bloated "used range" (one stray formatted cell a million rows down) now validates in moments instead of hanging.
-- **Partial success:** on commit, each row (or each PO, for purchase orders) is saved independently. Bad rows are skipped and reported; good rows land. After a partial commit, fix the failed rows in a **new file containing only those rows** — re-committing the full original file will report the already-imported rows as duplicates.
-- **Audit trail:** every committed import row is recorded in the tamper-evident audit log, tagged with source `import`, attributed to the signed-in user who ran it.
+- **Partial success and recovery:** each business record (or whole PO) commits together with its saved row receipt. Other records can succeed even when one needs correction. Use **Download failed rows CSV**, keep `_import_row_id` unchanged, upload it under **Corrected failed-row file**, and choose **Validate corrections**. Review again, then **Commit ready rows**. Created rows cannot be corrected or imported again through that batch. Keep every line of a failed PO together. After a timeout or interrupted session, **Refresh receipt** or reopen the batch from **Saved import batches** before resuming; do not start a new import to guess which rows landed.
+- **Audit trail:** domain imports write through the existing audit service with source `import`, attributed to the signed-in user. Saving a review, correcting failed inputs and committing row receipts also write batch audit entries. Passwords are excluded from saved batches and correction downloads.
 
 ---
 
 ## The migration sequence
 
-Run the steps in this order. The **Why this order** column tells you what breaks downstream if a step is skipped.
+Run the steps in this order. Each step explains which later records depend on it.
+
+For steps 1–6 and 10–11, the current Import Center uses `/api/v1/import/batches`: prepare a saved review, read its receipt, commit ready rows, and correct failed rows. The **Legacy API** endpoints listed below remain available for integrations and supply the same domain validation rules; the page no longer posts its files directly to those endpoints. Their explicit `dry_run=true` mode remains a validation-only API call that creates neither business records nor saved batch/audit entries.
 
 | # | Step | Where | How |
 |---|------|-------|-----|
-| 1 | Work centers | Import Center → **Work Centers** | Template + dry run + commit |
-| 2 | Users / operators | Import Center → **Employees / Users** | Template + dry run + commit |
-| 3 | Customers | Import Center → **Customers** | Template + dry run + commit |
-| 4 | Vendors | Import Center → **Vendors** | Template + dry run + commit |
-| 5 | Parts | Import Center → **Parts** | Template + dry run + commit |
-| 6 | Materials & supplies | Import Center → **Materials & Supplies** | Template + dry run + commit |
+| 1 | Work centers | Import Center → **Work Centers** | Template + saved review + commit ready rows |
+| 2 | Users / operators | Import Center → **Employees / Users** | Template + saved review + commit ready rows |
+| 3 | Customers | Import Center → **Customers** | Template + saved review + commit ready rows |
+| 4 | Vendors | Import Center → **Vendors** | Template + saved review + commit ready rows |
+| 5 | Parts | Import Center → **Parts** | Template + saved review + commit ready rows |
+| 6 | Materials & supplies | Import Center → **Materials & Supplies** | Template + saved review + commit ready rows |
 | 7 | BOMs | BOM page import wizard (Import Center links there) | Upload + review mapping + commit |
 | 8 | Routings | Routing page import wizard (Import Center links there) | Upload + dry run + commit, then **Release** |
 | 9 | Inventory on hand | Warehouse → Inventory tab (no spreadsheet import — see step) | Receive / Adjust with lot numbers |
-| 10 | Open purchase orders | Import Center → **Open Purchase Orders** | Template + dry run + commit |
-| 11 | Open work orders | Import Center → **Open Work Orders** | Template + dry run + commit |
+| 10 | Open purchase orders | Import Center → **Open Purchase Orders** | Template + saved review + commit ready rows |
+| 11 | Open work orders | Import Center → **Open Work Orders** | Template + saved review + commit ready rows |
 
 ### Step 1 — Work centers
 
 - **Before you start:** make sure your **work center types** (machining, welding, inspection, …) are configured in **Admin Settings → Work Center Types**. The import rejects a type the system doesn't know.
-- **Endpoint:** `POST /api/v1/work-centers/import-csv` (Admin or Manager).
+- **Legacy API:** `POST /api/v1/work-centers/import-csv` (Admin or Manager).
 - **Template:** `work-centers`.
 - **Required columns:** `code` (unique, uppercased), `name`, `work_center_type`.
 - **Optional columns:** `description`, `hourly_rate`, `capacity_hours_per_day` (default 8), `efficiency_factor` (default 1.0), `building`, `area`.
@@ -61,10 +63,11 @@ Run the steps in this order. The **Why this order** column tells you what breaks
 
 ### Step 2 — Users / operators
 
-- **Endpoint:** `POST /api/v1/users/import-csv` (**Admin only**).
+- **Legacy API:** `POST /api/v1/users/import-csv` (**Admin only**).
 - **Template:** `users`.
 - **Required columns:** `employee_id` (unique badge/employee number), `first_name`, `last_name`.
-- **Optional columns:** `email` (generated from `employee_id` when blank), `password` (auto-generated for operators; **required** for non-operators — per row, or via the **Default Password** box on the upload form), `role` (default `operator`; valid: `operator`, `supervisor`, `manager`, `admin`, `viewer`, `quality`, `shipping`), `department`.
+- **Optional columns:** `email` (generated from `employee_id` when blank), `password` (auto-generated for operators; **required** for non-operators — per row, or via the **Default password** box on the upload form), `role` (default `operator`; valid: `operator`, `supervisor`, `manager`, `admin`, `viewer`, `quality`, `shipping`), `department`.
+- **Resuming credentials:** saved batches and downloads contain no passwords. When reopening an employee batch, reattach the reviewed file in **Import file** or enter a **Default password** before committing the remaining rows. Operators can omit passwords. If correcting employees, add the required row passwords to the correction file or supply a default; the correction download deliberately leaves them out.
 - **`platform_admin` cannot be imported.** That is the cross-company Werco oversight role; a row with `role` = `platform_admin` is rejected. This is deliberate — a company spreadsheet must never mint a cross-company administrator.
 - **Why now:** every later import is performed *by* a signed-in user and attributed in the audit log; operators need badge accounts before day-1 clock-ins; and certification records (next note) attach to users.
 - **Certifications note:** operator certifications and the skill matrix are **not** part of the spreadsheet import. Enter them in the **Operator Certifications** module after users exist. Missing certs do **not** block day-1 clock-ins — the qualification gate records exceptions, it doesn't stop work — so certs can be backfilled in week 1.
@@ -72,15 +75,15 @@ Run the steps in this order. The **Why this order** column tells you what breaks
 
 ### Step 3 — Customers
 
-- **Endpoint:** `POST /api/v1/customers/import-csv` (Admin or Manager).
+- **Legacy API:** `POST /api/v1/customers/import-csv` (Admin or Manager).
 - **Template:** `customers`.
 - **Required column:** `name` (unique).
-- **Optional columns:** `code` (generated when blank), `contact_name`, `email`, `phone`, `address_line1`, `city`, `state`, `zip_code`, `payment_terms` (default Net 30), `requires_coc` (default true), `requires_fai` (default false).
+- **Optional columns:** `code` (generated when blank), `contact_name`, `email`, `phone`, billing `address_line1`, `address_line2`, `city`, `state`, `zip_code`, `country`; shipping `ship_to_name`, `ship_address_line1`, `ship_address_line2`, `ship_city`, `ship_state`, `ship_zip_code`, `ship_country`; `payment_terms` (default Net 30), `requires_coc` (default true), `requires_fai` (default false), `special_requirements`, `notes`.
 - **Why now:** parts can carry a `customer_name`, and the open-work-order import (step 11) looks up its `customer` column against existing customers — a name that doesn't exist yet fails the row.
 
 ### Step 4 — Vendors
 
-- **Endpoint:** `POST /api/v1/purchasing/vendors/import-csv` (Admin or Manager).
+- **Legacy API:** `POST /api/v1/purchasing/vendors/import-csv` (Admin or Manager).
 - **Template:** `vendors`.
 - **Required column:** `name`.
 - **Optional columns:** `code` (generated when blank), `contact_name`, `email`, `phone`, `payment_terms`, `lead_time_days` (default 14), `is_approved`, `is_as9100_certified`, `is_iso9001_certified`.
@@ -89,15 +92,15 @@ Run the steps in this order. The **Why this order** column tells you what breaks
 
 ### Step 5 — Parts
 
-- **Endpoint:** `POST /api/v1/parts/import-csv` (Admin, Manager, or Supervisor).
+- **Legacy API:** `POST /api/v1/parts/import-csv` (Admin, Manager, or Supervisor).
 - **Template:** `parts`.
 - **Required columns:** `part_number` (unique, uppercased), `name`, `part_type` (`manufactured` or `assembly`).
 - **Optional columns:** `revision` (default A), `description`, `unit_of_measure` (default each — fill it in for any part you don't stock in each; a sub-assembly used as a BOM component inherits its unit from here in step 7, same as a material does), `standard_cost`, `lead_time_days`, `is_critical`, `requires_inspection` (default true), `customer_name`, `customer_part_number`, `drawing_number`.
-- **Why now:** BOMs, routings, inventory, PO lines, and work orders all reference parts. This is the backbone load — take the dry-run review seriously here.
+- **Why now:** BOMs, routings, inventory, PO lines, and work orders all reference parts. This is the backbone load — check the saved review carefully here.
 
 ### Step 6 — Materials & supplies
 
-- **Endpoint:** `POST /api/v1/materials/import-csv` (Admin, Manager, or Supervisor).
+- **Legacy API:** `POST /api/v1/materials/import-csv` (Admin, Manager, or Supervisor).
 - **Template:** `materials`.
 - **Required columns:** `part_number` (unique, uppercased), `name`, `part_type` (`purchased`, `raw_material`, `hardware`, or `consumable`).
 - **Optional columns:** `description`, `unit_of_measure` (default each — **fill this in**, see below), `standard_cost`, `lead_time_days`, `reorder_point`, `reorder_quantity`.
@@ -105,6 +108,8 @@ Run the steps in this order. The **Why this order** column tells you what breaks
 - **Why now:** BOM buy-components and most open-PO lines point at materials. Same master table as parts — part numbers must be unique across both.
 
 ### Step 7 — BOMs
+
+BOM imports do **not** use saved import batches or failed-row receipt recovery. Follow the BOM wizard's preview/commit results and verify the resulting BOM before retrying an interrupted commit.
 
 - **Where:** the **BOM page import wizard** — the Import Center's BOMs tab links you there. This is a different flow from the other imports: you upload a spreadsheet (or PDF/Word drawing), the system proposes a **column mapping**, and you review the mapping and line items before committing.
 - **Endpoints:** `POST /api/v1/bom/import/preview` then `POST /api/v1/bom/import/commit` (Admin, Manager, or Supervisor).
@@ -116,6 +121,8 @@ Run the steps in this order. The **Why this order** column tells you what breaks
 - **Why now:** assemblies need a **released** BOM before work orders behave correctly (master-data health flags this), and MRP component demand comes from BOMs. Components that don't exist yet can be created during commit, but the cleaner path is parts/materials first.
 
 ### Step 8 — Routings
+
+Routing imports do **not** use saved import batches or failed-row receipt recovery. They retain their own per-routing preview/commit workflow and revision conflict checks.
 
 - **Where:** the **Routing page import wizard** — open the **Routing** page and click **Import Routings** (the header button next to *New Routing*). It's a two-step **upload → dry-run preview → commit** modal: pick your file, click **Preview (dry run)** to see what would be created, then **Commit**. The Import Center's **Routings** tab links you here and hosts the template download + column hints; the actual dry-run/commit happens in the wizard.
 - **Who sees the button:** the **Import Routings** button is gated on `routings:create` — visible to **Admin / Manager / Supervisor** only, hidden from operator / quality / shipping / viewer (the same roles that can create a routing by hand). A `403` from the server surfaces as "You don't have permission to import routings."
@@ -134,14 +141,14 @@ This is usually the longest step of the migration — budget real time for it, a
 
 ### Step 9 — Inventory on hand (no spreadsheet import)
 
-Also honest: **there is no bulk upload endpoint for inventory.** On-hand stock is entered on the **Warehouse → Inventory** tab using **Receive** (preferred — it captures lot numbers for traceability) or **Adjust**. The Import Center's Inventory tab offers a starter CSV (`part_number, warehouse, location, quantity_on_hand, lot_number, unit_cost`) — use it as an **offline counting worksheet** to organize the physical count, then key the results in.
+Also honest: **there is no bulk upload endpoint for inventory.** On-hand stock is entered on the **Warehouse → Inventory** tab using **Receive** (preferred — it captures lot numbers for traceability) or **Adjust**. The Import Center's Inventory section links to Warehouse; it does not upload a stock spreadsheet or provide the former starter CSV. An offline counting worksheet can help organize the physical count, then the values must be entered through the inventory workflows.
 
 - **Why now:** parts must exist before stock can be received against them; MRP, shortage checks, and day-1 picks read these balances.
 - **Do a real count.** Migrating an Excel inventory number nobody has verified just moves a wrong number into a better system.
 
 ### Step 10 — Open purchase orders
 
-- **Endpoint:** `POST /api/v1/purchasing/purchase-orders/import` (**Admin or Manager only**).
+- **Legacy API:** `POST /api/v1/purchasing/purchase-orders/import` (**Admin or Manager only**).
 - **Import Center tab:** **Open Purchase Orders**. **Template:** `purchase-orders`.
 - **Required columns:** `vendor_code` (must exist **and not be deleted** — step 4), `part_number` (must exist — steps 5/6), `quantity` (> 0), `unit_price` (≥ 0).
 - **Optional columns:** `po_number` (rows sharing the same `po_number` become **lines of one PO**; blank = a single-line PO with a generated number), `promised_date`.
@@ -153,7 +160,7 @@ Also honest: **there is no bulk upload endpoint for inventory.** On-hand stock i
 
 ### Step 11 — Open work orders
 
-- **Endpoint:** `POST /api/v1/work-orders/import` (Admin, Manager, or Supervisor — the same roles that can create a work order by hand).
+- **Legacy API:** `POST /api/v1/work-orders/import` (Admin, Manager, or Supervisor — the same roles that can create a work order by hand).
 - **Import Center tab:** **Open Work Orders**. **Template:** `work-orders`.
 - **Required columns:** `part_number` (must exist **with a released routing** — steps 5 and 8), `quantity` (> 0).
 - **Optional columns:** `wo_number` (generated when blank; must be unique — checked case-insensitively), `due_date` (**past dates are allowed** — open jobs can genuinely be overdue), `customer` (existing customer code *or* name), `customer_po`, `priority` (1–10, 1 = highest, default 5), `completed_through_seq`.
@@ -176,14 +183,17 @@ This column is how you tell the system "this job is already partway done on pape
 
 ## The dry-run discipline
 
-Every direct import follows the same loop:
+The eight import types uploaded directly in Import Center now follow a saved-review workflow:
 
-1. **Validate file (dry run).** The server fully processes the file — every lookup, every rule, even the routing expansion on work orders — then rolls everything back. Zero writes, guaranteed.
-2. **Read the preview.** It shows: total rows, **would-create** count, skipped count, and a per-row error table (row number, identifier, plain-English reason). Work-order previews additionally show each WO's operations-complete count and which operation becomes ready; PO previews show how rows grouped into POs, with line counts and totals. Numbers the system will generate show as "(generated at commit)" — numbers are only reserved when you commit.
-3. **Fix and re-validate** until the error table is empty, or until every remaining error is one you've consciously decided to handle later (e.g. three parts whose routings aren't released yet).
-4. **Commit.** The commit button is disabled until you've validated, and blocked entirely if the preview shows nothing would be created. Commit re-processes **the same file** — if you edit the file, validate again.
+1. **Validate file (dry run).** Select the file and run validation. The page saves its input and validation results in **Import receipt #…** and records that review in the audit log. No customer, user, part, material, vendor, work center, PO or WO is created yet. Uploading the same normalized input for the same company and record type opens its existing receipt, including any previous successes; it does not start another import or revalidate that receipt automatically.
+2. **Read the receipt.** It shows total input rows, ready rows, business records created, rows needing correction, and each row's status and error. Use **Previous rows / Next rows** for files over 200 rows. PO line counts differ from business-record counts: several input lines can create one PO. Generated identifiers are assigned only when the business record commits.
+3. **Correct invalid/failed rows.** Download the failed-row CSV, edit only those inputs, preserve `_import_row_id`, and keep all lines of a failed PO together. Upload under **Corrected failed-row file** and click **Validate corrections**. Corrections update and audit the saved review; they do not create business records or alter successful rows. Corrected data still needs your review before commit.
+4. **Authorize and commit.** Check **I reviewed the ready rows and authorize their import**, then choose **Commit ready rows**. The server rechecks domain rules against current data; a valid review is not a guarantee that the prerequisites will remain unchanged. The page works through bounded groups and updates the receipt as they finish. Each record (or whole PO) and its receipt commit together. The review checkbox resets when the batch version changes.
+5. **Recover from the receipt.** If the response is lost, refresh the receipt before doing anything else. After reopening the page, use **Saved import batches** for the same record type; history has **Newer batches / Older batches** controls. Review the remaining ready rows and authorize their import again. A row already marked created is not retried, including a WO/PO with a generated number. A stale batch version returns a reload message instead of overwriting newer results.
 
-Picking a new file clears the previous preview automatically — you can never commit against a stale preview.
+**Changing a file does not change a saved review.** Use its failed-row correction controls for recovery. Use the top upload form to prepare genuinely new input; do not upload a reshuffled or edited copy to work around receipt recovery. A different input batch can still create a second business record when the domain permits it. Keep the receipt number in your migration log.
+
+**Legacy API-only dry runs remain different.** Calling a listed direct-import endpoint with `dry_run=true` still validates without business writes, saved batches or audit entries. Those endpoints do not gain the batch ledger or its retry guarantee. Integrations using them must reconcile actual records after an uncertain commit; generated-number rows must never be resubmitted blindly. BOM and routing wizards retain the separate behavior in steps 7–8.
 
 ---
 
@@ -191,12 +201,12 @@ Picking a new file clears the previous preview automatically — you can never c
 
 **Do the full sequence twice as a rehearsal, with your real exported Excel files, before cutover day.** Not sample data — the actual exports, warts and all. The first rehearsal finds the data problems (duplicate part numbers, customers spelled three ways, missing vendor codes); the second proves your fixes worked and gives you a realistic time estimate for cutover day.
 
-**How to rehearse without polluting anything:**
+**Choose the rehearsal scope:**
 
-- **Dry-run rehearsal (recommended, safe anywhere):** run every direct-import step in dry-run mode only, in order, and review every preview. Because a dry run writes nothing, this is safe even in your production company. This is the rehearsal to do twice. Note its honest limits: the BOM wizard previews but steps 7 and 9 (BOM commit, inventory) can't be exercised end-to-end without committing, and dry-run "not found" errors for steps 10–11 are expected when the prerequisite steps weren't committed — focus those previews on file-format and column errors. The routings import (step 8) **does** have a real dry-run preview — run it from the **Routing page import wizard** (Preview/dry run), where the routings commit also lives.
+- **Review-only rehearsal:** validate the direct-import files and review their saved receipts without checking authorization or committing. This creates no business records, but it **does retain the uploaded non-password inputs and review audit entries** in the selected company. Use a scratch environment or practice company if those review records should not remain in production. Re-uploading unchanged input opens its saved review; use **Validate corrections** to recheck failed rows after fixing prerequisites. Expect "not found" errors for later steps when their prerequisite records were never committed. BOM and routing wizard previews remain separate; inventory and full commit behavior cannot be rehearsed this way. For technical integrations needing a zero-write validation rehearsal, use the explicit legacy API `dry_run=true` calls described above.
 - **Full commit rehearsal (optional, scratch environment only):** if you want to rehearse commits end-to-end — including BOMs, a few routings, and inventory — do it in a **development environment with a scratch database** (the dev Docker stack against a throwaway database, re-seeded from scratch; see [DEVELOPMENT.md](DEVELOPMENT.md)), or in a **separate practice company** created by your platform admin. **Be honest with yourself about resets: there is no "undo import" button.** Committed rows can only be cleaned up one-by-one (and traced records soft-delete rather than vanish), so never commit-rehearse in the production company. Resetting between rehearsals means wiping and re-creating the scratch database or practice company, not deleting rows.
 
-**Keep a migration log** during rehearsals: each step, file name, row counts (total / created / skipped), time taken, and every error you had to fix. Cutover day should be an execution of that log, not an adventure.
+**Keep a migration log** during rehearsals: each step, file name, batch receipt number where available, row/record counts (total / ready / created / needing correction), time taken, and every error you had to fix. Cutover day should be an execution of that log, not an adventure.
 
 ---
 
@@ -206,8 +216,8 @@ The night before / morning of:
 
 - [ ] **Freeze Excel.** Announce the freeze: from this moment, the workbooks are read-only. Any change after the freeze either waits for the new system or is written on the paper traveler.
 - [ ] **Export fresh files** from the frozen workbooks — not the rehearsal copies.
-- [ ] Run the sequence in order, **dry-run-first on every step**, committing on clean previews. Use your rehearsal log as the script.
-- [ ] After each commit, **verify counts**: the created-count on screen vs. the row count in the source file; spot-check a handful of records in the app.
+- [ ] Run the sequence in order, **review-first on every step**, authorizing only the intended ready rows (or committing the reviewed BOM/routing wizard result). Use your rehearsal log as the script.
+- [ ] After each commit, **verify the receipt counts** against the source file, distinguishing PO lines from POs created; spot-check a handful of created records in the app. Keep unresolved rows in the saved batch for correction.
 - [ ] After step 11, walk the floor queues with a supervisor: does each work center's queue match reality? Are the "current operations" right? Fix discrepancies now (the `completed_through_seq` values are the usual culprit).
 - [ ] Confirm receiving can see the open POs (Warehouse → Receiving → open POs list).
 - [ ] First operator clock-ins on the real queues.
@@ -233,22 +243,25 @@ The night before / morning of:
 | "File is too large (max 10 MB)" / "Too many rows (max 10000)…" | File caps | Split the file and import in batches |
 | "Found data at row N after a gap of more than 1,000 blank rows…" | Real rows sit below a block of 1,000+ blank rows; the importer treats such a gap as end of data and refuses the whole file rather than silently dropping those rows | Delete the blank rows (select and **delete the rows** in Excel — clearing the cells isn't enough) or re-save as CSV, then try again |
 | "The spreadsheet's used range is enormous (over 100,000 rows scanned)…" | The workbook *claims* far more rows than it has data — usually a stray formatted cell far below the real rows | Delete trailing empty rows/columns and re-save, or just re-save as CSV |
-| "The server took too long to read this file…" on **Validate** | The page stops waiting for a dry run after **2 minutes** — heavily formatted spreadsheets can be slow to read | Trim empty rows/columns or re-save as CSV, then validate again |
-| "The server took too long to respond, but the import may still be processing…" on **Commit** | The page stops waiting for a commit after **10 minutes** — but the server may **still be importing**; the rows are not necessarily lost | Don't re-commit blind. Wait a moment, then re-run **Validate file (dry run)**: rows that already landed show as "already exists", so the preview tells you exactly what's left before you retry |
+| Validation fails or the connection drops before a receipt appears | Parsing or saving the review may have failed; no business records are created by validation | Check **Saved import batches**. Retrying the same input opens its saved receipt if preparation completed. For file-format errors, trim empty rows/columns or re-save as CSV and validate the corrected input |
+| Commit fails, disconnects, or says to refresh the receipt | Some groups may already have committed; a failed response is not proof that nothing happened | Use **Refresh receipt**, or reopen it from **Saved import batches**. Review the remaining ready rows and authorize **Commit ready rows** again. Created rows are preserved and will not repeat in this batch |
+| "Batch changed. Reload its receipt before continuing." | Another request changed the saved batch version | Refresh its receipt and review the current statuses before authorizing more rows; do not overwrite the newer receipt |
+| "Corrections must contain distinct failed rows from this batch; created rows cannot change" | The correction file has a missing/changed row ID, a duplicate row, or a successful row | Download a fresh failed-row CSV from this receipt, keep `_import_row_id` unchanged, and correct only its failed inputs |
 | 403 / "permission" error on upload | Your role can't run this import | Users: **Admin** only. Customers, vendors, work centers, open POs: **Admin/Manager**. Parts, materials, routings, open WOs: **Admin/Manager/Supervisor**. Anyone signed in can download templates |
 | "role 'platform_admin' cannot be assigned via import" | A user row tried to grant the cross-company oversight role | Use a normal role; platform admins are provisioned outside tenant imports, by design |
 | "…already exists" on a row you don't think is a duplicate | Duplicate detection is **case-insensitive**: `wo-1001` collides with `WO-1001`, `EMP-7` with `emp-7`, and in-file duplicates are caught too | Find and fix the casing variant; don't just re-submit |
-| "part 'X' has no released routing" (open-WO import) | The routing exists but wasn't **released**, or doesn't exist | Step 8: build/release the routing, then re-import just the failed rows |
+| "part 'X' has no released routing" (open-WO import) | The routing exists but wasn't **released**, or doesn't exist | Step 8: build/release the routing, then download and validate the failed rows through this batch's correction controls |
 | "matches a deleted part…" / "A deleted/inactive BOM exists for part 'X'…" / "A BOM already exists for assembly part 'X'" (BOM wizard commit) | The assembly or a component part number collides with an existing record — **including soft-deleted ones**, common after cleaning up an earlier commit by deleting (records soft-delete, they don't vanish) | Follow the message: restore the deleted part/BOM (or use a different part number), reactivate or delete the inactive BOM, or edit the existing BOM on the BOM page instead of re-importing. The refused import writes nothing |
-| "skipped: row N in the same purchase order failed validation" | POs import whole-or-not-at-all — one bad line skips its whole `po_number` group | Fix the named row; re-import that PO's rows together |
-| "vendor 'X' was deleted — restore it (`POST /api/v1/purchasing/vendors/{id}/restore`) and re-import…" | The vendor was **deleted** (records soft-delete, they don't vanish, and a deleted vendor is no longer selectable anywhere) | **There is now a screen for this**, and it is the route to prefer: **Purchasing → Vendors → Deleted → Restore** (Admin/Manager). The message still carries the vendor's real id and API URL, which stays the fastest route for an admin already holding a token. Note what a restore does *not* do: it returns the vendor to the `is_active` it had when it was deleted, so a supplier that had been switched off comes back **switched off** — and a vendor deleted before 2026-08-16 comes back switched off too, because the prior state was not being recorded then and the app will not guess *"active"* for a supplier the shop may have switched off deliberately. Expect that for anything deleted during or shortly after cutover. The re-import still succeeds in either case — this loader gates on *deleted*, not on *active* — but the same vendor cannot be picked on the **New PO** form, which refuses an inactive supplier. If you want it usable interactively after the cutover, reactivate it as a separate step: **Purchasing → Vendors → Inactive → Edit → tick Active → Save** (Admin/Manager). That view exists precisely because a restored vendor is not on the ordinary Vendors list; the reactivation is an ordinary vendor edit and is recorded in the audit log like any other. Do **not** re-create the vendor under the same code: a deleted vendor still owns its code, so the create is refused as a duplicate, and the spreadsheet's `vendor_code` column is the join key so a different code is not an option either |
-| "vendor 'X' not found (import vendors first)" | The `vendor_code` matches no vendor at all — usually a typo, a trailing space, or step 4 not run | Fix the code (or load the vendor), then re-import that PO's rows together |
+| "skipped: row N in the same purchase order failed validation" | POs import whole-or-not-at-all — one bad line skips its whole `po_number` group | Download the failed-row CSV, fix the named row, and validate corrections with all of that PO's lines together |
+| "vendor 'X' was deleted — restore it (`POST /api/v1/purchasing/vendors/{id}/restore`) and re-import…" | The vendor was **deleted** (records soft-delete, they don't vanish, and a deleted vendor is no longer selectable anywhere) | **There is now a screen for this**, and it is the route to prefer: **Purchasing → Vendors → Deleted → Restore** (Admin/Manager). The message still carries the vendor's real id and API URL, which stays the fastest route for an admin already holding a token. Note what a restore does *not* do: it returns the vendor to the `is_active` it had when it was deleted, so a supplier that had been switched off comes back **switched off** — and a vendor deleted before 2026-08-16 comes back switched off too, because the prior state was not being recorded then and the app will not guess *"active"* for a supplier the shop may have switched off deliberately. Expect that for anything deleted during or shortly after cutover. After restoring, validate the saved batch's failed-row corrections again. This loader gates on *deleted*, not on *active*, so an inactive vendor does not by itself block this historical PO import — but the same vendor cannot be picked on the **New PO** form, which refuses an inactive supplier. If you want it usable interactively after the cutover, reactivate it as a separate step: **Purchasing → Vendors → Inactive → Edit → tick Active → Save** (Admin/Manager). That view exists precisely because a restored vendor is not on the ordinary Vendors list; the reactivation is an ordinary vendor edit and is recorded in the audit log like any other. Do **not** re-create the vendor under the same code: a deleted vendor still owns its code, so the create is refused as a duplicate, and the spreadsheet's `vendor_code` column is the join key so a different code is not an option either |
+| "vendor 'X' not found (import vendors first)" | The `vendor_code` matches no vendor at all — usually a typo, a trailing space, or step 4 not run | Fix the code (or load the vendor), then validate the batch's failed-row corrections with that PO's lines together |
 | "part 'X' already has a routing at revision 'A' — choose a new revision" (routing import) | A routing at that part+revision already exists; the importer never overwrites an existing routing | Bump `routing_revision` to a new value — the import then creates a new draft revision alongside the existing one(s), which stay untouched |
 | "duplicate sequence N for part 'X'" (routing import) | Two operation rows for the same part share a `sequence` | Make every `sequence` unique within a part (10, 20, 30…); re-import that part's rows together |
 | "part 'X' has operations without a work center (row(s) …) — assign a work center before committing" (routing import) | At **commit**, one or more operations had a blank `work_center_code` and no work center assigned in the wizard. Blank codes are fine in **preview**, but commit refuses an unassigned operation | Assign a work center to each flagged operation in the wizard (or fill `work_center_code` in the file), then commit again. No routing is created until all its operations have a work center |
 | "skipped: row N in the same routing failed validation" (routing import) | Routings import whole-or-not-at-all per part — one bad operation row skips its whole part's routing | Fix the named row; re-import that part's rows together |
-| Committed a file twice by mistake | Rows with system-generated numbers may have imported twice (rows with explicit numbers are rejected as duplicates) | Find the duplicates (sort by created date), remove/cancel them, and note it in your migration log |
+| Clicked commit again or reopened the same batch | Created row receipts are durable; the same batch does not repeat those writes | Refresh the receipt and confirm its created-record count. Continue only remaining ready rows |
+| Used a different input batch, a legacy direct API, or the BOM/routing wizard to retry an uncertain import | The saved-batch replay guarantee does not cover those separate submissions; generated identifiers may permit another record | Inspect actual records before retrying. If duplicates exist, use the domain's authorized correction/cancel workflow and record the incident in the migration log |
 
 ---
 
-*Every committed import row is on the tamper-evident audit trail (the direct imports tag source `import`; the BOM wizard's commits tag source `bom_import`), and paper-completed work-order operations are recorded as exactly that — see [API.md](API.md) → Bulk Imports & Templates for the contract details.*
+*Committed imports use the existing audit service (the direct imports tag source `import`; the BOM wizard's commits tag source `bom_import`), and paper-completed work-order operations are identified as paper history. Saved batches also retain per-row outcomes for recovery; those receipts supplement the audit trail. See [API.md](API.md) → Bulk Imports & Templates for the contract details.*

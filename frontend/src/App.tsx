@@ -43,6 +43,7 @@ const Routing = lazyWithRetry(() => import('./pages/Routing'));
 const ProcessSheets = lazyWithRetry(() => import('./pages/ProcessSheets'));
 const SetupWizard = lazyWithRetry(() => import('./pages/SetupWizard'));
 const ImportCenter = lazyWithRetry(() => import('./pages/ImportCenter'));
+const SearchResults = lazyWithRetry(() => import('./pages/SearchResults'));
 const ActionInbox = lazyWithRetry(() => import('./pages/ActionInbox'));
 const Notifications = lazyWithRetry(() => import('./pages/Notifications'));
 const MySettings = lazyWithRetry(() => import('./pages/MySettings'));
@@ -353,6 +354,7 @@ function AppRoutes() {
         />
 
         {/* Work Orders */}
+        <Route path="/search" element={<PrivateRoute><Layout><LazyRoute><SearchResults /></LazyRoute></Layout></PrivateRoute>} />
         <Route
           path="/work-orders"
           element={

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException
-from sqlalchemy import func, tuple_
+from sqlalchemy import func, or_, tuple_
 
 from app.db.locks import acquire_generator_lock
 from app.models.company import Company
@@ -31,6 +31,7 @@ SOURCE_ACCESS = {
     'low_stock': ('inventory:view', 'inventory:adjust'),
     'quality_ncr': ('quality:view', 'quality:inspect'),
     'overdue_po_line': ('purchasing:view', 'purchasing:create'),
+    'supplier_follow_up': ('purchasing:view', 'purchasing:create'),
     'mrp_shortage': ('inventory:view', 'inventory:adjust'),
 }
 SOURCE_ROLES = {
@@ -39,6 +40,7 @@ SOURCE_ROLES = {
     'low_stock': {UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR},
     'quality_ncr': {UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY},
     'overdue_po_line': {UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR},
+    'supplier_follow_up': {UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR},
     'mrp_shortage': {UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR},
 }
 SOURCE_LIMIT = 1000
@@ -102,7 +104,10 @@ class OperationalInboxService:
         )
         qty = func.coalesce(stock.c.quantity, 0)
         po_due = func.coalesce(
-            PurchaseOrderLine.required_date, PurchaseOrder.expected_date, PurchaseOrder.required_date
+            PurchaseOrder.supplier_confirmed_date,
+            PurchaseOrder.expected_date,
+            PurchaseOrderLine.required_date,
+            PurchaseOrder.required_date,
         )
         latest_mrp = (
             self.db.query(MRPRun.id)
@@ -184,6 +189,25 @@ class OperationalInboxService:
                     ),
                 ),
             ),
+            'supplier_follow_up': (
+                PurchaseOrder,
+                self.db.query(PurchaseOrder).filter(
+                    PurchaseOrder.company_id == cid,
+                    PurchaseOrder.is_deleted.is_(False),
+                    PurchaseOrder.status.in_([POStatus.SENT, POStatus.PARTIAL]),
+                    self.db.query(PurchaseOrderLine.id)
+                    .filter(
+                        PurchaseOrderLine.company_id == cid,
+                        PurchaseOrderLine.purchase_order_id == PurchaseOrder.id,
+                        PurchaseOrderLine.is_closed.is_(False),
+                        PurchaseOrderLine.quantity_received < PurchaseOrderLine.quantity_ordered,
+                    )
+                    .exists(),
+                    or_(
+                        PurchaseOrder.supplier_acknowledged_at.is_(None), PurchaseOrder.follow_up_due_date <= self.today
+                    ),
+                ),
+            ),
             'overdue_po_line': (
                 PurchaseOrderLine,
                 self.db.query(PurchaseOrderLine, PurchaseOrder, po_due)
@@ -208,7 +232,29 @@ class OperationalInboxService:
         facts = [kind, record.id, getattr(record, 'updated_at', None)]
         owner = getattr(record, 'assigned_to', None) if kind in ('blocker', 'quality_ncr') else None
         severity = 'medium'
-        if kind == 'mrp_shortage':
+        if kind == 'supplier_follow_up':
+            owner = record.follow_up_owner_id
+            late = bool(record.follow_up_due_date and record.follow_up_due_date < self.today)
+            title = f'{record.po_number}: ' + (
+                'supplier follow-up overdue'
+                if late
+                else (
+                    'awaiting supplier confirmation'
+                    if not record.supplier_acknowledged_at
+                    else 'supplier follow-up due'
+                )
+            )
+            detail = f'Requested {record.required_date or "date unknown"}; supplier confirmed {record.supplier_confirmed_date or "date unknown"}. '
+            detail += f'Follow up {record.follow_up_due_date or "date not set"}. {record.supplier_confirmation_note or "Record the supplier response and next follow-up."}'
+            href, action = f'/purchasing?po={record.id}', 'Record supplier response and next follow-up'
+            facts += [
+                record.supplier_acknowledged_at,
+                record.supplier_confirmed_date,
+                record.follow_up_due_date,
+                record.follow_up_owner_id,
+            ]
+            severity = 'high' if late else 'medium'
+        elif kind == 'mrp_shortage':
             _, run, part = row
             title = f'{part.part_number}: projected material shortage'
             detail = f'{record.quantity:g} units required by {record.required_date}. Planning snapshot {run.run_number}; verify current supply before acting.'
@@ -295,7 +341,7 @@ class OperationalInboxService:
 
     def _apply_state(self, item, state):
         if state:
-            if item.source_kind not in ('blocker', 'quality_ncr'):
+            if item.source_kind not in ('blocker', 'quality_ncr', 'supplier_follow_up'):
                 item.owner_id = state.owner_id
             item.next_action, item.version = state.next_action, state.version
             item.acknowledged = state.acknowledged_occurrence == item.occurrence
@@ -387,6 +433,16 @@ class OperationalInboxService:
                     {'assigned_to': data.owner_id},
                 )
                 record.assigned_to = data.owner_id
+                record.updated_at = self.now.replace(tzinfo=None)
+            elif kind == 'supplier_follow_up':
+                audit.log_update(
+                    'purchase_order',
+                    record.id,
+                    record.po_number,
+                    {'follow_up_owner_id': record.follow_up_owner_id},
+                    {'follow_up_owner_id': data.owner_id},
+                )
+                record.follow_up_owner_id = data.owner_id
                 record.updated_at = self.now.replace(tzinfo=None)
             else:
                 state.owner_id = data.owner_id

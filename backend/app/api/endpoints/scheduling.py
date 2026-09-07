@@ -1,5 +1,6 @@
 from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -33,6 +34,11 @@ from app.schemas.scheduling import (
 )
 from app.services import dispatch_service
 from app.services.audit_service import AuditService
+from app.services.material_readiness_service import (
+    load_locked_material_readiness,
+    material_start_date,
+    validate_material_start,
+)
 from app.services.operational_event_service import OperationalEventService
 from app.services.scheduling_impact_service import SchedulingImpactService
 from app.services.scheduling_projection import (
@@ -190,6 +196,7 @@ def _apply_work_order_schedule(
     scheduled_start: date,
     forward_schedule: bool = False,
     calendars: Optional[dict] = None,
+    materials: Optional[dict] = None,
 ) -> Dict[str, Any]:
     try:
         projected_ops = _project_work_order_schedule(
@@ -203,6 +210,8 @@ def _apply_work_order_schedule(
     except ValueError as error:
         raise HTTPException(409, str(error)) from error
     current_projection = projected_ops[0]
+    if materials is not None:
+        validate_material_start(materials, current_projection["scheduled_start"])
     current_op.scheduled_start = current_projection["scheduled_start"]
     current_op.scheduled_end = current_projection["scheduled_end"]
     days_needed = (current_op.scheduled_end - current_op.scheduled_start).days + 1
@@ -583,6 +592,9 @@ def schedule_work_order(
     endpoints (invariant 2). A genuine no-op self-suppresses.
     """
     work_order = _load_work_order_for_scheduling(db, work_order_id, company_id)
+    materials = load_locked_material_readiness(
+        db, company_id, [work_order], datetime.now(ZoneInfo("America/Chicago")).date()
+    )[work_order.id]
     operations, current_op = _get_current_operation(work_order)
 
     # Snapshot BEFORE any mutation: clear_run_order_on_move rewrites run_order and
@@ -607,6 +619,7 @@ def schedule_work_order(
         scheduled_start=schedule.scheduled_start,
         forward_schedule=schedule.forward_schedule,
         calendars=load_working_calendars(db, company_id),
+        materials=materials,
     )
     OperationalEventService(db).emit_best_effort(
         company_id=company_id,
@@ -688,6 +701,9 @@ def schedule_work_order_earliest(
     endpoints (invariant 2). A genuine no-op self-suppresses.
     """
     work_order = _load_work_order_for_scheduling(db, work_order_id, company_id)
+    materials = load_locked_material_readiness(
+        db, company_id, [work_order], datetime.now(ZoneInfo("America/Chicago")).date()
+    )[work_order.id]
     operations, current_op = _get_current_operation(work_order)
 
     target_work_center_id = request.work_center_id or current_op.work_center_id
@@ -712,7 +728,10 @@ def schedule_work_order_earliest(
         operation=current_op,
         operations=operations,
         work_center_id=target_work_center_id,
-        start_date=request.start_date,
+        start_date=max(
+            request.start_date or datetime.now(ZoneInfo("America/Chicago")).date(),
+            material_start_date(materials) or date.min,
+        ),
         horizon_days=request.horizon_days,
         forward_schedule=request.forward_schedule,
     )
@@ -724,6 +743,7 @@ def schedule_work_order_earliest(
         scheduled_start=earliest_start,
         forward_schedule=request.forward_schedule,
         calendars=load_working_calendars(db, company_id),
+        materials=materials,
     )
     OperationalEventService(db).emit_best_effort(
         company_id=company_id,
@@ -808,6 +828,12 @@ def schedule_operation(
     )
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
+
+    work_order = _load_work_order_for_scheduling(db, operation.work_order_id, company_id)
+    materials = load_locked_material_readiness(
+        db, company_id, [work_order], datetime.now(ZoneInfo("America/Chicago")).date()
+    )[work_order.id]
+    validate_material_start(materials, schedule.scheduled_start)
 
     calendars = load_working_calendars(db, company_id, [operation.work_center_id])
     if calendars.get(operation.work_center_id, {}).get("version", 0) > 0:
@@ -1494,6 +1520,22 @@ def bulk_schedule_earliest(
     """Schedule multiple work orders at their earliest available capacity in one call."""
     results = []
     errors = []
+    scoped_orders = (
+        db.query(WorkOrder)
+        .filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.id.in_(request.work_order_ids),
+            WorkOrder.is_deleted.is_(False),
+        )
+        .all()
+    )
+    by_id = {wo.id: wo for wo in scoped_orders}
+    material_jobs = load_locked_material_readiness(
+        db,
+        company_id,
+        [by_id[key] for key in request.work_order_ids if key in by_id],
+        datetime.now(ZoneInfo("America/Chicago")).date(),
+    )
 
     for wo_id in request.work_order_ids:
         try:
@@ -1505,13 +1547,14 @@ def bulk_schedule_earliest(
                 errors.append({"work_order_id": wo_id, "error": "No work center assigned"})
                 continue
 
+            materials = material_jobs[wo_id]
             earliest_start = _find_earliest_capacity_date(
                 db=db,
                 company_id=company_id,
                 operation=current_op,
                 operations=operations,
                 work_center_id=target_wc_id,
-                start_date=None,
+                start_date=material_start_date(materials),
                 horizon_days=request.horizon_days,
                 forward_schedule=request.forward_schedule,
             )
@@ -1523,6 +1566,7 @@ def bulk_schedule_earliest(
                 scheduled_start=earliest_start,
                 forward_schedule=request.forward_schedule,
                 calendars=load_working_calendars(db, company_id),
+                materials=materials,
             )
             OperationalEventService(db).emit_best_effort(
                 company_id=company_id,

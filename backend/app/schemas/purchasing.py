@@ -268,7 +268,38 @@ class VendorSummary(BaseModel):
         from_attributes = True
 
 
+class SupplierConfirmationUpdate(BaseModel):
+    expected_updated_at: Optional[datetime] = Field(...)
+    acknowledged: bool
+    supplier_confirmed_date: Optional[date] = None
+    supplier_confirmation_reference: Optional[str] = Field(None, max_length=100)
+    supplier_confirmation_note: str = Field(..., min_length=1, max_length=2000)
+    follow_up_owner_id: Optional[int] = Field(None, gt=0)
+    follow_up_due_date: Optional[date] = None
+
+    @field_validator('supplier_confirmed_date', 'follow_up_due_date', mode='before')
+    @classmethod
+    def empty_dates(cls, value):
+        return blank_str_to_none(value)
+
+    @model_validator(mode='after')
+    def valid_confirmation(self):
+        self.supplier_confirmation_note = self.supplier_confirmation_note.strip()
+        if not self.supplier_confirmation_note:
+            raise ValueError('Record the supplier response or follow-up reason')
+        if not self.acknowledged and self.supplier_confirmed_date:
+            raise ValueError('A confirmed date requires supplier acknowledgment')
+        return self
+
+
 class POResponse(POBase):
+    supplier_confirmed_date: Optional[date] = None
+    supplier_acknowledged_at: Optional[datetime] = None
+    supplier_acknowledged_by: Optional[int] = None
+    supplier_confirmation_reference: Optional[str] = None
+    supplier_confirmation_note: Optional[str] = None
+    follow_up_owner_id: Optional[int] = None
+    follow_up_due_date: Optional[date] = None
     id: int
     version: Optional[int] = 0
     po_number: str
@@ -320,6 +351,7 @@ class POListResponse(UTCModel):
 
 # Receipt schemas
 class ReceiptCreate(BaseModel):
+    certificate_document_id: Optional[int] = Field(None, gt=0)
     po_line_id: int = Field(..., gt=0)
     quantity_received: MoneySmall = Field(..., gt=Decimal("0"))
     lot_number: Optional[str] = Field(
@@ -350,6 +382,12 @@ class ReceiptCreate(BaseModel):
     tracking_number: Optional[str] = Field(None, max_length=100)
     notes: Optional[str] = Field(None, max_length=2000)
     over_receive_approved: bool = False
+
+
+class DeliveryReceiptCreate(BaseModel):
+    idempotency_key: str = Field(..., min_length=8, max_length=80, pattern=r"^[a-zA-Z0-9_-]+$")
+    purchase_order_id: int = Field(..., gt=0)
+    lines: List[ReceiptCreate] = Field(..., min_length=1, max_length=50)
 
 
 class ReceiptCorrection(BaseModel):
@@ -453,6 +491,8 @@ class UserSummary(BaseModel):
 
 
 class ReceiptResponse(UTCModel):
+    certificate_document_id: Optional[int] = None
+    delivery_batch_id: Optional[int] = None
     id: int
     receipt_number: str
     po_line_id: int
@@ -515,3 +555,15 @@ class InspectionResultResponse(BaseModel):
     ncr_created: bool = False
     ncr_number: Optional[str] = None
     ncr_id: Optional[int] = None
+
+
+class DeliveryReceiptResponse(BaseModel):
+    batch_id: int
+    idempotency_key: str
+    receipts: List[ReceiptResponse]
+
+
+class ReceivingCertificateResponse(BaseModel):
+    id: int
+    file_name: str
+    document_number: str

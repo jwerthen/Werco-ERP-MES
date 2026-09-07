@@ -114,6 +114,7 @@ const operationalLabels: Record<OperationalSource, string> = {
   low_stock: 'Low stock',
   quality_ncr: 'Quality',
   overdue_po_line: 'Overdue purchase order',
+  supplier_follow_up: 'Supplier follow-up',
   mrp_shortage: 'Projected material shortage',
 };
 

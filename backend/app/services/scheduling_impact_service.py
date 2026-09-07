@@ -23,6 +23,7 @@ from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.schemas.scheduling import SchedulingImpactRequest
 from app.services.audit_service import AuditService
+from app.services.material_readiness_service import lock_material_dependencies, material_readiness
 from app.services.scheduling_projection import (
     _build_daily_load_for_work_center,
     _project_work_order_schedule,
@@ -87,9 +88,11 @@ class ScheduleState:
     orders: Dict[int, WorkOrder]
     operations: Dict[int, WorkOrderOperation]
     calendars: dict
+    materials: dict
 
     def snapshot(self) -> dict:
         return {
+            "materials": self.materials["snapshot"],
             "calendars": [self.calendars[key] for key in sorted(self.calendars)],
             "orders": [
                 {
@@ -190,6 +193,12 @@ class SchedulingImpactService:
             {wo.id: wo for wo in orders},
             operations,
             load_working_calendars(self.db, self.company_id, center_ids),
+            material_readiness(
+                self.db,
+                self.company_id,
+                [next(wo for wo in orders if wo.id == key) for key in ids],
+                datetime.now(ZoneInfo("America/Chicago")).date(),
+            ),
         )
 
     @staticmethod
@@ -240,6 +249,7 @@ class SchedulingImpactService:
                 "outcome": "changed",
                 "reason": None,
                 "operations": [],
+                "materials": state.materials["jobs"][wo.id],
             }
             jobs.append(item)
             if wo.is_deleted or wo.status in TERMINAL or not remaining:
@@ -247,6 +257,15 @@ class SchedulingImpactService:
                     outcome="blocked", reason="Work order is deleted, finished, or has no remaining operations."
                 )
                 continue
+            materials = item["materials"]
+            if materials["status"] == "unknown":
+                item.update(
+                    outcome="blocked",
+                    after_finish=None,
+                    reason="Material-ready date is unknown. Resolve the shortages or demand warnings before applying a schedule.",
+                )
+                continue
+            material_start = date.fromisoformat(materials["ready_date"]) if materials["ready_date"] else today
             if any(
                 op.work_center_id not in state.centers or not state.centers[op.work_center_id].is_active
                 for op in remaining
@@ -301,7 +320,12 @@ class SchedulingImpactService:
                 for offset in range(request.horizon_days):
                     try:
                         candidate = _project_work_order_schedule(
-                            ops, current, today + timedelta(days=offset), current.work_center_id, True, state.calendars
+                            ops,
+                            current,
+                            max(today, material_start) + timedelta(days=offset),
+                            current.work_center_id,
+                            True,
+                            state.calendars,
                         )
                     except ValueError as error:
                         calendar_error = str(error)
@@ -328,6 +352,24 @@ class SchedulingImpactService:
                         or f"No available working capacity within {request.horizon_days} days. Adjust the calendar/capacity or review a manual date.",
                     )
                     continue
+            if materials["ready_date"] and projections[0]["scheduled_start"] < material_start:
+                item.update(
+                    outcome="blocked",
+                    after_finish=None,
+                    reason=f"Requested start precedes material readiness on {material_start.isoformat()}. Review earliest available instead.",
+                )
+                continue
+            if any(
+                source.get("expires_on") and source["expires_on"] < projections[0]["scheduled_start"].isoformat()
+                for line in materials["lines"]
+                for source in line["sources"]
+            ):
+                item.update(
+                    outcome="blocked",
+                    after_finish=None,
+                    reason="Covered stock expires before the proposed start. Review replacement supply.",
+                )
+                continue
             for projection in projections:
                 op = projection["operation"]
                 original = state.operations[op.id]
@@ -487,6 +529,7 @@ class SchedulingImpactService:
         self.db.query(WorkOrderOperation).filter(
             WorkOrderOperation.company_id == self.company_id, WorkOrderOperation.id.in_(state.operations)
         ).order_by(WorkOrderOperation.id).with_for_update().all()
+        lock_material_dependencies(self.db, self.company_id, [state.orders[key] for key in ids], state.materials)
         state = self._load_state(ids, center_ids)
         fingerprint = _fingerprint(state.snapshot())
         applied_ids = sorted(
@@ -506,7 +549,7 @@ class SchedulingImpactService:
         if fingerprint != claims["before"]:
             raise HTTPException(
                 409,
-                "The schedule, work orders, or capacity changed after this preview. Nothing was applied. Generate and review a new preview.",
+                "The schedule, work orders, material supply, or capacity changed after this preview. Nothing was applied. Generate and review a new preview.",
             )
         for change in claims["changes"]:
             op = state.operations[change["operation_id"]]

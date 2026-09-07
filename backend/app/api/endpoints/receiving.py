@@ -14,7 +14,7 @@ would quietly blank the supplier off receipts and lot traces.
 from datetime import date, datetime, timedelta
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
@@ -60,6 +60,8 @@ from app.schemas.print_profile import (
     PrintProfileUpdate,
 )
 from app.schemas.purchasing import (
+    DeliveryReceiptCreate,
+    DeliveryReceiptResponse,
     InspectionQueueItem,
     InspectionResultResponse,
     ReceiptClearInspectionRequest,
@@ -68,6 +70,7 @@ from app.schemas.purchasing import (
     ReceiptInspection,
     ReceiptResponse,
     ReceiptVoidRequest,
+    ReceivingCertificateResponse,
 )
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
@@ -174,6 +177,8 @@ def get_open_purchase_orders(
                     "order_date": po.order_date,
                     "required_date": po.required_date,
                     "expected_date": po.expected_date,
+                    "supplier_confirmed_date": po.supplier_confirmed_date,
+                    "supplier_acknowledged_at": po.supplier_acknowledged_at,
                     "status": po.status.value,
                     "lines": lines_data,
                     "total_lines": len(lines_data),
@@ -222,6 +227,7 @@ def get_purchase_order_for_receiving(
                 {
                     "receipt_id": r.id,
                     "receipt_number": r.receipt_number,
+                    "certificate_document_id": r.certificate_document_id,
                     "quantity_received": r.quantity_received,
                     "lot_number": r.lot_number,
                     "status": (r.status.value if hasattr(r.status, "value") else r.status),
@@ -260,6 +266,8 @@ def get_purchase_order_for_receiving(
         "order_date": po.order_date,
         "required_date": po.required_date,
         "expected_date": po.expected_date,
+        "supplier_confirmed_date": po.supplier_confirmed_date,
+        "supplier_acknowledged_at": po.supplier_acknowledged_at,
         "status": po.status.value,
         "notes": po.notes,
         "lines": lines_data,
@@ -274,6 +282,14 @@ def receive_material(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
+    receipt = _receive_material(receipt_in, db, current_user, company_id, audit)
+    db.commit()
+    db.refresh(receipt)
+    enqueue_receipt_label(receipt, company_id, current_user.id)
+    return receipt
+
+
+def _receive_material(receipt_in, db, current_user, company_id, audit):
     """
     Receive material against a PO line.
 
@@ -293,6 +309,29 @@ def receive_material(
     /receiving/po/{id} line payloads as an advisory hint the receiving UI shows next
     to the checkbox.
     """
+    # Same lock order for a single receipt and a delivery: number generator,
+    # PO header, then stock rows. Locks live until the caller commits the whole unit.
+    acquire_generator_lock(db, "receipt_number", company_id)
+    line_po = (
+        db.query(PurchaseOrderLine.purchase_order_id)
+        .filter(PurchaseOrderLine.id == receipt_in.po_line_id, PurchaseOrderLine.company_id == company_id)
+        .first()
+    )
+    if not line_po:
+        raise HTTPException(404, "PO line not found")
+    locked_po = (
+        db.query(PurchaseOrder)
+        .filter(
+            PurchaseOrder.id == line_po[0],
+            PurchaseOrder.company_id == company_id,
+            PurchaseOrder.is_deleted.is_(False),
+        )
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+    if not locked_po:
+        raise HTTPException(404, "Purchase order not found")
     po_line = (
         db.query(PurchaseOrderLine)
         .options(
@@ -311,6 +350,9 @@ def receive_material(
         raise HTTPException(status_code=404, detail="PO line not found")
 
     po = po_line.purchase_order
+    from app.services.receiving_delivery_service import validate_certificate
+
+    validate_certificate(db, company_id, po_line, receipt_in.certificate_document_id)
     if po.status not in [POStatus.SENT, POStatus.PARTIAL]:
         raise HTTPException(status_code=400, detail="PO must be in sent or partial status to receive")
 
@@ -364,7 +406,8 @@ def receive_material(
         serial_numbers=receipt_in.serial_numbers,
         heat_number=receipt_in.heat_number,
         cert_number=receipt_in.cert_number,
-        coc_attached=receipt_in.coc_attached,
+        coc_attached=bool(receipt_in.certificate_document_id) or receipt_in.coc_attached,
+        certificate_document_id=receipt_in.certificate_document_id,
         location_id=receipt_in.location_id,
         requires_inspection=requires_inspection,
         status=(ReceiptStatus.PENDING_INSPECTION if requires_inspection else ReceiptStatus.ACCEPTED),
@@ -470,22 +513,56 @@ def receive_material(
         },
     )
 
-    db.commit()
-    db.refresh(receipt)
-
-    # Best-effort auto-print of the 4x6 receiving label. The job ITSELF decides
-    # whether to print (gated on the per-company auto_print_on_receipt + egress
-    # toggles), so this enqueue is unconditional and minimal. enqueue_job_best_effort
-    # swallows any Redis/enqueue error so a printer/tunnel problem can NEVER fail or
-    # block an already-committed receipt.
-    enqueue_job_best_effort(
-        "print_receiving_label_job",
-        company_id=company_id,
-        receipt_id=receipt.id,
-        user_id=current_user.id,
-    )
-
+    db.flush()
     return receipt
+
+
+def enqueue_receipt_label(receipt, company_id, user_id):
+    enqueue_job_best_effort("print_receiving_label_job", company_id=company_id, receipt_id=receipt.id, user_id=user_id)
+
+
+@router.post("/deliveries", response_model=DeliveryReceiptResponse)
+def receive_delivery(
+    body: DeliveryReceiptCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Receive 1–50 lines from one company PO atomically.
+
+    Requires admin/manager/supervisor and receiving view/create permissions. The
+    company/user-bound idempotency key replays the original committed response;
+    a different body or actor returns 409. A failed line rolls back all receipts
+    and inventory movements. Print jobs are queued only after commit.
+    """
+    from app.services.receiving_delivery_service import post_delivery
+
+    return post_delivery(db, current_user, company_id, body, audit)
+
+
+@router.post("/certificates", response_model=ReceivingCertificateResponse)
+async def upload_receiving_certificate(
+    po_line_id: int = Form(...),
+    file: UploadFile = File(...),
+    receipt_id: Optional[int] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Store a PDF/PNG/JPEG certificate (up to 20 MB) for a scoped PO line.
+
+    Requires admin/manager/supervisor and receiving view/create permissions. An
+    optional receipt_id attaches late evidence without reposting stock. Historical
+    vendor/PO removal does not prevent attachment; existing receipt links cannot
+    be replaced. Returns the Document ID for authenticated download. On an unknown
+    commit outcome, 503 instructs callers to reconcile before retrying; bytes are
+    preserved so a committed document never loses its file.
+    """
+    from app.services.receiving_delivery_service import upload_certificate
+
+    return await upload_certificate(db, current_user, company_id, po_line_id, file, audit, receipt_id)
 
 
 @router.get("/inspection-queue", response_model=List[InspectionQueueItem])
@@ -598,6 +675,7 @@ def get_receipt_detail(
 
     return {
         "receipt_id": receipt.id,
+        "po_line_id": receipt.po_line_id,
         "receipt_number": receipt.receipt_number,
         "po_number": po.po_number if po else None,
         "po_id": po.id if po else None,
@@ -616,6 +694,8 @@ def get_receipt_detail(
         "heat_number": receipt.heat_number,
         "cert_number": receipt.cert_number,
         "coc_attached": receipt.coc_attached,
+        "certificate_document_id": receipt.certificate_document_id,
+        "delivery_batch_id": receipt.delivery_batch_id,
         "status": (receipt.status.value if hasattr(receipt.status, "value") else receipt.status),
         "inspection_status": (
             receipt.inspection_status.value
@@ -871,6 +951,7 @@ def _add_to_inventory(
             InventoryItem.location == location,
             InventoryItem.lot_number == lot_number,
         )
+        .with_for_update()
         .first()
     )
 
@@ -1754,6 +1835,7 @@ def get_receiving_history(
             {
                 "receipt_id": r.id,
                 "receipt_number": r.receipt_number,
+                "certificate_document_id": r.certificate_document_id,
                 "po_number": po.po_number if po else None,
                 "vendor_name": po.vendor.name if po and po.vendor else None,
                 "part_number": part.part_number if part else None,

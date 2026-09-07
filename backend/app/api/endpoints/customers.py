@@ -3,17 +3,18 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, EmailStr, ValidationError
+from pydantic import BaseModel, EmailStr, ValidationError, field_validator
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.customer import Customer
 from app.models.part import Part, PartType
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderStatus
+from app.schemas.base import UTCModel
 from app.services.audit_service import AuditService
 from app.services.import_service import ImportFileError, parse_import_file
 
@@ -41,14 +42,21 @@ class CustomerCreate(BaseModel):
     country: str = "USA"
     ship_to_name: Optional[str] = None
     ship_address_line1: Optional[str] = None
+    ship_address_line2: Optional[str] = None
     ship_city: Optional[str] = None
     ship_state: Optional[str] = None
     ship_zip_code: Optional[str] = None
+    ship_country: Optional[str] = None
     payment_terms: str = "Net 30"
     requires_coc: bool = True
     requires_fai: bool = False
     special_requirements: Optional[str] = None
     notes: Optional[str] = None
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def blank_email_is_absent(cls, value):
+        return None if isinstance(value, str) and not value.strip() else value
 
 
 class CustomerUpdate(BaseModel):
@@ -64,9 +72,11 @@ class CustomerUpdate(BaseModel):
     country: Optional[str] = None
     ship_to_name: Optional[str] = None
     ship_address_line1: Optional[str] = None
+    ship_address_line2: Optional[str] = None
     ship_city: Optional[str] = None
     ship_state: Optional[str] = None
     ship_zip_code: Optional[str] = None
+    ship_country: Optional[str] = None
     payment_terms: Optional[str] = None
     requires_coc: Optional[bool] = None
     requires_fai: Optional[bool] = None
@@ -74,8 +84,13 @@ class CustomerUpdate(BaseModel):
     notes: Optional[str] = None
     is_active: Optional[bool] = None
 
+    @field_validator("email", mode="before")
+    @classmethod
+    def blank_email_is_absent(cls, value):
+        return None if isinstance(value, str) and not value.strip() else value
 
-class CustomerResponse(BaseModel):
+
+class CustomerResponse(UTCModel):
     id: int
     name: str
     code: Optional[str] = None
@@ -83,12 +98,23 @@ class CustomerResponse(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     address_line1: Optional[str] = None
+    address_line2: Optional[str] = None
     city: Optional[str] = None
     state: Optional[str] = None
     zip_code: Optional[str] = None
+    country: Optional[str] = None
+    ship_to_name: Optional[str] = None
+    ship_address_line1: Optional[str] = None
+    ship_address_line2: Optional[str] = None
+    ship_city: Optional[str] = None
+    ship_state: Optional[str] = None
+    ship_zip_code: Optional[str] = None
+    ship_country: Optional[str] = None
     payment_terms: Optional[str] = None
     requires_coc: bool
     requires_fai: bool
+    special_requirements: Optional[str] = None
+    notes: Optional[str] = None
     is_active: bool
     created_at: datetime
 
@@ -311,6 +337,8 @@ async def _import_customers_csv_impl(
                     country=row.get("country") or "USA",
                     ship_to_name=row.get("ship_to_name") or None,
                     ship_address_line1=row.get("ship_address_line1") or None,
+                    ship_address_line2=row.get("ship_address_line2") or None,
+                    ship_country=row.get("ship_country") or "USA",
                     ship_city=row.get("ship_city") or None,
                     ship_state=row.get("ship_state") or None,
                     ship_zip_code=row.get("ship_zip_code") or None,
@@ -511,13 +539,20 @@ def update_customer(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Update a customer"""
-    customer = db.query(Customer).filter(Customer.id == customer_id, Customer.company_id == company_id).first()
+    customer = (
+        db.query(Customer)
+        .filter(Customer.id == customer_id, Customer.company_id == company_id, Customer.is_deleted.is_(False))
+        .with_for_update(of=Customer)
+        .first()
+    )
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
     update_data = customer_in.model_dump(exclude_unset=True)
+    previous = {field: getattr(customer, field) for field in update_data}
 
     # Check name uniqueness if changing
     if "name" in update_data and update_data["name"] != customer.name:
@@ -526,6 +561,8 @@ def update_customer(
 
     for field, value in update_data.items():
         setattr(customer, field, value)
+
+    audit.log_update("customer", customer.id, customer.name, old_values=previous, new_values=update_data)
 
     db.commit()
     db.refresh(customer)

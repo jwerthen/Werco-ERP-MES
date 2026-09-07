@@ -131,7 +131,9 @@ class TestLiveDocument:
             assert tags & (covered | EXCLUDED_TAGS), f"router module {module!r} (tags {sorted(tags)}) has no MCP tool"
         # The exclusions in use are the ones the brief names, so a new router cannot hide there quietly.
         in_use = {str(tag) for route in _live_routes() for tag in route.tags if tag in EXCLUDED_TAGS}
-        assert in_use == {"Authentication", "Carrier Webhooks", "Error Logging", "errors"}
+        # Recoverable spreadsheet batches preserve the same file-import boundary
+        # as the named legacy loaders; their receipt/correction API is not a tool.
+        assert in_use == {"Authentication", "Carrier Webhooks", "Error Logging", "errors", "Import Batches"}
 
 
 def _doc(*operations: Dict[str, Any]) -> Dict[str, Any]:

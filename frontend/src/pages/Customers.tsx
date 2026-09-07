@@ -1,6 +1,13 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import api from '../services/api';
-import { PlusIcon, PencilIcon, MagnifyingGlassIcon, XMarkIcon, ArrowLeftIcon, UserGroupIcon } from '@heroicons/react/24/outline';
+import {
+  PlusIcon,
+  PencilIcon,
+  MagnifyingGlassIcon,
+  XMarkIcon,
+  ArrowLeftIcon,
+  UserGroupIcon,
+} from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
 import { FormField } from '../components/ui/FormField';
 import { LoadingButton } from '../components/ui/LoadingButton';
@@ -27,9 +34,20 @@ interface Customer {
   email?: string;
   phone?: string;
   address_line1?: string;
+  address_line2?: string;
   city?: string;
   state?: string;
   zip_code?: string;
+  country?: string;
+  ship_to_name?: string;
+  ship_address_line1?: string;
+  ship_address_line2?: string;
+  ship_city?: string;
+  ship_state?: string;
+  ship_zip_code?: string;
+  ship_country?: string;
+  special_requirements?: string;
+  notes?: string;
   payment_terms?: string;
   requires_coc: boolean;
   requires_fai: boolean;
@@ -102,9 +120,11 @@ const EMPTY_CUSTOMER_FORM = {
   country: 'USA',
   ship_to_name: '',
   ship_address_line1: '',
+  ship_address_line2: '',
   ship_city: '',
   ship_state: '',
   ship_zip_code: '',
+  ship_country: '',
   payment_terms: 'Net 30',
   requires_coc: true,
   requires_fai: false,
@@ -173,23 +193,29 @@ export default function Customers() {
 
   useEffect(() => {
     const requestedId = Number(searchParams.get('id') || 0);
-    if (!requestedId || customers.length === 0) return;
+    // The data router may finish clearing ?id after Edit opens. Do not let
+    // that previous URL reopen the detail panel over the editing form.
+    if (showModal || !requestedId || customers.length === 0) return;
     const customer = customers.find(c => c.id === requestedId);
     if (customer && selectedCustomer?.id !== requestedId) {
       viewCustomerDetails(customer);
     }
-  }, [customers, searchParams, selectedCustomer?.id]);
+  }, [customers, searchParams, selectedCustomer?.id, showModal]);
 
-  const filteredCustomers = useMemo(() => customers.filter(c => {
-    if (!debouncedSearch) return true;
-    const searchLower = debouncedSearch.toLowerCase();
-    return (
-      c.name.toLowerCase().includes(searchLower) ||
-      c.code?.toLowerCase().includes(searchLower) ||
-      c.contact_name?.toLowerCase().includes(searchLower) ||
-      c.city?.toLowerCase().includes(searchLower)
-    );
-  }), [customers, debouncedSearch]);
+  const filteredCustomers = useMemo(
+    () =>
+      customers.filter(c => {
+        if (!debouncedSearch) return true;
+        const searchLower = debouncedSearch.toLowerCase();
+        return (
+          c.name.toLowerCase().includes(searchLower) ||
+          c.code?.toLowerCase().includes(searchLower) ||
+          c.contact_name?.toLowerCase().includes(searchLower) ||
+          c.city?.toLowerCase().includes(searchLower)
+        );
+      }),
+    [customers, debouncedSearch]
+  );
 
   const viewCustomerDetails = async (customer: Customer) => {
     setSelectedCustomer(customer);
@@ -221,7 +247,14 @@ export default function Customers() {
     setSaving(true);
     try {
       if (editingCustomer) {
-        await api.updateCustomer(editingCustomer.id, formData);
+        // Only explicit edits are sent: omitted fields and a concurrent change
+        // to an untouched field must survive this save.
+        const changes = Object.fromEntries(
+          (Object.keys(formData) as Array<keyof CustomerFormData>)
+            .filter(key => formData[key] !== initialFormData[key])
+            .map(key => [key, formData[key]])
+        );
+        await api.updateCustomer(editingCustomer.id, changes);
         showToast('success', 'Customer updated');
       } else {
         await api.createCustomer(formData);
@@ -246,9 +279,20 @@ export default function Customers() {
       email: customer.email || '',
       phone: customer.phone || '',
       address_line1: customer.address_line1 || '',
+      address_line2: customer.address_line2 || '',
       city: customer.city || '',
       state: customer.state || '',
       zip_code: customer.zip_code || '',
+      country: customer.country ?? '',
+      ship_to_name: customer.ship_to_name || '',
+      ship_address_line1: customer.ship_address_line1 || '',
+      ship_address_line2: customer.ship_address_line2 || '',
+      ship_city: customer.ship_city || '',
+      ship_state: customer.ship_state || '',
+      ship_zip_code: customer.ship_zip_code || '',
+      ship_country: customer.ship_country || '',
+      special_requirements: customer.special_requirements || '',
+      notes: customer.notes || '',
       payment_terms: customer.payment_terms || 'Net 30',
       requires_coc: customer.requires_coc,
       requires_fai: customer.requires_fai,
@@ -266,90 +310,90 @@ export default function Customers() {
 
   const renderRequirements = (customer: Customer) => (
     <div className="flex gap-1">
-      {customer.requires_coc && (
-        <span className="px-2 py-0.5 bg-blue-500/20 text-blue-300 text-xs rounded">COC</span>
-      )}
+      {customer.requires_coc && <span className="px-2 py-0.5 bg-blue-500/20 text-blue-300 text-xs rounded">COC</span>}
       {customer.requires_fai && (
         <span className="px-2 py-0.5 bg-purple-500/20 text-purple-300 text-xs rounded">FAI</span>
       )}
-      {!customer.requires_coc && !customer.requires_fai && (
-        <span className="text-slate-500 text-xs">-</span>
-      )}
+      {!customer.requires_coc && !customer.requires_fai && <span className="text-slate-500 text-xs">-</span>}
     </div>
   );
 
-  const columns = useMemo<Array<DataTableColumn<Customer>>>(() => [
-    {
-      key: 'code',
-      header: 'Code',
-      sortable: true,
-      className: 'font-mono',
-      accessor: (c) => c.code ?? '',
-    },
-    {
-      key: 'name',
-      header: 'Name',
-      sortable: true,
-      className: 'font-medium text-werco-primary',
-      accessor: (c) => c.name,
-    },
-    {
-      key: 'contact',
-      header: 'Contact',
-      sortable: true,
-      accessor: (c) => c.contact_name ?? '',
-      csv: (c) => [c.contact_name, c.email].filter(Boolean).join(' '),
-      render: (c) => (
-        <div>
-          <div className="text-sm">{c.contact_name || '-'}</div>
-          {c.email && <div className="text-xs text-slate-400">{c.email}</div>}
-        </div>
-      ),
-    },
-    {
-      key: 'location',
-      header: 'Location',
-      sortable: true,
-      accessor: (c) => (c.city && c.state ? `${c.city}, ${c.state}` : ''),
-      render: (c) => (c.city && c.state ? `${c.city}, ${c.state}` : '-'),
-    },
-    {
-      key: 'terms',
-      header: 'Terms',
-      sortable: true,
-      accessor: (c) => c.payment_terms ?? '',
-      render: (c) => c.payment_terms || '-',
-    },
-    {
-      key: 'requirements',
-      header: 'Requirements',
-      csv: (c) => [c.requires_coc ? 'COC' : '', c.requires_fai ? 'FAI' : ''].filter(Boolean).join(' '),
-      render: renderRequirements,
-    },
-    {
-      key: 'status',
-      header: 'Status',
-      sortable: true,
-      accessor: (c) => (c.is_active ? 'active' : 'inactive'),
-      render: (c) => (
-        <StatusBadge status={c.is_active ? 'active' : 'inactive'} />
-      ),
-    },
-    {
-      key: 'actions',
-      header: 'Actions',
-      align: 'center',
-      render: (c) => (
-        <button
-          onClick={(e) => { e.stopPropagation(); handleEdit(c); }}
-          className="text-slate-500 hover:text-slate-400"
-          aria-label={`Edit ${c.name}`}
-        >
-          <PencilIcon className="h-5 w-5" aria-hidden="true" />
-        </button>
-      ),
-    },
-  ], []);
+  const columns = useMemo<Array<DataTableColumn<Customer>>>(
+    () => [
+      {
+        key: 'code',
+        header: 'Code',
+        sortable: true,
+        className: 'font-mono',
+        accessor: c => c.code ?? '',
+      },
+      {
+        key: 'name',
+        header: 'Name',
+        sortable: true,
+        className: 'font-medium text-werco-primary',
+        accessor: c => c.name,
+      },
+      {
+        key: 'contact',
+        header: 'Contact',
+        sortable: true,
+        accessor: c => c.contact_name ?? '',
+        csv: c => [c.contact_name, c.email].filter(Boolean).join(' '),
+        render: c => (
+          <div>
+            <div className="text-sm">{c.contact_name || '-'}</div>
+            {c.email && <div className="text-xs text-slate-400">{c.email}</div>}
+          </div>
+        ),
+      },
+      {
+        key: 'location',
+        header: 'Location',
+        sortable: true,
+        accessor: c => (c.city && c.state ? `${c.city}, ${c.state}` : ''),
+        render: c => (c.city && c.state ? `${c.city}, ${c.state}` : '-'),
+      },
+      {
+        key: 'terms',
+        header: 'Terms',
+        sortable: true,
+        accessor: c => c.payment_terms ?? '',
+        render: c => c.payment_terms || '-',
+      },
+      {
+        key: 'requirements',
+        header: 'Requirements',
+        csv: c => [c.requires_coc ? 'COC' : '', c.requires_fai ? 'FAI' : ''].filter(Boolean).join(' '),
+        render: renderRequirements,
+      },
+      {
+        key: 'status',
+        header: 'Status',
+        sortable: true,
+        accessor: c => (c.is_active ? 'active' : 'inactive'),
+        render: c => <StatusBadge status={c.is_active ? 'active' : 'inactive'} />,
+      },
+      {
+        key: 'actions',
+        header: 'Actions',
+        align: 'center',
+        render: c => (
+          <button
+            onClick={e => {
+              e.stopPropagation();
+              handleEdit(c);
+            }}
+            className="text-slate-500 hover:text-slate-400"
+            aria-label={`Edit ${c.name}`}
+          >
+            <PencilIcon className="h-5 w-5" aria-hidden="true" />
+          </button>
+        ),
+      },
+    ],
+    []
+  );
 
   const renderMobileCard = (customer: Customer) => (
     <MobileDataCard
@@ -370,7 +414,10 @@ export default function Customers() {
       ]}
       actions={
         <button
-          onClick={(e) => { e.stopPropagation(); handleEdit(customer); }}
+          onClick={e => {
+            e.stopPropagation();
+            handleEdit(customer);
+          }}
           className="inline-flex items-center gap-1 text-sm text-slate-300 hover:text-slate-100"
         >
           <PencilIcon className="h-4 w-4" aria-hidden="true" />
@@ -385,7 +432,10 @@ export default function Customers() {
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Customers</h1>
         <Button
-          onClick={() => { resetForm(); setShowModal(true); }}
+          onClick={() => {
+            resetForm();
+            setShowModal(true);
+          }}
           className="flex items-center"
         >
           <PlusIcon className="h-5 w-5 mr-2" />
@@ -402,7 +452,7 @@ export default function Customers() {
             placeholder="Search customers..."
             aria-label="Search customers"
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={e => setSearch(e.target.value)}
             className="input pl-10"
           />
         </div>
@@ -410,7 +460,7 @@ export default function Customers() {
           <input
             type="checkbox"
             checked={showInactive}
-            onChange={(e) => setShowInactive(e.target.checked)}
+            onChange={e => setShowInactive(e.target.checked)}
             aria-label="Show inactive"
             className="mr-2 rounded border-slate-600"
           />
@@ -422,8 +472,8 @@ export default function Customers() {
       <DataTable
         columns={columns}
         data={filteredCustomers}
-        rowKey={(customer) => customer.id}
-        onRowClick={(customer) => viewCustomerDetails(customer)}
+        rowKey={customer => customer.id}
+        onRowClick={customer => viewCustomerDetails(customer)}
         defaultSort={{ key: 'name', dir: 'asc' }}
         pageSize={25}
         loading={loading}
@@ -435,218 +485,254 @@ export default function Customers() {
           icon: UserGroupIcon,
           title: 'No customers found',
           description: search ? 'No customers match your search.' : 'Add your first customer to get started.',
-          action: search ? undefined : { label: 'Add your first customer', onClick: () => { resetForm(); setShowModal(true); } },
+          action: search
+            ? undefined
+            : {
+                label: 'Add your first customer',
+                onClick: () => {
+                  resetForm();
+                  setShowModal(true);
+                },
+              },
         }}
       />
 
       {/* Add/Edit Modal */}
-      <Modal
-        open={showModal}
-        onClose={requestCloseModal}
-        size="2xl"
-        closeOnBackdrop={false}
-      >
-            <h3 className="text-lg font-semibold mb-4">
-              {editingCustomer ? 'Edit Customer' : 'Add Customer'}
-            </h3>
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <FormField label="Customer Name" required>
-                {(field) => (
+      <Modal open={showModal} onClose={requestCloseModal} size="2xl" closeOnBackdrop={false}>
+        <h3 className="text-lg font-semibold mb-4">{editingCustomer ? 'Edit Customer' : 'Add Customer'}</h3>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <FormField label="Customer Name" required>
+            {field => (
+              <input
+                {...field}
+                type="text"
+                value={formData.name}
+                onChange={e => setFormData({ ...formData, name: e.target.value })}
+                className="input"
+                required
+                autoFocus
+              />
+            )}
+          </FormField>
+
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Contact Name">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={formData.contact_name}
+                  onChange={e => setFormData({ ...formData, contact_name: e.target.value })}
+                  className="input"
+                />
+              )}
+            </FormField>
+            <FormField label="Email">
+              {field => (
+                <input
+                  {...field}
+                  type="email"
+                  value={formData.email}
+                  onChange={e => setFormData({ ...formData, email: e.target.value })}
+                  className="input"
+                />
+              )}
+            </FormField>
+          </div>
+
+          <FormField label="Phone">
+            {field => (
+              <input
+                {...field}
+                type="text"
+                value={formData.phone}
+                onChange={e => setFormData({ ...formData, phone: e.target.value })}
+                className="input"
+              />
+            )}
+          </FormField>
+
+          <div className="border-t pt-4">
+            <h4 className="font-medium mb-2">Billing Address</h4>
+            <div className="space-y-2">
+              <FormField label="Address Line 1">
+                {field => (
                   <input
                     {...field}
                     type="text"
-                    value={formData.name}
-                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                    value={formData.address_line1}
+                    onChange={e => setFormData({ ...formData, address_line1: e.target.value })}
                     className="input"
-                    required
-                    autoFocus
+                    placeholder="Address Line 1"
                   />
                 )}
               </FormField>
-
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Contact Name">
-                  {(field) => (
+              <FormField label="Address Line 2">
+                {field => (
+                  <input
+                    {...field}
+                    type="text"
+                    value={formData.address_line2}
+                    onChange={e => setFormData({ ...formData, address_line2: e.target.value })}
+                    className="input"
+                    placeholder="Address Line 2"
+                  />
+                )}
+              </FormField>
+              <div className="grid grid-cols-3 gap-2">
+                <FormField label="City">
+                  {field => (
                     <input
                       {...field}
                       type="text"
-                      value={formData.contact_name}
-                      onChange={(e) => setFormData({ ...formData, contact_name: e.target.value })}
+                      value={formData.city}
+                      onChange={e => setFormData({ ...formData, city: e.target.value })}
                       className="input"
+                      placeholder="City"
                     />
                   )}
                 </FormField>
-                <FormField label="Email">
-                  {(field) => (
+                <FormField label="State">
+                  {field => (
                     <input
                       {...field}
-                      type="email"
-                      value={formData.email}
-                      onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                      type="text"
+                      value={formData.state}
+                      onChange={e => setFormData({ ...formData, state: e.target.value })}
                       className="input"
+                      placeholder="State"
+                    />
+                  )}
+                </FormField>
+                <FormField label="ZIP">
+                  {field => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={formData.zip_code}
+                      onChange={e => setFormData({ ...formData, zip_code: e.target.value })}
+                      className="input"
+                      placeholder="ZIP"
                     />
                   )}
                 </FormField>
               </div>
+            </div>
+          </div>
 
-              <FormField label="Phone">
-                {(field) => (
+          <FormField label="Country">
+            {field => (
+              <input
+                {...field}
+                className="input"
+                value={formData.country}
+                onChange={e => setFormData({ ...formData, country: e.target.value })}
+              />
+            )}
+          </FormField>
+          <fieldset className="border-t pt-4 space-y-2">
+            <legend className="font-medium">Shipping address</legend>
+            {(
+              [
+                ['ship_to_name', 'Ship To Name'],
+                ['ship_address_line1', 'Shipping Address Line 1'],
+                ['ship_address_line2', 'Shipping Address Line 2'],
+                ['ship_city', 'Shipping City'],
+                ['ship_state', 'Shipping State'],
+                ['ship_zip_code', 'Shipping ZIP'],
+                ['ship_country', 'Shipping Country'],
+              ] as const
+            ).map(([key, label]) => (
+              <FormField key={key} label={label}>
+                {field => (
                   <input
                     {...field}
-                    type="text"
-                    value={formData.phone}
-                    onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
                     className="input"
+                    value={formData[key]}
+                    onChange={e => setFormData({ ...formData, [key]: e.target.value })}
                   />
                 )}
               </FormField>
-
-              <div className="border-t pt-4">
-                <h4 className="font-medium mb-2">Billing Address</h4>
-                <div className="space-y-2">
-                  <FormField label="Address Line 1">
-                    {(field) => (
-                      <input
-                        {...field}
-                        type="text"
-                        value={formData.address_line1}
-                        onChange={(e) => setFormData({ ...formData, address_line1: e.target.value })}
-                        className="input"
-                        placeholder="Address Line 1"
-                      />
-                    )}
-                  </FormField>
-                  <FormField label="Address Line 2">
-                    {(field) => (
-                      <input
-                        {...field}
-                        type="text"
-                        value={formData.address_line2}
-                        onChange={(e) => setFormData({ ...formData, address_line2: e.target.value })}
-                        className="input"
-                        placeholder="Address Line 2"
-                      />
-                    )}
-                  </FormField>
-                  <div className="grid grid-cols-3 gap-2">
-                    <FormField label="City">
-                      {(field) => (
-                        <input
-                          {...field}
-                          type="text"
-                          value={formData.city}
-                          onChange={(e) => setFormData({ ...formData, city: e.target.value })}
-                          className="input"
-                          placeholder="City"
-                        />
-                      )}
-                    </FormField>
-                    <FormField label="State">
-                      {(field) => (
-                        <input
-                          {...field}
-                          type="text"
-                          value={formData.state}
-                          onChange={(e) => setFormData({ ...formData, state: e.target.value })}
-                          className="input"
-                          placeholder="State"
-                        />
-                      )}
-                    </FormField>
-                    <FormField label="ZIP">
-                      {(field) => (
-                        <input
-                          {...field}
-                          type="text"
-                          value={formData.zip_code}
-                          onChange={(e) => setFormData({ ...formData, zip_code: e.target.value })}
-                          className="input"
-                          placeholder="ZIP"
-                        />
-                      )}
-                    </FormField>
-                  </div>
-                </div>
-              </div>
-
-              <div className="border-t pt-4">
-                <h4 className="font-medium mb-2">Terms & Requirements</h4>
-                <div className="grid grid-cols-2 gap-4">
-                  <FormField label="Payment Terms">
-                    {(field) => (
-                      <select
-                        {...field}
-                        value={formData.payment_terms}
-                        onChange={(e) => setFormData({ ...formData, payment_terms: e.target.value })}
-                        className="input"
-                      >
-                        <option value="Net 30">Net 30</option>
-                        <option value="Net 15">Net 15</option>
-                        <option value="Net 45">Net 45</option>
-                        <option value="Net 60">Net 60</option>
-                        <option value="Due on Receipt">Due on Receipt</option>
-                        <option value="COD">COD</option>
-                      </select>
-                    )}
-                  </FormField>
-                </div>
-                <div className="flex gap-6 mt-3">
-                  <label className="flex items-center">
-                    <input
-                      type="checkbox"
-                      checked={formData.requires_coc}
-                      onChange={(e) => setFormData({ ...formData, requires_coc: e.target.checked })}
-                      aria-label="Requires COC"
-                      className="mr-2 rounded border-slate-600"
-                    />
-                    <span className="text-sm">Requires COC</span>
-                  </label>
-                  <label className="flex items-center">
-                    <input
-                      type="checkbox"
-                      checked={formData.requires_fai}
-                      onChange={(e) => setFormData({ ...formData, requires_fai: e.target.checked })}
-                      aria-label="Requires FAI"
-                      className="mr-2 rounded border-slate-600"
-                    />
-                    <span className="text-sm">Requires FAI</span>
-                  </label>
-                </div>
-              </div>
-
-              <FormField label="Special Requirements">
-                {(field) => (
-                  <textarea
+            ))}
+          </fieldset>
+          <div className="border-t pt-4">
+            <h4 className="font-medium mb-2">Terms & Requirements</h4>
+            <div className="grid grid-cols-2 gap-4">
+              <FormField label="Payment Terms">
+                {field => (
+                  <select
                     {...field}
-                    value={formData.special_requirements}
-                    onChange={(e) => setFormData({ ...formData, special_requirements: e.target.value })}
+                    value={formData.payment_terms}
+                    onChange={e => setFormData({ ...formData, payment_terms: e.target.value })}
                     className="input"
-                    rows={2}
-                  />
+                  >
+                    <option value="Net 30">Net 30</option>
+                    <option value="Net 15">Net 15</option>
+                    <option value="Net 45">Net 45</option>
+                    <option value="Net 60">Net 60</option>
+                    <option value="Due on Receipt">Due on Receipt</option>
+                    <option value="COD">COD</option>
+                  </select>
                 )}
               </FormField>
+            </div>
+            <div className="flex gap-6 mt-3">
+              <label className="flex items-center">
+                <input
+                  type="checkbox"
+                  checked={formData.requires_coc}
+                  onChange={e => setFormData({ ...formData, requires_coc: e.target.checked })}
+                  aria-label="Requires COC"
+                  className="mr-2 rounded border-slate-600"
+                />
+                <span className="text-sm">Requires COC</span>
+              </label>
+              <label className="flex items-center">
+                <input
+                  type="checkbox"
+                  checked={formData.requires_fai}
+                  onChange={e => setFormData({ ...formData, requires_fai: e.target.checked })}
+                  aria-label="Requires FAI"
+                  className="mr-2 rounded border-slate-600"
+                />
+                <span className="text-sm">Requires FAI</span>
+              </label>
+            </div>
+          </div>
 
-              <FormField label="Notes">
-                {(field) => (
-                  <textarea
-                    {...field}
-                    value={formData.notes}
-                    onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
-                    className="input"
-                    rows={2}
-                  />
-                )}
-              </FormField>
+          <FormField label="Special Requirements">
+            {field => (
+              <textarea
+                {...field}
+                value={formData.special_requirements}
+                onChange={e => setFormData({ ...formData, special_requirements: e.target.value })}
+                className="input"
+                rows={2}
+              />
+            )}
+          </FormField>
 
-              <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
-                <Button variant="secondary" onClick={requestCloseModal} disabled={saving}>
-                  Cancel
-                </Button>
-                <LoadingButton type="submit" loading={saving} loadingText="Saving...">
-                  {editingCustomer ? 'Update' : 'Create'}
-                </LoadingButton>
-              </div>
-            </form>
+          <FormField label="Notes">
+            {field => (
+              <textarea
+                {...field}
+                value={formData.notes}
+                onChange={e => setFormData({ ...formData, notes: e.target.value })}
+                className="input"
+                rows={2}
+              />
+            )}
+          </FormField>
+
+          <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
+            <Button variant="secondary" onClick={requestCloseModal} disabled={saving}>
+              Cancel
+            </Button>
+            <LoadingButton type="submit" loading={saving} loadingText="Saving...">
+              {editingCustomer ? 'Update' : 'Create'}
+            </LoadingButton>
+          </div>
+        </form>
       </Modal>
 
       {/* Customer Detail Modal */}
@@ -663,7 +749,11 @@ export default function Customers() {
             {/* Header */}
             <div className="px-6 py-4 border-b flex items-center justify-between bg-slate-800/50">
               <div className="flex items-center gap-3">
-                <button onClick={closeDetails} className="text-slate-400 hover:text-slate-300" aria-label="Back to customers">
+                <button
+                  onClick={closeDetails}
+                  className="text-slate-400 hover:text-slate-300"
+                  aria-label="Back to customers"
+                >
                   <ArrowLeftIcon className="h-5 w-5" aria-hidden="true" />
                 </button>
                 <div>
@@ -696,8 +786,8 @@ export default function Customers() {
                     </div>
                     <div className="bg-yellow-500/10 rounded-lg p-4">
                       <div className="text-3xl font-bold text-yellow-600">
-                        {(customerStats.work_order_counts.by_status['in_progress'] || 0) + 
-                         (customerStats.work_order_counts.by_status['released'] || 0)}
+                        {(customerStats.work_order_counts.by_status['in_progress'] || 0) +
+                          (customerStats.work_order_counts.by_status['released'] || 0)}
                       </div>
                       <div className="text-sm text-yellow-300">Active WOs</div>
                     </div>
@@ -735,7 +825,9 @@ export default function Customers() {
                       <div className="text-sm text-slate-400">
                         {selectedCustomer.address_line1 && <p>{selectedCustomer.address_line1}</p>}
                         {selectedCustomer.city && selectedCustomer.state && (
-                          <p>{selectedCustomer.city}, {selectedCustomer.state} {selectedCustomer.zip_code}</p>
+                          <p>
+                            {selectedCustomer.city}, {selectedCustomer.state} {selectedCustomer.zip_code}
+                          </p>
                         )}
                       </div>
                     </div>
@@ -753,12 +845,14 @@ export default function Customers() {
                           <span>{customerStats.assemblies.length}</span>
                         </div>
                         <div className="max-h-40 overflow-y-auto divide-y divide-slate-700/30">
-                          {customerStats.assemblies.length > 0 ? customerStats.assemblies.map(item => (
-                            <div key={item.id} className="px-3 py-2 text-xs">
-                              <div className="font-mono text-white">{item.part_number}</div>
-                              <div className="text-slate-400 truncate">{item.name}</div>
-                            </div>
-                          )) : (
+                          {customerStats.assemblies.length > 0 ? (
+                            customerStats.assemblies.map(item => (
+                              <div key={item.id} className="px-3 py-2 text-xs">
+                                <div className="font-mono text-white">{item.part_number}</div>
+                                <div className="text-slate-400 truncate">{item.name}</div>
+                              </div>
+                            ))
+                          ) : (
                             <div className="px-3 py-2 text-xs text-slate-400">No assemblies found</div>
                           )}
                         </div>
@@ -770,12 +864,14 @@ export default function Customers() {
                           <span>{customerStats.parts.length}</span>
                         </div>
                         <div className="max-h-40 overflow-y-auto divide-y divide-slate-700/30">
-                          {customerStats.parts.length > 0 ? customerStats.parts.map(item => (
-                            <div key={item.id} className="px-3 py-2 text-xs">
-                              <div className="font-mono text-white">{item.part_number}</div>
-                              <div className="text-slate-400 truncate">{item.name}</div>
-                            </div>
-                          )) : (
+                          {customerStats.parts.length > 0 ? (
+                            customerStats.parts.map(item => (
+                              <div key={item.id} className="px-3 py-2 text-xs">
+                                <div className="font-mono text-white">{item.part_number}</div>
+                                <div className="text-slate-400 truncate">{item.name}</div>
+                              </div>
+                            ))
+                          ) : (
                             <div className="px-3 py-2 text-xs text-slate-400">No parts found</div>
                           )}
                         </div>
@@ -787,27 +883,29 @@ export default function Customers() {
                           <span>{customerStats.current_work_orders.length}</span>
                         </div>
                         <div className="max-h-44 overflow-y-auto divide-y divide-slate-700/30">
-                          {customerStats.current_work_orders.length > 0 ? customerStats.current_work_orders.map(wo => (
-                            <button
-                              type="button"
-                              key={wo.id}
-                              className="w-full text-left px-3 py-2 text-xs hover:bg-slate-800/50"
-                              onClick={() => {
-                                closeDetails();
-                                navigate(`/work-orders/${wo.id}`);
-                              }}
-                            >
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="font-mono text-white">{wo.work_order_number}</span>
-                                <span className={`px-2 py-0.5 rounded ${statusColor(wo.status)}`}>
-                                  {wo.status.replace('_', ' ')}
-                                </span>
-                              </div>
-                              <div className="text-slate-400 truncate">
-                                {wo.part_number || 'No part'} • Qty {wo.quantity_ordered}
-                              </div>
-                            </button>
-                          )) : (
+                          {customerStats.current_work_orders.length > 0 ? (
+                            customerStats.current_work_orders.map(wo => (
+                              <button
+                                type="button"
+                                key={wo.id}
+                                className="w-full text-left px-3 py-2 text-xs hover:bg-slate-800/50"
+                                onClick={() => {
+                                  closeDetails();
+                                  navigate(`/work-orders/${wo.id}`);
+                                }}
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="font-mono text-white">{wo.work_order_number}</span>
+                                  <span className={`px-2 py-0.5 rounded ${statusColor(wo.status)}`}>
+                                    {wo.status.replace('_', ' ')}
+                                  </span>
+                                </div>
+                                <div className="text-slate-400 truncate">
+                                  {wo.part_number || 'No part'} • Qty {wo.quantity_ordered}
+                                </div>
+                              </button>
+                            ))
+                          ) : (
                             <div className="px-3 py-2 text-xs text-slate-400">No current work orders</div>
                           )}
                         </div>
@@ -819,27 +917,29 @@ export default function Customers() {
                           <span>{customerStats.past_work_orders.length}</span>
                         </div>
                         <div className="max-h-44 overflow-y-auto divide-y divide-slate-700/30">
-                          {customerStats.past_work_orders.length > 0 ? customerStats.past_work_orders.map(wo => (
-                            <button
-                              type="button"
-                              key={wo.id}
-                              className="w-full text-left px-3 py-2 text-xs hover:bg-slate-800/50"
-                              onClick={() => {
-                                closeDetails();
-                                navigate(`/work-orders/${wo.id}`);
-                              }}
-                            >
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="font-mono text-white">{wo.work_order_number}</span>
-                                <span className={`px-2 py-0.5 rounded ${statusColor(wo.status)}`}>
-                                  {wo.status.replace('_', ' ')}
-                                </span>
-                              </div>
-                              <div className="text-slate-400 truncate">
-                                {wo.part_number || 'No part'} • Qty {wo.quantity_ordered}
-                              </div>
-                            </button>
-                          )) : (
+                          {customerStats.past_work_orders.length > 0 ? (
+                            customerStats.past_work_orders.map(wo => (
+                              <button
+                                type="button"
+                                key={wo.id}
+                                className="w-full text-left px-3 py-2 text-xs hover:bg-slate-800/50"
+                                onClick={() => {
+                                  closeDetails();
+                                  navigate(`/work-orders/${wo.id}`);
+                                }}
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="font-mono text-white">{wo.work_order_number}</span>
+                                  <span className={`px-2 py-0.5 rounded ${statusColor(wo.status)}`}>
+                                    {wo.status.replace('_', ' ')}
+                                  </span>
+                                </div>
+                                <div className="text-slate-400 truncate">
+                                  {wo.part_number || 'No part'} • Qty {wo.quantity_ordered}
+                                </div>
+                              </button>
+                            ))
+                          ) : (
                             <div className="px-3 py-2 text-xs text-slate-400">No past work orders</div>
                           )}
                         </div>
@@ -864,9 +964,14 @@ export default function Customers() {
 
             {/* Footer */}
             <div className="px-6 py-4 border-t bg-slate-800/50 flex justify-end gap-3">
-              <Button variant="secondary" onClick={closeDetails}>Close</Button>
+              <Button variant="secondary" onClick={closeDetails}>
+                Close
+              </Button>
               <Button
-                onClick={() => { closeDetails(); handleEdit(selectedCustomer); }}
+                onClick={() => {
+                  closeDetails();
+                  handleEdit(selectedCustomer);
+                }}
               >
                 Edit Customer
               </Button>

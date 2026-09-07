@@ -71,6 +71,7 @@ def global_search(
     q: str = Query(..., min_length=1, max_length=100, description="Search query"),
     limit: int = Query(default=20, ge=1, le=50, description="Maximum results"),
     types: Optional[str] = Query(default=None, description="Comma-separated types to search"),
+    offset: int = Query(default=0, ge=0, le=100000, description="Results to skip in stable relevance order"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
@@ -85,12 +86,13 @@ def global_search(
     - bom: BOMs by name
     - routing: Routings by name
     - user: Users by name, email, employee ID
-    - inventory: Inventory items by location, lot
-    - purchase_order: POs by number, vendor
+    - purchase_order: POs by number
     - quote: Quotes by number, customer
     - vendor: Vendors/Suppliers by name, code
     """
-    return run_global_search(db=db, company_id=company_id, current_user=current_user, q=q, limit=limit, types=types)
+    return run_global_search(
+        db=db, company_id=company_id, current_user=current_user, q=q, limit=limit, types=types, offset=offset
+    )
 
 
 def _contains_any(query: str, terms: List[str]) -> bool:

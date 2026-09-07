@@ -1,5 +1,5 @@
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Dict, List, Optional, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import atomic_transaction, get_db
 from app.db.ledger_filter import LEDGER_QUANTITY_EPSILON, WORK_ORDER_REFERENCE_TYPE, work_order_ledger_filter
+from app.models.company import Company
 from app.models.inventory import (
     CycleCount,
     CycleCountItem,
@@ -22,6 +23,7 @@ from app.models.inventory import (
 from app.models.part import Part
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
+from app.schemas.cycle_count import CycleCountDetail, CycleCounter, CycleCountReview, CycleCountWorkspace
 from app.schemas.inventory import InventoryTransactionResponse
 from app.schemas.inventory_combine import (
     CombineCostSchema,
@@ -36,6 +38,14 @@ from app.schemas.inventory_combine import (
     PartStockSummarySchema,
 )
 from app.services.audit_service import AuditService
+from app.services.cycle_count_workspace_service import (
+    count_or_404,
+    eligible_assignee,
+    review_count,
+    validate_review,
+    workspace_detail,
+    workspace_list,
+)
 from app.services.inventory_combine_service import build_combine_preview, combine_inventory
 from app.services.operational_event_service import OperationalEventService
 
@@ -406,12 +416,22 @@ class CycleCountCreate(BaseModel):
     part_id: Optional[int] = None
     scheduled_date: date
     notes: Optional[str] = None
+    assigned_to: Optional[int] = Field(default=None, gt=0)
+
+
+class CycleCountAssignment(BaseModel):
+    assigned_to: Optional[int] = Field(default=None, gt=0)
+
+
+class CycleCountPostReview(BaseModel):
+    review_token: str = Field(min_length=1, max_length=4096)
 
 
 class CountItemRequest(BaseModel):
     # A physical count observation can be zero (nothing on the shelf) but never negative.
-    counted_quantity: float = Field(ge=0)
+    counted_quantity: float = Field(ge=0, allow_inf_nan=False)
     notes: Optional[str] = None
+    expected_counted_at: Optional[datetime] = None
 
 
 # Location endpoints
@@ -1253,6 +1273,102 @@ def combine_inventory_endpoint(
 
 
 # Cycle Count endpoints
+@router.get("/cycle-counts/workspace", response_model=CycleCountWorkspace)
+def list_cycle_count_workspace(
+    status: Optional[CycleCountStatus] = None,
+    assigned_to: Optional[int] = Query(default=None, gt=0),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=25, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    return workspace_list(db, company_id, status=status, assigned_to=assigned_to, offset=offset, limit=limit)
+
+
+@router.get("/cycle-counts/counters", response_model=List[CycleCounter])
+def cycle_count_counters(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(STOCK_MUTATOR_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    return [
+        {"id": user.id, "name": user.full_name}
+        for user in db.query(User)
+        .filter(User.company_id == company_id, User.is_active == True, User.role != UserRole.VIEWER)
+        .order_by(User.first_name, User.last_name, User.id)
+        .all()
+    ]
+
+
+@router.get("/cycle-counts/{count_id}", response_model=CycleCountDetail)
+def get_cycle_count_workspace(
+    count_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    return workspace_detail(db, company_id, count_id)
+
+
+@router.put("/cycle-counts/{count_id}/assignment", response_model=CycleCountDetail)
+def assign_cycle_count(
+    count_id: int,
+    payload: CycleCountAssignment,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(STOCK_MUTATOR_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    count = count_or_404(db, company_id, count_id, lock=True)
+    if count.status in TERMINAL_COUNT_STATUSES:
+        raise HTTPException(409, "Closed cycle counts cannot be reassigned")
+    if payload.assigned_to:
+        eligible_assignee(db, company_id, payload.assigned_to)
+    old = count.assigned_to
+    count.assigned_to = payload.assigned_to
+    audit.log_update(
+        "cycle_count",
+        count.id,
+        count.count_number,
+        old_values={"assigned_to": old},
+        new_values={"assigned_to": payload.assigned_to},
+        description=f"Assigned cycle count {count.count_number}",
+    )
+    db.commit()
+    return workspace_detail(db, company_id, count_id)
+
+
+@router.post("/cycle-counts/{count_id}/review", response_model=CycleCountReview)
+def review_cycle_count(
+    count_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(STOCK_MUTATOR_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    return review_count(db, company_id, current_user.id, count_id)
+
+
+@router.post("/cycle-counts/{count_id}/post-reviewed")
+def post_reviewed_cycle_count(
+    count_id: int,
+    payload: CycleCountPostReview,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(STOCK_MUTATOR_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    return complete_cycle_count(
+        count_id,
+        apply_adjustments=True,
+        db=db,
+        current_user=current_user,
+        company_id=company_id,
+        audit=audit,
+        review_token=payload.review_token,
+    )
+
+
 @router.get("/cycle-counts")
 def list_cycle_counts(
     status: Optional[str] = None,
@@ -1281,6 +1397,17 @@ def create_cycle_count(
     pull in" has to be answerable from the hash chain. ``CycleCount`` and
     ``CycleCountItem`` are both TenantMixin tables, and this is their only writer.
     """
+    # Serialize number allocation per tenant; two planners can create counts at once.
+    db.query(Company.id).filter(Company.id == company_id).with_for_update().first()
+    if count_in.assigned_to:
+        eligible_assignee(db, company_id, count_in.assigned_to)
+    if (
+        count_in.part_id
+        and not db.query(Part.id)
+        .filter(Part.id == count_in.part_id, Part.company_id == company_id, Part.is_deleted == False)
+        .first()
+    ):
+        raise HTTPException(404, "Part not found")
     # Generate count number
     today = datetime.now().strftime("%Y%m%d")
     prefix = f"CC-{today}-"
@@ -1299,6 +1426,7 @@ def create_cycle_count(
         scheduled_date=count_in.scheduled_date,
         notes=count_in.notes,
         created_by=current_user.id,
+        assigned_to=count_in.assigned_to,
     )
     count.company_id = company_id
 
@@ -1407,9 +1535,7 @@ def start_cycle_count(
     second ``complete`` to double-post the same physical variance to the ledger, and
     a CANCELLED count was deliberately abandoned.
     """
-    count = db.query(CycleCount).filter(CycleCount.id == count_id, CycleCount.company_id == company_id).first()
-    if not count:
-        raise HTTPException(status_code=404, detail="Cycle count not found")
+    count = count_or_404(db, company_id, count_id, lock=True)
 
     if count.status in TERMINAL_COUNT_STATUSES:
         raise HTTPException(
@@ -1479,9 +1605,7 @@ def record_count(
     """
     # Tenant-scoped on both the parent count and the item: without it, any
     # authenticated user could write counted quantities onto another company's rows.
-    count = db.query(CycleCount).filter(CycleCount.id == count_id, CycleCount.company_id == company_id).first()
-    if not count:
-        raise HTTPException(status_code=404, detail="Cycle count not found")
+    count = count_or_404(db, company_id, count_id, lock=True)
 
     # The counted quantity is the quality record the variance adjustment is derived
     # from. Once the count is closed (COMPLETED / CANCELLED) that record is evidence
@@ -1508,6 +1632,12 @@ def record_count(
 
     if not item:
         raise HTTPException(status_code=404, detail="Count item not found")
+
+    expected_counted_at = count_in.expected_counted_at
+    if expected_counted_at is not None and expected_counted_at.tzinfo is not None:
+        expected_counted_at = expected_counted_at.astimezone(timezone.utc).replace(tzinfo=None)
+    if "expected_counted_at" in count_in.model_fields_set and expected_counted_at != item.counted_at:
+        raise HTTPException(409, "Another counter updated this item. Reload the count before saving again.")
 
     was_counted = bool(item.is_counted)
     old_values = {
@@ -1578,6 +1708,7 @@ def complete_cycle_count(
     current_user: User = Depends(require_role(STOCK_MUTATOR_ROLES)),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
+    review_token: Optional[str] = None,
 ):
     """Complete cycle count and optionally apply adjustments.
 
@@ -1649,6 +1780,8 @@ def complete_cycle_count(
     items_adjusted = 0
 
     with atomic_transaction(db):
+        if review_token:
+            validate_review(db, company_id, current_user.id, count_id, review_token)
         # One tenant-scoped bulk load instead of a SELECT per count item: a
         # warehouse-scoped count enrolls every stock row in the warehouse. Narrowed to
         # the rows this completion could actually adjust (same predicate as the loop),
@@ -1656,7 +1789,9 @@ def complete_cycle_count(
         # company are absent from the map, which is what makes the per-item guard
         # below refuse to write through them.
         adjustable_ids = (
-            [i.inventory_item_id for i in count.items if i.is_counted and i.variance] if apply_adjustments else []
+            [i.inventory_item_id for i in count.items if i.is_counted and (i.variance or review_token)]
+            if apply_adjustments
+            else []
         )
         # FOR UPDATE (no-op on SQLite): on-hand is read below to compute the
         # current-basis delta, then written absolutely — a concurrent movement (the
@@ -1667,7 +1802,7 @@ def complete_cycle_count(
         for item in count.items:
             # A null variance means the row was never really counted; writing
             # ``counted_quantity`` (also null) through to on-hand would corrupt stock.
-            if not item.is_counted or not item.variance:
+            if not item.is_counted or (not item.variance and not review_token):
                 continue
 
             measured_variance += item.variance_value or 0.0

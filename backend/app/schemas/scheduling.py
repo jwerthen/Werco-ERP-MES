@@ -3,6 +3,8 @@ from typing import Annotated, List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.schemas.material_readiness import MaterialReadiness
+
 CalendarHours = Annotated[float, Field(ge=0, le=24)]
 
 
@@ -88,6 +90,7 @@ class SchedulingImpactOperation(BaseModel):
 
 
 class SchedulingImpactJob(BaseModel):
+    materials: Optional[MaterialReadiness] = None
     work_order_id: int
     work_order_number: str
     due_date: Optional[str] = None

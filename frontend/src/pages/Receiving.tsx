@@ -1,3 +1,7 @@
+import ReceiptCertificateManager from '../components/receiving/ReceiptCertificateManager';
+import DeliveryReceiveModal, { DeliveryPO, pendingDelivery } from '../components/receiving/DeliveryReceiveModal';
+import ReceiptCertificateField, { CertificateDownload } from '../components/receiving/ReceiptCertificateField';
+import { ReceivingCertificate } from '../types/receivingDelivery';
 import { PageHeader } from '../components/ui/PageHeader';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { tabKeyboard } from '../components/operations/tabKeyboard';
@@ -78,6 +82,8 @@ interface PurchaseOrder {
   order_date: string | null;
   required_date: string | null;
   expected_date: string | null;
+  supplier_confirmed_date?: string | null;
+  supplier_acknowledged_at?: string | null;
   status: string;
   notes?: string;
   lines: POLine[];
@@ -91,6 +97,7 @@ interface Location {
 }
 
 interface ReceiveFormData {
+  certificate_document_id?: number;
   po_line_id: number;
   quantity_received: number;
   lot_number: string;
@@ -138,6 +145,7 @@ interface ReceiveFormData {
  */
 type PerItemReceiveFields = Pick<
   ReceiveFormData,
+  | 'certificate_document_id'
   | 'lot_number'
   | 'serial_numbers'
   | 'heat_number'
@@ -149,6 +157,7 @@ type PerItemReceiveFields = Pick<
 >;
 
 const BLANK_PER_ITEM_RECEIVE_FIELDS: PerItemReceiveFields = {
+  certificate_document_id: undefined,
   lot_number: '',
   serial_numbers: '',
   heat_number: '',
@@ -179,6 +188,7 @@ interface InspectionQueueItem {
 }
 
 interface HistoryItem {
+  certificate_document_id?: number | null;
   receipt_id: number;
   receipt_number: string;
   po_number: string;
@@ -206,6 +216,8 @@ export interface POArrival {
 /** Minimal shape classifyPOArrival needs — keeps the helper unit-testable without full PO fixtures. */
 interface POArrivalInput {
   expected_date?: string | null;
+  supplier_confirmed_date?: string | null;
+  supplier_acknowledged_at?: string | null;
   required_date?: string | null;
   lines?: Array<{ required_date?: string | null; is_closed?: boolean }> | null;
 }
@@ -222,7 +234,10 @@ const toISODateOnly = (value: string | null | undefined): string | null => (valu
  * chronological compare.
  */
 export function classifyPOArrival(po: POArrivalInput, todayISO: string): POArrival {
-  let date = toISODateOnly(po.expected_date) ?? toISODateOnly(po.required_date);
+  let date =
+    (po.supplier_acknowledged_at ? toISODateOnly(po.supplier_confirmed_date) : null) ??
+    toISODateOnly(po.expected_date) ??
+    toISODateOnly(po.required_date);
   if (!date) {
     for (const line of po.lines ?? []) {
       if (line.is_closed) continue;
@@ -261,6 +276,11 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   const selectedPOQuery = Number(searchParams.get('po') || 0);
   const [openPOs, setOpenPOs] = useState<PurchaseOrder[]>([]);
   const [selectedPO, setSelectedPO] = useState<PurchaseOrder | null>(null);
+  const [certificateReceipt, setCertificateReceipt] = useState<number | null>(null);
+  const [deliveryPO, setDeliveryPO] = useState<DeliveryPO | null>(null);
+  const [pendingDeliveryRecord, setPendingDeliveryRecord] = useState(() => pendingDelivery());
+  const [certificate, setCertificate] = useState<ReceivingCertificate | null>(null);
+  const [certificateUploading, setCertificateUploading] = useState(false);
   const [selectedLine, setSelectedLine] = useState<POLine | null>(null);
   const [locations, setLocations] = useState<Location[]>([]);
   const [loading, setLoading] = useState(true);
@@ -332,7 +352,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   // Cancel/Close gates. The successful receive/inspect paths close directly
   // (never through these), so a completed save never prompts.
   const requestCloseReceiveModal = () => {
-    if (!confirmDiscardReceive()) return;
+    if (receivingPending || certificateUploading || !confirmDiscardReceive()) return;
     setShowReceiveModal(false);
   };
 
@@ -393,6 +413,12 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   const [deletePOPending, setDeletePOPending] = useState(false);
 
   const { user } = useAuth();
+  useEffect(() => {
+    setDeliveryPO(null);
+    setCertificateReceipt(null);
+    setPendingDeliveryRecord(pendingDelivery());
+    setCertificate(null);
+  }, [user?.id, user?.company_id]);
   // Label printing is gated to the same roles that can receive (ADMIN / MANAGER
   // / SUPERVISOR) so the UI matches what the backend will allow.
   const canPrintLabel = !!user && ['admin', 'manager', 'supervisor'].includes(user.role);
@@ -650,6 +676,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
 
   const handleSelectLine = (line: POLine) => {
     setSelectedLine(line);
+    setCertificate(null);
     const nextForm: ReceiveFormData = {
       ...formData,
       // Blank everything that belongs to the PREVIOUS part before carrying the
@@ -689,7 +716,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     const selectedLineId = selectedLine?.line_id;
     const selectedPOId = selectedPO?.po_id;
 
-    if (receivingPending) return;
+    if (receivingPending || certificateUploading) return;
     setReceivingPending(true);
     try {
       const receipt = await api.receiveNewMaterial({
@@ -1023,9 +1050,16 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   // history rows, and the per-PO receipt-history sub-table. Each control stops
   // click propagation so it never triggers a row click-through.
   const renderReceiptRowActions = (receiptId: number, receiptNumber: string) => {
-    if (!canCorrectReceipt && !canVoidReceipt) return null;
     return (
       <>
+        <Button
+          type="button"
+          variant="secondary"
+          onClick={() => setCertificateReceipt(receiptId)}
+          aria-label={`Certificate for ${receiptNumber}`}
+        >
+          Certificate
+        </Button>
         {canCorrectReceipt && (
           <button
             type="button"
@@ -1340,6 +1374,12 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
         // Export what the cell shows (Central date-time), not the raw UTC ISO.
         csv: item => formatCentralDateTime(item.received_at),
       },
+      {
+        key: 'certificate',
+        header: 'Certificate',
+        render: item =>
+          item.certificate_document_id ? <CertificateDownload documentId={item.certificate_document_id} /> : '—',
+      },
       ...(canCorrectReceipt || canVoidReceipt
         ? [
             {
@@ -1372,7 +1412,12 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
         { label: 'Received By', value: item.received_by_name || '-' },
         { label: 'Date', value: formatCentralDateTime(item.received_at), fullWidth: true },
       ]}
-      actions={renderReceiptRowActions(item.receipt_id, item.receipt_number)}
+      actions={
+        <>
+          {item.certificate_document_id && <CertificateDownload documentId={item.certificate_document_id} />}
+          {renderReceiptRowActions(item.receipt_id, item.receipt_number)}
+        </>
+      }
     />
   );
 
@@ -1402,6 +1447,14 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     <div className="space-y-6">
       {pageHeader}
 
+      {pendingDeliveryRecord && (
+        <div role="status" className="border border-amber-500/40 p-3 mb-3">
+          A delivery submission needs confirmation.{' '}
+          <Button type="button" variant="secondary" onClick={() => setDeliveryPO(pendingDeliveryRecord.po)}>
+            Review pending delivery submission
+          </Button>
+        </div>
+      )}
       {/* Success/Error Messages */}
       {success && (
         <div className="bg-green-500/10 border border-green-500/30 rounded-xl p-4 flex flex-wrap items-center gap-3">
@@ -1483,7 +1536,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
           role="tablist"
           aria-label="Receiving sections"
           onKeyDown={tabKeyboard}
-          className="-mb-px flex space-x-8"
+          className="-mb-px flex gap-4 sm:gap-8 overflow-x-auto"
         >
           {[
             { id: 'receive', label: 'Receive Material', icon: TruckIcon },
@@ -1508,7 +1561,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                 next.set(embedded ? 'receivingTab' : 'tab', tab.id);
                 setSearchParams(next);
               }}
-              className={`flex items-center gap-2 py-4 px-1 border-b-2 font-medium text-sm ${
+              className={`shrink-0 whitespace-nowrap flex items-center gap-2 py-4 px-1 border-b-2 font-medium text-sm ${
                 activeTab === tab.id
                   ? 'border-werco-primary text-werco-primary'
                   : 'border-transparent text-slate-400 hover:text-slate-300'
@@ -1748,6 +1801,12 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                             <p className="font-medium text-slate-300">{formatCentralDate(selectedPO.required_date)}</p>
                           </div>
                         )}
+                        {selectedPO.supplier_acknowledged_at && selectedPO.supplier_confirmed_date && (
+                          <div className="text-center">
+                            <p className="text-slate-400">Supplier confirmed</p>
+                            <p>{formatCentralDate(selectedPO.supplier_confirmed_date)}</p>
+                          </div>
+                        )}
                         {selectedPO.expected_date && (
                           <div className="text-center">
                             <p className="text-slate-400">Expected</p>
@@ -1764,6 +1823,13 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                       </div>
                     )}
 
+                    {canPrintLabel && hasPermission(user?.role, 'receiving:create') && (
+                      <div className="mb-3">
+                        <Button type="button" onClick={() => setDeliveryPO(selectedPO)}>
+                          Receive delivery lines
+                        </Button>
+                      </div>
+                    )}
                     {/* Lines Table — scrollable */}
                     <div className="flex-1 overflow-y-auto bg-fd-panel rounded-lg border border-slate-700">
                       <table className="w-full divide-y divide-slate-700">
@@ -2031,6 +2097,31 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       </div>
 
       {/* RECEIVE MODAL */}
+      {certificateReceipt !== null && (
+        <ReceiptCertificateManager
+          receiptId={certificateReceipt}
+          canUpload={canCorrectReceipt && hasPermission(user?.role, 'receiving:create')}
+          onClose={() => {
+            setCertificateReceipt(null);
+          }}
+        />
+      )}
+      {deliveryPO && (
+        <DeliveryReceiveModal
+          po={deliveryPO}
+          locations={locations}
+          onClose={() => {
+            setDeliveryPO(null);
+            setPendingDeliveryRecord(pendingDelivery());
+            loadData();
+            loadInspectionQueue();
+            if (selectedPO) refreshSelectedPO(selectedPO.po_id);
+          }}
+          onSaved={() => {
+            setPendingDeliveryRecord(null);
+          }}
+        />
+      )}
       <Modal
         open={showReceiveModal && !!selectedLine}
         onClose={requestCloseReceiveModal}
@@ -2204,6 +2295,17 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                 )}
               </FormField>
 
+              <ReceiptCertificateField
+                key={selectedLine.line_id}
+                lineId={selectedLine.line_id}
+                certificate={certificate}
+                disabled={receivingPending}
+                onBusy={setCertificateUploading}
+                onChange={document => {
+                  setCertificate(document);
+                  setFormData(previous => ({ ...previous, certificate_document_id: document.id, coc_attached: true }));
+                }}
+              />
               <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
                 <label className="flex items-center gap-2">
                   <input
@@ -2261,7 +2363,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                   {error}
                 </p>
               )}
-              <Button className="px-6" disabled={receivingPending} onClick={handleReceive}>
+              <Button className="px-6" disabled={receivingPending || certificateUploading} onClick={handleReceive}>
                 {receivingPending ? 'Receiving…' : 'Receive Material'}
               </Button>
             </div>
@@ -2326,6 +2428,9 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                 <div>
                   <p className="text-sm text-slate-400">CoC</p>
                   <p>{receiptDetail.coc_attached ? '✓ Attached' : 'Not attached'}</p>
+                  {receiptDetail.certificate_document_id && (
+                    <CertificateDownload documentId={receiptDetail.certificate_document_id} />
+                  )}
                 </div>
               </div>
             </div>

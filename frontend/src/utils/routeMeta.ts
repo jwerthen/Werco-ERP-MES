@@ -94,6 +94,7 @@ export const routeTitles: Record<string, string> = {
   // Administration
   '/setup': 'Setup Wizard',
   '/import-center': 'Import Center',
+  '/search': 'Search Results',
   '/work-centers': 'Work Centers',
   '/users': 'Users',
   '/certifications': 'Operator Certifications',

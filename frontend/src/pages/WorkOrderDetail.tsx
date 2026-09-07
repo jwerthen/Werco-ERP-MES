@@ -1,3 +1,5 @@
+import JobTimelinePanel from '../components/workorders/JobTimelinePanel';
+import JobForecastPanel from '../components/workorders/JobForecastPanel';
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
@@ -2345,8 +2347,8 @@ export default function WorkOrderDetail() {
 
                     return (
                       <React.Fragment key={op.id}>
-                      <tr
-                        className={`hover:bg-slate-800/50 ${isNewGroup ? 'border-t-2 border-slate-600' : ''}`}
+                      <tr id={`operation-${op.id}`}
+                        className={`scroll-mt-20 hover:bg-slate-800/50 ${isNewGroup ? 'border-t-2 border-slate-600' : ''}`}
                       >
                         <td className="px-4 py-3 font-medium text-sm">{op.sequence}</td>
                         <td className="px-4 py-3">
@@ -2895,7 +2897,7 @@ export default function WorkOrderDetail() {
                 </p>
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               {canManageNests && (
                 <>
                   <Button
@@ -3095,6 +3097,9 @@ export default function WorkOrderDetail() {
         </div>
       )}
 
+      <JobTimelinePanel key={`timeline-${workOrder.id}`} workOrderId={workOrder.id} />
+      {user && ['admin', 'manager', 'supervisor'].includes(user.role) && <JobForecastPanel key={`forecast-${workOrder.id}`} workOrderId={workOrder.id} />}
+
       <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-12 gap-4 items-start">
         {isAdminView && (
           <CockpitPanel
@@ -3155,7 +3160,7 @@ export default function WorkOrderDetail() {
           </span>
         }
       >
-        <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-4">
+        <div id="job-blockers" className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-4 scroll-mt-20">
           <div className="space-y-3 xl:max-h-[440px] xl:overflow-y-auto pr-1">
             {secondaryErrors.blockers && <ErrorState message={`Could not verify blockers. Previously loaded issues below may be out of date.${lastVerifiedSuffix('blockers')}`} onRetry={loadWorkOrder} />}
             {secondaryLoading.blockers && <p role="status" className="text-sm text-slate-400">Loading blockers…</p>}

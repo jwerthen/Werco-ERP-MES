@@ -793,6 +793,23 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 
 ## Core Endpoints
 
+### Global search and customer edits
+
+`GET /search/` accepts `q` (1–100 characters), `types` (comma-separated entity
+types), `offset` (0–100000) and `limit` (1–50, default 20). SQL ranks the entire
+matching set before pagination: current exact matches, exact retired part aliases,
+identifier prefixes, then broader matches. `total` and `categories` count the complete
+selected result set; `has_more`, `offset` and `limit` describe its page. The full
+results screen at `/search` retains query and type filters in the URL. Employee
+directory results retain the existing Admin/Manager access restriction.
+
+Customer responses include every editable contact, address, payment, shipping and
+note field. The customer editor sends only changed fields; an omitted field is
+preserved, and an explicit blank clears a field where the schema permits it.
+Updates record old/new values through the normal committed audit path.
+Editing a soft-deleted customer returns 404; the update endpoint cannot reactivate
+a deleted record. Customer pickers independently exclude tombstoned rows.
+
 ### Work Orders
 
 | Method | Endpoint | Description | Auth Required |
@@ -800,6 +817,7 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 | GET | `/work-orders/` | List all work orders (`skip` ≥ 0, `limit` 1–5000 default 100 — the standard list tier, see [Pagination](#pagination)). `deleted_only=true` returns **only** this company's soft-deleted work orders — the restore view, **Admin / Manager**, and the only read in the API that can see one; see "Seeing a deleted work order" below | Yes (`deleted_only=true`: Admin / Manager) |
 | POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) and the optional `unit_number` (≤ 50 chars — see "Unit #" below) | Yes |
 | GET | `/work-orders/{id}` | Get work order by ID | Yes |
+| GET | `/work-orders/{id}/timeline` | Chronological job history with category, actor and time filters; opaque cursor, `limit` 1–100 (default 30). Returns business events and source links, not raw audit payloads | Yes |
 | PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below) | Admin / Manager / Supervisor |
 | DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it) | Admin / Manager |
 | POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below. Reached from Work Orders → **Deleted** (`deleted_only=true` above) | Admin / Manager |
@@ -6010,6 +6028,7 @@ the public paths are `/eco/eco/…`.
 | GET | `/purchasing/purchase-orders` | List purchase orders (filters: `status`, `vendor_id`, `deleted_only`). `deleted_only=true` returns **only** soft-deleted POs — the restore view, see note below. Bounded: `limit` **1–5000, default 5000**, `offset` ≥ 0 | Yes |
 | POST | `/purchasing/purchase-orders` | Create purchase order with its lines | Admin / Manager / Supervisor |
 | GET | `/purchasing/purchase-orders/{po_id}` | Get PO by ID | Yes |
+| PUT | `/purchasing/purchase-orders/{po_id}/supplier-confirmation` | Record acknowledgment, supplier-confirmed date and follow-up owner/due date on sent/partial POs; requires current `expected_updated_at`, stale returns 409. Requested dates remain unchanged | Admin / Manager / Supervisor, plus purchasing view/create permission |
 | PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order. **404** on a soft-deleted PO; **400** on a `status` change to anything but `closed`/`cancelled` while the vendor is soft-deleted (see note) | Admin / Manager / Supervisor |
 | POST | `/purchasing/purchase-orders/{po_id}/send` | Issue a PO to the vendor — status → `sent`, stamps `order_date`; only `draft`/`approved` POs (else **400**). **404** on a soft-deleted PO | Admin / Manager |
 | POST | `/purchasing/purchase-orders/{po_id}/lines` | Add a line to a `draft` PO (else **400**) and roll the PO subtotal/total. **404** on a soft-deleted PO | Admin / Manager / Supervisor |
@@ -6524,6 +6543,8 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | GET | `/receiving/open-pos` | List POs available for receiving (sent/partial); each PO carries `order_date` / `required_date` / `expected_date` plus its open lines | Yes |
 | GET | `/receiving/po/{po_id}` | Get full PO detail for receiving | Yes |
 | POST | `/receiving/receive` | Receive material against a PO line (`lot_number` optional — auto-assigned when blank, see below) | Admin / Manager / Supervisor |
+| POST | `/receiving/deliveries` | Atomically receive multiple lines with a stable request ID; identical retry returns the durable receipt, changed payload is refused. Certificate document IDs are validated against the PO line | Admin / Manager / Supervisor, plus receiving view/create permission |
+| POST | `/receiving/certificates` | Upload a real PDF/PNG/JPEG (20 MB maximum), bound to `po_line_id`; optional `receipt_id` attaches it to an existing receipt. Linked certificate bytes cannot be deleted through the document endpoint | Admin / Manager / Supervisor, plus receiving view/create permission |
 | GET | `/receiving/inspection-queue` | List receipts pending inspection (`days_back` optional, bounded 1–3650; **no date cutoff by default** — pending receipts never age out, so the list matches the `/stats` `pending_inspection` count) | Yes |
 | GET | `/receiving/receipt/{receipt_id}` | Get receipt detail | Yes |
 | PATCH | `/receiving/receipt/{receipt_id}` | Correct a mis-keyed receipt in place (new total `quantity_received` + optional traceability fields; required `reason`) — reconciles PO line / PO status / inventory. Guarded, see note | Admin / Manager / Supervisor |
@@ -6857,10 +6878,26 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 | POST | `/inventory/combine/preview` | What folding one SKU onto another would do — blockers, advisories, per-lot lines, the cost delta. **Pure read (writes nothing)** | Admin / Manager / **Supervisor** |
 | POST | `/inventory/combine` | Fold the source SKU's stock onto the target SKU, as two `ADJUST` ledger rows per lot line netting to **zero** | **Admin / Manager** |
 | GET | `/inventory/cycle-counts` | List cycle counts (optional `status`) | Yes |
+| GET | `/inventory/cycle-counts/workspace` | Paged sessions: `status`, `assigned_to`, `offset`, `limit` (1–100, default 25); returns `items`, `total`, `has_more` | Yes |
+| GET | `/inventory/cycle-counts/counters` | Active eligible counter IDs/names in the current company | Admin / Manager / Supervisor |
+| GET | `/inventory/cycle-counts/{count_id}` | Count observations with part/location/lot identity, saved timestamps and current stock | Yes |
+| PUT | `/inventory/cycle-counts/{count_id}/assignment` | Assign active counter using `assigned_to`, or clear with null; closed sessions refuse | Admin / Manager / Supervisor |
+| POST | `/inventory/cycle-counts/{count_id}/review` | Review all observations and current stock; returns a ten-minute company/user/count-bound `review_token` | Admin / Manager / Supervisor |
+| POST | `/inventory/cycle-counts/{count_id}/post-reviewed` | Body `{review_token}`; lock/revalidate stock and observations, then post audited current-basis adjustments and complete | Admin / Manager / Supervisor |
 | POST | `/inventory/cycle-counts` | Create a cycle count (enrolls matching stock rows — every active row with **nonzero** on-hand, negatives included) | Admin / Manager / Supervisor |
 | POST | `/inventory/cycle-counts/{count_id}/start` | Open a count for counting | All roles except Viewer |
 | POST | `/inventory/cycle-counts/{count_id}/items/{item_id}/count` | Record a counted quantity | All roles except Viewer |
 | POST | `/inventory/cycle-counts/{count_id}/complete` | Complete the count (optionally apply adjustments) | Admin / Manager / Supervisor |
+
+The warehouse count UI uses `review` → `post-reviewed`. Incomplete, closed or
+unavailable counts cannot be reviewed. Changed stock/count observations, expired
+tokens, a different reviewer, or replay after completion return **409**. A reviewed
+count compares every physical quantity to current on-hand, even when its enrollment
+variance was zero. The older `/complete` selection remains compatible.
+`POST /cycle-counts` also accepts optional `assigned_to`; count observations accept
+optional `expected_counted_at` (null for an uncounted row), producing **409** if a
+newer observation exists. Zero is valid; NaN/infinity/negative counts are **422**.
+See [Cycle counting](ux-workflows/cycle-counting.md) for the workflow and evidence.
 
 > **There is no `GET /inventory/{part_id}`.** An earlier revision of this doc listed one; no such
 > route exists in `app/api/endpoints/inventory.py`. Use `GET /inventory/?part_id=<id>` for that
@@ -7639,19 +7676,25 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > data — they write nothing: no ledger row, no audit row, no event.
 > - **`GET /analytics/predict/delivery/{work_order_id}`** — no query params. Returns
 >   `DeliveryPrediction`: the header (`work_order_number`, `part_number`, `quantity`, `due_date`),
->   `predicted_completion`, `confidence` (0.5–0.9, scaled by how much historical data backs the
+>   nullable `predicted_completion`, `confidence` (scaled by how much historical data backs the
 >   estimate), `on_time_probability` (0.1 / 0.5 / 0.75 / 0.95 by days of margin against `due_date`),
 >   `bottleneck_work_center`, and `operations[]` — per routing step the `operation_name`,
->   `work_center_name`, `predicted_start` / `predicted_end`, `queue_position` and `estimated_hours`.
+>   `work_center_name`, nullable `predicted_start` / `predicted_end`, `queue_position` and `estimated_hours`.
 >   Estimates are planned hours scaled by that work center's trailing-90-day actual-vs-planned ratio,
->   offset by queue depth at 8 h/day.
+>   using its weekday calendar, dated closures/capacity overrides and queue hours. The target job
+>   is excluded from its own queue. `materials`, `warnings` and `basis` explain the supply evidence
+>   and assumptions: missing arrival evidence, unavailable calendar capacity or missing time estimates
+>   produce unknown dates/probability rather than an unsupported promise. Known material supply
+>   constrains the forecast. A job without defined requirements retains a clearly labeled capacity
+>   estimate. See [planning and job history](ux-workflows/planning-job-history.md).
 > - **`GET /analytics/predict/capacity`** — `weeks_ahead` (int, default `4`, `ge=1`, `le=12`).
 >   Returns `CapacityForecastResponse`: `weeks[]` (each `week_start` / `week_end`, `work_centers[]`
 >   with `committed_hours` / `available_hours` / `utilization_pct` / `is_overloaded`, plus
 >   `total_committed` / `total_available` / `overall_utilization`) and `alerts[]` for week 0
 >   overloads (`severity` `high` above 110% utilization, else `medium`). Committed hours are the
 >   remaining hours on RELEASED/IN_PROGRESS work orders spread evenly across the window; available
->   hours are `capacity_hours_per_day × 5 × efficiency_factor`.
+>   hours sum the work center's actual calendar capacity across all seven dates in each window,
+>   including dated overrides. The existing even-spread demand heuristic remains an estimate.
 > - **`GET /analytics/predict/inventory-demand`** — no query params. Returns
 >   `InventoryDemandResponse`: `predictions[]` (**capped at the 50 most urgent**) with `part_number`
 >   / `part_name`, `current_stock`, `daily_usage_rate` (net 90-day issues less returns ÷ 90),
@@ -8325,6 +8368,25 @@ their own inbox).
 > a status string, not PII.
 
 ### Bulk Imports & Templates (Excel Migration Kit)
+
+**Recoverable Import Center batches.** The eight direct entity imports (users, parts,
+materials, customers, vendors, work centers, work orders and purchase orders) now have a
+durable review/receipt workflow. BOM and routing use their existing specialized import flows.
+These batch routes enforce the entity's existing import role on every read and write.
+
+| Method | Endpoint | Behavior |
+|--------|----------|----------|
+| GET | `/import/batches` | Latest 25 permitted batches; optional entity and offset; `has_more` |
+| POST | `/import/batches/prepare` | Multipart file, entity and stable request key; validates and saves review without creating business records |
+| GET | `/import/batches/{id}` | Durable receipt with 200 input rows per page (`row_offset`); reading never resumes writes |
+| POST | `/import/batches/{id}/commit` | Commit up to 25 reviewed groups using `expected_version`; created business records and receipts commit together |
+| GET | `/import/batches/{id}/failed-rows.csv` | Failed input rows with stable correction IDs; includes every line of a failed PO group; passwords excluded |
+| POST | `/import/batches/{id}/corrections` | Validate corrected failed rows with `expected_version`; successful rows are immutable |
+
+An uncertain commit is recovered by reading its receipt before resuming. The client pins
+mutations to the current token and stops queued chunks when company context changes.
+Employee passwords are supplied transiently at commit and never stored in the batch or
+correction export. See [customer, search and import workflows](ux-workflows/customer-search-imports.md).
 
 One shared CSV/XLSX upload kit for go-live data migration — see
 [docs/EXCEL_MIGRATION_RUNBOOK.md](EXCEL_MIGRATION_RUNBOOK.md) for the operational sequence. All

@@ -472,6 +472,21 @@ cd C:\Users\jmw\Desktop\Werco-ERP\scripts
 
 ### Run Database Migrations
 
+The warehouse/import workflow release adds migrations
+`099_recoverable_import_batches` and `100_receiving_supplier_followup` after
+`098_runtime_metrics`. Upgrade the API database before serving the matching
+frontend: receiving queries now include supplier promises and certificate links.
+New tables retain deny-by-default RLS and explicitly revoke Data API access to
+tables and sequences. The disposable PostgreSQL CI check exercises 095–100 with
+inherited grants and two upgrade/downgrade cycles.
+
+For rollback, keep these additive tables and columns while rolling back application
+code. Dropping them after use would remove import/retry receipts, certificate links
+and supplier follow-up history. Test downgrades are for disposable databases;
+production rollback must preserve those records. Vercel credential setup and public
+domain promotion remain the separate release prerequisite described in
+[release coordination](ux-operations/release-coordination.md).
+
 ```powershell
 # Via Railway
 railway run --service werco-api alembic upgrade head

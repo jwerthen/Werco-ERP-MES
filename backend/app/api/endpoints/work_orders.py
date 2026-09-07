@@ -70,6 +70,7 @@ from app.schemas.work_order import (
     WorkOrderSummary,
     WorkOrderUpdate,
 )
+from app.schemas.work_order_timeline import TimelineCategory, WorkOrderTimelineResponse
 from app.services import dispatch_service, process_sheet_service
 from app.services.audit_service import AuditService
 from app.services.completion_cost_service import (
@@ -181,6 +182,7 @@ from app.services.work_order_state_service import (
     work_order_operation_progress,
 )
 from app.services.work_order_template_service import templates_pointing_at_work_order
+from app.services.work_order_timeline_service import list_work_order_timeline
 
 logger = logging.getLogger(__name__)
 
@@ -3481,6 +3483,33 @@ def create_manual_laser_nest_endpoint(
 
     db.refresh(nest)
     return LaserNestManualResponse(**manual_nest_response_dict(nest))
+
+
+@router.get("/{work_order_id}/timeline", response_model=WorkOrderTimelineResponse)
+def get_work_order_timeline(
+    work_order_id: int,
+    category: Optional[TimelineCategory] = None,
+    actor_id: Optional[int] = Query(None, gt=0),
+    start_at: Optional[datetime] = None,
+    end_at: Optional[datetime] = None,
+    cursor: Optional[str] = Query(None, max_length=1000),
+    limit: int = Query(30, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Read this job's business history; same authorization as job detail."""
+    return list_work_order_timeline(
+        db,
+        company_id,
+        work_order_id,
+        category=category,
+        actor_id=actor_id,
+        start_at=start_at,
+        end_at=end_at,
+        cursor=cursor,
+        limit=limit,
+    )
 
 
 @router.get("/{work_order_id}", response_model=WorkOrderResponse)

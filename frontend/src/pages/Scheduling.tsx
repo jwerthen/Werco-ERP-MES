@@ -1,3 +1,4 @@
+import MaterialReadinessSummary from '../components/workorders/MaterialReadinessSummary';
 import { getPriorityClasses, getPriorityLabel } from '../utils/priority';
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -1797,6 +1798,7 @@ export default function Scheduling() {
                       </p>
                     </div>
                     {job.reason && <p className="mt-2 text-sm text-amber-200">{job.reason}</p>}
+                    {job.materials && <MaterialReadinessSummary materials={job.materials} />}
                     {job.operations.length > 0 && (
                       <div className="overflow-x-auto mt-2">
                         <table className="min-w-[560px] w-full text-sm">

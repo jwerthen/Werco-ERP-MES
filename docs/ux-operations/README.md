@@ -3,6 +3,9 @@
 This round follows PR 266. Its eight packages are distinct from the earlier saved-draft,
 review-before-posting, operational-inbox and document-delivery work.
 
+The same implementation branch now also contains the next eight
+[warehouse, purchasing and planning improvements](../ux-workflows/README.md).
+
 | Package | Result | Implementation and evidence |
 | --- | --- | --- |
 | 1. Safe kiosk retries | A stable request ID and durable production receipt let an uncertain report be retried without adding its quantities twice. Original operator and payload bindings are retained. | [Production recovery and calendars](production.md) |

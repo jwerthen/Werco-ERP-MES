@@ -12,7 +12,9 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo
 
+from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -20,6 +22,11 @@ from app.core.cache import invalidate_work_centers_cache
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
+from app.services.material_readiness_service import (
+    load_locked_material_readiness,
+    material_start_date,
+    validate_material_start,
+)
 from app.services.scheduling_projection import (
     _build_daily_load_for_work_center,
     _project_work_order_schedule,
@@ -71,6 +78,7 @@ class SchedulingService:
         self.company_id = company_id
         self.capacity_map: Dict[int, WorkCenterCapacity] = {}
         self.calendars = {}
+        self.materials = {}
 
     def run_scheduling(
         self,
@@ -108,6 +116,15 @@ class SchedulingService:
 
         # Sort operations by priority and due date
         sorted_ops = self._prioritize_operations(operations, optimize_setup)
+
+        # Allocate each material source once across this priority-ordered run.
+        for company in sorted({op.company_id for op in sorted_ops}):
+            orders = list({op.work_order_id: op.work_order for op in sorted_ops if op.company_id == company}.values())
+            self.materials.update(
+                load_locked_material_readiness(
+                    self.db, company, orders, datetime.now(ZoneInfo("America/Chicago")).date()
+                )
+            )
 
         # Schedule operations
         scheduled = []
@@ -267,6 +284,12 @@ class SchedulingService:
 
         # Check for predecessor operations (sequence dependencies)
         earliest_start = self._get_earliest_start_date(operation)
+        materials = self.materials.get(operation.work_order_id)
+        if materials:
+            try:
+                earliest_start = max(earliest_start, material_start_date(materials) or date.min)
+            except HTTPException as error:
+                return {"success": False, "reason": error.detail}
 
         if self.calendars.get(work_center_id, {}).get("version", 0) > 0:
             horizon = date.today() + timedelta(days=horizon_days)
@@ -293,6 +316,11 @@ class SchedulingService:
                     <= working_hours(self.calendars, work_center_id, day) + 0.000001
                     for day, hours in load.items()
                 ):
+                    if materials:
+                        try:
+                            validate_material_start(materials, projection["scheduled_start"])
+                        except HTTPException as error:
+                            return {"success": False, "reason": error.detail}
                     operation.scheduled_start = projection["scheduled_start"]
                     operation.scheduled_end = projection["scheduled_end"]
                     for day, hours in load.items():
@@ -324,6 +352,11 @@ class SchedulingService:
         end_date = scheduled_date + timedelta(days=max(0, days_needed - 1))
 
         # Update operation schedule
+        if materials:
+            try:
+                validate_material_start(materials, scheduled_date)
+            except HTTPException as error:
+                return {"success": False, "reason": error.detail}
         operation.scheduled_start = scheduled_date
         operation.scheduled_end = end_date
 

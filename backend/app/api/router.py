@@ -24,6 +24,7 @@ from app.api.endpoints import (
     errors,
     estimate_workbench,
     exports,
+    import_batches,
     import_templates,
     integrations,
     inventory,
@@ -132,6 +133,7 @@ api_router.include_router(analytics.router, prefix="/analytics", tags=["Analytic
 api_router.include_router(search.router, prefix="/search", tags=["Global Search"])
 api_router.include_router(exports.router, prefix="/exports", tags=["Data Export"])
 api_router.include_router(import_templates.router, prefix="/import", tags=["Import Kit"])
+api_router.include_router(import_batches.router, prefix="/import/batches", tags=["Import Batches"])
 api_router.include_router(print_reports.router, prefix="/print", tags=["Print Reports"])
 api_router.include_router(oee.router, prefix="/oee", tags=["OEE Tracking"])
 api_router.include_router(operational_events.router, prefix="/operational-events", tags=["Operational Events"])

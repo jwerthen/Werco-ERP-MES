@@ -13,7 +13,7 @@ from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.document import Document, DocumentType
 from app.models.part import Part
-from app.models.purchasing import Vendor
+from app.models.purchasing import POReceipt, Vendor
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
 from app.services.document_numbering import generate_document_number as generate_shared_document_number
@@ -383,7 +383,12 @@ def delete_document(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
 ):
-    document = db.query(Document).filter(Document.id == document_id, Document.company_id == company_id).first()
+    document = (
+        db.query(Document)
+        .filter(Document.id == document_id, Document.company_id == company_id)
+        .with_for_update()
+        .first()
+    )
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     if (
@@ -395,6 +400,15 @@ def delete_document(
         raise HTTPException(
             status_code=409,
             detail="This document belongs to a revision history and cannot be deleted. Its prior files must remain available.",
+        )
+
+    if (
+        db.query(POReceipt.id)
+        .filter(POReceipt.company_id == company_id, POReceipt.certificate_document_id == document.id)
+        .first()
+    ):
+        raise HTTPException(
+            409, "This certificate belongs to a receipt and must remain available, including after a receipt is voided."
         )
 
     # Delete stored bytes if they exist (per-ref dispatch covers local and s3 rows).

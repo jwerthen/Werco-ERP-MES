@@ -54,6 +54,7 @@ from .governance import (
     LegalHold,
     RetentionPolicy,
 )
+from .import_batch import ImportBatch, ImportBatchRow
 from .inventory import (
     InventoryItem,
     InventoryTransaction,
@@ -106,6 +107,7 @@ from .purchasing import (
     PurchaseOrder,
     PurchaseOrderLine,
     ReceiptStatus,
+    ReceivingDeliveryBatch,
     Vendor,
 )
 from .qms_standard import QMSClause, QMSClauseEvidence, QMSStandard
@@ -232,6 +234,8 @@ __all__ = [
     "TimeEntry",
     "InventoryItem",
     "InventoryCombine",
+    "ImportBatch",
+    "ImportBatchRow",
     "InventoryTransaction",
     "TransactionType",
     "AuditLog",
@@ -347,6 +351,7 @@ __all__ = [
     "PurchaseOrder",
     "PurchaseOrderLine",
     "POReceipt",
+    "ReceivingDeliveryBatch",
     "POStatus",
     "InspectionStatus",
     "DefectType",

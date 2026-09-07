@@ -756,7 +756,7 @@ def test_delivery_prediction_body_contains_no_company_b_marker(client: TestClien
     assert body["work_order_number"] == "ALPHA-WO-0001"
     assert body["part_number"] == "ALPHA-ASM-1"
     assert [op["operation_name"] for op in body["operations"]] == ["Alpha Saw", "Alpha Mill"]
-    assert body["bottleneck_work_center"] == "Alpha Cell One"
+    assert body["bottleneck_work_center"] is None
 
 
 def test_a_foreign_operation_hanging_off_our_own_work_order_is_not_in_our_routing(client: TestClient, world: World):
@@ -906,7 +906,10 @@ def test_queue_position_counts_only_this_tenants_live_queued_work(client: TestCl
     response = client.get(f"{DELIVERY}/{world.a_wo.id}", headers=headers_for(world.a_manager))
 
     assert response.status_code == status.HTTP_200_OK, response.text
-    assert [op["queue_position"] for op in response.json()["operations"]] == [2, 2]
+    assert [op["queue_position"] for op in response.json()["operations"]] == [
+        0,
+        0,
+    ]  # A job never queues behind its own operations
 
 
 def test_queue_depth_excludes_a_soft_deleted_work_orders_operations(
@@ -926,21 +929,21 @@ def test_queue_depth_excludes_a_soft_deleted_work_orders_operations(
         assert response.status_code == status.HTTP_200_OK, response.text
         return response.json()["operations"][0]["queue_position"]
 
-    assert depth() == 2
+    assert depth() == 0
 
     dead_wo = db_session.query(WorkOrder).filter(WorkOrder.id == world.a_wo_deleted.id).one()
     dead_wo.is_deleted = False
     db_session.commit()
-    assert depth() == 3, "restoring the job makes its queued op count -- so the row is otherwise eligible"
+    assert depth() == 1, "restoring the job makes its queued op count -- so the row is otherwise eligible"
 
     dead_wo.is_deleted = True
     db_session.commit()
-    assert depth() == 2, "and re-deleting it takes the op back out"
+    assert depth() == 0, "and re-deleting it takes the op back out"
 
     dead_op = db_session.query(WorkOrderOperation).filter(WorkOrderOperation.id == world.a_dead_op_pending.id).one()
     db_session.delete(dead_op)
     db_session.commit()
-    assert depth() == 2, "removing it physically changes nothing -- it was already not counted"
+    assert depth() == 0, "removing it physically changes nothing -- it was already not counted"
 
 
 def test_estimated_hours_are_not_steered_by_another_tenants_cycle_times(client: TestClient, world: World):
@@ -1006,10 +1009,10 @@ def test_committed_hours_count_only_this_tenants_open_jobs(client: TestClient, w
     assert len(week["work_centers"]) == 1
     row = week["work_centers"][0]
     assert row["committed_hours"] == pytest.approx(1.5)  # 6.0 h spread over 4 weeks
-    assert row["available_hours"] == pytest.approx(40.0)  # 8 h/day * 5 * 1.0 efficiency
-    assert row["utilization_pct"] == pytest.approx(3.8)
+    assert row["available_hours"] == pytest.approx(56.0)  # Unconfigured calendar: 8 h on each of 7 days
+    assert row["utilization_pct"] == pytest.approx(2.7)
     assert week["total_committed"] == pytest.approx(1.5)
-    assert week["total_available"] == pytest.approx(40.0)
+    assert week["total_available"] == pytest.approx(56.0)
 
 
 def test_committed_hours_ignore_our_own_operation_hanging_off_a_foreign_job(client: TestClient, world: World):
@@ -1033,7 +1036,7 @@ def test_committed_hours_ignore_a_foreign_operation_hanging_off_our_own_job(clie
     row = response.json()["weeks"][0]["work_centers"][0]
     # 9.0 setup + 0.9/pc * 10 = 18.0 h would be added, i.e. 24.0/4 = 6.0 committed.
     assert row["committed_hours"] == pytest.approx(1.5)
-    assert row["utilization_pct"] == pytest.approx(3.8)
+    assert row["utilization_pct"] == pytest.approx(2.7)
 
 
 def test_on_hand_stock_counts_only_this_tenants_inventory(client: TestClient, world: World):
@@ -1158,9 +1161,8 @@ def solo(db_session: Session) -> World:
     return w
 
 
-def test_single_tenant_capacity_is_unchanged(client: TestClient, solo: World):
-    """PASSES BOTH BEFORE AND AFTER -- that is the point. If this drifts, the new predicates
-    are filtering something they should not."""
+def test_single_tenant_capacity_uses_unconfigured_calendar(client: TestClient, solo: World):
+    """Tenant filters preserve demand; available time follows the shared calendar."""
     response = client.get(CAPACITY, headers=headers_for(solo.manager))
 
     assert response.status_code == status.HTTP_200_OK, response.text
@@ -1168,14 +1170,14 @@ def test_single_tenant_capacity_is_unchanged(client: TestClient, solo: World):
     (row,) = week["work_centers"]
     assert row["work_center_name"] == "Solo Cell"
     assert row["committed_hours"] == pytest.approx(1.5)
-    assert row["available_hours"] == pytest.approx(40.0)
-    assert row["utilization_pct"] == pytest.approx(3.8)
+    assert row["available_hours"] == pytest.approx(56.0)
+    assert row["utilization_pct"] == pytest.approx(2.7)
     assert row["is_overloaded"] is False
     assert response.json()["alerts"] == []
     assert len(response.json()["weeks"]) == 4
 
 
-def test_single_tenant_delivery_prediction_is_unchanged(client: TestClient, solo: World):
+def test_single_tenant_delivery_excludes_its_own_queue(client: TestClient, solo: World):
     response = client.get(f"{DELIVERY}/{solo.wo.id}", headers=headers_for(solo.manager))
 
     assert response.status_code == status.HTTP_200_OK, response.text
@@ -1185,10 +1187,10 @@ def test_single_tenant_delivery_prediction_is_unchanged(client: TestClient, solo
     assert body["quantity"] == pytest.approx(10.0)
     assert body["confidence"] == pytest.approx(0.5)
     assert body["on_time_probability"] == pytest.approx(0.95)
-    assert body["bottleneck_work_center"] == "Solo Cell"
+    assert body["bottleneck_work_center"] is None
     assert [(op["operation_name"], op["queue_position"], op["estimated_hours"]) for op in body["operations"]] == [
-        ("Solo Saw", 2, pytest.approx(2.0)),
-        ("Solo Mill", 2, pytest.approx(4.0)),
+        ("Solo Saw", 0, pytest.approx(2.0)),
+        ("Solo Mill", 0, pytest.approx(4.0)),
     ]
 
 

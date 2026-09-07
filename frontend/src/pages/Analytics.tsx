@@ -766,6 +766,7 @@ export default function Analytics() {
 
             <CockpitPanel
               title="Capacity Forecast (4 Weeks)"
+              subtitle="Working hours follow center calendars. Unscheduled workload is spread across the forecast window."
               className="xl:col-span-5"
               headerExtra={
                 <button
@@ -783,7 +784,7 @@ export default function Analytics() {
                       <div className="flex justify-between text-sm mb-1 gap-2">
                         <span className="font-medium truncate">{wc.work_center_name}</span>
                         <span className={`tabular-nums flex-shrink-0 ${wc.is_overloaded ? 'text-red-600 font-semibold' : 'text-slate-400'}`}>
-                          {wc.utilization_pct.toFixed(0)}%
+                          {wc.available_hours > 0 ? `${wc.utilization_pct.toFixed(0)}%` : 'Closed'}
                         </span>
                       </div>
                       <div className="h-3 bg-gray-200 rounded-full overflow-hidden">
@@ -1090,14 +1091,14 @@ export default function Analytics() {
                         <span className="font-medium">
                           {formatCentralDate(week.week_start)} - {formatCentralDate(week.week_end)}
                         </span>
-                        <span className="text-slate-400">{week.overall_utilization.toFixed(0)}%</span>
+                        <span className="text-slate-400">{week.work_centers.some(wc => wc.available_hours > 0) ? `${week.overall_utilization.toFixed(0)}%` : 'No working capacity'}</span>
                       </div>
                       <div className="space-y-2">
                         {week.work_centers.slice(0, 5).map((wc) => (
                           <div key={wc.work_center_id}>
                             <div className="flex justify-between text-xs text-slate-400 mb-1">
                               <span>{wc.work_center_name}</span>
-                              <span>{wc.utilization_pct.toFixed(0)}%</span>
+                              <span>{wc.available_hours > 0 ? `${wc.utilization_pct.toFixed(0)}%` : 'Closed'}</span>
                             </div>
                             <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
                               <div

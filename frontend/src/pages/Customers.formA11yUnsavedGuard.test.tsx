@@ -125,9 +125,7 @@ describe('Customers form — unsaved-changes discard guard', () => {
     fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
 
     expect(confirmSpy).not.toHaveBeenCalled();
-    await waitFor(() =>
-      expect(screen.queryByLabelText(/Customer Name/)).not.toBeInTheDocument()
-    );
+    await waitFor(() => expect(screen.queryByLabelText(/Customer Name/)).not.toBeInTheDocument());
   });
 
   it('prompts and keeps the modal open when the user cancels the discard confirm', async () => {
@@ -155,9 +153,7 @@ describe('Customers form — unsaved-changes discard guard', () => {
     fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
 
     expect(confirmSpy).toHaveBeenCalledTimes(1);
-    await waitFor(() =>
-      expect(screen.queryByLabelText(/Customer Name/)).not.toBeInTheDocument()
-    );
+    await waitFor(() => expect(screen.queryByLabelText(/Customer Name/)).not.toBeInTheDocument());
     // Nothing was persisted — discarding must not write.
     expect(mockedApi.createCustomer).not.toHaveBeenCalled();
   });
@@ -178,10 +174,78 @@ describe('Customers form — unsaved-changes discard guard', () => {
 
     await waitFor(() => expect(mockedApi.createCustomer).toHaveBeenCalledTimes(1));
     // Modal closed by the save path...
-    await waitFor(() =>
-      expect(screen.queryByLabelText(/Customer Name/)).not.toBeInTheDocument()
-    );
+    await waitFor(() => expect(screen.queryByLabelText(/Customer Name/)).not.toBeInTheDocument());
     // ...and crucially, no discard prompt was ever shown.
     expect(confirmSpy).not.toHaveBeenCalled();
   });
+});
+
+it('loads preserved account fields and sends only the field explicitly edited', async () => {
+  jest.clearAllMocks();
+  mockedApi.getCustomers.mockResolvedValue([
+    {
+      id: 7,
+      name: 'Canadian Account',
+      code: 'CA7',
+      phone: '111',
+      address_line2: 'Suite 12',
+      country: 'Canada',
+      ship_to_name: 'Receiving',
+      ship_address_line2: 'Door B',
+      ship_country: 'Canada',
+      special_requirements: 'Keep <REF> marking',
+      notes: 'Call receiving first',
+      requires_coc: true,
+      requires_fai: false,
+      is_active: true,
+      created_at: '2026-09-07T12:00:00Z',
+    },
+  ]);
+  mockedApi.updateCustomer.mockResolvedValue({ id: 7 });
+  renderCustomers();
+  fireEvent.click(await screen.findByRole('button', { name: /edit canadian account/i }));
+  expect(await screen.findByLabelText('Address Line 2')).toHaveValue('Suite 12');
+  expect(screen.getByLabelText('Country')).toHaveValue('Canada');
+  expect(screen.getByLabelText('Shipping Address Line 2')).toHaveValue('Door B');
+  expect(screen.getByLabelText('Special Requirements')).toHaveValue('Keep <REF> marking');
+  expect(screen.getByLabelText('Notes')).toHaveValue('Call receiving first');
+  fireEvent.change(screen.getByLabelText('Phone'), { target: { value: '222' } });
+  fireEvent.submit(screen.getByLabelText('Phone').closest('form')!);
+  await waitFor(() => expect(mockedApi.updateCustomer).toHaveBeenCalledWith(7, { phone: '222' }));
+});
+
+it('keeps a linked customer detail from reopening over its edit form', async () => {
+  jest.clearAllMocks();
+  mockedApi.getCustomers.mockResolvedValue([
+    {
+      id: 7,
+      name: 'Linked Account',
+      code: 'LINKED',
+      country: 'Canada',
+      ship_address_line2: 'Door B',
+      requires_coc: true,
+      requires_fai: false,
+      is_active: true,
+    },
+  ]);
+  mockedApi.getCustomerStats.mockResolvedValue({
+    part_count: 0,
+    work_order_counts: { total: 0, by_status: {} },
+    parts: [],
+    assemblies: [],
+    current_work_orders: [],
+    past_work_orders: [],
+    recent_work_orders: [],
+  });
+  render(
+    <MemoryRouter initialEntries={['/customers?id=7']}>
+      <Customers />
+    </MemoryRouter>
+  );
+  fireEvent.click(await screen.findByRole('button', { name: /^Edit Customer$/ }));
+  await screen.findByLabelText('Shipping Address Line 2');
+  fireEvent.change(screen.getByLabelText('Phone'), { target: { value: '555-0202' } });
+  expect(screen.getAllByRole('dialog')).toHaveLength(1);
+  expect(screen.getByRole('dialog')).toHaveAccessibleName('Edit Customer');
+  expect(screen.getByRole('button', { name: /^Update$/ })).toBeEnabled();
 });

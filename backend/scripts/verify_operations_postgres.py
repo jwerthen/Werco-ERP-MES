@@ -1,4 +1,4 @@
-"""Exercise migrations 095–098 and runtime p75 on CI's disposable PostgreSQL.
+"""Exercise migrations 095–100 and runtime p75 on CI's disposable PostgreSQL.
 
 This uses an isolated schema, rolls everything back, and refuses remote/production DBs.
 Run before the E2E seed so schema migration failures stop the browser suite early.
@@ -65,6 +65,8 @@ def verify():
         "096_working_calendars",
         "097_team_workspaces",
         "098_runtime_metrics",
+        "099_recoverable_import_batches",
+        "100_receiving_supplier_followup",
     ):
         path = Path(__file__).resolve().parents[1] / "alembic/versions" / (filename + ".py")
         spec = importlib.util.spec_from_file_location(filename, path)
@@ -102,6 +104,11 @@ def verify():
               id INTEGER PRIMARY KEY, company_id INTEGER, is_deleted BOOLEAN,
               priority INTEGER, due_date DATE
             )"""))
+            connection.execute(sa.text("CREATE TABLE documents (id INTEGER PRIMARY KEY)"))
+            connection.execute(
+                sa.text("CREATE TABLE purchase_orders (id INTEGER PRIMARY KEY, company_id INTEGER, status VARCHAR)")
+            )
+            connection.execute(sa.text("CREATE TABLE po_receipts (id INTEGER PRIMARY KEY)"))
             with Operations.context(MigrationContext.configure(connection)):
                 for migration in migrations:
                     migration.upgrade()
@@ -113,9 +120,35 @@ def verify():
                     "work_order_operations",
                     "time_entries",
                     "work_orders",
+                    "documents",
+                    "purchase_orders",
+                    "po_receipts",
                 }
                 assert_private_objects(connection, schema, new_tables)
                 connection.execute(sa.text("INSERT INTO companies (id) VALUES (1)"))
+                connection.execute(sa.text("INSERT INTO users (id) VALUES (1)"))
+                connection.execute(sa.text("INSERT INTO documents (id) VALUES (1)"))
+                connection.execute(
+                    sa.text("INSERT INTO purchase_orders (id, company_id, status) VALUES (1, 1, 'sent')")
+                )
+                connection.execute(sa.text("INSERT INTO po_receipts (id) VALUES (1)"))
+                connection.execute(
+                    sa.text(
+                        """INSERT INTO import_batches
+                    (id, company_id, entity, filename, source_hash, request_key, headers, version, created_by, created_at, updated_at)
+                    VALUES (1, 1, 'parts', 'synthetic.csv', 'synthetic-source', 'synthetic-import', '[]', 1, 1, now(), now())"""
+                    )
+                )
+                connection.execute(sa.text("""INSERT INTO import_batch_rows
+                    (company_id, batch_id, row_key, group_key, source_row, data, status, created_at, updated_at)
+                    VALUES (1, 1, 'synthetic-row', 'synthetic-group', 2, '{}', 'ready', now(), now())"""))
+                connection.execute(sa.text("""INSERT INTO receiving_delivery_batches
+                    (id, company_id, purchase_order_id, request_key, payload_hash, response, created_by, created_at)
+                    VALUES (1, 1, 1, 'synthetic-delivery', 'synthetic-payload', '{}', 1, now())"""))
+                connection.execute(sa.text("""UPDATE po_receipts
+                    SET certificate_document_id = 1, delivery_batch_id = 1 WHERE id = 1"""))
+                connection.execute(sa.text("""UPDATE purchase_orders SET supplier_confirmed_date = '2026-09-10',
+                    supplier_acknowledged_by = 1, follow_up_owner_id = 1 WHERE id = 1"""))
                 cohorts = {"/parts": 1, "/work-orders": 4, "/purchasing": 5, "/quality": 8}
                 rows = [
                     {
@@ -146,6 +179,8 @@ def verify():
                     migration.downgrade()
                 remaining = set(sa.inspect(connection).get_table_names(schema=schema))
                 assert not (new_tables & remaining)
+                assert connection.execute(sa.text("SELECT COUNT(*) FROM purchase_orders")).scalar_one() == 1
+                assert connection.execute(sa.text("SELECT COUNT(*) FROM po_receipts")).scalar_one() == 1
                 # Recreate after a populated downgrade to catch leftover tables,
                 # sequences and indexes that would break a second upgrade.
                 for migration in migrations:
@@ -158,7 +193,7 @@ def verify():
                 assert not sa.inspect(connection).get_sequence_names(schema=schema)
                 assert not sa.inspect(connection).get_indexes("work_orders", schema=schema)
             print(
-                "PostgreSQL migrations 095–098 passed upgrade/downgrade twice, "
+                "PostgreSQL migrations 095–100 passed upgrade/downgrade twice, "
                 "RLS and Data API table/sequence privilege checks, and p75 cohorts 1/4/5/8."
             )
         finally:
