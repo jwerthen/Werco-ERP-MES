@@ -37,6 +37,7 @@ class NCRCreate(BaseModel):
 
 
 class NCRUpdate(BaseModel):
+    expected_updated_at: Optional[datetime] = None
     version: int = Field(..., ge=0, description="Version for optimistic locking")
     status: Optional[NCRStatus] = None
     disposition: Optional[NCRDisposition] = None
@@ -49,11 +50,18 @@ class NCRUpdate(BaseModel):
     car_required: Optional[bool] = None
     car_id: Optional[int] = Field(None, gt=0)
 
+    @field_validator('quantity_rejected')
+    @classmethod
+    def reject_null_quantity(cls, value: Optional[Decimal]) -> Decimal:
+        if value is None:
+            raise ValueError('quantity_rejected cannot be null')
+        return value
+
     @model_validator(mode='after')
     def validate_closure(self) -> 'NCRUpdate':
         """Ensure required fields for closure"""
         if self.status == NCRStatus.CLOSED:
-            if not self.disposition:
+            if not self.disposition or self.disposition == NCRDisposition.PENDING:
                 raise ValueError('Disposition required for NCR closure')
             if not self.root_cause or len(self.root_cause) < 20:
                 raise ValueError('Root cause required (minimum 20 characters) for NCR closure')
@@ -146,6 +154,7 @@ class CARCreate(BaseModel):
 
 
 class CARUpdate(BaseModel):
+    expected_updated_at: Optional[datetime] = None
     version: int = Field(..., ge=0)
     status: Optional[CARStatus] = None
     priority: Optional[int] = Field(None, ge=1, le=10)
@@ -164,6 +173,9 @@ class CARUpdate(BaseModel):
 
 class CARResponse(UTCModel):
     id: int
+    updated_at: Optional[datetime] = None
+    effectiveness_check: Optional[str] = None
+    verification_due: Optional[date] = None
     car_number: str
     car_type: CARType
     status: CARStatus

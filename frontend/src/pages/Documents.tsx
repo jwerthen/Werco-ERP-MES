@@ -1,15 +1,11 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import api from '../services/api';
+import { useSearchParams } from 'react-router-dom';
+import DocumentDetail from '../components/operations/DocumentDetail';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { Modal } from '../components/ui/Modal';
 import { FormField } from '../components/ui/FormField';
-import {
-  ConfirmDialog,
-  useToast,
-  DataTable,
-  DataTableColumn,
-  MobileDataCard,
-} from '../components/ui';
+import { ConfirmDialog, useToast, DataTable, DataTableColumn, MobileDataCard } from '../components/ui';
 import { formatCentralDate } from '../utils/centralTime';
 import {
   ArrowUpTrayIcon,
@@ -27,6 +23,7 @@ interface Document {
   document_type: string;
   description?: string;
   part_id?: number;
+  part?: { part_number: string; name: string };
   work_order_id?: number;
   vendor_id?: number;
   file_name?: string;
@@ -71,12 +68,26 @@ const formatFileSize = (bytes?: number) => {
 
 export default function Documents() {
   const { showToast } = useToast();
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState('');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const detailId = Number(searchParams.get('document') || 0);
+  const selectDocument = useCallback(
+    (id: number) => {
+      const next = new URLSearchParams(searchParams);
+      if (id) next.set('document', String(id));
+      else next.delete('document');
+      setSearchParams(next);
+    },
+    [searchParams, setSearchParams]
+  );
   const [documents, setDocuments] = useState<Document[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
   const [documentTypes, setDocumentTypes] = useState<DocumentType[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState(searchParams.get('search') || '');
+  useEffect(() => setSearch(searchParams.get('search') || ''), [searchParams]);
   const debouncedSearch = useDebouncedValue(search, 250);
   const [filterType, setFilterType] = useState('');
   const [showUploadModal, setShowUploadModal] = useState(false);
@@ -89,22 +100,33 @@ export default function Documents() {
     description: '',
     part_id: 0,
     revision: 'A',
-    file: null as File | null
+    file: null as File | null,
   });
-  const partsById = useMemo(() => new Map(parts.map((part) => [part.id, part])), [parts]);
+  const partsById = useMemo(() => new Map(parts.map(part => [part.id, part])), [parts]);
+
+  useEffect(() => {
+    let active = true;
+    Promise.all([api.getParts({ active_only: false, item_group: 'all' }), api.getDocumentTypes()])
+      .then(([partRows, types]) => {
+        if (active) {
+          setParts(partRows);
+          setDocumentTypes(types);
+        }
+      })
+      .catch(() => {
+        if (active) showToast('error', 'Document type or part choices could not be loaded. Reload to retry.');
+      });
+    return () => {
+      active = false;
+    };
+  }, [showToast]);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     setLoadError(false);
     try {
-      const [docsRes, partsRes, typesRes] = await Promise.all([
-        api.getDocuments({ document_type: filterType || undefined }),
-        api.getParts({ active_only: true, item_group: 'all' }),
-        api.getDocumentTypes()
-      ]);
+      const docsRes = await api.getDocuments({ document_type: filterType || undefined });
       setDocuments(docsRes);
-      setParts(partsRes);
-      setDocumentTypes(typesRes);
     } catch (err) {
       console.error('Failed to load documents:', err);
       setLoadError(true);
@@ -134,6 +156,9 @@ export default function Documents() {
       formData.append('part_id', uploadForm.part_id.toString());
     }
 
+    if (actionBusy) return;
+    setActionBusy(true);
+    setActionError('');
     try {
       await api.uploadDocument(formData);
       setShowUploadModal(false);
@@ -141,24 +166,38 @@ export default function Documents() {
       showToast('success', 'Document uploaded');
       loadData();
     } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      setActionError(
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((item: any) => item.msg).join('; ')
+            : 'Unable to save. Check your entries and try again.'
+      );
       showToast('error', err.response?.data?.detail || 'Failed to upload document');
+    } finally {
+      setActionBusy(false);
     }
   };
 
-  const handleDownload = useCallback(async (doc: Document) => {
-    try {
-      const response = await api.downloadDocument(doc.id);
-      const url = window.URL.createObjectURL(new Blob([response]));
-      const link = document.createElement('a');
-      link.href = url;
-      link.setAttribute('download', doc.file_name || 'document');
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-    } catch {
-      showToast('error', 'Failed to download document');
-    }
-  }, [showToast]);
+  const handleDownload = useCallback(
+    async (doc: Document) => {
+      try {
+        const response = await api.downloadDocument(doc.id);
+        const url = window.URL.createObjectURL(new Blob([response]));
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', doc.file_name || 'document');
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+      } catch {
+        showToast('error', 'Failed to download document');
+      }
+    },
+    [showToast]
+  );
 
   const handleDelete = useCallback((docId: number) => {
     setDeleteDocTarget(docId);
@@ -182,132 +221,160 @@ export default function Documents() {
   const filteredDocs = useMemo(() => {
     if (!debouncedSearch) return documents;
     const searchLower = debouncedSearch.toLowerCase();
-    return documents.filter((doc) => (
-      doc.document_number.toLowerCase().includes(searchLower) ||
-      doc.title.toLowerCase().includes(searchLower) ||
-      doc.file_name?.toLowerCase().includes(searchLower)
-    ));
+    return documents.filter(
+      doc =>
+        doc.document_number.toLowerCase().includes(searchLower) ||
+        doc.title.toLowerCase().includes(searchLower) ||
+        doc.file_name?.toLowerCase().includes(searchLower)
+    );
   }, [documents, debouncedSearch]);
   const filteredCount = filteredDocs.length;
 
   const partNumberFor = useCallback(
-    (doc: Document) => (doc.part_id ? partsById.get(doc.part_id)?.part_number || '-' : '-'),
+    (doc: Document) => doc.part?.part_number || (doc.part_id ? partsById.get(doc.part_id)?.part_number || '-' : '-'),
     [partsById]
   );
 
-  const columns = useMemo<Array<DataTableColumn<Document>>>(() => [
-    {
-      key: 'document',
-      header: 'Document',
-      sortable: true,
-      accessor: (doc) => doc.title,
-      csv: (doc) => `${doc.title} (${doc.document_number} Rev ${doc.revision})`,
-      render: (doc) => (
-        <div className="flex items-center">
-          <span className="text-2xl mr-3">{typeIcons[doc.document_type] || '📄'}</span>
-          <div>
-            <div className="font-medium">{doc.title}</div>
-            <div className="text-sm text-slate-400">{doc.document_number} Rev {doc.revision}</div>
+  const columns = useMemo<Array<DataTableColumn<Document>>>(
+    () => [
+      {
+        key: 'document',
+        header: 'Document',
+        sortable: true,
+        accessor: doc => doc.title,
+        csv: doc => `${doc.title} (${doc.document_number} Rev ${doc.revision})`,
+        render: doc => (
+          <div className="flex items-center">
+            <span className="text-2xl mr-3">{typeIcons[doc.document_type] || '📄'}</span>
+            <div>
+              <div className="font-medium">{doc.title}</div>
+              <div className="text-sm text-slate-400">
+                {doc.document_number} Rev {doc.revision}
+              </div>
+            </div>
           </div>
-        </div>
-      ),
-    },
-    {
-      key: 'type',
-      header: 'Type',
-      sortable: true,
-      accessor: (doc) => doc.document_type,
-      csv: (doc) => doc.document_type.replace(/_/g, ' '),
-      render: (doc) => <span className="capitalize">{doc.document_type.replace('_', ' ')}</span>,
-    },
-    {
-      key: 'file',
-      header: 'File',
-      sortable: true,
-      accessor: (doc) => doc.file_name ?? '',
-      csv: (doc) => doc.file_name ?? '',
-      render: (doc) => (
-        <>
-          <div className="text-sm">{doc.file_name || '-'}</div>
-          <div className="text-xs text-slate-400">{formatFileSize(doc.file_size)}</div>
-        </>
-      ),
-    },
-    {
-      key: 'part',
-      header: 'Part',
-      sortable: true,
-      accessor: (doc) => partNumberFor(doc),
-      render: (doc) => <span className="text-sm">{partNumberFor(doc)}</span>,
-    },
-    {
-      key: 'uploaded',
-      header: 'Uploaded',
-      sortable: true,
-      accessor: (doc) => doc.created_at,
-      csv: (doc) => formatCentralDate(doc.created_at),
-      render: (doc) => <span className="text-sm">{formatCentralDate(doc.created_at)}</span>,
-    },
-    {
-      key: 'actions',
-      header: 'Actions',
-      align: 'center',
-      render: (doc) => (
-        <div className="flex justify-center gap-2">
-          <button
-            onClick={(e) => { e.stopPropagation(); handleDownload(doc); }}
-            className="text-werco-primary hover:text-blue-400"
-            title="Download"
-            aria-label="Download document"
-          >
-            <ArrowDownTrayIcon className="h-5 w-5" aria-hidden="true" />
-          </button>
-          <button
-            onClick={(e) => { e.stopPropagation(); handleDelete(doc.id); }}
-            className="text-red-500 hover:text-red-400"
-            title="Delete"
-            aria-label="Delete document"
-          >
-            <TrashIcon className="h-5 w-5" aria-hidden="true" />
-          </button>
-        </div>
-      ),
-    },
-  ], [partNumberFor, handleDownload, handleDelete]);
+        ),
+      },
+      {
+        key: 'type',
+        header: 'Type',
+        sortable: true,
+        accessor: doc => doc.document_type,
+        csv: doc => doc.document_type.replace(/_/g, ' '),
+        render: doc => <span className="capitalize">{doc.document_type.replace('_', ' ')}</span>,
+      },
+      {
+        key: 'file',
+        header: 'File',
+        sortable: true,
+        accessor: doc => doc.file_name ?? '',
+        csv: doc => doc.file_name ?? '',
+        render: doc => (
+          <>
+            <div className="text-sm">{doc.file_name || '-'}</div>
+            <div className="text-xs text-slate-400">{formatFileSize(doc.file_size)}</div>
+          </>
+        ),
+      },
+      {
+        key: 'part',
+        header: 'Part',
+        sortable: true,
+        accessor: doc => partNumberFor(doc),
+        render: doc => <span className="text-sm">{partNumberFor(doc)}</span>,
+      },
+      {
+        key: 'uploaded',
+        header: 'Uploaded',
+        sortable: true,
+        accessor: doc => doc.created_at,
+        csv: doc => formatCentralDate(doc.created_at),
+        render: doc => <span className="text-sm">{formatCentralDate(doc.created_at)}</span>,
+      },
+      {
+        key: 'actions',
+        header: 'Actions',
+        align: 'center',
+        render: doc => (
+          <div className="flex justify-center gap-2">
+            <button
+              onClick={e => {
+                e.stopPropagation();
+                selectDocument(doc.id);
+              }}
+              className="text-werco-primary underline"
+            >
+              Preview / History
+            </button>
+            <button
+              onClick={e => {
+                e.stopPropagation();
+                handleDownload(doc);
+              }}
+              className="text-werco-primary hover:text-blue-400"
+              title="Download"
+              aria-label="Download document"
+            >
+              <ArrowDownTrayIcon className="h-5 w-5" aria-hidden="true" />
+            </button>
+            <button
+              onClick={e => {
+                e.stopPropagation();
+                handleDelete(doc.id);
+              }}
+              className="text-red-500 hover:text-red-400"
+              title="Delete"
+              aria-label="Delete document"
+            >
+              <TrashIcon className="h-5 w-5" aria-hidden="true" />
+            </button>
+          </div>
+        ),
+      },
+    ],
+    [partNumberFor, handleDownload, handleDelete, selectDocument]
+  );
 
-  const renderMobileCard = useCallback((doc: Document) => (
-    <MobileDataCard
-      title={doc.title}
-      subtitle={`${doc.document_number} Rev ${doc.revision}`}
-      badge={<span className="text-xl">{typeIcons[doc.document_type] || '📄'}</span>}
-      fields={[
-        { label: 'Type', value: <span className="capitalize">{doc.document_type.replace('_', ' ')}</span> },
-        { label: 'Part', value: partNumberFor(doc) },
-        { label: 'File', value: doc.file_name || '-', fullWidth: true },
-        { label: 'Size', value: formatFileSize(doc.file_size) },
-        { label: 'Uploaded', value: formatCentralDate(doc.created_at) },
-      ]}
-      actions={
-        <>
-          <button
-            onClick={() => handleDownload(doc)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-werco-primary border border-fd-line rounded-sm hover:bg-slate-700/40"
-          >
-            <ArrowDownTrayIcon className="h-4 w-4" /> Download
-          </button>
-          <button
-            onClick={() => handleDelete(doc.id)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-500 border border-fd-line rounded-sm hover:bg-slate-700/40"
-          >
-            <TrashIcon className="h-4 w-4" /> Delete
-          </button>
-        </>
-      }
-    />
-  ), [partNumberFor, handleDownload, handleDelete]);
+  const renderMobileCard = useCallback(
+    (doc: Document) => (
+      <MobileDataCard
+        title={doc.title}
+        onClick={() => selectDocument(doc.id)}
+        subtitle={`${doc.document_number} Rev ${doc.revision}`}
+        badge={<span className="text-xl">{typeIcons[doc.document_type] || '📄'}</span>}
+        fields={[
+          { label: 'Type', value: <span className="capitalize">{doc.document_type.replace('_', ' ')}</span> },
+          { label: 'Part', value: partNumberFor(doc) },
+          { label: 'File', value: doc.file_name || '-', fullWidth: true },
+          { label: 'Size', value: formatFileSize(doc.file_size) },
+          { label: 'Uploaded', value: formatCentralDate(doc.created_at) },
+        ]}
+        actions={
+          <>
+            <button
+              onClick={() => handleDownload(doc)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-werco-primary border border-fd-line rounded-sm hover:bg-slate-700/40"
+            >
+              <ArrowDownTrayIcon className="h-4 w-4" /> Download
+            </button>
+            <button
+              onClick={() => handleDelete(doc.id)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-500 border border-fd-line rounded-sm hover:bg-slate-700/40"
+            >
+              <TrashIcon className="h-4 w-4" /> Delete
+            </button>
+          </>
+        }
+      />
+    ),
+    [partNumberFor, handleDownload, handleDelete, selectDocument]
+  );
 
   return (
     <div className="space-y-6">
+      {detailId > 0 && (
+        <DocumentDetail id={detailId} onClose={() => selectDocument(0)} onSelect={selectDocument} onSaved={loadData} />
+      )}
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Documents</h1>
         <button onClick={() => setShowUploadModal(true)} className="btn-primary flex items-center">
@@ -325,18 +392,16 @@ export default function Documents() {
             placeholder="Search documents..."
             aria-label="Search documents"
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={e => setSearch(e.target.value)}
             className="input pl-10"
           />
         </div>
-        <select
-          value={filterType}
-          onChange={(e) => setFilterType(e.target.value)}
-          className="input w-full sm:w-48"
-        >
+        <select value={filterType} onChange={e => setFilterType(e.target.value)} className="input w-full sm:w-48">
           <option value="">All Types</option>
           {documentTypes.map(t => (
-            <option key={t.value} value={t.value}>{t.label}</option>
+            <option key={t.value} value={t.value}>
+              {t.label}
+            </option>
           ))}
         </select>
       </div>
@@ -352,7 +417,8 @@ export default function Documents() {
       <DataTable
         columns={columns}
         data={filteredDocs}
-        rowKey={(doc) => doc.id}
+        rowKey={doc => doc.id}
+        onRowClick={doc => selectDocument(doc.id)}
         defaultSort={{ key: 'uploaded', dir: 'desc' }}
         pageSize={25}
         loading={loading}
@@ -364,104 +430,116 @@ export default function Documents() {
           icon: DocumentTextIcon,
           title: search || filterType ? 'No matching documents' : 'No documents',
           description:
-            search || filterType
-              ? 'Try adjusting your search or type filter.'
-              : 'Upload a document to get started.',
+            search || filterType ? 'Try adjusting your search or type filter.' : 'Upload a document to get started.',
           action:
-            search || filterType
-              ? undefined
-              : { label: 'Upload Document', onClick: () => setShowUploadModal(true) },
+            search || filterType ? undefined : { label: 'Upload Document', onClick: () => setShowUploadModal(true) },
         }}
       />
 
       {/* Upload Modal */}
       <Modal open={showUploadModal} onClose={() => setShowUploadModal(false)} size="md" closeOnBackdrop={false}>
-            <h3 className="text-lg font-semibold mb-4">Upload Document</h3>
-            <form onSubmit={handleUpload} className="space-y-4">
-              <FormField label="File" required>
-                {(field) => (
-                  <input
-                    {...field}
-                    type="file"
-                    onChange={(e) => setUploadForm({ ...uploadForm, file: e.target.files?.[0] || null })}
-                    className="input"
-                    required
-                  />
-                )}
-              </FormField>
-              <FormField label="Title" required>
-                {(field) => (
-                  <input
-                    {...field}
-                    type="text"
-                    value={uploadForm.title}
-                    onChange={(e) => setUploadForm({ ...uploadForm, title: e.target.value })}
-                    className="input"
-                    placeholder="Document title"
-                    required
-                  />
-                )}
-              </FormField>
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Type">
-                  {(field) => (
-                    <select
-                      {...field}
-                      value={uploadForm.document_type}
-                      onChange={(e) => setUploadForm({ ...uploadForm, document_type: e.target.value })}
-                      className="input"
-                    >
-                      {documentTypes.map(t => (
-                        <option key={t.value} value={t.value}>{t.label}</option>
-                      ))}
-                    </select>
-                  )}
-                </FormField>
-                <FormField label="Revision">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="text"
-                      value={uploadForm.revision}
-                      onChange={(e) => setUploadForm({ ...uploadForm, revision: e.target.value })}
-                      className="input"
-                    />
-                  )}
-                </FormField>
-              </div>
-              <FormField label="Associated Part">
-                {(field) => (
-                  <select
-                    {...field}
-                    value={uploadForm.part_id}
-                    onChange={(e) => setUploadForm({ ...uploadForm, part_id: parseInt(e.target.value) })}
-                    className="input"
-                  >
-                    <option value={0}>None</option>
-                    {parts.map(p => (
-                      <option key={p.id} value={p.id}>{p.part_number} - {p.name}</option>
-                    ))}
-                  </select>
-                )}
-              </FormField>
-              <FormField label="Description">
-                {(field) => (
-                  <textarea
-                    {...field}
-                    value={uploadForm.description}
-                    onChange={(e) => setUploadForm({ ...uploadForm, description: e.target.value })}
-                    className="input"
-                    rows={2}
-                  />
-                )}
-              </FormField>
-              <div className="flex justify-end gap-3 pt-4 border-t">
-                <button type="button" onClick={() => setShowUploadModal(false)} className="btn-secondary">
-                  Cancel
-                </button>
-                <button type="submit" className="btn-primary">Upload</button>
-              </div>
-            </form>
+        {actionError && (
+          <p role="alert" className="text-red-300 p-3">
+            {actionError}
+          </p>
+        )}
+        {actionBusy && (
+          <p role="status" className="text-slate-400 p-3">
+            Saving…
+          </p>
+        )}
+        <h3 className="text-lg font-semibold mb-4">Upload Document</h3>
+        <form onSubmit={handleUpload} className="space-y-4">
+          <FormField label="File" required>
+            {field => (
+              <input
+                {...field}
+                type="file"
+                onChange={e => setUploadForm({ ...uploadForm, file: e.target.files?.[0] || null })}
+                className="input"
+                required
+              />
+            )}
+          </FormField>
+          <FormField label="Title" required>
+            {field => (
+              <input
+                {...field}
+                type="text"
+                value={uploadForm.title}
+                onChange={e => setUploadForm({ ...uploadForm, title: e.target.value })}
+                className="input"
+                placeholder="Document title"
+                required
+              />
+            )}
+          </FormField>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Type">
+              {field => (
+                <select
+                  {...field}
+                  value={uploadForm.document_type}
+                  onChange={e => setUploadForm({ ...uploadForm, document_type: e.target.value })}
+                  className="input"
+                >
+                  {documentTypes.map(t => (
+                    <option key={t.value} value={t.value}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </FormField>
+            <FormField label="Revision">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={uploadForm.revision}
+                  onChange={e => setUploadForm({ ...uploadForm, revision: e.target.value })}
+                  className="input"
+                />
+              )}
+            </FormField>
+          </div>
+          <FormField label="Associated Part">
+            {field => (
+              <select
+                {...field}
+                value={uploadForm.part_id}
+                onChange={e => setUploadForm({ ...uploadForm, part_id: parseInt(e.target.value) })}
+                className="input"
+              >
+                <option value={0}>None</option>
+                {parts.map(p => (
+                  <option key={p.id} value={p.id}>
+                    {p.part_number} - {p.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </FormField>
+          <FormField label="Description">
+            {field => (
+              <textarea
+                {...field}
+                value={uploadForm.description}
+                onChange={e => setUploadForm({ ...uploadForm, description: e.target.value })}
+                className="input"
+                rows={2}
+              />
+            )}
+          </FormField>
+          <div className="flex justify-end gap-3 pt-4 border-t">
+            <button type="button" onClick={() => setShowUploadModal(false)} className="btn-secondary">
+              Cancel
+            </button>
+            <button disabled={actionBusy} type="submit" className="btn-primary">
+              Upload
+            </button>
+          </div>
+        </form>
       </Modal>
 
       {/* Delete document confirm */}

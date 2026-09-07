@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { tabKeyboard } from '../components/operations/tabKeyboard';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
@@ -246,13 +247,17 @@ const QUEUE_DAYS_BADGE: Record<string, string> = {
 
 export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [activeTab, setActiveTab] = useState<TabType>(() => {
-    const tab = searchParams.get('tab');
-    return tab === 'queue' || tab === 'history' ? tab : 'receive';
-  });
+  // Derive selection from the committed URL. A separate optimistic state can
+  // survive a cancelled router transition and disagree with browser Back.
+  const requestedTab = searchParams.get(embedded ? 'receivingTab' : 'tab');
+  const activeTab: TabType = requestedTab === 'queue' || requestedTab === 'history' ? requestedTab : 'receive';
 
   const { showToast } = useToast();
 
+  const poSearch = searchParams.get('receivingSearch') || '';
+  const [poDetailLoading, setPoDetailLoading] = useState(false);
+  const poDetailRequest = useRef(0);
+  const selectedPOQuery = Number(searchParams.get('po') || 0);
   const [openPOs, setOpenPOs] = useState<PurchaseOrder[]>([]);
   const [selectedPO, setSelectedPO] = useState<PurchaseOrder | null>(null);
   const [selectedLine, setSelectedLine] = useState<POLine | null>(null);
@@ -262,6 +267,9 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   const [stats, setStats] = useState<any>(null);
 
   const [inspectionQueue, setInspectionQueue] = useState<InspectionQueueItem[]>([]);
+  const [queueLoading, setQueueLoading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const historyRequest = useRef(0);
   const [queueError, setQueueError] = useState(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyError, setHistoryError] = useState(false);
@@ -269,7 +277,9 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   // the inspection queue, which deliberately never ages out. 30 days is the
   // default; clearing an aged inspection hold widens it once so the receipt the
   // user just released is still visible somewhere (see handleSubmitClearInspection).
-  const [historyDays, setHistoryDays] = useState(30);
+  const [historyDays, setHistoryDays] = useState(() =>
+    Math.min(365, Math.max(1, Number(searchParams.get('receivingDays')) || 30))
+  );
 
   const [showReceiveModal, setShowReceiveModal] = useState(false);
   const [showInspectModal, setShowInspectModal] = useState(false);
@@ -310,9 +320,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   // inspect modals is gated with confirmDiscard() so in-progress entries aren't
   // silently dropped; beforeunload is covered while dirty.
   const isReceiveDirty =
-    showReceiveModal &&
-    initialFormData !== null &&
-    JSON.stringify(formData) !== JSON.stringify(initialFormData);
+    showReceiveModal && initialFormData !== null && JSON.stringify(formData) !== JSON.stringify(initialFormData);
   const isInspectDirty =
     showInspectModal &&
     initialInspectionData !== null &&
@@ -333,6 +341,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   };
 
   const [error, setError] = useState('');
+  const [receivingPending, setReceivingPending] = useState(false);
   const [success, setSuccess] = useState('');
   // Receipt id offered for a one-click "Print label" on the success toast right
   // after a receipt is created.
@@ -393,8 +402,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   // Receipt corrections mirror PATCH /receiving/receipt/{id} (ADMIN / MANAGER /
   // SUPERVISOR); voids mirror POST .../void (ADMIN / MANAGER only). Superuser
   // qualifies for both, matching the backend require_role behavior.
-  const canCorrectReceipt =
-    (!!user && ['admin', 'manager', 'supervisor'].includes(user.role)) || !!user?.is_superuser;
+  const canCorrectReceipt = (!!user && ['admin', 'manager', 'supervisor'].includes(user.role)) || !!user?.is_superuser;
   const canVoidReceipt = (!!user && ['admin', 'manager'].includes(user.role)) || !!user?.is_superuser;
   // Deleting an open PO from the receiving list mirrors DELETE
   // /purchasing/purchase-orders/{id} (ADMIN / MANAGER). Same "never
@@ -525,6 +533,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
 
   const loadInspectionQueue = async () => {
     setQueueError(false);
+    setQueueLoading(true);
     try {
       // No cutoff — the queue must list every receipt still pending inspection.
       const data = await api.getInspectionQueue();
@@ -532,6 +541,8 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     } catch (err) {
       console.error('Failed to load inspection queue:', err);
       setQueueError(true);
+    } finally {
+      setQueueLoading(false);
     }
   };
 
@@ -539,25 +550,46 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   // call takes the current one. Never wire this straight to an onRetry/onClick —
   // React would hand the MouseEvent in as `days`.
   const loadHistory = async (days: number = historyDays) => {
+    const request = ++historyRequest.current;
     setHistoryError(false);
+    setHistoryLoading(true);
     try {
       const data = await api.getReceivingHistory(days);
-      setHistory(data);
+      if (request === historyRequest.current) setHistory(data);
     } catch (err) {
       console.error('Failed to load history:', err);
-      setHistoryError(true);
+      if (request === historyRequest.current) setHistoryError(true);
+    } finally {
+      if (request === historyRequest.current) setHistoryLoading(false);
     }
   };
 
   const handleSelectPO = async (po: PurchaseOrder) => {
-    try {
-      const fullPO = await api.getPOForReceiving(po.po_id);
-      setSelectedPO(fullPO);
-    } catch (err) {
-      console.error('Failed to load PO details:', err);
-      showToast('error', 'Failed to load PO details');
-    }
+    const next = new URLSearchParams(searchParams);
+    next.set('po', String(po.po_id));
+    setSearchParams(next);
   };
+  useEffect(() => {
+    const request = ++poDetailRequest.current;
+    if (!selectedPOQuery) {
+      setSelectedPO(null);
+      return;
+    }
+    setPoDetailLoading(true);
+    setSelectedPO(null);
+    api
+      .getPOForReceiving(selectedPOQuery)
+      .then(fullPO => {
+        if (request === poDetailRequest.current) setSelectedPO(fullPO);
+      })
+      .catch(() => {
+        if (request === poDetailRequest.current)
+          showToast('error', 'Unable to load the selected purchase order. Select it again to retry.');
+      })
+      .finally(() => {
+        if (request === poDetailRequest.current) setPoDetailLoading(false);
+      });
+  }, [selectedPOQuery, showToast]);
 
   /**
    * Delete (soft) an open PO straight from the receiving list.
@@ -594,7 +626,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       showToast(
         'success',
         `Purchase order ${target.po_number} deleted — record retained for audit. An admin or ` +
-          'manager can restore it from Purchasing → Purchase Orders → Deleted.',
+          'manager can restore it from Purchasing → Purchase Orders → Deleted.'
       );
       setDeletePOTarget(null);
       // If the deleted PO was the one loaded into the right-hand receive panel,
@@ -636,7 +668,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   const handleReceive = async () => {
     setError('');
 
-    if (formData.quantity_received <= 0) {
+    if (!Number.isFinite(formData.quantity_received) || formData.quantity_received <= 0) {
       setError('Quantity must be greater than 0');
       return;
     }
@@ -656,6 +688,8 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
     const selectedLineId = selectedLine?.line_id;
     const selectedPOId = selectedPO?.po_id;
 
+    if (receivingPending) return;
+    setReceivingPending(true);
     try {
       const receipt = await api.receiveNewMaterial({
         ...formData,
@@ -689,6 +723,8 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       }, 8000);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to receive material');
+    } finally {
+      setReceivingPending(false);
     }
   };
 
@@ -739,6 +775,14 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
   const handleInspect = async () => {
     setError('');
 
+    if (
+      ![inspectionData.quantity_accepted, inspectionData.quantity_rejected].every(
+        value => Number.isFinite(value) && value >= 0
+      )
+    ) {
+      setError('Enter nonnegative accepted and rejected quantities.');
+      return;
+    }
     const total = inspectionData.quantity_accepted + inspectionData.quantity_rejected;
     if (total > (selectedReceipt?.quantity_received || 0)) {
       setError('Total cannot exceed received quantity');
@@ -755,6 +799,8 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       return;
     }
 
+    if (receivingPending) return;
+    setReceivingPending(true);
     try {
       const result = await api.inspectReceiptNew(selectedReceipt.receipt_id, {
         ...inspectionData,
@@ -779,6 +825,8 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
       setTimeout(() => setSuccess(''), 5000);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to complete inspection');
+    } finally {
+      setReceivingPending(false);
     }
   };
 
@@ -1364,7 +1412,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
           )}
         </div>
       )}
-      {error && (
+      {error && !showReceiveModal && !showInspectModal && (
         <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 flex items-center gap-3">
           <ExclamationTriangleIcon className="h-5 w-5 text-red-600" />
           <span className="text-red-300">{error}</span>
@@ -1414,7 +1462,13 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
 
       {/* Tabs */}
       <div className="border-b border-slate-700">
-        <nav className="-mb-px flex space-x-8">
+        <div
+          tabIndex={-1}
+          role="tablist"
+          aria-label="Receiving sections"
+          onKeyDown={tabKeyboard}
+          className="-mb-px flex space-x-8"
+        >
           {[
             { id: 'receive', label: 'Receive Material', icon: TruckIcon },
             {
@@ -1427,9 +1481,16 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
           ].map(tab => (
             <button
               key={tab.id}
+              role="tab"
+              id={`receiving-tab-${tab.id}`}
+              aria-controls="receiving-panel"
+              aria-selected={activeTab === tab.id}
+              tabIndex={activeTab === tab.id ? 0 : -1}
               onClick={() => {
-                setActiveTab(tab.id as TabType);
-                setSearchParams({ tab: tab.id });
+                if (activeTab === tab.id) return;
+                const next = new URLSearchParams(searchParams);
+                next.set(embedded ? 'receivingTab' : 'tab', tab.id);
+                setSearchParams(next);
               }}
               className={`flex items-center gap-2 py-4 px-1 border-b-2 font-medium text-sm ${
                 activeTab === tab.id
@@ -1446,18 +1507,39 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               )}
             </button>
           ))}
-        </nav>
+        </div>
       </div>
 
       {/* Tab Content */}
-      <div className="card">
+      <div className="card" role="tabpanel" id="receiving-panel" aria-labelledby={`receiving-tab-${activeTab}`}>
         {/* RECEIVE TAB */}
         {activeTab === 'receive' && (
           <div className="space-y-4">
             {/* PO Selection Row */}
-            <div className="grid grid-cols-3 gap-4" style={{ minHeight: '500px' }}>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4" style={{ minHeight: '500px' }}>
               <div className="col-span-1 flex flex-col">
-                <h2 className="text-lg font-semibold mb-2">Open Purchase Orders</h2>
+                <h2 className="text-lg font-semibold mb-2">Open Purchase Orders ({openPOs.length})</h2>
+                <FormField label="Find purchase order">
+                  {field => (
+                    <input
+                      {...field}
+                      className="input mb-3"
+                      value={poSearch}
+                      placeholder="PO, supplier, or part"
+                      onChange={e => {
+                        const next = new URLSearchParams(searchParams);
+                        if (e.target.value) next.set('receivingSearch', e.target.value);
+                        else next.delete('receivingSearch');
+                        setSearchParams(next, { replace: true });
+                      }}
+                    />
+                  )}
+                </FormField>
+                {poDetailLoading && (
+                  <p role="status" className="text-sm text-slate-400">
+                    Loading selected purchase order…
+                  </p>
+                )}
                 {/* Arriving Today summary strip — always rendered so a zero is a
                     trustworthy "nothing due", not a missing signal. */}
                 <div
@@ -1498,99 +1580,114 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
                       description="Open purchase orders awaiting receipt will appear here."
                     />
                   ) : (
-                    poArrivals.sortedPOs.map(po => {
-                      const arrival = poArrivals.arrivalById.get(po.po_id);
-                      // State gate on top of the role gate. This list carries SENT and
-                      // PARTIAL POs only, and the backend sets PARTIAL exactly when some
-                      // line has quantity_received > 0 — which is exactly the condition
-                      // DELETE /purchasing/purchase-orders/{id} refuses on. So on THIS
-                      // surface `status === 'partial'` is a perfect predictor of the 400:
-                      // the control could only ever fail there ("a button that can only
-                      // ever fail is worse than no button" — the same rule that keeps
-                      // Clear Hold queue-only, see renderClearInspectionAction).
-                      //
-                      // Hiding it is the safe direction rather than merely the tidy one.
-                      // The server's refusal instructs "Void the receipt(s) first, then
-                      // delete" — correct advice for a bogus receipt, and destructive
-                      // advice on a PARTIAL PO, where PARTIAL normally means material
-                      // really arrived: following it voids a real receipt, reverses posted
-                      // on-hand, and deletes that lot's traceability chain, all to tidy a
-                      // list. A PO whose balance is dead belongs closed or cancelled in
-                      // Purchasing. The dialog still carries that counter-guidance for the
-                      // residual race (a PO that goes PARTIAL between list load and
-                      // confirm), where the server's 400 is still reachable.
-                      const canDeleteThisPO = canDeletePO && po.status !== 'partial';
-                      return (
-                        // The card is a real <button>; the Delete control is its SIBLING inside
-                        // this relative wrapper, never a nested one (nested interactive elements
-                        // are invalid HTML and jsx-a11y is enforced at --max-warnings=0). Being a
-                        // sibling also means a Delete click can't bubble into card selection.
-                        <div key={po.po_id} className="relative">
-                          <button
-                            type="button"
-                            onClick={() => handleSelectPO(po)}
-                            className={`w-full text-left p-3 ${
-                              canDeleteThisPO ? 'pr-10' : ''
-                            } rounded-xl border-2 cursor-pointer transition-all ${
-                              selectedPO?.po_id === po.po_id
-                                ? 'border-werco-primary bg-werco-500/10'
-                                : 'border-slate-700 hover:border-slate-600 hover:bg-slate-800'
-                            }`}
-                          >
-                            <div className="flex justify-between items-start">
-                              <div>
-                                <p className="font-semibold text-werco-primary">{po.po_number}</p>
-                                <p className="text-sm text-slate-400">{po.vendor_name}</p>
-                              </div>
-                              <span className="flex flex-shrink-0 items-center gap-1.5">
-                                {arrival?.status === 'today' && (
-                                  <span className="px-2 py-1 rounded text-xs font-medium bg-amber-500/20 text-amber-300">
-                                    Today
-                                  </span>
-                                )}
-                                {arrival?.status === 'overdue' && (
-                                  <span className="px-2 py-1 rounded text-xs font-medium bg-red-500/20 text-red-300">
-                                    Overdue
-                                  </span>
-                                )}
-                                <span className="px-2 py-1 rounded text-xs font-medium bg-blue-500/20 text-blue-300">
-                                  {po.total_lines} line{po.total_lines !== 1 ? 's' : ''}
-                                </span>
-                              </span>
-                            </div>
-                            {(po.required_date || arrival?.date) && (
-                              <p className="text-xs text-slate-400 mt-1">
-                                {po.required_date && <>Required: {formatCentralDate(po.required_date)}</>}
-                                {/* When the Today/Overdue badge is driven by a date other than the
-                                    visible Required date, show it so the badge is never contradicted. */}
-                                {arrival?.date && arrival.date !== toISODateOnly(po.required_date) && (
-                                  <>
-                                    {po.required_date && ' · '}
-                                    Expected: {formatCentralDate(arrival.date)}
-                                  </>
-                                )}
-                              </p>
-                            )}
-                          </button>
-                          {canDeleteThisPO && (
+                    poArrivals.sortedPOs
+                      .filter(po =>
+                        `${po.po_number} ${po.vendor_name} ${po.vendor_code} ${(po.lines || []).map(line => `${line.part_number} ${line.part_name}`).join(' ')}`
+                          .toLowerCase()
+                          .includes(poSearch.toLowerCase())
+                      )
+                      .map(po => {
+                        const arrival = poArrivals.arrivalById.get(po.po_id);
+                        // State gate on top of the role gate. This list carries SENT and
+                        // PARTIAL POs only, and the backend sets PARTIAL exactly when some
+                        // line has quantity_received > 0 — which is exactly the condition
+                        // DELETE /purchasing/purchase-orders/{id} refuses on. So on THIS
+                        // surface `status === 'partial'` is a perfect predictor of the 400:
+                        // the control could only ever fail there ("a button that can only
+                        // ever fail is worse than no button" — the same rule that keeps
+                        // Clear Hold queue-only, see renderClearInspectionAction).
+                        //
+                        // Hiding it is the safe direction rather than merely the tidy one.
+                        // The server's refusal instructs "Void the receipt(s) first, then
+                        // delete" — correct advice for a bogus receipt, and destructive
+                        // advice on a PARTIAL PO, where PARTIAL normally means material
+                        // really arrived: following it voids a real receipt, reverses posted
+                        // on-hand, and deletes that lot's traceability chain, all to tidy a
+                        // list. A PO whose balance is dead belongs closed or cancelled in
+                        // Purchasing. The dialog still carries that counter-guidance for the
+                        // residual race (a PO that goes PARTIAL between list load and
+                        // confirm), where the server's 400 is still reachable.
+                        const canDeleteThisPO = canDeletePO && po.status !== 'partial';
+                        return (
+                          // The card is a real <button>; the Delete control is its SIBLING inside
+                          // this relative wrapper, never a nested one (nested interactive elements
+                          // are invalid HTML and jsx-a11y is enforced at --max-warnings=0). Being a
+                          // sibling also means a Delete click can't bubble into card selection.
+                          <div key={po.po_id} className="relative">
                             <button
                               type="button"
-                              onClick={e => {
-                                // Structurally unnecessary (sibling, not nested) — kept so the
-                                // control can never select the PO if the markup is ever reworked.
-                                e.stopPropagation();
-                                setDeletePOTarget(po);
-                              }}
-                              title="Delete purchase order"
-                              aria-label={`Delete purchase order ${po.po_number}`}
-                              className="absolute right-1.5 top-2.5 p-1.5 rounded text-slate-500 hover:text-red-300 hover:bg-red-500/10 transition-colors"
+                              onClick={() => handleSelectPO(po)}
+                              className={`w-full text-left p-3 ${
+                                canDeleteThisPO ? 'pr-10' : ''
+                              } rounded-xl border-2 cursor-pointer transition-all ${
+                                selectedPO?.po_id === po.po_id
+                                  ? 'border-werco-primary bg-werco-500/10'
+                                  : 'border-slate-700 hover:border-slate-600 hover:bg-slate-800'
+                              }`}
                             >
-                              <TrashIcon className="h-4 w-4" />
+                              <div className="flex justify-between items-start">
+                                <div>
+                                  <p className="font-semibold text-werco-primary">{po.po_number}</p>
+                                  <p className="text-sm text-slate-400">
+                                    {po.vendor_code} · {po.vendor_name}
+                                  </p>
+                                  <p className="text-xs text-slate-400">
+                                    {(po.lines || [])
+                                      .map(line => line.part_number)
+                                      .slice(0, 3)
+                                      .join(', ')}
+                                    {po.lines?.length > 3 ? '…' : ''}
+                                  </p>
+                                </div>
+                                <span className="flex flex-shrink-0 items-center gap-1.5">
+                                  {arrival?.status === 'today' && (
+                                    <span className="px-2 py-1 rounded text-xs font-medium bg-amber-500/20 text-amber-300">
+                                      Today
+                                    </span>
+                                  )}
+                                  {arrival?.status === 'overdue' && (
+                                    <span className="px-2 py-1 rounded text-xs font-medium bg-red-500/20 text-red-300">
+                                      Overdue
+                                    </span>
+                                  )}
+                                  <span className="px-2 py-1 rounded text-xs font-medium bg-blue-500/20 text-blue-300">
+                                    {po.total_lines} line{po.total_lines !== 1 ? 's' : ''}
+                                  </span>
+                                </span>
+                              </div>
+                              {(po.required_date || arrival?.date) && (
+                                <p className="text-xs text-slate-400 mt-1">
+                                  {po.required_date && <>Required: {formatCentralDate(po.required_date)}</>}
+                                  {/* When the Today/Overdue badge is driven by a date other than the
+                                    visible Required date, show it so the badge is never contradicted. */}
+                                  {arrival?.date && arrival.date !== toISODateOnly(po.required_date) && (
+                                    <>
+                                      {po.required_date && ' · '}
+                                      Expected: {formatCentralDate(arrival.date)}
+                                    </>
+                                  )}
+                                </p>
+                              )}
                             </button>
-                          )}
-                        </div>
-                      );
-                    })
+                            {canDeleteThisPO && (
+                              <button
+                                type="button"
+                                onClick={e => {
+                                  // Structurally unnecessary (sibling, not nested) — kept so the
+                                  // control can never select the PO if the markup is ever reworked.
+                                  e.stopPropagation();
+                                  setDeletePOTarget(po);
+                                }}
+                                title="Delete purchase order"
+                                aria-label={`Delete purchase order ${po.po_number}`}
+                                className="absolute right-1.5 top-2.5 p-1.5 rounded text-slate-500 hover:text-red-300 hover:bg-red-500/10 transition-colors"
+                              >
+                                <TrashIcon className="h-4 w-4" />
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })
                   )}
                 </div>
               </div>
@@ -1854,6 +1951,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               defaultSort={{ key: 'days_pending', dir: 'desc' }}
               pageSize={25}
               csvExport={{ filename: 'inspection-queue' }}
+              loading={queueLoading}
               error={queueError}
               onRetry={loadInspectionQueue}
               empty={{
@@ -1869,7 +1967,32 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
         {/* HISTORY TAB */}
         {activeTab === 'history' && (
           <div>
-            <h2 className="text-lg font-semibold mb-4">Receiving History (Last 30 Days)</h2>
+            <h2 className="text-lg font-semibold mb-4">Receiving History (Last {historyDays} Days)</h2>
+            <FormField label="Received within">
+              {field => (
+                <select
+                  {...field}
+                  className="input max-w-xs mb-3"
+                  value={historyDays}
+                  onChange={e => {
+                    const days = Number(e.target.value);
+                    setHistoryDays(days);
+                    const next = new URLSearchParams(searchParams);
+                    next.set('receivingDays', String(days));
+                    setSearchParams(next);
+                    loadHistory(days);
+                  }}
+                >
+                  {Array.from(new Set([30, 90, 180, 365, historyDays]))
+                    .sort((a, b) => a - b)
+                    .map(days => (
+                      <option key={days} value={days}>
+                        Last {days} days
+                      </option>
+                    ))}
+                </select>
+              )}
+            </FormField>
             <DataTable
               columns={historyColumns}
               data={history}
@@ -1877,6 +2000,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               defaultSort={{ key: 'received_at', dir: 'desc' }}
               pageSize={25}
               csvExport={{ filename: 'receiving-history' }}
+              loading={historyLoading}
               error={historyError}
               onRetry={() => loadHistory()}
               empty={{
@@ -2116,8 +2240,13 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               <Button variant="secondary" className="px-6" onClick={requestCloseReceiveModal}>
                 Cancel
               </Button>
-              <Button className="px-6" onClick={handleReceive}>
-                Receive Material
+              {error && (
+                <p role="alert" className="text-red-300">
+                  {error}
+                </p>
+              )}
+              <Button className="px-6" disabled={receivingPending} onClick={handleReceive}>
+                {receivingPending ? 'Receiving…' : 'Receive Material'}
               </Button>
             </div>
           </>
@@ -2337,8 +2466,13 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               <Button variant="secondary" className="px-6" onClick={requestCloseInspectModal}>
                 Cancel
               </Button>
-              <Button className="px-6" onClick={handleInspect}>
-                Complete Inspection
+              {error && (
+                <p role="alert" className="text-red-300">
+                  {error}
+                </p>
+              )}
+              <Button className="px-6" disabled={receivingPending} onClick={handleInspect}>
+                {receivingPending ? 'Saving inspection…' : 'Complete Inspection'}
               </Button>
             </div>
           </>
@@ -2522,12 +2656,7 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
               <Button variant="secondary" onClick={() => setVoidTarget(null)}>
                 Cancel
               </Button>
-              <LoadingButton
-                variant="danger"
-                loading={voidSaving}
-                loadingText="Voiding…"
-                onClick={handleSubmitVoid}
-              >
+              <LoadingButton variant="danger" loading={voidSaving} loadingText="Voiding…" onClick={handleSubmitVoid}>
                 Void Receipt
               </LoadingButton>
             </div>
@@ -2552,12 +2681,12 @@ export default function ReceivingPage({ embedded }: { embedded?: boolean }) {
         message={
           `Use this only when the 'requires inspection' box was ticked by mistake` +
           `${clearTarget?.partNumber ? ` on part ${clearTarget.partNumber}` : ''}. ` +
-          "Confirming posts this material into inventory as on-hand stock right now and takes the receipt off the " +
-          "inspection queue — the lot, heat and cert stay exactly as keyed. Check the lot number FIRST if it might " +
-          "be wrong: once the stock posts, the lot can no longer be corrected in place (Correct refuses it) and the " +
-          "only fix left is a void and a full re-key. No inspection result is recorded, because no inspection " +
-          "happened. Your reason, and your name, go on the receipt and on the permanent audit trail, and Quality is " +
-          "notified."
+          'Confirming posts this material into inventory as on-hand stock right now and takes the receipt off the ' +
+          'inspection queue — the lot, heat and cert stay exactly as keyed. Check the lot number FIRST if it might ' +
+          'be wrong: once the stock posts, the lot can no longer be corrected in place (Correct refuses it) and the ' +
+          'only fix left is a void and a full re-key. No inspection result is recorded, because no inspection ' +
+          'happened. Your reason, and your name, go on the receipt and on the permanent audit trail, and Quality is ' +
+          'notified.'
         }
         label="Reason this material did not need inspection"
         placeholder="e.g. Inspection box ticked by mistake — stock hardware, no incoming inspection required"

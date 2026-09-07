@@ -2,9 +2,10 @@ from datetime import date, datetime
 from io import BytesIO
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
@@ -135,16 +136,22 @@ def generate_shipment_number(db: Session) -> str:
 @router.get("/", response_model=List[ShipmentResponse])
 def list_shipments(
     status: Optional[str] = None,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    query = db.query(Shipment).filter(Shipment.company_id == company_id).options(joinedload(Shipment.work_order))
+    query = (
+        db.query(Shipment)
+        .filter(Shipment.company_id == company_id)
+        .options(joinedload(Shipment.work_order).joinedload(WorkOrder.part))
+    )
 
     if status:
         query = query.filter(Shipment.status == status)
 
-    shipments = query.order_by(Shipment.created_at.desc()).limit(100).all()
+    shipments = query.order_by(Shipment.created_at.desc()).offset(skip).limit(limit).all()
 
     result = []
     for s in shipments:
@@ -174,26 +181,36 @@ def get_ready_to_ship(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get completed work orders ready to ship"""
+    """Completed quantities less dispatched and reserved quantities, including legacy partial closures."""
+    allocations = dict(
+        db.query(Shipment.work_order_id, func.sum(Shipment.quantity_shipped))
+        .filter(Shipment.company_id == company_id, Shipment.status != ShipmentStatus.CANCELLED)
+        .group_by(Shipment.work_order_id)
+        .all()
+    )
+    dispatched = dict(
+        db.query(Shipment.work_order_id, func.sum(Shipment.quantity_shipped))
+        .filter(
+            Shipment.company_id == company_id, Shipment.status.in_([ShipmentStatus.SHIPPED, ShipmentStatus.DELIVERED])
+        )
+        .group_by(Shipment.work_order_id)
+        .all()
+    )
     work_orders = (
         db.query(WorkOrder)
         .filter(WorkOrder.company_id == company_id)
         .options(joinedload(WorkOrder.part))
-        .filter(WorkOrder.status == WorkOrderStatus.COMPLETE)
+        .filter(WorkOrder.status.in_([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED]))
         .order_by(WorkOrder.due_date)
         .all()
     )
-
     result = []
     for wo in work_orders:
-        # Check if already shipped
-        existing = (
-            db.query(Shipment)
-            .filter(Shipment.work_order_id == wo.id, Shipment.status != ShipmentStatus.CANCELLED)
-            .first()
-        )
-
-        if not existing:
+        completed = float(wo.quantity_complete or 0)
+        allocated = float(allocations.get(wo.id) or 0)
+        shipped = float(dispatched.get(wo.id) or 0)
+        remaining = max(0, completed - allocated)
+        if remaining > 0:
             result.append(
                 {
                     "work_order_id": wo.id,
@@ -201,12 +218,25 @@ def get_ready_to_ship(
                     "part_number": wo.part.part_number if wo.part else None,
                     "part_name": wo.part.name if wo.part else None,
                     "customer_name": wo.customer_name,
-                    "quantity_complete": wo.quantity_complete,
+                    "quantity_complete": completed,
+                    "quantity_shipped": shipped,
+                    "quantity_reserved": max(0, allocated - shipped),
+                    "quantity_remaining": remaining,
                     "due_date": wo.due_date.isoformat() if wo.due_date else None,
                 }
             )
-
     return result
+
+
+def _allocated_quantity(db: Session, company_id: int, work_order_id: int, exclude_id: Optional[int] = None) -> float:
+    query = db.query(func.coalesce(func.sum(Shipment.quantity_shipped), 0)).filter(
+        Shipment.company_id == company_id,
+        Shipment.work_order_id == work_order_id,
+        Shipment.status != ShipmentStatus.CANCELLED,
+    )
+    if exclude_id is not None:
+        query = query.filter(Shipment.id != exclude_id)
+    return float(query.scalar() or 0)
 
 
 @router.get("/{shipment_id}")
@@ -265,10 +295,20 @@ def create_shipment(
     wo = (
         db.query(WorkOrder)
         .filter(WorkOrder.id == shipment_in.work_order_id, WorkOrder.company_id == company_id)
+        .with_for_update()
         .first()
     )
     if not wo:
         raise HTTPException(status_code=404, detail="Work order not found")
+
+    if wo.status not in (WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED):
+        raise HTTPException(status_code=409, detail="Complete the work order before creating a shipment")
+    remaining = max(0, float(wo.quantity_complete or 0) - _allocated_quantity(db, company_id, wo.id))
+    if shipment_in.quantity_shipped > remaining + 1e-9:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Only {remaining:g} completed units remain available. Refresh shipping quantities and try again.",
+        )
 
     shipment_number = generate_shipment_number(db)
 
@@ -351,6 +391,17 @@ def mark_shipped(
     # G2: lock the shipment row while we re-check status + write the offsetting FG
     # decrement, so a concurrent double-ship can't both pass the idempotency guard and
     # double-decrement on-hand. (with_for_update is a no-op on SQLite used by tests.)
+    shipment_wo_id = (
+        db.query(Shipment.work_order_id).filter(Shipment.id == shipment_id, Shipment.company_id == company_id).scalar()
+    )
+    if shipment_wo_id is None:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+    wo = (
+        db.query(WorkOrder)
+        .filter(WorkOrder.id == shipment_wo_id, WorkOrder.company_id == company_id)
+        .with_for_update()
+        .first()
+    )
     shipment = (
         db.query(Shipment)
         .filter(Shipment.id == shipment_id, Shipment.company_id == company_id)
@@ -368,12 +419,33 @@ def mark_shipped(
     # WO close is separately gated (below) so it fires exactly ONCE per WO; keying this
     # early return on the WO being closed (the old behavior) made the G2 decrement +
     # over-ship guard unreachable for every 2nd-or-later shipment.
-    if shipment.status == ShipmentStatus.SHIPPED:
+    if shipment.status in (ShipmentStatus.SHIPPED, ShipmentStatus.DELIVERED):
         return {
             "message": "Shipment already marked as shipped",
             "shipment_number": shipment.shipment_number,
             "already_shipped": True,
         }
+
+    if shipment.status == ShipmentStatus.CANCELLED:
+        raise HTTPException(
+            status_code=409,
+            detail="Cancelled shipments cannot be dispatched. Create a new shipment from the available remainder.",
+        )
+    dispatched = float(
+        db.query(func.coalesce(func.sum(Shipment.quantity_shipped), 0))
+        .filter(
+            Shipment.company_id == company_id,
+            Shipment.work_order_id == shipment.work_order_id,
+            Shipment.status.in_([ShipmentStatus.SHIPPED, ShipmentStatus.DELIVERED]),
+        )
+        .scalar()
+        or 0
+    )
+    if wo and dispatched + shipment.quantity_shipped > float(wo.quantity_complete or 0) + 1e-9:
+        raise HTTPException(
+            status_code=409,
+            detail="This shipment exceeds the remaining completed quantity. Edit or cancel the pending shipment first.",
+        )
 
     shipment.status = ShipmentStatus.SHIPPED
     shipment.ship_date = date.today()
@@ -387,9 +459,12 @@ def mark_shipped(
     # stays None when the WO is already CLOSED, so every close-once side effect (the
     # work_order_closed event, the close audit row, and the post-commit broadcast +
     # completion-signal enqueue) is guarded on `wo_previous_status is not None` and skips.
-    wo = shipment.work_order
     wo_previous_status = None
-    if wo and wo.status != WorkOrderStatus.CLOSED:
+    if (
+        wo
+        and wo.status == WorkOrderStatus.COMPLETE
+        and dispatched + shipment.quantity_shipped >= float(wo.quantity_complete or 0) - 1e-9
+    ):
         wo_previous_status = wo.status.value if hasattr(wo.status, "value") else wo.status
         wo.status = WorkOrderStatus.CLOSED
 
@@ -536,26 +611,55 @@ def update_shipment(
     shipment_id: int,
     shipment_in: ShipmentUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(CARRIER_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
 ):
-    shipment = (
-        db.query(Shipment)
-        .options(joinedload(Shipment.work_order))
-        .filter(Shipment.id == shipment_id, Shipment.company_id == company_id)
+    shipment_wo_id = (
+        db.query(Shipment.work_order_id).filter(Shipment.id == shipment_id, Shipment.company_id == company_id).scalar()
+    )
+    if shipment_wo_id is None:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+    wo = (
+        db.query(WorkOrder)
+        .filter(WorkOrder.id == shipment_wo_id, WorkOrder.company_id == company_id)
+        .with_for_update()
         .first()
     )
-
-    if not shipment:
-        raise HTTPException(status_code=404, detail="Shipment not found")
-
+    shipment = (
+        db.query(Shipment)
+        .filter(Shipment.id == shipment_id, Shipment.company_id == company_id)
+        .with_for_update()
+        .first()
+    )
     previous_status = shipment.status
     update_data = shipment_in.model_dump(exclude_unset=True)
+    target_status = ShipmentStatus(update_data.get("status") or shipment.status)
+    if target_status != shipment.status:
+        is_delivery = shipment.status == ShipmentStatus.SHIPPED and target_status == ShipmentStatus.DELIVERED
+        is_draft_change = shipment.status in (ShipmentStatus.PENDING, ShipmentStatus.PACKED) and target_status in (
+            ShipmentStatus.PENDING,
+            ShipmentStatus.PACKED,
+            ShipmentStatus.CANCELLED,
+        )
+        if not is_delivery and not is_draft_change:
+            raise HTTPException(
+                status_code=409,
+                detail="Use the dispatch action to ship. Dispatched and cancelled shipments cannot be reopened or cancelled here.",
+            )
+        if target_status == ShipmentStatus.CANCELLED and shipment.label_purchased_at and not shipment.voided_at:
+            raise HTTPException(
+                status_code=409, detail="Void the purchased carrier label before cancelling this shipment."
+            )
+    if "quantity_shipped" in update_data:
+        if shipment.status not in (ShipmentStatus.PENDING, ShipmentStatus.PACKED):
+            raise HTTPException(status_code=409, detail="Only pending or packed shipment quantities can be edited")
+        remaining = max(0, float(wo.quantity_complete or 0) - _allocated_quantity(db, company_id, wo.id, shipment.id))
+        if update_data["quantity_shipped"] > remaining + 1e-9:
+            raise HTTPException(status_code=409, detail=f"Only {remaining:g} units are available for this shipment")
+    if target_status == ShipmentStatus.DELIVERED and shipment.actual_delivery is None:
+        shipment.actual_delivery = date.today()
     for field, value in update_data.items():
-        if field == "status":
-            setattr(shipment, field, ShipmentStatus(value))
-        else:
-            setattr(shipment, field, value)
+        setattr(shipment, field, ShipmentStatus(value) if field == "status" else value)
 
     OperationalEventService(db).emit_best_effort(
         company_id=company_id,

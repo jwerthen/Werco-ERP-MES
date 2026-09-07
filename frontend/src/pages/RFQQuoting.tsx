@@ -1,7 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
-import { ArrowDownTrayIcon, CheckCircleIcon, DocumentArrowUpIcon, SparklesIcon, CalculatorIcon } from '@heroicons/react/24/outline';
+import {
+  ArrowDownTrayIcon,
+  CheckCircleIcon,
+  DocumentArrowUpIcon,
+  SparklesIcon,
+  CalculatorIcon,
+} from '@heroicons/react/24/outline';
 import { Breadcrumbs, ErrorState, FormField, useToast } from '../components/ui';
 import { getBreadcrumbParent } from '../utils/routeMeta';
 
@@ -86,14 +92,19 @@ function downloadBlob(blob: Blob, filename: string) {
 
 function formatSummary(summary?: Record<string, any>) {
   if (!summary) return '-';
-  return Object.entries(summary)
-    .filter(([, value]) => value !== null && value !== undefined && value !== '' && (!Array.isArray(value) || value.length > 0))
-    .map(([key, value]) => {
-      const label = key.replace(/_/g, ' ');
-      const display = Array.isArray(value) ? value.join(', ') : String(value);
-      return `${label}: ${display}`;
-    })
-    .join(' | ') || '-';
+  return (
+    Object.entries(summary)
+      .filter(
+        ([, value]) =>
+          value !== null && value !== undefined && value !== '' && (!Array.isArray(value) || value.length > 0)
+      )
+      .map(([key, value]) => {
+        const label = key.replace(/_/g, ' ');
+        const display = Array.isArray(value) ? value.join(', ') : String(value);
+        return `${label}: ${display}`;
+      })
+      .join(' | ') || '-'
+  );
 }
 
 function lineSourceTrail(line: QuoteLineSummary) {
@@ -108,7 +119,7 @@ function lineSourceTrail(line: QuoteLineSummary) {
     'features',
   ];
   return priority
-    .flatMap((key) => (line.sources?.[key] || []).map((ref) => `${key.replace(/_/g, ' ')}: ${ref}`))
+    .flatMap(key => (line.sources?.[key] || []).map(ref => `${key.replace(/_/g, ' ')}: ${ref}`))
     .slice(0, 4);
 }
 
@@ -179,7 +190,7 @@ export default function RFQQuoting() {
       if (customerName.trim()) formData.append('customer_name', customerName.trim());
       if (rfqReference.trim()) formData.append('rfq_reference', rfqReference.trim());
       if (notes.trim()) formData.append('notes', notes.trim());
-      files.forEach((file) => formData.append('files', file));
+      files.forEach(file => formData.append('files', file));
       const response = await api.createRfqPackage(formData);
       setPackageData(response);
       setEstimate(null);
@@ -214,7 +225,7 @@ export default function RFQQuoting() {
     try {
       const result = await api.approveRfqEstimate(packageData.id);
       if (result?.quote_id) {
-        navigate('/quotes');
+        navigate(`/quotes?id=${result.quote_id}`);
       }
     } catch (err: any) {
       showToast('error', err?.response?.data?.detail || 'Failed to approve estimate.');
@@ -252,7 +263,8 @@ export default function RFQQuoting() {
         <div>
           <h1 className="text-2xl font-bold text-white">AI Quoting Agent (Sheet Metal)</h1>
           <p className="text-sm text-slate-400 mt-1">
-            Upload BOM spreadsheets, assembly PDFs, STEP models, and matching flat-pattern DXFs, then review traced quote inputs before publishing.
+            Upload BOM spreadsheets, assembly PDFs, STEP models, and matching flat-pattern DXFs, then review traced
+            quote inputs before publishing.
           </p>
         </div>
       </div>
@@ -265,15 +277,17 @@ export default function RFQQuoting() {
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div>
-            <label htmlFor="rfq-customer" className="label">Customer</label>
+            <label htmlFor="rfq-customer" className="label">
+              Customer
+            </label>
             <select
               id="rfq-customer"
               value={selectedCustomerId}
-              onChange={(e) => setSelectedCustomerId(e.target.value ? parseInt(e.target.value, 10) : '')}
+              onChange={e => setSelectedCustomerId(e.target.value ? parseInt(e.target.value, 10) : '')}
               className="input"
             >
               <option value="">Select customer...</option>
-              {customers.map((customer) => (
+              {customers.map(customer => (
                 <option key={customer.id} value={customer.id}>
                   {customer.name}
                 </option>
@@ -288,23 +302,23 @@ export default function RFQQuoting() {
             )}
           </div>
           <FormField label="Customer Name Override">
-            {(field) => (
+            {field => (
               <input
                 {...field}
                 className="input"
                 value={customerName}
-                onChange={(e) => setCustomerName(e.target.value)}
+                onChange={e => setCustomerName(e.target.value)}
                 placeholder="Optional"
               />
             )}
           </FormField>
           <FormField label="RFQ Reference">
-            {(field) => (
+            {field => (
               <input
                 {...field}
                 className="input"
                 value={rfqReference}
-                onChange={(e) => setRfqReference(e.target.value)}
+                onChange={e => setRfqReference(e.target.value)}
                 placeholder="RFQ-12345"
               />
             )}
@@ -313,7 +327,7 @@ export default function RFQQuoting() {
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <FormField label="Target Margin (%)">
-            {(field) => (
+            {field => (
               <input
                 {...field}
                 className="input"
@@ -321,39 +335,39 @@ export default function RFQQuoting() {
                 value={targetMargin}
                 min={0}
                 step={0.5}
-                onChange={(e) => setTargetMargin(parseFloat(e.target.value) || 0)}
+                onChange={e => setTargetMargin(parseFloat(e.target.value) || 0)}
               />
             )}
           </FormField>
           <FormField label="Quote Valid Days">
-            {(field) => (
+            {field => (
               <input
                 {...field}
                 className="input"
                 type="number"
                 value={validDays}
                 min={1}
-                onChange={(e) => setValidDays(parseInt(e.target.value, 10) || 30)}
+                onChange={e => setValidDays(parseInt(e.target.value, 10) || 30)}
               />
             )}
           </FormField>
           <FormField label="Files">
-            {(field) => (
+            {field => (
               <input
                 {...field}
                 className="input"
                 type="file"
                 multiple
                 accept=".pdf,.xlsx,.xls,.dxf,.step,.stp"
-                onChange={(e) => setFiles(Array.from(e.target.files || []))}
+                onChange={e => setFiles(Array.from(e.target.files || []))}
               />
             )}
           </FormField>
         </div>
 
         <FormField label="Notes">
-          {(field) => (
-            <textarea {...field} className="input" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
+          {field => (
+            <textarea {...field} className="input" rows={2} value={notes} onChange={e => setNotes(e.target.value)} />
           )}
         </FormField>
 
@@ -370,7 +384,8 @@ export default function RFQQuoting() {
         {packageData && (
           <div className="text-sm text-slate-400 border-t border-fd-line pt-3 space-y-2">
             <p>
-              Package <span className="font-semibold text-white">{packageData.rfq_number}</span> with {packageData.file_count} files is ready.
+              Package <span className="font-semibold text-white">{packageData.rfq_number}</span> with{' '}
+              {packageData.file_count} files is ready.
             </p>
             {packageData.warnings?.length > 0 && (
               <div className="rounded-sm bg-fd-amber/10 border border-fd-amber/30 px-3 py-2 text-fd-amber">
@@ -408,9 +423,7 @@ export default function RFQQuoting() {
                             {file.parse_status || 'pending'}
                           </span>
                         </td>
-                        <td className="px-3 py-2 text-slate-400">
-                          {file.parse_error || formatSummary(file.summary)}
-                        </td>
+                        <td className="px-3 py-2 text-slate-400">{file.parse_error || formatSummary(file.summary)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -424,9 +437,7 @@ export default function RFQQuoting() {
       {estimate && (
         <div className="bg-fd-panel border border-fd-line rounded-sm p-3 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold text-white">
-              Estimate Review ({estimate.quote_number})
-            </h2>
+            <h2 className="text-lg font-semibold text-white">Estimate Review ({estimate.quote_number})</h2>
             <div className="text-sm text-slate-400">
               Lead Time: <span className="font-medium text-white">{estimate.lead_time.label || 'TBD'}</span>
             </div>
@@ -481,10 +492,15 @@ export default function RFQQuoting() {
                   const sourceTrail = lineSourceTrail(line);
                   return (
                     <tr key={`${line.part_number || line.part_name}-${idx}`} className="border-t border-fd-line">
-                      <td className="px-3 py-2 min-w-[300px]" style={{ paddingLeft: `${12 + (line.bom_level || 0) * 18}px` }}>
+                      <td
+                        className="px-3 py-2 min-w-[300px]"
+                        style={{ paddingLeft: `${12 + (line.bom_level || 0) * 18}px` }}
+                      >
                         <div className="font-medium text-white">{line.part_number || line.part_name}</div>
                         <div className="text-xs text-slate-400">{line.part_name}</div>
-                        {line.parent_part_number && <div className="text-[11px] text-slate-500">Parent: {line.parent_part_number}</div>}
+                        {line.parent_part_number && (
+                          <div className="text-[11px] text-slate-500">Parent: {line.parent_part_number}</div>
+                        )}
                         {line.notes && <div className="text-xs text-slate-500 mt-1">{line.notes}</div>}
                         {sourceTrail.length > 0 && (
                           <div className="text-[11px] leading-4 text-slate-500 mt-1 max-w-md">
@@ -493,16 +509,23 @@ export default function RFQQuoting() {
                         )}
                       </td>
                       <td className="px-3 py-2">
-                        <span className={`px-2 py-0.5 rounded-sm text-xs whitespace-nowrap ${lineTypeClass(line.line_type)}`}>
-                          {line.item_number ? `${line.item_number} · ` : ''}{lineTypeLabel(line.line_type)}
+                        <span
+                          className={`px-2 py-0.5 rounded-sm text-xs whitespace-nowrap ${lineTypeClass(line.line_type)}`}
+                        >
+                          {line.item_number ? `${line.item_number} · ` : ''}
+                          {lineTypeLabel(line.line_type)}
                         </span>
                       </td>
                       <td className="px-3 py-2 text-right tabular-nums">{line.quantity}</td>
                       <td className="px-3 py-2 text-right tabular-nums">{line.quantity_per_assembly ?? '-'}</td>
                       <td className="px-3 py-2">{line.material || 'TBD'}</td>
                       <td className="px-3 py-2">{line.thickness || 'TBD'}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{line.flat_area ? line.flat_area.toFixed(2) : '-'}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{line.cut_length ? line.cut_length.toFixed(2) : '-'}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">
+                        {line.flat_area ? line.flat_area.toFixed(2) : '-'}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums">
+                        {line.cut_length ? line.cut_length.toFixed(2) : '-'}
+                      </td>
                       <td className="px-3 py-2 text-right tabular-nums">{line.bend_count ?? '-'}</td>
                       <td className="px-3 py-2">{line.finish || '-'}</td>
                       <td className="px-3 py-2 text-right font-semibold tabular-nums">${line.part_total.toFixed(2)}</td>
@@ -525,7 +548,9 @@ export default function RFQQuoting() {
             </div>
             <div className="rounded-sm border border-fd-line p-3">
               <h3 className="font-semibold text-white mb-2">Missing / Needs Review</h3>
-              {estimate.missing_specs.length === 0 && <p className="text-sm text-slate-400">No missing specs detected.</p>}
+              {estimate.missing_specs.length === 0 && (
+                <p className="text-sm text-slate-400">No missing specs detected.</p>
+              )}
               {estimate.missing_specs.map((item, idx) => (
                 <p key={idx} className="text-sm text-fd-amber mb-1">
                   - {item.part_id || 'part'}: {item.field} ({item.message})
@@ -550,9 +575,7 @@ export default function RFQQuoting() {
               <button
                 type="button"
                 className="btn-secondary"
-                onClick={() =>
-                  navigate(`/estimate-workbench/new?rfq_package_id=${packageData.id}`)
-                }
+                onClick={() => navigate(`/estimate-workbench/new?rfq_package_id=${packageData.id}`)}
               >
                 <CalculatorIcon className="h-4 w-4 mr-2 inline" />
                 Open Estimate Workbench

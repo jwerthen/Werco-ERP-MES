@@ -1,5 +1,6 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import api from '../services/api';
+import { Modal } from '../components/ui/Modal';
 import { formatCentralDate } from '../utils/centralTime';
 import {
   PlusIcon,
@@ -13,16 +14,7 @@ import {
   WrenchIcon,
   ChartBarIcon,
 } from '@heroicons/react/24/outline';
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Cell,
-} from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import {
   EmptyState,
@@ -113,7 +105,7 @@ const CATEGORIES = [
 ];
 
 const categoryLabel = (cat: string) => {
-  const found = CATEGORIES.find((c) => c.value === cat);
+  const found = CATEGORIES.find(c => c.value === cat);
   return found ? found.label : cat;
 };
 
@@ -134,6 +126,8 @@ function getElapsedMinutes(startTime: string): number {
 
 export default function DowntimeTracking() {
   const { showToast } = useToast();
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState('');
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [activeEvents, setActiveEvents] = useState<DowntimeEvent[]>([]);
   const [allEvents, setAllEvents] = useState<DowntimeEvent[]>([]);
@@ -141,6 +135,7 @@ export default function DowntimeTracking() {
   const [summary, setSummary] = useState<DowntimeSummary | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [wcDowntime, setWcDowntime] = useState<WorkCenterDowntime[]>([]);
+  const loadRequest = useRef(0);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -177,6 +172,8 @@ export default function DowntimeTracking() {
   }, []);
 
   const loadData = useCallback(async () => {
+    const request = ++loadRequest.current;
+    setLoading(true);
     try {
       setLoading(true);
       setLoadError(false);
@@ -205,6 +202,7 @@ export default function DowntimeTracking() {
         api.getDowntimeByWorkCenter(dateParams),
       ]);
 
+      if (request !== loadRequest.current) return;
       setWorkCenters(wcRes);
       setActiveEvents(activeRes as DowntimeEvent[]);
       setAllEvents(eventsRes as DowntimeEvent[]);
@@ -212,10 +210,11 @@ export default function DowntimeTracking() {
       setSummary(summaryRes as DowntimeSummary);
       setWcDowntime(wcDtRes as WorkCenterDowntime[]);
     } catch (err) {
+      if (request !== loadRequest.current) return;
       console.error('Failed to load downtime data:', err);
       setLoadError(true);
     } finally {
-      setLoading(false);
+      if (request === loadRequest.current) setLoading(false);
     }
   }, [filterWorkCenter, filterCategory, filterPlannedType, filterDateFrom, filterDateTo]);
 
@@ -229,6 +228,9 @@ export default function DowntimeTracking() {
       showToast('error', 'Please select a work center');
       return;
     }
+    if (actionBusy) return;
+    setActionBusy(true);
+    setActionError('');
     try {
       await api.createDowntimeEvent({
         work_center_id: newForm.work_center_id,
@@ -241,13 +243,26 @@ export default function DowntimeTracking() {
       setNewForm({ work_center_id: 0, category: 'other', planned_type: 'unplanned', reason_code: '', description: '' });
       loadData();
     } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      setActionError(
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((item: any) => item.msg).join('; ')
+            : 'Unable to save. Check your entries and try again.'
+      );
       showToast('error', err.response?.data?.detail || err.message || 'Failed to create downtime event');
+    } finally {
+      setActionBusy(false);
     }
   };
 
   const handleResolve = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!resolvingEvent) return;
+    if (actionBusy) return;
+    setActionBusy(true);
+    setActionError('');
     try {
       await api.resolveDowntimeEvent(resolvingEvent.id, {
         resolution: resolveForm.resolution || null,
@@ -257,7 +272,17 @@ export default function DowntimeTracking() {
       setResolveForm({ resolution: '' });
       loadData();
     } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      setActionError(
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((item: any) => item.msg).join('; ')
+            : 'Unable to save. Check your entries and try again.'
+      );
       showToast('error', err.response?.data?.detail || err.message || 'Failed to resolve downtime event');
+    } finally {
+      setActionBusy(false);
     }
   };
 
@@ -272,15 +297,13 @@ export default function DowntimeTracking() {
     evt.duration_minutes
       ? formatDuration(evt.duration_minutes)
       : evt.end_time
-      ? '-'
-      : formatDuration(getElapsedMinutes(evt.start_time));
+        ? '-'
+        : formatDuration(getElapsedMinutes(evt.start_time));
 
   const renderTypeBadge = (evt: DowntimeEvent) => (
     <span
       className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-        evt.planned_type === 'planned'
-          ? 'bg-blue-500/20 text-blue-300'
-          : 'bg-red-500/20 text-red-300'
+        evt.planned_type === 'planned' ? 'bg-blue-500/20 text-blue-300' : 'bg-red-500/20 text-red-300'
       }`}
     >
       {evt.planned_type === 'planned' ? 'Planned' : 'Unplanned'}
@@ -289,12 +312,10 @@ export default function DowntimeTracking() {
 
   const renderStatus = (evt: DowntimeEvent) =>
     evt.end_time ? (
-      <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/20 text-green-300">
-        Resolved
-      </span>
+      <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/20 text-green-300">Resolved</span>
     ) : (
       <button
-        onClick={(e) => {
+        onClick={e => {
           e.stopPropagation();
           openResolveModal(evt);
         }}
@@ -312,25 +333,25 @@ export default function DowntimeTracking() {
         header: 'Work Center',
         sortable: true,
         className: 'font-medium',
-        accessor: (evt) => evt.work_center?.code || `WC-${evt.work_center_id}`,
+        accessor: evt => evt.work_center?.code || `WC-${evt.work_center_id}`,
       },
       {
         key: 'start',
         header: 'Start',
         sortable: true,
         className: 'text-sm',
-        accessor: (evt) => evt.start_time,
-        render: (evt) => formatCentralDate(evt.start_time),
-        csv: (evt) => formatCentralDate(evt.start_time),
+        accessor: evt => evt.start_time,
+        render: evt => formatCentralDate(evt.start_time),
+        csv: evt => formatCentralDate(evt.start_time),
       },
       {
         key: 'end',
         header: 'End',
         sortable: true,
         className: 'text-sm',
-        accessor: (evt) => evt.end_time ?? '',
-        render: (evt) => (evt.end_time ? formatCentralDate(evt.end_time) : '-'),
-        csv: (evt) => (evt.end_time ? formatCentralDate(evt.end_time) : ''),
+        accessor: evt => evt.end_time ?? '',
+        render: evt => (evt.end_time ? formatCentralDate(evt.end_time) : '-'),
+        csv: evt => (evt.end_time ? formatCentralDate(evt.end_time) : ''),
       },
       {
         key: 'duration',
@@ -338,39 +359,38 @@ export default function DowntimeTracking() {
         sortable: true,
         className: 'text-sm font-mono',
         // Sort/CSV by raw minutes so live elapsed compares correctly.
-        accessor: (evt) =>
-          evt.duration_minutes ?? (evt.end_time ? 0 : getElapsedMinutes(evt.start_time)),
-        render: (evt) => eventDuration(evt),
-        csv: (evt) => eventDuration(evt),
+        accessor: evt => evt.duration_minutes ?? (evt.end_time ? 0 : getElapsedMinutes(evt.start_time)),
+        render: evt => eventDuration(evt),
+        csv: evt => eventDuration(evt),
       },
       {
         key: 'category',
         header: 'Category',
         sortable: true,
-        accessor: (evt) => categoryLabel(evt.category),
-        render: (evt) => <span className="text-xs">{categoryLabel(evt.category)}</span>,
+        accessor: evt => categoryLabel(evt.category),
+        render: evt => <span className="text-xs">{categoryLabel(evt.category)}</span>,
       },
       {
         key: 'reason',
         header: 'Reason',
         sortable: true,
         className: 'text-sm text-slate-400 max-w-[200px] truncate',
-        accessor: (evt) => evt.reason_code || evt.description || '',
-        render: (evt) => evt.reason_code || evt.description || '-',
+        accessor: evt => evt.reason_code || evt.description || '',
+        render: evt => evt.reason_code || evt.description || '-',
       },
       {
         key: 'type',
         header: 'Type',
         sortable: true,
-        accessor: (evt) => evt.planned_type,
-        render: (evt) => renderTypeBadge(evt),
+        accessor: evt => evt.planned_type,
+        render: evt => renderTypeBadge(evt),
       },
       {
         key: 'status',
         header: 'Status',
         sortable: true,
-        accessor: (evt) => (evt.end_time ? 'Resolved' : 'Active'),
-        render: (evt) => renderStatus(evt),
+        accessor: evt => (evt.end_time ? 'Resolved' : 'Active'),
+        render: evt => renderStatus(evt),
       },
     ],
     [openResolveModal]
@@ -430,10 +450,7 @@ export default function DowntimeTracking() {
           <h1 className="text-2xl font-bold text-white">Downtime Tracking</h1>
           <p className="text-sm text-slate-400 mt-1">Monitor and manage machine downtime events</p>
         </div>
-        <ErrorState
-          message="Could not load downtime data."
-          onRetry={loadData}
-        />
+        <ErrorState message="Could not load downtime data." onRetry={loadData} />
       </div>
     );
   }
@@ -453,16 +470,18 @@ export default function DowntimeTracking() {
           <p className="text-sm text-slate-400 mt-1">Monitor and manage machine downtime events</p>
         </div>
         <div className="flex gap-2">
-          <button
-            onClick={() => loadData()}
-            className="btn btn-ghost btn-sm"
-            title="Refresh"
-          >
+          <button onClick={() => loadData()} className="btn btn-ghost btn-sm" title="Refresh">
             <ArrowPathIcon className="h-5 w-5" />
           </button>
           <button
             onClick={() => {
-              setNewForm({ work_center_id: 0, category: 'other', planned_type: 'unplanned', reason_code: '', description: '' });
+              setNewForm({
+                work_center_id: 0,
+                category: 'other',
+                planned_type: 'unplanned',
+                reason_code: '',
+                description: '',
+              });
               setShowNewModal(true);
             }}
             className="btn btn-primary btn-sm"
@@ -521,14 +540,10 @@ export default function DowntimeTracking() {
           title="Work Center Status"
           subtitle="Live machine state"
           footer={`${workCenters.length} work center${workCenters.length === 1 ? '' : 's'}`}
-          headerExtra={
-            <span className="text-xs tabular-nums text-fd-red font-bold">
-              {activeWcIds.size} down
-            </span>
-          }
+          headerExtra={<span className="text-xs tabular-nums text-fd-red font-bold">{activeWcIds.size} down</span>}
         >
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-            {workCenters.map((wc) => {
+            {workCenters.map(wc => {
               const st = getWcDisplayStatus(wc);
               return (
                 <div
@@ -537,8 +552,8 @@ export default function DowntimeTracking() {
                     st === 'down'
                       ? 'border-fd-red/40 bg-red-500/10'
                       : st === 'idle'
-                      ? 'border-fd-line bg-slate-800/40'
-                      : 'border-fd-green/40 bg-green-500/10'
+                        ? 'border-fd-line bg-slate-800/40'
+                        : 'border-fd-green/40 bg-green-500/10'
                   }`}
                 >
                   <div className="flex items-center justify-center gap-1 mb-0.5">
@@ -562,9 +577,7 @@ export default function DowntimeTracking() {
           subtitle="Open events, live elapsed"
           footer={`${activeEvents.length} active`}
           headerExtra={
-            activeEvents.length > 0 ? (
-              <ExclamationTriangleIcon className="h-4 w-4 text-red-500" />
-            ) : undefined
+            activeEvents.length > 0 ? <ExclamationTriangleIcon className="h-4 w-4 text-red-500" /> : undefined
           }
         >
           {activeEvents.length === 0 ? (
@@ -575,7 +588,7 @@ export default function DowntimeTracking() {
             />
           ) : (
             <div className="divide-y divide-fd-line">
-              {activeEvents.map((evt) => {
+              {activeEvents.map(evt => {
                 const elapsed = getElapsedMinutes(evt.start_time);
                 return (
                   <div key={evt.id} className="py-2 flex items-center gap-2 min-w-0">
@@ -643,8 +656,20 @@ export default function DowntimeTracking() {
                   tick={{ fontSize: 11, fill: '#94a3b8' }}
                   stroke="#334155"
                 />
-                <YAxis label={{ value: 'Hours', angle: -90, position: 'insideLeft', fill: '#94a3b8' }} tick={{ fill: '#94a3b8' }} stroke="#334155" />
-                <Tooltip contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '3px', color: '#e2e8f0' }} formatter={(value: number | undefined) => [`${value ?? 0}h`, 'Downtime']} />
+                <YAxis
+                  label={{ value: 'Hours', angle: -90, position: 'insideLeft', fill: '#94a3b8' }}
+                  tick={{ fill: '#94a3b8' }}
+                  stroke="#334155"
+                />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: '#1a1f2e',
+                    border: '1px solid #334155',
+                    borderRadius: '3px',
+                    color: '#e2e8f0',
+                  }}
+                  formatter={(value: number | undefined) => [`${value ?? 0}h`, 'Downtime']}
+                />
                 <Bar dataKey="hours" fill="#ef4444" radius={[4, 4, 0, 0]}>
                   {paretoData.map((entry, index) => (
                     <Cell key={`cell-${index}`} fill={index === 0 ? '#ef4444' : index < 3 ? '#f97316' : '#fbbf24'} />
@@ -665,10 +690,10 @@ export default function DowntimeTracking() {
           <select
             className="select select-bordered select-sm"
             value={filterWorkCenter}
-            onChange={(e) => setFilterWorkCenter(e.target.value)}
+            onChange={e => setFilterWorkCenter(e.target.value)}
           >
             <option value="">All Work Centers</option>
-            {workCenters.map((wc) => (
+            {workCenters.map(wc => (
               <option key={wc.id} value={wc.id}>
                 {wc.code} - {wc.name}
               </option>
@@ -677,10 +702,10 @@ export default function DowntimeTracking() {
           <select
             className="select select-bordered select-sm"
             value={filterCategory}
-            onChange={(e) => setFilterCategory(e.target.value)}
+            onChange={e => setFilterCategory(e.target.value)}
           >
             <option value="">All Categories</option>
-            {CATEGORIES.map((cat) => (
+            {CATEGORIES.map(cat => (
               <option key={cat.value} value={cat.value}>
                 {cat.label}
               </option>
@@ -689,7 +714,7 @@ export default function DowntimeTracking() {
           <select
             className="select select-bordered select-sm"
             value={filterPlannedType}
-            onChange={(e) => setFilterPlannedType(e.target.value)}
+            onChange={e => setFilterPlannedType(e.target.value)}
           >
             <option value="">Planned & Unplanned</option>
             <option value="planned">Planned Only</option>
@@ -699,7 +724,7 @@ export default function DowntimeTracking() {
             type="date"
             className="input input-bordered input-sm"
             value={filterDateFrom}
-            onChange={(e) => setFilterDateFrom(e.target.value)}
+            onChange={e => setFilterDateFrom(e.target.value)}
             placeholder="From"
             aria-label="Filter from date"
           />
@@ -707,7 +732,7 @@ export default function DowntimeTracking() {
             type="date"
             className="input input-bordered input-sm"
             value={filterDateTo}
-            onChange={(e) => setFilterDateTo(e.target.value)}
+            onChange={e => setFilterDateTo(e.target.value)}
             placeholder="To"
             aria-label="Filter to date"
           />
@@ -731,7 +756,7 @@ export default function DowntimeTracking() {
         <DataTable
           columns={logColumns}
           data={allEvents}
-          rowKey={(evt) => evt.id}
+          rowKey={evt => evt.id}
           defaultSort={{ key: 'start', dir: 'desc' }}
           pageSize={25}
           csvExport={{ filename: 'downtime-log' }}
@@ -739,12 +764,17 @@ export default function DowntimeTracking() {
           empty={{
             icon: ClockIcon,
             title: 'No downtime events found',
-            description:
-              'No events match the current filters. Log a downtime event to start tracking.',
+            description: 'No events match the current filters. Log a downtime event to start tracking.',
             action: {
               label: 'Log Downtime',
               onClick: () => {
-                setNewForm({ work_center_id: 0, category: 'other', planned_type: 'unplanned', reason_code: '', description: '' });
+                setNewForm({
+                  work_center_id: 0,
+                  category: 'other',
+                  planned_type: 'unplanned',
+                  reason_code: '',
+                  description: '',
+                });
                 setShowNewModal(true);
               },
             },
@@ -754,160 +784,200 @@ export default function DowntimeTracking() {
 
       {/* New Downtime Modal */}
       {showNewModal && (
-        <div className="modal modal-open">
-          <div className="modal-box max-w-lg">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold">Log Downtime Event</h3>
-              <button onClick={() => setShowNewModal(false)} className="btn btn-ghost btn-sm btn-circle">
-                <XMarkIcon className="h-5 w-5" />
+        <Modal
+          open
+          onClose={() => {
+            if (!actionBusy) setShowNewModal(false);
+          }}
+          size="lg"
+          ariaLabel="Log downtime"
+          closeOnBackdrop={false}
+        >
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-bold">Log Downtime Event</h3>
+            <button
+              onClick={() => setShowNewModal(false)}
+              disabled={actionBusy}
+              aria-label="Close dialog"
+              className="btn btn-ghost btn-sm btn-circle"
+            >
+              <XMarkIcon className="h-5 w-5" />
+            </button>
+          </div>
+          <form onSubmit={handleCreateDowntime} className="space-y-4">
+            <FormField label={<span className="label-text font-medium">Work Center</span>} required>
+              {field => (
+                <select
+                  {...field}
+                  className="select select-bordered w-full"
+                  value={newForm.work_center_id}
+                  onChange={e => setNewForm({ ...newForm, work_center_id: parseInt(e.target.value) })}
+                  required
+                >
+                  <option value={0} disabled>
+                    Select work center...
+                  </option>
+                  {workCenters.map(wc => (
+                    <option key={wc.id} value={wc.id}>
+                      {wc.code} - {wc.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </FormField>
+            <div className="grid grid-cols-2 gap-3">
+              <FormField label={<span className="label-text font-medium">Category</span>}>
+                {field => (
+                  <select
+                    {...field}
+                    className="select select-bordered w-full"
+                    value={newForm.category}
+                    onChange={e => setNewForm({ ...newForm, category: e.target.value, reason_code: '' })}
+                  >
+                    {CATEGORIES.map(cat => (
+                      <option key={cat.value} value={cat.value}>
+                        {cat.label}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </FormField>
+              <FormField label={<span className="label-text font-medium">Type</span>}>
+                {field => (
+                  <select
+                    {...field}
+                    className="select select-bordered w-full"
+                    value={newForm.planned_type}
+                    onChange={e => setNewForm({ ...newForm, planned_type: e.target.value })}
+                  >
+                    <option value="unplanned">Unplanned</option>
+                    <option value="planned">Planned</option>
+                  </select>
+                )}
+              </FormField>
+            </div>
+            <FormField label={<span className="label-text font-medium">Reason Code</span>}>
+              {field => (
+                <select
+                  {...field}
+                  className="select select-bordered w-full"
+                  value={newForm.reason_code}
+                  onChange={e => setNewForm({ ...newForm, reason_code: e.target.value })}
+                >
+                  <option value="">None</option>
+                  {filteredReasonCodes.map(rc => (
+                    <option key={rc.id} value={rc.code}>
+                      {rc.code} - {rc.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </FormField>
+            <FormField label={<span className="label-text font-medium">Description</span>}>
+              {field => (
+                <textarea
+                  {...field}
+                  className="textarea textarea-bordered w-full"
+                  rows={3}
+                  value={newForm.description}
+                  onChange={e => setNewForm({ ...newForm, description: e.target.value })}
+                  placeholder="Describe the downtime reason..."
+                />
+              )}
+            </FormField>
+            <div className="modal-action">
+              <button type="button" onClick={() => setShowNewModal(false)} className="btn btn-ghost">
+                Cancel
+              </button>
+              <button disabled={actionBusy} type="submit" className="btn btn-primary">
+                <StopIcon className="h-4 w-4 mr-1" />
+                Start Downtime
               </button>
             </div>
-            <form onSubmit={handleCreateDowntime} className="space-y-4">
-              <FormField label={<span className="label-text font-medium">Work Center</span>} required>
-                {(field) => (
-                  <select
-                    {...field}
-                    className="select select-bordered w-full"
-                    value={newForm.work_center_id}
-                    onChange={(e) => setNewForm({ ...newForm, work_center_id: parseInt(e.target.value) })}
-                    required
-                  >
-                    <option value={0} disabled>Select work center...</option>
-                    {workCenters.map((wc) => (
-                      <option key={wc.id} value={wc.id}>
-                        {wc.code} - {wc.name}
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </FormField>
-              <div className="grid grid-cols-2 gap-3">
-                <FormField label={<span className="label-text font-medium">Category</span>}>
-                  {(field) => (
-                    <select
-                      {...field}
-                      className="select select-bordered w-full"
-                      value={newForm.category}
-                      onChange={(e) => setNewForm({ ...newForm, category: e.target.value, reason_code: '' })}
-                    >
-                      {CATEGORIES.map((cat) => (
-                        <option key={cat.value} value={cat.value}>{cat.label}</option>
-                      ))}
-                    </select>
-                  )}
-                </FormField>
-                <FormField label={<span className="label-text font-medium">Type</span>}>
-                  {(field) => (
-                    <select
-                      {...field}
-                      className="select select-bordered w-full"
-                      value={newForm.planned_type}
-                      onChange={(e) => setNewForm({ ...newForm, planned_type: e.target.value })}
-                    >
-                      <option value="unplanned">Unplanned</option>
-                      <option value="planned">Planned</option>
-                    </select>
-                  )}
-                </FormField>
-              </div>
-              <FormField label={<span className="label-text font-medium">Reason Code</span>}>
-                {(field) => (
-                  <select
-                    {...field}
-                    className="select select-bordered w-full"
-                    value={newForm.reason_code}
-                    onChange={(e) => setNewForm({ ...newForm, reason_code: e.target.value })}
-                  >
-                    <option value="">None</option>
-                    {filteredReasonCodes.map((rc) => (
-                      <option key={rc.id} value={rc.code}>
-                        {rc.code} - {rc.name}
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </FormField>
-              <FormField label={<span className="label-text font-medium">Description</span>}>
-                {(field) => (
-                  <textarea
-                    {...field}
-                    className="textarea textarea-bordered w-full"
-                    rows={3}
-                    value={newForm.description}
-                    onChange={(e) => setNewForm({ ...newForm, description: e.target.value })}
-                    placeholder="Describe the downtime reason..."
-                  />
-                )}
-              </FormField>
-              <div className="modal-action">
-                <button type="button" onClick={() => setShowNewModal(false)} className="btn btn-ghost">
-                  Cancel
-                </button>
-                <button type="submit" className="btn btn-primary">
-                  <StopIcon className="h-4 w-4 mr-1" />
-                  Start Downtime
-                </button>
-              </div>
-            </form>
-          </div>
-          <div
-            className="modal-backdrop"
-            role="presentation"
-            onClick={(e) => {
-              if (e.target === e.currentTarget) setShowNewModal(false);
-            }}
-          ></div>
-        </div>
+          </form>
+          {actionError && (
+            <p role="alert" className="text-red-300 mt-3">
+              {actionError}
+            </p>
+          )}
+          {actionBusy && (
+            <p role="status" className="text-slate-400 mt-3">
+              Saving…
+            </p>
+          )}
+        </Modal>
       )}
 
       {/* Resolve Downtime Modal */}
       {showResolveModal && resolvingEvent && (
-        <div className="modal modal-open">
-          <div className="modal-box max-w-md">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold">Resolve Downtime</h3>
-              <button onClick={() => setShowResolveModal(false)} className="btn btn-ghost btn-sm btn-circle">
-                <XMarkIcon className="h-5 w-5" />
+        <Modal
+          open
+          onClose={() => {
+            if (!actionBusy) setShowResolveModal(false);
+          }}
+          size="md"
+          ariaLabel="Resolve downtime"
+          closeOnBackdrop={false}
+        >
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-bold">Resolve Downtime</h3>
+            <button
+              onClick={() => setShowResolveModal(false)}
+              disabled={actionBusy}
+              aria-label="Close dialog"
+              className="btn btn-ghost btn-sm btn-circle"
+            >
+              <XMarkIcon className="h-5 w-5" />
+            </button>
+          </div>
+          <div className="mb-4 p-3 bg-slate-800/50 rounded-lg text-sm">
+            <div>
+              <strong>Work Center:</strong> {resolvingEvent.work_center?.code} - {resolvingEvent.work_center?.name}
+            </div>
+            <div>
+              <strong>Category:</strong> {categoryLabel(resolvingEvent.category)}
+            </div>
+            <div>
+              <strong>Started:</strong> {formatCentralDate(resolvingEvent.start_time)}
+            </div>
+            <div>
+              <strong>Elapsed:</strong> {formatDuration(getElapsedMinutes(resolvingEvent.start_time))}
+            </div>
+          </div>
+          <form onSubmit={handleResolve} className="space-y-4">
+            <FormField label={<span className="label-text font-medium">Resolution Notes</span>}>
+              {field => (
+                <textarea
+                  {...field}
+                  className="textarea textarea-bordered w-full"
+                  rows={3}
+                  value={resolveForm.resolution}
+                  onChange={e => setResolveForm({ ...resolveForm, resolution: e.target.value })}
+                  placeholder="Describe what was done to resolve..."
+                />
+              )}
+            </FormField>
+            <div className="modal-action">
+              <button type="button" onClick={() => setShowResolveModal(false)} className="btn btn-ghost">
+                Cancel
+              </button>
+              <button disabled={actionBusy} type="submit" className="btn btn-success">
+                <CheckCircleIcon className="h-4 w-4 mr-1" />
+                Resolve
               </button>
             </div>
-            <div className="mb-4 p-3 bg-slate-800/50 rounded-lg text-sm">
-              <div><strong>Work Center:</strong> {resolvingEvent.work_center?.code} - {resolvingEvent.work_center?.name}</div>
-              <div><strong>Category:</strong> {categoryLabel(resolvingEvent.category)}</div>
-              <div><strong>Started:</strong> {formatCentralDate(resolvingEvent.start_time)}</div>
-              <div><strong>Elapsed:</strong> {formatDuration(getElapsedMinutes(resolvingEvent.start_time))}</div>
-            </div>
-            <form onSubmit={handleResolve} className="space-y-4">
-              <FormField label={<span className="label-text font-medium">Resolution Notes</span>}>
-                {(field) => (
-                  <textarea
-                    {...field}
-                    className="textarea textarea-bordered w-full"
-                    rows={3}
-                    value={resolveForm.resolution}
-                    onChange={(e) => setResolveForm({ ...resolveForm, resolution: e.target.value })}
-                    placeholder="Describe what was done to resolve..."
-                  />
-                )}
-              </FormField>
-              <div className="modal-action">
-                <button type="button" onClick={() => setShowResolveModal(false)} className="btn btn-ghost">
-                  Cancel
-                </button>
-                <button type="submit" className="btn btn-success">
-                  <CheckCircleIcon className="h-4 w-4 mr-1" />
-                  Resolve
-                </button>
-              </div>
-            </form>
-          </div>
-          <div
-            className="modal-backdrop"
-            role="presentation"
-            onClick={(e) => {
-              if (e.target === e.currentTarget) setShowResolveModal(false);
-            }}
-          ></div>
-        </div>
+          </form>
+          {actionError && (
+            <p role="alert" className="text-red-300 mt-3">
+              {actionError}
+            </p>
+          )}
+          {actionBusy && (
+            <p role="status" className="text-slate-400 mt-3">
+              Saving…
+            </p>
+          )}
+        </Modal>
       )}
     </div>
   );

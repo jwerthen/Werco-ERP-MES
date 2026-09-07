@@ -83,9 +83,9 @@ const renderPurchasing = () =>
 /** Load the page, switch to the Vendors tab, and open the Edit modal for `vendorName`. */
 async function openEditModalFor(vendorName: string) {
   renderPurchasing();
-  await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+  await screen.findByRole('heading', { name: 'Purchasing' });
 
-  fireEvent.click(screen.getByRole('button', { name: /^Vendors/i }));
+  fireEvent.click(screen.getByRole('tab', { name: /^Vendors/i }));
 
   const row = (await screen.findByText(vendorName)).closest('tr')!;
   fireEvent.click(within(row).getByRole('button', { name: 'Edit' }));

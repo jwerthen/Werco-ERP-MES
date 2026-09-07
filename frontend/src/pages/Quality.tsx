@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { tabKeyboard } from '../components/operations/tabKeyboard';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
+import QualityRecordDetail from '../components/operations/QualityRecordDetail';
 import { Modal } from '../components/ui/Modal';
 import {
   ErrorState,
@@ -133,14 +135,26 @@ const ncrStatusColors: Record<string, string> = {
 // constants so the unsaved-changes dirty checks can compare against the
 // pristine shape.
 const BLANK_NCR_FORM = {
-  part_id: 0, title: '', description: '', source: 'in_process',
-  quantity_affected: 1, specification: '', actual_value: '', required_value: ''
+  part_id: 0,
+  title: '',
+  description: '',
+  source: 'in_process',
+  quantity_affected: 1,
+  specification: '',
+  actual_value: '',
+  required_value: '',
 };
 const BLANK_CAR_FORM = {
-  title: '', problem_description: '', car_type: 'corrective', priority: 3
+  title: '',
+  problem_description: '',
+  car_type: 'corrective',
+  priority: 3,
 };
 const BLANK_FAI_FORM = {
-  part_id: 0, fai_type: 'full', reason: 'new_part', customer_approval_required: false
+  part_id: 0,
+  fai_type: 'full',
+  reason: 'new_part',
+  customer_approval_required: false,
 };
 
 export default function QualityPage() {
@@ -158,7 +172,11 @@ export default function QualityPage() {
     const filter = searchParams.get('filter');
     return filter === 'open' ? 'open' : '';
   });
-  
+
+  useEffect(() => {
+    setNcrStatusFilter(searchParams.get('filter') === 'open' ? 'open' : '');
+  }, [searchParams]);
+
   // ── Deep links ────────────────────────────────────────────────────────────
   // Notification/email links land here as `/quality?tab=<id>`, optionally with
   // `&fai=<id>`. These MUST be effects, not useState lazy initializers: a bell
@@ -205,6 +223,24 @@ export default function QualityPage() {
     setSearchParams(next, { replace: true });
   };
 
+  const recordKind = searchParams.get('car') ? 'car' : 'ncr';
+  const recordId = Number(searchParams.get('car') || searchParams.get('ncr') || 0);
+  const openQualityRecord = (kind: 'ncr' | 'car', id: number) => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('ncr');
+    next.delete('car');
+    next.set('tab', kind);
+    next.set(kind, String(id));
+    setSearchParams(next);
+  };
+  const closeQualityRecord = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('ncr');
+    next.delete('car');
+    setSearchParams(next);
+  };
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState('');
   const [showNCRModal, setShowNCRModal] = useState(false);
   const [showCARModal, setShowCARModal] = useState(false);
   const [showFAIModal, setShowFAIModal] = useState(false);
@@ -268,11 +304,17 @@ export default function QualityPage() {
   const [scrapCodesLoading, setScrapCodesLoading] = useState(false);
   const [scrapCodesError, setScrapCodesError] = useState(false);
   const [scrapCodesLoaded, setScrapCodesLoaded] = useState(false);
-  const [scrapCodeModal, setScrapCodeModal] = useState<{ mode: 'create' } | { mode: 'edit'; code: ScrapReasonCode } | null>(null);
+  const [scrapCodeModal, setScrapCodeModal] = useState<
+    { mode: 'create' } | { mode: 'edit'; code: ScrapReasonCode } | null
+  >(null);
   const [scrapCodeSaving, setScrapCodeSaving] = useState(false);
   const [togglingCodeId, setTogglingCodeId] = useState<number | null>(null);
   const [scrapCodeForm, setScrapCodeForm] = useState({
-    code: '', name: '', category: 'other', description: '', display_order: 0,
+    code: '',
+    name: '',
+    category: 'other',
+    description: '',
+    display_order: 0,
   });
 
   useEffect(() => {
@@ -288,7 +330,7 @@ export default function QualityPage() {
         api.getCARs(),
         api.getFAIs(),
         api.getQualitySummary(),
-        api.getParts({ active_only: true, item_group: 'all' })
+        api.getParts({ active_only: true, item_group: 'all' }),
       ]);
       setNcrs(ncrsRes);
       setCars(carsRes);
@@ -305,17 +347,29 @@ export default function QualityPage() {
 
   const handleCreateNCR = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (creating) return;
+    setCreating(true);
+    setCreateError('');
     try {
       const payload = {
         ...ncrForm,
-        part_id: ncrForm.part_id || null  // Send null instead of 0
+        part_id: ncrForm.part_id || null, // Send null instead of 0
       };
       await api.createNCR(payload);
       setShowNCRModal(false);
       setNcrForm(BLANK_NCR_FORM);
       loadData();
     } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to create NCR');
+      const detail = err.response?.data?.detail;
+      setCreateError(
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((e: any) => e.msg).join('; ')
+            : 'Failed to create NCR'
+      );
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -344,25 +398,49 @@ export default function QualityPage() {
 
   const handleCreateCAR = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (creating) return;
+    setCreating(true);
+    setCreateError('');
     try {
       await api.createCAR(carForm);
       setShowCARModal(false);
       setCarForm(BLANK_CAR_FORM);
       loadData();
     } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to create CAR');
+      const detail = err.response?.data?.detail;
+      setCreateError(
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((e: any) => e.msg).join('; ')
+            : 'Failed to create CAR'
+      );
+    } finally {
+      setCreating(false);
     }
   };
 
   const handleCreateFAI = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (creating) return;
+    setCreating(true);
+    setCreateError('');
     try {
       await api.createFAI(faiForm);
       setShowFAIModal(false);
       setFaiForm(BLANK_FAI_FORM);
       loadData();
     } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to create FAI');
+      const detail = err.response?.data?.detail;
+      setCreateError(
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((e: any) => e.msg).join('; ')
+            : 'Failed to create FAI'
+      );
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -506,7 +584,14 @@ export default function QualityPage() {
   };
 
   const filteredNcrs = useMemo(
-    () => (ncrStatusFilter ? ncrs.filter((ncr) => ncr.status === ncrStatusFilter) : ncrs),
+    () =>
+      ncrStatusFilter
+        ? ncrs.filter(ncr =>
+            ncrStatusFilter === 'open'
+              ? ['open', 'under_review', 'pending_disposition'].includes(ncr.status)
+              : ncr.status === ncrStatusFilter
+          )
+        : ncrs,
     [ncrs, ncrStatusFilter]
   );
 
@@ -514,7 +599,7 @@ export default function QualityPage() {
     canVoidNCR ? (
       <button
         type="button"
-        onClick={(e) => {
+        onClick={e => {
           e.stopPropagation();
           setVoidNCRReason('');
           setVoidNCRTarget(ncr);
@@ -528,274 +613,290 @@ export default function QualityPage() {
       </button>
     ) : null;
 
-  const ncrColumns = useMemo<Array<DataTableColumn<NCR>>>(() => [
-    {
-      key: 'ncr_number',
-      header: 'NCR #',
-      sortable: true,
-      className: 'font-medium',
-      accessor: (ncr) => ncr.ncr_number,
-    },
-    {
-      key: 'part',
-      header: 'Part',
-      sortable: true,
-      accessor: (ncr) => ncr.part?.part_number ?? '',
-      render: (ncr) => ncr.part?.part_number || '-',
-    },
-    {
-      key: 'title',
-      header: 'Title',
-      sortable: true,
-      accessor: (ncr) => ncr.title,
-    },
-    {
-      key: 'source',
-      header: 'Source',
-      sortable: true,
-      accessor: (ncr) => ncr.source,
-      render: (ncr) => <span className="capitalize">{ncr.source.replace(/_/g, ' ')}</span>,
-    },
-    {
-      key: 'status',
-      header: 'Status',
-      sortable: true,
-      accessor: (ncr) => ncr.status,
-      csv: (ncr) => ncr.status.replace(/_/g, ' '),
-      render: (ncr) => <StatusBadge status={ncr.status} colorMap={ncrStatusColors} />,
-    },
-    {
-      key: 'disposition',
-      header: 'Disposition',
-      sortable: true,
-      accessor: (ncr) => ncr.disposition,
-      csv: (ncr) => ncr.disposition.replace(/_/g, ' '),
-      render: (ncr) => <StatusBadge status={ncr.disposition} colorMap={dispositionColors} />,
-    },
-    {
-      key: 'created_at',
-      header: 'Date',
-      sortable: true,
-      accessor: (ncr) => ncr.created_at,
-      csv: (ncr) => formatCentralDate(ncr.created_at),
-      render: (ncr) => <span className="text-sm">{formatCentralDate(ncr.created_at)}</span>,
-    },
-    ...(canVoidNCR
-      ? [
-          {
-            key: 'actions',
-            header: 'Action',
-            align: 'right' as const,
-            render: (ncr: NCR) => (
-              <div className="flex items-center justify-end gap-2">{renderNCRVoidAction(ncr)}</div>
-            ),
-          },
-        ]
-      : []),
-  ], [canVoidNCR]);
+  const ncrColumns = useMemo<Array<DataTableColumn<NCR>>>(
+    () => [
+      {
+        key: 'ncr_number',
+        header: 'NCR #',
+        sortable: true,
+        className: 'font-medium',
+        accessor: ncr => ncr.ncr_number,
+      },
+      {
+        key: 'part',
+        header: 'Part',
+        sortable: true,
+        accessor: ncr => ncr.part?.part_number ?? '',
+        render: ncr => ncr.part?.part_number || '-',
+      },
+      {
+        key: 'title',
+        header: 'Title',
+        sortable: true,
+        accessor: ncr => ncr.title,
+      },
+      {
+        key: 'source',
+        header: 'Source',
+        sortable: true,
+        accessor: ncr => ncr.source,
+        render: ncr => <span className="capitalize">{ncr.source.replace(/_/g, ' ')}</span>,
+      },
+      {
+        key: 'status',
+        header: 'Status',
+        sortable: true,
+        accessor: ncr => ncr.status,
+        csv: ncr => ncr.status.replace(/_/g, ' '),
+        render: ncr => <StatusBadge status={ncr.status} colorMap={ncrStatusColors} />,
+      },
+      {
+        key: 'disposition',
+        header: 'Disposition',
+        sortable: true,
+        accessor: ncr => ncr.disposition,
+        csv: ncr => ncr.disposition.replace(/_/g, ' '),
+        render: ncr => <StatusBadge status={ncr.disposition} colorMap={dispositionColors} />,
+      },
+      {
+        key: 'created_at',
+        header: 'Date',
+        sortable: true,
+        accessor: ncr => ncr.created_at,
+        csv: ncr => formatCentralDate(ncr.created_at),
+        render: ncr => <span className="text-sm">{formatCentralDate(ncr.created_at)}</span>,
+      },
+      ...(canVoidNCR
+        ? [
+            {
+              key: 'actions',
+              header: 'Action',
+              align: 'right' as const,
+              render: (ncr: NCR) => (
+                <div className="flex items-center justify-end gap-2">{renderNCRVoidAction(ncr)}</div>
+              ),
+            },
+          ]
+        : []),
+    ],
+    [canVoidNCR]
+  );
 
-  const carColumns = useMemo<Array<DataTableColumn<CAR>>>(() => [
-    {
-      key: 'car_number',
-      header: 'CAR #',
-      sortable: true,
-      className: 'font-medium',
-      accessor: (car) => car.car_number,
-    },
-    {
-      key: 'car_type',
-      header: 'Type',
-      sortable: true,
-      accessor: (car) => car.car_type,
-      render: (car) => <span className="capitalize">{car.car_type}</span>,
-    },
-    {
-      key: 'title',
-      header: 'Title',
-      sortable: true,
-      accessor: (car) => car.title,
-    },
-    {
-      key: 'priority',
-      header: 'Priority',
-      sortable: true,
-      align: 'center',
-      headerClassName: 'text-center',
-      accessor: (car) => car.priority,
-      csv: (car) => priorityLabel(car.priority),
-      render: (car) => (
-        <span className={`px-2 py-1 rounded text-xs font-medium ${
-          car.priority === 1 ? 'bg-red-500/20 text-red-300' :
-          car.priority === 2 ? 'bg-yellow-500/20 text-yellow-300' :
-          'bg-slate-800 text-slate-100'
-        }`}>
-          {priorityLabel(car.priority)}
-        </span>
-      ),
-    },
-    {
-      key: 'status',
-      header: 'Status',
-      sortable: true,
-      accessor: (car) => car.status,
-      csv: (car) => car.status.replace(/_/g, ' '),
-      render: (car) => <StatusBadge status={car.status} colorMap={ncrStatusColors} />,
-    },
-    {
-      key: 'due_date',
-      header: 'Due Date',
-      sortable: true,
-      accessor: (car) => car.due_date ?? '',
-      csv: (car) => (car.due_date ? formatCentralDate(car.due_date) : ''),
-      render: (car) => <span className="text-sm">{car.due_date ? formatCentralDate(car.due_date) : '-'}</span>,
-    },
-  ], []);
+  const carColumns = useMemo<Array<DataTableColumn<CAR>>>(
+    () => [
+      {
+        key: 'car_number',
+        header: 'CAR #',
+        sortable: true,
+        className: 'font-medium',
+        accessor: car => car.car_number,
+      },
+      {
+        key: 'car_type',
+        header: 'Type',
+        sortable: true,
+        accessor: car => car.car_type,
+        render: car => <span className="capitalize">{car.car_type}</span>,
+      },
+      {
+        key: 'title',
+        header: 'Title',
+        sortable: true,
+        accessor: car => car.title,
+      },
+      {
+        key: 'priority',
+        header: 'Priority',
+        sortable: true,
+        align: 'center',
+        headerClassName: 'text-center',
+        accessor: car => car.priority,
+        csv: car => priorityLabel(car.priority),
+        render: car => (
+          <span
+            className={`px-2 py-1 rounded text-xs font-medium ${
+              car.priority === 1
+                ? 'bg-red-500/20 text-red-300'
+                : car.priority === 2
+                  ? 'bg-yellow-500/20 text-yellow-300'
+                  : 'bg-slate-800 text-slate-100'
+            }`}
+          >
+            {priorityLabel(car.priority)}
+          </span>
+        ),
+      },
+      {
+        key: 'status',
+        header: 'Status',
+        sortable: true,
+        accessor: car => car.status,
+        csv: car => car.status.replace(/_/g, ' '),
+        render: car => <StatusBadge status={car.status} colorMap={ncrStatusColors} />,
+      },
+      {
+        key: 'due_date',
+        header: 'Due Date',
+        sortable: true,
+        accessor: car => car.due_date ?? '',
+        csv: car => (car.due_date ? formatCentralDate(car.due_date) : ''),
+        render: car => <span className="text-sm">{car.due_date ? formatCentralDate(car.due_date) : '-'}</span>,
+      },
+    ],
+    []
+  );
 
-  const faiColumns = useMemo<Array<DataTableColumn<FAI>>>(() => [
-    {
-      key: 'fai_number',
-      header: 'FAI #',
-      sortable: true,
-      className: 'font-medium',
-      accessor: (fai) => fai.fai_number,
-    },
-    {
-      key: 'part',
-      header: 'Part',
-      sortable: true,
-      accessor: (fai) => fai.part?.part_number ?? '',
-      csv: (fai) => `${fai.part?.part_number ?? ''}${fai.part_revision ? ` Rev ${fai.part_revision}` : ''}`.trim(),
-      render: (fai) => (
-        <span>
-          {fai.part?.part_number}
-          {fai.part_revision && <span className="text-slate-500 ml-1">Rev {fai.part_revision}</span>}
-        </span>
-      ),
-    },
-    {
-      key: 'fai_type',
-      header: 'Type',
-      sortable: true,
-      accessor: (fai) => fai.fai_type,
-      render: (fai) => <span className="capitalize">{fai.fai_type}</span>,
-    },
-    {
-      key: 'status',
-      header: 'Status',
-      sortable: true,
-      accessor: (fai) => fai.status,
-      render: (fai) => <StatusBadge status={fai.status} />,
-    },
-    {
-      key: 'pass_fail',
-      header: 'Pass/Fail',
-      align: 'center',
-      headerClassName: 'text-center',
-      accessor: (fai) => fai.characteristics_passed,
-      csv: (fai) => `${fai.characteristics_passed}/${fai.characteristics_failed}/${fai.total_characteristics}`,
-      render: (fai) => (
-        <span className="text-sm">
-          <span className="text-green-600">{fai.characteristics_passed}</span>
-          {' / '}
-          <span className="text-red-600">{fai.characteristics_failed}</span>
-          {' / '}
-          <span className="text-slate-400">{fai.total_characteristics}</span>
-        </span>
-      ),
-    },
-    {
-      key: 'due_date',
-      header: 'Due Date',
-      sortable: true,
-      accessor: (fai) => fai.due_date ?? '',
-      csv: (fai) => (fai.due_date ? formatCentralDate(fai.due_date) : ''),
-      render: (fai) => <span className="text-sm">{fai.due_date ? formatCentralDate(fai.due_date) : '-'}</span>,
-    },
-  ], []);
+  const faiColumns = useMemo<Array<DataTableColumn<FAI>>>(
+    () => [
+      {
+        key: 'fai_number',
+        header: 'FAI #',
+        sortable: true,
+        className: 'font-medium',
+        accessor: fai => fai.fai_number,
+      },
+      {
+        key: 'part',
+        header: 'Part',
+        sortable: true,
+        accessor: fai => fai.part?.part_number ?? '',
+        csv: fai => `${fai.part?.part_number ?? ''}${fai.part_revision ? ` Rev ${fai.part_revision}` : ''}`.trim(),
+        render: fai => (
+          <span>
+            {fai.part?.part_number}
+            {fai.part_revision && <span className="text-slate-500 ml-1">Rev {fai.part_revision}</span>}
+          </span>
+        ),
+      },
+      {
+        key: 'fai_type',
+        header: 'Type',
+        sortable: true,
+        accessor: fai => fai.fai_type,
+        render: fai => <span className="capitalize">{fai.fai_type}</span>,
+      },
+      {
+        key: 'status',
+        header: 'Status',
+        sortable: true,
+        accessor: fai => fai.status,
+        render: fai => <StatusBadge status={fai.status} />,
+      },
+      {
+        key: 'pass_fail',
+        header: 'Pass/Fail',
+        align: 'center',
+        headerClassName: 'text-center',
+        accessor: fai => fai.characteristics_passed,
+        csv: fai => `${fai.characteristics_passed}/${fai.characteristics_failed}/${fai.total_characteristics}`,
+        render: fai => (
+          <span className="text-sm">
+            <span className="text-green-600">{fai.characteristics_passed}</span>
+            {' / '}
+            <span className="text-red-600">{fai.characteristics_failed}</span>
+            {' / '}
+            <span className="text-slate-400">{fai.total_characteristics}</span>
+          </span>
+        ),
+      },
+      {
+        key: 'due_date',
+        header: 'Due Date',
+        sortable: true,
+        accessor: fai => fai.due_date ?? '',
+        csv: fai => (fai.due_date ? formatCentralDate(fai.due_date) : ''),
+        render: fai => <span className="text-sm">{fai.due_date ? formatCentralDate(fai.due_date) : '-'}</span>,
+      },
+    ],
+    []
+  );
 
-  const scrapCodeColumns = useMemo<Array<DataTableColumn<ScrapReasonCode>>>(() => [
-    {
-      key: 'code',
-      header: 'Code',
-      sortable: true,
-      className: 'font-mono font-medium',
-      accessor: (rc) => rc.code,
-    },
-    {
-      key: 'name',
-      header: 'Name',
-      sortable: true,
-      accessor: (rc) => rc.name,
-    },
-    {
-      key: 'category',
-      header: 'Category',
-      sortable: true,
-      accessor: (rc) => rc.category,
-      render: (rc) => <span className="capitalize">{rc.category}</span>,
-    },
-    {
-      key: 'description',
-      header: 'Description',
-      className: 'text-sm text-slate-400 max-w-[280px] truncate',
-      accessor: (rc) => rc.description ?? '',
-      render: (rc) => rc.description || '-',
-    },
-    {
-      key: 'display_order',
-      header: 'Order',
-      sortable: true,
-      align: 'center',
-      headerClassName: 'text-center',
-      accessor: (rc) => rc.display_order,
-    },
-    {
-      key: 'status',
-      header: 'Status',
-      sortable: true,
-      accessor: (rc) => (rc.is_active ? 'active' : 'inactive'),
-      render: (rc) => <StatusBadge status={rc.is_active ? 'active' : 'inactive'} />,
-    },
-    ...(canManageScrapCodes
-      ? [
-          {
-            key: 'actions',
-            header: 'Actions',
-            align: 'right',
-            headerClassName: 'text-right',
-            accessor: () => '',
-            csv: () => '',
-            render: (rc) => (
-              <div className="flex justify-end gap-2">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    openScrapCodeEdit(rc);
-                  }}
-                >
-                  Edit
-                </Button>
-                <Button
-                  type="button"
-                  variant={rc.is_active ? 'danger' : 'secondary'}
-                  size="sm"
-                  disabled={togglingCodeId === rc.id}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void handleToggleScrapCode(rc);
-                  }}
-                >
-                  {rc.is_active ? 'Deactivate' : 'Reactivate'}
-                </Button>
-              </div>
-            ),
-          } as DataTableColumn<ScrapReasonCode>,
-        ]
-      : []),
-  ], [canManageScrapCodes, togglingCodeId]);
+  const scrapCodeColumns = useMemo<Array<DataTableColumn<ScrapReasonCode>>>(
+    () => [
+      {
+        key: 'code',
+        header: 'Code',
+        sortable: true,
+        className: 'font-mono font-medium',
+        accessor: rc => rc.code,
+      },
+      {
+        key: 'name',
+        header: 'Name',
+        sortable: true,
+        accessor: rc => rc.name,
+      },
+      {
+        key: 'category',
+        header: 'Category',
+        sortable: true,
+        accessor: rc => rc.category,
+        render: rc => <span className="capitalize">{rc.category}</span>,
+      },
+      {
+        key: 'description',
+        header: 'Description',
+        className: 'text-sm text-slate-400 max-w-[280px] truncate',
+        accessor: rc => rc.description ?? '',
+        render: rc => rc.description || '-',
+      },
+      {
+        key: 'display_order',
+        header: 'Order',
+        sortable: true,
+        align: 'center',
+        headerClassName: 'text-center',
+        accessor: rc => rc.display_order,
+      },
+      {
+        key: 'status',
+        header: 'Status',
+        sortable: true,
+        accessor: rc => (rc.is_active ? 'active' : 'inactive'),
+        render: rc => <StatusBadge status={rc.is_active ? 'active' : 'inactive'} />,
+      },
+      ...(canManageScrapCodes
+        ? [
+            {
+              key: 'actions',
+              header: 'Actions',
+              align: 'right',
+              headerClassName: 'text-right',
+              accessor: () => '',
+              csv: () => '',
+              render: rc => (
+                <div className="flex justify-end gap-2">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={e => {
+                      e.stopPropagation();
+                      openScrapCodeEdit(rc);
+                    }}
+                  >
+                    Edit
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={rc.is_active ? 'danger' : 'secondary'}
+                    size="sm"
+                    disabled={togglingCodeId === rc.id}
+                    onClick={e => {
+                      e.stopPropagation();
+                      void handleToggleScrapCode(rc);
+                    }}
+                  >
+                    {rc.is_active ? 'Deactivate' : 'Reactivate'}
+                  </Button>
+                </div>
+              ),
+            } as DataTableColumn<ScrapReasonCode>,
+          ]
+        : []),
+    ],
+    [canManageScrapCodes, togglingCodeId]
+  );
 
   if (loadError) {
     return (
@@ -803,16 +904,17 @@ export default function QualityPage() {
         <div className="flex justify-between items-center">
           <h1 className="text-2xl font-bold text-white">Quality Management</h1>
         </div>
-        <ErrorState
-          message="Could not load quality data (NCRs, CARs, FAIs)."
-          onRetry={loadData}
-        />
+        <ErrorState message="Could not load quality data (NCRs, CARs, FAIs)." onRetry={loadData} />
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
+      {recordId > 0 && (
+        <QualityRecordDetail kind={recordKind} id={recordId} onClose={closeQualityRecord} onSaved={loadData} />
+      )}
+
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Quality Management</h1>
       </div>
@@ -820,61 +922,72 @@ export default function QualityPage() {
       {/* Summary strip */}
       {summary && (
         <div data-tour="qa-ncr">
-        <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-          <MiniStat
-            icon={ExclamationTriangleIcon}
-            iconBg="bg-fd-red/15"
-            iconColor="text-fd-red"
-            label="Open NCRs"
-            value={summary.open_ncrs}
-            valueColor={summary.open_ncrs > 0 ? 'text-fd-red' : undefined}
-            active={activeTab === 'ncr' && ncrStatusFilter === 'open'}
-            onClick={() => {
-              setActiveTab('ncr');
-              setNcrStatusFilter('open');
-              // Both params in ONE copy-and-set — two sequential updates would
-              // each copy the same stale searchParams and lose one of them.
-              const next = new URLSearchParams(searchParams);
-              next.set('tab', 'ncr');
-              next.set('filter', 'open');
-              setSearchParams(next);
-            }}
-          />
-          <MiniStat
-            icon={ClipboardDocumentCheckIcon}
-            iconBg="bg-fd-amber/15"
-            iconColor="text-fd-amber"
-            label="Open CARs"
-            value={summary.open_cars}
-            valueColor={summary.open_cars > 0 ? 'text-fd-amber' : undefined}
-            active={activeTab === 'car'}
-            onClick={() => selectTab('car')}
-          />
-          <MiniStat
-            icon={DocumentMagnifyingGlassIcon}
-            iconBg="bg-fd-blue/15"
-            iconColor="text-fd-blue"
-            label="Pending FAIs"
-            value={summary.pending_fais}
-            valueColor={summary.pending_fais > 0 ? 'text-fd-blue' : undefined}
-            active={activeTab === 'fai'}
-            onClick={() => selectTab('fai')}
-          />
-        </MiniStatStrip>
+          <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            <MiniStat
+              icon={ExclamationTriangleIcon}
+              iconBg="bg-fd-red/15"
+              iconColor="text-fd-red"
+              label="Open NCRs"
+              value={summary.open_ncrs}
+              valueColor={summary.open_ncrs > 0 ? 'text-fd-red' : undefined}
+              active={activeTab === 'ncr' && ncrStatusFilter === 'open'}
+              onClick={() => {
+                setActiveTab('ncr');
+                setNcrStatusFilter('open');
+                // Both params in ONE copy-and-set — two sequential updates would
+                // each copy the same stale searchParams and lose one of them.
+                const next = new URLSearchParams(searchParams);
+                next.set('tab', 'ncr');
+                next.set('filter', 'open');
+                setSearchParams(next);
+              }}
+            />
+            <MiniStat
+              icon={ClipboardDocumentCheckIcon}
+              iconBg="bg-fd-amber/15"
+              iconColor="text-fd-amber"
+              label="Open CARs"
+              value={summary.open_cars}
+              valueColor={summary.open_cars > 0 ? 'text-fd-amber' : undefined}
+              active={activeTab === 'car'}
+              onClick={() => selectTab('car')}
+            />
+            <MiniStat
+              icon={DocumentMagnifyingGlassIcon}
+              iconBg="bg-fd-blue/15"
+              iconColor="text-fd-blue"
+              label="Pending FAIs"
+              value={summary.pending_fais}
+              valueColor={summary.pending_fais > 0 ? 'text-fd-blue' : undefined}
+              active={activeTab === 'fai'}
+              onClick={() => selectTab('fai')}
+            />
+          </MiniStatStrip>
         </div>
       )}
 
       {/* Tabs */}
       <div className="border-b border-slate-700">
-        <nav className="-mb-px flex space-x-8">
+        <div
+          tabIndex={-1}
+          role="tablist"
+          aria-label="Quality sections"
+          onKeyDown={tabKeyboard}
+          className="-mb-px flex space-x-8"
+        >
           {[
             { id: 'ncr', label: 'NCR', icon: ExclamationTriangleIcon },
             { id: 'car', label: 'CAR', icon: ClipboardDocumentCheckIcon },
             { id: 'fai', label: 'FAI', icon: DocumentMagnifyingGlassIcon },
             { id: 'scrap', label: 'Scrap Codes', icon: TagIcon },
-          ].map((tab) => (
+          ].map(tab => (
             <button
               key={tab.id}
+              role="tab"
+              id={`quality-tab-${tab.id}`}
+              aria-controls="quality-panel"
+              aria-selected={activeTab === tab.id}
+              tabIndex={activeTab === tab.id ? 0 : -1}
               onClick={() => selectTab(tab.id as TabType)}
               className={`flex items-center py-4 px-1 border-b-2 font-medium text-sm ${
                 activeTab === tab.id
@@ -886,11 +999,11 @@ export default function QualityPage() {
               {tab.label}
             </button>
           ))}
-        </nav>
+        </div>
       </div>
 
       {/* Tab Content */}
-      <div className="card">
+      <div className="card" role="tabpanel" id="quality-panel" aria-labelledby={`quality-tab-${activeTab}`}>
         {/* NCR Tab */}
         {activeTab === 'ncr' && (
           <>
@@ -899,12 +1012,16 @@ export default function QualityPage() {
                 <h2 className="text-lg font-semibold">Non-Conformance Reports</h2>
                 <select
                   value={ncrStatusFilter}
-                  onChange={(e) => {
+                  onChange={e => {
                     setNcrStatusFilter(e.target.value);
                     if (e.target.value) {
-                      setSearchParams({ filter: e.target.value });
+                      const next = new URLSearchParams(searchParams);
+                      next.set('filter', e.target.value);
+                      setSearchParams(next);
                     } else {
-                      setSearchParams({});
+                      const next = new URLSearchParams(searchParams);
+                      next.delete('filter');
+                      setSearchParams(next);
                     }
                   }}
                   className="input w-40"
@@ -919,7 +1036,9 @@ export default function QualityPage() {
                   <button
                     onClick={() => {
                       setNcrStatusFilter('');
-                      setSearchParams({});
+                      const next = new URLSearchParams(searchParams);
+                      next.delete('filter');
+                      setSearchParams(next);
                     }}
                     className="flex items-center gap-1 px-3 py-1.5 text-sm bg-werco-100 text-werco-700 rounded-full hover:bg-werco-200"
                   >
@@ -934,8 +1053,13 @@ export default function QualityPage() {
             </div>
             <DataTable
               columns={ncrColumns}
-              data={filteredNcrs}
-              rowKey={(ncr) => ncr.id}
+              data={filteredNcrs.filter(
+                ncr =>
+                  !searchParams.get('search') ||
+                  `${ncr.ncr_number} ${ncr.title}`.toLowerCase().includes(searchParams.get('search')!.toLowerCase())
+              )}
+              rowKey={ncr => ncr.id}
+              onRowClick={ncr => openQualityRecord('ncr', ncr.id)}
               loading={loading}
               defaultSort={{ key: 'created_at', dir: 'desc' }}
               pageSize={25}
@@ -946,15 +1070,19 @@ export default function QualityPage() {
                 description: 'Non-conformance reports will appear here once they are created.',
                 action: { label: 'New NCR', onClick: () => setShowNCRModal(true) },
               }}
-              mobileCards={(ncr) => (
+              mobileCards={ncr => (
                 <MobileDataCard
                   title={ncr.ncr_number}
+                  onClick={() => openQualityRecord('ncr', ncr.id)}
                   subtitle={ncr.title}
                   badge={<StatusBadge status={ncr.status} colorMap={ncrStatusColors} />}
                   fields={[
                     { label: 'Part', value: ncr.part?.part_number || '-' },
                     { label: 'Source', value: <span className="capitalize">{ncr.source.replace(/_/g, ' ')}</span> },
-                    { label: 'Disposition', value: <StatusBadge status={ncr.disposition} colorMap={dispositionColors} /> },
+                    {
+                      label: 'Disposition',
+                      value: <StatusBadge status={ncr.disposition} colorMap={dispositionColors} />,
+                    },
                     { label: 'Date', value: formatCentralDate(ncr.created_at) },
                   ]}
                   actions={renderNCRVoidAction(ncr)}
@@ -976,7 +1104,8 @@ export default function QualityPage() {
             <DataTable
               columns={carColumns}
               data={cars}
-              rowKey={(car) => car.id}
+              rowKey={car => car.id}
+              onRowClick={car => openQualityRecord('car', car.id)}
               loading={loading}
               defaultSort={{ key: 'car_number', dir: 'desc' }}
               pageSize={25}
@@ -987,9 +1116,10 @@ export default function QualityPage() {
                 description: 'Corrective action requests will appear here once they are created.',
                 action: { label: 'New CAR', onClick: () => setShowCARModal(true) },
               }}
-              mobileCards={(car) => (
+              mobileCards={car => (
                 <MobileDataCard
                   title={car.car_number}
+                  onClick={() => openQualityRecord('car', car.id)}
                   subtitle={car.title}
                   badge={<StatusBadge status={car.status} colorMap={ncrStatusColors} />}
                   fields={[
@@ -997,11 +1127,15 @@ export default function QualityPage() {
                     {
                       label: 'Priority',
                       value: (
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${
-                          car.priority === 1 ? 'bg-red-500/20 text-red-300' :
-                          car.priority === 2 ? 'bg-yellow-500/20 text-yellow-300' :
-                          'bg-slate-800 text-slate-100'
-                        }`}>
+                        <span
+                          className={`px-2 py-1 rounded text-xs font-medium ${
+                            car.priority === 1
+                              ? 'bg-red-500/20 text-red-300'
+                              : car.priority === 2
+                                ? 'bg-yellow-500/20 text-yellow-300'
+                                : 'bg-slate-800 text-slate-100'
+                          }`}
+                        >
                           {priorityLabel(car.priority)}
                         </span>
                       ),
@@ -1026,19 +1160,19 @@ export default function QualityPage() {
             <DataTable
               columns={faiColumns}
               data={fais}
-              rowKey={(fai) => fai.id}
+              rowKey={fai => fai.id}
               loading={loading}
               defaultSort={{ key: 'fai_number', dir: 'desc' }}
               pageSize={25}
               csvExport={{ filename: 'fais' }}
-              onRowClick={(fai) => openFaiDetail(fai.id)}
+              onRowClick={fai => openFaiDetail(fai.id)}
               empty={{
                 icon: DocumentMagnifyingGlassIcon,
                 title: 'No FAIs found',
                 description: 'First article inspections will appear here once they are created.',
                 action: { label: 'New FAI', onClick: () => setShowFAIModal(true) },
               }}
-              mobileCards={(fai) => (
+              mobileCards={fai => (
                 <MobileDataCard
                   title={fai.fai_number}
                   subtitle={`${fai.part?.part_number ?? ''}${fai.part_revision ? ` Rev ${fai.part_revision}` : ''}`}
@@ -1073,8 +1207,8 @@ export default function QualityPage() {
               <div>
                 <h2 className="text-lg font-semibold">Scrap Reason Codes</h2>
                 <p className="text-sm text-slate-400 mt-0.5">
-                  Structured scrap categorization for kiosk and desktop scrap entry. With no active
-                  codes, scrap capture falls back to the built-in reason list.
+                  Structured scrap categorization for kiosk and desktop scrap entry. With no active codes, scrap capture
+                  falls back to the built-in reason list.
                 </p>
               </div>
               {canManageScrapCodes && (
@@ -1089,7 +1223,7 @@ export default function QualityPage() {
               <DataTable
                 columns={scrapCodeColumns}
                 data={scrapCodes}
-                rowKey={(rc) => rc.id}
+                rowKey={rc => rc.id}
                 loading={scrapCodesLoading && !scrapCodesLoaded}
                 defaultSort={{ key: 'display_order', dir: 'asc' }}
                 pageSize={25}
@@ -1099,11 +1233,9 @@ export default function QualityPage() {
                   title: 'No scrap reason codes',
                   description:
                     'Define codes (e.g. OT — Out of tolerance) to categorize scrap for Pareto analysis. Until then, scrap entry uses the built-in reason list.',
-                  ...(canManageScrapCodes
-                    ? { action: { label: 'New Scrap Code', onClick: openScrapCodeCreate } }
-                    : {}),
+                  ...(canManageScrapCodes ? { action: { label: 'New Scrap Code', onClick: openScrapCodeCreate } } : {}),
                 }}
-                mobileCards={(rc) => (
+                mobileCards={rc => (
                   <MobileDataCard
                     title={`${rc.code} — ${rc.name}`}
                     subtitle={rc.description || undefined}
@@ -1117,7 +1249,12 @@ export default function QualityPage() {
                               label: 'Actions',
                               value: (
                                 <div className="flex gap-2">
-                                  <Button type="button" variant="secondary" size="sm" onClick={() => openScrapCodeEdit(rc)}>
+                                  <Button
+                                    type="button"
+                                    variant="secondary"
+                                    size="sm"
+                                    onClick={() => openScrapCodeEdit(rc)}
+                                  >
                                     Edit
                                   </Button>
                                   <Button
@@ -1162,13 +1299,13 @@ export default function QualityPage() {
         <form onSubmit={handleSaveScrapCode} className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <FormField label="Code" required help="Short identifier, e.g. OT or TOOL-DMG.">
-              {(field) => (
+              {field => (
                 <input
                   {...field}
                   type="text"
                   maxLength={50}
                   value={scrapCodeForm.code}
-                  onChange={(e) => setScrapCodeForm({ ...scrapCodeForm, code: e.target.value.toUpperCase() })}
+                  onChange={e => setScrapCodeForm({ ...scrapCodeForm, code: e.target.value.toUpperCase() })}
                   className="input font-mono"
                   required
                   disabled={scrapCodeSaving}
@@ -1176,29 +1313,31 @@ export default function QualityPage() {
               )}
             </FormField>
             <FormField label="Category">
-              {(field) => (
+              {field => (
                 <select
                   {...field}
                   value={scrapCodeForm.category}
-                  onChange={(e) => setScrapCodeForm({ ...scrapCodeForm, category: e.target.value })}
+                  onChange={e => setScrapCodeForm({ ...scrapCodeForm, category: e.target.value })}
                   className="input capitalize"
                   disabled={scrapCodeSaving}
                 >
-                  {SCRAP_CATEGORIES.map((cat) => (
-                    <option key={cat} value={cat}>{cat}</option>
+                  {SCRAP_CATEGORIES.map(cat => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
                   ))}
                 </select>
               )}
             </FormField>
           </div>
           <FormField label="Name" required>
-            {(field) => (
+            {field => (
               <input
                 {...field}
                 type="text"
                 maxLength={255}
                 value={scrapCodeForm.name}
-                onChange={(e) => setScrapCodeForm({ ...scrapCodeForm, name: e.target.value })}
+                onChange={e => setScrapCodeForm({ ...scrapCodeForm, name: e.target.value })}
                 className="input"
                 required
                 disabled={scrapCodeSaving}
@@ -1206,11 +1345,11 @@ export default function QualityPage() {
             )}
           </FormField>
           <FormField label="Description">
-            {(field) => (
+            {field => (
               <textarea
                 {...field}
                 value={scrapCodeForm.description}
-                onChange={(e) => setScrapCodeForm({ ...scrapCodeForm, description: e.target.value })}
+                onChange={e => setScrapCodeForm({ ...scrapCodeForm, description: e.target.value })}
                 className="input"
                 rows={2}
                 disabled={scrapCodeSaving}
@@ -1218,19 +1357,24 @@ export default function QualityPage() {
             )}
           </FormField>
           <FormField label="Display order" help="Lower numbers sort first in the pickers.">
-            {(field) => (
+            {field => (
               <input
                 {...field}
                 type="number"
                 value={scrapCodeForm.display_order}
-                onChange={(e) => setScrapCodeForm({ ...scrapCodeForm, display_order: Number(e.target.value) || 0 })}
+                onChange={e => setScrapCodeForm({ ...scrapCodeForm, display_order: Number(e.target.value) || 0 })}
                 className="input w-32"
                 disabled={scrapCodeSaving}
               />
             )}
           </FormField>
           <div className="flex justify-end gap-3">
-            <Button type="button" variant="secondary" onClick={() => setScrapCodeModal(null)} disabled={scrapCodeSaving}>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setScrapCodeModal(null)}
+              disabled={scrapCodeSaving}
+            >
               Cancel
             </Button>
             <LoadingButton type="submit" loading={scrapCodeSaving} loadingText="Saving...">
@@ -1264,10 +1408,7 @@ export default function QualityPage() {
         </div>
 
         {faiDetailError ? (
-          <ErrorState
-            message={faiDetailError}
-            onRetry={() => faiDetailId != null && void loadFaiDetail(faiDetailId)}
-          />
+          <ErrorState message={faiDetailError} onRetry={() => faiDetailId != null && void loadFaiDetail(faiDetailId)} />
         ) : !faiDetail ? (
           <p className="py-8 text-center text-sm text-slate-400">Loading FAI…</p>
         ) : (
@@ -1303,7 +1444,7 @@ export default function QualityPage() {
                 </p>
                 {prefillResult.prefilled.length > 0 && (
                   <ul className="mt-1 space-y-0.5 text-slate-300">
-                    {prefillResult.prefilled.map((entry) => (
+                    {prefillResult.prefilled.map(entry => (
                       <li key={`filled-${entry.char_number}`}>
                         <span className="font-mono text-slate-500">#{entry.char_number}</span> {entry.characteristic} →{' '}
                         <span className="font-mono">{entry.actual_value ?? '—'}</span>
@@ -1319,10 +1460,9 @@ export default function QualityPage() {
                 )}
                 {prefillResult.unmatched.length > 0 && (
                   <ul className="mt-2 space-y-0.5 text-fd-amber">
-                    {prefillResult.unmatched.map((entry) => (
+                    {prefillResult.unmatched.map(entry => (
                       <li key={`unmatched-${entry.char_number}`}>
-                        <span className="font-mono">#{entry.char_number}</span> {entry.characteristic} —{' '}
-                        {entry.reason}
+                        <span className="font-mono">#{entry.char_number}</span> {entry.characteristic} — {entry.reason}
                       </li>
                     ))}
                   </ul>
@@ -1331,9 +1471,7 @@ export default function QualityPage() {
             )}
 
             {faiDetail.characteristics.length === 0 ? (
-              <p className="py-6 text-center text-sm text-slate-400">
-                No characteristics on this FAI yet.
-              </p>
+              <p className="py-6 text-center text-sm text-slate-400">No characteristics on this FAI yet.</p>
             ) : (
               <div className="overflow-x-auto">
                 <table className="min-w-full text-sm">
@@ -1348,7 +1486,7 @@ export default function QualityPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {faiDetail.characteristics.map((char) => (
+                    {faiDetail.characteristics.map(char => (
                       <tr key={char.id} className="border-b border-slate-800">
                         <td className="py-2 pr-3 font-mono text-slate-400">{char.char_number}</td>
                         <td className="py-2 pr-3">
@@ -1385,159 +1523,298 @@ export default function QualityPage() {
 
       {/* NCR Modal */}
       <Modal open={showNCRModal} onClose={requestCloseNCRModal} size="lg" closeOnBackdrop={false}>
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-semibold">New Non-Conformance Report</h3>
-              <button onClick={requestCloseNCRModal} aria-label="Close dialog"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
-            </div>
-            <form onSubmit={handleCreateNCR} className="space-y-4">
-              <FormField label="Title" required>
-                {(field) => (
-                  <input {...field} type="text" value={ncrForm.title} onChange={(e) => setNcrForm({...ncrForm, title: e.target.value})} className="input" required />
-                )}
-              </FormField>
-              <FormField label="Part (optional)">
-                {(field) => (
-                  <select {...field} value={ncrForm.part_id} onChange={(e) => setNcrForm({...ncrForm, part_id: parseInt(e.target.value)})} className="input">
-                    <option value={0}>Select part...</option>
-                    {parts.map(p => <option key={p.id} value={p.id}>{p.part_number} - {p.name}</option>)}
-                  </select>
-                )}
-              </FormField>
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Source">
-                  {(field) => (
-                    <select {...field} value={ncrForm.source} onChange={(e) => setNcrForm({...ncrForm, source: e.target.value})} className="input">
-                      <option value="incoming_inspection">Incoming Inspection</option>
-                      <option value="in_process">In Process</option>
-                      <option value="final_inspection">Final Inspection</option>
-                      <option value="customer_return">Customer Return</option>
-                    </select>
-                  )}
-                </FormField>
-                <FormField label="Qty Affected">
-                  {(field) => (
-                    <input {...field} type="number" value={ncrForm.quantity_affected} onChange={(e) => setNcrForm({...ncrForm, quantity_affected: parseFloat(e.target.value)})} className="input" min={1} />
-                  )}
-                </FormField>
-              </div>
-              <FormField label="Description" required>
-                {(field) => (
-                  <textarea {...field} value={ncrForm.description} onChange={(e) => setNcrForm({...ncrForm, description: e.target.value})} className="input" rows={3} required />
-                )}
-              </FormField>
-              <div className="grid grid-cols-3 gap-4">
-                <FormField label="Specification">
-                  {(field) => (
-                    <input {...field} type="text" value={ncrForm.specification} onChange={(e) => setNcrForm({...ncrForm, specification: e.target.value})} className="input" placeholder="e.g., 10.00 ± 0.05" />
-                  )}
-                </FormField>
-                <FormField label="Actual Value">
-                  {(field) => (
-                    <input {...field} type="text" value={ncrForm.actual_value} onChange={(e) => setNcrForm({...ncrForm, actual_value: e.target.value})} className="input" placeholder="e.g., 10.12" />
-                  )}
-                </FormField>
-                <FormField label="Required">
-                  {(field) => (
-                    <input {...field} type="text" value={ncrForm.required_value} onChange={(e) => setNcrForm({...ncrForm, required_value: e.target.value})} className="input" placeholder="e.g., 9.95-10.05" />
-                  )}
-                </FormField>
-              </div>
-              <div className="flex justify-end gap-3">
-                <Button type="button" variant="secondary" onClick={requestCloseNCRModal}>Cancel</Button>
-                <Button type="submit">Create NCR</Button>
-              </div>
-            </form>
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-lg font-semibold">New Non-Conformance Report</h3>
+          <button onClick={requestCloseNCRModal} aria-label="Close dialog">
+            <XMarkIcon className="h-6 w-6" aria-hidden="true" />
+          </button>
+        </div>
+        <form aria-busy={creating} onSubmit={handleCreateNCR} className="space-y-4">
+          {createError && (
+            <p role="alert" className="text-red-300">
+              {createError}
+            </p>
+          )}
+          <FormField label="Title" required>
+            {field => (
+              <input
+                {...field}
+                type="text"
+                value={ncrForm.title}
+                onChange={e => setNcrForm({ ...ncrForm, title: e.target.value })}
+                className="input"
+                required
+              />
+            )}
+          </FormField>
+          <FormField label="Part (optional)">
+            {field => (
+              <select
+                {...field}
+                value={ncrForm.part_id}
+                onChange={e => setNcrForm({ ...ncrForm, part_id: parseInt(e.target.value) })}
+                className="input"
+              >
+                <option value={0}>Select part...</option>
+                {parts.map(p => (
+                  <option key={p.id} value={p.id}>
+                    {p.part_number} - {p.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </FormField>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Source">
+              {field => (
+                <select
+                  {...field}
+                  value={ncrForm.source}
+                  onChange={e => setNcrForm({ ...ncrForm, source: e.target.value })}
+                  className="input"
+                >
+                  <option value="incoming_inspection">Incoming Inspection</option>
+                  <option value="in_process">In Process</option>
+                  <option value="final_inspection">Final Inspection</option>
+                  <option value="customer_return">Customer Return</option>
+                </select>
+              )}
+            </FormField>
+            <FormField label="Qty Affected">
+              {field => (
+                <input
+                  {...field}
+                  type="number"
+                  value={ncrForm.quantity_affected}
+                  onChange={e => setNcrForm({ ...ncrForm, quantity_affected: parseFloat(e.target.value) })}
+                  className="input"
+                  min={1}
+                />
+              )}
+            </FormField>
+          </div>
+          <FormField label="Description" required>
+            {field => (
+              <textarea
+                {...field}
+                value={ncrForm.description}
+                onChange={e => setNcrForm({ ...ncrForm, description: e.target.value })}
+                className="input"
+                rows={3}
+                required
+              />
+            )}
+          </FormField>
+          <div className="grid grid-cols-3 gap-4">
+            <FormField label="Specification">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={ncrForm.specification}
+                  onChange={e => setNcrForm({ ...ncrForm, specification: e.target.value })}
+                  className="input"
+                  placeholder="e.g., 10.00 ± 0.05"
+                />
+              )}
+            </FormField>
+            <FormField label="Actual Value">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={ncrForm.actual_value}
+                  onChange={e => setNcrForm({ ...ncrForm, actual_value: e.target.value })}
+                  className="input"
+                  placeholder="e.g., 10.12"
+                />
+              )}
+            </FormField>
+            <FormField label="Required">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={ncrForm.required_value}
+                  onChange={e => setNcrForm({ ...ncrForm, required_value: e.target.value })}
+                  className="input"
+                  placeholder="e.g., 9.95-10.05"
+                />
+              )}
+            </FormField>
+          </div>
+          <div className="flex justify-end gap-3">
+            <Button type="button" variant="secondary" onClick={requestCloseNCRModal}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={creating}>
+              {creating ? 'Saving…' : 'Create NCR'}
+            </Button>
+          </div>
+        </form>
       </Modal>
 
       {/* CAR Modal */}
       <Modal open={showCARModal} onClose={requestCloseCARModal} size="lg" closeOnBackdrop={false}>
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-semibold">New Corrective Action Request</h3>
-              <button onClick={requestCloseCARModal} aria-label="Close dialog"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
-            </div>
-            <form onSubmit={handleCreateCAR} className="space-y-4">
-              <FormField label="Title" required>
-                {(field) => (
-                  <input {...field} type="text" value={carForm.title} onChange={(e) => setCarForm({...carForm, title: e.target.value})} className="input" required />
-                )}
-              </FormField>
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Type">
-                  {(field) => (
-                    <select {...field} value={carForm.car_type} onChange={(e) => setCarForm({...carForm, car_type: e.target.value})} className="input">
-                      <option value="corrective">Corrective</option>
-                      <option value="preventive">Preventive</option>
-                      <option value="improvement">Improvement</option>
-                    </select>
-                  )}
-                </FormField>
-                <FormField label="Priority">
-                  {(field) => (
-                    <select {...field} value={carForm.priority} onChange={(e) => setCarForm({...carForm, priority: parseInt(e.target.value)})} className="input">
-                      <option value={1}>Critical</option>
-                      <option value={2}>Major</option>
-                      <option value={3}>Minor</option>
-                    </select>
-                  )}
-                </FormField>
-              </div>
-              <FormField label="Problem Description" required>
-                {(field) => (
-                  <textarea {...field} value={carForm.problem_description} onChange={(e) => setCarForm({...carForm, problem_description: e.target.value})} className="input" rows={4} required />
-                )}
-              </FormField>
-              <div className="flex justify-end gap-3">
-                <Button type="button" variant="secondary" onClick={requestCloseCARModal}>Cancel</Button>
-                <Button type="submit">Create CAR</Button>
-              </div>
-            </form>
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-lg font-semibold">New Corrective Action Request</h3>
+          <button onClick={requestCloseCARModal} aria-label="Close dialog">
+            <XMarkIcon className="h-6 w-6" aria-hidden="true" />
+          </button>
+        </div>
+        <form aria-busy={creating} onSubmit={handleCreateCAR} className="space-y-4">
+          {createError && (
+            <p role="alert" className="text-red-300">
+              {createError}
+            </p>
+          )}
+          <FormField label="Title" required>
+            {field => (
+              <input
+                {...field}
+                type="text"
+                value={carForm.title}
+                onChange={e => setCarForm({ ...carForm, title: e.target.value })}
+                className="input"
+                required
+              />
+            )}
+          </FormField>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Type">
+              {field => (
+                <select
+                  {...field}
+                  value={carForm.car_type}
+                  onChange={e => setCarForm({ ...carForm, car_type: e.target.value })}
+                  className="input"
+                >
+                  <option value="corrective">Corrective</option>
+                  <option value="preventive">Preventive</option>
+                  <option value="improvement">Improvement</option>
+                </select>
+              )}
+            </FormField>
+            <FormField label="Priority">
+              {field => (
+                <select
+                  {...field}
+                  value={carForm.priority}
+                  onChange={e => setCarForm({ ...carForm, priority: parseInt(e.target.value) })}
+                  className="input"
+                >
+                  <option value={1}>Critical</option>
+                  <option value={2}>Major</option>
+                  <option value={3}>Minor</option>
+                </select>
+              )}
+            </FormField>
+          </div>
+          <FormField label="Problem Description" required>
+            {field => (
+              <textarea
+                {...field}
+                value={carForm.problem_description}
+                onChange={e => setCarForm({ ...carForm, problem_description: e.target.value })}
+                className="input"
+                rows={4}
+                required
+              />
+            )}
+          </FormField>
+          <div className="flex justify-end gap-3">
+            <Button type="button" variant="secondary" onClick={requestCloseCARModal}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={creating}>
+              {creating ? 'Saving…' : 'Create CAR'}
+            </Button>
+          </div>
+        </form>
       </Modal>
 
       {/* FAI Modal */}
       <Modal open={showFAIModal} onClose={requestCloseFAIModal} size="lg" closeOnBackdrop={false}>
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-semibold">New First Article Inspection</h3>
-              <button onClick={requestCloseFAIModal} aria-label="Close dialog"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
-            </div>
-            <form onSubmit={handleCreateFAI} className="space-y-4">
-              <FormField label="Part" required>
-                {(field) => (
-                  <select {...field} value={faiForm.part_id} onChange={(e) => setFaiForm({...faiForm, part_id: parseInt(e.target.value)})} className="input" required>
-                    <option value={0}>Select part...</option>
-                    {parts.map(p => <option key={p.id} value={p.id}>{p.part_number} - {p.name}</option>)}
-                  </select>
-                )}
-              </FormField>
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="FAI Type">
-                  {(field) => (
-                    <select {...field} value={faiForm.fai_type} onChange={(e) => setFaiForm({...faiForm, fai_type: e.target.value})} className="input">
-                      <option value="full">Full</option>
-                      <option value="partial">Partial</option>
-                      <option value="delta">Delta</option>
-                    </select>
-                  )}
-                </FormField>
-                <FormField label="Reason">
-                  {(field) => (
-                    <select {...field} value={faiForm.reason} onChange={(e) => setFaiForm({...faiForm, reason: e.target.value})} className="input">
-                      <option value="new_part">New Part</option>
-                      <option value="design_change">Design Change</option>
-                      <option value="process_change">Process Change</option>
-                      <option value="new_supplier">New Supplier</option>
-                    </select>
-                  )}
-                </FormField>
-              </div>
-              <label className="flex items-center">
-                <input type="checkbox" aria-label="Customer Approval Required" checked={faiForm.customer_approval_required} onChange={(e) => setFaiForm({...faiForm, customer_approval_required: e.target.checked})} className="mr-2" />
-                <span className="text-sm">Customer Approval Required</span>
-              </label>
-              <div className="flex justify-end gap-3">
-                <Button type="button" variant="secondary" onClick={requestCloseFAIModal}>Cancel</Button>
-                <Button type="submit">Create FAI</Button>
-              </div>
-            </form>
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-lg font-semibold">New First Article Inspection</h3>
+          <button onClick={requestCloseFAIModal} aria-label="Close dialog">
+            <XMarkIcon className="h-6 w-6" aria-hidden="true" />
+          </button>
+        </div>
+        <form aria-busy={creating} onSubmit={handleCreateFAI} className="space-y-4">
+          {createError && (
+            <p role="alert" className="text-red-300">
+              {createError}
+            </p>
+          )}
+          <FormField label="Part" required>
+            {field => (
+              <select
+                {...field}
+                value={faiForm.part_id}
+                onChange={e => setFaiForm({ ...faiForm, part_id: parseInt(e.target.value) })}
+                className="input"
+                required
+              >
+                <option value={0}>Select part...</option>
+                {parts.map(p => (
+                  <option key={p.id} value={p.id}>
+                    {p.part_number} - {p.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </FormField>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="FAI Type">
+              {field => (
+                <select
+                  {...field}
+                  value={faiForm.fai_type}
+                  onChange={e => setFaiForm({ ...faiForm, fai_type: e.target.value })}
+                  className="input"
+                >
+                  <option value="full">Full</option>
+                  <option value="partial">Partial</option>
+                  <option value="delta">Delta</option>
+                </select>
+              )}
+            </FormField>
+            <FormField label="Reason">
+              {field => (
+                <select
+                  {...field}
+                  value={faiForm.reason}
+                  onChange={e => setFaiForm({ ...faiForm, reason: e.target.value })}
+                  className="input"
+                >
+                  <option value="new_part">New Part</option>
+                  <option value="design_change">Design Change</option>
+                  <option value="process_change">Process Change</option>
+                  <option value="new_supplier">New Supplier</option>
+                </select>
+              )}
+            </FormField>
+          </div>
+          <label className="flex items-center">
+            <input
+              type="checkbox"
+              aria-label="Customer Approval Required"
+              checked={faiForm.customer_approval_required}
+              onChange={e => setFaiForm({ ...faiForm, customer_approval_required: e.target.checked })}
+              className="mr-2"
+            />
+            <span className="text-sm">Customer Approval Required</span>
+          </label>
+          <div className="flex justify-end gap-3">
+            <Button type="button" variant="secondary" onClick={requestCloseFAIModal}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={creating}>
+              {creating ? 'Saving…' : 'Create FAI'}
+            </Button>
+          </div>
+        </form>
       </Modal>
 
       {/* Void NCR Modal — needs a required reason, so it's a Modal (not ConfirmDialog). */}
@@ -1559,11 +1836,11 @@ export default function QualityPage() {
             </div>
 
             <FormField label="Reason for Void" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
-              {(field) => (
+              {field => (
                 <textarea
                   {...field}
                   value={voidNCRReason}
-                  onChange={(e) => setVoidNCRReason(e.target.value)}
+                  onChange={e => setVoidNCRReason(e.target.value)}
                   className="input w-full"
                   rows={3}
                   placeholder="Why is this NCR being voided?"

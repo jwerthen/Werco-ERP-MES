@@ -1,3 +1,4 @@
+import type { BOMExploded } from '../types/engineering';
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
 import { normalizeAxiosErrorDetail } from '../utils/apiError';
 import {
@@ -347,7 +348,8 @@ class ApiService {
    */
   private redirectToLoginUnlessKiosk(): void {
     if (window.location.pathname.startsWith('/kiosk')) return;
-    window.location.href = '/login';
+    const returnTo = window.location.pathname + window.location.search + window.location.hash;
+    window.location.href = `/login?returnTo=${encodeURIComponent(returnTo)}`;
   }
 
   private async refreshAccessToken(): Promise<void> {
@@ -394,7 +396,7 @@ class ApiService {
   private async fetchWithCache(
     url: string, 
     config?: AxiosRequestConfig
-  ): Promise<{ data: any; fromCache: boolean; changed: boolean }> {
+  ): Promise<{ data: any; fromCache: boolean; changed: boolean; stale?: boolean }> {
     const cacheKey = url + (config?.params ? JSON.stringify(config.params) : '');
     const cached = etagCache.get(cacheKey);
     
@@ -413,6 +415,7 @@ class ApiService {
       
       // 304 Not Modified - return cached data
       if (response.status === 304 && cached) {
+        cached.timestamp = Date.now(); // A successful validation refreshes the cache's age.
         return { data: cached.data, fromCache: true, changed: false };
       }
       
@@ -435,7 +438,7 @@ class ApiService {
       // On error, return stale cache if available and not too old
       if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
         console.warn('API error, returning stale cache:', error);
-        return { data: cached.data, fromCache: true, changed: false };
+        return { data: cached.data, fromCache: true, changed: false, stale: true };
       }
       throw error;
     }
@@ -956,7 +959,7 @@ class ApiService {
     return response.data;
   }
 
-  async explodeBOM(id: number, maxLevels = 10) {
+  async explodeBOM(id: number, maxLevels = 10): Promise<BOMExploded> {
     const response = await this.api.get(`/bom/${id}/explode`, { params: { max_levels: maxLevels } });
     return response.data;
   }
@@ -2080,7 +2083,7 @@ class ApiService {
    * Get dashboard data with ETag-based caching.
    * Returns cached data on 304 Not Modified, reducing bandwidth by ~75%.
    */
-  async getDashboardWithCache(): Promise<{ data: any; fromCache: boolean; changed: boolean }> {
+  async getDashboardWithCache(): Promise<{ data: any; fromCache: boolean; changed: boolean; stale?: boolean }> {
     return this.fetchWithCache('/shop-floor/dashboard');
   }
 
@@ -2457,9 +2460,15 @@ class ApiService {
 
   // Quality Management
   async getNCRs(params?: { status?: string; part_id?: number }) {
-    const response = await this.api.get('/quality/ncr', { params });
-    return response.data;
+    const rows: any[] = [];
+    for (let skip = 0; ; skip += 500) {
+      const response = await this.api.get('/quality/ncr', { params: { ...params, skip, limit: 500 } });
+      rows.push(...response.data);
+      if (response.data.length < 500) return rows;
+    }
   }
+
+  async getNCR(id: number) { return (await this.api.get(`/quality/ncr/${id}`)).data; }
 
   async createNCR(data: any) {
     const response = await this.api.post('/quality/ncr', data);
@@ -2485,9 +2494,15 @@ class ApiService {
   }
 
   async getCARs(params?: { status?: string }) {
-    const response = await this.api.get('/quality/car', { params });
-    return response.data;
+    const rows: any[] = [];
+    for (let skip = 0; ; skip += 500) {
+      const response = await this.api.get('/quality/car', { params: { ...params, skip, limit: 500 } });
+      rows.push(...response.data);
+      if (response.data.length < 500) return rows;
+    }
   }
+
+  async getCAR(id: number) { return (await this.api.get(`/quality/car/${id}`)).data; }
 
   async createCAR(data: any) {
     const response = await this.api.post('/quality/car', data);
@@ -2500,8 +2515,12 @@ class ApiService {
   }
 
   async getFAIs(params?: { status?: string; part_id?: number }) {
-    const response = await this.api.get('/quality/fai', { params });
-    return response.data;
+    const rows: any[] = [];
+    for (let skip = 0; ; skip += 500) {
+      const response = await this.api.get('/quality/fai', { params: { ...params, skip, limit: 500 } });
+      rows.push(...response.data);
+      if (response.data.length < 500) return rows;
+    }
   }
 
   async getFAI(id: number) {
@@ -2878,6 +2897,10 @@ class ApiService {
     return allDocuments;
   }
 
+  async getDocument(id: number) { return (await this.api.get(`/documents/${id}`)).data; }
+
+  async getDocumentRevisions(id: number) { return (await this.api.get(`/documents/${id}/revisions`)).data; }
+
   async getDocumentTypes() {
     const response = await this.api.get('/documents/types/list');
     return response.data;
@@ -2940,8 +2963,12 @@ class ApiService {
 
   // Shipping
   async getShipments(params?: { status?: string }) {
-    const response = await this.api.get('/shipping/', { params });
-    return response.data;
+    const rows: any[] = [];
+    for (let skip = 0; ; skip += 500) {
+      const response = await this.api.get('/shipping/', { params: { ...params, skip, limit: 500 } });
+      rows.push(...response.data);
+      if (response.data.length < 500) return rows;
+    }
   }
 
   async getShipment(shipmentId: number) {
@@ -2957,6 +2984,10 @@ class ApiService {
   async createShipment(data: any) {
     const response = await this.api.post('/shipping/', data);
     return response.data;
+  }
+
+  async updateShipment(shipmentId: number, data: { quantity_shipped?: number; status?: string }) {
+    return (await this.api.put(`/shipping/${shipmentId}`, data)).data;
   }
 
   async markShipped(shipmentId: number, trackingNumber?: string) {
@@ -3186,9 +3217,15 @@ class ApiService {
   }
 
   // Quotes
-  async getQuotes(params?: { status?: string; customer?: string }) {
-    const response = await this.api.get('/quotes/', { params });
-    return response.data;
+  async getQuotes(params?: { status?: string; customer?: string; search?: string }) {
+    // Fetch the complete selected scope before client-side sorting/export/paging.
+    const rows: any[] = [];
+    const limit = 500;
+    for (let offset = 0; ; offset += limit) {
+      const response = await this.api.get('/quotes/', { params: { ...params, limit, offset } });
+      rows.push(...response.data);
+      if (response.data.length < limit) return rows;
+    }
   }
 
   async getQuote(id: number) {
@@ -3201,13 +3238,23 @@ class ApiService {
     return response.data;
   }
 
+  async updateQuote(quoteId: number, data: any) {
+    const response = await this.api.put(`/quotes/${quoteId}`, data);
+    return response.data;
+  }
+
+  async getQuoteConversionPlan(quoteId: number) {
+    const response = await this.api.get(`/quotes/${quoteId}/conversion-plan`);
+    return response.data;
+  }
+
   async sendQuote(quoteId: number) {
     const response = await this.api.post(`/quotes/${quoteId}/send`);
     return response.data;
   }
 
-  async convertQuote(quoteId: number) {
-    const response = await this.api.post(`/quotes/${quoteId}/convert`);
+  async convertQuote(quoteId: number, data?: { line_ids: number[]; acknowledge_unlinked: boolean }) {
+    const response = await this.api.post(`/quotes/${quoteId}/convert`, data);
     return response.data;
   }
 
@@ -3382,6 +3429,8 @@ class ApiService {
   }
 
   // Users
+  async getAssignmentPeople() { return (await this.api.get('/certifications/people')).data; }
+
   async getUsers(includeInactive = false) {
     const response = await this.api.get('/users/', { params: { include_inactive: includeInactive } });
     return response.data;

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../services/api';
 import { EmptyState, ErrorState } from '../components/ui';
@@ -39,52 +39,105 @@ interface SetupHealth {
 }
 
 const fallbackSteps: SetupStep[] = [
-  { key: 'employees', label: 'Employees imported', status: 'missing', count: 0, required_count: 1, href: '/import-center?type=employees', reason: 'Import or add employees.' },
-  { key: 'work_centers', label: 'Work centers configured', status: 'missing', count: 0, required_count: 1, href: '/work-centers', reason: 'Create at least one work center.' },
-  { key: 'parts', label: 'Parts loaded', status: 'missing', count: 0, required_count: 1, href: '/import-center?type=parts', reason: 'Import or create parts.' },
-  { key: 'boms', label: 'BOMs created', status: 'missing', count: 0, required_count: 1, href: '/import-center?type=boms', reason: 'Import or create BOMs.' },
-  { key: 'routings', label: 'Routings created', status: 'missing', count: 0, required_count: 1, href: '/routing', reason: 'Create or generate routings.' },
-  { key: 'work_orders', label: 'First work order', status: 'missing', count: 0, required_count: 1, href: '/work-orders/new', reason: 'Create your first work order.' },
+  {
+    key: 'employees',
+    label: 'Employees imported',
+    status: 'missing',
+    count: 0,
+    required_count: 1,
+    href: '/import-center?type=employees',
+    reason: 'Import or add employees.',
+  },
+  {
+    key: 'work_centers',
+    label: 'Work centers configured',
+    status: 'missing',
+    count: 0,
+    required_count: 1,
+    href: '/work-centers',
+    reason: 'Create at least one work center.',
+  },
+  {
+    key: 'parts',
+    label: 'Parts loaded',
+    status: 'missing',
+    count: 0,
+    required_count: 1,
+    href: '/import-center?type=parts',
+    reason: 'Import or create parts.',
+  },
+  {
+    key: 'boms',
+    label: 'BOMs created',
+    status: 'missing',
+    count: 0,
+    required_count: 1,
+    href: '/import-center?type=boms',
+    reason: 'Import or create BOMs.',
+  },
+  {
+    key: 'routings',
+    label: 'Routings created',
+    status: 'missing',
+    count: 0,
+    required_count: 1,
+    href: '/routing',
+    reason: 'Create or generate routings.',
+  },
+  {
+    key: 'work_orders',
+    label: 'First work order',
+    status: 'missing',
+    count: 0,
+    required_count: 1,
+    href: '/work-orders/new',
+    reason: 'Create your first work order.',
+  },
 ];
 
 export default function SetupWizard() {
+  const request = useRef(0);
   const [health, setHealth] = useState<SetupHealth | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
 
   const loadHealth = async () => {
+    const seq = ++request.current;
     setLoading(true);
     try {
       const data = await api.getSetupHealth();
+      if (seq !== request.current) return;
       setHealth(data);
       setLoadError(false);
     } catch (err) {
       console.error('Failed to load setup health:', err);
-      setHealth({ progress: 0, counts: {}, steps: fallbackSteps, issues: [] });
-      setLoadError(true);
+      if (seq === request.current) setLoadError(true);
     } finally {
-      setLoading(false);
+      if (seq === request.current) setLoading(false);
     }
   };
 
   useEffect(() => {
     loadHealth();
+    return () => {
+      ++request.current;
+    };
   }, []);
 
   const steps = health?.steps || fallbackSteps;
-  const currentStep = useMemo(() => steps.find((step) => step.status !== 'complete') || steps[steps.length - 1], [steps]);
-  const blockingIssues = health?.issues?.filter((issue) => issue.severity === 'high') || [];
+  const currentStep = useMemo(() => steps.find(step => step.status !== 'complete') || steps[steps.length - 1], [steps]);
+  const blockingIssues = health?.issues?.filter(issue => issue.severity === 'high') || [];
   const issueCount = (keys: string[]) =>
-    health?.issues
-      ?.filter((issue) => keys.includes(issue.key))
-      .reduce((total, issue) => total + issue.count, 0) || 0;
+    health?.issues?.filter(issue => keys.includes(issue.key)).reduce((total, issue) => total + issue.count, 0) || 0;
   const reviewQueue = [
     {
       key: 'imports',
       title: 'Import review',
       detail: 'Load employees, parts, customers, vendors, and work centers from one place before production starts.',
       href: '/import-center',
-      count: steps.filter((step) => step.status !== 'complete' && ['employees', 'parts', 'work_centers'].includes(step.key)).length,
+      count: steps.filter(
+        step => step.status !== 'complete' && ['employees', 'parts', 'work_centers'].includes(step.key)
+      ).length,
     },
     {
       key: 'bom',
@@ -103,11 +156,41 @@ export default function SetupWizard() {
     {
       key: 'readiness',
       title: 'Work order readiness',
-      detail: 'Use part and work-order readiness checks to explain missing BOM, routing, and work-center data before release.',
+      detail:
+        'Use part and work-order readiness checks to explain missing BOM, routing, and work-center data before release.',
       href: '/work-orders/new',
       count: blockingIssues.length,
     },
   ];
+
+  if (!health)
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-bold text-white">Setup Wizard</h1>
+        {loading ? (
+          <p role="status">Checking setup health…</p>
+        ) : (
+          <>
+            <ErrorState
+              title="Setup health is unavailable"
+              message="Readiness has not been verified. Retry before making production-readiness decisions."
+              onRetry={loadHealth}
+            />
+            <h2 className="text-lg text-white">Setup reference checklist</h2>
+            <p className="text-fd-mute">These links are guidance; completion and counts are not known.</p>
+            <ul className="space-y-2">
+              {fallbackSteps.map(step => (
+                <li key={step.key}>
+                  <Link className="text-fd-link underline" to={step.href}>
+                    {step.label}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </div>
+    );
 
   return (
     <div className="space-y-6">
@@ -127,7 +210,7 @@ export default function SetupWizard() {
 
       {loadError && (
         <ErrorState
-          message="Could not load setup health. Showing default checklist — retry to refresh live data."
+          message="Could not refresh setup health. The checklist below is the last verified result and may be out of date."
           onRetry={loadHealth}
         />
       )}
@@ -138,13 +221,16 @@ export default function SetupWizard() {
             <div className="text-sm text-slate-400 uppercase tracking-wide">Onboarding Progress</div>
             <div className="text-3xl font-semibold text-white mt-1">{health?.progress ?? 0}%</div>
           </div>
-          <Link to={currentStep.href} className="btn-primary flex items-center">
+          <Link to={currentStep?.href ?? '/work-orders/new'} className="btn-primary flex items-center">
             <PlayCircleIcon className="h-5 w-5 mr-2" />
             Continue Setup
           </Link>
         </div>
         <div className="mt-4 h-3 rounded-full bg-slate-800 overflow-hidden">
-          <div className="h-full rounded-full bg-cyan-500 transition-all" style={{ width: `${health?.progress ?? 0}%` }} />
+          <div
+            className="h-full rounded-full bg-cyan-500 transition-all"
+            style={{ width: `${health?.progress ?? 0}%` }}
+          />
         </div>
       </div>
 
@@ -154,7 +240,7 @@ export default function SetupWizard() {
           <h2 className="text-lg font-semibold text-white">Review Queue</h2>
         </div>
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-3">
-          {reviewQueue.map((item) => (
+          {reviewQueue.map(item => (
             <Link
               key={item.key}
               to={item.href}
@@ -165,9 +251,11 @@ export default function SetupWizard() {
                   <div className="font-semibold text-white">{item.title}</div>
                   <div className="text-xs text-slate-400 mt-2 leading-5">{item.detail}</div>
                 </div>
-                <span className={`shrink-0 rounded px-2 py-1 text-xs font-semibold ${
-                  item.count > 0 ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-300'
-                }`}>
+                <span
+                  className={`shrink-0 rounded px-2 py-1 text-xs font-semibold ${
+                    item.count > 0 ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-300'
+                  }`}
+                >
                   {item.count}
                 </span>
               </div>
@@ -187,10 +275,16 @@ export default function SetupWizard() {
             className="bg-fd-panel border border-slate-700 rounded-lg p-4 hover:border-cyan-500/60 transition-colors"
           >
             <div className="flex items-start gap-3">
-              <div className={`h-9 w-9 rounded-lg flex items-center justify-center ${
-                step.status === 'complete' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-500/20 text-amber-300'
-              }`}>
-                {step.status === 'complete' ? <CheckCircleIcon className="h-5 w-5" /> : <span className="font-semibold">{index + 1}</span>}
+              <div
+                className={`h-9 w-9 rounded-lg flex items-center justify-center ${
+                  step.status === 'complete' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-500/20 text-amber-300'
+                }`}
+              >
+                {step.status === 'complete' ? (
+                  <CheckCircleIcon className="h-5 w-5" />
+                ) : (
+                  <span className="font-semibold">{index + 1}</span>
+                )}
               </div>
               <div className="min-w-0">
                 <div className="font-semibold text-white">{step.label}</div>
@@ -208,18 +302,26 @@ export default function SetupWizard() {
           <ExclamationTriangleIcon className="h-5 w-5 text-amber-300" />
           <h2 className="text-lg font-semibold text-white">Master Data Health</h2>
         </div>
-        {health?.issues?.length ? (
+        {loadError ? (
+          <p className="text-amber-200">Current master-data health is unknown. Retry to verify readiness.</p>
+        ) : health?.issues?.length ? (
           <div className="space-y-3">
-            {health.issues.map((issue) => (
-              <Link key={issue.key} to={issue.href} className="block rounded-lg border border-slate-700 bg-slate-900/40 p-3 hover:border-amber-500/60">
+            {health.issues.map(issue => (
+              <Link
+                key={issue.key}
+                to={issue.href}
+                className="block rounded-lg border border-slate-700 bg-slate-900/40 p-3 hover:border-amber-500/60"
+              >
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <div className="font-medium text-white">{issue.title}</div>
                     <div className="text-sm text-slate-400 mt-1">{issue.detail}</div>
                   </div>
-                  <span className={`px-2 py-1 rounded text-xs font-semibold ${
-                    issue.severity === 'high' ? 'bg-red-500/20 text-red-300' : 'bg-amber-500/20 text-amber-300'
-                  }`}>
+                  <span
+                    className={`px-2 py-1 rounded text-xs font-semibold ${
+                      issue.severity === 'high' ? 'bg-red-500/20 text-red-300' : 'bg-amber-500/20 text-amber-300'
+                    }`}
+                  >
                     {issue.count}
                   </span>
                 </div>

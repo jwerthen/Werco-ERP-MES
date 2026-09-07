@@ -3009,38 +3009,25 @@ def shop_floor_dashboard(
     # next poll's fast-304 match.
     etag = _dashboard_state_fingerprint(db, company_id, connected_user_ids, connected_since_by_id)
 
-    # Active work orders
-    active_wos = (
-        db.query(WorkOrder)
-        .filter(WorkOrder.company_id == company_id, WorkOrder.status == WorkOrderStatus.IN_PROGRESS)
-        .count()
+    # Match the list's nondeleted, nonterminal population on the shop's Central day.
+    # UTC date.today() and omitted soft-delete predicates made overview clicks disagree.
+    central_today = datetime.now(CENTRAL_TIME_ZONE).date()
+    live_orders = db.query(WorkOrder).filter(
+        WorkOrder.company_id == company_id,
+        WorkOrder.is_deleted == False,  # noqa: E712
     )
-
-    # Work orders due today
-    due_today = (
-        db.query(WorkOrder)
-        .filter(
-            and_(
-                WorkOrder.company_id == company_id,
-                WorkOrder.due_date == date.today(),
-                WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED]),
-            )
+    active_wos = live_orders.filter(WorkOrder.status == WorkOrderStatus.IN_PROGRESS).count()
+    outstanding_orders = live_orders.filter(
+        WorkOrder.status.not_in(
+            [
+                WorkOrderStatus.COMPLETE,
+                WorkOrderStatus.CLOSED,
+                WorkOrderStatus.CANCELLED,
+            ]
         )
-        .count()
     )
-
-    # Overdue work orders
-    overdue = (
-        db.query(WorkOrder)
-        .filter(
-            and_(
-                WorkOrder.company_id == company_id,
-                WorkOrder.due_date < date.today(),
-                WorkOrder.status.not_in([WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED]),
-            )
-        )
-        .count()
-    )
+    due_today = outstanding_orders.filter(WorkOrder.due_date == central_today).count()
+    overdue = outstanding_orders.filter(WorkOrder.due_date < central_today).count()
 
     # OPTIMIZATION: Single aggregation query for operation counts by work center
     # (conditional SUM/CASE, not N COUNT queries). Shared with the wallboard so

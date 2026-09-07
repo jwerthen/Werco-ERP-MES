@@ -14,7 +14,7 @@
  */
 import React from 'react';
 import { render, screen, within, fireEvent, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Reports from './Reports';
 
@@ -95,7 +95,12 @@ const dailyOutput = [
   { date: '2026-06-21', completed: 14, scrapped: 0 },
 ];
 
-const renderReports = () => render(<MemoryRouter><Reports /></MemoryRouter>);
+const renderReports = () =>
+  render(
+    <MemoryRouter>
+      <Reports />
+    </MemoryRouter>
+  );
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -124,7 +129,7 @@ test('renders the MiniStat KPI strip after the initial data load', async () => {
   // …and surface their loaded values (formatted per the page).
   expect(screen.getByText('85.7%')).toBeInTheDocument();
   expect(screen.getByText('2.22%')).toBeInTheDocument();
-  expect(screen.getByText('$125,000')).toBeInTheDocument();
+  expect(screen.getByText('$125,000.00')).toBeInTheDocument();
 });
 
 test('renders the CockpitPanel report sections', async () => {
@@ -200,4 +205,45 @@ test('a failed KPI source renders — / Unavailable (not a fabricated $0) and a 
   expect(mockedApi.getInventoryValue).toHaveBeenCalledTimes(1);
   fireEvent.click(retryButtons[0]);
   await waitFor(() => expect(mockedApi.getInventoryValue).toHaveBeenCalledTimes(2));
+});
+
+function HistoryProbe() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  return (
+    <>
+      <output aria-label="Current query">{location.search}</output>
+      <button onClick={() => navigate(-1)}>Back</button>
+    </>
+  );
+}
+
+test('employee time exposes the eleventh entry and preserves tab and period through Back', async () => {
+  mockedApi.getEmployeeTimeReport.mockResolvedValue([
+    {
+      user_id: 1,
+      employee_name: 'Fixture Operator',
+      total_hours: 11,
+      entries: Array.from({ length: 11 }, (_, index) => ({ hours: 1, work_order_number: `WO-FIXTURE-${index + 1}` })),
+    },
+  ] as any);
+  render(
+    <MemoryRouter initialEntries={['/reports?tab=timesheets&period=90']}>
+      <HistoryProbe />
+      <Reports />
+    </MemoryRouter>
+  );
+  expect(await screen.findByText('10 of 11 entries · total includes all entries')).toBeInTheDocument();
+  expect(screen.queryByText('WO-FIXTURE-11')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Show all 11 entries for Fixture Operator' }));
+  expect(screen.getByText('WO-FIXTURE-11')).toBeInTheDocument();
+  expect(screen.getByText('11 hrs')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('tab', { name: 'Dashboard' }));
+  expect(screen.getByLabelText('Current query')).toHaveTextContent('tab=dashboard&period=90');
+  fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+  expect(screen.getByRole('tab', { name: 'Employee Time' })).toHaveAttribute('aria-selected', 'true');
+  expect(screen.getByRole('combobox', { name: 'Report period' })).toHaveValue('90');
+  fireEvent.change(screen.getByRole('combobox', { name: 'Report period' }), { target: { value: '7' } });
+  await waitFor(() => expect(mockedApi.getProductionSummary).toHaveBeenLastCalledWith(7));
+  expect(screen.getByLabelText('Current query')).toHaveTextContent('tab=timesheets&period=7');
 });

@@ -1,4 +1,5 @@
-import React, { createContext, useContext, useState, useCallback, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import { useAuth } from './AuthContext';
 import { UserRole } from '../types';
 import { Permission } from '../utils/permissions';
 
@@ -7,7 +8,7 @@ export interface TourStep {
   title: string;
   description: string;
   position?: 'top' | 'bottom' | 'left' | 'right' | 'auto';
-  path?: string;  // Optional path to navigate to for this step
+  path?: string; // Optional path to navigate to for this step
   /** If set, this step is only shown to users with ANY of these permissions */
   requiredPermissions?: Permission[];
 }
@@ -16,7 +17,7 @@ export interface Tour {
   id: string;
   name: string;
   description: string;
-  startPath?: string;  // Path to navigate to before starting the tour
+  startPath?: string; // Path to navigate to before starting the tour
   steps: TourStep[];
   /** Category for grouping in the help menu */
   category?: 'getting-started' | 'production' | 'engineering' | 'quality' | 'admin';
@@ -52,16 +53,30 @@ const TourContext = createContext<TourContextType | undefined>(undefined);
 const STORAGE_KEY = 'werco-completed-tours';
 
 export function TourProvider({ children }: { children: ReactNode }) {
+  const { user } = useAuth();
+  const storageKey = `${STORAGE_KEY}:${user?.company_id ?? 'workspace'}:${user?.id ?? 'anonymous'}`;
   const [activeTour, setActiveTour] = useState<Tour | null>(null);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [completedTours, setCompletedTours] = useState<string[]>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      return saved ? JSON.parse(saved) : [];
+      const saved = localStorage.getItem(storageKey);
+      const parsed = saved ? JSON.parse(saved) : [];
+      return Array.isArray(parsed) ? parsed.filter(item => typeof item === 'string') : [];
     } catch {
       return [];
     }
   });
+
+  useEffect(() => {
+    setActiveTour(null);
+    setCurrentStepIndex(0);
+    try {
+      const value = JSON.parse(localStorage.getItem(storageKey) ?? '[]');
+      setCompletedTours(Array.isArray(value) ? value.filter(item => typeof item === 'string') : []);
+    } catch {
+      setCompletedTours([]);
+    }
+  }, [storageKey]);
 
   const isActive = activeTour !== null;
 
@@ -75,14 +90,21 @@ export function TourProvider({ children }: { children: ReactNode }) {
     setCurrentStepIndex(0);
   }, []);
 
-  const markTourComplete = useCallback((tourId: string) => {
-    setCompletedTours(prev => {
-      if (prev.includes(tourId)) return prev;
-      const updated = [...prev, tourId];
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-      return updated;
-    });
-  }, []);
+  const markTourComplete = useCallback(
+    (tourId: string) => {
+      setCompletedTours(prev => {
+        if (prev.includes(tourId)) return prev;
+        const updated = [...prev, tourId];
+        try {
+          localStorage.setItem(storageKey, JSON.stringify(updated));
+        } catch {
+          /* Optional preference storage. */
+        }
+        return updated;
+      });
+    },
+    [storageKey]
+  );
 
   const nextStep = useCallback(() => {
     if (activeTour && currentStepIndex < activeTour.steps.length - 1) {
@@ -99,36 +121,53 @@ export function TourProvider({ children }: { children: ReactNode }) {
     }
   }, [currentStepIndex]);
 
-  const goToStep = useCallback((index: number) => {
-    if (activeTour && index >= 0 && index < activeTour.steps.length) {
-      setCurrentStepIndex(index);
-    }
-  }, [activeTour]);
+  const goToStep = useCallback(
+    (index: number) => {
+      if (activeTour && index >= 0 && index < activeTour.steps.length) {
+        setCurrentStepIndex(index);
+      }
+    },
+    [activeTour]
+  );
 
-  const isTourComplete = useCallback((tourId: string) => {
-    return completedTours.includes(tourId);
-  }, [completedTours]);
+  const isTourComplete = useCallback(
+    (tourId: string) => {
+      try {
+        const saved = JSON.parse(localStorage.getItem(storageKey) ?? '[]');
+        return Array.isArray(saved) && saved.includes(tourId);
+      } catch {
+        return false;
+      }
+    },
+    [completedTours, storageKey]
+  );
 
   const resetAllTours = useCallback(() => {
     setCompletedTours([]);
-    localStorage.removeItem(STORAGE_KEY);
-  }, []);
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {
+      /* Optional preference storage. */
+    }
+  }, [storageKey]);
 
   return (
-    <TourContext.Provider value={{
-      activeTour,
-      currentStepIndex,
-      isActive,
-      completedTours,
-      startTour,
-      endTour,
-      nextStep,
-      prevStep,
-      goToStep,
-      markTourComplete,
-      isTourComplete,
-      resetAllTours,
-    }}>
+    <TourContext.Provider
+      value={{
+        activeTour,
+        currentStepIndex,
+        isActive,
+        completedTours,
+        startTour,
+        endTour,
+        nextStep,
+        prevStep,
+        goToStep,
+        markTourComplete,
+        isTourComplete,
+        resetAllTours,
+      }}
+    >
       {children}
     </TourContext.Provider>
   );

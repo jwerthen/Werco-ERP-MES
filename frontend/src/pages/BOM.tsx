@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { BOMItemEditor, EditableBOMItem } from '../components/parts/BOMItemEditor';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
 import { LoadingButton } from '../components/ui/LoadingButton';
@@ -6,7 +7,7 @@ import { ConfirmDialog, EmptyState, ErrorState, FormField, useToast } from '../c
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { Part, PartType } from '../types';
 import { isMaterialSupplyPartType, partTypeLabel } from '../utils/catalogGroups';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { 
   PlusIcon, 
   ChevronRightIcon, 
@@ -41,7 +42,7 @@ interface BOMItem {
     name: string;
     revision: string;
     part_type: string;
-    has_bom: boolean;
+    has_bom?: boolean;
   };
   children?: BOMItem[];
   level?: number;
@@ -125,9 +126,17 @@ const partTypeBadge: Record<string, string> = {
 
 export default function BOMPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectedId = searchParams.get('id');
+  const selectionRequestRef = useRef(0);
+  const explosionRequestRef = useRef(0);
+  const [explosionLoading, setExplosionLoading] = useState(false);
   const { showToast } = useToast();
   const [boms, setBoms] = useState<BOM[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
+  const [editingItem, setEditingItem] = useState<EditableBOMItem | null>(null);
+  const catalogSearch = searchParams.get('search') || '';
+  const setCatalogSearch = (search: string) => { const next = new URLSearchParams(searchParams); if (search) next.set('search', search); else next.delete('search'); setSearchParams(next, { replace: true }); };
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [explodeError, setExplodeError] = useState(false);
@@ -192,7 +201,7 @@ export default function BOMPage() {
     () => showCreateModal && JSON.stringify(newBOM) !== JSON.stringify(initialBOM),
     [showCreateModal, newBOM, initialBOM]
   );
-  const { confirmDiscard: confirmDiscardBOM } = useUnsavedChanges(isCreateBOMDirty);
+  const { confirmDiscard: confirmDiscardBOM, markSaved: markBOMSaved } = useUnsavedChanges(isCreateBOMDirty);
 
   const isNewPartDirty = useMemo(
     () => showNewPartModal && JSON.stringify(newPart) !== JSON.stringify(initialPart),
@@ -234,11 +243,25 @@ export default function BOMPage() {
     }
   }, [selectedBOM, viewMode]);
 
+  useEffect(() => {
+    const requestId = ++selectionRequestRef.current;
+    explosionRequestRef.current += 1;
+    setExplodedView([]);
+    setViewMode('single');
+    setSelectedBOM(null);
+    if (!selectedId) return;
+    api.getBOM(Number(selectedId)).then(bom => {
+      if (requestId === selectionRequestRef.current) setSelectedBOM(bom);
+    }).catch(() => {
+      if (requestId === selectionRequestRef.current) { setSelectedBOM(null); showToast('error', 'Could not load the selected BOM. Select it again to retry.'); }
+    });
+  }, [selectedId]);
+
   const loadData = async () => {
     setLoading(true);
     setLoadError(false);
     try {
-      const requestedBOMId = Number(new URLSearchParams(window.location.search).get('id') || 0);
+
 
       // Load BOMs and parts separately so one failure doesn't block the other
       const [bomsResult, partsResult] = await Promise.allSettled([
@@ -250,22 +273,7 @@ export default function BOMPage() {
         const loadedBOMs = bomsResult.value;
         setBoms(loadedBOMs);
 
-        if (requestedBOMId) {
-          const matchingBOM = loadedBOMs.find((bom: BOM) => bom.id === requestedBOMId);
-          if (matchingBOM) {
-            setSelectedBOM(matchingBOM);
-            setViewMode('single');
-          } else {
-            try {
-              const fetchedBOM = await api.getBOM(requestedBOMId);
-              setSelectedBOM(fetchedBOM);
-              setBoms([...loadedBOMs.filter((bom: BOM) => bom.id !== fetchedBOM.id), fetchedBOM]);
-              setViewMode('single');
-            } catch (err) {
-              console.error('Failed to load requested BOM:', err);
-            }
-          }
-        }
+
       } else {
         console.error('Failed to load BOMs:', bomsResult.reason);
         setLoadError(true);
@@ -331,14 +339,17 @@ export default function BOMPage() {
   };
 
   const loadExplodedBOM = async (bomId: number) => {
+    const requestId = ++explosionRequestRef.current;
+    setExplosionLoading(true);
+    setExplodedView([]);
     setExplodeError(false);
     try {
       const response = await api.explodeBOM(bomId);
-      setExplodedView(response.items);
+      if (requestId === explosionRequestRef.current) setExplodedView(response.items);
     } catch (err) {
       console.error('Failed to explode BOM:', err);
-      setExplodeError(true);
-    }
+      if (requestId === explosionRequestRef.current) setExplodeError(true);
+    } finally { if (requestId === explosionRequestRef.current) setExplosionLoading(false); }
   };
 
   const handleCreateBOM = async (e: React.FormEvent) => {
@@ -347,6 +358,8 @@ export default function BOMPage() {
     setCreatingBOM(true);
     try {
       const created = await api.createBOM(newBOM);
+      markBOMSaved();
+      const next = new URLSearchParams(searchParams); next.set('id', String(created.id)); setSearchParams(next);
       setBoms([...boms, created]);
       setSelectedBOM(created);
       setShowCreateModal(false);
@@ -722,13 +735,14 @@ export default function BOMPage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6" data-tour="eng-bom">
         {/* BOM List */}
         <div className="card lg:col-span-1">
-          <h2 className="text-lg font-semibold mb-4">BOMs</h2>
+          <h2 className="text-lg font-semibold mb-4">BOMs</h2><input aria-label="Search BOMs" placeholder="Part, revision or status" className="input mb-3" value={catalogSearch} onChange={e => setCatalogSearch(e.target.value)} />
           <div className="space-y-2 max-h-96 overflow-y-auto">
-            {boms.map(bom => (
+            {catalogSearch && !boms.some(bom => `${bom.part?.part_number} ${bom.part?.name} ${bom.revision} ${bom.status}`.toLowerCase().includes(catalogSearch.toLowerCase())) && <p className="text-sm text-slate-400">No BOMs match this search. Clear or change the search.</p>}
+            {boms.filter(bom => `${bom.part?.part_number} ${bom.part?.name} ${bom.revision} ${bom.status}`.toLowerCase().includes(catalogSearch.toLowerCase())).map(bom => (
               <button
                 type="button"
                 key={bom.id}
-                onClick={() => { setSelectedBOM(bom); setViewMode('single'); }}
+                onClick={() => { const next = new URLSearchParams(searchParams); next.set('id', String(bom.id)); setSearchParams(next); }}
                 className={`w-full text-left p-3 rounded-lg cursor-pointer border transition-colors ${
                   selectedBOM?.id === bom.id
                     ? 'border-werco-primary bg-blue-500/10'
@@ -814,8 +828,9 @@ export default function BOMPage() {
                 </div>
               </div>
 
+              {selectedBOM.status === 'released' && <p className="text-sm text-slate-400 mb-3">Released components are read-only. Use Unrelease to Draft before editing this BOM.</p>}
               {/* BOM Items Table */}
-              {viewMode === 'exploded' && explodeError ? (
+              {viewMode === 'exploded' && explosionLoading ? <p role="status" className="p-4">Loading multi-level BOM…</p> : viewMode === 'exploded' && explodeError ? (
                 <ErrorState
                   message="Could not load the multi-level explosion for this BOM."
                   onRetry={() => loadExplodedBOM(selectedBOM.id)}
@@ -871,7 +886,9 @@ export default function BOMPage() {
                           <td className="px-4 py-3 text-center">{item.unit_of_measure}</td>
                           {selectedBOM.status === 'draft' && (
                             <td className="px-4 py-3 text-center">
+                              <button className="text-blue-300 mr-3" onClick={() => setEditingItem(item)}>Edit</button>
                               <button
+                                aria-label={`Delete ${item.component_part?.part_number || "component"}`}
                                 onClick={() => handleDeleteItem(item.id)}
                                 className="text-red-500 hover:text-red-400"
                               >
@@ -927,6 +944,12 @@ export default function BOMPage() {
         </div>
       </div>
 
+      {editingItem && <BOMItemEditor item={editingItem} onClose={() => setEditingItem(null)} onSaved={async () => {
+        if (!selectedBOM) return;
+        const updated = await api.getBOM(selectedBOM.id);
+        setSelectedBOM(updated);
+        setBoms(rows => rows.map(row => row.id === updated.id ? updated : row));
+      }} />}
       {/* Create BOM Modal */}
       <Modal open={showCreateModal} onClose={requestCloseCreateBOM} size="md" closeOnBackdrop={false}>
             <h3 className="text-lg font-semibold mb-4">Create New BOM</h3>

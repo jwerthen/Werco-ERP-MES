@@ -147,6 +147,9 @@ export default function RoutingPage() {
   const canEditReleasedTimes =
     hasPermission(user?.role, 'routings:release') || user?.is_superuser === true;
 
+  const [savingRouting, setSavingRouting] = useState(false);
+  const routingSaveRef = useRef(false);
+  const routingRequestRef = useRef(0);
   const [routings, setRoutings] = useState<Routing[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
@@ -195,6 +198,7 @@ export default function RoutingPage() {
     queue: 'min'
   });
   const [searchParams, setSearchParams] = useSearchParams();
+  const routingIdParam = searchParams.get('id');
   const [forcedRoutingPart, setForcedRoutingPart] = useState<RoutingPartOption | null>(null);
   const [routingPartSearch, setRoutingPartSearch] = useState('');
   const [routingPartOpen, setRoutingPartOpen] = useState(false);
@@ -283,11 +287,14 @@ export default function RoutingPage() {
   };
 
   const loadRouting = async (id: number) => {
+    const request = ++routingRequestRef.current;
     try {
       const routing = await api.getRouting(id);
+      if (request !== routingRequestRef.current) return null;
       setSelectedRouting(routing);
       return routing;
     } catch (err) {
+      if (request !== routingRequestRef.current) return null;
       console.error('Failed to load routing:', err);
       showToast('error', 'Failed to load routing details.');
     }
@@ -295,12 +302,14 @@ export default function RoutingPage() {
   };
 
   useEffect(() => {
-    const routingIdParam = searchParams.get('id');
-    if (!routingIdParam) return;
+    routingRequestRef.current += 1;
+    if (!routingIdParam) { setSelectedRouting(null); return; }
     const routingId = parseInt(routingIdParam, 10);
-    if (Number.isNaN(routingId) || selectedRouting?.id === routingId) return;
+    if (Number.isNaN(routingId)) { setSelectedRouting(null); return; }
+    if (selectedRouting?.id === routingId) return;
+    setSelectedRouting(null);
     loadRouting(routingId);
-  }, [searchParams, selectedRouting?.id]);
+  }, [routingIdParam]);
 
   const handleCreateRouting = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -308,6 +317,9 @@ export default function RoutingPage() {
       showToast('error', 'Select a part before creating a routing.');
       return;
     }
+    if (routingSaveRef.current) return;
+    routingSaveRef.current = true;
+    setSavingRouting(true);
     try {
       const created = await api.createRouting(newRouting);
       setRoutings([created, ...routings]);
@@ -317,9 +329,13 @@ export default function RoutingPage() {
       setForcedRoutingPart(null);
       const nextParams = new URLSearchParams(searchParams);
       nextParams.delete('part_id');
+      nextParams.set('id', String(created.id));
       setSearchParams(nextParams);
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to create routing');
+    } finally {
+      routingSaveRef.current = false;
+      setSavingRouting(false);
     }
   };
 
@@ -338,6 +354,9 @@ export default function RoutingPage() {
       process_sheet_id: newOperation.process_sheet_id || null,
     };
 
+    if (routingSaveRef.current) return;
+    routingSaveRef.current = true;
+    setSavingRouting(true);
     try {
       if (editingOperation) {
         const payload = releasedEdit
@@ -366,6 +385,9 @@ export default function RoutingPage() {
         // 400 surfaces the server's "only time standards…" message; other codes fall back.
         showToast('error', err.response?.data?.detail || 'Failed to save operation');
       }
+    } finally {
+      routingSaveRef.current = false;
+      setSavingRouting(false);
     }
   };
 
@@ -753,19 +775,19 @@ export default function RoutingPage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Routings List */}
         <div className="card">
-          <h2 className="text-lg font-semibold mb-4">Routings</h2>
+          <h2 className="text-lg font-semibold mb-4">Routings</h2><input aria-label="Search routings" placeholder="Part, revision or status" className="input mb-3" value={searchParams.get('search') || ''} onChange={e => { const next = new URLSearchParams(searchParams); if(e.target.value) next.set('search', e.target.value); else next.delete('search'); setSearchParams(next, { replace: true }); }} />
           <div className="space-y-2 max-h-[600px] overflow-y-auto">
-            {routings.map((routing) => (
+            {routings.filter(routing => `${routing.part?.part_number} ${routing.part?.name} ${routing.revision} ${routing.status}`.toLowerCase().includes((searchParams.get('search') || '').toLowerCase())).map((routing) => (
               <div
                 key={routing.id}
                 role="button"
                 tabIndex={0}
-                onClick={() => loadRouting(routing.id)}
+                onClick={() => { const next = new URLSearchParams(searchParams); next.set('id', String(routing.id)); setSearchParams(next); }}
                 onKeyDown={(e) => {
                   if (e.target !== e.currentTarget) return;
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
-                    loadRouting(routing.id);
+                    const next = new URLSearchParams(searchParams); next.set('id', String(routing.id)); setSearchParams(next);
                   }
                 }}
                 className={`p-3 rounded-lg border cursor-pointer transition-colors ${
@@ -1107,7 +1129,7 @@ export default function RoutingPage() {
                 >
                   Cancel
                 </button>
-                <button type="submit" className="btn-primary" disabled={!newRouting.part_id}>Create</button>
+                <button type="submit" className="btn-primary" disabled={!newRouting.part_id || savingRouting}>Create</button>
               </div>
             </form>
       </Modal>
@@ -1823,8 +1845,8 @@ export default function RoutingPage() {
                 >
                   Cancel
                 </button>
-                <button type="submit" className="btn-primary">
-                  {isReleasedEdit ? 'Save Time Standards' : `${editingOperation ? 'Update' : 'Add'} Operation`}
+                <button type="submit" className="btn-primary" disabled={savingRouting}>
+                  {savingRouting ? 'Saving…' : isReleasedEdit ? 'Save Time Standards' : `${editingOperation ? 'Update' : 'Add'} Operation`}
                 </button>
               </div>
             </form>

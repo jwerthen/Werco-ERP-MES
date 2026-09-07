@@ -3,6 +3,7 @@ import { join } from 'path';
 
 // As with App.legacyDeepLinkRedirect.test.tsx, pin the actual route table's
 // declarations instead of copying route JSX into a separate test router.
+const accessSource = readFileSync(join(__dirname, 'utils/routeAccess.ts'), 'utf8');
 const source = readFileSync(join(__dirname, 'App.tsx'), 'utf8');
 
 describe('Material Nesting route registration', () => {
@@ -20,6 +21,6 @@ describe('Material Nesting route registration', () => {
   });
 
   it('requires the same purchasing:view permission as the Material Nesting navigation entry', () => {
-    expect(/\{\s*prefix:\s*['"]\/nest['"],\s*permission:\s*['"]purchasing:view['"]\s*\}/.test(source)).toBe(true);
+    expect(/\{\s*prefix:\s*['"]\/nest['"],\s*permission:\s*['"]purchasing:view['"]\s*\}/.test(accessSource)).toBe(true);
   });
 });

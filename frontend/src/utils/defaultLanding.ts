@@ -17,3 +17,11 @@ export function getDefaultLandingPath(role?: string | null): string {
   if (!role) return '/';
   return DEFAULT_LANDING_BY_ROLE[role] ?? '/';
 }
+
+/** Accept local application destinations only, preserving their query and fragment. */
+export function safeReturnPath(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//') || /[\\\r\n]/.test(value))
+    return null;
+  const path = value.split(/[?#]/)[0];
+  return ['/login', '/register', '/company-register'].includes(path) ? null : value;
+}

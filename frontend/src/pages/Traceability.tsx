@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { ErrorState } from '../components/ui';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
@@ -26,6 +27,7 @@ interface LotHistoryItem {
 
 interface LotTrace {
   lot_number: string;
+  serial_number?: string;
   part_id?: number;
   part_number?: string;
   part_name?: string;
@@ -64,54 +66,94 @@ const eventTypeIcons: Record<string, React.ReactNode> = {
 };
 
 export default function Traceability() {
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchQuery, setSearchQuery] = useState(searchParams.get('q') || '');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [lotTrace, setLotTrace] = useState<LotTrace | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-
-  const handleSearch = async () => {
-    if (!searchQuery.trim()) return;
-    
+  const [searched, setSearched] = useState(false);
+  const requestId = useRef(0);
+  const [retry, setRetry] = useState(0);
+  const query = searchParams.get('q') || '';
+  const selectedNumber = searchParams.get('number');
+  const selectedType = searchParams.get('type') || 'lot';
+  useEffect(() => {
+    setSearchQuery(query);
+    const id = ++requestId.current;
+    if (!query && !selectedNumber) {
+      setSearched(false);
+      setLotTrace(null);
+      setSearchResults([]);
+      return;
+    }
     setLoading(true);
     setError('');
-    setSearchResults([]);
     setLotTrace(null);
-    
-    try {
-      const results = await api.searchLots(searchQuery.trim());
+    setSearched(true);
+    const run = async () => {
+      const results = query ? await api.searchLots(query) : [];
+      if (id !== requestId.current) return;
       setSearchResults(results);
-      
-      // If exactly one result, auto-load it
-      if (results.length === 1) {
-        loadLotTrace(results[0].number);
+      const result = selectedNumber
+        ? { number: selectedNumber, type: selectedType }
+        : results.length === 1
+          ? results[0]
+          : null;
+      if (result) {
+        const trace =
+          result.type === 'serial' ? await api.traceSerial(result.number) : await api.traceLot(result.number);
+        if (id !== requestId.current) return;
+        setLotTrace({
+          ...trace,
+          current_quantity: trace.current_quantity ?? (result.type === 'serial' ? 1 : 0),
+          work_orders_used: trace.work_orders_used || [],
+          shipments: trace.shipments || [],
+          ncrs: trace.ncrs || [],
+          history: (trace.history || []).map((item: any) => ({
+            ...item,
+            description: item.description || item.event_type.replace(/_/g, ' '),
+          })),
+        });
       }
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Search failed');
-    } finally {
-      setLoading(false);
-    }
+    };
+    run()
+      .catch(err => {
+        if (id === requestId.current) setError(err.response?.data?.detail || 'Failed to load traceability');
+      })
+      .finally(() => {
+        if (id === requestId.current) setLoading(false);
+      });
+    return () => {
+      requestId.current++;
+    };
+  }, [query, selectedNumber, selectedType, retry]);
+  const handleSearch = () => {
+    if (!searchQuery.trim()) return;
+    const next = new URLSearchParams(searchParams);
+    next.set('q', searchQuery.trim());
+    next.delete('number');
+    next.delete('type');
+    if (next.toString() === searchParams.toString()) setRetry(n => n + 1);
+    else setSearchParams(next);
   };
-
-  const loadLotTrace = async (lotNumber: string) => {
-    setLoading(true);
-    setError('');
-    
-    try {
-      const trace = await api.traceLot(lotNumber);
-      setLotTrace(trace);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to load traceability');
-    } finally {
-      setLoading(false);
-    }
+  const loadLotTrace = (result: SearchResult) => {
+    const next = new URLSearchParams(searchParams);
+    next.set('number', result.number);
+    next.set('type', result.type);
+    setSearchParams(next);
   };
-
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      handleSearch();
-    }
+    if (e.key === 'Enter') handleSearch();
   };
+  const relatedLink = (kind: string, number: string) =>
+    kind === 'workOrder'
+      ? `/work-orders?search=${encodeURIComponent(number)}`
+      : kind === 'shipment'
+        ? `/warehouse?tab=shipping&shippingSearch=${encodeURIComponent(number)}`
+        : kind === 'ncr'
+          ? `/quality?tab=ncr&search=${encodeURIComponent(number)}`
+          : `/purchasing?search=${encodeURIComponent(number)}`;
 
   return (
     <div className="space-y-3">
@@ -120,8 +162,8 @@ export default function Traceability() {
         <p className="flex items-center gap-1.5 text-xs text-fd-blue">
           <CheckCircleIcon className="h-4 w-4 flex-shrink-0" />
           <span>
-            <strong className="font-semibold">AS9100D:</strong> lot/serial/cert tracking across the full
-            production lifecycle — receiving through shipment.
+            <strong className="font-semibold">AS9100D:</strong> lot/serial/cert tracking across the full production
+            lifecycle — receiving through shipment.
           </span>
         </p>
       </div>
@@ -135,18 +177,14 @@ export default function Traceability() {
             <input
               type="text"
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={e => setSearchQuery(e.target.value)}
               onKeyDown={handleKeyDown}
               className="input pl-10"
               placeholder="Enter lot number, serial number, cert number, or heat lot..."
               aria-label="Search by lot, serial, cert, or heat lot number"
             />
           </div>
-          <button
-            onClick={handleSearch}
-            disabled={loading}
-            className="btn-primary flex items-center"
-          >
+          <button onClick={handleSearch} disabled={loading} className="btn-primary flex items-center">
             <DocumentMagnifyingGlassIcon className="h-5 w-5 mr-2" />
             {loading ? 'Searching...' : 'Trace'}
           </button>
@@ -154,7 +192,30 @@ export default function Traceability() {
       </div>
 
       {/* Error: shared ErrorState with a Retry that re-runs the search. */}
-      {error && <ErrorState message={error} onRetry={handleSearch} />}
+      {error && <ErrorState message={error} onRetry={() => setRetry(n => n + 1)} />}
+      {loading && (
+        <p role="status" className="text-slate-400">
+          Loading trace and related history…
+        </p>
+      )}
+      {!loading && !error && searched && searchResults.length === 0 && !lotTrace && (
+        <p role="status" className="bg-fd-panel border border-fd-line p-4">
+          No matching lot or serial records. Check the number or search a shorter part of it.
+        </p>
+      )}
+      {lotTrace && searchResults.length > 1 && (
+        <button
+          className="text-werco-primary underline"
+          onClick={() => {
+            const next = new URLSearchParams(searchParams);
+            next.delete('number');
+            next.delete('type');
+            setSearchParams(next);
+          }}
+        >
+          Back to {searchResults.length} search results
+        </button>
+      )}
 
       {/* Search Results */}
       {searchResults.length > 1 && !lotTrace && (
@@ -166,20 +227,20 @@ export default function Traceability() {
             {searchResults.map((r, idx) => (
               <button
                 key={idx}
-                onClick={() => loadLotTrace(r.number)}
+                onClick={() => loadLotTrace(r)}
                 className="w-full text-left p-2.5 border border-fd-line rounded-sm hover:bg-fd-sunken flex items-center justify-between gap-3 min-w-0"
               >
                 <div className="flex items-center min-w-0">
-                  <span className={`px-1.5 py-0.5 rounded-sm text-[10px] font-medium mr-3 flex-shrink-0 ${
-                    r.type === 'lot' ? 'bg-fd-blue/15 text-fd-blue' : 'bg-fd-cyan/15 text-fd-cyan'
-                  }`}>
+                  <span
+                    className={`px-1.5 py-0.5 rounded-sm text-[10px] font-medium mr-3 flex-shrink-0 ${
+                      r.type === 'lot' ? 'bg-fd-blue/15 text-fd-blue' : 'bg-fd-cyan/15 text-fd-cyan'
+                    }`}
+                  >
                     {r.type.toUpperCase()}
                   </span>
                   <div className="min-w-0">
                     <span className="font-mono font-medium tabular-nums">{r.number}</span>
-                    {r.part_number && (
-                      <span className="text-slate-400 ml-2 truncate">- {r.part_number}</span>
-                    )}
+                    {r.part_number && <span className="text-slate-400 ml-2 truncate">- {r.part_number}</span>}
                   </div>
                 </div>
                 <div className="text-sm text-slate-400 flex-shrink-0 tabular-nums">
@@ -195,24 +256,48 @@ export default function Traceability() {
       {/* Lot Trace Result */}
       {lotTrace && (
         <div className="space-y-3">
+          {lotTrace.serial_number && lotTrace.lot_number && (
+            <Link
+              className="text-fd-link underline"
+              to={`/traceability?number=${encodeURIComponent(lotTrace.lot_number)}&type=lot`}
+            >
+              Trace parent lot {lotTrace.lot_number}
+            </Link>
+          )}
           {/* Summary Card */}
           <div className="bg-fd-panel border border-fd-line rounded-sm p-3">
             <div className="flex items-start justify-between gap-3">
               <div className="flex items-center min-w-0">
-                <CubeIcon className="h-7 w-7 text-werco-navy-600 mr-3 flex-shrink-0" />
+                <CubeIcon className="h-7 w-7 text-fd-link mr-3 flex-shrink-0" />
                 <div className="min-w-0">
-                  <h2 className="text-lg font-bold truncate">Lot: <span className="tabular-nums">{lotTrace.lot_number}</span></h2>
+                  <h2 className="text-lg font-bold truncate">
+                    {lotTrace.serial_number ? 'Serial' : 'Lot'}:{' '}
+                    <span className="tabular-nums">{lotTrace.serial_number || lotTrace.lot_number}</span>
+                  </h2>
                   {lotTrace.part_number && (
-                    <p className="text-sm text-slate-400 truncate">{lotTrace.part_number} - {lotTrace.part_name}</p>
+                    <p className="text-sm text-slate-400 truncate">
+                      {lotTrace.part_id ? (
+                        <Link className="underline text-fd-link" to={`/parts/${lotTrace.part_id}`}>
+                          {lotTrace.part_number} - {lotTrace.part_name}
+                        </Link>
+                      ) : (
+                        `${lotTrace.part_number} - ${lotTrace.part_name}`
+                      )}
+                    </p>
                   )}
                 </div>
               </div>
-              <span className={`px-2 py-0.5 rounded-sm text-xs font-medium flex-shrink-0 ${
-                lotTrace.status === 'available' ? 'bg-fd-green/15 text-fd-green' :
-                lotTrace.status === 'quarantine' ? 'bg-fd-amber/15 text-fd-amber' :
-                lotTrace.status === 'rejected' ? 'bg-fd-red/15 text-fd-red' :
-                'bg-fd-sunken text-slate-300'
-              }`}>
+              <span
+                className={`px-2 py-0.5 rounded-sm text-xs font-medium flex-shrink-0 ${
+                  lotTrace.status === 'available'
+                    ? 'bg-fd-green/15 text-fd-green'
+                    : lotTrace.status === 'quarantine'
+                      ? 'bg-fd-amber/15 text-fd-amber'
+                      : lotTrace.status === 'rejected'
+                        ? 'bg-fd-red/15 text-fd-red'
+                        : 'bg-fd-sunken text-slate-300'
+                }`}
+              >
                 {lotTrace.status}
               </span>
             </div>
@@ -232,11 +317,30 @@ export default function Traceability() {
               </div>
               <div className="min-w-0">
                 <span className="block text-[10px] uppercase tracking-wide text-slate-500">PO Number</span>
-                <p className="font-medium text-sm tabular-nums truncate">{lotTrace.po_number || '-'}</p>
+                <p className="font-medium text-sm tabular-nums truncate">
+                  {lotTrace.po_number ? (
+                    <Link className="text-werco-primary underline" to={relatedLink('po', lotTrace.po_number)}>
+                      {lotTrace.po_number}
+                    </Link>
+                  ) : (
+                    '-'
+                  )}
+                </p>
               </div>
               <div className="min-w-0">
                 <span className="block text-[10px] uppercase tracking-wide text-slate-500">Cert Number</span>
-                <p className="font-mono text-sm tabular-nums truncate">{lotTrace.cert_number || '-'}</p>
+                <p className="font-mono text-sm tabular-nums truncate">
+                  {lotTrace.cert_number ? (
+                    <Link
+                      className="underline text-fd-link"
+                      to={`/documents?search=${encodeURIComponent(lotTrace.cert_number)}`}
+                    >
+                      {lotTrace.cert_number}
+                    </Link>
+                  ) : (
+                    '-'
+                  )}
+                </p>
               </div>
               <div className="min-w-0">
                 <span className="block text-[10px] uppercase tracking-wide text-slate-500">Heat Lot</span>
@@ -264,7 +368,11 @@ export default function Traceability() {
                 {lotTrace.work_orders_used.length > 0 ? (
                   <ul className="text-sm space-y-1">
                     {lotTrace.work_orders_used.map((wo, idx) => (
-                      <li key={idx} className="font-mono tabular-nums text-fd-blue truncate">{wo}</li>
+                      <li key={idx} className="font-mono tabular-nums text-fd-blue truncate">
+                        <Link className="underline" to={relatedLink('workOrder', wo)}>
+                          {wo}
+                        </Link>
+                      </li>
                     ))}
                   </ul>
                 ) : (
@@ -280,7 +388,11 @@ export default function Traceability() {
                 {lotTrace.shipments.length > 0 ? (
                   <ul className="text-sm space-y-1">
                     {lotTrace.shipments.map((s, idx) => (
-                      <li key={idx} className="font-mono tabular-nums text-fd-green truncate">{s}</li>
+                      <li key={idx} className="font-mono tabular-nums text-fd-green truncate">
+                        <Link className="underline" to={relatedLink('shipment', s)}>
+                          {s}
+                        </Link>
+                      </li>
                     ))}
                   </ul>
                 ) : (
@@ -296,7 +408,11 @@ export default function Traceability() {
                 {lotTrace.ncrs.length > 0 ? (
                   <ul className="text-sm space-y-1">
                     {lotTrace.ncrs.map((ncr, idx) => (
-                      <li key={idx} className="font-mono tabular-nums text-fd-red truncate">{ncr}</li>
+                      <li key={idx} className="font-mono tabular-nums text-fd-red truncate">
+                        <Link className="underline" to={relatedLink('ncr', ncr)}>
+                          {ncr}
+                        </Link>
+                      </li>
                     ))}
                   </ul>
                 ) : (
@@ -324,9 +440,7 @@ export default function Traceability() {
                           <div className="min-w-0">
                             <span className="font-medium text-sm">{item.description}</span>
                             {item.reference && (
-                              <span className="ml-2 text-xs text-slate-400 tabular-nums">
-                                Ref: {item.reference}
-                              </span>
+                              <span className="ml-2 text-xs text-slate-400 tabular-nums">Ref: {item.reference}</span>
                             )}
                           </div>
                           <span className="text-xs text-slate-400 tabular-nums flex-shrink-0">
@@ -337,12 +451,8 @@ export default function Traceability() {
                             })}
                           </span>
                         </div>
-                        {item.user && (
-                          <p className="text-xs text-slate-400 mt-1 truncate">By: {item.user}</p>
-                        )}
-                        {item.location && (
-                          <p className="text-xs text-slate-400 truncate">Location: {item.location}</p>
-                        )}
+                        {item.user && <p className="text-xs text-slate-400 mt-1 truncate">By: {item.user}</p>}
+                        {item.location && <p className="text-xs text-slate-400 truncate">Location: {item.location}</p>}
                       </div>
                     </div>
                   ))}

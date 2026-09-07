@@ -33,6 +33,7 @@ jest.mock('../../services/api', () => ({
     getParts: jest.fn(),
     releaseBOM: jest.fn(),
     unreleaseBOM: jest.fn(),
+    updateBOMItem: jest.fn(),
   },
 }));
 
@@ -148,5 +149,37 @@ describe('PartBOMTab delete-item confirm pending', () => {
 
     expect(await screen.findByText(detail)).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+});
+
+
+describe('BOM contents and line editing', () => {
+  it('reads the API explosion envelope and keeps the component visible in Multi-Level', async () => {
+    mockedApi.explodeBOM.mockResolvedValue({ bom_id: 10, part_id: 1, part_number: 'ASM-001', part_name: 'Assembly', revision: 'A', total_levels: 1, items: draftBom.items });
+    renderTab();
+    fireEvent.click(screen.getByRole('button', { name: 'Multi-Level' }));
+    expect(await screen.findByText('CMP-100')).toBeInTheDocument();
+    expect(screen.queryByText('No items to display')).not.toBeInTheDocument();
+  });
+  it('shows a recoverable explosion failure instead of an empty BOM', async () => {
+    mockedApi.explodeBOM.mockRejectedValueOnce(new Error('Offline'));
+    renderTab();
+    fireEvent.click(screen.getByRole('button', { name: 'Multi-Level' }));
+    expect(await screen.findByText('Could not load the multi-level BOM.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry multi-level BOM' })).toBeInTheDocument();
+    expect(screen.queryByText('No items to display')).not.toBeInTheDocument();
+  });
+  it('edits a draft line in place and retains values after a refused save', async () => {
+    mockedApi.updateBOMItem.mockRejectedValueOnce({ response: { data: { detail: 'BOM has just been released' } } });
+    const refreshed = renderTab();
+    fireEvent.click(screen.getByRole('button', { name: /Edit/ }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByRole('spinbutton', { name: /Quantity/ }), { target: { value: '7' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save component' }));
+    expect(await screen.findByText('BOM has just been released')).toBeInTheDocument();
+    expect(within(dialog).getByRole('spinbutton', { name: /Quantity/ })).toHaveValue(7);
+    expect(mockedApi.updateBOMItem).toHaveBeenCalledWith(100, expect.objectContaining({ quantity: 7 }));
+    expect(mockedApi.updateBOMItem.mock.calls[0][1]).not.toHaveProperty('component_part_id');
+    expect(refreshed).not.toHaveBeenCalled();
   });
 });

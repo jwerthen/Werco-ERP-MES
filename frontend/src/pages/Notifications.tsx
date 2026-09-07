@@ -6,10 +6,11 @@
  * and deep links into each notification's route. Timestamps render in Central time.
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { BellIcon, CheckIcon, Cog6ToothIcon } from '@heroicons/react/24/outline';
 import api from '../services/api';
+import { useNotificationState } from '../hooks/useNotificationState';
 import { DataTable, DataTableColumn, StatusBadge, Button, useToast } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDateTime } from '../utils/centralTime';
@@ -45,6 +46,8 @@ const formatTimestamp = (ts: string) =>
 export default function Notifications() {
   const navigate = useNavigate();
   const { showToast } = useToast();
+  const notificationState = useNotificationState();
+  const request = useRef(0);
 
   const [items, setItems] = useState<NotificationItem[]>([]);
   const [meta, setMeta] = useState<PaginationMeta | null>(null);
@@ -63,7 +66,7 @@ export default function Notifications() {
     let cancelled = false;
     api
       .getNotificationCatalog()
-      .then((entries) => {
+      .then(entries => {
         if (!cancelled) setCatalog(entries);
       })
       .catch(() => {
@@ -76,17 +79,18 @@ export default function Notifications() {
 
   const categoryByKey = useMemo(() => {
     const map = new Map<string, string>();
-    catalog.forEach((entry) => map.set(entry.event_key, entry.category));
+    catalog.forEach(entry => map.set(entry.event_key, entry.category));
     return map;
   }, [catalog]);
 
   const categoryOptions = useMemo(() => {
     const seen = new Set<string>();
-    catalog.forEach((entry) => seen.add(entry.category));
+    catalog.forEach(entry => seen.add(entry.category));
     return Array.from(seen).sort((a, b) => a.localeCompare(b));
   }, [catalog]);
 
   const load = useCallback(async () => {
+    const seq = ++request.current;
     setLoading(true);
     setLoadError(false);
     try {
@@ -97,19 +101,23 @@ export default function Notifications() {
       if (severityFilter) params.severity = severityFilter;
 
       const res = await api.getNotifications(params);
+      if (seq !== request.current) return;
       setItems(res.items);
       setMeta(res.pagination);
     } catch (err) {
       console.error('Failed to load notifications:', err);
-      setLoadError(true);
+      if (seq === request.current) setLoadError(true);
     } finally {
-      setLoading(false);
+      if (seq === request.current) setLoading(false);
     }
   }, [page, unreadFilter, categoryFilter, severityFilter]);
 
   useEffect(() => {
     load();
-  }, [load]);
+    return () => {
+      ++request.current;
+    };
+  }, [load, notificationState.revision]);
 
   // Changing a filter always returns to the first (newest) page.
   const changeUnread = (value: UnreadFilter) => {
@@ -129,11 +137,11 @@ export default function Notifications() {
     async (item: NotificationItem) => {
       if (item.is_read) return;
       // Optimistic flip — mark-read is UI state and effectively never rejected.
-      setItems((current) => current.map((n) => (n.id === item.id ? { ...n, is_read: true } : n)));
+      setItems(current => current.map(n => (n.id === item.id ? { ...n, is_read: true } : n)));
       try {
-        await api.markNotificationRead(item.id);
+        await notificationState.markRead(item.id);
       } catch (err: any) {
-        setItems((current) => current.map((n) => (n.id === item.id ? { ...n, is_read: false } : n)));
+        setItems(current => current.map(n => (n.id === item.id ? { ...n, is_read: false } : n)));
         showToast('error', err?.response?.data?.detail || 'Could not mark the notification read.');
       }
     },
@@ -147,15 +155,20 @@ export default function Notifications() {
 
   const markAllRead = useCallback(async () => {
     try {
-      const res = await api.markAllNotificationsRead();
-      showToast('success', res.updated > 0 ? `Marked ${res.updated} notification${res.updated === 1 ? '' : 's'} read.` : 'No unread notifications.');
+      const res = await notificationState.markAllRead();
+      showToast(
+        'success',
+        res.updated > 0
+          ? `Marked ${res.updated} notification${res.updated === 1 ? '' : 's'} read.`
+          : 'No unread notifications.'
+      );
       load();
     } catch (err: any) {
       showToast('error', err?.response?.data?.detail || 'Could not mark all notifications read.');
     }
   }, [showToast, load]);
 
-  const unreadOnPage = useMemo(() => items.filter((n) => !n.is_read).length, [items]);
+  const unreadOnPage = useMemo(() => items.filter(n => !n.is_read).length, [items]);
 
   const columns = useMemo<Array<DataTableColumn<NotificationItem>>>(
     () => [
@@ -163,22 +176,18 @@ export default function Notifications() {
         key: 'severity',
         header: 'Severity',
         className: 'whitespace-nowrap',
-        accessor: (n) => n.severity,
-        render: (n) => <StatusBadge status={n.severity} colorMap={SEVERITY_COLOR_MAP} />,
+        accessor: n => n.severity,
+        render: n => <StatusBadge status={n.severity} colorMap={SEVERITY_COLOR_MAP} />,
       },
       {
         key: 'title',
         header: 'Notification',
-        accessor: (n) => n.title,
-        render: (n) => (
+        accessor: n => n.title,
+        render: n => (
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              {!n.is_read && (
-                <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-fd-blue" aria-hidden="true" />
-              )}
-              <span className={`truncate ${n.is_read ? 'text-fd-body' : 'font-semibold text-fd-ink'}`}>
-                {n.title}
-              </span>
+              {!n.is_read && <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-fd-blue" aria-hidden="true" />}
+              <span className={`truncate ${n.is_read ? 'text-fd-body' : 'font-semibold text-fd-ink'}`}>{n.title}</span>
             </div>
             {n.body && <div className="mt-0.5 text-xs text-fd-mute truncate max-w-md">{n.body}</div>}
           </div>
@@ -188,23 +197,23 @@ export default function Notifications() {
         key: 'category',
         header: 'Category',
         className: 'whitespace-nowrap text-fd-mute',
-        accessor: (n) => categoryByKey.get(n.event_key) || '',
-        render: (n) => categoryByKey.get(n.event_key) || '—',
+        accessor: n => categoryByKey.get(n.event_key) || '',
+        render: n => categoryByKey.get(n.event_key) || '—',
       },
       {
         key: 'created_at',
         header: 'Received',
         className: 'whitespace-nowrap text-fd-mute',
-        accessor: (n) => n.created_at,
-        render: (n) => formatTimestamp(n.created_at),
-        csv: (n) => formatTimestamp(n.created_at),
+        accessor: n => n.created_at,
+        render: n => formatTimestamp(n.created_at),
+        csv: n => formatTimestamp(n.created_at),
       },
       {
         key: 'status',
         header: 'Status',
         align: 'center',
-        accessor: (n) => (n.is_read ? 'Read' : 'Unread'),
-        render: (n) =>
+        accessor: n => (n.is_read ? 'Read' : 'Unread'),
+        render: n =>
           n.is_read ? (
             <span className="text-xs text-fd-mute">Read</span>
           ) : (
@@ -217,11 +226,11 @@ export default function Notifications() {
         key: 'actions',
         header: '',
         align: 'right',
-        render: (n) =>
+        render: n =>
           n.is_read ? null : (
             <button
               type="button"
-              onClick={(e) => {
+              onClick={e => {
                 e.stopPropagation();
                 void markRead(n);
               }}
@@ -253,7 +262,13 @@ export default function Notifications() {
               Notification settings
             </Button>
           </Link>
-          <Button variant="secondary" size="sm" onClick={markAllRead} disabled={unreadOnPage === 0}>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={markAllRead}
+            title="Mark all notifications read across every page and filter"
+            disabled={notificationState.unreadCount === 0 || notificationState.pending}
+          >
             <CheckIcon className="h-4 w-4 mr-1.5" aria-hidden="true" />
             Mark all read
           </Button>
@@ -289,11 +304,13 @@ export default function Notifications() {
       <div className="rounded-sm border border-fd-line bg-fd-panel p-3">
         <div className="flex flex-wrap gap-3 items-end">
           <div>
-            <label htmlFor="notif-unread" className="label">Show</label>
+            <label htmlFor="notif-unread" className="label">
+              Show
+            </label>
             <select
               id="notif-unread"
               value={unreadFilter}
-              onChange={(e) => changeUnread(e.target.value as UnreadFilter)}
+              onChange={e => changeUnread(e.target.value as UnreadFilter)}
               className="input"
             >
               <option value="all">All</option>
@@ -302,29 +319,37 @@ export default function Notifications() {
             </select>
           </div>
           <div>
-            <label htmlFor="notif-category" className="label">Category</label>
+            <label htmlFor="notif-category" className="label">
+              Category
+            </label>
             <select
               id="notif-category"
               value={categoryFilter}
-              onChange={(e) => changeCategory(e.target.value)}
+              onChange={e => changeCategory(e.target.value)}
               className="input"
             >
               <option value="">All categories</option>
-              {categoryOptions.map((c) => (
-                <option key={c} value={c}>{c}</option>
+              {categoryOptions.map(c => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
               ))}
             </select>
           </div>
           <div>
-            <label htmlFor="notif-severity" className="label">Severity</label>
+            <label htmlFor="notif-severity" className="label">
+              Severity
+            </label>
             <select
               id="notif-severity"
               value={severityFilter}
-              onChange={(e) => changeSeverity(e.target.value)}
+              onChange={e => changeSeverity(e.target.value)}
               className="input"
             >
-              {SEVERITY_OPTIONS.map((o) => (
-                <option key={o.value || 'all'} value={o.value}>{o.label}</option>
+              {SEVERITY_OPTIONS.map(o => (
+                <option key={o.value || 'all'} value={o.value}>
+                  {o.label}
+                </option>
               ))}
             </select>
           </div>
@@ -335,7 +360,7 @@ export default function Notifications() {
       <DataTable<NotificationItem>
         columns={columns}
         data={items}
-        rowKey={(n) => n.id}
+        rowKey={n => n.id}
         onRowClick={handleRowClick}
         loading={loading}
         error={loadError ? 'Could not load notifications.' : false}
@@ -350,8 +375,7 @@ export default function Notifications() {
         empty={{
           icon: BellIcon,
           title: 'No notifications',
-          description:
-            'Notifications about holds, completions, receipts, quality events, and more will appear here.',
+          description: 'Notifications about holds, completions, receipts, quality events, and more will appear here.',
         }}
       />
     </div>

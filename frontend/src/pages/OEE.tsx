@@ -1,5 +1,6 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import api from '../services/api';
+import { Modal } from '../components/ui/Modal';
 import {
   PlusIcon,
   XMarkIcon,
@@ -125,7 +126,6 @@ function oeeBgColor(value: number | null | undefined): string {
   return 'bg-red-500/20 border-red-500/40';
 }
 
-
 function gaugeArc(pct: number): string {
   const clamp = Math.min(100, Math.max(0, pct));
   const angle = (clamp / 100) * 180;
@@ -161,11 +161,15 @@ function defaultDateRange(): { from: string; to: string } {
 
 export default function OEE() {
   const { showToast } = useToast();
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState('');
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [dashboard, setDashboard] = useState<OEEDashboard | null>(null);
   const [trends, setTrends] = useState<OEETrend[]>([]);
   const [records, setRecords] = useState<OEERecord[]>([]);
+  const loadRequest = useRef(0);
   const [loading, setLoading] = useState(true);
+  const [sectionErrors, setSectionErrors] = useState<string[]>([]);
   const [loadError, setLoadError] = useState(false);
 
   const [selectedWorkCenter, setSelectedWorkCenter] = useState<string>('');
@@ -188,7 +192,10 @@ export default function OEE() {
   });
 
   const loadData = useCallback(async () => {
+    const request = ++loadRequest.current;
+    setLoading(true);
     setLoadError(false);
+    setSectionErrors([]);
     try {
       // The From/To range scopes the WHOLE dashboard (plant strip, tiles, trends, records).
       // The work-center selection is a drill-in that scopes only the detail views (trends +
@@ -210,17 +217,21 @@ export default function OEE() {
         api.get('/oee/records', { params: detailParams }),
       ]);
 
+      if (request !== loadRequest.current) return;
+      const failedSections: string[] = [];
       if (wcRes.status === 'fulfilled') {
         const wcData = wcRes.value.data;
         setWorkCenters(Array.isArray(wcData) ? wcData : wcData?.items || []);
       } else {
-        console.error('Failed to load work centers:', wcRes.reason);
+        setWorkCenters([]);
+        failedSections.push('work center choices');
       }
 
       if (dashRes.status === 'fulfilled') {
         setDashboard(dashRes.value.data);
       } else {
-        console.error('Failed to load OEE dashboard:', dashRes.reason);
+        setDashboard(null);
+        failedSections.push('dashboard');
         setLoadError(true);
       }
 
@@ -231,20 +242,24 @@ export default function OEE() {
         const series = Array.isArray(td) ? td : td?.time_series;
         setTrends(Array.isArray(series) ? series : []);
       } else {
-        console.error('Failed to load OEE trends:', trendsRes.reason);
+        setTrends([]);
+        failedSections.push('trends');
       }
 
       if (recordsRes.status === 'fulfilled') {
         const recData = recordsRes.value.data;
         setRecords(Array.isArray(recData) ? recData : recData?.items || []);
       } else {
-        console.error('Failed to load OEE records:', recordsRes.reason);
+        setRecords([]);
+        failedSections.push('records');
       }
+      setSectionErrors(failedSections);
     } catch (err) {
+      if (request !== loadRequest.current) return;
       console.error('Failed to load OEE data:', err);
       setLoadError(true);
     } finally {
-      setLoading(false);
+      if (request === loadRequest.current) setLoading(false);
     }
   }, [selectedWorkCenter, dateFrom, dateTo]);
 
@@ -258,6 +273,9 @@ export default function OEE() {
       showToast('error', 'Please select a work center');
       return;
     }
+    if (actionBusy) return;
+    setActionBusy(true);
+    setActionError('');
     try {
       await api.post('/oee/records', {
         work_center_id: addForm.work_center_id,
@@ -293,12 +311,22 @@ export default function OEE() {
       showToast('success', 'OEE record added');
       loadData();
     } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      setActionError(
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((item: any) => item.msg).join('; ')
+            : 'Unable to save. Check your entries and try again.'
+      );
       showToast('error', err.response?.data?.detail || err.message || 'Failed to add OEE record');
+    } finally {
+      setActionBusy(false);
     }
   };
 
   const selectedWcData = selectedWorkCenter
-    ? dashboard?.work_centers?.find((wc) => wc.work_center_id === parseInt(selectedWorkCenter))
+    ? dashboard?.work_centers?.find(wc => wc.work_center_id === parseInt(selectedWorkCenter))
     : null;
 
   if (loading) {
@@ -312,6 +340,14 @@ export default function OEE() {
   if (loadError && !dashboard) {
     return (
       <div className="p-3">
+        {sectionErrors.length > 0 && (
+          <div role="alert" className="text-red-300">
+            Unable to load {sectionErrors.join(', ')} for the selected dates and work center.{' '}
+            <button className="underline" onClick={loadData}>
+              Retry
+            </button>
+          </div>
+        )}
         <ErrorState
           title="Failed to load OEE data"
           message="Could not load the OEE dashboard. Check your connection and try again."
@@ -325,10 +361,10 @@ export default function OEE() {
   // The API returns only plant_oee_pct (no plant A/P/Q). Derive all four plant metrics
   // the same way the backend derives OEE — average across the work centers that actually
   // have data — so a plant with no records yet shows `--` instead of a fabricated 0%.
-  const plantOEE = meanOrNull(wcList.map((wc) => wc.current_oee_pct));
-  const plantA = meanOrNull(wcList.map((wc) => wc.availability_pct));
-  const plantP = meanOrNull(wcList.map((wc) => wc.performance_pct));
-  const plantQ = meanOrNull(wcList.map((wc) => wc.quality_pct));
+  const plantOEE = meanOrNull(wcList.map(wc => wc.current_oee_pct));
+  const plantA = meanOrNull(wcList.map(wc => wc.availability_pct));
+  const plantP = meanOrNull(wcList.map(wc => wc.performance_pct));
+  const plantQ = meanOrNull(wcList.map(wc => wc.quality_pct));
 
   // Trends now honor the From/To range, so the chart title must reflect the actual window
   // rather than a hard-coded "30 Days" (the default range is 30 days, preserving that label).
@@ -338,6 +374,14 @@ export default function OEE() {
 
   return (
     <div className="p-3 space-y-3">
+      {sectionErrors.length > 0 && (
+        <div role="alert" className="text-red-300">
+          Unable to load {sectionErrors.join(', ')} for the selected dates and work center.{' '}
+          <button className="underline" onClick={loadData}>
+            Retry
+          </button>
+        </div>
+      )}
       {/* Header */}
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
@@ -376,15 +420,17 @@ export default function OEE() {
       <div className="card card-compact !p-2.5">
         <div className="flex flex-wrap gap-3 items-end">
           <div>
-            <label htmlFor="oee-filter-work-center" className="label !py-0"><span className="label-text text-[10px] uppercase tracking-wide text-fd-mute">Work Center</span></label>
+            <label htmlFor="oee-filter-work-center" className="label !py-0">
+              <span className="label-text text-[10px] uppercase tracking-wide text-fd-mute">Work Center</span>
+            </label>
             <select
               id="oee-filter-work-center"
               className="select select-bordered select-sm rounded-sm"
               value={selectedWorkCenter}
-              onChange={(e) => setSelectedWorkCenter(e.target.value)}
+              onChange={e => setSelectedWorkCenter(e.target.value)}
             >
               <option value="">All Work Centers</option>
-              {workCenters.map((wc) => (
+              {workCenters.map(wc => (
                 <option key={wc.id} value={wc.id}>
                   {wc.code} - {wc.name}
                 </option>
@@ -392,25 +438,29 @@ export default function OEE() {
             </select>
           </div>
           <div>
-            <label htmlFor="oee-filter-from" className="label !py-0"><span className="label-text text-[10px] uppercase tracking-wide text-fd-mute">From</span></label>
+            <label htmlFor="oee-filter-from" className="label !py-0">
+              <span className="label-text text-[10px] uppercase tracking-wide text-fd-mute">From</span>
+            </label>
             <input
               id="oee-filter-from"
               type="date"
               aria-label="Filter from date"
               className="input input-bordered input-sm rounded-sm"
               value={dateFrom}
-              onChange={(e) => setDateFrom(e.target.value)}
+              onChange={e => setDateFrom(e.target.value)}
             />
           </div>
           <div>
-            <label htmlFor="oee-filter-to" className="label !py-0"><span className="label-text text-[10px] uppercase tracking-wide text-fd-mute">To</span></label>
+            <label htmlFor="oee-filter-to" className="label !py-0">
+              <span className="label-text text-[10px] uppercase tracking-wide text-fd-mute">To</span>
+            </label>
             <input
               id="oee-filter-to"
               type="date"
               aria-label="Filter to date"
               className="input input-bordered input-sm rounded-sm"
               value={dateTo}
-              onChange={(e) => setDateTo(e.target.value)}
+              onChange={e => setDateTo(e.target.value)}
             />
           </div>
           {(selectedWorkCenter || dateFrom !== defaultDates.from || dateTo !== defaultDates.to) && (
@@ -474,7 +524,7 @@ export default function OEE() {
           footer={`${(dashboard?.work_centers || []).length} work centers`}
         >
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
-            {(dashboard?.work_centers || []).map((wc) => (
+            {(dashboard?.work_centers || []).map(wc => (
               <button
                 type="button"
                 key={wc.work_center_id}
@@ -529,17 +579,14 @@ export default function OEE() {
                 { label: 'Availability', value: selectedWcData.availability_pct, target: 90 },
                 { label: 'Performance', value: selectedWcData.performance_pct, target: 95 },
                 { label: 'Quality', value: selectedWcData.quality_pct, target: 99 },
-              ].map((metric) => (
-                <div key={metric.label} className="flex flex-col items-center p-2.5 rounded-sm border border-fd-line min-w-0">
+              ].map(metric => (
+                <div
+                  key={metric.label}
+                  className="flex flex-col items-center p-2.5 rounded-sm border border-fd-line min-w-0"
+                >
                   <svg width="140" height="80" viewBox="0 0 140 80">
                     {/* Background arc */}
-                    <path
-                      d={gaugeArc(100)}
-                      fill="none"
-                      stroke="#334155"
-                      strokeWidth="12"
-                      strokeLinecap="round"
-                    />
+                    <path d={gaugeArc(100)} fill="none" stroke="#334155" strokeWidth="12" strokeLinecap="round" />
                     {/* Value arc */}
                     <path
                       d={gaugeArc(metric.value ?? 0)}
@@ -548,7 +595,13 @@ export default function OEE() {
                       strokeWidth="12"
                       strokeLinecap="round"
                     />
-                    <text x="70" y="70" textAnchor="middle" className="text-xl font-bold" fill={gaugeColor(metric.value)}>
+                    <text
+                      x="70"
+                      y="70"
+                      textAnchor="middle"
+                      className="text-xl font-bold"
+                      fill={gaugeColor(metric.value)}
+                    >
                       {fmtPct(metric.value)}
                     </text>
                   </svg>
@@ -589,22 +642,59 @@ export default function OEE() {
               <XAxis
                 dataKey="date"
                 tick={{ fontSize: 11, fill: '#94a3b8' }}
-                tickFormatter={(val) =>
+                tickFormatter={val =>
                   formatCentralDate(val as string, { month: 'numeric', day: 'numeric', year: undefined })
                 }
               />
               <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: '#94a3b8' }} />
               <Tooltip
-                contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '4px', color: '#e2e8f0' }}
-                formatter={(value: number | undefined, name: string | undefined) => [`${(value ?? 0).toFixed(1)}%`, name ?? '']}
-                labelFormatter={(label) => formatCentralDate(label as string)}
+                contentStyle={{
+                  backgroundColor: '#1a1f2e',
+                  border: '1px solid #334155',
+                  borderRadius: '4px',
+                  color: '#e2e8f0',
+                }}
+                formatter={(value: number | undefined, name: string | undefined) => [
+                  `${(value ?? 0).toFixed(1)}%`,
+                  name ?? '',
+                ]}
+                labelFormatter={label => formatCentralDate(label as string)}
               />
               <Legend />
-              <ReferenceLine y={85} stroke="#9ca3af" strokeDasharray="5 5" label={{ value: '85% Target', position: 'right', fontSize: 10 }} />
+              <ReferenceLine
+                y={85}
+                stroke="#9ca3af"
+                strokeDasharray="5 5"
+                label={{ value: '85% Target', position: 'right', fontSize: 10 }}
+              />
               <Line type="monotone" dataKey="oee_pct" stroke="#2563eb" strokeWidth={2} name="OEE" dot={false} />
-              <Line type="monotone" dataKey="availability_pct" stroke="#3b82f6" strokeWidth={1} name="Availability" dot={false} strokeDasharray="4 2" />
-              <Line type="monotone" dataKey="performance_pct" stroke="#8b5cf6" strokeWidth={1} name="Performance" dot={false} strokeDasharray="4 2" />
-              <Line type="monotone" dataKey="quality_pct" stroke="#14b8a6" strokeWidth={1} name="Quality" dot={false} strokeDasharray="4 2" />
+              <Line
+                type="monotone"
+                dataKey="availability_pct"
+                stroke="#3b82f6"
+                strokeWidth={1}
+                name="Availability"
+                dot={false}
+                strokeDasharray="4 2"
+              />
+              <Line
+                type="monotone"
+                dataKey="performance_pct"
+                stroke="#8b5cf6"
+                strokeWidth={1}
+                name="Performance"
+                dot={false}
+                strokeDasharray="4 2"
+              />
+              <Line
+                type="monotone"
+                dataKey="quality_pct"
+                stroke="#14b8a6"
+                strokeWidth={1}
+                name="Quality"
+                dot={false}
+                strokeDasharray="4 2"
+              />
             </LineChart>
           </ResponsiveContainer>
         </CockpitPanel>
@@ -642,12 +732,10 @@ export default function OEE() {
                   </td>
                 </tr>
               ) : (
-                records.map((rec) => (
+                records.map(rec => (
                   <tr key={rec.id} className="hover">
                     <td className="text-sm tabular-nums">{rec.record_date}</td>
-                    <td className="font-medium text-sm">
-                      {rec.work_center_name || `WC-${rec.work_center_id}`}
-                    </td>
+                    <td className="font-medium text-sm">{rec.work_center_name || `WC-${rec.work_center_id}`}</td>
                     <td className="text-sm">{rec.shift || '-'}</td>
                     <td>
                       <span className={`font-bold text-sm tabular-nums ${oeeColor(rec.oee_pct)}`}>
@@ -671,224 +759,247 @@ export default function OEE() {
 
       {/* Add Record Modal */}
       {showAddModal && (
-        <div className="modal modal-open">
-          <div className="modal-box max-w-2xl">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold">Add OEE Record</h3>
-              <button onClick={() => setShowAddModal(false)} className="btn btn-ghost btn-sm btn-circle">
-                <XMarkIcon className="h-5 w-5" />
+        <Modal
+          open
+          onClose={() => {
+            if (!actionBusy) setShowAddModal(false);
+          }}
+          size="2xl"
+          ariaLabel="Add OEE record"
+          closeOnBackdrop={false}
+        >
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-bold">Add OEE Record</h3>
+            <button
+              onClick={() => setShowAddModal(false)}
+              disabled={actionBusy}
+              aria-label="Close dialog"
+              className="btn btn-ghost btn-sm btn-circle"
+            >
+              <XMarkIcon className="h-5 w-5" />
+            </button>
+          </div>
+          <form onSubmit={handleAddRecord} className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <FormField label="Work Center" required labelClassName="font-medium">
+                {field => (
+                  <select
+                    {...field}
+                    className="select select-bordered w-full"
+                    value={addForm.work_center_id}
+                    onChange={e => setAddForm({ ...addForm, work_center_id: parseInt(e.target.value) })}
+                    required
+                  >
+                    <option value={0} disabled>
+                      Select work center...
+                    </option>
+                    {workCenters.map(wc => (
+                      <option key={wc.id} value={wc.id}>
+                        {wc.code} - {wc.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </FormField>
+              <FormField label="Date" required labelClassName="font-medium">
+                {field => (
+                  <input
+                    {...field}
+                    type="date"
+                    className="input input-bordered w-full"
+                    value={addForm.record_date}
+                    onChange={e => setAddForm({ ...addForm, record_date: e.target.value })}
+                    required
+                  />
+                )}
+              </FormField>
+            </div>
+
+            <div className="grid grid-cols-3 gap-4">
+              <FormField label="Shift" labelClassName="font-medium">
+                {field => (
+                  <select
+                    {...field}
+                    className="select select-bordered w-full"
+                    value={addForm.shift}
+                    onChange={e => setAddForm({ ...addForm, shift: e.target.value })}
+                  >
+                    <option value="">N/A</option>
+                    <option value="1st">1st Shift</option>
+                    <option value="2nd">2nd Shift</option>
+                    <option value="3rd">3rd Shift</option>
+                  </select>
+                )}
+              </FormField>
+              <FormField label="Planned Time (min)" required labelClassName="font-medium">
+                {field => (
+                  <input
+                    {...field}
+                    type="number"
+                    className="input input-bordered w-full"
+                    value={addForm.planned_production_time}
+                    onChange={e => setAddForm({ ...addForm, planned_production_time: parseFloat(e.target.value) || 0 })}
+                    min={0}
+                    required
+                  />
+                )}
+              </FormField>
+              <FormField label="Actual Run Time (min)" required labelClassName="font-medium">
+                {field => (
+                  <input
+                    {...field}
+                    type="number"
+                    className="input input-bordered w-full"
+                    value={addForm.actual_run_time}
+                    onChange={e => setAddForm({ ...addForm, actual_run_time: parseFloat(e.target.value) || 0 })}
+                    min={0}
+                    required
+                  />
+                )}
+              </FormField>
+            </div>
+
+            <div className="grid grid-cols-3 gap-4">
+              <FormField label="Ideal Cycle Time (sec)" labelClassName="font-medium">
+                {field => (
+                  <input
+                    {...field}
+                    type="number"
+                    className="input input-bordered w-full"
+                    value={addForm.ideal_cycle_time}
+                    onChange={e => setAddForm({ ...addForm, ideal_cycle_time: parseFloat(e.target.value) || 0 })}
+                    min={0}
+                    step="0.01"
+                  />
+                )}
+              </FormField>
+              <FormField label="Total Pieces" required labelClassName="font-medium">
+                {field => (
+                  <input
+                    {...field}
+                    type="number"
+                    className="input input-bordered w-full"
+                    value={addForm.total_pieces}
+                    onChange={e => setAddForm({ ...addForm, total_pieces: parseInt(e.target.value) || 0 })}
+                    min={0}
+                    required
+                  />
+                )}
+              </FormField>
+              <FormField label="Good Pieces" required labelClassName="font-medium">
+                {field => (
+                  <input
+                    {...field}
+                    type="number"
+                    className="input input-bordered w-full"
+                    value={addForm.good_pieces}
+                    onChange={e => setAddForm({ ...addForm, good_pieces: parseInt(e.target.value) || 0 })}
+                    min={0}
+                    required
+                  />
+                )}
+              </FormField>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <FormField label="Rejected Pieces" labelClassName="font-medium">
+                {field => (
+                  <input
+                    {...field}
+                    type="number"
+                    className="input input-bordered w-full"
+                    value={addForm.rejected_pieces}
+                    onChange={e => setAddForm({ ...addForm, rejected_pieces: parseInt(e.target.value) || 0 })}
+                    min={0}
+                  />
+                )}
+              </FormField>
+              <FormField label="Notes" labelClassName="font-medium">
+                {field => (
+                  <input
+                    {...field}
+                    type="text"
+                    className="input input-bordered w-full"
+                    value={addForm.notes}
+                    onChange={e => setAddForm({ ...addForm, notes: e.target.value })}
+                    placeholder="Optional notes..."
+                  />
+                )}
+              </FormField>
+            </div>
+
+            {/* Live OEE Preview */}
+            {addForm.planned_production_time > 0 && addForm.total_pieces > 0 && (
+              <div className="p-3 bg-slate-800 rounded-lg">
+                <div className="text-xs font-medium text-slate-400 mb-2">Calculated OEE Preview</div>
+                <div className="grid grid-cols-4 gap-3 text-center">
+                  {(() => {
+                    // Cap each factor at 100% to mirror the backend (calculate_oee applies
+                    // min(x, 100) before multiplying), so the preview never shows a value the
+                    // saved record can't hold.
+                    const a = Math.min(
+                      100,
+                      addForm.planned_production_time > 0
+                        ? (addForm.actual_run_time / addForm.planned_production_time) * 100
+                        : 0
+                    );
+                    const p = Math.min(
+                      100,
+                      addForm.actual_run_time > 0 && addForm.ideal_cycle_time > 0
+                        ? ((addForm.ideal_cycle_time * addForm.total_pieces) / (addForm.actual_run_time * 60)) * 100
+                        : 0
+                    );
+                    const q = Math.min(
+                      100,
+                      addForm.total_pieces > 0 ? (addForm.good_pieces / addForm.total_pieces) * 100 : 0
+                    );
+                    const oee = (a / 100) * (p / 100) * (q / 100) * 100;
+                    return (
+                      <>
+                        <div>
+                          <div className="text-xs text-slate-400">Availability</div>
+                          <div className={`text-lg font-bold ${oeeColor(a)}`}>{a.toFixed(1)}%</div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-slate-400">Performance</div>
+                          <div className={`text-lg font-bold ${oeeColor(p)}`}>{p.toFixed(1)}%</div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-slate-400">Quality</div>
+                          <div className={`text-lg font-bold ${oeeColor(q)}`}>{q.toFixed(1)}%</div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-slate-400">OEE</div>
+                          <div className={`text-lg font-bold ${oeeColor(oee)}`}>{oee.toFixed(1)}%</div>
+                        </div>
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
+            )}
+
+            <div className="modal-action">
+              <button type="button" onClick={() => setShowAddModal(false)} className="btn btn-ghost">
+                Cancel
+              </button>
+              <button disabled={actionBusy} type="submit" className="btn btn-primary">
+                <PlusIcon className="h-4 w-4 mr-1" />
+                Add Record
               </button>
             </div>
-            <form onSubmit={handleAddRecord} className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Work Center" required labelClassName="font-medium">
-                  {(field) => (
-                    <select
-                      {...field}
-                      className="select select-bordered w-full"
-                      value={addForm.work_center_id}
-                      onChange={(e) => setAddForm({ ...addForm, work_center_id: parseInt(e.target.value) })}
-                      required
-                    >
-                      <option value={0} disabled>Select work center...</option>
-                      {workCenters.map((wc) => (
-                        <option key={wc.id} value={wc.id}>
-                          {wc.code} - {wc.name}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                </FormField>
-                <FormField label="Date" required labelClassName="font-medium">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="date"
-                      className="input input-bordered w-full"
-                      value={addForm.record_date}
-                      onChange={(e) => setAddForm({ ...addForm, record_date: e.target.value })}
-                      required
-                    />
-                  )}
-                </FormField>
-              </div>
-
-              <div className="grid grid-cols-3 gap-4">
-                <FormField label="Shift" labelClassName="font-medium">
-                  {(field) => (
-                    <select
-                      {...field}
-                      className="select select-bordered w-full"
-                      value={addForm.shift}
-                      onChange={(e) => setAddForm({ ...addForm, shift: e.target.value })}
-                    >
-                      <option value="">N/A</option>
-                      <option value="1st">1st Shift</option>
-                      <option value="2nd">2nd Shift</option>
-                      <option value="3rd">3rd Shift</option>
-                    </select>
-                  )}
-                </FormField>
-                <FormField label="Planned Time (min)" required labelClassName="font-medium">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="number"
-                      className="input input-bordered w-full"
-                      value={addForm.planned_production_time}
-                      onChange={(e) => setAddForm({ ...addForm, planned_production_time: parseFloat(e.target.value) || 0 })}
-                      min={0}
-                      required
-                    />
-                  )}
-                </FormField>
-                <FormField label="Actual Run Time (min)" required labelClassName="font-medium">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="number"
-                      className="input input-bordered w-full"
-                      value={addForm.actual_run_time}
-                      onChange={(e) => setAddForm({ ...addForm, actual_run_time: parseFloat(e.target.value) || 0 })}
-                      min={0}
-                      required
-                    />
-                  )}
-                </FormField>
-              </div>
-
-              <div className="grid grid-cols-3 gap-4">
-                <FormField label="Ideal Cycle Time (sec)" labelClassName="font-medium">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="number"
-                      className="input input-bordered w-full"
-                      value={addForm.ideal_cycle_time}
-                      onChange={(e) => setAddForm({ ...addForm, ideal_cycle_time: parseFloat(e.target.value) || 0 })}
-                      min={0}
-                      step="0.01"
-                    />
-                  )}
-                </FormField>
-                <FormField label="Total Pieces" required labelClassName="font-medium">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="number"
-                      className="input input-bordered w-full"
-                      value={addForm.total_pieces}
-                      onChange={(e) => setAddForm({ ...addForm, total_pieces: parseInt(e.target.value) || 0 })}
-                      min={0}
-                      required
-                    />
-                  )}
-                </FormField>
-                <FormField label="Good Pieces" required labelClassName="font-medium">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="number"
-                      className="input input-bordered w-full"
-                      value={addForm.good_pieces}
-                      onChange={(e) => setAddForm({ ...addForm, good_pieces: parseInt(e.target.value) || 0 })}
-                      min={0}
-                      required
-                    />
-                  )}
-                </FormField>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Rejected Pieces" labelClassName="font-medium">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="number"
-                      className="input input-bordered w-full"
-                      value={addForm.rejected_pieces}
-                      onChange={(e) => setAddForm({ ...addForm, rejected_pieces: parseInt(e.target.value) || 0 })}
-                      min={0}
-                    />
-                  )}
-                </FormField>
-                <FormField label="Notes" labelClassName="font-medium">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="text"
-                      className="input input-bordered w-full"
-                      value={addForm.notes}
-                      onChange={(e) => setAddForm({ ...addForm, notes: e.target.value })}
-                      placeholder="Optional notes..."
-                    />
-                  )}
-                </FormField>
-              </div>
-
-              {/* Live OEE Preview */}
-              {addForm.planned_production_time > 0 && addForm.total_pieces > 0 && (
-                <div className="p-3 bg-slate-800 rounded-lg">
-                  <div className="text-xs font-medium text-slate-400 mb-2">Calculated OEE Preview</div>
-                  <div className="grid grid-cols-4 gap-3 text-center">
-                    {(() => {
-                      // Cap each factor at 100% to mirror the backend (calculate_oee applies
-                      // min(x, 100) before multiplying), so the preview never shows a value the
-                      // saved record can't hold.
-                      const a = Math.min(100, addForm.planned_production_time > 0
-                        ? (addForm.actual_run_time / addForm.planned_production_time) * 100
-                        : 0);
-                      const p = Math.min(100, addForm.actual_run_time > 0 && addForm.ideal_cycle_time > 0
-                        ? ((addForm.ideal_cycle_time * addForm.total_pieces) / (addForm.actual_run_time * 60)) * 100
-                        : 0);
-                      const q = Math.min(100, addForm.total_pieces > 0
-                        ? (addForm.good_pieces / addForm.total_pieces) * 100
-                        : 0);
-                      const oee = (a / 100) * (p / 100) * (q / 100) * 100;
-                      return (
-                        <>
-                          <div>
-                            <div className="text-xs text-slate-400">Availability</div>
-                            <div className={`text-lg font-bold ${oeeColor(a)}`}>{a.toFixed(1)}%</div>
-                          </div>
-                          <div>
-                            <div className="text-xs text-slate-400">Performance</div>
-                            <div className={`text-lg font-bold ${oeeColor(p)}`}>{p.toFixed(1)}%</div>
-                          </div>
-                          <div>
-                            <div className="text-xs text-slate-400">Quality</div>
-                            <div className={`text-lg font-bold ${oeeColor(q)}`}>{q.toFixed(1)}%</div>
-                          </div>
-                          <div>
-                            <div className="text-xs text-slate-400">OEE</div>
-                            <div className={`text-lg font-bold ${oeeColor(oee)}`}>{oee.toFixed(1)}%</div>
-                          </div>
-                        </>
-                      );
-                    })()}
-                  </div>
-                </div>
-              )}
-
-              <div className="modal-action">
-                <button type="button" onClick={() => setShowAddModal(false)} className="btn btn-ghost">
-                  Cancel
-                </button>
-                <button type="submit" className="btn btn-primary">
-                  <PlusIcon className="h-4 w-4 mr-1" />
-                  Add Record
-                </button>
-              </div>
-            </form>
-          </div>
-          <div
-            className="modal-backdrop"
-            role="presentation"
-            onClick={(e) => {
-              if (e.target === e.currentTarget) setShowAddModal(false);
-            }}
-          ></div>
-        </div>
+          </form>
+          {actionError && (
+            <p role="alert" className="text-red-300 mt-3">
+              {actionError}
+            </p>
+          )}
+          {actionBusy && (
+            <p role="status" className="text-slate-400 mt-3">
+              Saving…
+            </p>
+          )}
+        </Modal>
       )}
     </div>
   );

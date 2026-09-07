@@ -20,12 +20,22 @@ export interface CockpitPanelProps {
  * Extracted from the Dashboard cockpit so analytics/ops pages can lay capped
  * panels side-by-side in a grid instead of stacking unbounded full-width sections.
  */
-export function CockpitPanel({ title, subtitle, footer, headerExtra, className, bodyClassName, children }: CockpitPanelProps) {
+export function CockpitPanel({
+  title,
+  subtitle,
+  footer,
+  headerExtra,
+  className,
+  bodyClassName,
+  children,
+}: CockpitPanelProps) {
   return (
     <div className={`card card-compact flex flex-col min-w-0 ${className || ''}`}>
       <div className="card-header !pb-2 !mb-2 gap-3">
         <div className="min-w-0">
-          <h2 className="card-title">{title}</h2>
+          <h2 data-cockpit-panel={title} tabIndex={-1} className="card-title">
+            {title}
+          </h2>
           {subtitle && <p className="card-subtitle truncate">{subtitle}</p>}
         </div>
         {headerExtra && <div className="flex-shrink-0">{headerExtra}</div>}

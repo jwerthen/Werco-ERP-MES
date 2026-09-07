@@ -127,15 +127,20 @@ def list_equipment(
     if not include_inactive:
         query = query.filter(Equipment.is_active == True)
 
-    if status:
-        query = query.filter(Equipment.status == status)
-
     equipment_list = query.order_by(Equipment.next_calibration_date).all()
 
     result = []
     today = date.today()
     for eq in equipment_list:
-        update_equipment_status(eq)
+        effective_status = eq.status.value if hasattr(eq.status, "value") else eq.status
+        if eq.next_calibration_date and effective_status != "out_of_service":
+            days = (eq.next_calibration_date - today).days
+            effective_status = "overdue" if days < 0 else "due" if days <= 30 else "active"
+        if status == "due_soon":
+            if not eq.next_calibration_date or (eq.next_calibration_date - today).days > 30:
+                continue
+        elif status and effective_status != status:
+            continue
         days_until = None
         if eq.next_calibration_date:
             days_until = (eq.next_calibration_date - today).days
@@ -156,13 +161,12 @@ def list_equipment(
                 last_calibration_date=eq.last_calibration_date,
                 next_calibration_date=eq.next_calibration_date,
                 calibration_provider=eq.calibration_provider,
-                status=eq.status.value if hasattr(eq.status, 'value') else eq.status,
+                status=effective_status,
                 is_active=eq.is_active,
                 days_until_due=days_until,
             )
         )
 
-    db.commit()  # Save status updates
     return result
 
 

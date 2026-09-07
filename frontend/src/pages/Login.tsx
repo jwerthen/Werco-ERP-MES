@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { getDefaultLandingPath } from '../utils/defaultLanding';
+import { getDefaultLandingPath, safeReturnPath } from '../utils/defaultLanding';
+import { Modal } from '../components/ui/Modal';
 import {
   ShieldCheckIcon,
   LockClosedIcon,
@@ -29,6 +30,7 @@ export default function Login() {
   //              pre-existing wire-agnostic mode keys; ?kiosk=1 pins 'employee'.
   const [loginMode, setLoginMode] = useState<'employee' | 'email'>('email');
   const [showPassword, setShowPassword] = useState(false);
+  const [recoveryOpen, setRecoveryOpen] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [focusedField, setFocusedField] = useState<string | null>(null);
@@ -75,7 +77,9 @@ export default function Login() {
       } catch {
         // Ignore parsing issues and fall back to the classic dashboard.
       }
-      navigate(landingPath, { replace: true });
+      const requestedPath =
+        safeReturnPath(location.state?.from) ?? safeReturnPath(new URLSearchParams(location.search).get('returnTo'));
+      navigate(forceEmployeeMode ? landingPath : (requestedPath ?? landingPath), { replace: true });
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Login failed. Please try again.');
     } finally {
@@ -90,6 +94,19 @@ export default function Login() {
 
   return (
     <div className="min-h-screen flex font-sans" style={{ background: 'var(--fd-canvas)' }}>
+      <Modal open={recoveryOpen} onClose={() => setRecoveryOpen(false)} size="sm">
+        <h2 className="text-lg font-semibold text-fd-ink">Reset your password</h2>
+        <p className="mt-3 text-fd-body">
+          Ask your Werco administrator or supervisor to reset your password in Users. Give them your employee ID or
+          company email so they can find your account.
+        </p>
+        <p className="mt-3 text-sm text-fd-mute">
+          This workspace uses administrator-assisted recovery. No reset email has been sent.
+        </p>
+        <button type="button" className="btn-primary mt-5" onClick={() => setRecoveryOpen(false)}>
+          Back to sign in
+        </button>
+      </Modal>
       {/* Left — Brand instrument panel */}
       <div
         className="hidden lg:block lg:w-[52%] relative overflow-hidden"
@@ -117,7 +134,7 @@ export default function Login() {
               className="font-mono text-[10px] tracking-[0.1em] text-fd-green px-1.5 py-1 rounded-[3px]"
               style={{ border: '1px solid var(--fd-line)' }}
             >
-              ● SYSTEM LIVE
+              SECURE SIGN-IN
             </span>
           </div>
 
@@ -162,17 +179,28 @@ export default function Login() {
         <div className="w-full max-w-[380px] relative z-10">
           {/* Mobile logo */}
           <div className="lg:hidden text-center mb-8">
-            <img src="/Werco_Logo-PNG.png" alt="Werco Manufacturing" className="h-12 mx-auto mb-2 brightness-0 invert" />
+            <img
+              src="/Werco_Logo-PNG.png"
+              alt="Werco Manufacturing"
+              className="h-12 mx-auto mb-2 brightness-0 invert"
+            />
             <p className="font-mono text-[11px] tracking-[0.18em] text-fd-mute uppercase">ERP // MES</p>
           </div>
 
           {/* Auth card */}
           <div
             className="relative p-9"
-            style={{ background: 'var(--fd-panel)', border: '1px solid var(--fd-line)', borderRadius: 'var(--fd-radius-lg)' }}
+            style={{
+              background: 'var(--fd-panel)',
+              border: '1px solid var(--fd-line)',
+              borderRadius: 'var(--fd-radius-lg)',
+            }}
           >
             {/* Top accent bar */}
-            <div className="absolute top-[-1px] left-[-1px] right-[-1px] h-0.5" style={{ background: 'var(--fd-blue)' }} />
+            <div
+              className="absolute top-[-1px] left-[-1px] right-[-1px] h-0.5"
+              style={{ background: 'var(--fd-blue)' }}
+            />
 
             <div className="font-mono text-[11px] text-fd-mute tracking-[0.18em]">AUTHENTICATE</div>
             <h2 className="text-2xl font-bold text-fd-ink mt-2.5 mb-1">Sign in</h2>
@@ -319,9 +347,15 @@ export default function Login() {
                       <button
                         type="button"
                         onClick={() => setShowPassword(!showPassword)}
+                        aria-label={showPassword ? 'Hide password' : 'Show password'}
+                        aria-pressed={showPassword}
                         className="absolute inset-y-0 right-0 pr-3 flex items-center text-fd-faint hover:text-fd-body transition-colors"
                       >
-                        {showPassword ? <EyeSlashIcon className="h-[18px] w-[18px]" /> : <EyeIcon className="h-[18px] w-[18px]" />}
+                        {showPassword ? (
+                          <EyeSlashIcon className="h-[18px] w-[18px]" />
+                        ) : (
+                          <EyeIcon className="h-[18px] w-[18px]" />
+                        )}
                       </button>
                     </div>
                   </div>
@@ -330,7 +364,11 @@ export default function Login() {
 
               {loginMode === 'email' && (
                 <div className="flex justify-end -mt-2">
-                  <button type="button" className="font-mono text-[11px] text-fd-blue hover:text-blue-400 transition-colors">
+                  <button
+                    type="button"
+                    onClick={() => setRecoveryOpen(true)}
+                    className="font-mono text-[11px] text-fd-blue hover:text-blue-400 transition-colors"
+                  >
                     Forgot password?
                   </button>
                 </div>

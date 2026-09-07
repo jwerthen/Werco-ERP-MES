@@ -101,7 +101,8 @@ def test_mark_shipped_succeeds_when_event_store_raises(client: TestClient, db_se
 
     manager = make_user(db_session, role=UserRole.MANAGER)
     part = make_part(db_session)
-    wo = make_wo(db_session, part, status_=WorkOrderStatus.IN_PROGRESS)
+    wo = make_wo(db_session, part, status_=WorkOrderStatus.COMPLETE)
+    wo.quantity_complete = 5
     shipment = make_shipment(db_session, wo, status=ShipmentStatus.PENDING, quantity_shipped=5)
 
     with caplog.at_level(logging.WARNING, logger=EMIT_LOGGER):

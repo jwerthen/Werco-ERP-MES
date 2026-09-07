@@ -433,7 +433,9 @@ def test_send_po_persists_committed_status_change_row(client: TestClient, db_ses
         headers=_headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
-    assert resp.json() == {"message": "PO sent", "po_number": po.po_number}
+    assert resp.json()["po_number"] == po.po_number
+    assert resp.json()["delivery_status"] == "not_dispatched"
+    assert "marked as sent" in resp.json()["message"]
 
     rows = _committed_audit_rows(db_session, resource_type=PO_RESOURCE, resource_id=po.id, action="STATUS_CHANGE")
     assert len(rows) == 1, "expected exactly one COMMITTED STATUS_CHANGE audit row for the send"

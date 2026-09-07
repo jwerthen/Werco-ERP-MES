@@ -22,7 +22,7 @@
  *     non-optimistic pattern the ConfirmDialog callers use.
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useId, useState } from 'react';
 import { Modal } from './Modal';
 import { FormField } from './FormField';
 import { Button } from './Button';
@@ -57,6 +57,7 @@ export function InputDialog({
   onSubmit,
   onCancel,
 }: InputDialogProps) {
+  const titleId = useId();
   const [value, setValue] = useState(defaultValue);
 
   // Re-seed the field each time the dialog opens so a reopened dialog starts
@@ -75,17 +76,20 @@ export function InputDialog({
 
   return (
     <Modal
+      ariaLabelledBy={titleId}
       open={open}
       onClose={onCancel}
       size="sm"
       closeOnBackdrop={!pending}
       closeOnEscape={!pending}
     >
-      <h3 className="text-lg font-semibold text-white">{title}</h3>
+      <h3 id={titleId} className="text-lg font-semibold text-white">
+        {title}
+      </h3>
       {message && <p className="text-sm text-slate-300 mt-1">{message}</p>}
       <form onSubmit={handleSubmit} className="mt-4">
         <FormField label={label} required>
-          {(field) => (
+          {field => (
             <input
               {...field}
               type="text"
@@ -94,7 +98,7 @@ export function InputDialog({
               value={value}
               placeholder={placeholder}
               disabled={pending}
-              onChange={(event) => setValue(event.target.value)}
+              onChange={event => setValue(event.target.value)}
             />
           )}
         </FormField>

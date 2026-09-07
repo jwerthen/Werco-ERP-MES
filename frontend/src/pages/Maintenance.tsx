@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import api from '../services/api';
+import EntityPicker from '../components/operations/EntityPicker';
 import { Modal } from '../components/ui/Modal';
 import {
   EmptyState,
@@ -86,11 +87,13 @@ const priorityColors: Record<string, { bg: string; text: string }> = {
 };
 
 const priorityBadgeColors: Record<string, string> = Object.fromEntries(
-  Object.entries(priorityColors).map(([k, v]) => [k, `${v.bg} ${v.text}`]),
+  Object.entries(priorityColors).map(([k, v]) => [k, `${v.bg} ${v.text}`])
 );
 
 export default function Maintenance() {
   const { showToast } = useToast();
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState('');
   const [activeTab, setActiveTab] = useState<Tab>('dashboard');
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [schedules, setSchedules] = useState<MaintenanceSchedule[]>([]);
@@ -106,12 +109,21 @@ export default function Maintenance() {
   const [selectedWO, setSelectedWO] = useState<MaintenanceWorkOrder | null>(null);
 
   const [scheduleForm, setScheduleForm] = useState({
-    work_center_id: '', maintenance_type: 'preventive', frequency: 'monthly',
-    frequency_value: '1', description: '', checklist: '', estimated_duration_hours: '1',
+    work_center_id: '',
+    maintenance_type: 'preventive',
+    frequency: 'monthly',
+    frequency_value: '1',
+    description: '',
+    checklist: '',
+    estimated_duration_hours: '1',
   });
   const [woForm, setWoForm] = useState({
-    work_center_id: '', maintenance_type: 'preventive', priority: 'medium',
-    title: '', description: '', scheduled_date: '',
+    work_center_id: '',
+    maintenance_type: 'preventive',
+    priority: 'medium',
+    title: '',
+    description: '',
+    scheduled_date: '',
   });
   const [completeForm, setCompleteForm] = useState({ notes: '', parts_used: '', labor_cost: '', parts_cost: '' });
 
@@ -120,9 +132,9 @@ export default function Maintenance() {
       setLoading(true);
       setError('');
       const [dashData, schedData, woData] = await Promise.all([
-        api.getMaintenanceDashboard().catch(() => null),
-        api.getMaintenanceSchedules({}).catch(() => []),
-        api.getMaintenanceWorkOrders({}).catch(() => []),
+        api.getMaintenanceDashboard(),
+        api.getMaintenanceSchedules({}),
+        api.getMaintenanceWorkOrders({}),
       ]);
       setDashboard(dashData);
       setSchedules(schedData || []);
@@ -134,7 +146,9 @@ export default function Maintenance() {
     }
   }, []);
 
-  useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   const filteredWOs = useMemo(() => {
     return workOrders.filter(wo => {
@@ -148,6 +162,9 @@ export default function Maintenance() {
   }, [workOrders, statusFilter, debouncedSearch]);
 
   const handleCreateSchedule = async () => {
+    if (actionBusy) return;
+    setActionBusy(true);
+    setActionError('');
     try {
       await api.createMaintenanceSchedule({
         ...scheduleForm,
@@ -156,32 +173,93 @@ export default function Maintenance() {
         estimated_duration_hours: parseFloat(scheduleForm.estimated_duration_hours),
       });
       setShowCreateScheduleModal(false);
-      setScheduleForm({ work_center_id: '', maintenance_type: 'preventive', frequency: 'monthly', frequency_value: '1', description: '', checklist: '', estimated_duration_hours: '1' });
+      setScheduleForm({
+        work_center_id: '',
+        maintenance_type: 'preventive',
+        frequency: 'monthly',
+        frequency_value: '1',
+        description: '',
+        checklist: '',
+        estimated_duration_hours: '1',
+      });
       loadData();
-    } catch (err: any) { showToast('error', err.response?.data?.detail || 'Failed to create schedule'); }
+    } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      setActionError(
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((item: any) => item.msg).join('; ')
+            : 'Unable to save. Check your entries and try again.'
+      );
+      showToast('error', err.response?.data?.detail || 'Failed to create schedule');
+    } finally {
+      setActionBusy(false);
+    }
   };
 
   const handleCreateWO = async () => {
+    if (actionBusy) return;
+    setActionBusy(true);
+    setActionError('');
     try {
       await api.createMaintenanceWorkOrder({
         ...woForm,
         work_center_id: parseInt(woForm.work_center_id),
+        scheduled_date: woForm.scheduled_date || undefined,
       });
       setShowCreateWOModal(false);
-      setWoForm({ work_center_id: '', maintenance_type: 'preventive', priority: 'medium', title: '', description: '', scheduled_date: '' });
+      setWoForm({
+        work_center_id: '',
+        maintenance_type: 'preventive',
+        priority: 'medium',
+        title: '',
+        description: '',
+        scheduled_date: '',
+      });
       loadData();
-    } catch (err: any) { showToast('error', err.response?.data?.detail || 'Failed to create work order'); }
+    } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      setActionError(
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((item: any) => item.msg).join('; ')
+            : 'Unable to save. Check your entries and try again.'
+      );
+      showToast('error', err.response?.data?.detail || 'Failed to create work order');
+    } finally {
+      setActionBusy(false);
+    }
   };
 
   const handleStart = async (wo: MaintenanceWorkOrder) => {
+    if (actionBusy) return;
+    setActionBusy(true);
+    setActionError('');
     try {
       await api.startMaintenanceWorkOrder(wo.id);
       loadData();
-    } catch (err: any) { showToast('error', err.response?.data?.detail || 'Failed to start'); }
+    } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      setActionError(
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((item: any) => item.msg).join('; ')
+            : 'Unable to save. Check your entries and try again.'
+      );
+      showToast('error', err.response?.data?.detail || 'Failed to start');
+    } finally {
+      setActionBusy(false);
+    }
   };
 
   const handleComplete = async () => {
     if (!selectedWO) return;
+    if (actionBusy) return;
+    setActionBusy(true);
+    setActionError('');
     try {
       await api.completeMaintenanceWorkOrder(selectedWO.id, {
         notes: completeForm.notes,
@@ -192,201 +270,263 @@ export default function Maintenance() {
       setShowCompleteModal(false);
       setCompleteForm({ notes: '', parts_used: '', labor_cost: '', parts_cost: '' });
       loadData();
-    } catch (err: any) { showToast('error', err.response?.data?.detail || 'Failed to complete'); }
+    } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      setActionError(
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((item: any) => item.msg).join('; ')
+            : 'Unable to save. Check your entries and try again.'
+      );
+      showToast('error', err.response?.data?.detail || 'Failed to complete');
+    } finally {
+      setActionBusy(false);
+    }
   };
 
-  const woRowActions = useCallback((wo: MaintenanceWorkOrder) => (
-    <div className="flex gap-1">
-      {wo.status === 'open' && (
-        <button onClick={(e) => { e.stopPropagation(); handleStart(wo); }} className="text-xs px-2 py-1 bg-blue-500/100 text-white rounded hover:bg-blue-600" title="Start" aria-label="Start work order">
-          <PlayIcon className="w-4 h-4" aria-hidden="true" />
-        </button>
-      )}
-      {wo.status === 'in_progress' && (
-        <button onClick={(e) => { e.stopPropagation(); setSelectedWO(wo); setShowCompleteModal(true); }} className="text-xs px-2 py-1 bg-green-500/100 text-white rounded hover:bg-green-600" title="Complete" aria-label="Complete work order">
-          <CheckCircleIcon className="w-4 h-4" aria-hidden="true" />
-        </button>
-      )}
-    </div>
-  ), [handleStart]);
+  const woRowActions = useCallback(
+    (wo: MaintenanceWorkOrder) => (
+      <div className="flex gap-1">
+        {wo.status === 'open' && (
+          <button
+            onClick={e => {
+              e.stopPropagation();
+              handleStart(wo);
+            }}
+            className="text-xs px-2 py-1 bg-blue-500/100 text-white rounded hover:bg-blue-600"
+            title="Start"
+            aria-label="Start work order"
+          >
+            <PlayIcon className="w-4 h-4" aria-hidden="true" />
+          </button>
+        )}
+        {wo.status === 'in_progress' && (
+          <button
+            onClick={e => {
+              e.stopPropagation();
+              setSelectedWO(wo);
+              setShowCompleteModal(true);
+            }}
+            className="text-xs px-2 py-1 bg-green-500/100 text-white rounded hover:bg-green-600"
+            title="Complete"
+            aria-label="Complete work order"
+          >
+            <CheckCircleIcon className="w-4 h-4" aria-hidden="true" />
+          </button>
+        )}
+      </div>
+    ),
+    [handleStart]
+  );
 
   // ---- Work Orders tab columns ----
-  const woColumns = useMemo<Array<DataTableColumn<MaintenanceWorkOrder>>>(() => [
-    {
-      key: 'title',
-      header: 'Title',
-      sortable: true,
-      className: 'font-medium',
-      accessor: (wo) => wo.title,
-    },
-    {
-      key: 'work_center',
-      header: 'Work Center',
-      sortable: true,
-      accessor: (wo) => wo.work_center_name || '',
-      render: (wo) => wo.work_center_name || '-',
-    },
-    {
-      key: 'type',
-      header: 'Type',
-      sortable: true,
-      className: 'capitalize',
-      accessor: (wo) => wo.maintenance_type,
-    },
-    {
-      key: 'priority',
-      header: 'Priority',
-      sortable: true,
-      accessor: (wo) => wo.priority,
-      render: (wo) => <StatusBadge status={wo.priority} colorMap={priorityBadgeColors} />,
-    },
-    {
-      key: 'status',
-      header: 'Status',
-      sortable: true,
-      accessor: (wo) => wo.status,
-      render: (wo) => <StatusBadge status={wo.status} />,
-    },
-    {
-      key: 'scheduled',
-      header: 'Scheduled',
-      sortable: true,
-      accessor: (wo) => wo.scheduled_date || '',
-      csv: (wo) => (wo.scheduled_date ? formatCentralDate(wo.scheduled_date) : ''),
-      render: (wo) => (wo.scheduled_date ? formatCentralDate(wo.scheduled_date) : '-'),
-    },
-    {
-      key: 'actions',
-      header: 'Actions',
-      render: woRowActions,
-    },
-  ], [woRowActions]);
+  const woColumns = useMemo<Array<DataTableColumn<MaintenanceWorkOrder>>>(
+    () => [
+      {
+        key: 'title',
+        header: 'Title',
+        sortable: true,
+        className: 'font-medium',
+        accessor: wo => wo.title,
+      },
+      {
+        key: 'work_center',
+        header: 'Work Center',
+        sortable: true,
+        accessor: wo => wo.work_center_name || '',
+        render: wo => wo.work_center_name || '-',
+      },
+      {
+        key: 'type',
+        header: 'Type',
+        sortable: true,
+        className: 'capitalize',
+        accessor: wo => wo.maintenance_type,
+      },
+      {
+        key: 'priority',
+        header: 'Priority',
+        sortable: true,
+        accessor: wo => wo.priority,
+        render: wo => <StatusBadge status={wo.priority} colorMap={priorityBadgeColors} />,
+      },
+      {
+        key: 'status',
+        header: 'Status',
+        sortable: true,
+        accessor: wo => wo.status,
+        render: wo => <StatusBadge status={wo.status} />,
+      },
+      {
+        key: 'scheduled',
+        header: 'Scheduled',
+        sortable: true,
+        accessor: wo => wo.scheduled_date || '',
+        csv: wo => (wo.scheduled_date ? formatCentralDate(wo.scheduled_date) : ''),
+        render: wo => (wo.scheduled_date ? formatCentralDate(wo.scheduled_date) : '-'),
+      },
+      {
+        key: 'actions',
+        header: 'Actions',
+        render: woRowActions,
+      },
+    ],
+    [woRowActions]
+  );
 
-  const renderWOCard = useCallback((wo: MaintenanceWorkOrder) => (
-    <MobileDataCard
-      title={wo.title}
-      subtitle={wo.work_center_name || undefined}
-      badge={<StatusBadge status={wo.status} />}
-      fields={[
-        { label: 'Type', value: <span className="capitalize">{wo.maintenance_type}</span> },
-        { label: 'Priority', value: <StatusBadge status={wo.priority} colorMap={priorityBadgeColors} /> },
-        { label: 'Scheduled', value: wo.scheduled_date ? formatCentralDate(wo.scheduled_date) : '-' },
-      ]}
-      actions={
-        (wo.status === 'open' || wo.status === 'in_progress') ? woRowActions(wo) : undefined
-      }
-    />
-  ), [woRowActions]);
+  const renderWOCard = useCallback(
+    (wo: MaintenanceWorkOrder) => (
+      <MobileDataCard
+        title={wo.title}
+        subtitle={wo.work_center_name || undefined}
+        badge={<StatusBadge status={wo.status} />}
+        fields={[
+          { label: 'Type', value: <span className="capitalize">{wo.maintenance_type}</span> },
+          { label: 'Priority', value: <StatusBadge status={wo.priority} colorMap={priorityBadgeColors} /> },
+          { label: 'Scheduled', value: wo.scheduled_date ? formatCentralDate(wo.scheduled_date) : '-' },
+        ]}
+        actions={wo.status === 'open' || wo.status === 'in_progress' ? woRowActions(wo) : undefined}
+      />
+    ),
+    [woRowActions]
+  );
 
   // ---- Schedules tab columns ----
-  const scheduleColumns = useMemo<Array<DataTableColumn<MaintenanceSchedule>>>(() => [
-    {
-      key: 'work_center',
-      header: 'Work Center',
-      sortable: true,
-      className: 'font-medium',
-      accessor: (s) => s.work_center_name || `WC #${s.work_center_id}`,
-    },
-    {
-      key: 'type',
-      header: 'Type',
-      sortable: true,
-      className: 'capitalize',
-      accessor: (s) => s.maintenance_type,
-    },
-    {
-      key: 'frequency',
-      header: 'Frequency',
-      sortable: true,
-      className: 'capitalize',
-      accessor: (s) => s.frequency,
-      csv: (s) => `${s.frequency}${s.frequency_value ? ` (${s.frequency_value})` : ''}`,
-      render: (s) => `${s.frequency}${s.frequency_value ? ` (${s.frequency_value})` : ''}`,
-    },
-    {
-      key: 'description',
-      header: 'Description',
-      accessor: (s) => s.description,
-      className: 'max-w-xs truncate',
-      render: (s) => <span className="block max-w-xs truncate">{s.description}</span>,
-    },
-    {
-      key: 'duration',
-      header: 'Est. Duration',
-      sortable: true,
-      align: 'right',
-      accessor: (s) => s.estimated_duration_hours,
-      csv: (s) => `${s.estimated_duration_hours}h`,
-      render: (s) => `${s.estimated_duration_hours}h`,
-    },
-    {
-      key: 'last_performed',
-      header: 'Last Performed',
-      sortable: true,
-      accessor: (s) => s.last_performed_at || '',
-      csv: (s) => (s.last_performed_at ? formatCentralDate(s.last_performed_at) : ''),
-      render: (s) => (s.last_performed_at ? formatCentralDate(s.last_performed_at) : '-'),
-    },
-    {
-      key: 'next_due',
-      header: 'Next Due',
-      sortable: true,
-      accessor: (s) => s.next_due_date || '',
-      csv: (s) => (s.next_due_date ? formatCentralDate(s.next_due_date) : ''),
-      render: (s) =>
-        s.next_due_date ? (
-          <span className={(toDate(s.next_due_date) ?? new Date()) < new Date() ? 'text-red-600 font-medium' : ''}>
-            {formatCentralDate(s.next_due_date)}
-          </span>
-        ) : (
-          '-'
-        ),
-    },
-    {
-      key: 'active',
-      header: 'Active',
-      sortable: true,
-      accessor: (s) => (s.is_active ? 1 : 0),
-      csv: (s) => (s.is_active ? 'Yes' : 'No'),
-      render: (s) =>
-        s.is_active ? (
-          <CheckCircleIcon className="w-5 h-5 text-green-500" />
-        ) : (
-          <XMarkIcon className="w-5 h-5 text-slate-400" />
-        ),
-    },
-  ], []);
-
-  const renderScheduleCard = useCallback((s: MaintenanceSchedule) => (
-    <MobileDataCard
-      title={s.work_center_name || `WC #${s.work_center_id}`}
-      subtitle={s.description || undefined}
-      badge={
-        <StatusBadge
-          status={s.is_active ? 'active' : 'inactive'}
-          colorMap={{ active: 'bg-green-500/20 text-green-300', inactive: 'bg-slate-800/50 text-slate-400' }}
-        />
-      }
-      fields={[
-        { label: 'Type', value: <span className="capitalize">{s.maintenance_type}</span> },
-        { label: 'Frequency', value: <span className="capitalize">{s.frequency}{s.frequency_value ? ` (${s.frequency_value})` : ''}</span> },
-        { label: 'Est. Duration', value: `${s.estimated_duration_hours}h` },
-        {
-          label: 'Next Due',
-          value: s.next_due_date ? (
+  const scheduleColumns = useMemo<Array<DataTableColumn<MaintenanceSchedule>>>(
+    () => [
+      {
+        key: 'work_center',
+        header: 'Work Center',
+        sortable: true,
+        className: 'font-medium',
+        accessor: s => s.work_center_name || `WC #${s.work_center_id}`,
+      },
+      {
+        key: 'type',
+        header: 'Type',
+        sortable: true,
+        className: 'capitalize',
+        accessor: s => s.maintenance_type,
+      },
+      {
+        key: 'frequency',
+        header: 'Frequency',
+        sortable: true,
+        className: 'capitalize',
+        accessor: s => s.frequency,
+        csv: s => `${s.frequency}${s.frequency_value ? ` (${s.frequency_value})` : ''}`,
+        render: s => `${s.frequency}${s.frequency_value ? ` (${s.frequency_value})` : ''}`,
+      },
+      {
+        key: 'description',
+        header: 'Description',
+        accessor: s => s.description,
+        className: 'max-w-xs truncate',
+        render: s => <span className="block max-w-xs truncate">{s.description}</span>,
+      },
+      {
+        key: 'duration',
+        header: 'Est. Duration',
+        sortable: true,
+        align: 'right',
+        accessor: s => s.estimated_duration_hours,
+        csv: s => `${s.estimated_duration_hours}h`,
+        render: s => `${s.estimated_duration_hours}h`,
+      },
+      {
+        key: 'last_performed',
+        header: 'Last Performed',
+        sortable: true,
+        accessor: s => s.last_performed_at || '',
+        csv: s => (s.last_performed_at ? formatCentralDate(s.last_performed_at) : ''),
+        render: s => (s.last_performed_at ? formatCentralDate(s.last_performed_at) : '-'),
+      },
+      {
+        key: 'next_due',
+        header: 'Next Due',
+        sortable: true,
+        accessor: s => s.next_due_date || '',
+        csv: s => (s.next_due_date ? formatCentralDate(s.next_due_date) : ''),
+        render: s =>
+          s.next_due_date ? (
             <span className={(toDate(s.next_due_date) ?? new Date()) < new Date() ? 'text-red-600 font-medium' : ''}>
               {formatCentralDate(s.next_due_date)}
             </span>
           ) : (
             '-'
           ),
-        },
-      ]}
-    />
-  ), []);
+      },
+      {
+        key: 'active',
+        header: 'Active',
+        sortable: true,
+        accessor: s => (s.is_active ? 1 : 0),
+        csv: s => (s.is_active ? 'Yes' : 'No'),
+        render: s =>
+          s.is_active ? (
+            <CheckCircleIcon className="w-5 h-5 text-green-500" />
+          ) : (
+            <XMarkIcon className="w-5 h-5 text-slate-400" />
+          ),
+      },
+    ],
+    []
+  );
+
+  const renderScheduleCard = useCallback(
+    (s: MaintenanceSchedule) => (
+      <MobileDataCard
+        title={s.work_center_name || `WC #${s.work_center_id}`}
+        subtitle={s.description || undefined}
+        badge={
+          <StatusBadge
+            status={s.is_active ? 'active' : 'inactive'}
+            colorMap={{ active: 'bg-green-500/20 text-green-300', inactive: 'bg-slate-800/50 text-slate-400' }}
+          />
+        }
+        fields={[
+          { label: 'Type', value: <span className="capitalize">{s.maintenance_type}</span> },
+          {
+            label: 'Frequency',
+            value: (
+              <span className="capitalize">
+                {s.frequency}
+                {s.frequency_value ? ` (${s.frequency_value})` : ''}
+              </span>
+            ),
+          },
+          { label: 'Est. Duration', value: `${s.estimated_duration_hours}h` },
+          {
+            label: 'Next Due',
+            value: s.next_due_date ? (
+              <span className={(toDate(s.next_due_date) ?? new Date()) < new Date() ? 'text-red-600 font-medium' : ''}>
+                {formatCentralDate(s.next_due_date)}
+              </span>
+            ) : (
+              '-'
+            ),
+          },
+        ]}
+      />
+    ),
+    []
+  );
 
   if (loading) {
-    return <div className="p-6"><div className="animate-pulse space-y-4"><div className="h-8 bg-gray-200 rounded w-1/4" /><div className="grid grid-cols-4 gap-4">{[...Array(4)].map((_, i) => <div key={i} className="h-24 bg-gray-200 rounded" />)}</div><div className="h-64 bg-gray-200 rounded" /></div></div>;
+    return (
+      <div className="p-6">
+        <div className="animate-pulse space-y-4">
+          <div className="h-8 bg-gray-200 rounded w-1/4" />
+          <div className="grid grid-cols-4 gap-4">
+            {[...Array(4)].map((_, i) => (
+              <div key={i} className="h-24 bg-gray-200 rounded" />
+            ))}
+          </div>
+          <div className="h-64 bg-gray-200 rounded" />
+        </div>
+      </div>
+    );
   }
 
   if (error) {
@@ -402,11 +542,17 @@ export default function Maintenance() {
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Preventive Maintenance</h1>
         <div className="flex gap-2">
-          <Button variant="secondary" onClick={() => setShowCreateScheduleModal(true)} className="inline-flex items-center">
-            <CalendarDaysIcon className="w-4 h-4 mr-1" />New Schedule
+          <Button
+            variant="secondary"
+            onClick={() => setShowCreateScheduleModal(true)}
+            className="inline-flex items-center"
+          >
+            <CalendarDaysIcon className="w-4 h-4 mr-1" />
+            New Schedule
           </Button>
           <Button onClick={() => setShowCreateWOModal(true)} className="inline-flex items-center">
-            <PlusIcon className="w-5 h-5 mr-2" />New Work Order
+            <PlusIcon className="w-5 h-5 mr-2" />
+            New Work Order
           </Button>
         </div>
       </div>
@@ -450,8 +596,11 @@ export default function Maintenance() {
       <div className="border-b border-slate-700">
         <nav className="flex -mb-px space-x-6">
           {(['dashboard', 'schedules', 'work_orders'] as Tab[]).map(tab => (
-            <button key={tab} onClick={() => setActiveTab(tab)}
-              className={`py-3 px-1 border-b-2 text-sm font-medium capitalize ${activeTab === tab ? 'border-blue-500 text-blue-600' : 'border-transparent text-slate-400 hover:text-slate-300'}`}>
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`py-3 px-1 border-b-2 text-sm font-medium capitalize ${activeTab === tab ? 'border-blue-500 text-blue-600' : 'border-transparent text-slate-400 hover:text-slate-300'}`}
+            >
               {tab.replace(/_/g, ' ')}
             </button>
           ))}
@@ -468,9 +617,18 @@ export default function Maintenance() {
                 <div key={i} className="bg-fd-panel rounded-lg shadow p-4 border-l-4 border-blue-400">
                   <div className="font-medium">{item.title || item.description}</div>
                   <div className="text-sm text-slate-400 mt-1">{item.work_center_name}</div>
-                  <div className="text-sm text-slate-400 mt-1">Due: {item.next_due_date ? formatCentralDate(item.next_due_date) : item.scheduled_date ? formatCentralDate(item.scheduled_date) : '-'}</div>
+                  <div className="text-sm text-slate-400 mt-1">
+                    Due:{' '}
+                    {item.next_due_date
+                      ? formatCentralDate(item.next_due_date)
+                      : item.scheduled_date
+                        ? formatCentralDate(item.scheduled_date)
+                        : '-'}
+                  </div>
                   <div className="mt-2">
-                    <span className={`text-xs px-2 py-1 rounded-full ${item.maintenance_type === 'preventive' ? 'bg-blue-500/20 text-blue-400' : 'bg-orange-500/20 text-orange-700'}`}>
+                    <span
+                      className={`text-xs px-2 py-1 rounded-full ${item.maintenance_type === 'preventive' ? 'bg-blue-500/20 text-blue-400' : 'bg-orange-500/20 text-orange-700'}`}
+                    >
                       {item.maintenance_type}
                     </span>
                   </div>
@@ -505,7 +663,9 @@ export default function Maintenance() {
                     <td className="px-4 py-3">{wo.work_center_name || '-'}</td>
                     <td className="px-4 py-3 capitalize">{wo.maintenance_type}</td>
                     <td className="px-4 py-3">
-                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${priorityColors[wo.priority]?.bg || 'bg-slate-800/50'} ${priorityColors[wo.priority]?.text || ''}`}>
+                      <span
+                        className={`px-2 py-1 rounded-full text-xs font-medium ${priorityColors[wo.priority]?.bg || 'bg-slate-800/50'} ${priorityColors[wo.priority]?.text || ''}`}
+                      >
                         {wo.priority}
                       </span>
                     </td>
@@ -514,7 +674,9 @@ export default function Maintenance() {
                         {wo.status?.replace(/_/g, ' ')}
                       </span>
                     </td>
-                    <td className="px-4 py-3">{wo.scheduled_date ? formatCentralDate(wo.scheduled_date) : formatCentralDate(wo.created_at)}</td>
+                    <td className="px-4 py-3">
+                      {wo.scheduled_date ? formatCentralDate(wo.scheduled_date) : formatCentralDate(wo.created_at)}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -528,7 +690,7 @@ export default function Maintenance() {
         <DataTable
           columns={scheduleColumns}
           data={schedules}
-          rowKey={(s) => s.id}
+          rowKey={s => s.id}
           defaultSort={{ key: 'next_due', dir: 'asc' }}
           pageSize={25}
           csvExport={{ filename: 'maintenance-schedules' }}
@@ -548,11 +710,20 @@ export default function Maintenance() {
           <div className="flex gap-3 flex-wrap">
             <div className="relative flex-1 min-w-[200px]">
               <MagnifyingGlassIcon className="absolute left-3 top-2.5 w-5 h-5 text-slate-400" />
-              <input type="text" placeholder="Search..." value={search} onChange={e => setSearch(e.target.value)}
+              <input
+                type="text"
+                placeholder="Search..."
+                value={search}
+                onChange={e => setSearch(e.target.value)}
                 aria-label="Search work orders"
-                className="w-full pl-10 pr-4 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500" />
+                className="w-full pl-10 pr-4 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500"
+              />
             </div>
-            <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className="px-3 py-2 border border-slate-600 rounded-lg">
+            <select
+              value={statusFilter}
+              onChange={e => setStatusFilter(e.target.value)}
+              className="px-3 py-2 border border-slate-600 rounded-lg"
+            >
               <option value="">All Statuses</option>
               <option value="open">Open</option>
               <option value="in_progress">In Progress</option>
@@ -564,7 +735,7 @@ export default function Maintenance() {
           <DataTable
             columns={woColumns}
             data={filteredWOs}
-            rowKey={(wo) => wo.id}
+            rowKey={wo => wo.id}
             defaultSort={{ key: 'scheduled', dir: 'desc' }}
             pageSize={25}
             csvExport={{ filename: 'maintenance-work-orders' }}
@@ -586,157 +757,335 @@ export default function Maintenance() {
       )}
 
       {/* Create Schedule Modal */}
-      <Modal open={showCreateScheduleModal} onClose={() => setShowCreateScheduleModal(false)} size="lg" scroll={false} padded={false} closeOnBackdrop={false}>
-            <div className="flex justify-between items-center p-4 border-b">
-              <h3 className="text-lg font-semibold">New Maintenance Schedule</h3>
-              <button onClick={() => setShowCreateScheduleModal(false)} aria-label="Close dialog"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
-            </div>
-            <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
-              <FormField label="Work Center ID" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
-                  <input {...field} type="number" value={scheduleForm.work_center_id} onChange={e => setScheduleForm(f => ({ ...f, work_center_id: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                )}
-              </FormField>
-              <div className="grid grid-cols-2 gap-3">
-                <FormField label="Type" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
-                    <select {...field} value={scheduleForm.maintenance_type} onChange={e => setScheduleForm(f => ({ ...f, maintenance_type: e.target.value }))} className="w-full px-3 py-2 border rounded-lg">
-                      <option value="preventive">Preventive</option>
-                      <option value="predictive">Predictive</option>
-                      <option value="calibration">Calibration</option>
-                      <option value="inspection">Inspection</option>
-                      <option value="lubrication">Lubrication</option>
-                    </select>
-                  )}
-                </FormField>
-                <FormField label="Frequency" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
-                    <select {...field} value={scheduleForm.frequency} onChange={e => setScheduleForm(f => ({ ...f, frequency: e.target.value }))} className="w-full px-3 py-2 border rounded-lg">
-                      <option value="daily">Daily</option>
-                      <option value="weekly">Weekly</option>
-                      <option value="biweekly">Bi-weekly</option>
-                      <option value="monthly">Monthly</option>
-                      <option value="quarterly">Quarterly</option>
-                      <option value="semi_annual">Semi-Annual</option>
-                      <option value="annual">Annual</option>
-                      <option value="usage_based">Usage Based</option>
-                    </select>
-                  )}
-                </FormField>
-              </div>
-              <FormField label="Description" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
-                  <textarea {...field} value={scheduleForm.description} onChange={e => setScheduleForm(f => ({ ...f, description: e.target.value }))} rows={3} className="w-full px-3 py-2 border rounded-lg" />
-                )}
-              </FormField>
-              <FormField label="Checklist" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
-                  <textarea {...field} value={scheduleForm.checklist} onChange={e => setScheduleForm(f => ({ ...f, checklist: e.target.value }))} rows={3} className="w-full px-3 py-2 border rounded-lg" placeholder="One item per line" />
-                )}
-              </FormField>
-              <FormField label="Est. Duration (hours)" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
-                  <input {...field} type="number" step="0.5" value={scheduleForm.estimated_duration_hours} onChange={e => setScheduleForm(f => ({ ...f, estimated_duration_hours: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                )}
-              </FormField>
-            </div>
-            <div className="flex justify-end gap-2 p-4 border-t">
-              <Button variant="secondary" onClick={() => setShowCreateScheduleModal(false)}>Cancel</Button>
-              <Button onClick={handleCreateSchedule} disabled={!scheduleForm.work_center_id || !scheduleForm.description}>Create</Button>
-            </div>
+      <Modal
+        open={showCreateScheduleModal}
+        onClose={() => setShowCreateScheduleModal(false)}
+        size="lg"
+        scroll={false}
+        padded={false}
+        closeOnBackdrop={false}
+      >
+        {actionError && (
+          <p role="alert" className="text-red-300 p-3">
+            {actionError}
+          </p>
+        )}
+        {actionBusy && (
+          <p role="status" className="text-slate-400 p-3">
+            Saving…
+          </p>
+        )}
+        <div className="flex justify-between items-center p-4 border-b">
+          <h3 className="text-lg font-semibold">New Maintenance Schedule</h3>
+          <button onClick={() => setShowCreateScheduleModal(false)} aria-label="Close dialog">
+            <XMarkIcon className="w-5 h-5" aria-hidden="true" />
+          </button>
+        </div>
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
+          <FormField label="Work Center" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+            {field => (
+              <EntityPicker
+                {...field}
+                kind="workCenter"
+                value={scheduleForm.work_center_id}
+                onChange={value => setScheduleForm(f => ({ ...f, work_center_id: value }))}
+              />
+            )}
+          </FormField>
+          <div className="grid grid-cols-2 gap-3">
+            <FormField label="Type" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+              {field => (
+                <select
+                  {...field}
+                  value={scheduleForm.maintenance_type}
+                  onChange={e => setScheduleForm(f => ({ ...f, maintenance_type: e.target.value }))}
+                  className="w-full px-3 py-2 border rounded-lg"
+                >
+                  <option value="preventive">Preventive</option>
+                  <option value="predictive">Predictive</option>
+                  <option value="calibration">Calibration</option>
+                  <option value="inspection">Inspection</option>
+                  <option value="lubrication">Lubrication</option>
+                </select>
+              )}
+            </FormField>
+            <FormField label="Frequency" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+              {field => (
+                <select
+                  {...field}
+                  value={scheduleForm.frequency}
+                  onChange={e => setScheduleForm(f => ({ ...f, frequency: e.target.value }))}
+                  className="w-full px-3 py-2 border rounded-lg"
+                >
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="biweekly">Bi-weekly</option>
+                  <option value="monthly">Monthly</option>
+                  <option value="quarterly">Quarterly</option>
+                  <option value="semi_annual">Semi-Annual</option>
+                  <option value="annual">Annual</option>
+                  <option value="usage_based">Usage Based</option>
+                </select>
+              )}
+            </FormField>
+          </div>
+          <FormField label="Frequency interval" required>
+            {field => (
+              <input
+                {...field}
+                className="input"
+                type="number"
+                min="1"
+                value={scheduleForm.frequency_value}
+                onChange={e => setScheduleForm(f => ({ ...f, frequency_value: e.target.value }))}
+              />
+            )}
+          </FormField>
+          <FormField label="Description" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+            {field => (
+              <textarea
+                {...field}
+                value={scheduleForm.description}
+                onChange={e => setScheduleForm(f => ({ ...f, description: e.target.value }))}
+                rows={3}
+                className="w-full px-3 py-2 border rounded-lg"
+              />
+            )}
+          </FormField>
+          <FormField label="Checklist" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+            {field => (
+              <textarea
+                {...field}
+                value={scheduleForm.checklist}
+                onChange={e => setScheduleForm(f => ({ ...f, checklist: e.target.value }))}
+                rows={3}
+                className="w-full px-3 py-2 border rounded-lg"
+                placeholder="One item per line"
+              />
+            )}
+          </FormField>
+          <FormField label="Est. Duration (hours)" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+            {field => (
+              <input
+                {...field}
+                type="number"
+                step="0.5"
+                value={scheduleForm.estimated_duration_hours}
+                onChange={e => setScheduleForm(f => ({ ...f, estimated_duration_hours: e.target.value }))}
+                className="w-full px-3 py-2 border rounded-lg"
+              />
+            )}
+          </FormField>
+        </div>
+        <div className="flex justify-end gap-2 p-4 border-t">
+          <Button variant="secondary" onClick={() => setShowCreateScheduleModal(false)}>
+            Cancel
+          </Button>
+          <Button
+            onClick={handleCreateSchedule}
+            disabled={actionBusy || !scheduleForm.work_center_id || !scheduleForm.description}
+          >
+            Create
+          </Button>
+        </div>
       </Modal>
 
       {/* Create Work Order Modal */}
-      <Modal open={showCreateWOModal} onClose={() => setShowCreateWOModal(false)} size="lg" scroll={false} padded={false} closeOnBackdrop={false}>
-            <div className="flex justify-between items-center p-4 border-b">
-              <h3 className="text-lg font-semibold">New Maintenance Work Order</h3>
-              <button onClick={() => setShowCreateWOModal(false)} aria-label="Close dialog"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
-            </div>
-            <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
-              <FormField label="Title" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
-                  <input {...field} type="text" value={woForm.title} onChange={e => setWoForm(f => ({ ...f, title: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                )}
-              </FormField>
-              <FormField label="Work Center ID" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
-                  <input {...field} type="number" value={woForm.work_center_id} onChange={e => setWoForm(f => ({ ...f, work_center_id: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                )}
-              </FormField>
-              <div className="grid grid-cols-3 gap-3">
-                <FormField label="Type" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
-                    <select {...field} value={woForm.maintenance_type} onChange={e => setWoForm(f => ({ ...f, maintenance_type: e.target.value }))} className="w-full px-3 py-2 border rounded-lg">
-                      <option value="preventive">Preventive</option>
-                      <option value="corrective">Corrective</option>
-                      <option value="predictive">Predictive</option>
-                      <option value="emergency">Emergency</option>
-                    </select>
-                  )}
-                </FormField>
-                <FormField label="Priority" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
-                    <select {...field} value={woForm.priority} onChange={e => setWoForm(f => ({ ...f, priority: e.target.value }))} className="w-full px-3 py-2 border rounded-lg">
-                      <option value="low">Low</option>
-                      <option value="medium">Medium</option>
-                      <option value="high">High</option>
-                      <option value="critical">Critical</option>
-                      <option value="emergency">Emergency</option>
-                    </select>
-                  )}
-                </FormField>
-                <FormField label="Scheduled Date" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
-                    <input {...field} type="date" value={woForm.scheduled_date} onChange={e => setWoForm(f => ({ ...f, scheduled_date: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                  )}
-                </FormField>
-              </div>
-              <FormField label="Description" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
-                  <textarea {...field} value={woForm.description} onChange={e => setWoForm(f => ({ ...f, description: e.target.value }))} rows={3} className="w-full px-3 py-2 border rounded-lg" />
-                )}
-              </FormField>
-            </div>
-            <div className="flex justify-end gap-2 p-4 border-t">
-              <Button variant="secondary" onClick={() => setShowCreateWOModal(false)}>Cancel</Button>
-              <Button onClick={handleCreateWO} disabled={!woForm.title || !woForm.work_center_id}>Create</Button>
-            </div>
+      <Modal
+        open={showCreateWOModal}
+        onClose={() => setShowCreateWOModal(false)}
+        size="lg"
+        scroll={false}
+        padded={false}
+        closeOnBackdrop={false}
+      >
+        {actionError && (
+          <p role="alert" className="text-red-300 p-3">
+            {actionError}
+          </p>
+        )}
+        {actionBusy && (
+          <p role="status" className="text-slate-400 p-3">
+            Saving…
+          </p>
+        )}
+        <div className="flex justify-between items-center p-4 border-b">
+          <h3 className="text-lg font-semibold">New Maintenance Work Order</h3>
+          <button onClick={() => setShowCreateWOModal(false)} aria-label="Close dialog">
+            <XMarkIcon className="w-5 h-5" aria-hidden="true" />
+          </button>
+        </div>
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
+          <FormField label="Title" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+            {field => (
+              <input
+                {...field}
+                type="text"
+                value={woForm.title}
+                onChange={e => setWoForm(f => ({ ...f, title: e.target.value }))}
+                className="w-full px-3 py-2 border rounded-lg"
+              />
+            )}
+          </FormField>
+          <FormField label="Work Center" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+            {field => (
+              <EntityPicker
+                {...field}
+                kind="workCenter"
+                value={woForm.work_center_id}
+                onChange={value => setWoForm(f => ({ ...f, work_center_id: value }))}
+              />
+            )}
+          </FormField>
+          <div className="grid grid-cols-3 gap-3">
+            <FormField label="Type" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+              {field => (
+                <select
+                  {...field}
+                  value={woForm.maintenance_type}
+                  onChange={e => setWoForm(f => ({ ...f, maintenance_type: e.target.value }))}
+                  className="w-full px-3 py-2 border rounded-lg"
+                >
+                  <option value="preventive">Preventive</option>
+                  <option value="corrective">Corrective</option>
+                  <option value="predictive">Predictive</option>
+                  <option value="emergency">Emergency</option>
+                </select>
+              )}
+            </FormField>
+            <FormField label="Priority" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+              {field => (
+                <select
+                  {...field}
+                  value={woForm.priority}
+                  onChange={e => setWoForm(f => ({ ...f, priority: e.target.value }))}
+                  className="w-full px-3 py-2 border rounded-lg"
+                >
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                  <option value="critical">Critical</option>
+                  <option value="emergency">Emergency</option>
+                </select>
+              )}
+            </FormField>
+            <FormField label="Scheduled Date" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="date"
+                  value={woForm.scheduled_date}
+                  onChange={e => setWoForm(f => ({ ...f, scheduled_date: e.target.value }))}
+                  className="w-full px-3 py-2 border rounded-lg"
+                />
+              )}
+            </FormField>
+          </div>
+          <FormField label="Description" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+            {field => (
+              <textarea
+                {...field}
+                value={woForm.description}
+                onChange={e => setWoForm(f => ({ ...f, description: e.target.value }))}
+                rows={3}
+                className="w-full px-3 py-2 border rounded-lg"
+              />
+            )}
+          </FormField>
+        </div>
+        <div className="flex justify-end gap-2 p-4 border-t">
+          <Button variant="secondary" onClick={() => setShowCreateWOModal(false)}>
+            Cancel
+          </Button>
+          <Button onClick={handleCreateWO} disabled={actionBusy || !woForm.title || !woForm.work_center_id}>
+            Create
+          </Button>
+        </div>
       </Modal>
 
       {/* Complete Work Order Modal */}
-      <Modal open={showCompleteModal && !!selectedWO} onClose={() => setShowCompleteModal(false)} size="md" scroll={false} padded={false} closeOnBackdrop={false}>
-            <div className="flex justify-between items-center p-4 border-b">
-              <h3 className="text-lg font-semibold">Complete: {selectedWO?.title}</h3>
-              <button onClick={() => setShowCompleteModal(false)} aria-label="Close dialog"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
-            </div>
-            <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
-              <FormField label="Completion Notes" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
-                  <textarea {...field} value={completeForm.notes} onChange={e => setCompleteForm(f => ({ ...f, notes: e.target.value }))} rows={3} className="w-full px-3 py-2 border rounded-lg" />
-                )}
-              </FormField>
-              <FormField label="Parts Used" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
-                  <input {...field} type="text" value={completeForm.parts_used} onChange={e => setCompleteForm(f => ({ ...f, parts_used: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                )}
-              </FormField>
-              <div className="grid grid-cols-2 gap-3">
-                <FormField label="Labor Cost ($)" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
-                    <input {...field} type="number" step="0.01" value={completeForm.labor_cost} onChange={e => setCompleteForm(f => ({ ...f, labor_cost: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                  )}
-                </FormField>
-                <FormField label="Parts Cost ($)" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
-                    <input {...field} type="number" step="0.01" value={completeForm.parts_cost} onChange={e => setCompleteForm(f => ({ ...f, parts_cost: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                  )}
-                </FormField>
-              </div>
-            </div>
-            <div className="flex justify-end gap-2 p-4 border-t">
-              <Button variant="secondary" onClick={() => setShowCompleteModal(false)}>Cancel</Button>
-              <Button onClick={handleComplete}>Complete</Button>
-            </div>
+      <Modal
+        open={showCompleteModal && !!selectedWO}
+        onClose={() => setShowCompleteModal(false)}
+        size="md"
+        scroll={false}
+        padded={false}
+        closeOnBackdrop={false}
+      >
+        {actionError && (
+          <p role="alert" className="text-red-300 p-3">
+            {actionError}
+          </p>
+        )}
+        {actionBusy && (
+          <p role="status" className="text-slate-400 p-3">
+            Saving…
+          </p>
+        )}
+        <div className="flex justify-between items-center p-4 border-b">
+          <h3 className="text-lg font-semibold">Complete: {selectedWO?.title}</h3>
+          <button onClick={() => setShowCompleteModal(false)} aria-label="Close dialog">
+            <XMarkIcon className="w-5 h-5" aria-hidden="true" />
+          </button>
+        </div>
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
+          <FormField label="Completion Notes" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+            {field => (
+              <textarea
+                {...field}
+                value={completeForm.notes}
+                onChange={e => setCompleteForm(f => ({ ...f, notes: e.target.value }))}
+                rows={3}
+                className="w-full px-3 py-2 border rounded-lg"
+              />
+            )}
+          </FormField>
+          <FormField label="Parts Used" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+            {field => (
+              <input
+                {...field}
+                type="text"
+                value={completeForm.parts_used}
+                onChange={e => setCompleteForm(f => ({ ...f, parts_used: e.target.value }))}
+                className="w-full px-3 py-2 border rounded-lg"
+              />
+            )}
+          </FormField>
+          <div className="grid grid-cols-2 gap-3">
+            <FormField label="Labor Cost ($)" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="number"
+                  step="0.01"
+                  value={completeForm.labor_cost}
+                  onChange={e => setCompleteForm(f => ({ ...f, labor_cost: e.target.value }))}
+                  className="w-full px-3 py-2 border rounded-lg"
+                />
+              )}
+            </FormField>
+            <FormField label="Parts Cost ($)" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="number"
+                  step="0.01"
+                  value={completeForm.parts_cost}
+                  onChange={e => setCompleteForm(f => ({ ...f, parts_cost: e.target.value }))}
+                  className="w-full px-3 py-2 border rounded-lg"
+                />
+              )}
+            </FormField>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 p-4 border-t">
+          <Button variant="secondary" onClick={() => setShowCompleteModal(false)}>
+            Cancel
+          </Button>
+          <Button onClick={handleComplete} disabled={actionBusy}>
+            Complete
+          </Button>
+        </div>
       </Modal>
     </div>
   );

@@ -1,11 +1,12 @@
 import React, { Suspense } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
+import { createBrowserRouter, RouterProvider, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
+import { UnsavedChangesProvider } from './context/UnsavedChangesContext';
+import { getRouteAccessRequirement } from './utils/routeAccess';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { CompanyProvider } from './context/CompanyContext';
 import { TourProvider } from './context/TourContext';
 import { KeyboardShortcutsProvider } from './context/KeyboardShortcutsContext';
 import { usePermissions } from './hooks/usePermissions';
-import type { Permission } from './utils/permissions';
 import { ToastProvider } from './components/ui/Toast';
 import { TourHighlight } from './components/Tour';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -96,91 +97,6 @@ const PageLoader = () => (
   </div>
 );
 
-interface RouteAccessRequirement {
-  prefix: string;
-  permission?: Permission;
-  anyOf?: Permission[];
-  allOf?: Permission[];
-}
-
-const routeAccessRequirements: RouteAccessRequirement[] = [
-  { prefix: '/admin/settings', permission: 'admin:settings' },
-  { prefix: '/audit-log', permission: 'admin:audit_logs' },
-  { prefix: '/visitor-log', permission: 'visitor_logs:view' },
-  { prefix: '/users', permission: 'users:view' },
-  { prefix: '/work-orders/new', permission: 'work_orders:create' },
-  { prefix: '/work-orders', permission: 'work_orders:view' },
-  { prefix: '/print/traveler', permission: 'work_orders:view' },
-  // Badge printing loads GET /users, which is server-enforced to ADMIN/MANAGER —
-  // gate to the matching admin/manager permissions (canManageUsers), not users:view,
-  // so a Supervisor is not routed into a guaranteed 403.
-  { prefix: '/print/badges', anyOf: ['users:create', 'users:edit'] },
-  { prefix: '/print/purchase-order', permission: 'purchasing:view' },
-  { prefix: '/print/packing-slip', permission: 'shipping:view' },
-  { prefix: '/print/shipping-label', permission: 'shipping:view' },
-  { prefix: '/shop-floor', permission: 'work_orders:view' },
-  { prefix: '/parts', permission: 'parts:view' },
-  // The unit-mismatch worklist is gated ADMIN / MANAGER / SUPERVISOR server-side
-  // (bom.py -> list_bom_uom_mismatches) — the roles that can actually edit a BOM
-  // line or arm `Part.backflush_components`. `boms:edit` is exactly that set, so
-  // a Viewer/Operator with boms:view is not routed into a guaranteed 403.
-  // `getRouteAccessRequirement` picks the LONGEST matching prefix, so this wins
-  // over the `/bom` entry below.
-  { prefix: '/bom/uom-mismatches', permission: 'boms:edit' },
-  { prefix: '/bom', permission: 'boms:view' },
-  { prefix: '/routing', permission: 'routings:view' },
-  { prefix: '/engineering-changes', anyOf: ['parts:view', 'boms:view', 'routings:view'] },
-  { prefix: '/warehouse', anyOf: ['inventory:view', 'receiving:view', 'shipping:view'] },
-  { prefix: '/materials', permission: 'inventory:view' },
-  { prefix: '/inventory', permission: 'inventory:view' },
-  { prefix: '/receiving', permission: 'receiving:view' },
-  { prefix: '/shipping', permission: 'shipping:view' },
-  { prefix: '/purchasing', permission: 'purchasing:view' },
-  { prefix: '/po-upload', permission: 'purchasing:create' },
-  { prefix: '/mrp', permission: 'purchasing:create' },
-  { prefix: '/quality', permission: 'quality:view' },
-  { prefix: '/calibration', permission: 'quality:calibration' },
-  { prefix: '/traceability', permission: 'quality:view' },
-  { prefix: '/spc', permission: 'quality:view' },
-  { prefix: '/customer-complaints', permission: 'quality:view' },
-  { prefix: '/qms-standards', permission: 'quality:view' },
-  { prefix: '/supplier-scorecards', permission: 'purchasing:view' },
-  { prefix: '/quotes', permission: 'purchasing:view' },
-  { prefix: '/nest', permission: 'purchasing:view' },
-  { prefix: '/quote-calculator', permission: 'purchasing:view' },
-  { prefix: '/estimate-workbench', permission: 'purchasing:view' },
-  { prefix: '/shop-data', permission: 'purchasing:view' },
-  { prefix: '/rfq-packages', permission: 'purchasing:create' },
-  { prefix: '/customers', permission: 'purchasing:view' },
-  { prefix: '/scheduling', permission: 'work_orders:view' },
-  // Dispatch Board is a dispatching WRITE tool (it sets the run order operators
-  // see), so it is gated on work_orders:edit — admin / manager / supervisor —
-  // rather than the read-only work_orders:view that Scheduling uses.
-  { prefix: '/dispatch', permission: 'work_orders:edit' },
-  { prefix: '/documents', permission: 'work_orders:view' },
-  { prefix: '/downtime', permission: 'work_orders:view' },
-  { prefix: '/maintenance', permission: 'work_orders:view' },
-  { prefix: '/oee', permission: 'analytics:view' },
-  { prefix: '/tool-management', permission: 'inventory:view' },
-  // Operator Certifications View is open to ALL authenticated roles (RBAC doc); the
-  // backend read endpoints (operator_certifications.py) use get_current_user and only
-  // skill-matrix WRITES require SUPERVISOR. No routeAccessRequirements entry → falls
-  // through to auth-only, so it must NOT depend on users:view (which is admin+manager).
-  { prefix: '/analytics', permission: 'analytics:view' },
-  { prefix: '/reports', permission: 'analytics:view' },
-  { prefix: '/job-costing', permission: 'analytics:view' },
-  { prefix: '/setup', permission: 'admin:settings' },
-  { prefix: '/import-center', permission: 'admin:settings' },
-  { prefix: '/work-centers', permission: 'admin:settings' },
-  { prefix: '/custom-fields', permission: 'admin:settings' },
-];
-
-function getRouteAccessRequirement(pathname: string): RouteAccessRequirement | undefined {
-  return routeAccessRequirements
-    .filter(requirement => pathname === requirement.prefix || pathname.startsWith(`${requirement.prefix}/`))
-    .sort((a, b) => b.prefix.length - a.prefix.length)[0];
-}
-
 /**
  * Legacy notification / QMS-evidence deep links.
  *
@@ -249,13 +165,13 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth();
   const location = useLocation();
   const { can, canAny, canAll } = usePermissions();
-  
+
   if (isLoading) {
     return <LoadingOverlay message="Authenticating..." />;
   }
 
   if (!isAuthenticated) {
-    return <Navigate to="/login" />;
+    return <Navigate to="/login" state={{ from: location.pathname + location.search + location.hash }} replace />;
   }
 
   const requirement = getRouteAccessRequirement(location.pathname);
@@ -273,24 +189,26 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
 }
 
 function AdminRoute({ children }: { children: React.ReactNode }) {
+  const location = useLocation();
   const { user, isAuthenticated, isLoading } = useAuth();
-  
+
   if (isLoading) {
     return <LoadingOverlay message="Authenticating..." />;
   }
-  
+
   if (!isAuthenticated) {
-    return <Navigate to="/login" />;
+    return <Navigate to="/login" state={{ from: location.pathname + location.search + location.hash }} replace />;
   }
-  
+
   if (user?.role !== 'admin' && user?.role !== 'platform_admin' && !user?.is_superuser) {
     return <Navigate to="/unauthorized" />;
   }
-  
+
   return <>{children}</>;
 }
 
 function PlatformAdminRoute({ children }: { children: React.ReactNode }) {
+  const location = useLocation();
   const { user, isAuthenticated, isLoading } = useAuth();
 
   if (isLoading) {
@@ -298,7 +216,7 @@ function PlatformAdminRoute({ children }: { children: React.ReactNode }) {
   }
 
   if (!isAuthenticated) {
-    return <Navigate to="/login" />;
+    return <Navigate to="/login" state={{ from: location.pathname + location.search + location.hash }} replace />;
   }
 
   if (user?.role !== 'platform_admin' && !user?.is_superuser) {
@@ -329,7 +247,6 @@ function KioskGuard({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-
 /**
  * /kiosk mode dispatcher: ?station=<id> selects the crew-station kiosk
  * (shared-PIN station auth, multi-operator roster); ?work_center_id=N keeps
@@ -342,11 +259,7 @@ function KioskRouteDispatcher() {
 
 // Wrapper for lazy-loaded routes with Suspense
 function LazyRoute({ children }: { children: React.ReactNode }) {
-  return (
-    <Suspense fallback={<PageLoader />}>
-      {children}
-    </Suspense>
-  );
+  return <Suspense fallback={<PageLoader />}>{children}</Suspense>;
 }
 
 function AppRoutes() {
@@ -358,237 +271,387 @@ function AppRoutes() {
 
   return (
     <ErrorBoundary level="page" name="AppRoutes">
-    <Routes>
-      <Route path="/login" element={<Login />} />
-      <Route path="/register" element={<Register />} />
-      <Route path="/register-company" element={<CompanyRegister />} />
-      <Route path="/unauthorized" element={<Unauthorized />} />
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+        <Route path="/register-company" element={<CompanyRegister />} />
+        <Route path="/unauthorized" element={<Unauthorized />} />
 
-      {/* TV wallboard (A0.5) — full-screen, NO Layout chrome, NO PrivateRoute.
+        {/* TV wallboard (A0.5) — full-screen, NO Layout chrome, NO PrivateRoute.
           Auth is a scoped display token via ?token= (or a signed-in session);
           the backend endpoint rejects anything else. */}
-      <Route path="/wallboard" element={<LazyRoute><Wallboard /></LazyRoute>} />
+        <Route
+          path="/wallboard"
+          element={
+            <LazyRoute>
+              <Wallboard />
+            </LazyRoute>
+          }
+        />
 
-      {/* TV pairing — full-screen, NO Layout chrome, NO PrivateRoute. Safe as a
+        {/* TV pairing — full-screen, NO Layout chrome, NO PrivateRoute. Safe as a
           TV's browser homepage: already-paired displays bounce straight to
           /wallboard; otherwise an 8-char setup code (issued in Admin Settings →
           Wallboard Displays) is claimed via the PUBLIC single-use claim endpoint. */}
-      <Route path="/tv" element={<LazyRoute><TvPair /></LazyRoute>} />
-      <Route path="/tv/:code" element={<LazyRoute><TvPair /></LazyRoute>} />
+        <Route
+          path="/tv"
+          element={
+            <LazyRoute>
+              <TvPair />
+            </LazyRoute>
+          }
+        />
+        <Route
+          path="/tv/:code"
+          element={
+            <LazyRoute>
+              <TvPair />
+            </LazyRoute>
+          }
+        />
 
-      {/* Visitor sign-in tablet — full-screen, NO Layout chrome, NO PrivateRoute.
+        {/* Visitor sign-in tablet — full-screen, NO Layout chrome, NO PrivateRoute.
           Auth is a shared-PIN station token minted via POST /visitor-logs/station-login;
           the backend write endpoints reject anything else. */}
-      <Route path="/visitor-signin" element={<LazyRoute><VisitorSignIn /></LazyRoute>} />
+        <Route
+          path="/visitor-signin"
+          element={
+            <LazyRoute>
+              <VisitorSignIn />
+            </LazyRoute>
+          }
+        />
 
-      {/* Platform Administration (platform admin only) */}
-      <Route path="/platform" element={
-        <PlatformAdminRoute>
-          <Layout>
-            <LazyRoute><PlatformOverview /></LazyRoute>
-          </Layout>
-        </PlatformAdminRoute>
-      } />
-      
-      {/* Dashboard - eagerly loaded */}
-      <Route path="/" element={
-        <PrivateRoute>
-          {user?.role === 'operator' ? (
-            <Navigate to="/shop-floor/operations?kiosk=1" replace />
-          ) : (
-            <Layout>
-              <Dashboard />
-            </Layout>
-          )}
-        </PrivateRoute>
-      } />
-      
-      {/* Work Orders */}
-      <Route path="/work-orders" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><WorkOrders /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/work-orders/new" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><WorkOrderNew /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/work-orders/:id" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><WorkOrderDetail /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      
-      {/* Operator kiosk (A0.3) — full-screen, no Layout. Handles its own auth:
+        {/* Platform Administration (platform admin only) */}
+        <Route
+          path="/platform"
+          element={
+            <PlatformAdminRoute>
+              <Layout>
+                <LazyRoute>
+                  <PlatformOverview />
+                </LazyRoute>
+              </Layout>
+            </PlatformAdminRoute>
+          }
+        />
+
+        {/* Dashboard - eagerly loaded */}
+        <Route
+          path="/"
+          element={
+            <PrivateRoute>
+              {user?.role === 'operator' ? (
+                <Navigate to="/shop-floor/operations?kiosk=1" replace />
+              ) : (
+                <Layout>
+                  <Dashboard />
+                </Layout>
+              )}
+            </PrivateRoute>
+          }
+        />
+
+        {/* Work Orders */}
+        <Route
+          path="/work-orders"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <WorkOrders />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/work-orders/new"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <WorkOrderNew />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/work-orders/:id"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <WorkOrderDetail />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+
+        {/* Operator kiosk (A0.3) — full-screen, no Layout. Handles its own auth:
           unauthenticated visitors get the badge-login screen, not a redirect.
           ?station=<id> routes to the crew-station kiosk (shared-PIN station
           auth + per-badge operator tokens); ?work_center_id=N stays the
           single-operator badge-login kiosk. */}
-      <Route path="/kiosk" element={
-        <LazyRoute><KioskRouteDispatcher /></LazyRoute>
-      } />
+        <Route
+          path="/kiosk"
+          element={
+            <LazyRoute>
+              <KioskRouteDispatcher />
+            </LazyRoute>
+          }
+        />
 
-      {/* Shop Floor */}
-      <Route path="/shop-floor" element={
-        <PrivateRoute>
-          <KioskGuard>
-            <Layout>
-              <LazyRoute><ShopFloor /></LazyRoute>
-            </Layout>
-          </KioskGuard>
-        </PrivateRoute>
-      } />
-      <Route path="/shop-floor/operations" element={
-        <PrivateRoute>
-          <KioskGuard>
-            <Layout>
-              <LazyRoute><ShopFloorSimple /></LazyRoute>
-            </Layout>
-          </KioskGuard>
-        </PrivateRoute>
-      } />
-      
-      {/* Work Centers */}
-      <Route path="/work-centers" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><WorkCenters /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      
-      {/* Parts & BOM */}
-      <Route path="/parts" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Parts /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/parts/:id" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><PartDetail /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/parts/:id/edit" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><PartEdit /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/bom" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><BOM /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      {/* Declared AFTER /bom is fine — react-router v6 ranks by specificity, not
+        {/* Shop Floor */}
+        <Route
+          path="/shop-floor"
+          element={
+            <PrivateRoute>
+              <KioskGuard>
+                <Layout>
+                  <LazyRoute>
+                    <ShopFloor />
+                  </LazyRoute>
+                </Layout>
+              </KioskGuard>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/shop-floor/operations"
+          element={
+            <PrivateRoute>
+              <KioskGuard>
+                <Layout>
+                  <LazyRoute>
+                    <ShopFloorSimple />
+                  </LazyRoute>
+                </Layout>
+              </KioskGuard>
+            </PrivateRoute>
+          }
+        />
+
+        {/* Work Centers */}
+        <Route
+          path="/work-centers"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <WorkCenters />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+
+        {/* Parts & BOM */}
+        <Route
+          path="/parts"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Parts />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/parts/:id"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <PartDetail />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/parts/:id/edit"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <PartEdit />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/bom"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <BOM />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        {/* Declared AFTER /bom is fine — react-router v6 ranks by specificity, not
           declaration order — but the access requirement above must stay longest-prefix. */}
-      <Route path="/bom/uom-mismatches" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><BOMUomMismatches /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/routing" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Routing /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      {/* Reads are open to any authenticated user (mirrors the backend);
+        <Route
+          path="/bom/uom-mismatches"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <BOMUomMismatches />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/routing"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Routing />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        {/* Reads are open to any authenticated user (mirrors the backend);
           author/release actions are role-gated inside the page. */}
-      <Route path="/process-sheets" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><ProcessSheets /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/setup" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><SetupWizard /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/import-center" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><ImportCenter /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/action-inbox" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><ActionInbox /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      {/* In-app notification inbox — all authenticated roles (auth-only gate). */}
-      <Route path="/notifications" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Notifications /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      {/* Per-user notification settings (self-scoped) — all authenticated roles. */}
-      <Route path="/settings" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><MySettings /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      
-      {/* Warehouse (unified Inventory + Receiving + Shipping) */}
-      <Route path="/warehouse" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Warehouse /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/materials" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Materials /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      {/* Legacy redirects */}
-      <Route path="/inventory" element={
-        <PrivateRoute>
-          <Navigate to="/warehouse?tab=inventory" replace />
-        </PrivateRoute>
-      } />
-      <Route path="/inventory/parts" element={
-        <PrivateRoute>
-          <Navigate to="/warehouse?tab=inventory&group=parts" replace />
-        </PrivateRoute>
-      } />
-      <Route path="/inventory/materials" element={
-        <PrivateRoute>
-          <Navigate to="/warehouse?tab=inventory&group=materials" replace />
-        </PrivateRoute>
-      } />
+        <Route
+          path="/process-sheets"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <ProcessSheets />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/setup"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <SetupWizard />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/import-center"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <ImportCenter />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/action-inbox"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <ActionInbox />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        {/* In-app notification inbox — all authenticated roles (auth-only gate). */}
+        <Route
+          path="/notifications"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Notifications />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        {/* Per-user notification settings (self-scoped) — all authenticated roles. */}
+        <Route
+          path="/settings"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <MySettings />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
 
-      {/* Legacy notification / evidence deep links — see LegacyDeepLinkRedirect
+        {/* Warehouse (unified Inventory + Receiving + Shipping) */}
+        <Route
+          path="/warehouse"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Warehouse />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/materials"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Materials />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        {/* Legacy redirects */}
+        <Route
+          path="/inventory"
+          element={
+            <PrivateRoute>
+              <Navigate to="/warehouse?tab=inventory" replace />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/inventory/parts"
+          element={
+            <PrivateRoute>
+              <Navigate to="/warehouse?tab=inventory&group=parts" replace />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/inventory/materials"
+          element={
+            <PrivateRoute>
+              <Navigate to="/warehouse?tab=inventory&group=materials" replace />
+            </PrivateRoute>
+          }
+        />
+
+        {/* Legacy notification / evidence deep links — see LegacyDeepLinkRedirect
           above. These are a permanent compatibility guarantee (already-delivered
           emails carry them as absolute URLs), enforced by a backend test that
           parses this file. Do NOT remove them.
@@ -596,421 +659,694 @@ function AppRoutes() {
           matches by longest prefix, so each inherits its parent's permission
           (purchasing:view / quality:view / quality:calibration / shipping:view)
           and every redirect target is equal-or-looser. */}
-      <Route path="/purchasing/:poId" element={
-        <PrivateRoute>
-          <LegacyDeepLinkRedirect resolve={resolveLegacyPurchasing} />
-        </PrivateRoute>
-      } />
-      <Route path="/quality/:legacyTab/:legacyId" element={
-        <PrivateRoute>
-          <LegacyDeepLinkRedirect resolve={resolveLegacyQuality} />
-        </PrivateRoute>
-      } />
-      <Route path="/calibration/:equipmentId" element={
-        <PrivateRoute>
-          <LegacyDeepLinkRedirect resolve={resolveLegacyCalibration} />
-        </PrivateRoute>
-      } />
-      <Route path="/quotes/:quoteId" element={
-        <PrivateRoute>
-          <LegacyDeepLinkRedirect resolve={resolveLegacyQuote} />
-        </PrivateRoute>
-      } />
-      <Route path="/shipping/:shipmentId" element={
-        <PrivateRoute>
-          <LegacyDeepLinkRedirect resolve={resolveLegacyShipping} />
-        </PrivateRoute>
-      } />
+        <Route
+          path="/purchasing/:poId"
+          element={
+            <PrivateRoute>
+              <LegacyDeepLinkRedirect resolve={resolveLegacyPurchasing} />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/quality/:legacyTab/:legacyId"
+          element={
+            <PrivateRoute>
+              <LegacyDeepLinkRedirect resolve={resolveLegacyQuality} />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/calibration/:equipmentId"
+          element={
+            <PrivateRoute>
+              <LegacyDeepLinkRedirect resolve={resolveLegacyCalibration} />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/quotes/:quoteId"
+          element={
+            <PrivateRoute>
+              <LegacyDeepLinkRedirect resolve={resolveLegacyQuote} />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/shipping/:shipmentId"
+          element={
+            <PrivateRoute>
+              <LegacyDeepLinkRedirect resolve={resolveLegacyShipping} />
+            </PrivateRoute>
+          }
+        />
 
-      <Route path="/mrp" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><MRP /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      
-      {/* Quality */}
-      <Route path="/quality" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Quality /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      
-      {/* Custom Fields */}
-      <Route path="/custom-fields" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><CustomFields /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      
-      {/* Purchasing & Receiving */}
-      <Route path="/purchasing" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Purchasing /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/receiving" element={
-        <PrivateRoute>
-          <Navigate to="/warehouse?tab=receiving" replace />
-        </PrivateRoute>
-      } />
-      <Route path="/po-upload" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><POUpload /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      
-      {/* Scheduling */}
-      <Route path="/scheduling" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Scheduling /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
+        <Route
+          path="/mrp"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <MRP />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
 
-      {/* Dispatch Board — manager-controlled run order (write tool) */}
-      <Route path="/dispatch" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><DispatchBoard /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      
-      {/* Documents & Reports */}
-      <Route path="/documents" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Documents /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/reports" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Reports /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      
-      {/* Shipping (redirect to warehouse) */}
-      <Route path="/shipping" element={
-        <PrivateRoute>
-          <Navigate to="/warehouse?tab=shipping" replace />
-        </PrivateRoute>
-      } />
-      
-      <Route path="/nest" element={
-        <PrivateRoute><Layout><LazyRoute><MaterialNesting /></LazyRoute></Layout></PrivateRoute>
-      } />
-      {/* Quotes */}
-      <Route path="/rfq-packages/new" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><RFQQuoting /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/quotes" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Quotes /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/quote-calculator" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><QuoteCalculator /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/estimate-workbench" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><EstimateWorkbench /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/estimate-workbench/:estimateId" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><EstimateWorkbench /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/shop-data" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><ShopData /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      
-      {/* Users & Customers */}
-      <Route path="/users" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Users /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/customers" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Customers /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      
-      
-      {/* Calibration */}
-      <Route path="/calibration" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Calibration /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      
-      {/* Print Pages (no Layout) */}
-      <Route path="/print/traveler/:id" element={
-        <PrivateRoute>
-          <LazyRoute><PrintTraveler /></LazyRoute>
-        </PrivateRoute>
-      } />
-      <Route path="/print/purchase-order/:id" element={
-        <PrivateRoute>
-          <LazyRoute><PrintPurchaseOrder /></LazyRoute>
-        </PrivateRoute>
-      } />
-      <Route path="/print/packing-slip/:id" element={
-        <PrivateRoute>
-          <LazyRoute><PrintPackingSlip /></LazyRoute>
-        </PrivateRoute>
-      } />
-      <Route path="/print/shipping-label/:id" element={
-        <PrivateRoute>
-          <LazyRoute><PrintShippingLabel /></LazyRoute>
-        </PrivateRoute>
-      } />
-      {/* A0.4 badge print sheet — admin/manager only (its GET /users fetch is
+        {/* Quality */}
+        <Route
+          path="/quality"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Quality />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+
+        {/* Custom Fields */}
+        <Route
+          path="/custom-fields"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <CustomFields />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+
+        {/* Purchasing & Receiving */}
+        <Route
+          path="/purchasing"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Purchasing />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/receiving"
+          element={
+            <PrivateRoute>
+              <Navigate to="/warehouse?tab=receiving" replace />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/po-upload"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <POUpload />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+
+        {/* Scheduling */}
+        <Route
+          path="/scheduling"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Scheduling />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+
+        {/* Dispatch Board — manager-controlled run order (write tool) */}
+        <Route
+          path="/dispatch"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <DispatchBoard />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+
+        {/* Documents & Reports */}
+        <Route
+          path="/documents"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Documents />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/reports"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Reports />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+
+        {/* Shipping (redirect to warehouse) */}
+        <Route
+          path="/shipping"
+          element={
+            <PrivateRoute>
+              <Navigate to="/warehouse?tab=shipping" replace />
+            </PrivateRoute>
+          }
+        />
+
+        <Route
+          path="/nest"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <MaterialNesting />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        {/* Quotes */}
+        <Route
+          path="/rfq-packages/new"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <RFQQuoting />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/quotes"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Quotes />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/quote-calculator"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <QuoteCalculator />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/estimate-workbench"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <EstimateWorkbench />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/estimate-workbench/:estimateId"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <EstimateWorkbench />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/shop-data"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <ShopData />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+
+        {/* Users & Customers */}
+        <Route
+          path="/users"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Users />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/customers"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Customers />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+
+        {/* Calibration */}
+        <Route
+          path="/calibration"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Calibration />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+
+        {/* Print Pages (no Layout) */}
+        <Route
+          path="/print/traveler/:id"
+          element={
+            <PrivateRoute>
+              <LazyRoute>
+                <PrintTraveler />
+              </LazyRoute>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/print/purchase-order/:id"
+          element={
+            <PrivateRoute>
+              <LazyRoute>
+                <PrintPurchaseOrder />
+              </LazyRoute>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/print/packing-slip/:id"
+          element={
+            <PrivateRoute>
+              <LazyRoute>
+                <PrintPackingSlip />
+              </LazyRoute>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/print/shipping-label/:id"
+          element={
+            <PrivateRoute>
+              <LazyRoute>
+                <PrintShippingLabel />
+              </LazyRoute>
+            </PrivateRoute>
+          }
+        />
+        {/* A0.4 badge print sheet — admin/manager only (its GET /users fetch is
           server-enforced to ADMIN/MANAGER; see routeAccessRequirements). */}
-      <Route path="/print/badges" element={
-        <PrivateRoute>
-          <LazyRoute><PrintBadges /></LazyRoute>
-        </PrivateRoute>
-      } />
-      
-      {/* Traceability */}
-      <Route path="/traceability" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Traceability /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      
-      {/* Audit Log */}
-      <Route path="/audit-log" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><AuditLog /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
+        <Route
+          path="/print/badges"
+          element={
+            <PrivateRoute>
+              <LazyRoute>
+                <PrintBadges />
+              </LazyRoute>
+            </PrivateRoute>
+          }
+        />
 
-      {/* Visitor Log (admin) */}
-      <Route path="/visitor-log" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><VisitorLog /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      
-      {/* Admin Settings */}
-      <Route path="/admin/settings" element={
-        <AdminRoute>
-          <Layout>
-            <LazyRoute><AdminSettings /></LazyRoute>
-          </Layout>
-        </AdminRoute>
-      } />
-      
-      {/* Analytics */}
-      <Route path="/analytics" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Analytics /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/analytics/production" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Analytics /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/analytics/quality" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Analytics /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/analytics/inventory" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Analytics /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/analytics/forecasting" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Analytics /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/analytics/costs" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Analytics /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/analytics/flow" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Analytics /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
-      <Route path="/analytics/reports" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Analytics /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
+        {/* Traceability */}
+        <Route
+          path="/traceability"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Traceability />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
 
-      {/* Job Costing */}
-      <Route path="/job-costing" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><JobCosting /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
+        {/* Audit Log */}
+        <Route
+          path="/audit-log"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <AuditLog />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
 
-      {/* Downtime Tracking */}
-      <Route path="/downtime" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><DowntimeTracking /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
+        {/* Visitor Log (admin) */}
+        <Route
+          path="/visitor-log"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <VisitorLog />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
 
-      {/* Maintenance */}
-      <Route path="/maintenance" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><Maintenance /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
+        {/* Admin Settings */}
+        <Route
+          path="/admin/settings"
+          element={
+            <AdminRoute>
+              <Layout>
+                <LazyRoute>
+                  <AdminSettings />
+                </LazyRoute>
+              </Layout>
+            </AdminRoute>
+          }
+        />
 
-      {/* OEE */}
-      <Route path="/oee" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><OEEDashboard /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
+        {/* Analytics */}
+        <Route
+          path="/analytics"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Analytics />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/analytics/production"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Analytics />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/analytics/quality"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Analytics />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/analytics/inventory"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Analytics />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/analytics/forecasting"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Analytics />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/analytics/costs"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Analytics />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/analytics/flow"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Analytics />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/analytics/reports"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Analytics />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
 
-      {/* Operator Certifications */}
-      <Route path="/certifications" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><OperatorCertifications /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
+        {/* Job Costing */}
+        <Route
+          path="/job-costing"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <JobCosting />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
 
-      {/* Engineering Changes */}
-      <Route path="/engineering-changes" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><EngineeringChanges /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
+        {/* Downtime Tracking */}
+        <Route
+          path="/downtime"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <DowntimeTracking />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
 
-      {/* SPC */}
-      <Route path="/spc" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><SPCPage /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
+        {/* Maintenance */}
+        <Route
+          path="/maintenance"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Maintenance />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
 
-      {/* Customer Complaints */}
-      <Route path="/customer-complaints" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><CustomerComplaints /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
+        {/* OEE */}
+        <Route
+          path="/oee"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <OEEDashboard />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
 
-      {/* Tool Management */}
-      <Route path="/tool-management" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><ToolManagement /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
+        {/* Operator Certifications */}
+        <Route
+          path="/certifications"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <OperatorCertifications />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
 
-      {/* QMS Standards & Audit Readiness */}
-      <Route path="/qms-standards" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><QMSStandards /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
+        {/* Engineering Changes */}
+        <Route
+          path="/engineering-changes"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <EngineeringChanges />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
 
-      {/* Supplier Scorecards */}
-      <Route path="/supplier-scorecards" element={
-        <PrivateRoute>
-          <Layout>
-            <LazyRoute><SupplierScorecards /></LazyRoute>
-          </Layout>
-        </PrivateRoute>
-      } />
+        {/* SPC */}
+        <Route
+          path="/spc"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <SPCPage />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
 
-      {/* Catch-all 404 */}
-      <Route path="*" element={<NotFound />} />
-    </Routes>
+        {/* Customer Complaints */}
+        <Route
+          path="/customer-complaints"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <CustomerComplaints />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+
+        {/* Tool Management */}
+        <Route
+          path="/tool-management"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <ToolManagement />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+
+        {/* QMS Standards & Audit Readiness */}
+        <Route
+          path="/qms-standards"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <QMSStandards />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+
+        {/* Supplier Scorecards */}
+        <Route
+          path="/supplier-scorecards"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <SupplierScorecards />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+
+        {/* Catch-all 404 */}
+        <Route path="*" element={<NotFound />} />
+      </Routes>
     </ErrorBoundary>
   );
 }
+
+const router = createBrowserRouter([
+  {
+    path: '*',
+    element: (
+      <UnsavedChangesProvider>
+        <KeyboardShortcutsProvider>
+          <AppRoutes />
+          <TourHighlight />
+        </KeyboardShortcutsProvider>
+      </UnsavedChangesProvider>
+    ),
+  },
+]);
 
 function App() {
   return (
@@ -1023,12 +1359,7 @@ function App() {
         <CompanyProvider>
           <ToastProvider>
             <TourProvider>
-              <Router>
-                <KeyboardShortcutsProvider>
-                  <AppRoutes />
-                  <TourHighlight />
-                </KeyboardShortcutsProvider>
-              </Router>
+              <RouterProvider router={router} />
             </TourProvider>
           </ToastProvider>
         </CompanyProvider>

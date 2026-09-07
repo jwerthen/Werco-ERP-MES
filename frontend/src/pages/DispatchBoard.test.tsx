@@ -1313,3 +1313,27 @@ describe('insertionIndexFromPointer', () => {
     expect(insertionIndexFromPointer([], 0)).toBe(0);
   });
 });
+
+
+describe('Dispatch freshness', () => {
+  beforeEach(() => { jest.clearAllMocks(); mockApi.getDispatchBoard.mockResolvedValue(board()); });
+  it('refreshes when focus returns and links each job to its work-order context', async () => {
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+    expect(screen.getByRole('link', { name: `Open work order ${LASER_ROWS[0].work_order_number}` })).toHaveAttribute('href', `/work-orders/${LASER_ROWS[0].work_order_id}`);
+    fireEvent(window, new Event('focus'));
+    await waitFor(() => expect(mockApi.getDispatchBoard).toHaveBeenCalledTimes(2));
+    expect(screen.getByText(/refreshes every 30 seconds while visible/)).toBeInTheDocument();
+  });
+  it('defers a focus refresh while a card is dragged and reconciles when the drag ends', async () => {
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+    const card = screen.getByTestId('dispatch-card-9');
+    fireDrag('dragStart', card);
+    fireEvent(window, new Event('focus'));
+    expect(mockApi.getDispatchBoard).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/Updates deferred/)).toBeInTheDocument();
+    fireEvent.dragEnd(card);
+    await waitFor(() => expect(mockApi.getDispatchBoard).toHaveBeenCalledTimes(2));
+  });
+});

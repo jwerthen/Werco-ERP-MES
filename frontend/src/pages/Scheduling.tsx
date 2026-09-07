@@ -1,3 +1,4 @@
+import { getPriorityClasses, getPriorityLabel } from '../utils/priority';
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
@@ -172,7 +173,7 @@ export default function Scheduling() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [weekStart, setWeekStart] = useState(startOfWeek(getCentralTodayDate(), { weekStartsOn: 1 }));
-  const [daysToShow] = useState(7);
+  const [daysToShow, setDaysToShow] = useState(7);
   const [selectedJob, setSelectedJob] = useState<ScheduledJob | null>(null);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
   const [scheduleForm, setScheduleForm] = useState({ scheduled_start: '', scheduled_end: '', work_center_id: 0 });
@@ -184,6 +185,24 @@ export default function Scheduling() {
   const [bulkPriority, setBulkPriority] = useState(5);
   const [bulkWorkCenterId, setBulkWorkCenterId] = useState<number | ''>('');
   const [bulkShiftDays, setBulkShiftDays] = useState(1);
+  const [schedulePending, setSchedulePending] = useState(false);
+  const schedulePendingRef = useRef(false);
+  const pendingJobsRef = useRef(new Set<number>());
+  const [pendingJobIds, setPendingJobIds] = useState(new Set<number>());
+  const capacityRequestRef = useRef(0);
+  const beginJob = (id: number) => {
+    if (pendingJobsRef.current.has(id) || bulkPendingRef.current) return false;
+    pendingJobsRef.current.add(id);
+    setPendingJobIds(new Set(pendingJobsRef.current));
+    return true;
+  };
+  const endJob = (id: number) => {
+    pendingJobsRef.current.delete(id);
+    setPendingJobIds(new Set(pendingJobsRef.current));
+  };
+  const bulkPendingRef = useRef(false);
+  const [bulkResults, setBulkResults] = useState<Array<{ number: string; result: string }>>([]);
+  const retryBulkRef = useRef<(() => Promise<void>) | null>(null);
   const [bulkActionRunning, setBulkActionRunning] = useState<string | null>(null);
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const scheduleBoardRef = useRef<HTMLDivElement | null>(null);
@@ -230,7 +249,7 @@ export default function Scheduling() {
   const [showBulkActions, setShowBulkActions] = useState(false);
 
   // Collapsible Machine Capacity section
-  const [showMachineCapacity, setShowMachineCapacity] = useState(true);
+  const [showMachineCapacity, setShowMachineCapacity] = useState(false);
 
   // Generate days for display: Monday-Saturday only (skip Sundays)
   const days = useMemo(
@@ -453,6 +472,7 @@ export default function Scheduling() {
 
   // Drag and drop handlers
   const handleDragStart = (e: React.DragEvent, job: ScheduledJob) => {
+    if (pendingJobsRef.current.has(job.work_order_id) || bulkPendingRef.current) { e.preventDefault(); return; }
     setDragState({ job, isDragging: true });
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', job.work_order_id.toString());
@@ -491,6 +511,7 @@ export default function Scheduling() {
       return;
     }
 
+    if (!beginJob(job.work_order_id)) return;
     try {
       // If work center changed, move it first
       if (job.work_center_id !== targetWcId) {
@@ -501,9 +522,11 @@ export default function Scheduling() {
         scheduled_start: targetDate,
         work_center_id: targetWcId,
       });
-      await loadData();
     } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to schedule work order');
+      showToast('error', `${job.work_order_number}: ${err.response?.data?.detail || 'Scheduling failed'}. Refreshing the saved machine and date; a machine move may already have succeeded. Review the refreshed job before retrying.`);
+    } finally {
+      await loadData();
+      endJob(job.work_order_id);
     }
 
     setDragState({ job: null, isDragging: false });
@@ -512,6 +535,7 @@ export default function Scheduling() {
   // Drop on work center row header (no specific date - just move work center)
   const handleDropOnRow = async (e: React.DragEvent, targetWcId: number) => {
     e.preventDefault();
+    e.stopPropagation();
     setDropTarget(null);
 
     const job = dragState.job;
@@ -520,20 +544,23 @@ export default function Scheduling() {
       return;
     }
 
+    if (!beginJob(job.work_order_id)) return;
     try {
       await api.updateOperationWorkCenter(job.current_operation_id, targetWcId);
-      await loadData();
     } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to move work order');
+      showToast('error', `${job.work_order_number}: ${err.response?.data?.detail || 'Failed to move work order'}. Review the refreshed machine assignment before retrying.`);
+    } finally {
+      await loadData();
+      endJob(job.work_order_id);
+      setDragState({ job: null, isDragging: false });
     }
-
-    setDragState({ job: null, isDragging: false });
   };
 
   const handleSchedule = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedJob) return;
-
+    if (!selectedJob || schedulePendingRef.current) return;
+    schedulePendingRef.current = true;
+    setSchedulePending(true);
     try {
       await api.scheduleWorkOrder(selectedJob.work_order_id, {
         scheduled_start: scheduleForm.scheduled_start,
@@ -545,10 +572,14 @@ export default function Scheduling() {
       await loadData();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to schedule');
+    } finally {
+      schedulePendingRef.current = false;
+      setSchedulePending(false);
     }
   };
 
   const handleUnschedule = async (job: ScheduledJob) => {
+    if (!beginJob(job.work_order_id)) return;
     try {
       await api.unscheduleWorkOrder(job.work_order_id);
       setShowScheduleModal(false);
@@ -556,7 +587,7 @@ export default function Scheduling() {
       await loadData();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to unschedule');
-    }
+    } finally { endJob(job.work_order_id); }
   };
 
   const loadCapacityPreview = useCallback(async (workCenterId: number, dateStr: string, job: ScheduledJob | null, shouldForwardSchedule: boolean) => {
@@ -564,17 +595,18 @@ export default function Scheduling() {
       setCapacityPreview(null);
       return;
     }
+    const requestId = ++capacityRequestRef.current;
     setLoadingCapacity(true);
     try {
       const data = await api.getCapacityForDate(workCenterId, dateStr, {
         work_order_id: job?.work_order_id,
         forward_schedule: shouldForwardSchedule,
       });
-      setCapacityPreview(data);
+      if (requestId === capacityRequestRef.current) setCapacityPreview(data);
     } catch {
-      setCapacityPreview(null);
+      if (requestId === capacityRequestRef.current) setCapacityPreview(null);
     } finally {
-      setLoadingCapacity(false);
+      if (requestId === capacityRequestRef.current) setLoadingCapacity(false);
     }
   }, []);
 
@@ -588,10 +620,12 @@ export default function Scheduling() {
   }, [showScheduleModal, scheduleForm.scheduled_start, scheduleForm.work_center_id, selectedJob, forwardSchedule, loadCapacityPreview]);
 
   const handleInlineDateSave = async (job: ScheduledJob) => {
+    if (pendingJobsRef.current.has(job.work_order_id)) return;
     if (!inlineEditDate) {
       setInlineEditJobId(null);
       return;
     }
+    if (!beginJob(job.work_order_id)) return;
     try {
       await api.scheduleWorkOrder(job.work_order_id, {
         scheduled_start: inlineEditDate,
@@ -602,10 +636,11 @@ export default function Scheduling() {
       await loadData();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to reschedule');
-    }
+    } finally { endJob(job.work_order_id); }
   };
 
   const handleAutoScheduleAll = async () => {
+    if (bulkPendingRef.current || pendingJobsRef.current.size > 0) return;
     const unscheduledIds = scheduleQueue
       .filter((job) => !job.scheduled_start)
       .map((job) => job.work_order_id);
@@ -615,9 +650,15 @@ export default function Scheduling() {
       return;
     }
 
+    bulkPendingRef.current = true;
     setRunningAutoSchedule(true);
     try {
       const result = await api.bulkScheduleEarliest(unscheduledIds, { forward_schedule: true });
+      const failures = new Map<number, string>((result.errors || []).map((row: {work_order_id: number; error: string}) => [row.work_order_id, row.error]));
+      setBulkResults(unscheduledIds.map(id => ({ number: jobs.find(job => job.work_order_id === id)?.work_order_number || String(id), result: failures.get(id) || 'Scheduled' })));
+      const failedJobs = jobs.filter(job => failures.has(job.work_order_id));
+      setSelectedWorkOrderIds(new Set(failedJobs.map(job => job.work_order_id)));
+      retryBulkRef.current = failedJobs.length ? () => runBulkAction('earliest', async job => { await api.scheduleWorkOrderEarliest(job.work_order_id, { work_center_id: job.work_center_id, forward_schedule: true }); return 'success'; }, failedJobs) : null;
       await loadData();
       showToast(
         result.scheduled_count > 0 ? (result.error_count > 0 ? 'info' : 'success') : 'error',
@@ -626,11 +667,13 @@ export default function Scheduling() {
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Auto-schedule failed');
     } finally {
+      bulkPendingRef.current = false;
       setRunningAutoSchedule(false);
     }
   };
 
   const handleScheduleEarliest = async (job: ScheduledJob) => {
+    if (!beginJob(job.work_order_id)) return;
     setSchedulingEarliestWorkOrderId(job.work_order_id);
     try {
       await api.scheduleWorkOrderEarliest(job.work_order_id, {
@@ -641,6 +684,7 @@ export default function Scheduling() {
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to schedule earliest');
     } finally {
+      endJob(job.work_order_id);
       setSchedulingEarliestWorkOrderId(null);
     }
   };
@@ -652,6 +696,7 @@ export default function Scheduling() {
     const existing = jobs.find((job) => job.work_order_id === workOrderId);
     if (!existing || existing.priority === priority) return;
 
+    if (!beginJob(workOrderId)) return;
     setUpdatingPriorityWorkOrderId(workOrderId);
     try {
       const reason = priorityReason.trim() || undefined;
@@ -667,39 +712,52 @@ export default function Scheduling() {
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to update priority');
     } finally {
+      endJob(workOrderId);
       setUpdatingPriorityWorkOrderId(null);
     }
   };
 
   const runBulkAction = async (
     actionKey: string,
-    actionRunner: (job: ScheduledJob) => Promise<'success' | 'skipped'>
+    actionRunner: (job: ScheduledJob) => Promise<'success' | 'skipped'>,
+    targetJobs: ScheduledJob[] = selectedQueueJobs
   ) => {
-    if (selectedQueueJobs.length === 0) {
+    if (bulkPendingRef.current || pendingJobsRef.current.size > 0) return;
+    if (targetJobs.length === 0) {
       showToast('info', 'Select at least one work order first.');
       return;
     }
 
+    bulkPendingRef.current = true;
     setBulkActionRunning(actionKey);
+    const outcomes: Array<{ number: string; result: string }> = [];
+    const failedJobs: ScheduledJob[] = [];
     let success = 0;
     let skipped = 0;
     let failed = 0;
 
-    for (const job of selectedQueueJobs) {
+    for (const job of targetJobs) {
       try {
         const result = await actionRunner(job);
+        outcomes.push({ number: job.work_order_number, result: result === 'skipped' ? 'Skipped: no applicable change' : 'Updated' });
         if (result === 'skipped') {
           skipped += 1;
         } else {
           success += 1;
         }
-      } catch (err) {
+      } catch (err: any) {
+        failedJobs.push(job);
+        outcomes.push({ number: job.work_order_number, result: err.response?.data?.detail || 'Update failed. Retry this work order.' });
         failed += 1;
         console.error(`Bulk action failed for ${job.work_order_number}`, err);
       }
     }
 
+    bulkPendingRef.current = false;
     setBulkActionRunning(null);
+    setBulkResults(outcomes);
+    setSelectedWorkOrderIds(new Set(failedJobs.map(job => job.work_order_id)));
+    retryBulkRef.current = failedJobs.length ? () => runBulkAction(actionKey, actionRunner, failedJobs) : null;
     await loadData();
     showToast(
       failed > 0 ? 'error' : 'success',
@@ -752,25 +810,11 @@ export default function Scheduling() {
   };
 
   const handleBulkScheduleEarliest = async () => {
-    const unscheduledSelected = selectedQueueJobs.filter((job) => !job.scheduled_start);
-    if (unscheduledSelected.length === 0) {
-      showToast('info', 'No unscheduled work orders selected.');
-      return;
-    }
-    setBulkActionRunning('earliest');
-    try {
-      const ids = unscheduledSelected.map((job) => job.work_order_id);
-      const result = await api.bulkScheduleEarliest(ids, { forward_schedule: true });
-      await loadData();
-      showToast(
-        result.scheduled_count > 0 ? (result.error_count > 0 ? 'info' : 'success') : 'error',
-        `Scheduled ${result.scheduled_count} work orders. ${result.error_count} errors.`,
-      );
-    } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Bulk schedule failed');
-    } finally {
-      setBulkActionRunning(null);
-    }
+    await runBulkAction('earliest', async job => {
+      if (job.scheduled_start) return 'skipped';
+      await api.scheduleWorkOrderEarliest(job.work_order_id, { work_center_id: job.work_center_id, forward_schedule: true });
+      return 'success';
+    });
   };
 
   const toggleRowSelection = (workOrderId: number) => {
@@ -786,18 +830,14 @@ export default function Scheduling() {
   };
 
   const selectAllVisibleRows = () => {
-    setSelectedWorkOrderIds(new Set(queueRows.map((job) => job.work_order_id)));
+    setSelectedWorkOrderIds(new Set(filteredQueueRows.map((job) => job.work_order_id)));
   };
 
   const clearSelections = () => {
     setSelectedWorkOrderIds(new Set());
   };
 
-  const priorityBadgeClasses = (priority: number) => {
-    if (priority <= 2) return 'bg-red-500/20 text-red-300';
-    if (priority <= 5) return 'bg-yellow-500/20 text-yellow-300';
-    return 'bg-slate-800 text-slate-100';
-  };
+
 
   const capacityDayClass = (day: CapacityHeatmapDay) => {
     if (day.utilization_pct > 100) return 'bg-red-500 text-white border-red-400';
@@ -1042,6 +1082,7 @@ export default function Scheduling() {
         )}
       </div>
 
+      <div className="flex flex-wrap gap-3 items-center"><label htmlFor="schedule-days">Date window</label><select id="schedule-days" className="input w-36" value={daysToShow} onChange={e => setDaysToShow(Number(e.target.value))}><option value={3}>3 days</option><option value={7}>1 week</option><option value={14}>2 weeks</option></select><a href="#schedule-queue" className="text-blue-300">Jump to job queue</a></div>
       {/* Gantt Chart with Continuous Bars and Drag-Drop */}
       <div ref={scheduleBoardRef} className="card overflow-hidden">
         <div className="overflow-x-auto lg:max-h-[32rem] lg:overflow-y-auto">
@@ -1214,8 +1255,10 @@ export default function Scheduling() {
         </div>
       )}
 
+      {bulkResults.length > 0 && <div className="card p-3" role="status"><h2 className="font-semibold">Bulk action results</h2><ul>{bulkResults.map(row => <li key={row.number}>{row.number}: {row.result}</li>)}</ul>{retryBulkRef.current && <button className="btn-secondary mt-2" disabled={!!bulkActionRunning} onClick={() => retryBulkRef.current?.()}>Retry failed jobs</button>}</div>}
+      {pendingJobIds.size > 0 && <p role="status" className="text-sm text-slate-300">Saving changes for {Array.from(pendingJobIds).map(id => jobs.find(job => job.work_order_id === id)?.work_order_number || `work order ${id}`).join(', ')}…</p>}
       {/* Dispatch Queue */}
-      <div className="card">
+      <div id="schedule-queue" className="card">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
           <div className="flex items-center gap-3">
             <h2 className="text-lg font-semibold">Dispatch Queue</h2>
@@ -1224,7 +1267,7 @@ export default function Scheduling() {
               <span className="badge badge-warning text-xs">{stats.unscheduledCount} unscheduled</span>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <div className="relative">
               <MagnifyingGlassIcon className="h-4 w-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
               <input
@@ -1276,7 +1319,7 @@ export default function Scheduling() {
         {showBulkActions && (
         <div className="border rounded-lg p-3 mb-3 bg-slate-800/50 animate-fade-in">
           <div className="flex flex-wrap items-center gap-2 mb-2">
-            <span className="text-xs font-medium text-slate-300">Selected: {selectedQueueJobs.length}</span>
+            <span className="text-xs font-medium text-slate-300">Selected: {selectedQueueJobs.length}{selectedQueueJobs.some(job => !filteredQueueRows.some(row => row.work_order_id === job.work_order_id)) ? ' (includes jobs hidden by filters)' : ''}</span>
             <button type="button" onClick={selectAllVisibleRows} className="text-xs text-werco-primary hover:underline">
               Select visible
             </button>
@@ -1307,7 +1350,7 @@ export default function Scheduling() {
                 >
                   {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((p) => (
                     <option key={`bulk-p-${p}`} value={p}>
-                      Set P{p}
+                      Set {getPriorityLabel(p)}
                     </option>
                   ))}
                 </select>
@@ -1317,7 +1360,7 @@ export default function Scheduling() {
                   disabled={bulkActionRunning !== null}
                   onClick={handleBulkSetPriority}
                 >
-                  Apply
+                  Apply Priority
                 </Button>
               </div>
             )}
@@ -1382,7 +1425,7 @@ export default function Scheduling() {
                     type="checkbox"
                     checked={filteredQueueRows.length > 0 && filteredQueueRows.every((job) => selectedWorkOrderIds.has(job.work_order_id))}
                     onChange={(e) => (e.target.checked ? selectAllVisibleRows() : clearSelections())}
-                    aria-label="Select all work orders"
+                    aria-label="Select all visible work orders"
                   />
                 </th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-slate-400 uppercase">WO #</th>
@@ -1446,6 +1489,7 @@ export default function Scheduling() {
                           }}
                         />
                         <button
+                          disabled={pendingJobIds.has(job.work_order_id)}
                           onClick={() => handleInlineDateSave(job)}
                           className="text-green-600 hover:text-green-300 text-xs font-medium"
                         >
@@ -1490,18 +1534,18 @@ export default function Scheduling() {
                         value={job.priority}
                         onChange={(e) => handlePriorityChange(job.work_order_id, e.target.value)}
                         disabled={updatingPriorityWorkOrderId === job.work_order_id}
-                        className={`px-2 py-1 rounded text-xs font-bold border border-transparent ${priorityBadgeClasses(job.priority)}`}
+                        className={`px-2 py-1 rounded text-xs font-bold border border-transparent ${getPriorityClasses(job.priority)}`}
                         title="Update priority"
                       >
                         {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((p) => (
                           <option key={p} value={p}>
-                            P{p}
+                            {getPriorityLabel(p)}
                           </option>
                         ))}
                       </select>
                     ) : (
-                      <span className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${priorityBadgeClasses(job.priority)}`}>
-                        {job.priority}
+                      <span className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${getPriorityClasses(job.priority)}`}>
+                        {getPriorityLabel(job.priority)}
                       </span>
                     )}
                   </td>
@@ -1523,6 +1567,7 @@ export default function Scheduling() {
                       </button>
                       {job.scheduled_start && (
                         <button
+                          disabled={pendingJobIds.has(job.work_order_id)}
                           onClick={() => handleUnschedule(job)}
                           className="text-red-500 hover:underline text-sm"
                           title="Clear this work order's schedule"
@@ -1731,6 +1776,7 @@ export default function Scheduling() {
                     <button
                       type="button"
                       className="text-red-500 hover:text-red-400 text-sm font-medium px-2"
+                      disabled={pendingJobIds.has(selectedJob.work_order_id)}
                       onClick={() => handleUnschedule(selectedJob)}
                     >
                       Unschedule
@@ -1741,7 +1787,7 @@ export default function Scheduling() {
                   <Button variant="secondary" onClick={() => { setShowScheduleModal(false); setCapacityPreview(null); }}>
                     Cancel
                   </Button>
-                  <Button type="submit">Schedule</Button>
+                  <Button type="submit" disabled={schedulePending}>{schedulePending ? 'Scheduling…' : 'Schedule'}</Button>
                 </div>
               </div>
             </form>

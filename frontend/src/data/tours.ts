@@ -21,7 +21,7 @@ export const tours: Record<string, Tour> = {
       shipping: 'Learn how to navigate to shipping and inventory areas',
       quality: 'Learn where to access quality tools, NCRs, and calibration',
       viewer: 'Learn how to navigate and view data across the system',
-      supervisor: 'Learn the basics and where to manage your team\'s work',
+      supervisor: "Learn the basics and where to manage your team's work",
       manager: 'Get oriented with dashboards, approvals, and department tools',
       admin: 'Quick overview of navigation, settings, and system administration',
     },
@@ -29,28 +29,32 @@ export const tours: Record<string, Tour> = {
       {
         target: '[data-tour="sidebar"]',
         title: 'Navigation Sidebar',
-        description: 'Access all modules from here. Click on any section to expand and see sub-menus. The sidebar organizes everything from Shop Floor operations to Quality management.',
+        description:
+          'Access all modules from here. Click on any section to expand and see sub-menus. The sidebar organizes everything from Shop Floor operations to Quality management.',
         position: 'right',
         path: '/',
       },
       {
         target: '[data-tour="dashboard-stats"]',
         title: 'Key Metrics Dashboard',
-        description: 'Monitor your most important KPIs at a glance: active work orders, overdue items, inventory alerts, and quality metrics. These update in real-time.',
+        description:
+          'Monitor your most important KPIs at a glance: active work orders, overdue items, inventory alerts, and quality metrics. These update in real-time.',
         position: 'bottom',
         path: '/',
       },
       {
         target: '[data-tour="search"]',
         title: 'Quick Search',
-        description: 'Press Cmd/Ctrl + K or click the search icon to instantly find parts, work orders, customers, or any data in the system.',
+        description:
+          'Press Cmd/Ctrl + K or click the search icon to instantly find parts, work orders, customers, or any data in the system.',
         position: 'bottom',
         path: '/',
       },
       {
         target: '[data-tour="user-menu"]',
         title: 'User Menu',
-        description: 'Access your profile, settings, and logout from here. You can also restart this tour anytime from the help menu.',
+        description:
+          'Access your profile, settings, and logout from here. You can also restart this tour anytime from the help menu.',
         position: 'left',
         path: '/',
       },
@@ -74,18 +78,22 @@ export const tours: Record<string, Tour> = {
       viewer: 'Browse work orders and their status (read-only)',
     },
     roleStepOverrides: {
-      1: { // "Create Work Order" step
+      1: {
+        // "Create Work Order" step
         operator: {
           title: 'Work Order Details',
-          description: 'Click any work order row to see its full details, assigned operations, and current status. Your assigned operations appear on the Shop Floor.',
+          description:
+            'Click any work order row to see its full details, assigned operations, and current status. Your assigned operations appear on the Shop Floor.',
         },
         viewer: {
           title: 'Work Order Details',
-          description: 'Click any row to view full work order details including status, priority, and operation history.',
+          description:
+            'Click any row to view full work order details including status, priority, and operation history.',
         },
         quality: {
           title: 'Work Order Details',
-          description: 'Click any work order to view details. Quality holds and NCRs linked to work orders appear here.',
+          description:
+            'Click any work order to view details. Quality holds and NCRs linked to work orders appear here.',
         },
       },
     },
@@ -93,14 +101,16 @@ export const tours: Record<string, Tour> = {
       {
         target: '[data-tour="wo-list"]',
         title: 'Work Order List',
-        description: 'View all work orders with their status, priority, and due dates. Click any row to see full details.',
+        description:
+          'View all work orders with their status, priority, and due dates. Click any row to see full details.',
         position: 'bottom',
         path: '/work-orders',
       },
       {
         target: '[data-tour="wo-create"]',
         title: 'Create Work Order',
-        description: 'Click here to create a new work order. You\'ll select a part, set quantity, and the system will auto-populate operations from the routing.',
+        description:
+          "Click here to create a new work order. You'll select a part, set quantity, and the system will auto-populate operations from the routing.",
         position: 'left',
         path: '/work-orders',
         requiredPermissions: ['work_orders:create'],
@@ -108,7 +118,8 @@ export const tours: Record<string, Tour> = {
       {
         target: '[data-tour="wo-filters"]',
         title: 'Filter & Search',
-        description: 'Filter work orders by status, priority, customer, or date range. Use the search to find specific work order numbers.',
+        description:
+          'Filter work orders by status, priority, customer, or date range. Use the search to find specific work order numbers.',
         position: 'bottom',
         path: '/work-orders',
       },
@@ -125,27 +136,31 @@ export const tours: Record<string, Tour> = {
     roles: ['admin', 'manager', 'supervisor', 'operator'],
     roleDescriptions: {
       operator: 'Your primary workspace — clock in, run operations, and record completions',
-      supervisor: 'Monitor your team\'s active operations and throughput in real-time',
+      supervisor: "Monitor your team's active operations and throughput in real-time",
       manager: 'Oversee shop floor activity, labor utilization, and operation status',
       admin: 'Full shop floor visibility with configuration access',
     },
     roleStepOverrides: {
       0: {
         supervisor: {
-          description: 'Select a work center to see who is clocked in and which operations are running. Track labor hours and identify bottlenecks.',
+          description:
+            'Select a work center to see who is clocked in and which operations are running. Track labor hours and identify bottlenecks.',
         },
         manager: {
-          description: 'Select a work center to view real-time labor tracking. Use this data for capacity planning and labor cost analysis.',
+          description:
+            'Select a work center to view real-time labor tracking. Use this data for capacity planning and labor cost analysis.',
         },
       },
       2: {
         supervisor: {
           title: 'Priority Focus',
-          description: 'Review the top priority jobs for your work center. Check quantities, scrap rates, and flag any issues for quality review.',
+          description:
+            'Review the top priority jobs for your work center. Check quantities, scrap rates, and flag any issues for quality review.',
         },
         manager: {
           title: 'Priority & Completion',
-          description: 'See the highest-priority jobs at a glance. Track completion rates, scrap percentages, and on-time delivery.',
+          description:
+            'See the highest-priority jobs at a glance. Track completion rates, scrap percentages, and on-time delivery.',
         },
       },
     },
@@ -153,28 +168,31 @@ export const tours: Record<string, Tour> = {
       {
         target: '[data-tour="sf-clock"]',
         title: 'Work Center Selector',
-        description: 'Select a work center to view its job queue. Operators clock in/out of operations from here by clicking Clock In on a queue item.',
+        description:
+          'Select a work center to view its job queue. Operators clock in/out of operations from here by clicking Clock In on a queue item.',
         position: 'bottom',
         path: '/shop-floor',
       },
       {
         target: '[data-tour="sf-operations"]',
         title: 'Job Queue',
-        description: 'See all operations queued for this work center. Sorted by priority and due date. Click Clock In to start tracking time on a job.',
+        description:
+          'See all operations queued for this work center. Sorted by priority and due date. Click Clock In to start tracking time on a job.',
         position: 'top',
         path: '/shop-floor',
       },
       {
         target: '[data-tour="sf-complete"]',
         title: 'Priority Focus',
-        description: 'The top priority jobs to run next, at a glance. When you clock out, enter quantity completed and any scrap to record production.',
+        description:
+          'The top priority jobs to run next, at a glance. When you clock out, enter quantity completed and any scrap to record production.',
         position: 'bottom',
         path: '/shop-floor',
       },
     ],
   },
 
-  'engineering': {
+  engineering: {
     id: 'engineering',
     name: 'Engineering',
     description: 'Manage parts, BOMs, and routings',
@@ -185,7 +203,7 @@ export const tours: Record<string, Tour> = {
     roles: ['admin', 'manager', 'supervisor', 'operator', 'quality', 'viewer'],
     roleDescriptions: {
       operator: 'View part specs, BOMs, and routing steps for your operations',
-      supervisor: 'Create and edit parts, BOMs, and routings for your team\'s work',
+      supervisor: "Create and edit parts, BOMs, and routings for your team's work",
       manager: 'Full engineering data management with release and approval controls',
       admin: 'Complete engineering module access including delete and configuration',
       quality: 'Review part specifications, BOMs, and routing details for inspections',
@@ -197,7 +215,8 @@ export const tours: Record<string, Tour> = {
           description: 'Look up part numbers, materials, and specifications needed for your current operations.',
         },
         quality: {
-          description: 'Review part specifications, material requirements, and revision history relevant to quality inspections.',
+          description:
+            'Review part specifications, material requirements, and revision history relevant to quality inspections.',
         },
       },
     },
@@ -205,14 +224,16 @@ export const tours: Record<string, Tour> = {
       {
         target: '[data-tour="eng-parts"]',
         title: 'Parts Master',
-        description: 'Create and manage all part numbers here. Parts can be manufactured, purchased, assemblies, or raw materials.',
+        description:
+          'Create and manage all part numbers here. Parts can be manufactured, purchased, assemblies, or raw materials.',
         position: 'right',
         path: '/parts',
       },
       {
         target: '[data-tour="eng-bom"]',
         title: 'Bill of Materials',
-        description: 'Define what components make up an assembly. BOMs support multiple levels and can include both manufactured and purchased parts.',
+        description:
+          'Define what components make up an assembly. BOMs support multiple levels and can include both manufactured and purchased parts.',
         position: 'right',
         path: '/bom',
         requiredPermissions: ['boms:view'],
@@ -220,7 +241,8 @@ export const tours: Record<string, Tour> = {
       {
         target: '[data-tour="eng-routing"]',
         title: 'Routing',
-        description: 'Define the manufacturing operations for each part. Set work centers, setup/run times, and operation sequence.',
+        description:
+          'Define the manufacturing operations for each part. Set work centers, setup/run times, and operation sequence.',
         position: 'right',
         path: '/routing',
         requiredPermissions: ['routings:view'],
@@ -228,7 +250,7 @@ export const tours: Record<string, Tour> = {
     ],
   },
 
-  'quality': {
+  quality: {
     id: 'quality',
     name: 'Quality Management',
     description: 'NCRs, CARs, FAIs, and calibration',
@@ -247,15 +269,18 @@ export const tours: Record<string, Tour> = {
     roleStepOverrides: {
       0: {
         quality: {
-          description: 'Create and manage NCRs here. Document non-conformances, link to work orders and lots, assign dispositions, and track corrective actions through closure.',
+          description:
+            'Create and manage NCRs here. Document non-conformances, link to work orders and lots, assign dispositions, and track corrective actions through closure.',
         },
         operator: {
-          description: 'View NCRs related to your operations. If you spot a quality issue, notify your supervisor to create an NCR.',
+          description:
+            'View NCRs related to your operations. If you spot a quality issue, notify your supervisor to create an NCR.',
         },
       },
       1: {
         quality: {
-          description: 'Your calibration dashboard — manage all calibrated equipment, schedule calibrations, upload certificates, and set up automated alerts before items come due.',
+          description:
+            'Your calibration dashboard — manage all calibrated equipment, schedule calibrations, upload certificates, and set up automated alerts before items come due.',
         },
       },
     },
@@ -263,14 +288,16 @@ export const tours: Record<string, Tour> = {
       {
         target: '[data-tour="qa-ncr"]',
         title: 'Non-Conformance Reports',
-        description: 'Document quality issues here. NCRs can be linked to work orders, lots, and suppliers. Track disposition and corrective actions.',
+        description:
+          'Document quality issues here. NCRs can be linked to work orders, lots, and suppliers. Track disposition and corrective actions.',
         position: 'bottom',
         path: '/quality',
       },
       {
         target: '[data-tour="qa-calibration"]',
         title: 'Calibration Tracking',
-        description: 'Manage all calibrated equipment. Set calibration intervals, track certificates, and get alerts before items are due.',
+        description:
+          'Manage all calibrated equipment. Set calibration intervals, track certificates, and get alerts before items are due.',
         position: 'bottom',
         path: '/calibration',
         requiredPermissions: ['quality:calibration'],
@@ -278,7 +305,8 @@ export const tours: Record<string, Tour> = {
       {
         target: '[data-tour="qa-traceability"]',
         title: 'Lot Traceability',
-        description: 'Full traceability from raw material to finished goods. Track lot numbers, certifications, and material test reports.',
+        description:
+          'Full traceability from raw material to finished goods. Track lot numbers, certifications, and material test reports.',
         position: 'bottom',
         path: '/traceability',
       },
@@ -302,21 +330,24 @@ export const tours: Record<string, Tour> = {
       {
         target: '[data-tour="quote-type"]',
         title: 'Select Quote Type',
-        description: 'Choose between CNC Machining for milled/turned parts, or Sheet Metal for laser cut and formed parts.',
+        description:
+          'Choose between CNC Machining for milled/turned parts, or Sheet Metal for laser cut and formed parts.',
         position: 'bottom',
         path: '/quote-calculator',
       },
       {
         target: '[data-tour="quote-inputs"]',
         title: 'Enter Part Details',
-        description: 'Input dimensions, material, complexity factors, and quantity. For sheet metal, you can upload a DXF file to auto-extract cut length and features.',
+        description:
+          'Input dimensions, material, complexity factors, and quantity. For sheet metal, you can upload a DXF file to auto-extract cut length and features.',
         position: 'right',
         path: '/quote-calculator',
       },
       {
         target: '[data-tour="quote-result"]',
         title: 'Quote Result',
-        description: 'See the calculated price with full cost breakdown: material, machining time, setup, and any finishing operations.',
+        description:
+          'See the calculated price with full cost breakdown: material, machining time, setup, and any finishing operations.',
         position: 'left',
         path: '/quote-calculator',
       },
@@ -334,7 +365,7 @@ export const tours: Record<string, Tour> = {
     requiredPermissions: ['shipping:view'],
     roleDescriptions: {
       shipping: 'Your primary workspace — create shipments, print labels, and complete deliveries',
-      supervisor: 'Track shipments and receiving for your team\'s work orders',
+      supervisor: "Track shipments and receiving for your team's work orders",
       manager: 'Oversee shipping schedules, on-time delivery metrics, and receiving inspections',
       admin: 'Full shipping and receiving access with configuration',
     },
@@ -342,7 +373,8 @@ export const tours: Record<string, Tour> = {
       {
         target: '[data-tour="sidebar"]',
         title: 'Shipping Module',
-        description: 'Access shipping and receiving from the sidebar. Create shipments, track packages, and manage receiving inspections.',
+        description:
+          'Access shipping and receiving from the sidebar. Create shipments, track packages, and manage receiving inspections.',
         position: 'right',
         path: '/shipping',
       },
@@ -362,14 +394,16 @@ export const tours: Record<string, Tour> = {
       {
         target: '[data-tour="sidebar"]',
         title: 'Admin Tools',
-        description: 'Access user management, role permissions, system settings, and audit logs from the Admin section in the sidebar.',
+        description:
+          'Access user management, role permissions, system settings, and audit logs from the Admin section in the sidebar.',
         position: 'right',
         path: '/admin/settings',
       },
       {
         target: '[data-tour="user-menu"]',
         title: 'User Management',
-        description: 'Create and manage user accounts, assign roles, reset passwords, and control access. Navigate to Users from the sidebar.',
+        description:
+          'Create and manage user accounts, assign roles, reset passwords, and control access. Navigate to Users from the sidebar.',
         position: 'left',
         path: '/users',
       },
@@ -419,7 +453,8 @@ export const helpTips: HelpTip[] = [
   {
     id: 'release-wo',
     title: 'Release Work Orders',
-    description: 'Only released work orders appear on the shop floor. Use the Release action from the work order detail page.',
+    description:
+      'Only released work orders appear on the shop floor. Use the Release action from the work order detail page.',
     requiredPermissions: ['work_orders:release'],
   },
   {
@@ -460,67 +495,61 @@ export const helpTips: HelpTip[] = [
  * Get tours visible to a specific role, with role-customized descriptions
  * and filtered steps based on permissions.
  */
-export function getToursForRole(
-  role: UserRole | undefined,
-  isSuperuser?: boolean
-): Tour[] {
+export function getToursForRole(role: UserRole | undefined, isSuperuser?: boolean): Tour[] {
   if (!role && !isSuperuser) return [];
 
-  return Object.values(tours)
-    .filter((tour) => {
-      // Superusers see everything
-      if (isSuperuser) return true;
-      // Check role restriction
-      if (tour.roles && tour.roles.length > 0 && !tour.roles.includes(role!)) {
-        return false;
-      }
-      // Check permission restriction
-      if (tour.requiredPermissions && tour.requiredPermissions.length > 0) {
-        return hasAnyPermission(role, tour.requiredPermissions);
-      }
-      return true;
-    })
-    .map((tour) => {
-      // Apply role-specific description
-      const description: string =
-        (role && tour.roleDescriptions?.[role]) || tour.description;
+  return (
+    Object.values(tours)
+      .filter(tour => {
+        // Superusers see everything
+        if (isSuperuser) return true;
+        // Check role restriction
+        if (tour.roles && tour.roles.length > 0 && !tour.roles.includes(role!)) {
+          return false;
+        }
+        // Check permission restriction
+        if (tour.requiredPermissions && tour.requiredPermissions.length > 0) {
+          return hasAnyPermission(role, tour.requiredPermissions);
+        }
+        return true;
+      })
+      .map(tour => {
+        // Apply role-specific description
+        const description: string = (role && tour.roleDescriptions?.[role]) || tour.description;
 
-      // Filter steps by permission and apply role overrides
-      const steps = tour.steps
-        .filter((step) => {
-          if (isSuperuser) return true;
-          if (step.requiredPermissions && step.requiredPermissions.length > 0) {
-            return hasAnyPermission(role, step.requiredPermissions);
-          }
-          return true;
-        })
-        .map((step, _filteredIdx) => {
-          // Find the original index for this step in the unfiltered array
-          const originalIdx = tour.steps.indexOf(step);
-          const override =
-            role && tour.roleStepOverrides?.[originalIdx]?.[role];
-          if (override) {
-            return { ...step, ...override };
-          }
-          return step;
-        });
+        // Filter steps by permission and apply role overrides
+        const steps = tour.steps
+          .filter(step => {
+            if (isSuperuser) return true;
+            if (step.requiredPermissions && step.requiredPermissions.length > 0) {
+              return hasAnyPermission(role, step.requiredPermissions);
+            }
+            return true;
+          })
+          .map((step, _filteredIdx) => {
+            // Find the original index for this step in the unfiltered array
+            const originalIdx = tour.steps.indexOf(step);
+            const override = role && tour.roleStepOverrides?.[originalIdx]?.[role];
+            if (override) {
+              return { ...step, ...override };
+            }
+            return step;
+          });
 
-      return { ...tour, description, steps };
-    })
-    // Don't show tours with 0 steps after filtering
-    .filter((tour) => tour.steps.length > 0);
+        return { ...tour, description, steps };
+      })
+      // Don't show tours with 0 steps after filtering
+      .filter(tour => tour.steps.length > 0)
+  );
 }
 
 /**
  * Get help tips visible to a specific role.
  */
-export function getHelpTipsForRole(
-  role: UserRole | undefined,
-  isSuperuser?: boolean
-): HelpTip[] {
+export function getHelpTipsForRole(role: UserRole | undefined, isSuperuser?: boolean): HelpTip[] {
   if (!role && !isSuperuser) return [];
 
-  return helpTips.filter((tip) => {
+  return helpTips.filter(tip => {
     if (isSuperuser) return true;
     if (tip.roles && tip.roles.length > 0 && !tip.roles.includes(role!)) {
       return false;
@@ -540,14 +569,14 @@ export const getTour = (tourId: string): Tour | undefined => {
 };
 
 /** localStorage key for the per-user "Getting-Started auto-start attempted" flag. */
-export const gettingStartedAutostartKey = (userKey: string | number): string =>
-  `werco-gs-tour-autostart:${userKey}`;
+export const gettingStartedAutostartKey = (userKey: string | number): string => `werco-gs-tour-autostart:${userKey}`;
 
 /**
  * Decide whether the Getting-Started tour should auto-start for this user on
  * mount. Pure + storage-aware so the Layout effect stays trivial and the
  * gating is unit-testable. Returns true only when the user is authenticated,
- * not in kiosk mode, the tour hasn't been completed, and it hasn't already
+ * on the tour's start page, not in kiosk mode, the tour hasn't been completed,
+ * and it hasn't already
  * been auto-started for this user (so dismissing/skipping does NOT re-trigger).
  *
  * When it returns true it also records the attempt, so a caller that acts on
@@ -555,17 +584,18 @@ export const gettingStartedAutostartKey = (userKey: string | number): string =>
  */
 export function shouldAutoStartGettingStarted(opts: {
   userKey: string | number | null | undefined;
+  pathname: string;
   isKiosk: boolean;
   isTourComplete: (tourId: string) => boolean;
   storage?: Pick<Storage, 'getItem' | 'setItem'>;
 }): boolean {
-  const { userKey, isKiosk, isTourComplete } = opts;
+  const { userKey, pathname, isKiosk, isTourComplete } = opts;
   if (userKey == null || isKiosk) return false;
+  const tour = getTour('getting-started');
+  if (!tour || pathname !== tour.startPath) return false;
   if (isTourComplete('getting-started')) return false;
-  if (!getTour('getting-started')) return false;
 
-  const store =
-    opts.storage ?? (typeof localStorage !== 'undefined' ? localStorage : undefined);
+  const store = opts.storage ?? (typeof localStorage !== 'undefined' ? localStorage : undefined);
   const key = gettingStartedAutostartKey(userKey);
   try {
     if (store?.getItem(key) === '1') return false;
@@ -576,4 +606,3 @@ export function shouldAutoStartGettingStarted(opts: {
   }
   return true;
 }
-

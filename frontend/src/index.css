@@ -60,6 +60,7 @@
   --fd-mute: #8a98ab;
   --fd-faint: #616f82;
   --fd-blue: #2f81f7;
+  --fd-link: #93c5fd; /* Readable identifiers on dark canvas and panel surfaces. */
   --fd-blue-glow: rgba(47, 129, 247, 0.5);
   --fd-red: #f04438;
   --fd-amber: #d29922;
@@ -1232,5 +1233,16 @@
 
   .card {
     @apply shadow-none border border-slate-300;
+  }
+}
+
+/* Legacy identifier utilities resolve to the shared dark-surface link token.
+   Background/nav brand colors remain unchanged. */
+@layer utilities {
+  .text-fd-link, .text-werco-navy-600, .text-werco-navy-700 {
+    color: var(--fd-link);
+  }
+  .hover\:text-werco-navy-700:hover, .hover\:text-werco-navy-800:hover {
+    color: #bfdbfe;
   }
 }

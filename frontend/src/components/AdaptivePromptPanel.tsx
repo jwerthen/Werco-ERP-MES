@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ArrowRightIcon, LightBulbIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import { useAuth } from '../context/AuthContext';
 import { AdaptivePrompt } from '../types/aiForward';
 
 const VISIT_KEY = 'wercoAdaptiveVisits';
@@ -16,7 +17,11 @@ const readJson = <T,>(key: string, fallback: T): T => {
 };
 
 const writeJson = (key: string, value: unknown) => {
-  localStorage.setItem(key, JSON.stringify(value));
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* Optional help preferences. */
+  }
 };
 
 const promptForPath = (path: string, visitCount: number): AdaptivePrompt | null => {
@@ -52,6 +57,8 @@ const promptForPath = (path: string, visitCount: number): AdaptivePrompt | null 
 };
 
 export default function AdaptivePromptPanel() {
+  const { user } = useAuth();
+  const scope = `${user?.company_id ?? 'workspace'}:${user?.id ?? 'anonymous'}`;
   const location = useLocation();
   const navigate = useNavigate();
   const [prompt, setPrompt] = useState<AdaptivePrompt | null>(null);
@@ -59,26 +66,26 @@ export default function AdaptivePromptPanel() {
   const pathKey = useMemo(() => location.pathname, [location.pathname]);
 
   useEffect(() => {
-    const dismissed = readJson<Record<string, boolean>>(DISMISSED_KEY, {});
-    const visits = readJson<Record<string, number>>(VISIT_KEY, {});
+    const dismissed = readJson<Record<string, boolean>>(`${DISMISSED_KEY}:${scope}`, {});
+    const visits = readJson<Record<string, number>>(`${VISIT_KEY}:${scope}`, {});
     const nextVisits = { ...visits, [pathKey]: (visits[pathKey] || 0) + 1 };
-    writeJson(VISIT_KEY, nextVisits);
+    writeJson(`${VISIT_KEY}:${scope}`, nextVisits);
 
     const nextPrompt = promptForPath(pathKey, nextVisits[pathKey]);
     if (nextPrompt && !dismissed[nextPrompt.id]) {
       setPrompt(nextPrompt);
-    }
-  }, [pathKey]);
+    } else setPrompt(null);
+  }, [pathKey, scope]);
 
   useEffect(() => {
     const onFriction = (event: Event) => {
       const detail = (event as CustomEvent<{ type?: string; query?: string }>).detail;
       if (detail?.type !== 'failed_search') return;
-      const failed = readJson<Record<string, number>>(FAILED_SEARCH_KEY, {});
+      const failed = readJson<Record<string, number>>(`${FAILED_SEARCH_KEY}:${scope}`, {});
       const count = (failed[detail.query || 'unknown'] || 0) + 1;
-      writeJson(FAILED_SEARCH_KEY, { ...failed, [detail.query || 'unknown']: count });
+      writeJson(`${FAILED_SEARCH_KEY}:${scope}`, { ...failed, [detail.query || 'unknown']: count });
       const promptId = 'natural-language-search';
-      const dismissed = readJson<Record<string, boolean>>(DISMISSED_KEY, {});
+      const dismissed = readJson<Record<string, boolean>>(`${DISMISSED_KEY}:${scope}`, {});
       if (count >= 2 && !dismissed[promptId]) {
         setPrompt({
           id: promptId,
@@ -91,13 +98,13 @@ export default function AdaptivePromptPanel() {
     };
     window.addEventListener('werco:friction', onFriction);
     return () => window.removeEventListener('werco:friction', onFriction);
-  }, []);
+  }, [scope]);
 
   if (!prompt) return null;
 
   const dismiss = () => {
-    const dismissed = readJson<Record<string, boolean>>(DISMISSED_KEY, {});
-    writeJson(DISMISSED_KEY, { ...dismissed, [prompt.id]: true });
+    const dismissed = readJson<Record<string, boolean>>(`${DISMISSED_KEY}:${scope}`, {});
+    writeJson(`${DISMISSED_KEY}:${scope}`, { ...dismissed, [prompt.id]: true });
     setPrompt(null);
   };
 
@@ -110,7 +117,11 @@ export default function AdaptivePromptPanel() {
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-3">
             <h2 className="text-sm font-semibold text-white">{prompt.title}</h2>
-            <button onClick={dismiss} className="rounded p-1 text-slate-400 hover:bg-slate-700 hover:text-white">
+            <button
+              aria-label="Dismiss suggestion"
+              onClick={dismiss}
+              className="rounded p-1 text-slate-400 hover:bg-slate-700 hover:text-white"
+            >
               <XMarkIcon className="h-4 w-4" />
             </button>
           </div>
@@ -118,7 +129,14 @@ export default function AdaptivePromptPanel() {
           {prompt.href && (
             <button
               onClick={() => {
-                navigate(prompt.href!);
+                const blockers =
+                  prompt.id === 'work-order-blockers'
+                    ? document.querySelector<HTMLElement>('[data-cockpit-panel="Blockers"]')
+                    : null;
+                if (blockers) {
+                  blockers.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  blockers.focus({ preventScroll: true });
+                } else navigate(prompt.id === 'work-order-blockers' ? '/action-inbox' : prompt.href!);
                 dismiss();
               }}
               className="mt-3 inline-flex items-center text-sm font-medium text-cyan-300 hover:text-cyan-200"

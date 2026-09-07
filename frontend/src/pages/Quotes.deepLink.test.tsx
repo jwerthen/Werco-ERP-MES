@@ -72,7 +72,7 @@ const renderAt = (url: string) =>
           <Route path="/quotes" element={<Quotes />} />
         </Routes>
       </ToastProvider>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
 
 beforeEach(() => {
@@ -117,7 +117,7 @@ describe('?id= misses the loaded list (EXPIRED / CONVERTED / beyond the 100 cap)
     mockedApi.getQuote.mockRejectedValue(new Error('404'));
     renderAt('/quotes?id=42');
 
-    expect(await screen.findByText('Quote not found')).toBeInTheDocument();
+    expect(await screen.findByText('Quote could not be loaded. Check access or try again.')).toBeInTheDocument();
     await new Promise(resolve => setTimeout(resolve, 50));
     expect(mockedApi.getQuote).toHaveBeenCalledTimes(1);
   });

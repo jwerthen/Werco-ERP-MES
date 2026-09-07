@@ -101,7 +101,7 @@ async function renderPage() {
 }
 
 async function selectPart(partNumber: string, partId: number) {
-  fireEvent.change(screen.getByRole('combobox'), { target: { value: partNumber } });
+  fireEvent.change(screen.getByRole('combobox', { name: /^Part/ }), { target: { value: partNumber } });
   const option = await screen.findByRole('option', { name: new RegExp(partNumber, 'i') });
   fireEvent.mouseDown(option);
   await waitFor(() => expect(mockedApi.getPartReadiness).toHaveBeenCalledWith(partId));
@@ -247,5 +247,56 @@ describe('WorkOrderNew posts a bare operation identifier', () => {
     const operations = await submit();
     expect(operations.map((op) => op.operation_number)).toEqual(['10', '20']);
     operations.forEach((op) => expect(String(op.operation_number)).not.toMatch(/op/i));
+  });
+});
+
+describe('reviewed operation overrides and request ownership', () => {
+  const twoOperations = {
+    id: 3, part_id: 1, revision: 'A', status: 'released',
+    operations: [
+      { id: 30, sequence: 10, operation_number: '10', name: 'Laser Cut', work_center_id: 5, work_center: { id: 5, code: 'WC-LASER', name: 'Laser Cell' }, setup_hours: 0.5, run_hours_per_unit: 0.1 },
+      { id: 31, sequence: 20, operation_number: '20', name: 'Inspect', work_center_id: 5, work_center: { id: 5, code: 'WC-LASER', name: 'Laser Cell' }, setup_hours: 0, run_hours_per_unit: 0.2 },
+    ],
+  };
+  it('posts the remaining routing rows when the only edit was removing an operation', async () => {
+    mockedApi.getRoutingByPart.mockResolvedValue(twoOperations);
+    await renderPage();
+    await selectPart('PN-7731', 1);
+    await waitFor(() => expect(screen.getAllByLabelText('Operation name')).toHaveLength(2));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Remove operation' })[0]);
+    const operations = await submit();
+    expect(operations).toHaveLength(1);
+    expect(operations[0]).toMatchObject({ name: 'Inspect', operation_number: '20' });
+  });
+  it('does not silently restore a routing after all reviewed operations are removed', async () => {
+    mockedApi.getRoutingByPart.mockResolvedValue(twoOperations);
+    await renderPage();
+    await selectPart('PN-7731', 1);
+    await waitFor(() => expect(screen.getAllByLabelText('Operation name')).toHaveLength(2));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Remove operation' })[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Remove operation' }));
+    expect(screen.getByRole('button', { name: /create work order/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /add operation/i })).toBeEnabled();
+    expect(mockedApi.createWorkOrder).not.toHaveBeenCalled();
+  });
+  it('ignores a routing response after the selected part is cleared', async () => {
+    let resolveRouting!: (value: typeof twoOperations) => void;
+    mockedApi.getRoutingByPart.mockImplementation(() => new Promise(resolve => { resolveRouting = resolve; }));
+    await renderPage();
+    await selectPart('PN-7731', 1);
+    await waitFor(() => expect(mockedApi.getRoutingByPart).toHaveBeenCalledWith(1));
+    expect(screen.getByRole('button', { name: /create work order/i })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear selected part' }));
+    resolveRouting(twoOperations);
+    await waitFor(() => expect(screen.queryByLabelText('Operation name')).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: /create work order/i })).toBeDisabled();
+  });
+  it('blocks creation when part readiness could not be verified', async () => {
+    mockedApi.getPartReadiness.mockRejectedValueOnce(new Error('Offline'));
+    await renderPage();
+    await selectPart('PN-7731', 1);
+    expect(await screen.findByText(/Could not verify part readiness/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /create work order/i })).toBeDisabled();
+    expect(mockedApi.createWorkOrder).not.toHaveBeenCalled();
   });
 });

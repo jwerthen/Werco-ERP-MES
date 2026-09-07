@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import api from '../services/api';
+import { ComboBox } from '../components/ui/ComboBox';
 import {
   ArrowsRightLeftIcon,
   ArrowDownTrayIcon,
@@ -68,6 +69,8 @@ const PART_TYPES = new Set(['manufactured', 'assembly']);
 
 export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   const { showToast } = useToast();
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState('');
   const { user } = useAuth();
   const location = useLocation();
   // Breadcrumb parent — non-null only on /inventory/parts | /inventory/materials
@@ -105,60 +108,67 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   const [showLowStockOnly, setShowLowStockOnly] = useState(() => searchParams.get('filter') === 'low_stock');
   const [filterText, setFilterText] = useState('');
   const debouncedFilterText = useDebouncedValue(filterText, 250);
-  
+
   const [showReceiveModal, setShowReceiveModal] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [showCombineModal, setShowCombineModal] = useState(false);
   const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
 
   const [receiveForm, setReceiveForm] = useState({
-    part_id: 0, quantity: 0, location_code: '', lot_number: '', 
-    serial_number: '', po_number: '', unit_cost: 0
+    part_id: 0,
+    quantity: 0,
+    location_code: '',
+    lot_number: '',
+    serial_number: '',
+    po_number: '',
+    unit_cost: 0,
   });
   const [transferForm, setTransferForm] = useState({
-    inventory_item_id: 0, quantity: 0, to_location_code: '', notes: ''
+    inventory_item_id: 0,
+    quantity: 0,
+    to_location_code: '',
+    notes: '',
   });
-  const lowStockPartIds = useMemo(
-    () => new Set(lowStockItems.map((item: any) => item.part_id)),
-    [lowStockItems]
-  );
+  const lowStockPartIds = useMemo(() => new Set(lowStockItems.map((item: any) => item.part_id)), [lowStockItems]);
   const partsById = useMemo(() => new Map(parts.map((p: any) => [p.id, p])), [parts]);
-  const getPartType = useCallback((partId: number) => {
-    return partsById.get(partId)?.part_type as string | undefined;
-  }, [partsById]);
-  const filterByGroup = useCallback((partType?: string) => {
-    if (!partType) return groupFilter === 'all';
-    if (groupFilter === 'parts') return PART_TYPES.has(partType);
-    if (groupFilter === 'materials') return MATERIAL_TYPES.has(partType);
-    return true;
-  }, [groupFilter]);
+  const getPartType = useCallback(
+    (partId: number) => {
+      return partsById.get(partId)?.part_type as string | undefined;
+    },
+    [partsById]
+  );
+  const filterByGroup = useCallback(
+    (partType?: string) => {
+      if (!partType) return groupFilter === 'all';
+      if (groupFilter === 'parts') return PART_TYPES.has(partType);
+      if (groupFilter === 'materials') return MATERIAL_TYPES.has(partType);
+      return true;
+    },
+    [groupFilter]
+  );
   const filteredSummary = useMemo(() => {
-    const base = showLowStockOnly
-      ? summary.filter((item) => lowStockPartIds.has(item.part_id))
-      : summary;
-    const grouped = base.filter((item) => filterByGroup(getPartType(item.part_id)));
+    const base = showLowStockOnly ? summary.filter(item => lowStockPartIds.has(item.part_id)) : summary;
+    const grouped = base.filter(item => filterByGroup(getPartType(item.part_id)));
     if (!debouncedFilterText) return grouped;
     const term = debouncedFilterText.toLowerCase();
-    return grouped.filter((item) => (
-      item.part_number?.toLowerCase().includes(term) ||
-      item.part_name?.toLowerCase().includes(term)
-    ));
+    return grouped.filter(
+      item => item.part_number?.toLowerCase().includes(term) || item.part_name?.toLowerCase().includes(term)
+    );
   }, [debouncedFilterText, filterByGroup, getPartType, lowStockPartIds, showLowStockOnly, summary]);
   const groupSummary = useMemo(
-    () => summary.filter((item) => filterByGroup(getPartType(item.part_id))),
+    () => summary.filter(item => filterByGroup(getPartType(item.part_id))),
     [filterByGroup, getPartType, summary]
   );
   const filteredInventory = useMemo(() => {
-    const grouped = inventory.filter((item) => filterByGroup(item.part?.part_type));
+    const grouped = inventory.filter(item => filterByGroup(item.part?.part_type));
     if (!debouncedFilterText) return grouped;
     const term = debouncedFilterText.toLowerCase();
-    return grouped.filter((item) => (
-      item.part?.part_number?.toLowerCase().includes(term) ||
-      item.part?.name?.toLowerCase().includes(term)
-    ));
+    return grouped.filter(
+      item => item.part?.part_number?.toLowerCase().includes(term) || item.part?.name?.toLowerCase().includes(term)
+    );
   }, [filterByGroup, debouncedFilterText, inventory]);
   const groupInventory = useMemo(
-    () => inventory.filter((item) => filterByGroup(item.part?.part_type)),
+    () => inventory.filter(item => filterByGroup(item.part?.part_type)),
     [filterByGroup, inventory]
   );
   const filteredPartsForReceive = useMemo(() => {
@@ -200,7 +210,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         api.getInventorySummary(),
         api.getParts({ active_only: true, item_group: 'all' }),
         api.getInventoryLocations(),
-        api.getLowStockAlerts()
+        api.getLowStockAlerts(),
       ]);
       setInventory(invRes);
       setSummary(summaryRes);
@@ -217,25 +227,81 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
 
   const handleReceive = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (
+      !receiveForm.part_id ||
+      !receiveForm.location_code ||
+      !Number.isFinite(receiveForm.quantity) ||
+      receiveForm.quantity <= 0 ||
+      !Number.isFinite(receiveForm.unit_cost) ||
+      receiveForm.unit_cost < 0
+    ) {
+      setActionError('Select a part and location, enter a positive quantity and a nonnegative unit cost.');
+      return;
+    }
+    if (actionBusy) return;
+    setActionBusy(true);
+    setActionError('');
     try {
       await api.receiveInventory(receiveForm);
       setShowReceiveModal(false);
-      setReceiveForm({ part_id: 0, quantity: 0, location_code: '', lot_number: '', serial_number: '', po_number: '', unit_cost: 0 });
+      setReceiveForm({
+        part_id: 0,
+        quantity: 0,
+        location_code: '',
+        lot_number: '',
+        serial_number: '',
+        po_number: '',
+        unit_cost: 0,
+      });
       loadData();
     } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      setActionError(
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((item: any) => item.msg).join('; ')
+            : 'Unable to save. Check your entries and try again.'
+      );
       showToast('error', err.response?.data?.detail || 'Failed to receive inventory');
+    } finally {
+      setActionBusy(false);
     }
   };
 
   const handleTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (
+      !selectedItem ||
+      !transferForm.to_location_code ||
+      transferForm.to_location_code === selectedItem.location ||
+      !Number.isFinite(transferForm.quantity) ||
+      transferForm.quantity <= 0 ||
+      transferForm.quantity > selectedItem.quantity_available
+    ) {
+      setActionError('Choose a different destination and a positive quantity within the available amount.');
+      return;
+    }
+    if (actionBusy) return;
+    setActionBusy(true);
+    setActionError('');
     try {
       await api.transferInventory(transferForm);
       setShowTransferModal(false);
       setTransferForm({ inventory_item_id: 0, quantity: 0, to_location_code: '', notes: '' });
       loadData();
     } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      setActionError(
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((item: any) => item.msg).join('; ')
+            : 'Unable to save. Check your entries and try again.'
+      );
       showToast('error', err.response?.data?.detail || 'Failed to transfer inventory');
+    } finally {
+      setActionBusy(false);
     }
   };
 
@@ -247,194 +313,225 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
 
   const getPartTypeLabel = (type?: string) => {
     switch (type) {
-      case 'manufactured': return 'Manufactured';
-      case 'assembly': return 'Assembly';
-      case 'raw_material': return 'Raw Material';
-      case 'purchased': return 'Purchased';
-      case 'hardware': return 'Hardware';
-      case 'consumable': return 'Consumable';
-      default: return type || '—';
+      case 'manufactured':
+        return 'Manufactured';
+      case 'assembly':
+        return 'Assembly';
+      case 'raw_material':
+        return 'Raw Material';
+      case 'purchased':
+        return 'Purchased';
+      case 'hardware':
+        return 'Hardware';
+      case 'consumable':
+        return 'Consumable';
+      default:
+        return type || '—';
     }
   };
 
   const getPartTypeIcon = (type?: string) => {
     switch (type) {
-      case 'manufactured': return <CubeIcon className="h-4 w-4" />;
-      case 'assembly': return <Squares2X2Icon className="h-4 w-4" />;
-      case 'raw_material': return <CubeIcon className="h-4 w-4" />;
-      case 'purchased': return <WrenchScrewdriverIcon className="h-4 w-4" />;
-      case 'hardware': return <WrenchScrewdriverIcon className="h-4 w-4" />;
-      case 'consumable': return <CubeIcon className="h-4 w-4" />;
-      default: return null;
+      case 'manufactured':
+        return <CubeIcon className="h-4 w-4" />;
+      case 'assembly':
+        return <Squares2X2Icon className="h-4 w-4" />;
+      case 'raw_material':
+        return <CubeIcon className="h-4 w-4" />;
+      case 'purchased':
+        return <WrenchScrewdriverIcon className="h-4 w-4" />;
+      case 'hardware':
+        return <WrenchScrewdriverIcon className="h-4 w-4" />;
+      case 'consumable':
+        return <CubeIcon className="h-4 w-4" />;
+      default:
+        return null;
     }
   };
 
   const renderTypeBadge = (partType?: string) => (
-    <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
-      PART_TYPES.has(partType || '')
-        ? 'bg-blue-500/20 text-werco-navy-700'
-        : 'bg-amber-500/20 text-amber-400'
-    }`}>
+    <span
+      className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
+        PART_TYPES.has(partType || '') ? 'bg-blue-500/20 text-fd-link' : 'bg-amber-500/20 text-amber-400'
+      }`}
+    >
       {getPartTypeIcon(partType)}
       {getPartTypeLabel(partType)}
     </span>
   );
 
   // ---- Summary tab (by part) columns ----
-  const summaryColumns = useMemo<Array<DataTableColumn<InventorySummary>>>(() => [
-    {
-      key: 'part',
-      header: 'Part',
-      sortable: true,
-      accessor: (item) => item.part_number,
-      csv: (item) => `${item.part_number} ${item.part_name}`.trim(),
-      render: (item) => {
-        const isLowStock = lowStockPartIds.has(item.part_id);
-        return (
-          <div>
-            <div className="font-medium">{item.part_number}</div>
-            <div className="text-sm text-slate-400">{item.part_name}</div>
-            {isLowStock && <span className="text-xs text-red-600 font-medium">LOW STOCK</span>}
-          </div>
-        );
-      },
-    },
-    {
-      key: 'type',
-      header: 'Type',
-      sortable: true,
-      accessor: (item) => getPartTypeLabel(getPartType(item.part_id)),
-      render: (item) => renderTypeBadge(getPartType(item.part_id)),
-    },
-    {
-      key: 'on_hand',
-      header: 'On Hand',
-      sortable: true,
-      align: 'right',
-      className: 'font-medium',
-      accessor: (item) => item.total_on_hand,
-    },
-    {
-      key: 'allocated',
-      header: 'Allocated',
-      sortable: true,
-      align: 'right',
-      accessor: (item) => item.total_allocated,
-    },
-    {
-      key: 'available',
-      header: 'Available',
-      sortable: true,
-      align: 'right',
-      className: 'text-green-600 font-medium',
-      accessor: (item) => item.available,
-    },
-    {
-      key: 'locations',
-      header: 'Locations',
-      csv: (item) =>
-        item.locations
-          .map((loc) => `${loc.location} (${loc.quantity})${loc.lot_number ? ` Lot:${loc.lot_number}` : ''}`)
-          .join('; '),
-      render: (item) => (
-        <>
-          {item.locations.map((loc, idx) => (
-            <div key={idx} className="text-sm">
-              <span className="font-mono bg-slate-800/50 px-1 rounded">{loc.location}</span>
-              <span className="text-slate-400 ml-2">({loc.quantity})</span>
-              {loc.lot_number && <span className="text-slate-400 ml-1">Lot: {loc.lot_number}</span>}
+  const summaryColumns = useMemo<Array<DataTableColumn<InventorySummary>>>(
+    () => [
+      {
+        key: 'part',
+        header: 'Part',
+        sortable: true,
+        accessor: item => item.part_number,
+        csv: item => `${item.part_number} ${item.part_name}`.trim(),
+        render: item => {
+          const isLowStock = lowStockPartIds.has(item.part_id);
+          return (
+            <div>
+              <div className="font-medium">{item.part_number}</div>
+              <div className="text-sm text-slate-400">{item.part_name}</div>
+              {isLowStock && <span className="text-xs text-red-600 font-medium">LOW STOCK</span>}
             </div>
-          ))}
-        </>
-      ),
-    },
-  ], [lowStockPartIds, getPartType]);
+          );
+        },
+      },
+      {
+        key: 'type',
+        header: 'Type',
+        sortable: true,
+        accessor: item => getPartTypeLabel(getPartType(item.part_id)),
+        render: item => renderTypeBadge(getPartType(item.part_id)),
+      },
+      {
+        key: 'on_hand',
+        header: 'On Hand',
+        sortable: true,
+        align: 'right',
+        className: 'font-medium',
+        accessor: item => item.total_on_hand,
+      },
+      {
+        key: 'allocated',
+        header: 'Allocated',
+        sortable: true,
+        align: 'right',
+        accessor: item => item.total_allocated,
+      },
+      {
+        key: 'available',
+        header: 'Available',
+        sortable: true,
+        align: 'right',
+        className: 'text-green-600 font-medium',
+        accessor: item => item.available,
+      },
+      {
+        key: 'locations',
+        header: 'Locations',
+        csv: item =>
+          item.locations
+            .map(loc => `${loc.location} (${loc.quantity})${loc.lot_number ? ` Lot:${loc.lot_number}` : ''}`)
+            .join('; '),
+        render: item => (
+          <>
+            {item.locations.map((loc, idx) => (
+              <div key={idx} className="text-sm">
+                <span className="font-mono bg-slate-800/50 px-1 rounded">{loc.location}</span>
+                <span className="text-slate-400 ml-2">({loc.quantity})</span>
+                {loc.lot_number && <span className="text-slate-400 ml-1">Lot: {loc.lot_number}</span>}
+              </div>
+            ))}
+          </>
+        ),
+      },
+    ],
+    [lowStockPartIds, getPartType]
+  );
 
   // ---- Detail tab (by location) columns ----
-  const detailColumns = useMemo<Array<DataTableColumn<InventoryItem>>>(() => [
-    {
-      key: 'part',
-      header: 'Part',
-      sortable: true,
-      accessor: (item) => item.part?.part_number ?? '',
-      csv: (item) => `${item.part?.part_number ?? ''} ${item.part?.name ?? ''}`.trim(),
-      render: (item) => (
-        <div>
-          <div className="font-medium">{item.part?.part_number}</div>
-          <div className="text-xs text-slate-400">{item.part?.name}</div>
-        </div>
-      ),
-    },
-    {
-      key: 'type',
-      header: 'Type',
-      sortable: true,
-      accessor: (item) => getPartTypeLabel(item.part?.part_type),
-      render: (item) => renderTypeBadge(item.part?.part_type),
-    },
-    {
-      key: 'location',
-      header: 'Location',
-      sortable: true,
-      className: 'font-mono text-sm',
-      accessor: (item) => item.location,
-    },
-    {
-      key: 'lot',
-      header: 'Lot #',
-      sortable: true,
-      className: 'text-sm',
-      accessor: (item) => item.lot_number ?? '',
-      render: (item) => item.lot_number || '-',
-    },
-    {
-      key: 'qty',
-      header: 'Qty',
-      sortable: true,
-      align: 'right',
-      className: 'font-medium',
-      accessor: (item) => item.quantity_on_hand,
-    },
-    {
-      key: 'available',
-      header: 'Available',
-      sortable: true,
-      align: 'right',
-      className: 'text-green-600',
-      accessor: (item) => item.quantity_available,
-    },
-    {
-      key: 'status',
-      header: 'Status',
-      sortable: true,
-      accessor: (item) => item.status,
-      render: (item) => (
-        <span className={`px-2 py-1 rounded text-xs ${
-          item.status === 'available' ? 'bg-green-500/20 text-emerald-300' :
-          item.status === 'quarantine' ? 'bg-yellow-500/20 text-yellow-300' :
-          'bg-slate-800/50 text-slate-100'
-        }`}>{item.status}</span>
-      ),
-    },
-    // Transfer is the only row action; without the permission the whole column is
-    // dropped so no empty "Actions" header is left behind.
-    ...(canTransfer
-      ? [{
-          key: 'actions',
-          header: 'Actions',
-          align: 'center' as const,
-          render: (item: InventoryItem) => (
-            <button
-              onClick={(e) => { e.stopPropagation(); openTransfer(item); }}
-              className="text-werco-primary hover:text-blue-400"
-              aria-label="Transfer inventory"
-            >
-              <ArrowsRightLeftIcon className="h-5 w-5" aria-hidden="true" />
-            </button>
-          ),
-        }]
-      : []),
-  ], [canTransfer]);
+  const detailColumns = useMemo<Array<DataTableColumn<InventoryItem>>>(
+    () => [
+      {
+        key: 'part',
+        header: 'Part',
+        sortable: true,
+        accessor: item => item.part?.part_number ?? '',
+        csv: item => `${item.part?.part_number ?? ''} ${item.part?.name ?? ''}`.trim(),
+        render: item => (
+          <div>
+            <div className="font-medium">{item.part?.part_number}</div>
+            <div className="text-xs text-slate-400">{item.part?.name}</div>
+          </div>
+        ),
+      },
+      {
+        key: 'type',
+        header: 'Type',
+        sortable: true,
+        accessor: item => getPartTypeLabel(item.part?.part_type),
+        render: item => renderTypeBadge(item.part?.part_type),
+      },
+      {
+        key: 'location',
+        header: 'Location',
+        sortable: true,
+        className: 'font-mono text-sm',
+        accessor: item => item.location,
+      },
+      {
+        key: 'lot',
+        header: 'Lot #',
+        sortable: true,
+        className: 'text-sm',
+        accessor: item => item.lot_number ?? '',
+        render: item => item.lot_number || '-',
+      },
+      {
+        key: 'qty',
+        header: 'Qty',
+        sortable: true,
+        align: 'right',
+        className: 'font-medium',
+        accessor: item => item.quantity_on_hand,
+      },
+      {
+        key: 'available',
+        header: 'Available',
+        sortable: true,
+        align: 'right',
+        className: 'text-green-600',
+        accessor: item => item.quantity_available,
+      },
+      {
+        key: 'status',
+        header: 'Status',
+        sortable: true,
+        accessor: item => item.status,
+        render: item => (
+          <span
+            className={`px-2 py-1 rounded text-xs ${
+              item.status === 'available'
+                ? 'bg-green-500/20 text-emerald-300'
+                : item.status === 'quarantine'
+                  ? 'bg-yellow-500/20 text-yellow-300'
+                  : 'bg-slate-800/50 text-slate-100'
+            }`}
+          >
+            {item.status}
+          </span>
+        ),
+      },
+      // Transfer is the only row action; without the permission the whole column is
+      // dropped so no empty "Actions" header is left behind.
+      ...(canTransfer
+        ? [
+            {
+              key: 'actions',
+              header: 'Actions',
+              align: 'center' as const,
+              render: (item: InventoryItem) => (
+                <button
+                  onClick={e => {
+                    e.stopPropagation();
+                    openTransfer(item);
+                  }}
+                  className="text-werco-primary hover:text-blue-400"
+                  aria-label="Transfer inventory"
+                >
+                  <ArrowsRightLeftIcon className="h-5 w-5" aria-hidden="true" />
+                </button>
+              ),
+            },
+          ]
+        : []),
+    ],
+    [canTransfer]
+  );
 
   // ---- Mobile cards (below md) ----
   const renderSummaryCard = (item: InventorySummary) => {
@@ -514,18 +611,27 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         {
           label: 'Status',
           value: (
-            <span className={`px-2 py-1 rounded text-xs ${
-              item.status === 'available' ? 'bg-green-500/20 text-emerald-300' :
-              item.status === 'quarantine' ? 'bg-yellow-500/20 text-yellow-300' :
-              'bg-slate-800/50 text-slate-100'
-            }`}>{item.status}</span>
+            <span
+              className={`px-2 py-1 rounded text-xs ${
+                item.status === 'available'
+                  ? 'bg-green-500/20 text-emerald-300'
+                  : item.status === 'quarantine'
+                    ? 'bg-yellow-500/20 text-yellow-300'
+                    : 'bg-slate-800/50 text-slate-100'
+              }`}
+            >
+              {item.status}
+            </span>
           ),
         },
       ]}
       actions={
         canTransfer ? (
           <button
-            onClick={(e) => { e.stopPropagation(); openTransfer(item); }}
+            onClick={e => {
+              e.stopPropagation();
+              openTransfer(item);
+            }}
             className="inline-flex items-center gap-1.5 border border-slate-600 text-slate-200 hover:border-werco-primary hover:text-werco-primary text-sm px-3 py-1 transition-colors"
             aria-label="Transfer inventory"
           >
@@ -546,13 +652,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   }
 
   if (loadError) {
-    return (
-      <ErrorState
-        message="Could not load inventory data."
-        onRetry={loadData}
-        className="my-8"
-      />
-    );
+    return <ErrorState message="Could not load inventory data." onRetry={loadData} className="my-8" />;
   }
 
   return (
@@ -636,103 +736,103 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
           its own filters, and the "Showing N of M items" counter here would be
           counting a different set than the one on screen. */}
       {activeTab !== 'movements' && (
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex flex-col gap-3 w-full sm:max-w-xl">
-          <div className="relative">
-            <input
-              type="text"
-              value={filterText}
-              onChange={(e) => setFilterText(e.target.value)}
-              placeholder="Filter by part number or name..."
-              aria-label="Filter by part number or name"
-              className="input pr-10"
-            />
-            {filterText && (
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-col gap-3 w-full sm:max-w-xl">
+            <div className="relative">
+              <input
+                type="text"
+                value={filterText}
+                onChange={e => setFilterText(e.target.value)}
+                placeholder="Filter by part number or name..."
+                aria-label="Filter by part number or name"
+                className="input pr-10"
+              />
+              {filterText && (
+                <button
+                  type="button"
+                  onClick={() => setFilterText('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-400"
+                  aria-label="Clear filter"
+                >
+                  <XMarkIcon className="h-4 w-4" aria-hidden="true" />
+                </button>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              {[
+                { id: 'all', label: 'All Inventory' },
+                { id: 'parts', label: 'Manufactured & Assemblies' },
+                { id: 'materials', label: 'Materials & Supplies' },
+              ].map(chip => (
+                <button
+                  key={chip.id}
+                  type="button"
+                  onClick={() => {
+                    const next = chip.id as InventoryGroup;
+                    setGroupFilter(next);
+                    const nextParams = new URLSearchParams(searchParams);
+                    if (next === 'all') {
+                      nextParams.delete('group');
+                    } else {
+                      nextParams.set('group', next);
+                    }
+                    setSearchParams(nextParams);
+                  }}
+                  className={`rounded-full border px-3 py-1 font-medium transition ${
+                    groupFilter === chip.id
+                      ? 'border-werco-500 bg-werco-500/10 text-fd-link'
+                      : 'border-slate-700 text-slate-400 hover:border-werco-300'
+                  }`}
+                >
+                  {chip.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-sm text-slate-400">
+            <span>Showing</span>
+            <span className="px-2 py-1 rounded-full bg-slate-800/50 text-slate-300 font-medium">
+              {activeTab === 'details' ? filteredInventory.length : filteredSummary.length}
+            </span>
+            <span>of</span>
+            <span className="px-2 py-1 rounded-full bg-slate-800/50 text-slate-300 font-medium">
+              {activeTab === 'details' ? groupInventory.length : groupSummary.length}
+            </span>
+            <span>items</span>
+            {showLowStockOnly ? (
+              <span className="ml-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-sm text-xs font-medium border border-fd-amber/40 bg-fd-amber/10 text-fd-amber">
+                <ExclamationTriangleIcon className="h-3.5 w-3.5" />
+                Showing {lowStockCount} low stock
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowLowStockOnly(false);
+                    const nextParams = new URLSearchParams(searchParams);
+                    nextParams.delete('filter');
+                    setSearchParams(nextParams);
+                  }}
+                  className="-mr-0.5 ml-0.5 rounded-sm hover:bg-fd-amber/20"
+                  aria-label="Clear low stock filter"
+                >
+                  <XMarkIcon className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              </span>
+            ) : (
               <button
                 type="button"
-                onClick={() => setFilterText('')}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-400"
-                aria-label="Clear filter"
+                onClick={() => {
+                  setShowLowStockOnly(true);
+                  const nextParams = new URLSearchParams(searchParams);
+                  nextParams.set('filter', 'low_stock');
+                  setSearchParams(nextParams);
+                }}
+                className="ml-2 px-2.5 py-1 rounded-sm text-xs font-medium border border-fd-line bg-fd-panel text-slate-400 hover:border-fd-line-bright"
               >
-                <XMarkIcon className="h-4 w-4" aria-hidden="true" />
+                Show Low Stock
               </button>
             )}
           </div>
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            {[
-              { id: 'all', label: 'All Inventory' },
-              { id: 'parts', label: 'Manufactured & Assemblies' },
-              { id: 'materials', label: 'Materials & Supplies' },
-            ].map((chip) => (
-              <button
-                key={chip.id}
-                type="button"
-                onClick={() => {
-                  const next = chip.id as InventoryGroup;
-                  setGroupFilter(next);
-                  const nextParams = new URLSearchParams(searchParams);
-                  if (next === 'all') {
-                    nextParams.delete('group');
-                  } else {
-                    nextParams.set('group', next);
-                  }
-                  setSearchParams(nextParams);
-                }}
-                className={`rounded-full border px-3 py-1 font-medium transition ${
-                  groupFilter === chip.id
-                    ? 'border-werco-500 bg-werco-500/10 text-werco-700'
-                    : 'border-slate-700 text-slate-400 hover:border-werco-300'
-                }`}
-              >
-                {chip.label}
-              </button>
-            ))}
-          </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2 text-sm text-slate-400">
-          <span>Showing</span>
-          <span className="px-2 py-1 rounded-full bg-slate-800/50 text-slate-300 font-medium">
-            {activeTab === 'details' ? filteredInventory.length : filteredSummary.length}
-          </span>
-          <span>of</span>
-          <span className="px-2 py-1 rounded-full bg-slate-800/50 text-slate-300 font-medium">
-            {activeTab === 'details' ? groupInventory.length : groupSummary.length}
-          </span>
-          <span>items</span>
-          {showLowStockOnly ? (
-            <span className="ml-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-sm text-xs font-medium border border-fd-amber/40 bg-fd-amber/10 text-fd-amber">
-              <ExclamationTriangleIcon className="h-3.5 w-3.5" />
-              Showing {lowStockCount} low stock
-              <button
-                type="button"
-                onClick={() => {
-                  setShowLowStockOnly(false);
-                  const nextParams = new URLSearchParams(searchParams);
-                  nextParams.delete('filter');
-                  setSearchParams(nextParams);
-                }}
-                className="-mr-0.5 ml-0.5 rounded-sm hover:bg-fd-amber/20"
-                aria-label="Clear low stock filter"
-              >
-                <XMarkIcon className="h-3.5 w-3.5" aria-hidden="true" />
-              </button>
-            </span>
-          ) : (
-            <button
-              type="button"
-              onClick={() => {
-                setShowLowStockOnly(true);
-                const nextParams = new URLSearchParams(searchParams);
-                nextParams.set('filter', 'low_stock');
-                setSearchParams(nextParams);
-              }}
-              className="ml-2 px-2.5 py-1 rounded-sm text-xs font-medium border border-fd-line bg-fd-panel text-slate-400 hover:border-fd-line-bright"
-            >
-              Show Low Stock
-            </button>
-          )}
-        </div>
-      </div>
       )}
 
       {/* Tabs */}
@@ -742,7 +842,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
             { id: 'summary', label: 'Summary by Part' },
             { id: 'details', label: 'Detail by Location' },
             { id: 'movements', label: 'Stock Movements' },
-          ].map((tab) => (
+          ].map(tab => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id as TabType)}
@@ -764,7 +864,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
           <DataTable
             columns={summaryColumns}
             data={filteredSummary}
-            rowKey={(item) => item.part_id}
+            rowKey={item => item.part_id}
             defaultSort={{ key: 'part', dir: 'asc' }}
             pageSize={25}
             csvExport={{ filename: 'inventory-summary' }}
@@ -773,9 +873,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
               icon: CubeIcon,
               title: 'No inventory on hand',
               description: 'Received parts and materials will appear here once you receive stock.',
-              action: canReceive
-                ? { label: 'Receive Inventory', onClick: () => setShowReceiveModal(true) }
-                : undefined,
+              action: canReceive ? { label: 'Receive Inventory', onClick: () => setShowReceiveModal(true) } : undefined,
             }}
           />
         )}
@@ -784,7 +882,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
           <DataTable
             columns={detailColumns}
             data={filteredInventory}
-            rowKey={(item) => item.id}
+            rowKey={item => item.id}
             defaultSort={{ key: 'part', dir: 'asc' }}
             pageSize={25}
             csvExport={{ filename: 'inventory-detail' }}
@@ -793,9 +891,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
               icon: CubeIcon,
               title: 'No inventory on hand',
               description: 'Received parts and materials will appear here once you receive stock.',
-              action: canReceive
-                ? { label: 'Receive Inventory', onClick: () => setShowReceiveModal(true) }
-                : undefined,
+              action: canReceive ? { label: 'Receive Inventory', onClick: () => setShowReceiveModal(true) } : undefined,
             }}
           />
         )}
@@ -825,59 +921,124 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       )}
 
       {/* Receive Modal */}
-      <Modal open={showReceiveModal && canReceive} onClose={() => setShowReceiveModal(false)} size="lg" closeOnBackdrop={false}>
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-semibold">Receive Inventory</h3>
-              <button onClick={() => setShowReceiveModal(false)} aria-label="Close"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
-            </div>
-            <form onSubmit={handleReceive} className="space-y-4">
-              <FormField label="Part">
-                {(field) => (
-                  <select {...field} value={receiveForm.part_id} onChange={(e) => setReceiveForm({...receiveForm, part_id: parseInt(e.target.value)})} className="input" required>
-                    <option value={0}>Select part...</option>
-                    {filteredPartsForReceive.map(p => (
-                      <option key={p.id} value={p.id}>{p.part_number} - {p.name}</option>
-                    ))}
-                  </select>
-                )}
-              </FormField>
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Quantity">
-                  {(field) => (
-                    <input {...field} type="number" value={receiveForm.quantity} onChange={(e) => setReceiveForm({...receiveForm, quantity: parseFloat(e.target.value)})} className="input" min={0.01} step={0.01} required />
-                  )}
-                </FormField>
-                <FormField label="Location">
-                  {(field) => (
-                    <select {...field} value={receiveForm.location_code} onChange={(e) => setReceiveForm({...receiveForm, location_code: e.target.value})} className="input" required>
-                      <option value="">Select location...</option>
-                      {locations.map(l => <option key={l.id} value={l.code}>{l.code} - {l.name || l.warehouse}</option>)}
-                    </select>
-                  )}
-                </FormField>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Lot Number">
-                  {(field) => (
-                    <input {...field} type="text" value={receiveForm.lot_number} onChange={(e) => setReceiveForm({...receiveForm, lot_number: e.target.value})} className="input" />
-                  )}
-                </FormField>
-                <FormField label="PO Number">
-                  {(field) => (
-                    <input {...field} type="text" value={receiveForm.po_number} onChange={(e) => setReceiveForm({...receiveForm, po_number: e.target.value})} className="input" />
-                  )}
-                </FormField>
-              </div>
-              <FormField label="Unit Cost">
-                {(field) => (
-                  <input {...field} type="number" value={receiveForm.unit_cost} onChange={(e) => setReceiveForm({...receiveForm, unit_cost: parseFloat(e.target.value)})} className="input" min={0} step={0.01} />
-                )}
-              </FormField>
-              <div className="flex justify-end gap-3">
-                <button type="button" onClick={() => setShowReceiveModal(false)} className="btn-secondary">Cancel</button>
-                <button type="submit" className="btn-primary">Receive</button>
-              </div>
-            </form>
+      <Modal
+        open={showReceiveModal && canReceive}
+        onClose={() => setShowReceiveModal(false)}
+        size="lg"
+        closeOnBackdrop={false}
+      >
+        {actionError && (
+          <p role="alert" className="text-red-300 p-3">
+            {actionError}
+          </p>
+        )}
+        {actionBusy && (
+          <p role="status" className="text-slate-400 p-3">
+            Saving…
+          </p>
+        )}
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-lg font-semibold">Receive Inventory</h3>
+          <button onClick={() => setShowReceiveModal(false)} aria-label="Close">
+            <XMarkIcon className="h-6 w-6" aria-hidden="true" />
+          </button>
+        </div>
+        <form onSubmit={handleReceive} className="space-y-4">
+          <FormField label="Part">
+            {field => (
+              <ComboBox
+                id={field.id}
+                ariaDescribedBy={field['aria-describedby']}
+                options={filteredPartsForReceive.map(part => ({
+                  value: String(part.id),
+                  label: `${part.part_number} — ${part.name}`,
+                }))}
+                value={receiveForm.part_id ? String(receiveForm.part_id) : ''}
+                onChange={value => setReceiveForm(form => ({ ...form, part_id: Number(value) }))}
+                placeholder="Search for a part…"
+              />
+            )}
+          </FormField>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Quantity">
+              {field => (
+                <input
+                  {...field}
+                  type="number"
+                  value={receiveForm.quantity}
+                  onChange={e => setReceiveForm({ ...receiveForm, quantity: parseFloat(e.target.value) })}
+                  className="input"
+                  min={0.01}
+                  step={0.01}
+                  required
+                />
+              )}
+            </FormField>
+            <FormField label="Location">
+              {field => (
+                <select
+                  {...field}
+                  value={receiveForm.location_code}
+                  onChange={e => setReceiveForm({ ...receiveForm, location_code: e.target.value })}
+                  className="input"
+                  required
+                >
+                  <option value="">Select location...</option>
+                  {locations.map(l => (
+                    <option key={l.id} value={l.code}>
+                      {l.code} - {l.name || l.warehouse}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </FormField>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Lot Number">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={receiveForm.lot_number}
+                  onChange={e => setReceiveForm({ ...receiveForm, lot_number: e.target.value })}
+                  className="input"
+                />
+              )}
+            </FormField>
+            <FormField label="PO Number">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={receiveForm.po_number}
+                  onChange={e => setReceiveForm({ ...receiveForm, po_number: e.target.value })}
+                  className="input"
+                />
+              )}
+            </FormField>
+          </div>
+          <FormField label="Unit Cost">
+            {field => (
+              <input
+                {...field}
+                type="number"
+                value={receiveForm.unit_cost}
+                onChange={e => setReceiveForm({ ...receiveForm, unit_cost: parseFloat(e.target.value) })}
+                className="input"
+                min={0}
+                step={0.01}
+              />
+            )}
+          </FormField>
+          <div className="flex justify-end gap-3">
+            <button type="button" onClick={() => setShowReceiveModal(false)} className="btn-secondary">
+              Cancel
+            </button>
+            <button disabled={actionBusy} type="submit" className="btn-primary">
+              Receive
+            </button>
+          </div>
+        </form>
       </Modal>
 
       {/* Transfer Modal */}
@@ -887,11 +1048,23 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         size="md"
         closeOnBackdrop={false}
       >
+        {actionError && (
+          <p role="alert" className="text-red-300 p-3">
+            {actionError}
+          </p>
+        )}
+        {actionBusy && (
+          <p role="status" className="text-slate-400 p-3">
+            Saving…
+          </p>
+        )}
         {selectedItem && (
           <>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">Transfer Inventory</h3>
-              <button onClick={() => setShowTransferModal(false)} aria-label="Close"><XMarkIcon className="h-6 w-6" aria-hidden="true" /></button>
+              <button onClick={() => setShowTransferModal(false)} aria-label="Close">
+                <XMarkIcon className="h-6 w-6" aria-hidden="true" />
+              </button>
             </div>
             <div className="mb-4 p-3 bg-slate-800 rounded">
               <div className="font-medium">{selectedItem.part?.part_number}</div>
@@ -900,26 +1073,58 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
             </div>
             <form onSubmit={handleTransfer} className="space-y-4">
               <FormField label="Quantity to Transfer">
-                {(field) => (
-                  <input {...field} type="number" value={transferForm.quantity} onChange={(e) => setTransferForm({...transferForm, quantity: parseFloat(e.target.value)})} className="input" min={0.01} max={selectedItem.quantity_available} step={0.01} required />
+                {field => (
+                  <input
+                    {...field}
+                    type="number"
+                    value={transferForm.quantity}
+                    onChange={e => setTransferForm({ ...transferForm, quantity: parseFloat(e.target.value) })}
+                    className="input"
+                    min={0.01}
+                    max={selectedItem.quantity_available}
+                    step={0.01}
+                    required
+                  />
                 )}
               </FormField>
               <FormField label="To Location">
-                {(field) => (
-                  <select {...field} value={transferForm.to_location_code} onChange={(e) => setTransferForm({...transferForm, to_location_code: e.target.value})} className="input" required>
+                {field => (
+                  <select
+                    {...field}
+                    value={transferForm.to_location_code}
+                    onChange={e => setTransferForm({ ...transferForm, to_location_code: e.target.value })}
+                    className="input"
+                    required
+                  >
                     <option value="">Select destination...</option>
-                    {locations.filter(l => l.code !== selectedItem.location).map(l => <option key={l.id} value={l.code}>{l.code}</option>)}
+                    {locations
+                      .filter(l => l.code !== selectedItem.location)
+                      .map(l => (
+                        <option key={l.id} value={l.code}>
+                          {l.code}
+                        </option>
+                      ))}
                   </select>
                 )}
               </FormField>
               <FormField label="Notes">
-                {(field) => (
-                  <input {...field} type="text" value={transferForm.notes} onChange={(e) => setTransferForm({...transferForm, notes: e.target.value})} className="input" />
+                {field => (
+                  <input
+                    {...field}
+                    type="text"
+                    value={transferForm.notes}
+                    onChange={e => setTransferForm({ ...transferForm, notes: e.target.value })}
+                    className="input"
+                  />
                 )}
               </FormField>
               <div className="flex justify-end gap-3">
-                <button type="button" onClick={() => setShowTransferModal(false)} className="btn-secondary">Cancel</button>
-                <button type="submit" className="btn-primary">Transfer</button>
+                <button type="button" onClick={() => setShowTransferModal(false)} className="btn-secondary">
+                  Cancel
+                </button>
+                <button disabled={actionBusy} type="submit" className="btn-primary">
+                  Transfer
+                </button>
               </div>
             </form>
           </>

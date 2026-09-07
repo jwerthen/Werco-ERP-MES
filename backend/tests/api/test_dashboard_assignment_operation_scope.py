@@ -473,3 +473,42 @@ class TestAfterRealProductionPosting:
         assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
         assert "2" in resp.json()["detail"]
         assert float(wo.quantity_ordered) == 18.0
+
+
+def test_dashboard_due_counts_exclude_deleted_terminal_and_use_central_day(
+    client: TestClient, db_session: Session, monkeypatch
+):
+    from datetime import timezone
+
+    from app.api.endpoints import shop_floor
+    from app.core.time_utils import CENTRAL_TIME_ZONE
+
+    # 00:30 UTC is still the PREVIOUS shop day. The original date.today() drifted here.
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = datetime(2026, 9, 7, 0, 30, tzinfo=timezone.utc)
+            return fixed.astimezone(tz) if tz else fixed.replace(tzinfo=None)
+
+    monkeypatch.setattr(shop_floor, 'datetime', FixedDateTime)
+    viewer = make_user(db_session, role=UserRole.MANAGER)
+    wc = make_work_center(db_session)
+    today = FixedDateTime.now(CENTRAL_TIME_ZONE).date()
+    for wo_status, due, deleted in [
+        (WorkOrderStatus.IN_PROGRESS, today - timedelta(days=1), False),
+        (WorkOrderStatus.IN_PROGRESS, today, False),
+        (WorkOrderStatus.IN_PROGRESS, today - timedelta(days=1), True),
+        (WorkOrderStatus.CANCELLED, today, False),
+        (WorkOrderStatus.CLOSED, today - timedelta(days=1), False),
+    ]:
+        wo, _ = make_routed_wo(db_session, wc, quantity_ordered=10)
+        wo.status = wo_status
+        wo.due_date = due
+        wo.is_deleted = deleted
+    db_session.commit()
+    response = client.get(DASHBOARD, headers=headers_for(viewer))
+    assert response.status_code == 200, response.text
+    summary = response.json()['summary']
+    assert summary['overdue'] == 1
+    assert summary['due_today'] == 1
+    assert summary['active_work_orders'] == 2

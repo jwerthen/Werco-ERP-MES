@@ -71,7 +71,7 @@ const renderPurchasing = () =>
 /** Load the page and open the Create Vendor modal; returns the Code input + form. */
 async function openCreateVendorModal() {
   renderPurchasing();
-  await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+  await screen.findByRole('heading', { name: 'Purchasing' });
   fireEvent.click(screen.getByRole('button', { name: /new vendor/i }));
   const codeInput = await screen.findByLabelText(/^Code/);
   return { codeInput, form: codeInput.closest('form') as HTMLFormElement };
@@ -187,7 +187,7 @@ describe('Purchasing — Create PO unsaved-changes guard', () => {
 
   async function openCreatePOModal() {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     fireEvent.click(screen.getByRole('button', { name: /new po/i }));
     await screen.findByRole('heading', { name: 'Create Purchase Order' });
   }
@@ -224,8 +224,8 @@ describe('Purchasing — Edit Vendor unsaved-changes guard', () => {
 
   async function openEditVendorModal() {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
-    fireEvent.click(screen.getByRole('button', { name: /^Vendors/i }));
+    await screen.findByRole('heading', { name: 'Purchasing' });
+    fireEvent.click(screen.getByRole('tab', { name: /^Vendors/i }));
     const row = (await screen.findByText('Acme Aerospace')).closest('tr')!;
     fireEvent.click(within(row).getByRole('button', { name: 'Edit' }));
     await screen.findByRole('heading', { name: 'Edit Vendor' });

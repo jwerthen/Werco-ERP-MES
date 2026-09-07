@@ -16,11 +16,12 @@
  */
 
 import React from 'react';
-import { render, screen, within, fireEvent } from '@testing-library/react';
+import { render, screen, within, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import Scheduling from './Scheduling';
 import { ToastProvider } from '../components/ui/Toast';
+import { getCentralDateStamp, getCentralTodayDate } from '../utils/centralTime';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -28,6 +29,9 @@ jest.mock('../services/api', () => ({
     getWorkCenters: jest.fn(),
     getSchedulableWorkOrders: jest.fn(),
     getCapacityHeatmap: jest.fn(),
+    updateWorkOrderPriority: jest.fn(),
+    updateOperationWorkCenter: jest.fn(),
+    scheduleWorkOrder: jest.fn(),
   },
 }));
 
@@ -141,6 +145,56 @@ describe('Scheduling renders the server run order verbatim', () => {
     mockedApi.getCapacityHeatmap.mockResolvedValue(emptyHeatmap as never);
   });
 
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('guards a row-header machine move until saved state is reconciled', async () => {
+    const today = getCentralDateStamp(getCentralTodayDate());
+    const scheduledJob = { ...serverOrderedJobs[0], scheduled_start: today, remaining_hours: 1 };
+    mockedApi.getWorkCenters.mockResolvedValue([...workCenters, { id: 8, code: 'MILL-2', name: 'Mill 2', capacity_hours_per_day: 8 }] as never);
+    mockedApi.getSchedulableWorkOrders.mockResolvedValue([scheduledJob] as never);
+    let resolveMove!: () => void;
+    mockedApi.updateOperationWorkCenter.mockImplementation(() => new Promise(resolve => { resolveMove = () => resolve({} as never); }));
+    renderScheduling();
+    const card = await screen.findByRole('button', { name: /WO-7001/ });
+    const target = screen.getByText('Mill 2').closest('td')!;
+    const dataTransfer = { setData: jest.fn(), effectAllowed: '', dropEffect: '' };
+    fireEvent.dragStart(card, { dataTransfer });
+    fireEvent.drop(target, { dataTransfer });
+    expect(screen.getByText('Saving changes for WO-7001…')).toBeInTheDocument();
+    fireEvent.drop(target, { dataTransfer });
+    expect(mockedApi.updateOperationWorkCenter).toHaveBeenCalledTimes(1);
+    expect(mockedApi.updateOperationWorkCenter).toHaveBeenCalledWith(101, 8);
+    await act(async () => { resolveMove(); });
+    await waitFor(() => expect(mockedApi.getSchedulableWorkOrders).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText('Saving changes for WO-7001…')).not.toBeInTheDocument();
+  });
+
+  it('keeps a named partial scheduling failure available after the machine assignment changes', async () => {
+    const today = getCentralDateStamp(getCentralTodayDate());
+    const scheduledJob = { ...serverOrderedJobs[0], scheduled_start: today, remaining_hours: 1 };
+    mockedApi.getWorkCenters.mockResolvedValue([...workCenters, { id: 8, code: 'MILL-2', name: 'Mill 2', capacity_hours_per_day: 8 }] as never);
+    mockedApi.getSchedulableWorkOrders.mockResolvedValueOnce([scheduledJob] as never)
+      .mockResolvedValue([{ ...scheduledJob, work_center_id: 8, work_center_code: 'MILL-2' }] as never);
+    mockedApi.updateOperationWorkCenter.mockResolvedValue({} as never);
+    mockedApi.scheduleWorkOrder.mockRejectedValue({ response: { data: { detail: 'Date is unavailable' } } });
+    const { container } = renderScheduling();
+    const card = await screen.findByRole('button', { name: /WO-7001/ });
+    const target = container.querySelector(`[data-capacity-cell="8-${today}"]`)!;
+    const dataTransfer = { setData: jest.fn(), effectAllowed: '', dropEffect: '' };
+    jest.useFakeTimers();
+    fireEvent.dragStart(card, { dataTransfer });
+    fireEvent.drop(target, { dataTransfer });
+    const warning = await screen.findByText(/WO-7001: Date is unavailable.*machine move may already have succeeded/);
+    expect(warning).toBeInTheDocument();
+    await waitFor(() => expect(mockedApi.getSchedulableWorkOrders).toHaveBeenCalledTimes(2));
+    const queueTable = screen.getByRole('columnheader', { name: 'Run' }).closest('table')!;
+    expect(within(getWoRow(queueTable, 'WO-7001')).getByText('MILL-2')).toBeInTheDocument();
+    act(() => { jest.advanceTimersByTime(5000); });
+    expect(warning).toBeInTheDocument();
+  });
+
   it('renders the queue rows in payload order — no client dispatch-score re-sort', async () => {
     renderScheduling();
     const table = await getQueueTable();
@@ -224,5 +278,42 @@ describe('Scheduling — work-center filter round-trips through ?work_center=', 
     expect(select.value).toBe('');
     // All four rows render — the junk param filtered nothing out.
     expect(screen.getByText('WO-7004')).toBeInTheDocument();
+  });
+});
+
+
+describe('Scheduling bulk actions apply the reviewed visible selection', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockedApi.getWorkCenters.mockResolvedValue(workCenters as never);
+    mockedApi.getSchedulableWorkOrders.mockResolvedValue(serverOrderedJobs as never);
+    mockedApi.getCapacityHeatmap.mockResolvedValue(emptyHeatmap as never);
+    mockedApi.updateWorkOrderPriority.mockResolvedValue(undefined);
+  });
+  it('Select visible excludes rows hidden by the text query', async () => {
+    renderScheduling();
+    await getQueueTable();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search WO#, part' }), { target: { value: 'WO-7001' } });
+    fireEvent.click(screen.getByRole('button', { name: /Bulk/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Select visible' }));
+    expect(screen.getByText('Selected: 1')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Apply Priority' }));
+    await waitFor(() => expect(mockedApi.updateWorkOrderPriority).toHaveBeenCalledTimes(1));
+    expect(mockedApi.updateWorkOrderPriority).toHaveBeenCalledWith(1, 5, undefined);
+    expect(await screen.findByText('WO-7001: Updated')).toBeInTheDocument();
+  });
+  it('retains failures and retries only those work orders after a mixed bulk result', async () => {
+    mockedApi.updateWorkOrderPriority.mockRejectedValueOnce({ response: { data: { detail: 'Priority locked' } } });
+    renderScheduling();
+    await getQueueTable();
+    fireEvent.click(screen.getByRole('button', { name: /Bulk/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Select visible' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply Priority' }));
+    expect(await screen.findByText('WO-7001: Priority locked')).toBeInTheDocument();
+    expect(screen.getByText('Selected: 1')).toBeInTheDocument();
+    expect(mockedApi.updateWorkOrderPriority).toHaveBeenCalledTimes(4);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry failed jobs' }));
+    await waitFor(() => expect(mockedApi.updateWorkOrderPriority).toHaveBeenCalledTimes(5));
+    expect(mockedApi.updateWorkOrderPriority.mock.calls[4]).toEqual([1, 5, undefined]);
   });
 });

@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { tabKeyboard } from '../components/operations/tabKeyboard';
 import api from '../services/api';
+import PurchaseOrderDetail from '../components/operations/PurchaseOrderDetail';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { hasPermission } from '../utils/permissions';
@@ -181,6 +183,8 @@ const BLANK_EDIT_VENDOR = {
 
 export default function Purchasing() {
   const { showToast } = useToast();
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState('');
   const { user } = useAuth();
   // Mirror the backend role gates so no button 403s:
   // - POST /purchasing/purchase-orders allows admin/manager/supervisor → purchasing:create
@@ -212,7 +216,18 @@ export default function Purchasing() {
   // not silently move the other. The deleted VIEW is again ungated — `deleted_only` on
   // GET /purchasing/vendors stays on get_current_user.
   const canRestoreVendor = user?.role === 'admin' || user?.role === 'manager' || !!user?.is_superuser;
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const detailPOId = Number(searchParams.get('po') || 0);
+  const openPODetail = (id: number) => {
+    const next = new URLSearchParams(searchParams);
+    next.set('po', String(id));
+    setSearchParams(next);
+  };
+  const closePODetail = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('po');
+    setSearchParams(next);
+  };
   const [activeTab, setActiveTab] = useState<TabType>('orders');
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
@@ -220,8 +235,33 @@ export default function Purchasing() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [vendorDocsError, setVendorDocsError] = useState(false);
-  const [poSearch, setPoSearch] = useState('');
+  const [poSearch, setPoSearch] = useState(searchParams.get('search') || '');
   const debouncedPoSearch = useDebouncedValue(poSearch, 250);
+  const poStatusFilter = searchParams.get('poStatus') || '';
+  const [statusPOs, setStatusPOs] = useState<PurchaseOrder[]>([]);
+  const [statusPOLoading, setStatusPOLoading] = useState(false);
+  const [statusPOError, setStatusPOError] = useState(false);
+  const [statusRetry, setStatusRetry] = useState(0);
+  useEffect(() => {
+    let active = true;
+    if (!poStatusFilter) return;
+    setStatusPOLoading(true);
+    setStatusPOError(false);
+    api
+      .getPurchaseOrders({ status: poStatusFilter })
+      .then(rows => {
+        if (active) setStatusPOs(rows);
+      })
+      .catch(() => {
+        if (active) setStatusPOError(true);
+      })
+      .finally(() => {
+        if (active) setStatusPOLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [poStatusFilter, statusRetry]);
 
   // The deleted-PO book. Kept in its OWN state rather than merged into
   // `purchaseOrders`, and fetched LAZILY the first time the user switches into the
@@ -325,7 +365,7 @@ export default function Purchasing() {
     description: '',
     part_type: 'purchased',
     unit_of_measure: 'EA',
-    unit_cost: 0
+    unit_cost: 0,
   });
 
   const [vendorDocForm, setVendorDocForm] = useState({
@@ -333,7 +373,7 @@ export default function Purchasing() {
     document_type: 'certificate',
     description: '',
     revision: 'A',
-    file: null as File | null
+    file: null as File | null,
   });
 
   // Once-per-id latch for the `?po=` deep-link fallback fetch below.
@@ -396,7 +436,8 @@ export default function Purchasing() {
         // dependency array and the fetch WRITES it, so without a once-per-id
         // latch the miss path is an infinite fetch loop.
         deepLinkedPoIdRef.current = poId;
-        void loadDeepLinkedPurchaseOrder(poId);
+        setActiveTab('orders');
+        setPoView('active');
       }
     }
   }, [searchParams, vendors, purchaseOrders, selectedVendor?.id, loading, loadError]);
@@ -419,7 +460,7 @@ export default function Purchasing() {
       const [vendorsRes, posRes, partsRes] = await Promise.all([
         api.getVendors(),
         api.getPurchaseOrders(),
-        api.getParts({ active_only: true, item_group: 'all' })
+        api.getParts({ active_only: true, item_group: 'all' }),
       ]);
       setVendors(vendorsRes);
       setPurchaseOrders(posRes);
@@ -519,7 +560,7 @@ export default function Purchasing() {
         showToast(
           'warning',
           `Purchase order ${po.po_number} restored. It is ${po.status}, so it stays off the ` +
-            'active list until its status changes.',
+            'active list until its status changes.'
         );
       } else {
         showToast('success', `Purchase order ${po.po_number} restored`);
@@ -606,7 +647,7 @@ export default function Purchasing() {
     try {
       const rows = await api.getVendors({ active_only: false });
       if (inactiveVendorsRequestRef.current !== requestId) return;
-      setInactiveVendors((rows as Vendor[]).filter((v) => v.is_active === false));
+      setInactiveVendors((rows as Vendor[]).filter(v => v.is_active === false));
     } catch (err) {
       console.error('Failed to load inactive vendors:', err);
       if (inactiveVendorsRequestRef.current !== requestId) return;
@@ -628,12 +669,12 @@ export default function Purchasing() {
   const openDeepLinkedInactiveVendor = async (vendorId: number) => {
     try {
       const rows = (await api.getVendors({ active_only: false })) as Vendor[];
-      const vendor = rows.find((v) => v.id === vendorId);
+      const vendor = rows.find(v => v.id === vendorId);
       if (!vendor) {
         showToast('error', 'Vendor not found — it may have been deleted.');
         return;
       }
-      setInactiveVendors(rows.filter((v) => v.is_active === false));
+      setInactiveVendors(rows.filter(v => v.is_active === false));
       selectTab('vendors');
       setVendorView('inactive');
       openEditVendorModal(vendor);
@@ -679,14 +720,14 @@ export default function Purchasing() {
       // `null` = the reload itself failed, so we know nothing about where the vendor
       // landed. Fall back to the plain success toast rather than guessing: the restore
       // genuinely did succeed, and the page is already showing its own load error.
-      const offVendorList = freshVendors !== null && !freshVendors.some((v) => v.id === vendor.id);
+      const offVendorList = freshVendors !== null && !freshVendors.some(v => v.id === vendor.id);
       if (offVendorList) {
         showToast(
           'warning',
           `Vendor ${vendor.name} restored as INACTIVE — restore puts back the state it had ` +
             'when it was deleted, or inactive when that was never recorded. It stays off the ' +
             'vendor list, and off purchase orders, until someone reactivates it under ' +
-            'Vendors → Inactive.',
+            'Vendors → Inactive.'
         );
       } else {
         showToast('success', `Vendor ${vendor.name} restored`);
@@ -713,28 +754,22 @@ export default function Purchasing() {
    * returns POResponse (nested `vendor`, full `lines`) rather than the list's
    * flat summary shape, hence the explicit mapping.
    */
-  const loadDeepLinkedPurchaseOrder = async (poId: number) => {
-    try {
-      const detail = await api.getPurchaseOrder(poId);
-      const summary: PurchaseOrder = {
-        id: detail.id,
-        po_number: detail.po_number,
-        vendor_id: detail.vendor_id,
-        vendor_name: detail.vendor?.name,
-        status: detail.status,
-        order_date: detail.order_date,
-        required_date: detail.required_date,
-        total: detail.total,
-        line_count: Array.isArray(detail.lines) ? detail.lines.length : 0,
-      };
-      setPurchaseOrders(prev => (prev.some(p => p.id === summary.id) ? prev : [summary, ...prev]));
-      setActiveTab('orders');
-      setPoView('active');
-      setPoSearch(summary.po_number);
-    } catch (err) {
-      console.error('Failed to load deep-linked purchase order:', err);
-      showToast('error', 'Purchase order not found');
-    }
+  const onPODetailLoaded = (detail: any) => {
+    const summary: PurchaseOrder = {
+      id: detail.id,
+      po_number: detail.po_number,
+      vendor_id: detail.vendor_id,
+      vendor_name: detail.vendor?.name,
+      status: detail.status,
+      order_date: detail.order_date,
+      required_date: detail.required_date,
+      total: detail.total,
+      line_count: Array.isArray(detail.lines) ? detail.lines.length : 0,
+    };
+    setPurchaseOrders(prev => (prev.some(p => p.id === summary.id) ? prev : [summary, ...prev]));
+    setActiveTab('orders');
+    setPoView('active');
+    setPoSearch(summary.po_number);
   };
 
   const loadVendorDocuments = async (vendorId: number) => {
@@ -743,7 +778,7 @@ export default function Purchasing() {
     try {
       const [docsRes, typesRes] = await Promise.all([
         api.getDocuments({ vendor_id: vendorId }),
-        api.getDocumentTypes()
+        api.getDocumentTypes(),
       ]);
       setVendorDocuments(docsRes);
       setDocumentTypes(typesRes);
@@ -774,7 +809,7 @@ export default function Purchasing() {
       is_as9100_certified: vendor.is_as9100_certified,
       is_iso9001_certified: vendor.is_iso9001_certified,
       is_active: vendor.is_active ?? true,
-      notes: vendor.notes || ''
+      notes: vendor.notes || '',
     };
     setEditVendorForm(nextForm);
     setInitialEditVendorForm(nextForm);
@@ -783,7 +818,7 @@ export default function Purchasing() {
       document_type: 'certificate',
       description: '',
       revision: 'A',
-      file: null
+      file: null,
     });
     setShowEditVendorModal(true);
     loadVendorDocuments(vendor.id);
@@ -810,7 +845,7 @@ export default function Purchasing() {
       };
       await api.updateVendor(selectedVendor.id, {
         version: selectedVendor.version ?? 0,
-        ...cleanedForm
+        ...cleanedForm,
       });
       setShowEditVendorModal(false);
       setSelectedVendor(null);
@@ -846,7 +881,7 @@ export default function Purchasing() {
         document_type: vendorDocForm.document_type,
         description: '',
         revision: 'A',
-        file: null
+        file: null,
       });
       showToast('success', 'Document uploaded');
       loadVendorDocuments(selectedVendor.id);
@@ -923,6 +958,9 @@ export default function Purchasing() {
         return;
       }
     }
+    if (actionBusy) return;
+    setActionBusy(true);
+    setActionError('');
     try {
       // An empty-string date 422s server-side — omit it when blank.
       await api.createPurchaseOrder({
@@ -934,7 +972,17 @@ export default function Purchasing() {
       showToast('success', 'Purchase order created');
       loadData();
     } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      setActionError(
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((item: any) => item.msg).join('; ')
+            : 'Unable to save. Check your entries and try again.'
+      );
       showToast('error', err.response?.data?.detail || 'Failed to create PO');
+    } finally {
+      setActionBusy(false);
     }
   };
 
@@ -947,13 +995,13 @@ export default function Purchasing() {
     setSendPOPending(true);
     try {
       await api.sendPurchaseOrder(sendPOTarget.id);
-      showToast('success', 'Purchase order sent');
+      showToast('success', 'Purchase order marked as sent. Send the document to the supplier separately.');
+      setSendPOTarget(null);
       loadData();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to send PO');
     } finally {
       setSendPOPending(false);
-      setSendPOTarget(null);
     }
   };
 
@@ -1015,7 +1063,7 @@ export default function Purchasing() {
       description: '',
       part_type: 'purchased',
       unit_of_measure: 'EA',
-      unit_cost: 0
+      unit_cost: 0,
     });
     setShowAddPartModal(true);
   };
@@ -1029,10 +1077,10 @@ export default function Purchasing() {
       // Update the PO line with the new part
       if (addPartForLineIndex !== null) {
         const lines = [...newPO.lines];
-        lines[addPartForLineIndex] = { 
-          ...lines[addPartForLineIndex], 
+        lines[addPartForLineIndex] = {
+          ...lines[addPartForLineIndex],
           part_id: createdPart.id,
-          unit_price: newPart.unit_cost
+          unit_price: newPart.unit_cost,
         };
         setNewPO({ ...newPO, lines });
       }
@@ -1046,7 +1094,7 @@ export default function Purchasing() {
   const addPOLine = () => {
     setNewPO({
       ...newPO,
-      lines: [...newPO.lines, { part_id: 0, quantity_ordered: 1, unit_price: 0 }]
+      lines: [...newPO.lines, { part_id: 0, quantity_ordered: 1, unit_price: 0 }],
     });
   };
 
@@ -1065,13 +1113,10 @@ export default function Purchasing() {
   const matchesPoSearch = (po: PurchaseOrder) => {
     const term = debouncedPoSearch.trim().toLowerCase();
     if (!term) return true;
-    return (
-      po.po_number.toLowerCase().includes(term) ||
-      (po.vendor_name || '').toLowerCase().includes(term)
-    );
+    return po.po_number.toLowerCase().includes(term) || (po.vendor_name || '').toLowerCase().includes(term);
   };
 
-  const filteredPOs = purchaseOrders.filter(matchesPoSearch);
+  const filteredPOs = (poStatusFilter ? statusPOs : purchaseOrders).filter(matchesPoSearch);
   const filteredDeletedPOs = deletedPOs.filter(matchesPoSearch);
 
   // Columns shared by both books. The two views then append DIFFERENT tails: the active
@@ -1083,54 +1128,54 @@ export default function Purchasing() {
       key: 'po_number',
       header: 'PO #',
       sortable: true,
-      accessor: (po) => po.po_number,
-      render: (po) => <span className="font-medium text-werco-primary">{po.po_number}</span>,
+      accessor: po => po.po_number,
+      render: po => <span className="font-medium text-werco-primary">{po.po_number}</span>,
     },
     {
       key: 'vendor_name',
       header: 'Vendor',
       sortable: true,
-      accessor: (po) => po.vendor_name ?? '',
+      accessor: po => po.vendor_name ?? '',
     },
     {
       key: 'status',
       header: 'Status',
       sortable: true,
-      accessor: (po) => po.status,
-      render: (po) => <StatusBadge status={po.status} />,
-      csv: (po) => po.status.replace('_', ' '),
+      accessor: po => po.status,
+      render: po => <StatusBadge status={po.status} />,
+      csv: po => po.status.replace('_', ' '),
     },
     {
       key: 'order_date',
       header: 'Order Date',
       sortable: true,
-      accessor: (po) => po.order_date ?? '',
-      render: (po) => (po.order_date ? formatCentralDate(po.order_date) : '-'),
-      csv: (po) => (po.order_date ? formatCentralDate(po.order_date) : ''),
+      accessor: po => po.order_date ?? '',
+      render: po => (po.order_date ? formatCentralDate(po.order_date) : '-'),
+      csv: po => (po.order_date ? formatCentralDate(po.order_date) : ''),
     },
     {
       key: 'required_date',
       header: 'Due Date',
       sortable: true,
-      accessor: (po) => po.required_date ?? '',
-      render: (po) => (po.required_date ? formatCentralDate(po.required_date) : '-'),
-      csv: (po) => (po.required_date ? formatCentralDate(po.required_date) : ''),
+      accessor: po => po.required_date ?? '',
+      render: po => (po.required_date ? formatCentralDate(po.required_date) : '-'),
+      csv: po => (po.required_date ? formatCentralDate(po.required_date) : ''),
     },
     {
       key: 'total',
       header: 'Total',
       sortable: true,
       align: 'right',
-      accessor: (po) => Number(po.total || 0),
-      render: (po) => <span className="font-medium">${Number(po.total || 0).toFixed(2)}</span>,
-      csv: (po) => Number(po.total || 0).toFixed(2),
+      accessor: po => Number(po.total || 0),
+      render: po => <span className="font-medium">${Number(po.total || 0).toFixed(2)}</span>,
+      csv: po => Number(po.total || 0).toFixed(2),
     },
     {
       key: 'line_count',
       header: 'Lines',
       sortable: true,
       align: 'center',
-      accessor: (po) => po.line_count,
+      accessor: po => po.line_count,
     },
   ];
 
@@ -1140,27 +1185,18 @@ export default function Purchasing() {
       key: 'actions',
       header: 'Actions',
       align: 'center',
-      render: (po) => (
-        <div className="flex items-center justify-center gap-3" role="presentation" onClick={(e) => e.stopPropagation()}>
-          <button
-            onClick={() => handlePrintPO(po.id)}
-            className="text-surface-600 hover:text-werco-primary text-sm"
-          >
+      render: po => (
+        <div className="flex items-center justify-center gap-3" role="presentation" onClick={e => e.stopPropagation()}>
+          <button onClick={() => handlePrintPO(po.id)} className="text-surface-600 hover:text-werco-primary text-sm">
             Print
           </button>
           {canSendPO && po.status === 'draft' && (
-            <button
-              onClick={() => handleSendPO(po)}
-              className="text-werco-primary hover:underline text-sm"
-            >
-              Send
+            <button onClick={() => handleSendPO(po)} className="text-werco-primary hover:underline text-sm">
+              Mark as sent
             </button>
           )}
           {canDeletePurchasing && (
-            <button
-              onClick={() => setDeletePOTarget(po)}
-              className="text-red-400 hover:text-red-300 text-sm"
-            >
+            <button onClick={() => setDeletePOTarget(po)} className="text-red-400 hover:text-red-300 text-sm">
               Delete
             </button>
           )}
@@ -1178,28 +1214,28 @@ export default function Purchasing() {
       key: 'deleted_at',
       header: 'Deleted',
       sortable: true,
-      accessor: (po) => po.deleted_at ?? '',
-      render: (po) => (po.deleted_at ? formatCentralDateTime(po.deleted_at) : '-'),
-      csv: (po) => (po.deleted_at ? formatCentralDateTime(po.deleted_at) : ''),
+      accessor: po => po.deleted_at ?? '',
+      render: po => (po.deleted_at ? formatCentralDateTime(po.deleted_at) : '-'),
+      csv: po => (po.deleted_at ? formatCentralDateTime(po.deleted_at) : ''),
     },
     {
       key: 'deleted_by_name',
       header: 'Deleted By',
       sortable: true,
-      accessor: (po) => po.deleted_by_name ?? '',
-      render: (po) => po.deleted_by_name || <span className="text-slate-500">Unknown</span>,
-      csv: (po) => po.deleted_by_name ?? '',
+      accessor: po => po.deleted_by_name ?? '',
+      render: po => po.deleted_by_name || <span className="text-slate-500">Unknown</span>,
+      csv: po => po.deleted_by_name ?? '',
     },
     {
       key: 'actions',
       header: 'Actions',
       align: 'center',
-      render: (po) =>
+      render: po =>
         canRestorePO ? (
           // No confirm dialog on purpose: restore is non-destructive and one click from
           // being undone by the Delete control this row will have again the moment it is
           // back. A confirm here would be reflex-training, not a safeguard.
-          <div role="presentation" onClick={(e) => e.stopPropagation()}>
+          <div role="presentation" onClick={e => e.stopPropagation()}>
             <LoadingButton
               variant="secondary"
               size="sm"
@@ -1222,7 +1258,7 @@ export default function Purchasing() {
     <MobileDataCard
       title={po.po_number}
       subtitle={po.vendor_name || undefined}
-      onClick={() => handlePrintPO(po.id)}
+      onClick={() => openPODetail(po.id)}
       badge={<StatusBadge status={po.status} />}
       fields={[
         { label: 'Order Date', value: po.order_date ? formatCentralDate(po.order_date) : '-' },
@@ -1234,26 +1270,17 @@ export default function Purchasing() {
         { label: 'Lines', value: <span className="tabular-nums">{po.line_count}</span> },
       ]}
       actions={
-        <div className="flex flex-wrap gap-3 justify-end" role="presentation" onClick={(e) => e.stopPropagation()}>
-          <button
-            onClick={() => handlePrintPO(po.id)}
-            className="text-surface-600 hover:text-werco-primary text-sm"
-          >
+        <div className="flex flex-wrap gap-3 justify-end" role="presentation" onClick={e => e.stopPropagation()}>
+          <button onClick={() => handlePrintPO(po.id)} className="text-surface-600 hover:text-werco-primary text-sm">
             Print
           </button>
           {canSendPO && po.status === 'draft' && (
-            <button
-              onClick={() => handleSendPO(po)}
-              className="text-werco-primary hover:underline text-sm"
-            >
-              Send
+            <button onClick={() => handleSendPO(po)} className="text-werco-primary hover:underline text-sm">
+              Mark as sent
             </button>
           )}
           {canDeletePurchasing && (
-            <button
-              onClick={() => setDeletePOTarget(po)}
-              className="text-red-400 hover:text-red-300 text-sm"
-            >
+            <button onClick={() => setDeletePOTarget(po)} className="text-red-400 hover:text-red-300 text-sm">
               Delete
             </button>
           )}
@@ -1280,7 +1307,7 @@ export default function Purchasing() {
       ]}
       actions={
         canRestorePO ? (
-          <div className="flex justify-end" role="presentation" onClick={(e) => e.stopPropagation()}>
+          <div className="flex justify-end" role="presentation" onClick={e => e.stopPropagation()}>
             <LoadingButton
               variant="secondary"
               size="sm"
@@ -1322,7 +1349,7 @@ export default function Purchasing() {
   // response agree (the field is either in the schema or it is not), so this is a
   // whole-view switch, not a per-row one. Today's API always reports it; this stays for
   // the separate-deploy window described on the Vendor interface.
-  const restoreStateReported = deletedVendors.some((v) => v.is_active_before_delete !== undefined);
+  const restoreStateReported = deletedVendors.some(v => v.is_active_before_delete !== undefined);
 
   const restoresAsBadge = (vendor: Vendor) => {
     const state = restoresAs(vendor);
@@ -1351,42 +1378,42 @@ export default function Purchasing() {
       key: 'code',
       header: 'Code',
       sortable: true,
-      accessor: (vendor) => vendor.code,
-      render: (vendor) => <span className="font-mono text-werco-primary">{vendor.code}</span>,
+      accessor: vendor => vendor.code,
+      render: vendor => <span className="font-mono text-werco-primary">{vendor.code}</span>,
     },
     {
       key: 'name',
       header: 'Name',
       sortable: true,
-      accessor: (vendor) => vendor.name,
-      render: (vendor) => <span className="font-medium">{vendor.name}</span>,
+      accessor: vendor => vendor.name,
+      render: vendor => <span className="font-medium">{vendor.name}</span>,
     },
     {
       key: 'contact_name',
       header: 'Contact',
       sortable: true,
-      accessor: (vendor) => vendor.contact_name ?? '',
-      render: (vendor) => (
+      accessor: vendor => vendor.contact_name ?? '',
+      render: vendor => (
         <div>
           <div>{vendor.contact_name || '-'}</div>
           <div className="text-sm text-slate-400">{vendor.email}</div>
         </div>
       ),
-      csv: (vendor) => vendor.contact_name ?? '',
+      csv: vendor => vendor.contact_name ?? '',
     },
     {
       key: 'is_approved',
       header: 'Approved',
       sortable: true,
       align: 'center',
-      accessor: (vendor) => (vendor.is_approved ? 1 : 0),
-      render: (vendor) =>
+      accessor: vendor => (vendor.is_approved ? 1 : 0),
+      render: vendor =>
         vendor.is_approved ? (
           <CheckCircleIcon className="h-5 w-5 text-green-500 mx-auto" aria-label="Approved" />
         ) : (
           <span className="text-slate-400">-</span>
         ),
-      csv: (vendor) => (vendor.is_approved ? 'Yes' : 'No'),
+      csv: vendor => (vendor.is_approved ? 'Yes' : 'No'),
     },
     // Only when the server reports it — see restoreStateReported.
     ...(restoreStateReported
@@ -1406,23 +1433,23 @@ export default function Purchasing() {
       key: 'deleted_at',
       header: 'Deleted',
       sortable: true,
-      accessor: (vendor) => vendor.deleted_at ?? '',
-      render: (vendor) => (vendor.deleted_at ? formatCentralDateTime(vendor.deleted_at) : '-'),
-      csv: (vendor) => (vendor.deleted_at ? formatCentralDateTime(vendor.deleted_at) : ''),
+      accessor: vendor => vendor.deleted_at ?? '',
+      render: vendor => (vendor.deleted_at ? formatCentralDateTime(vendor.deleted_at) : '-'),
+      csv: vendor => (vendor.deleted_at ? formatCentralDateTime(vendor.deleted_at) : ''),
     },
     {
       key: 'deleted_by_name',
       header: 'Deleted By',
       sortable: true,
-      accessor: (vendor) => vendor.deleted_by_name ?? '',
-      render: (vendor) => vendor.deleted_by_name || <span className="text-slate-500">Unknown</span>,
-      csv: (vendor) => vendor.deleted_by_name ?? '',
+      accessor: vendor => vendor.deleted_by_name ?? '',
+      render: vendor => vendor.deleted_by_name || <span className="text-slate-500">Unknown</span>,
+      csv: vendor => vendor.deleted_by_name ?? '',
     },
     {
       key: 'actions',
       header: 'Actions',
       align: 'center',
-      render: (vendor) =>
+      render: vendor =>
         canRestoreVendor ? (
           // No confirm dialog, matching the deleted-PO table: restore is non-destructive
           // and one click from being undone by the Delete control this row gets back the
@@ -1430,7 +1457,7 @@ export default function Purchasing() {
           // safeguard — and the outcome that IS surprising (coming back deactivated) is
           // answered by the Restores As column beside it, before the click, which is
           // where that belongs rather than in a dialog nobody reads.
-          <div role="presentation" onClick={(e) => e.stopPropagation()}>
+          <div role="presentation" onClick={e => e.stopPropagation()}>
             <LoadingButton
               variant="secondary"
               size="sm"
@@ -1463,50 +1490,50 @@ export default function Purchasing() {
       key: 'code',
       header: 'Code',
       sortable: true,
-      accessor: (vendor) => vendor.code,
-      render: (vendor) => <span className="font-mono text-werco-primary">{vendor.code}</span>,
+      accessor: vendor => vendor.code,
+      render: vendor => <span className="font-mono text-werco-primary">{vendor.code}</span>,
     },
     {
       key: 'name',
       header: 'Name',
       sortable: true,
-      accessor: (vendor) => vendor.name,
-      render: (vendor) => <span className="font-medium">{vendor.name}</span>,
+      accessor: vendor => vendor.name,
+      render: vendor => <span className="font-medium">{vendor.name}</span>,
     },
     {
       key: 'contact_name',
       header: 'Contact',
       sortable: true,
-      accessor: (vendor) => vendor.contact_name ?? '',
-      render: (vendor) => (
+      accessor: vendor => vendor.contact_name ?? '',
+      render: vendor => (
         <div>
           <div>{vendor.contact_name || '-'}</div>
           <div className="text-sm text-slate-400">{vendor.email}</div>
         </div>
       ),
-      csv: (vendor) => vendor.contact_name ?? '',
+      csv: vendor => vendor.contact_name ?? '',
     },
     {
       key: 'is_approved',
       header: 'Approved',
       sortable: true,
       align: 'center',
-      accessor: (vendor) => (vendor.is_approved ? 1 : 0),
-      render: (vendor) =>
+      accessor: vendor => (vendor.is_approved ? 1 : 0),
+      render: vendor =>
         vendor.is_approved ? (
           <CheckCircleIcon className="h-5 w-5 text-green-500 mx-auto" aria-label="Approved" />
         ) : (
           <span className="text-slate-400">-</span>
         ),
-      csv: (vendor) => (vendor.is_approved ? 'Yes' : 'No'),
+      csv: vendor => (vendor.is_approved ? 'Yes' : 'No'),
     },
     {
       key: 'actions',
       header: 'Actions',
       align: 'center',
-      render: (vendor) =>
+      render: vendor =>
         canCreateVendor ? (
-          <div role="presentation" onClick={(e) => e.stopPropagation()}>
+          <div role="presentation" onClick={e => e.stopPropagation()}>
             <Button
               variant="secondary"
               size="sm"
@@ -1533,7 +1560,7 @@ export default function Purchasing() {
       ]}
       actions={
         canCreateVendor ? (
-          <div className="flex justify-end" role="presentation" onClick={(e) => e.stopPropagation()}>
+          <div className="flex justify-end" role="presentation" onClick={e => e.stopPropagation()}>
             <Button
               variant="secondary"
               size="sm"
@@ -1557,16 +1584,14 @@ export default function Purchasing() {
       subtitle={vendor.code}
       badge={vendor.is_approved ? <StatusBadge status="approved" /> : undefined}
       fields={[
-        ...(restoreStateReported
-          ? [{ label: 'Restores As', value: restoresAsBadge(vendor) }]
-          : []),
+        ...(restoreStateReported ? [{ label: 'Restores As', value: restoresAsBadge(vendor) }] : []),
         { label: 'Deleted', value: vendor.deleted_at ? formatCentralDateTime(vendor.deleted_at) : '-' },
         { label: 'Deleted By', value: vendor.deleted_by_name || 'Unknown' },
         { label: 'Contact', value: vendor.contact_name || '-' },
       ]}
       actions={
         canRestoreVendor ? (
-          <div className="flex justify-end" role="presentation" onClick={(e) => e.stopPropagation()}>
+          <div className="flex justify-end" role="presentation" onClick={e => e.stopPropagation()}>
             <LoadingButton
               variant="secondary"
               size="sm"
@@ -1597,10 +1622,7 @@ export default function Purchasing() {
       <div className="space-y-6">
         <h1 className="text-2xl font-bold text-white">Purchasing &amp; Receiving</h1>
         <div className="card">
-          <ErrorState
-            message="Could not load purchasing data."
-            onRetry={loadData}
-          />
+          <ErrorState message="Could not load purchasing data." onRetry={loadData} />
         </div>
       </div>
     );
@@ -1608,8 +1630,11 @@ export default function Purchasing() {
 
   return (
     <div className="space-y-6">
+      {detailPOId > 0 && (
+        <PurchaseOrderDetail id={detailPOId} onClose={closePODetail} onSaved={loadData} onLoaded={onPODetailLoaded} />
+      )}
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-white">Purchasing & Receiving</h1>
+        <h1 className="text-2xl font-bold text-white">Purchasing</h1>
         <div className="flex gap-2">
           {canCreateVendor && (
             <Button variant="secondary" onClick={() => setShowVendorModal(true)} className="flex items-center">
@@ -1633,7 +1658,7 @@ export default function Purchasing() {
           iconBg="bg-werco-navy-500/15"
           iconColor="text-werco-navy-400"
           label="Open POs"
-          value={purchaseOrders.length}
+          value={purchaseOrders.filter(po => ['draft', 'sent', 'acknowledged', 'partial'].includes(po.status)).length}
         />
         <MiniStat
           icon={CheckCircleIcon}
@@ -1647,13 +1672,24 @@ export default function Purchasing() {
 
       {/* Tabs */}
       <div className="border-b border-slate-700">
-        <nav className="flex space-x-8">
+        <div
+          tabIndex={-1}
+          role="tablist"
+          aria-label="Purchasing sections"
+          onKeyDown={tabKeyboard}
+          className="flex space-x-8"
+        >
           {[
             { id: 'orders', label: 'Purchase Orders', count: purchaseOrders.length },
-            { id: 'vendors', label: 'Vendors', count: vendors.length }
+            { id: 'vendors', label: 'Vendors', count: vendors.length },
           ].map(tab => (
             <button
               key={tab.id}
+              role="tab"
+              id={`purchasing-tab-${tab.id}`}
+              aria-controls="purchasing-panel"
+              aria-selected={activeTab === tab.id}
+              tabIndex={activeTab === tab.id ? 0 : -1}
               onClick={() => selectTab(tab.id as TabType)}
               className={`py-2 px-1 border-b-2 font-medium text-sm ${
                 activeTab === tab.id
@@ -1663,20 +1699,22 @@ export default function Purchasing() {
             >
               {tab.label}
               {tab.count > 0 && (
-                <span className={`ml-2 px-2 py-0.5 rounded-full text-xs ${
-                  activeTab === tab.id ? 'bg-werco-primary text-white' : 'bg-slate-800/50'
-                }`}>
+                <span
+                  className={`ml-2 px-2 py-0.5 rounded-full text-xs ${
+                    activeTab === tab.id ? 'bg-werco-primary text-white' : 'bg-slate-800/50'
+                  }`}
+                >
                   {tab.count}
                 </span>
               )}
             </button>
           ))}
-        </nav>
+        </div>
       </div>
 
       {/* Purchase Orders Tab */}
       {activeTab === 'orders' && (
-        <div className="card">
+        <div className="card" role="tabpanel" id="purchasing-panel" aria-labelledby="purchasing-tab-orders">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-4">
             <h2 className="text-lg font-semibold">
               {poView === 'deleted' ? 'Deleted Purchase Orders' : 'Purchase Orders'}
@@ -1692,10 +1730,10 @@ export default function Purchasing() {
                 role="group"
                 aria-label="Purchase order view"
               >
-                {([
+                {[
                   { id: 'active' as POView, label: 'Active' },
                   { id: 'deleted' as POView, label: 'Deleted' },
-                ]).map((view) => (
+                ].map(view => (
                   <button
                     key={view.id}
                     type="button"
@@ -1711,10 +1749,29 @@ export default function Purchasing() {
                   </button>
                 ))}
               </div>
+              <select
+                className="input max-w-xs"
+                aria-label="Purchase order status"
+                value={poStatusFilter}
+                disabled={poView === 'deleted'}
+                onChange={e => {
+                  const next = new URLSearchParams(searchParams);
+                  if (e.target.value) next.set('poStatus', e.target.value);
+                  else next.delete('poStatus');
+                  setSearchParams(next);
+                }}
+              >
+                <option value="">Active book · all statuses</option>
+                {['draft', 'sent', 'acknowledged', 'partial', 'received', 'closed', 'cancelled'].map(status => (
+                  <option key={status} value={status}>
+                    {status.replace(/_/g, ' ')}
+                  </option>
+                ))}
+              </select>
               <input
                 type="text"
                 value={poSearch}
-                onChange={(e) => setPoSearch(e.target.value)}
+                onChange={e => setPoSearch(e.target.value)}
                 className="input max-w-sm"
                 placeholder="Search by PO # or vendor..."
                 aria-label="Search purchase orders"
@@ -1727,8 +1784,8 @@ export default function Purchasing() {
               <div className="flex items-start gap-2 mb-4 px-3 py-2 rounded border border-amber-500/40 bg-amber-500/10 text-sm text-amber-200">
                 <TrashIcon className="h-5 w-5 flex-shrink-0" aria-hidden="true" />
                 <p>
-                  These purchase orders are deleted records. They are off the receiving list and
-                  nothing can be received against them.
+                  These purchase orders are deleted records. They are off the receiving list and nothing can be received
+                  against them.
                   {canRestorePO
                     ? ' Restore one to put it back in the active book.'
                     : ' An admin or manager can restore one.'}
@@ -1737,7 +1794,7 @@ export default function Purchasing() {
               <DataTable
                 columns={deletedPOColumns}
                 data={filteredDeletedPOs}
-                rowKey={(po) => po.id}
+                rowKey={po => po.id}
                 // No onRowClick: the active table's row click PRINTS the PO, and a deleted
                 // order is not a document anyone should be handing to a vendor.
                 rowClassName={() => 'opacity-70'}
@@ -1763,8 +1820,11 @@ export default function Purchasing() {
             <DataTable
               columns={poColumns}
               data={filteredPOs}
-              rowKey={(po) => po.id}
-              onRowClick={(po) => handlePrintPO(po.id)}
+              loading={statusPOLoading}
+              error={statusPOError}
+              onRetry={() => setStatusRetry(n => n + 1)}
+              rowKey={po => po.id}
+              onRowClick={po => openPODetail(po.id)}
               defaultSort={{ key: 'po_number', dir: 'asc' }}
               pageSize={25}
               csvExport={{ filename: 'purchase-orders' }}
@@ -1787,7 +1847,7 @@ export default function Purchasing() {
 
       {/* Vendors Tab */}
       {activeTab === 'vendors' && (
-        <div className="card">
+        <div className="card" role="tabpanel" id="purchasing-panel" aria-labelledby="purchasing-tab-vendors">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-4">
             <h2 className="text-lg font-semibold">
               {vendorView === 'deleted'
@@ -1807,14 +1867,14 @@ export default function Purchasing() {
               role="group"
               aria-label="Vendor view"
             >
-              {([
+              {[
                 { id: 'active' as VendorView, label: 'Active' },
                 // Inactive sits BETWEEN Active and Deleted because that is the order the
                 // states actually run in, and because it is where a restored vendor
                 // lands — Deleted → Restore → here → Edit → Active.
                 { id: 'inactive' as VendorView, label: 'Inactive' },
                 { id: 'deleted' as VendorView, label: 'Deleted' },
-              ]).map((view) => (
+              ].map(view => (
                 <button
                   key={view.id}
                   type="button"
@@ -1837,10 +1897,9 @@ export default function Purchasing() {
               <div className="flex items-start gap-2 mb-4 px-3 py-2 rounded border border-amber-500/40 bg-amber-500/10 text-sm text-amber-200">
                 <BuildingOfficeIcon className="h-5 w-5 flex-shrink-0" aria-hidden="true" />
                 <p>
-                  These vendors exist but are switched off: they are kept out of the vendor list
-                  and cannot be selected on a purchase order. Vendors restored from the Deleted
-                  view land here whenever they were switched off before deletion, or were deleted
-                  before that was recorded.
+                  These vendors exist but are switched off: they are kept out of the vendor list and cannot be selected
+                  on a purchase order. Vendors restored from the Deleted view land here whenever they were switched off
+                  before deletion, or were deleted before that was recorded.
                   {canCreateVendor
                     ? ' Edit one and tick Active to bring it back into use — a deliberate change, recorded in the audit log.'
                     : ' An admin or manager can reactivate one.'}
@@ -1849,7 +1908,7 @@ export default function Purchasing() {
               <DataTable
                 columns={inactiveVendorColumns}
                 data={inactiveVendors}
-                rowKey={(vendor) => vendor.id}
+                rowKey={vendor => vendor.id}
                 rowClassName={() => 'opacity-70'}
                 loading={inactiveVendorsLoading}
                 error={inactiveVendorsError}
@@ -1871,11 +1930,10 @@ export default function Purchasing() {
               <div className="flex items-start gap-2 mb-4 px-3 py-2 rounded border border-amber-500/40 bg-amber-500/10 text-sm text-amber-200">
                 <TrashIcon className="h-5 w-5 flex-shrink-0" aria-hidden="true" />
                 <p>
-                  These vendors are deleted records. They are off the vendor list and cannot be
-                  selected on a purchase order. Restoring one returns it to the active or inactive
-                  state it had before deletion &mdash; a supplier that was switched off comes back
-                  switched off, and one deleted before this was recorded comes back inactive. The
-                  &ldquo;Restores As&rdquo; column says which, before you click. One that comes back
+                  These vendors are deleted records. They are off the vendor list and cannot be selected on a purchase
+                  order. Restoring one returns it to the active or inactive state it had before deletion &mdash; a
+                  supplier that was switched off comes back switched off, and one deleted before this was recorded comes
+                  back inactive. The &ldquo;Restores As&rdquo; column says which, before you click. One that comes back
                   inactive appears under Inactive, where it can be reactivated.
                   {canRestoreVendor
                     ? ' Restore one to put it back in the vendor list.'
@@ -1885,7 +1943,7 @@ export default function Purchasing() {
               <DataTable
                 columns={deletedVendorColumns}
                 data={deletedVendors}
-                rowKey={(vendor) => vendor.id}
+                rowKey={vendor => vendor.id}
                 // No onRowClick: the active table's row action is Edit, and a deleted
                 // vendor is a record, not something to open an edit form on. The server
                 // agrees — PUT refuses to resolve a deleted vendor at all.
@@ -1900,8 +1958,7 @@ export default function Purchasing() {
                 empty={{
                   icon: TrashIcon,
                   title: 'No deleted vendors',
-                  description:
-                    'Vendors deleted from the Vendors tab appear here so they can be restored.',
+                  description: 'Vendors deleted from the Vendors tab appear here so they can be restored.',
                 }}
               />
             </>
@@ -1921,7 +1978,7 @@ export default function Purchasing() {
                   </tr>
                 </thead>
                 <tbody className="bg-fd-panel divide-y divide-slate-700">
-                  {vendors.map((vendor) => (
+                  {vendors.map(vendor => (
                     <tr key={vendor.id} className="hover:bg-slate-800">
                       <td className="px-4 py-3 font-mono">{vendor.code}</td>
                       <td className="px-4 py-3 font-medium">{vendor.name}</td>
@@ -1980,222 +2037,258 @@ export default function Purchasing() {
 
       {/* Create PO Modal */}
       <Modal open={showPOModal} onClose={requestClosePOModal} size="2xl" closeOnBackdrop={false}>
-            <h3 className="text-lg font-semibold mb-4">Create Purchase Order</h3>
-            <form onSubmit={handleCreatePO} className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Vendor" required>
-                  {(field) => (
+        {actionError && (
+          <p role="alert" className="text-red-300 p-3">
+            {actionError}
+          </p>
+        )}
+        {actionBusy && (
+          <p role="status" className="text-slate-400 p-3">
+            Saving…
+          </p>
+        )}
+        <h3 className="text-lg font-semibold mb-4">Create Purchase Order</h3>
+        <form onSubmit={handleCreatePO} className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Vendor" required>
+              {field => (
+                <select
+                  {...field}
+                  value={newPO.vendor_id}
+                  onChange={e => setNewPO({ ...newPO, vendor_id: parseInt(e.target.value) })}
+                  className="input"
+                  required
+                >
+                  <option value={0}>Select vendor...</option>
+                  {vendors
+                    .filter(v => v.is_approved)
+                    .map(v => (
+                      <option key={v.id} value={v.id}>
+                        {v.code} - {v.name}
+                      </option>
+                    ))}
+                </select>
+              )}
+            </FormField>
+            <FormField label="Required Date">
+              {field => (
+                <input
+                  {...field}
+                  type="date"
+                  value={newPO.required_date}
+                  onChange={e => setNewPO({ ...newPO, required_date: e.target.value })}
+                  className="input"
+                />
+              )}
+            </FormField>
+          </div>
+
+          <div>
+            <div className="flex justify-between items-center mb-2">
+              <span className="label">Line Items</span>
+              <button type="button" onClick={addPOLine} className="text-werco-primary text-sm hover:underline">
+                + Add Line
+              </button>
+            </div>
+            {newPO.lines.length > 0 && (
+              <div className="flex gap-2 mb-1 text-xs text-slate-400 font-medium">
+                <div className="flex-1">Part</div>
+                <div className="w-24">Quantity</div>
+                <div className="w-28">Unit Price ($)</div>
+                <div className="w-6"></div>
+              </div>
+            )}
+            {newPO.lines.map((line, idx) => (
+              <div key={idx} className="flex gap-2 mb-2 items-start">
+                <div className="flex-1">
                   <select
-                    {...field}
-                    value={newPO.vendor_id}
-                    onChange={(e) => setNewPO({ ...newPO, vendor_id: parseInt(e.target.value) })}
-                    className="input"
+                    value={line.part_id}
+                    onChange={e => updatePOLine(idx, 'part_id', parseInt(e.target.value))}
+                    className="input text-sm"
                     required
                   >
-                    <option value={0}>Select vendor...</option>
-                    {vendors.filter(v => v.is_approved).map(v => (
-                      <option key={v.id} value={v.id}>{v.code} - {v.name}</option>
+                    <option value={0}>Select part...</option>
+                    {parts.map(p => (
+                      <option key={p.id} value={p.id}>
+                        {p.part_number} - {p.name}
+                      </option>
                     ))}
                   </select>
-                  )}
-                </FormField>
-                <FormField label="Required Date">
-                  {(field) => (
-                  <input
-                    {...field}
-                    type="date"
-                    value={newPO.required_date}
-                    onChange={(e) => setNewPO({ ...newPO, required_date: e.target.value })}
-                    className="input"
-                  />
-                  )}
-                </FormField>
-              </div>
-
-              <div>
-                <div className="flex justify-between items-center mb-2">
-                  <span className="label">Line Items</span>
-                  <button type="button" onClick={addPOLine} className="text-werco-primary text-sm hover:underline">
-                    + Add Line
+                  <button
+                    type="button"
+                    onClick={() => openAddPartModal(idx)}
+                    className="text-werco-primary text-xs hover:underline mt-1"
+                  >
+                    + New Part
                   </button>
                 </div>
-                {newPO.lines.length > 0 && (
-                  <div className="flex gap-2 mb-1 text-xs text-slate-400 font-medium">
-                    <div className="flex-1">Part</div>
-                    <div className="w-24">Quantity</div>
-                    <div className="w-28">Unit Price ($)</div>
-                    <div className="w-6"></div>
-                  </div>
-                )}
-                {newPO.lines.map((line, idx) => (
-                  <div key={idx} className="flex gap-2 mb-2 items-start">
-                    <div className="flex-1">
-                      <select
-                        value={line.part_id}
-                        onChange={(e) => updatePOLine(idx, 'part_id', parseInt(e.target.value))}
-                        className="input text-sm"
-                        required
-                      >
-                        <option value={0}>Select part...</option>
-                        {parts.map(p => (
-                          <option key={p.id} value={p.id}>{p.part_number} - {p.name}</option>
-                        ))}
-                      </select>
-                      <button
-                        type="button"
-                        onClick={() => openAddPartModal(idx)}
-                        className="text-werco-primary text-xs hover:underline mt-1"
-                      >
-                        + New Part
-                      </button>
-                    </div>
-                    <div className="w-24">
-                      <input
-                        type="number"
-                        value={line.quantity_ordered}
-                        onChange={(e) => updatePOLine(idx, 'quantity_ordered', parseFloat(e.target.value) || 0)}
-                        className="input text-sm"
-                        min={1}
-                        required
-                        aria-label="Quantity ordered"
-                      />
-                    </div>
-                    <div className="w-28">
-                      <input
-                        type="number"
-                        value={line.unit_price}
-                        onChange={(e) => updatePOLine(idx, 'unit_price', parseFloat(e.target.value) || 0)}
-                        className="input text-sm"
-                        step={0.01}
-                        min={0}
-                        required
-                        aria-label="Unit price"
-                      />
-                    </div>
-                    <button type="button" onClick={() => removePOLine(idx)} className="text-red-500 hover:text-red-400 mt-2">
-                      &times;
-                    </button>
-                  </div>
-                ))}
-                {newPO.lines.length === 0 && (
-                  <p className="text-slate-400 text-sm">Click "+ Add Line" to add items</p>
-                )}
+                <div className="w-24">
+                  <input
+                    type="number"
+                    value={line.quantity_ordered}
+                    onChange={e => updatePOLine(idx, 'quantity_ordered', parseFloat(e.target.value) || 0)}
+                    className="input text-sm"
+                    min={1}
+                    required
+                    aria-label="Quantity ordered"
+                  />
+                </div>
+                <div className="w-28">
+                  <input
+                    type="number"
+                    value={line.unit_price}
+                    onChange={e => updatePOLine(idx, 'unit_price', parseFloat(e.target.value) || 0)}
+                    className="input text-sm"
+                    step={0.01}
+                    min={0}
+                    required
+                    aria-label="Unit price"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => removePOLine(idx)}
+                  className="text-red-500 hover:text-red-400 mt-2"
+                >
+                  &times;
+                </button>
               </div>
+            ))}
+            {newPO.lines.length === 0 && <p className="text-slate-400 text-sm">Click "+ Add Line" to add items</p>}
+          </div>
 
-              <FormField label="Notes">
-                {(field) => (
-                <textarea
-                  {...field}
-                  value={newPO.notes}
-                  onChange={(e) => setNewPO({ ...newPO, notes: e.target.value })}
-                  className="input"
-                  rows={2}
-                />
-                )}
-              </FormField>
+          <FormField label="Notes">
+            {field => (
+              <textarea
+                {...field}
+                value={newPO.notes}
+                onChange={e => setNewPO({ ...newPO, notes: e.target.value })}
+                className="input"
+                rows={2}
+              />
+            )}
+          </FormField>
 
-              <div className="flex justify-end gap-3 pt-4 border-t">
-                <Button variant="secondary" onClick={requestClosePOModal}>Cancel</Button>
-                <Button type="submit">Create PO</Button>
-              </div>
-            </form>
+          <div className="flex justify-end gap-3 pt-4 border-t">
+            <Button variant="secondary" onClick={requestClosePOModal}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={actionBusy}>
+              Create PO
+            </Button>
+          </div>
+        </form>
       </Modal>
 
       {/* Create Vendor Modal */}
       <Modal open={showVendorModal} onClose={requestCloseVendorModal} size="md" closeOnBackdrop={false}>
-            <h3 className="text-lg font-semibold mb-4">Create Vendor</h3>
-            <form onSubmit={handleCreateVendor} className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Code" required>
-                  {(field) => (
-                  <input
-                    {...field}
-                    type="text"
-                    value={newVendor.code}
-                    onChange={(e) => setNewVendor({ ...newVendor, code: e.target.value })}
-                    className="input"
-                    placeholder="VND-001"
-                    required
-                  />
-                  )}
-                </FormField>
-                <FormField label="Payment Terms">
-                  {(field) => (
-                  <input
-                    {...field}
-                    type="text"
-                    value={newVendor.payment_terms}
-                    onChange={(e) => setNewVendor({ ...newVendor, payment_terms: e.target.value })}
-                    className="input"
-                    placeholder="e.g., NET 30"
-                  />
-                  )}
-                </FormField>
-              </div>
-              <FormField label="Name" required>
-                {(field) => (
+        {actionError && (
+          <p role="alert" className="text-red-300 p-3">
+            {actionError}
+          </p>
+        )}
+        {actionBusy && (
+          <p role="status" className="text-slate-400 p-3">
+            Saving…
+          </p>
+        )}
+        <h3 className="text-lg font-semibold mb-4">Create Vendor</h3>
+        <form onSubmit={handleCreateVendor} className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Code" required>
+              {field => (
                 <input
                   {...field}
                   type="text"
-                  value={newVendor.name}
-                  onChange={(e) => setNewVendor({ ...newVendor, name: e.target.value })}
+                  value={newVendor.code}
+                  onChange={e => setNewVendor({ ...newVendor, code: e.target.value })}
                   className="input"
+                  placeholder="VND-001"
                   required
                 />
-                )}
-              </FormField>
-              <FormField label="Contact Name">
-                {(field) => (
+              )}
+            </FormField>
+            <FormField label="Payment Terms">
+              {field => (
                 <input
                   {...field}
                   type="text"
-                  value={newVendor.contact_name}
-                  onChange={(e) => setNewVendor({ ...newVendor, contact_name: e.target.value })}
+                  value={newVendor.payment_terms}
+                  onChange={e => setNewVendor({ ...newVendor, payment_terms: e.target.value })}
+                  className="input"
+                  placeholder="e.g., NET 30"
+                />
+              )}
+            </FormField>
+          </div>
+          <FormField label="Name" required>
+            {field => (
+              <input
+                {...field}
+                type="text"
+                value={newVendor.name}
+                onChange={e => setNewVendor({ ...newVendor, name: e.target.value })}
+                className="input"
+                required
+              />
+            )}
+          </FormField>
+          <FormField label="Contact Name">
+            {field => (
+              <input
+                {...field}
+                type="text"
+                value={newVendor.contact_name}
+                onChange={e => setNewVendor({ ...newVendor, contact_name: e.target.value })}
+                className="input"
+              />
+            )}
+          </FormField>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Email">
+              {field => (
+                <input
+                  {...field}
+                  type="email"
+                  value={newVendor.email}
+                  onChange={e => setNewVendor({ ...newVendor, email: e.target.value })}
                   className="input"
                 />
-                )}
-              </FormField>
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Email">
-                  {(field) => (
-                  <input
-                    {...field}
-                    type="email"
-                    value={newVendor.email}
-                    onChange={(e) => setNewVendor({ ...newVendor, email: e.target.value })}
-                    className="input"
-                  />
-                  )}
-                </FormField>
-                <FormField label="Phone">
-                  {(field) => (
-                  <input
-                    {...field}
-                    type="text"
-                    value={newVendor.phone}
-                    onChange={(e) => setNewVendor({ ...newVendor, phone: e.target.value })}
-                    className="input"
-                  />
-                  )}
-                </FormField>
-              </div>
-              <div>
-                <label className="flex items-center">
-                  <input
-                    type="checkbox"
-                    checked={newVendor.is_approved}
-                    onChange={(e) => setNewVendor({ ...newVendor, is_approved: e.target.checked })}
-                    className="mr-2"
-                    aria-label="Approved Vendor"
-                  />
-                  <span>Approved Vendor</span>
-                </label>
-              </div>
-              <div className="flex justify-end gap-3 pt-4 border-t">
-                <Button variant="secondary" onClick={requestCloseVendorModal}>Cancel</Button>
-                <Button type="submit">Create Vendor</Button>
-              </div>
-            </form>
+              )}
+            </FormField>
+            <FormField label="Phone">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={newVendor.phone}
+                  onChange={e => setNewVendor({ ...newVendor, phone: e.target.value })}
+                  className="input"
+                />
+              )}
+            </FormField>
+          </div>
+          <div>
+            <label className="flex items-center">
+              <input
+                type="checkbox"
+                checked={newVendor.is_approved}
+                onChange={e => setNewVendor({ ...newVendor, is_approved: e.target.checked })}
+                className="mr-2"
+                aria-label="Approved Vendor"
+              />
+              <span>Approved Vendor</span>
+            </label>
+          </div>
+          <div className="flex justify-end gap-3 pt-4 border-t">
+            <Button variant="secondary" onClick={requestCloseVendorModal}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={actionBusy}>
+              Create Vendor
+            </Button>
+          </div>
+        </form>
       </Modal>
 
       {/* Edit Vendor Modal */}
@@ -2205,6 +2298,16 @@ export default function Purchasing() {
         size="5xl"
         closeOnBackdrop={false}
       >
+        {actionError && (
+          <p role="alert" className="text-red-300 p-3">
+            {actionError}
+          </p>
+        )}
+        {actionBusy && (
+          <p role="status" className="text-slate-400 p-3">
+            Saving…
+          </p>
+        )}
         {selectedVendor && (
           <>
             <div className="flex items-center justify-between mb-4">
@@ -2224,150 +2327,150 @@ export default function Purchasing() {
             <form onSubmit={handleUpdateVendor} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <FormField label="Vendor Code" required>
-                  {(field) => (
-                  <input
-                    {...field}
-                    type="text"
-                    value={editVendorForm.code}
-                    onChange={(e) => setEditVendorForm({ ...editVendorForm, code: e.target.value })}
-                    className="input"
-                    placeholder="VND-001"
-                    required
-                  />
+                  {field => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={editVendorForm.code}
+                      onChange={e => setEditVendorForm({ ...editVendorForm, code: e.target.value })}
+                      className="input"
+                      placeholder="VND-001"
+                      required
+                    />
                   )}
                 </FormField>
                 <FormField label="Vendor Name" required>
-                  {(field) => (
-                  <input
-                    {...field}
-                    type="text"
-                    value={editVendorForm.name}
-                    onChange={(e) => setEditVendorForm({ ...editVendorForm, name: e.target.value })}
-                    className="input"
-                    required
-                  />
+                  {field => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={editVendorForm.name}
+                      onChange={e => setEditVendorForm({ ...editVendorForm, name: e.target.value })}
+                      className="input"
+                      required
+                    />
                   )}
                 </FormField>
                 <FormField label="Payment Terms">
-                  {(field) => (
-                  <input
-                    {...field}
-                    type="text"
-                    value={editVendorForm.payment_terms}
-                    onChange={(e) => setEditVendorForm({ ...editVendorForm, payment_terms: e.target.value })}
-                    className="input"
-                    placeholder="e.g., NET 30"
-                  />
+                  {field => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={editVendorForm.payment_terms}
+                      onChange={e => setEditVendorForm({ ...editVendorForm, payment_terms: e.target.value })}
+                      className="input"
+                      placeholder="e.g., NET 30"
+                    />
                   )}
                 </FormField>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <FormField label="Contact Name">
-                  {(field) => (
-                  <input
-                    {...field}
-                    type="text"
-                    value={editVendorForm.contact_name}
-                    onChange={(e) => setEditVendorForm({ ...editVendorForm, contact_name: e.target.value })}
-                    className="input"
-                  />
+                  {field => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={editVendorForm.contact_name}
+                      onChange={e => setEditVendorForm({ ...editVendorForm, contact_name: e.target.value })}
+                      className="input"
+                    />
                   )}
                 </FormField>
                 <FormField label="Email">
-                  {(field) => (
-                  <input
-                    {...field}
-                    type="email"
-                    value={editVendorForm.email}
-                    onChange={(e) => setEditVendorForm({ ...editVendorForm, email: e.target.value })}
-                    className="input"
-                  />
+                  {field => (
+                    <input
+                      {...field}
+                      type="email"
+                      value={editVendorForm.email}
+                      onChange={e => setEditVendorForm({ ...editVendorForm, email: e.target.value })}
+                      className="input"
+                    />
                   )}
                 </FormField>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <FormField label="Phone">
-                  {(field) => (
-                  <input
-                    {...field}
-                    type="text"
-                    value={editVendorForm.phone}
-                    onChange={(e) => setEditVendorForm({ ...editVendorForm, phone: e.target.value })}
-                    className="input"
-                  />
+                  {field => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={editVendorForm.phone}
+                      onChange={e => setEditVendorForm({ ...editVendorForm, phone: e.target.value })}
+                      className="input"
+                    />
                   )}
                 </FormField>
                 <FormField label="Country">
-                  {(field) => (
-                  <input
-                    {...field}
-                    type="text"
-                    value={editVendorForm.country}
-                    onChange={(e) => setEditVendorForm({ ...editVendorForm, country: e.target.value.toUpperCase() })}
-                    className="input"
-                    maxLength={3}
-                  />
+                  {field => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={editVendorForm.country}
+                      onChange={e => setEditVendorForm({ ...editVendorForm, country: e.target.value.toUpperCase() })}
+                      className="input"
+                      maxLength={3}
+                    />
                   )}
                 </FormField>
               </div>
 
               <FormField label="Address Line 1">
-                {(field) => (
-                <input
-                  {...field}
-                  type="text"
-                  value={editVendorForm.address_line1}
-                  onChange={(e) => setEditVendorForm({ ...editVendorForm, address_line1: e.target.value })}
-                  className="input"
-                />
+                {field => (
+                  <input
+                    {...field}
+                    type="text"
+                    value={editVendorForm.address_line1}
+                    onChange={e => setEditVendorForm({ ...editVendorForm, address_line1: e.target.value })}
+                    className="input"
+                  />
                 )}
               </FormField>
               <FormField label="Address Line 2">
-                {(field) => (
-                <input
-                  {...field}
-                  type="text"
-                  value={editVendorForm.address_line2}
-                  onChange={(e) => setEditVendorForm({ ...editVendorForm, address_line2: e.target.value })}
-                  className="input"
-                />
+                {field => (
+                  <input
+                    {...field}
+                    type="text"
+                    value={editVendorForm.address_line2}
+                    onChange={e => setEditVendorForm({ ...editVendorForm, address_line2: e.target.value })}
+                    className="input"
+                  />
                 )}
               </FormField>
               <div className="grid grid-cols-3 gap-4">
                 <FormField label="City">
-                  {(field) => (
-                  <input
-                    {...field}
-                    type="text"
-                    value={editVendorForm.city}
-                    onChange={(e) => setEditVendorForm({ ...editVendorForm, city: e.target.value })}
-                    className="input"
-                  />
+                  {field => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={editVendorForm.city}
+                      onChange={e => setEditVendorForm({ ...editVendorForm, city: e.target.value })}
+                      className="input"
+                    />
                   )}
                 </FormField>
                 <FormField label="State">
-                  {(field) => (
-                  <input
-                    {...field}
-                    type="text"
-                    value={editVendorForm.state}
-                    onChange={(e) => setEditVendorForm({ ...editVendorForm, state: e.target.value.toUpperCase() })}
-                    className="input"
-                    maxLength={2}
-                  />
+                  {field => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={editVendorForm.state}
+                      onChange={e => setEditVendorForm({ ...editVendorForm, state: e.target.value.toUpperCase() })}
+                      className="input"
+                      maxLength={2}
+                    />
                   )}
                 </FormField>
                 <FormField label="Postal Code">
-                  {(field) => (
-                  <input
-                    {...field}
-                    type="text"
-                    value={editVendorForm.postal_code}
-                    onChange={(e) => setEditVendorForm({ ...editVendorForm, postal_code: e.target.value })}
-                    className="input"
-                  />
+                  {field => (
+                    <input
+                      {...field}
+                      type="text"
+                      value={editVendorForm.postal_code}
+                      onChange={e => setEditVendorForm({ ...editVendorForm, postal_code: e.target.value })}
+                      className="input"
+                    />
                   )}
                 </FormField>
               </div>
@@ -2377,7 +2480,7 @@ export default function Purchasing() {
                   <input
                     type="checkbox"
                     checked={editVendorForm.is_approved}
-                    onChange={(e) => setEditVendorForm({ ...editVendorForm, is_approved: e.target.checked })}
+                    onChange={e => setEditVendorForm({ ...editVendorForm, is_approved: e.target.checked })}
                     className="rounded border-slate-600"
                     aria-label="Approved Vendor"
                   />
@@ -2387,7 +2490,7 @@ export default function Purchasing() {
                   <input
                     type="checkbox"
                     checked={editVendorForm.is_active}
-                    onChange={(e) => setEditVendorForm({ ...editVendorForm, is_active: e.target.checked })}
+                    onChange={e => setEditVendorForm({ ...editVendorForm, is_active: e.target.checked })}
                     className="rounded border-slate-600"
                     aria-label="Active"
                   />
@@ -2400,7 +2503,7 @@ export default function Purchasing() {
                   <input
                     type="checkbox"
                     checked={editVendorForm.is_as9100_certified}
-                    onChange={(e) => setEditVendorForm({ ...editVendorForm, is_as9100_certified: e.target.checked })}
+                    onChange={e => setEditVendorForm({ ...editVendorForm, is_as9100_certified: e.target.checked })}
                     className="rounded border-slate-600"
                     aria-label="AS9100D Certified"
                   />
@@ -2410,7 +2513,7 @@ export default function Purchasing() {
                   <input
                     type="checkbox"
                     checked={editVendorForm.is_iso9001_certified}
-                    onChange={(e) => setEditVendorForm({ ...editVendorForm, is_iso9001_certified: e.target.checked })}
+                    onChange={e => setEditVendorForm({ ...editVendorForm, is_iso9001_certified: e.target.checked })}
                     className="rounded border-slate-600"
                     aria-label="ISO 9001 Certified"
                   />
@@ -2419,14 +2522,14 @@ export default function Purchasing() {
               </div>
 
               <FormField label="Notes">
-                {(field) => (
-                <textarea
-                  {...field}
-                  value={editVendorForm.notes}
-                  onChange={(e) => setEditVendorForm({ ...editVendorForm, notes: e.target.value })}
-                  className="input"
-                  rows={3}
-                />
+                {field => (
+                  <textarea
+                    {...field}
+                    value={editVendorForm.notes}
+                    onChange={e => setEditVendorForm({ ...editVendorForm, notes: e.target.value })}
+                    className="input"
+                    rows={3}
+                  />
                 )}
               </FormField>
 
@@ -2434,7 +2537,9 @@ export default function Purchasing() {
                 <Button variant="secondary" onClick={requestCloseEditVendorModal}>
                   Cancel
                 </Button>
-                <Button type="submit">Save Vendor</Button>
+                <Button type="submit" disabled={actionBusy}>
+                  Save Vendor
+                </Button>
               </div>
             </form>
 
@@ -2447,19 +2552,21 @@ export default function Purchasing() {
                 <input
                   type="text"
                   value={vendorDocForm.title}
-                  onChange={(e) => setVendorDocForm({ ...vendorDocForm, title: e.target.value })}
+                  onChange={e => setVendorDocForm({ ...vendorDocForm, title: e.target.value })}
                   className="input md:col-span-2"
                   placeholder="Title"
                   aria-label="Document title"
                 />
                 <select
                   value={vendorDocForm.document_type}
-                  onChange={(e) => setVendorDocForm({ ...vendorDocForm, document_type: e.target.value })}
+                  onChange={e => setVendorDocForm({ ...vendorDocForm, document_type: e.target.value })}
                   className="input md:col-span-1"
                 >
                   {documentTypes.length > 0 ? (
-                    documentTypes.map((t) => (
-                      <option key={t.value} value={t.value}>{t.label}</option>
+                    documentTypes.map(t => (
+                      <option key={t.value} value={t.value}>
+                        {t.label}
+                      </option>
                     ))
                   ) : (
                     <option value="certificate">Certificate</option>
@@ -2468,22 +2575,24 @@ export default function Purchasing() {
                 <input
                   type="text"
                   value={vendorDocForm.revision}
-                  onChange={(e) => setVendorDocForm({ ...vendorDocForm, revision: e.target.value })}
+                  onChange={e => setVendorDocForm({ ...vendorDocForm, revision: e.target.value })}
                   className="input md:col-span-1"
                   placeholder="Rev"
                   aria-label="Document revision"
                 />
                 <input
                   type="file"
-                  onChange={(e) => setVendorDocForm({ ...vendorDocForm, file: e.target.files?.[0] || null })}
+                  onChange={e => setVendorDocForm({ ...vendorDocForm, file: e.target.files?.[0] || null })}
                   className="input md:col-span-1"
                   aria-label="Document file"
                 />
-                <Button type="submit" className="md:col-span-1">Upload</Button>
+                <Button type="submit" className="md:col-span-1" disabled={actionBusy}>
+                  Upload
+                </Button>
                 <input
                   type="text"
                   value={vendorDocForm.description}
-                  onChange={(e) => setVendorDocForm({ ...vendorDocForm, description: e.target.value })}
+                  onChange={e => setVendorDocForm({ ...vendorDocForm, description: e.target.value })}
                   className="input md:col-span-6"
                   placeholder="Description (optional)"
                   aria-label="Document description"
@@ -2510,11 +2619,13 @@ export default function Purchasing() {
                       </tr>
                     </thead>
                     <tbody className="bg-fd-panel divide-y divide-slate-700">
-                      {vendorDocuments.map((doc) => (
+                      {vendorDocuments.map(doc => (
                         <tr key={doc.id} className="hover:bg-slate-800">
                           <td className="px-3 py-2 text-sm">
                             <div className="font-medium">{doc.title}</div>
-                            <div className="text-xs text-slate-400">{doc.document_number} Rev {doc.revision}</div>
+                            <div className="text-xs text-slate-400">
+                              {doc.document_number} Rev {doc.revision}
+                            </div>
                           </td>
                           <td className="px-3 py-2 text-sm capitalize">{doc.document_type.replace('_', ' ')}</td>
                           <td className="px-3 py-2 text-sm">
@@ -2559,101 +2670,115 @@ export default function Purchasing() {
 
       {/* Add New Part Modal */}
       <Modal open={showAddPartModal} onClose={() => setShowAddPartModal(false)} size="md" closeOnBackdrop={false}>
-            <h3 className="text-lg font-semibold mb-4">Add New Part</h3>
-            <form onSubmit={handleCreatePart} className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Part Number" required>
-                  {(field) => (
-                  <input
-                    {...field}
-                    type="text"
-                    value={newPart.part_number}
-                    onChange={(e) => setNewPart({ ...newPart, part_number: e.target.value })}
-                    className="input"
-                    placeholder="e.g., RAW-001"
-                    required
-                  />
-                  )}
-                </FormField>
-                <FormField label="Type">
-                  {(field) => (
-                  <select
-                    {...field}
-                    value={newPart.part_type}
-                    onChange={(e) => setNewPart({ ...newPart, part_type: e.target.value })}
-                    className="input"
-                  >
-                    <option value="purchased">Purchased</option>
-                    <option value="raw_material">Raw Material</option>
-                    <option value="manufactured">Manufactured</option>
-                  </select>
-                  )}
-                </FormField>
-              </div>
-              <FormField label="Name" required>
-                {(field) => (
+        {actionError && (
+          <p role="alert" className="text-red-300 p-3">
+            {actionError}
+          </p>
+        )}
+        {actionBusy && (
+          <p role="status" className="text-slate-400 p-3">
+            Saving…
+          </p>
+        )}
+        <h3 className="text-lg font-semibold mb-4">Add New Part</h3>
+        <form onSubmit={handleCreatePart} className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Part Number" required>
+              {field => (
                 <input
                   {...field}
                   type="text"
-                  value={newPart.name}
-                  onChange={(e) => setNewPart({ ...newPart, name: e.target.value })}
+                  value={newPart.part_number}
+                  onChange={e => setNewPart({ ...newPart, part_number: e.target.value })}
                   className="input"
-                  placeholder="Part description"
+                  placeholder="e.g., RAW-001"
                   required
                 />
-                )}
-              </FormField>
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Unit of Measure">
-                  {(field) => (
-                  <select
-                    {...field}
-                    value={newPart.unit_of_measure}
-                    onChange={(e) => setNewPart({ ...newPart, unit_of_measure: e.target.value })}
-                    className="input"
-                  >
-                    <option value="EA">Each (EA)</option>
-                    <option value="FT">Feet (FT)</option>
-                    <option value="IN">Inches (IN)</option>
-                    <option value="LB">Pounds (LB)</option>
-                    <option value="KG">Kilograms (KG)</option>
-                    <option value="GAL">Gallons (GAL)</option>
-                    <option value="SHT">Sheets (SHT)</option>
-                    <option value="BOX">Box (BOX)</option>
-                  </select>
-                  )}
-                </FormField>
-                <FormField label="Unit Cost ($)">
-                  {(field) => (
-                  <input
-                    {...field}
-                    type="number"
-                    value={newPart.unit_cost}
-                    onChange={(e) => setNewPart({ ...newPart, unit_cost: parseFloat(e.target.value) || 0 })}
-                    className="input"
-                    step={0.01}
-                    min={0}
-                  />
-                  )}
-                </FormField>
-              </div>
-              <FormField label="Description">
-                {(field) => (
-                <textarea
+              )}
+            </FormField>
+            <FormField label="Type">
+              {field => (
+                <select
                   {...field}
-                  value={newPart.description}
-                  onChange={(e) => setNewPart({ ...newPart, description: e.target.value })}
+                  value={newPart.part_type}
+                  onChange={e => setNewPart({ ...newPart, part_type: e.target.value })}
                   className="input"
-                  rows={2}
-                  placeholder="Optional details"
+                >
+                  <option value="purchased">Purchased</option>
+                  <option value="raw_material">Raw Material</option>
+                  <option value="manufactured">Manufactured</option>
+                </select>
+              )}
+            </FormField>
+          </div>
+          <FormField label="Name" required>
+            {field => (
+              <input
+                {...field}
+                type="text"
+                value={newPart.name}
+                onChange={e => setNewPart({ ...newPart, name: e.target.value })}
+                className="input"
+                placeholder="Part description"
+                required
+              />
+            )}
+          </FormField>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Unit of Measure">
+              {field => (
+                <select
+                  {...field}
+                  value={newPart.unit_of_measure}
+                  onChange={e => setNewPart({ ...newPart, unit_of_measure: e.target.value })}
+                  className="input"
+                >
+                  <option value="EA">Each (EA)</option>
+                  <option value="FT">Feet (FT)</option>
+                  <option value="IN">Inches (IN)</option>
+                  <option value="LB">Pounds (LB)</option>
+                  <option value="KG">Kilograms (KG)</option>
+                  <option value="GAL">Gallons (GAL)</option>
+                  <option value="SHT">Sheets (SHT)</option>
+                  <option value="BOX">Box (BOX)</option>
+                </select>
+              )}
+            </FormField>
+            <FormField label="Unit Cost ($)">
+              {field => (
+                <input
+                  {...field}
+                  type="number"
+                  value={newPart.unit_cost}
+                  onChange={e => setNewPart({ ...newPart, unit_cost: parseFloat(e.target.value) || 0 })}
+                  className="input"
+                  step={0.01}
+                  min={0}
                 />
-                )}
-              </FormField>
-              <div className="flex justify-end gap-3 pt-4 border-t">
-                <Button variant="secondary" onClick={() => setShowAddPartModal(false)}>Cancel</Button>
-                <Button type="submit">Create Part</Button>
-              </div>
-            </form>
+              )}
+            </FormField>
+          </div>
+          <FormField label="Description">
+            {field => (
+              <textarea
+                {...field}
+                value={newPart.description}
+                onChange={e => setNewPart({ ...newPart, description: e.target.value })}
+                className="input"
+                rows={2}
+                placeholder="Optional details"
+              />
+            )}
+          </FormField>
+          <div className="flex justify-end gap-3 pt-4 border-t">
+            <Button variant="secondary" onClick={() => setShowAddPartModal(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={actionBusy}>
+              Create Part
+            </Button>
+          </div>
+        </form>
       </Modal>
 
       {/* Delete PO confirm */}
@@ -2698,9 +2823,7 @@ export default function Purchasing() {
         open={!!deleteVendorDocTarget}
         title="Delete Document"
         message={
-          deleteVendorDocTarget?.file_name
-            ? `Delete "${deleteVendorDocTarget.file_name}"?`
-            : 'Delete this document?'
+          deleteVendorDocTarget?.file_name ? `Delete "${deleteVendorDocTarget.file_name}"?` : 'Delete this document?'
         }
         confirmLabel="Delete"
         pending={deleteVendorDocPending}
@@ -2711,12 +2834,16 @@ export default function Purchasing() {
         }}
       />
 
-      {/* Send PO confirm (non-destructive) */}
+      {/* Mark as sent confirm (non-destructive) */}
       <ConfirmDialog
         open={!!sendPOTarget}
-        title="Send Purchase Order"
-        message={sendPOTarget ? `Send ${sendPOTarget.po_number} to the vendor?` : 'Send this PO to vendor?'}
-        confirmLabel="Send"
+        title="Mark purchase order as sent"
+        message={
+          sendPOTarget
+            ? `Mark ${sendPOTarget.po_number} as sent? This updates its status and internal notifications. Send the printed document to the supplier using your communication channel.`
+            : 'Mark this purchase order as sent?'
+        }
+        confirmLabel="Mark as sent"
         pending={sendPOPending}
         variant="info"
         onConfirm={handleConfirmSendPO}

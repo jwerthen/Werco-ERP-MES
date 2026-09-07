@@ -80,14 +80,14 @@ beforeEach(() => {
 // ===========================================================================
 
 describe('VisitorLog "Add visit" button visibility', () => {
-  it.each(['admin', 'manager'])('shows the Add visit button for %s', async (role) => {
+  it.each(['admin', 'manager'])('shows the Add visit button for %s', async role => {
     mockRole = role;
     renderPage();
     await waitFor(() => expect(mockedApi.getVisitorLogs).toHaveBeenCalled());
     expect(screen.getByRole('button', { name: /add visit/i })).toBeInTheDocument();
   });
 
-  it.each(['supervisor', 'viewer'])('hides the Add visit button for %s', async (role) => {
+  it.each(['supervisor', 'viewer'])('hides the Add visit button for %s', async role => {
     mockRole = role;
     renderPage();
     await waitFor(() => expect(mockedApi.getVisitorLogs).toHaveBeenCalled());
@@ -195,7 +195,7 @@ describe('VisitorManualEntryModal validation', () => {
     await user.click(screen.getByRole('checkbox'));
 
     // Pick "Other" from the custom SelectField.
-    await user.click(screen.getByRole('button', { name: 'Purpose' }));
+    await user.click(screen.getByRole('combobox', { name: 'Purpose' }));
     await user.click(await screen.findByRole('option', { name: /other/i }));
 
     await user.click(screen.getByRole('button', { name: /add visit/i }));

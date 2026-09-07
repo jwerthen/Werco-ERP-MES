@@ -1,6 +1,7 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
+import { useAuth } from '../context/AuthContext';
 import DXFViewer from '../components/DXFViewer';
 import {
   CalculatorIcon,
@@ -98,6 +99,17 @@ const thicknessOptions = [
 
 export default function QuoteCalculator() {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const draftKey = `werco:quote-calculator:${user?.company_id || 'none'}:${user?.id || 'none'}`;
+  const [restoredKey, setRestoredKey] = useState('');
+  const calculationRequest = useRef(0);
+  const calculationPending = useRef(false);
+  const [resultSnapshot, setResultSnapshot] = useState<{
+    inputKey: string;
+    quantity: number;
+    capturedAt: string;
+    inputs: unknown;
+  } | null>(null);
   const [calcType, setCalcType] = useState<CalcType>('cnc');
   const [materials, setMaterials] = useState<Material[]>([]);
   const [finishes, setFinishes] = useState<Finish[]>([]);
@@ -126,7 +138,7 @@ export default function QuoteCalculator() {
     surface_finish: 'as_machined',
     finish_ids: [] as number[],
     quantity: 1,
-    rush: false
+    rush: false,
   });
 
   // Sheet Metal Form
@@ -144,33 +156,65 @@ export default function QuoteCalculator() {
     num_weld_nuts: 0,
     finish_ids: [] as number[],
     quantity: 1,
-    rush: false
+    rush: false,
   });
+
+  const inputKey = JSON.stringify({ type: calcType, form: calcType === 'cnc' ? cncForm : sheetForm });
+  const staleResult = !!result && resultSnapshot?.inputKey !== inputKey;
+  // Quote lines use cent-rounded unit prices. Keep the displayed total aligned
+  // with the review form, while retaining the raw estimate in its snapshot.
+  const quotedTotal =
+    result && resultSnapshot
+      ? Math.round((result.unit_price * resultSnapshot.quantity + Number.EPSILON) * 100) / 100
+      : result?.total || 0;
+  const unitRounding = result ? Math.round((quotedTotal - result.total) * 100) / 100 : 0;
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem(draftKey);
+      if (saved) {
+        const draft = JSON.parse(saved);
+        if (draft.cncForm && draft.sheetForm && ['cnc', 'sheet_metal'].includes(draft.calcType)) {
+          setCncForm(draft.cncForm);
+          setSheetForm(draft.sheetForm);
+          setCalcType(draft.calcType);
+          setResult(draft.result || null);
+          setResultSnapshot(draft.resultSnapshot || null);
+        }
+      }
+    } catch {
+      /* A calculator still works when session storage is unavailable. */
+    }
+    // Persist only after restored state has committed. A ref lets this render's
+    // defaults overwrite storage before restoration, including StrictMode replay.
+    setRestoredKey(draftKey);
+  }, [draftKey]);
+  useEffect(() => {
+    if (restoredKey !== draftKey) return;
+    try {
+      sessionStorage.setItem(draftKey, JSON.stringify({ cncForm, sheetForm, calcType, result, resultSnapshot }));
+    } catch {
+      /* In-memory work remains usable. */
+    }
+  }, [draftKey, restoredKey, cncForm, sheetForm, calcType, result, resultSnapshot]);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     setLoadError(false);
     try {
-      const [materialsRes, finishesRes] = await Promise.all([
-        api.getQuoteMaterials(),
-        api.getQuoteFinishes()
-      ]);
+      const [materialsRes, finishesRes] = await Promise.all([api.getQuoteMaterials(), api.getQuoteFinishes()]);
       setMaterials(materialsRes);
       setFinishes(finishesRes);
 
       if (materialsRes.length > 0) {
-        setCncForm(f => ({ ...f, material_id: materialsRes[0].id }));
-        setSheetForm(f => ({ ...f, material_id: materialsRes[0].id }));
+        setCncForm(f => ({ ...f, material_id: f.material_id || materialsRes[0].id }));
+        setSheetForm(f => ({ ...f, material_id: f.material_id || materialsRes[0].id }));
       }
     } catch (err: any) {
       if (err.response?.status === 404) {
         try {
           await api.seedQuoteDefaults();
           // Reload after seeding
-          const [mats, fins] = await Promise.all([
-            api.getQuoteMaterials(),
-            api.getQuoteFinishes()
-          ]);
+          const [mats, fins] = await Promise.all([api.getQuoteMaterials(), api.getQuoteFinishes()]);
           setMaterials(mats);
           setFinishes(fins);
           return;
@@ -191,16 +235,16 @@ export default function QuoteCalculator() {
   const handleDxfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    
+
     setDxfFile(file);
     setAnalyzingDxf(true);
     setError('');
     setDxfAnalysis(null);
-    
+
     try {
       const analysis = await api.analyzeDXF(file);
       setDxfAnalysis(analysis);
-      
+
       setSheetForm(prev => ({
         ...prev,
         flat_length: Math.round(analysis.flat_length * 100) / 100,
@@ -225,6 +269,15 @@ export default function QuoteCalculator() {
   };
 
   const calculateQuote = async () => {
+    if (calculationPending.current) return;
+    calculationPending.current = true;
+    const request = ++calculationRequest.current;
+    const snapshot = {
+      inputKey,
+      quantity: calcType === 'cnc' ? cncForm.quantity : sheetForm.quantity,
+      capturedAt: new Date().toISOString(),
+      inputs: JSON.parse(inputKey),
+    };
     setCalculating(true);
     setError('');
     setResult(null);
@@ -236,10 +289,14 @@ export default function QuoteCalculator() {
       } else {
         response = await api.calculateSheetMetalQuote(sheetForm);
       }
-      setResult(response);
+      if (request === calculationRequest.current) {
+        setResult(response);
+        setResultSnapshot(snapshot);
+      }
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Calculation failed');
     } finally {
+      calculationPending.current = false;
       setCalculating(false);
     }
   };
@@ -263,7 +320,25 @@ export default function QuoteCalculator() {
   };
 
   const createQuoteFromResult = () => {
-    navigate('/quotes');
+    if (!result || !resultSnapshot || staleResult || calculating) return;
+    navigate('/quotes?create=calculator', {
+      state: {
+        calculatorDraft: {
+          lead_time_days: result.lead_time_days,
+          internal_notes: JSON.stringify({ source: 'Quote Calculator', ...resultSnapshot, result }, null, 2),
+          lines: [
+            {
+              part_id: 0,
+              description: `${calcType === 'cnc' ? 'CNC' : 'Sheet metal'} estimate`,
+              quantity: resultSnapshot.quantity,
+              unit_price: result.unit_price,
+              labor_hours: result.estimated_hours,
+              material_cost: result.material_cost,
+            },
+          ],
+        },
+      },
+    });
   };
 
   if (loading) {
@@ -293,39 +368,42 @@ export default function QuoteCalculator() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-100 flex items-center gap-2">
-            <CalculatorIcon className="h-6 w-6 text-werco-navy-600" />
+            <CalculatorIcon className="h-6 w-6 text-fd-link" />
             Instant Quote Calculator
           </h1>
-          <p className="text-slate-500 mt-1">Generate accurate quotes in seconds with AI-powered pricing</p>
+          <p className="text-slate-500 mt-1">Estimate pricing using part details and configured shop rates</p>
         </div>
-        <button
-          onClick={() => navigate('/admin/settings')}
-          className="btn-secondary"
-        >
+        <button onClick={() => navigate('/admin/settings')} className="btn-secondary">
           <CogIcon className="h-5 w-5 mr-2" />
           Configure Pricing
         </button>
       </div>
 
       {/* Calculator Type Selector */}
-      <div className="inline-flex rounded-sm border border-fd-line bg-fd-sunken p-0.5" data-tour="quote-type" role="group">
+      <div
+        className="inline-flex rounded-sm border border-fd-line bg-fd-sunken p-0.5"
+        data-tour="quote-type"
+        role="group"
+      >
         <button
-          onClick={() => { setCalcType('cnc'); setResult(null); }}
+          onClick={() => {
+            setCalcType('cnc');
+            setResult(null);
+          }}
           className={`flex items-center gap-2 px-4 py-2 rounded-sm text-sm font-medium transition-colors ${
-            calcType === 'cnc'
-              ? 'bg-werco-navy-600 text-white'
-              : 'text-slate-400 hover:text-slate-200'
+            calcType === 'cnc' ? 'bg-werco-navy-600 text-white' : 'text-slate-400 hover:text-slate-200'
           }`}
         >
           <CubeIcon className="h-4 w-4" />
           <span>CNC Machining</span>
         </button>
         <button
-          onClick={() => { setCalcType('sheet_metal'); setResult(null); }}
+          onClick={() => {
+            setCalcType('sheet_metal');
+            setResult(null);
+          }}
           className={`flex items-center gap-2 px-4 py-2 rounded-sm text-sm font-medium transition-colors ${
-            calcType === 'sheet_metal'
-              ? 'bg-werco-navy-600 text-white'
-              : 'text-slate-400 hover:text-slate-200'
+            calcType === 'sheet_metal' ? 'bg-werco-navy-600 text-white' : 'text-slate-400 hover:text-slate-200'
           }`}
         >
           <Square3Stack3DIcon className="h-4 w-4" />
@@ -337,7 +415,7 @@ export default function QuoteCalculator() {
         {/* Input Form */}
         <div className="card" data-tour="quote-inputs">
           <h2 className="text-lg font-semibold mb-5 flex items-center gap-2 text-slate-100">
-            <CalculatorIcon className="h-5 w-5 text-werco-navy-600" />
+            <CalculatorIcon className="h-5 w-5 text-fd-link" />
             {calcType === 'cnc' ? 'CNC Part Details' : 'Sheet Metal Details'}
           </h2>
 
@@ -352,7 +430,7 @@ export default function QuoteCalculator() {
                       type="number"
                       aria-label="Length (inches)"
                       value={cncForm.length}
-                      onChange={(e) => setCncForm({ ...cncForm, length: parseFloat(e.target.value) || 0 })}
+                      onChange={e => setCncForm({ ...cncForm, length: parseFloat(e.target.value) || 0 })}
                       className="input text-center"
                       step="0.1"
                     />
@@ -363,7 +441,7 @@ export default function QuoteCalculator() {
                       type="number"
                       aria-label="Width (inches)"
                       value={cncForm.width}
-                      onChange={(e) => setCncForm({ ...cncForm, width: parseFloat(e.target.value) || 0 })}
+                      onChange={e => setCncForm({ ...cncForm, width: parseFloat(e.target.value) || 0 })}
                       className="input text-center"
                       step="0.1"
                     />
@@ -374,7 +452,7 @@ export default function QuoteCalculator() {
                       type="number"
                       aria-label="Height (inches)"
                       value={cncForm.height}
-                      onChange={(e) => setCncForm({ ...cncForm, height: parseFloat(e.target.value) || 0 })}
+                      onChange={e => setCncForm({ ...cncForm, height: parseFloat(e.target.value) || 0 })}
                       className="input text-center"
                       step="0.1"
                     />
@@ -385,16 +463,22 @@ export default function QuoteCalculator() {
 
               {/* Material */}
               <FormField label="Material">
-                {(field) => (
+                {field => (
                   <select
                     {...field}
                     value={cncForm.material_id}
-                    onChange={(e) => setCncForm({ ...cncForm, material_id: parseInt(e.target.value) })}
+                    onChange={e => setCncForm({ ...cncForm, material_id: parseInt(e.target.value) })}
                     className="input"
                   >
-                    {materials.filter(m => !m.sheet_pricing || Object.keys(m.sheet_pricing).length === 0 || m.category !== 'steel').map(m => (
-                      <option key={m.id} value={m.id}>{m.name}</option>
-                    ))}
+                    {materials
+                      .filter(
+                        m => !m.sheet_pricing || Object.keys(m.sheet_pricing).length === 0 || m.category !== 'steel'
+                      )
+                      .map(m => (
+                        <option key={m.id} value={m.id}>
+                          {m.name}
+                        </option>
+                      ))}
                   </select>
                 )}
               </FormField>
@@ -402,11 +486,11 @@ export default function QuoteCalculator() {
               {/* Complexity */}
               <div className="grid grid-cols-2 gap-4">
                 <FormField label="Complexity">
-                  {(field) => (
+                  {field => (
                     <select
                       {...field}
                       value={cncForm.complexity}
-                      onChange={(e) => setCncForm({ ...cncForm, complexity: e.target.value })}
+                      onChange={e => setCncForm({ ...cncForm, complexity: e.target.value })}
                       className="input"
                     >
                       <option value="simple">Simple (basic shapes)</option>
@@ -417,12 +501,12 @@ export default function QuoteCalculator() {
                   )}
                 </FormField>
                 <FormField label="# of Setups">
-                  {(field) => (
+                  {field => (
                     <input
                       {...field}
                       type="number"
                       value={cncForm.num_setups}
-                      onChange={(e) => setCncForm({ ...cncForm, num_setups: parseInt(e.target.value) || 1 })}
+                      onChange={e => setCncForm({ ...cncForm, num_setups: parseInt(e.target.value) || 1 })}
                       className="input"
                       min={1}
                       max={6}
@@ -440,7 +524,7 @@ export default function QuoteCalculator() {
                       type="number"
                       aria-label="Holes"
                       value={cncForm.num_holes}
-                      onChange={(e) => setCncForm({ ...cncForm, num_holes: parseInt(e.target.value) || 0 })}
+                      onChange={e => setCncForm({ ...cncForm, num_holes: parseInt(e.target.value) || 0 })}
                       className="input text-center"
                       min={0}
                     />
@@ -451,7 +535,7 @@ export default function QuoteCalculator() {
                       type="number"
                       aria-label="Tapped holes"
                       value={cncForm.num_tapped_holes}
-                      onChange={(e) => setCncForm({ ...cncForm, num_tapped_holes: parseInt(e.target.value) || 0 })}
+                      onChange={e => setCncForm({ ...cncForm, num_tapped_holes: parseInt(e.target.value) || 0 })}
                       className="input text-center"
                       min={0}
                     />
@@ -462,7 +546,7 @@ export default function QuoteCalculator() {
                       type="number"
                       aria-label="Pockets"
                       value={cncForm.num_pockets}
-                      onChange={(e) => setCncForm({ ...cncForm, num_pockets: parseInt(e.target.value) || 0 })}
+                      onChange={e => setCncForm({ ...cncForm, num_pockets: parseInt(e.target.value) || 0 })}
                       className="input text-center"
                       min={0}
                     />
@@ -473,7 +557,7 @@ export default function QuoteCalculator() {
                       type="number"
                       aria-label="Slots"
                       value={cncForm.num_slots}
-                      onChange={(e) => setCncForm({ ...cncForm, num_slots: parseInt(e.target.value) || 0 })}
+                      onChange={e => setCncForm({ ...cncForm, num_slots: parseInt(e.target.value) || 0 })}
                       className="input text-center"
                       min={0}
                     />
@@ -485,11 +569,11 @@ export default function QuoteCalculator() {
               {/* Tolerance & Surface */}
               <div className="grid grid-cols-2 gap-4">
                 <FormField label="Tightest Tolerance">
-                  {(field) => (
+                  {field => (
                     <select
                       {...field}
                       value={cncForm.tightest_tolerance}
-                      onChange={(e) => setCncForm({ ...cncForm, tightest_tolerance: e.target.value })}
+                      onChange={e => setCncForm({ ...cncForm, tightest_tolerance: e.target.value })}
                       className="input"
                     >
                       <option value="standard">Standard (+/-.005)</option>
@@ -500,11 +584,11 @@ export default function QuoteCalculator() {
                   )}
                 </FormField>
                 <FormField label="Surface Finish">
-                  {(field) => (
+                  {field => (
                     <select
                       {...field}
                       value={cncForm.surface_finish}
-                      onChange={(e) => setCncForm({ ...cncForm, surface_finish: e.target.value })}
+                      onChange={e => setCncForm({ ...cncForm, surface_finish: e.target.value })}
                       className="input"
                     >
                       <option value="as_machined">As Machined</option>
@@ -519,12 +603,12 @@ export default function QuoteCalculator() {
               {/* Quantity & Rush */}
               <div className="grid grid-cols-2 gap-4">
                 <FormField label="Quantity">
-                  {(field) => (
+                  {field => (
                     <input
                       {...field}
                       type="number"
                       value={cncForm.quantity}
-                      onChange={(e) => setCncForm({ ...cncForm, quantity: parseInt(e.target.value) || 1 })}
+                      onChange={e => setCncForm({ ...cncForm, quantity: parseInt(e.target.value) || 1 })}
                       className="input"
                       min={1}
                     />
@@ -536,7 +620,7 @@ export default function QuoteCalculator() {
                       type="checkbox"
                       aria-label="Rush Order (1.5x)"
                       checked={cncForm.rush}
-                      onChange={(e) => setCncForm({ ...cncForm, rush: e.target.checked })}
+                      onChange={e => setCncForm({ ...cncForm, rush: e.target.checked })}
                       className="sr-only peer"
                     />
                     <div className="w-11 h-6 bg-fd-sunken border border-fd-line peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-fd-blue/40 rounded-sm peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[3px] after:left-[3px] after:bg-slate-300 after:rounded-sm after:h-4 after:w-4 after:transition-all peer-checked:bg-fd-amber peer-checked:after:bg-white"></div>
@@ -552,9 +636,13 @@ export default function QuoteCalculator() {
             /* Sheet Metal Form */
             <div className="space-y-5">
               {/* DXF Upload */}
-              <div className={`border border-dashed rounded-sm p-3 text-center transition-colors ${
-                dxfFile ? 'border-fd-blue/50 bg-fd-blue/10' : 'border-fd-line hover:border-fd-blue/60 hover:bg-fd-sunken'
-              }`}>
+              <div
+                className={`border border-dashed rounded-sm p-3 text-center transition-colors ${
+                  dxfFile
+                    ? 'border-fd-blue/50 bg-fd-blue/10'
+                    : 'border-fd-line hover:border-fd-blue/60 hover:bg-fd-sunken'
+                }`}
+              >
                 {!dxfFile ? (
                   <label className="cursor-pointer block py-2">
                     <input
@@ -576,22 +664,24 @@ export default function QuoteCalculator() {
                 ) : dxfAnalysis ? (
                   <div className="text-left">
                     <div className="flex items-center justify-between mb-3">
-                      <div className="flex items-center text-werco-navy-600">
+                      <div className="flex items-center text-fd-link">
                         <CheckCircleIcon className="h-5 w-5 mr-2" />
                         <span className="font-medium">{dxfFile.name}</span>
                       </div>
-                      <button onClick={clearDxf} className="text-slate-500 text-sm hover:underline font-medium">Clear</button>
+                      <button onClick={clearDxf} className="text-slate-500 text-sm hover:underline font-medium">
+                        Clear
+                      </button>
                     </div>
                     <div className="mb-3">
-                      <DXFViewer 
-                        file={dxfFile} 
+                      <DXFViewer
+                        file={dxfFile}
                         analysis={{
                           min_x: dxfAnalysis.min_x || 0,
                           max_x: dxfAnalysis.max_x || dxfAnalysis.flat_length,
                           min_y: dxfAnalysis.min_y || 0,
                           max_y: dxfAnalysis.max_y || dxfAnalysis.flat_width,
                           flat_length: dxfAnalysis.flat_length,
-                          flat_width: dxfAnalysis.flat_width
+                          flat_width: dxfAnalysis.flat_width,
                         }}
                       />
                     </div>
@@ -601,7 +691,9 @@ export default function QuoteCalculator() {
                         Extracted from DXF
                       </p>
                       <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm text-slate-300 tabular-nums">
-                        <span>Flat Size: {dxfAnalysis.flat_length}" x {dxfAnalysis.flat_width}"</span>
+                        <span>
+                          Flat Size: {dxfAnalysis.flat_length}" x {dxfAnalysis.flat_width}"
+                        </span>
                         <span>Cut Length: {dxfAnalysis.total_cut_length}"</span>
                         <span>Holes: {dxfAnalysis.num_holes}</span>
                         <span>Slots: {dxfAnalysis.num_slots}</span>
@@ -623,7 +715,9 @@ export default function QuoteCalculator() {
               <div>
                 <label className="label flex items-center gap-2">
                   Flat Pattern Size (inches)
-                  {dxfAnalysis && <span className="text-xs text-fd-blue bg-fd-blue/15 px-2 py-0.5 rounded-sm">from DXF</span>}
+                  {dxfAnalysis && (
+                    <span className="text-xs text-fd-blue bg-fd-blue/15 px-2 py-0.5 rounded-sm">from DXF</span>
+                  )}
                 </label>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -631,7 +725,7 @@ export default function QuoteCalculator() {
                       type="number"
                       aria-label="Flat pattern length (inches)"
                       value={sheetForm.flat_length}
-                      onChange={(e) => setSheetForm({ ...sheetForm, flat_length: parseFloat(e.target.value) || 0 })}
+                      onChange={e => setSheetForm({ ...sheetForm, flat_length: parseFloat(e.target.value) || 0 })}
                       className="input text-center"
                       step="0.1"
                     />
@@ -642,7 +736,7 @@ export default function QuoteCalculator() {
                       type="number"
                       aria-label="Flat pattern width (inches)"
                       value={sheetForm.flat_width}
-                      onChange={(e) => setSheetForm({ ...sheetForm, flat_width: parseFloat(e.target.value) || 0 })}
+                      onChange={e => setSheetForm({ ...sheetForm, flat_width: parseFloat(e.target.value) || 0 })}
                       className="input text-center"
                       step="0.1"
                     />
@@ -654,29 +748,33 @@ export default function QuoteCalculator() {
               {/* Material & Thickness */}
               <div className="grid grid-cols-2 gap-4">
                 <FormField label="Material">
-                  {(field) => (
+                  {field => (
                     <select
                       {...field}
                       value={sheetForm.material_id}
-                      onChange={(e) => setSheetForm({ ...sheetForm, material_id: parseInt(e.target.value) })}
+                      onChange={e => setSheetForm({ ...sheetForm, material_id: parseInt(e.target.value) })}
                       className="input"
                     >
                       {materials.map(m => (
-                        <option key={m.id} value={m.id}>{m.name}</option>
+                        <option key={m.id} value={m.id}>
+                          {m.name}
+                        </option>
                       ))}
                     </select>
                   )}
                 </FormField>
                 <FormField label="Thickness">
-                  {(field) => (
+                  {field => (
                     <select
                       {...field}
                       value={sheetForm.gauge}
-                      onChange={(e) => setSheetForm({ ...sheetForm, gauge: e.target.value })}
+                      onChange={e => setSheetForm({ ...sheetForm, gauge: e.target.value })}
                       className="input"
                     >
                       {thicknessOptions.map(t => (
-                        <option key={t.value} value={t.value}>{t.label}</option>
+                        <option key={t.value} value={t.value}>
+                          {t.label}
+                        </option>
                       ))}
                     </select>
                   )}
@@ -687,7 +785,9 @@ export default function QuoteCalculator() {
               <div>
                 <label className="label flex items-center gap-2">
                   Cutting
-                  {dxfAnalysis && <span className="text-xs text-fd-blue bg-fd-blue/15 px-2 py-0.5 rounded-sm">from DXF</span>}
+                  {dxfAnalysis && (
+                    <span className="text-xs text-fd-blue bg-fd-blue/15 px-2 py-0.5 rounded-sm">from DXF</span>
+                  )}
                 </label>
                 <div className="grid grid-cols-3 gap-3">
                   <div>
@@ -695,7 +795,7 @@ export default function QuoteCalculator() {
                       type="number"
                       aria-label="Cut Length (in)"
                       value={sheetForm.cut_perimeter}
-                      onChange={(e) => setSheetForm({ ...sheetForm, cut_perimeter: parseFloat(e.target.value) || 0 })}
+                      onChange={e => setSheetForm({ ...sheetForm, cut_perimeter: parseFloat(e.target.value) || 0 })}
                       className="input text-center"
                       step="1"
                     />
@@ -706,7 +806,7 @@ export default function QuoteCalculator() {
                       type="number"
                       aria-label="Holes"
                       value={sheetForm.num_holes}
-                      onChange={(e) => setSheetForm({ ...sheetForm, num_holes: parseInt(e.target.value) || 0 })}
+                      onChange={e => setSheetForm({ ...sheetForm, num_holes: parseInt(e.target.value) || 0 })}
                       className="input text-center"
                       min={0}
                     />
@@ -717,7 +817,7 @@ export default function QuoteCalculator() {
                       type="number"
                       aria-label="Slots"
                       value={sheetForm.num_slots}
-                      onChange={(e) => setSheetForm({ ...sheetForm, num_slots: parseInt(e.target.value) || 0 })}
+                      onChange={e => setSheetForm({ ...sheetForm, num_slots: parseInt(e.target.value) || 0 })}
                       className="input text-center"
                       min={0}
                     />
@@ -730,7 +830,9 @@ export default function QuoteCalculator() {
               <div>
                 <label className="label flex items-center gap-2">
                   Bending
-                  {dxfAnalysis && <span className="text-xs text-fd-blue bg-fd-blue/15 px-2 py-0.5 rounded-sm">from DXF</span>}
+                  {dxfAnalysis && (
+                    <span className="text-xs text-fd-blue bg-fd-blue/15 px-2 py-0.5 rounded-sm">from DXF</span>
+                  )}
                 </label>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -738,7 +840,7 @@ export default function QuoteCalculator() {
                       type="number"
                       aria-label="Total Bends"
                       value={sheetForm.num_bends}
-                      onChange={(e) => setSheetForm({ ...sheetForm, num_bends: parseInt(e.target.value) || 0 })}
+                      onChange={e => setSheetForm({ ...sheetForm, num_bends: parseInt(e.target.value) || 0 })}
                       className="input text-center"
                       min={0}
                     />
@@ -749,7 +851,7 @@ export default function QuoteCalculator() {
                       type="number"
                       aria-label="Unique Bends"
                       value={sheetForm.num_unique_bends}
-                      onChange={(e) => setSheetForm({ ...sheetForm, num_unique_bends: parseInt(e.target.value) || 0 })}
+                      onChange={e => setSheetForm({ ...sheetForm, num_unique_bends: parseInt(e.target.value) || 0 })}
                       className="input text-center"
                       min={0}
                     />
@@ -767,7 +869,7 @@ export default function QuoteCalculator() {
                       type="number"
                       aria-label="PEM Inserts"
                       value={sheetForm.num_pem_inserts}
-                      onChange={(e) => setSheetForm({ ...sheetForm, num_pem_inserts: parseInt(e.target.value) || 0 })}
+                      onChange={e => setSheetForm({ ...sheetForm, num_pem_inserts: parseInt(e.target.value) || 0 })}
                       className="input text-center"
                       min={0}
                     />
@@ -778,7 +880,7 @@ export default function QuoteCalculator() {
                       type="number"
                       aria-label="Weld Nuts"
                       value={sheetForm.num_weld_nuts}
-                      onChange={(e) => setSheetForm({ ...sheetForm, num_weld_nuts: parseInt(e.target.value) || 0 })}
+                      onChange={e => setSheetForm({ ...sheetForm, num_weld_nuts: parseInt(e.target.value) || 0 })}
                       className="input text-center"
                       min={0}
                     />
@@ -790,12 +892,12 @@ export default function QuoteCalculator() {
               {/* Quantity & Rush */}
               <div className="grid grid-cols-2 gap-4">
                 <FormField label="Quantity">
-                  {(field) => (
+                  {field => (
                     <input
                       {...field}
                       type="number"
                       value={sheetForm.quantity}
-                      onChange={(e) => setSheetForm({ ...sheetForm, quantity: parseInt(e.target.value) || 1 })}
+                      onChange={e => setSheetForm({ ...sheetForm, quantity: parseInt(e.target.value) || 1 })}
                       className="input"
                       min={1}
                     />
@@ -807,7 +909,7 @@ export default function QuoteCalculator() {
                       type="checkbox"
                       aria-label="Rush Order (1.5x)"
                       checked={sheetForm.rush}
-                      onChange={(e) => setSheetForm({ ...sheetForm, rush: e.target.checked })}
+                      onChange={e => setSheetForm({ ...sheetForm, rush: e.target.checked })}
                       className="sr-only peer"
                     />
                     <div className="w-11 h-6 bg-fd-sunken border border-fd-line peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-fd-blue/40 rounded-sm peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[3px] after:left-[3px] after:bg-slate-300 after:rounded-sm after:h-4 after:w-4 after:transition-all peer-checked:bg-fd-amber peer-checked:after:bg-white"></div>
@@ -846,11 +948,7 @@ export default function QuoteCalculator() {
           </div>
 
           {/* Calculate Button */}
-          <button
-            onClick={calculateQuote}
-            disabled={calculating}
-            className="btn-primary w-full mt-5"
-          >
+          <button onClick={calculateQuote} disabled={calculating} className="btn-primary w-full mt-5">
             {calculating ? (
               <span className="flex items-center justify-center gap-3">
                 <div className="spinner h-5 w-5 border-white/30 border-t-white"></div>
@@ -875,10 +973,10 @@ export default function QuoteCalculator() {
         {/* Results */}
         <div className="card" data-tour="quote-result">
           <h2 className="text-lg font-semibold mb-5 flex items-center gap-2 text-slate-100">
-            <CurrencyDollarIcon className="h-5 w-5 text-werco-navy-600" />
+            <CurrencyDollarIcon className="h-5 w-5 text-fd-link" />
             Quote Result
           </h2>
-          
+
           {!result ? (
             <EmptyState
               icon={CalculatorIcon}
@@ -887,22 +985,31 @@ export default function QuoteCalculator() {
             />
           ) : (
             <div className="space-y-5">
+              {staleResult && (
+                <p role="status" className="rounded border border-amber-500/40 bg-amber-500/10 p-3 text-amber-200">
+                  Inputs changed — recalculate before creating or printing a quote. The values below belong to the
+                  previous calculation.
+                </p>
+              )}
               {/* Big Price Card */}
               <div className="rounded-sm border border-fd-line bg-fd-sunken p-4 text-center">
                 <p className="text-fd-blue text-sm font-medium">Total Quote</p>
-                <p className="text-3xl font-bold text-white mt-1 tabular-nums">${result.total.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                <p className="text-3xl font-bold text-white mt-1 tabular-nums">
+                  ${quotedTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </p>
                 <p className="text-slate-400 mt-2 tabular-nums">
-                  <span className="text-fd-blue font-semibold">${result.unit_price.toFixed(2)}</span> per unit x {calcType === 'cnc' ? cncForm.quantity : sheetForm.quantity}
+                  <span className="text-fd-blue font-semibold">${result.unit_price.toFixed(2)}</span> per unit x{' '}
+                  {resultSnapshot?.quantity}
                 </p>
               </div>
 
               {/* Lead Time */}
               <div className="flex items-center justify-between p-3 bg-fd-sunken rounded-sm border border-fd-line">
                 <div className="flex items-center gap-2">
-                  <ClockIcon className="h-5 w-5 text-werco-navy-600" />
+                  <ClockIcon className="h-5 w-5 text-fd-link" />
                   <span className="font-medium text-slate-300">Estimated Lead Time</span>
                 </div>
-                <span className="text-xl font-bold text-werco-navy-600 tabular-nums">{result.lead_time_days} days</span>
+                <span className="text-xl font-bold text-fd-link tabular-nums">{result.lead_time_days} days</span>
               </div>
 
               {/* Cost Breakdown */}
@@ -914,7 +1021,9 @@ export default function QuoteCalculator() {
                   {result.material_cost > 0 && (
                     <div className="flex justify-between px-3 py-2 text-sm">
                       <span className="text-slate-400">Material</span>
-                      <span className="font-medium text-slate-100 tabular-nums">${result.material_cost.toFixed(2)}</span>
+                      <span className="font-medium text-slate-100 tabular-nums">
+                        ${result.material_cost.toFixed(2)}
+                      </span>
                     </div>
                   )}
                   {result.cutting_cost > 0 && (
@@ -926,7 +1035,9 @@ export default function QuoteCalculator() {
                   {result.machining_cost > 0 && (
                     <div className="flex justify-between px-3 py-2 text-sm">
                       <span className="text-slate-400">Machining</span>
-                      <span className="font-medium text-slate-100 tabular-nums">${result.machining_cost.toFixed(2)}</span>
+                      <span className="font-medium text-slate-100 tabular-nums">
+                        ${result.machining_cost.toFixed(2)}
+                      </span>
                     </div>
                   )}
                   {result.setup_cost > 0 && (
@@ -944,7 +1055,9 @@ export default function QuoteCalculator() {
                   {result.hardware_cost > 0 && (
                     <div className="flex justify-between px-3 py-2 text-sm">
                       <span className="text-slate-400">Hardware</span>
-                      <span className="font-medium text-slate-100 tabular-nums">${result.hardware_cost.toFixed(2)}</span>
+                      <span className="font-medium text-slate-100 tabular-nums">
+                        ${result.hardware_cost.toFixed(2)}
+                      </span>
                     </div>
                   )}
                   {result.finish_cost > 0 && (
@@ -958,13 +1071,15 @@ export default function QuoteCalculator() {
                     <span className="font-semibold text-slate-100 tabular-nums">${result.subtotal.toFixed(2)}</span>
                   </div>
                   <div className="flex justify-between px-3 py-2 text-sm">
-                    <span className="text-slate-400">Markup (25%)</span>
+                    <span className="text-slate-400">Markup</span>
                     <span className="font-medium text-slate-100 tabular-nums">${result.markup_amount.toFixed(2)}</span>
                   </div>
                   {result.quantity_discount > 0 && (
                     <div className="flex justify-between px-3 py-2 text-sm bg-fd-green/10">
                       <span className="text-fd-green">Quantity Discount</span>
-                      <span className="font-medium text-fd-green tabular-nums">-${result.quantity_discount.toFixed(2)}</span>
+                      <span className="font-medium text-fd-green tabular-nums">
+                        -${result.quantity_discount.toFixed(2)}
+                      </span>
                     </div>
                   )}
                   {result.rush_charge > 0 && (
@@ -974,6 +1089,14 @@ export default function QuoteCalculator() {
                         Rush Charge
                       </span>
                       <span className="font-medium text-fd-amber tabular-nums">+${result.rush_charge.toFixed(2)}</span>
+                    </div>
+                  )}
+                  {Math.abs(unitRounding) >= 0.005 && (
+                    <div className="flex justify-between gap-3 px-3 py-2 text-sm">
+                      <span className="text-slate-400">Unit-price rounding</span>
+                      <span className="text-slate-100 tabular-nums">
+                        {unitRounding >= 0 ? '+' : '-'}${Math.abs(unitRounding).toFixed(2)}
+                      </span>
                     </div>
                   )}
                 </div>
@@ -986,7 +1109,9 @@ export default function QuoteCalculator() {
                   {Object.entries(result.details).map(([key, value]) => (
                     <p key={key} className="flex justify-between">
                       <span className="capitalize">{key.replace(/_/g, ' ')}</span>
-                      <span className="text-slate-400 tabular-nums">{typeof value === 'number' ? value.toFixed(2) : value}</span>
+                      <span className="text-slate-400 tabular-nums">
+                        {typeof value === 'number' ? value.toFixed(2) : value}
+                      </span>
                     </p>
                   ))}
                 </div>
@@ -994,14 +1119,15 @@ export default function QuoteCalculator() {
 
               {/* Actions */}
               <div className="flex gap-3 pt-4 border-t border-fd-line">
-                <button onClick={createQuoteFromResult} className="btn-primary flex-1">
+                <button
+                  onClick={createQuoteFromResult}
+                  disabled={staleResult || calculating}
+                  className="btn-primary flex-1"
+                >
                   <PlusIcon className="h-5 w-5 mr-2" />
                   Create Quote
                 </button>
-                <button 
-                  onClick={() => window.print()}
-                  className="btn-secondary"
-                >
+                <button onClick={() => window.print()} disabled={staleResult || calculating} className="btn-secondary">
                   Print
                 </button>
               </div>

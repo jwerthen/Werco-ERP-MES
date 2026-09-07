@@ -317,7 +317,7 @@ test('Add Record posts the backend contract field names, not the ignored *_piece
 
   // Open the modal (only the header "Add Record" exists while records are present).
   fireEvent.click(screen.getByRole('button', { name: /add record/i }));
-  const modal = (await screen.findByText('Add OEE Record')).closest('.modal-box') as HTMLElement;
+  const modal = await screen.findByRole('dialog', { name: 'Add OEE record' });
   const modalUtils = within(modal);
 
   // Select a work center (the only field the submit handler requires)...

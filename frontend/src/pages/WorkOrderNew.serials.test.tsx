@@ -76,7 +76,7 @@ async function renderPage() {
 }
 
 async function selectPart() {
-  fireEvent.change(screen.getByRole('combobox'), { target: { value: 'PN-7731' } });
+  fireEvent.change(screen.getByRole('combobox', { name: /^Part/ }), { target: { value: 'PN-7731' } });
   const option = await screen.findByRole('option', { name: /PN-7731/i });
   fireEvent.mouseDown(option);
   await waitFor(() => expect(mockedApi.getPartReadiness).toHaveBeenCalledWith(1));

@@ -181,3 +181,17 @@ describe('FEPERF-1: dashboard cache invalidation', () => {
     }
   });
 });
+
+it('distinguishes an unverified stale fallback from a server-validated 304', async () => {
+  api.clearCache();
+  mockGet
+    .mockResolvedValueOnce(dashboard200('version-1', { summary: { overdue: 3 } }))
+    .mockResolvedValueOnce(dashboard304())
+    .mockRejectedValueOnce(new Error('offline'));
+  await api.getDashboardWithCache();
+  const validated = await api.getDashboardWithCache();
+  expect(validated.stale).not.toBe(true);
+  const fallback = await api.getDashboardWithCache();
+  expect(fallback.stale).toBe(true);
+  expect(fallback.data.summary.overdue).toBe(3);
+});
