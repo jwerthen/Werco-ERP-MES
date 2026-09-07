@@ -71,7 +71,7 @@ const NAV_NOT_IMPLEMENTED = /Not implemented: navigation/;
 type ConsoleErrorSpy = jest.SpyInstance<void, unknown[]>;
 
 function navigationAttempts(spy: ConsoleErrorSpy): number {
-  return spy.mock.calls.filter((call) => call.some((arg) => NAV_NOT_IMPLEMENTED.test(String(arg)))).length;
+  return spy.mock.calls.filter(call => call.some(arg => NAV_NOT_IMPLEMENTED.test(String(arg)))).length;
 }
 
 describe('api response interceptor — kiosk 401 guard', () => {
@@ -119,6 +119,46 @@ describe('api response interceptor — kiosk 401 guard', () => {
     expect(sessionStorage.getItem('token')).toBeNull();
     // jsdom cannot actually navigate; the attempt itself proves the redirect.
     expect(navigationAttempts(errorSpy)).toBe(1);
+  });
+
+  it.each(['/login', '/login/', '/login?reason=idle&returnTo=%2Fwork-orders%2F42%3Ftab%3Doperations#sign-in'])(
+    'a pending protected-request 401 preserves the existing login URL %s',
+    async loginUrl => {
+      window.history.replaceState(null, '', loginUrl);
+      sessionStorage.setItem('token', 'dead-jwt');
+
+      const error = http401('/work-orders/');
+      await expect(rejectionHandler()(error)).rejects.toBe(error);
+
+      expect(sessionStorage.getItem('token')).toBeNull();
+      expect(navigationAttempts(errorSpy)).toBe(0);
+      expect(window.location.pathname + window.location.search + window.location.hash).toBe(loginUrl);
+    }
+  );
+
+  it('a refresh failure arriving after navigation to login preserves its reason and return destination', async () => {
+    window.history.replaceState(null, '', '/work-orders/42?tab=operations');
+    sessionStorage.setItem('token', 'dead-jwt');
+    (api as unknown as { refreshToken: string | null }).refreshToken = 'stale-refresh';
+    let rejectRefresh!: (reason: Error) => void;
+    rawAxiosPost.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectRefresh = reject;
+        })
+    );
+
+    const error = http401('/work-orders/42');
+    const response = rejectionHandler()(error);
+    const loginUrl = '/login?reason=idle&returnTo=%2Fwork-orders%2F42%3Ftab%3Doperations#sign-in';
+    window.history.replaceState(null, '', loginUrl);
+    const refreshError = new Error('refresh expired after logout');
+    rejectRefresh(refreshError);
+    await expect(response).rejects.toBe(refreshError);
+
+    expect(sessionStorage.getItem('token')).toBeNull();
+    expect(navigationAttempts(errorSpy)).toBe(0);
+    expect(window.location.pathname + window.location.search + window.location.hash).toBe(loginUrl);
   });
 
   it('refresh-failure branch on a /kiosk path: rejects with the refresh error, still no navigation', async () => {

@@ -348,6 +348,9 @@ class ApiService {
    */
   private redirectToLoginUnlessKiosk(): void {
     if (window.location.pathname.startsWith('/kiosk')) return;
+    // A protected request can finish after logout has already opened login.
+    // Preserve its reason/return destination instead of redirecting login to itself.
+    if (/^\/login\/?$/i.test(window.location.pathname)) return;
     const returnTo = window.location.pathname + window.location.search + window.location.hash;
     window.location.href = `/login?returnTo=${encodeURIComponent(returnTo)}`;
   }

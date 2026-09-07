@@ -84,7 +84,13 @@ export async function loginAs(page: Page, user: typeof TEST_USERS.admin) {
  */
 export async function logout(page: Page) {
   await page.click('button[title="Sign out"]');
-  await page.waitForURL('**/login');
+  await page.waitForURL(url => url.pathname === '/login');
+  // A pending protected request may retain its destination when logout wins.
+  // Login itself must never become the return destination of a second redirect.
+  const returnTo = new URL(page.url()).searchParams.get('returnTo');
+  if (returnTo) {
+    expect(new URL(returnTo, page.url()).pathname).not.toMatch(/^\/login\/?$/i);
+  }
 }
 
 /**

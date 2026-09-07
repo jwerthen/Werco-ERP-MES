@@ -38,17 +38,19 @@ PR #265 subsequently passed the full GitHub backend gate at commit `4888c517a0c8
 
 | Gate | Result |
 |---|---|
-| Combined Jest suite with CI coverage and UTC timezone | **326 suites / 3,552 tests passed**, 54.926 seconds |
+| Combined Jest suite with CI coverage and UTC timezone | **326 suites / 3,556 tests passed**, 61.029 seconds |
 | Frontend coverage | 64.30% statements, 54.63% branches, 49.42% functions, 64.67% lines; repository thresholds passed |
 | Source and test TypeScript | Passed |
 | ESLint with zero warnings | Passed |
-| Production Vite build | Passed, 3.45 seconds |
+| Production Vite build | Passed, 3.58 seconds |
 
 The completed gate table includes the final Receiving history race, StrictMode calculator restoration, Scheduling duplicate-drop protection, work-order independent support loading and retained stale-content corrections. The Receiving and calculator regressions reproduced their observed browser failures before the corresponding fixes.
 
 PR CI exposed a Scheduling calendar bug under UTC: host-local week-start calculation could move Monday's Central date into Sunday and omit its jobs. The calendar now preserves its noon-UTC anchors when calculating week starts and moving days. Both affected tests use a fixed Monday and check the actual dated cell and header while retaining their pending-state and partial-failure assertions. All nine Scheduling regressions passed with coverage in UTC, America/Chicago and Pacific/Kiritimati (UTC+14), followed by the full coverage run and fresh type, lint and build checks reported above.
 
 The full browser run also exposed successful process-sheet creation being blocked by the unsaved-navigation guard. Sheet creation and update now mark the form saved only after a successful API response, before opening its detail. A regression using the real data router and guard reproduced the blocked URL before the fix; its companion test checks that failed creation remains dirty and retains the entered title. The unchanged complete process-sheet browser journey passes with the fix.
+
+Detailed review of the subsequent green GitHub browser run found a retried logout test: a late unauthorized response could reload the already-open login page and replace its return destination with login itself. Four interceptor regressions reproduced the unwanted navigation, then passed with a narrow guard that preserves existing login URLs, including idle reasons, destinations and fragments. Protected-page redirects and kiosk behavior remain covered. Logout also passed 20 consecutive local browser runs without retries; the final complete frontend checks above include this correction.
 
 Reproduction from `frontend/`:
 
