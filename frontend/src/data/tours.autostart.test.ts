@@ -23,7 +23,13 @@ describe('shouldAutoStartGettingStarted', () => {
   it('starts for an authenticated, non-kiosk user who has not seen it', () => {
     const store = makeStore();
     expect(
-      shouldAutoStartGettingStarted({ userKey: 7, isKiosk: false, isTourComplete: notComplete, storage: store })
+      shouldAutoStartGettingStarted({
+        pathname: '/',
+        userKey: 7,
+        isKiosk: false,
+        isTourComplete: notComplete,
+        storage: store,
+      })
     ).toBe(true);
     // It records the attempt so the next call is a no-op.
     expect(store.getItem(gettingStartedAutostartKey(7))).toBe('1');
@@ -31,7 +37,7 @@ describe('shouldAutoStartGettingStarted', () => {
 
   it('does not re-trigger on a second call (dismissal/skip does not reset)', () => {
     const store = makeStore();
-    const args = { userKey: 7, isKiosk: false, isTourComplete: notComplete, storage: store };
+    const args = { pathname: '/', userKey: 7, isKiosk: false, isTourComplete: notComplete, storage: store };
     expect(shouldAutoStartGettingStarted(args)).toBe(true);
     expect(shouldAutoStartGettingStarted(args)).toBe(false);
   });
@@ -43,39 +49,81 @@ describe('shouldAutoStartGettingStarted', () => {
     // hung on completion alone, this would wrongly re-fire on every reload.
     const store = makeStore();
     expect(
-      shouldAutoStartGettingStarted({ userKey: 7, isKiosk: false, isTourComplete: notComplete, storage: store })
+      shouldAutoStartGettingStarted({
+        pathname: '/',
+        userKey: 7,
+        isKiosk: false,
+        isTourComplete: notComplete,
+        storage: store,
+      })
     ).toBe(true);
     // Second "session" — same persisted store, tour still not complete.
     expect(
-      shouldAutoStartGettingStarted({ userKey: 7, isKiosk: false, isTourComplete: notComplete, storage: store })
+      shouldAutoStartGettingStarted({
+        pathname: '/',
+        userKey: 7,
+        isKiosk: false,
+        isTourComplete: notComplete,
+        storage: store,
+      })
     ).toBe(false);
   });
 
   it('does not start when unauthenticated', () => {
     expect(
-      shouldAutoStartGettingStarted({ userKey: null, isKiosk: false, isTourComplete: notComplete, storage: makeStore() })
+      shouldAutoStartGettingStarted({
+        pathname: '/',
+        userKey: null,
+        isKiosk: false,
+        isTourComplete: notComplete,
+        storage: makeStore(),
+      })
     ).toBe(false);
   });
 
   it('does not start in kiosk mode', () => {
     expect(
-      shouldAutoStartGettingStarted({ userKey: 7, isKiosk: true, isTourComplete: notComplete, storage: makeStore() })
+      shouldAutoStartGettingStarted({
+        pathname: '/',
+        userKey: 7,
+        isKiosk: true,
+        isTourComplete: notComplete,
+        storage: makeStore(),
+      })
     ).toBe(false);
   });
 
   it('does not start when the tour is already complete', () => {
     expect(
-      shouldAutoStartGettingStarted({ userKey: 7, isKiosk: false, isTourComplete: () => true, storage: makeStore() })
+      shouldAutoStartGettingStarted({
+        pathname: '/',
+        userKey: 7,
+        isKiosk: false,
+        isTourComplete: () => true,
+        storage: makeStore(),
+      })
     ).toBe(false);
   });
 
   it('is keyed per user — a different user still gets the tour', () => {
     const store = makeStore({ [gettingStartedAutostartKey(7)]: '1' });
     expect(
-      shouldAutoStartGettingStarted({ userKey: 7, isKiosk: false, isTourComplete: notComplete, storage: store })
+      shouldAutoStartGettingStarted({
+        pathname: '/',
+        userKey: 7,
+        isKiosk: false,
+        isTourComplete: notComplete,
+        storage: store,
+      })
     ).toBe(false);
     expect(
-      shouldAutoStartGettingStarted({ userKey: 99, isKiosk: false, isTourComplete: notComplete, storage: store })
+      shouldAutoStartGettingStarted({
+        pathname: '/',
+        userKey: 99,
+        isKiosk: false,
+        isTourComplete: notComplete,
+        storage: store,
+      })
     ).toBe(true);
   });
 
@@ -85,6 +133,7 @@ describe('shouldAutoStartGettingStarted', () => {
     const store = makeStore();
     expect(
       shouldAutoStartGettingStarted({
+        pathname: '/',
         userKey: 'rosa@werco.test',
         isKiosk: false,
         isTourComplete: notComplete,
@@ -95,6 +144,7 @@ describe('shouldAutoStartGettingStarted', () => {
     // Re-fire suppressed for that string key…
     expect(
       shouldAutoStartGettingStarted({
+        pathname: '/',
         userKey: 'rosa@werco.test',
         isKiosk: false,
         isTourComplete: notComplete,
@@ -103,7 +153,13 @@ describe('shouldAutoStartGettingStarted', () => {
     ).toBe(false);
     // …but a different identity is unaffected.
     expect(
-      shouldAutoStartGettingStarted({ userKey: 'sam@werco.test', isKiosk: false, isTourComplete: notComplete, storage: store })
+      shouldAutoStartGettingStarted({
+        pathname: '/',
+        userKey: 'sam@werco.test',
+        isKiosk: false,
+        isTourComplete: notComplete,
+        storage: store,
+      })
     ).toBe(true);
   });
 
@@ -111,13 +167,20 @@ describe('shouldAutoStartGettingStarted', () => {
     // A user id of 0 is a valid identity; only null/undefined means "no user".
     const store = makeStore();
     expect(
-      shouldAutoStartGettingStarted({ userKey: 0, isKiosk: false, isTourComplete: notComplete, storage: store })
+      shouldAutoStartGettingStarted({
+        pathname: '/',
+        userKey: 0,
+        isKiosk: false,
+        isTourComplete: notComplete,
+        storage: store,
+      })
     ).toBe(true);
   });
 
   it('does not start when userKey is undefined (no user loaded yet)', () => {
     expect(
       shouldAutoStartGettingStarted({
+        pathname: '/',
         userKey: undefined,
         isKiosk: false,
         isTourComplete: notComplete,
@@ -140,6 +203,7 @@ describe('shouldAutoStartGettingStarted', () => {
     };
     expect(
       shouldAutoStartGettingStarted({
+        pathname: '/',
         userKey: 7,
         isKiosk: false,
         isTourComplete: notComplete,
@@ -153,13 +217,24 @@ describe('shouldAutoStartGettingStarted', () => {
     // production path that the Layout effect actually uses is covered too.
     localStorage.removeItem(gettingStartedAutostartKey(1234));
     expect(
-      shouldAutoStartGettingStarted({ userKey: 1234, isKiosk: false, isTourComplete: notComplete })
+      shouldAutoStartGettingStarted({ pathname: '/', userKey: 1234, isKiosk: false, isTourComplete: notComplete })
     ).toBe(true);
     expect(localStorage.getItem(gettingStartedAutostartKey(1234))).toBe('1');
     // Second call, same default storage — suppressed.
     expect(
-      shouldAutoStartGettingStarted({ userKey: 1234, isKiosk: false, isTourComplete: notComplete })
+      shouldAutoStartGettingStarted({ pathname: '/', userKey: 1234, isKiosk: false, isTourComplete: notComplete })
     ).toBe(false);
     localStorage.removeItem(gettingStartedAutostartKey(1234));
   });
 });
+
+it.each(['/quotes', '/work-orders/new', '/action-inbox'])(
+  'defers first-use onboarding on %s without consuming the Dashboard attempt',
+  pathname => {
+    const storage = makeStore();
+    const opts = { userKey: 'company-1:7', isKiosk: false, isTourComplete: notComplete, storage };
+    expect(shouldAutoStartGettingStarted({ ...opts, pathname })).toBe(false);
+    expect(storage.getItem(gettingStartedAutostartKey(opts.userKey))).toBeNull();
+    expect(shouldAutoStartGettingStarted({ ...opts, pathname: '/' })).toBe(true);
+  }
+);

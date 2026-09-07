@@ -1,3 +1,4 @@
+import { getPriorityClasses, getPriorityLabel } from '../utils/priority';
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
@@ -419,11 +420,7 @@ export default function ShopFloor() {
     setClockOutShowMore(false);
   };
 
-  const getPriorityClasses = (priority: number) => {
-    if (priority <= 2) return 'bg-red-500/20 text-red-400';
-    if (priority <= 5) return 'bg-amber-500/20 text-amber-400';
-    return 'bg-surface-100 text-surface-600';
-  };
+
 
   // The queue renders in SERVER order — no client re-sort. The work-center-queue
   // payload is the same canonical order the kiosks honor (manager-dictated
@@ -549,7 +546,7 @@ export default function ShopFloor() {
       <div className="page-header">
         <div>
           <h1 className="page-title flex items-center gap-3">
-            <WrenchScrewdriverIcon className="h-8 w-8 text-werco-600" />
+            <WrenchScrewdriverIcon className="h-8 w-8 text-fd-link" />
             Shop Floor
           </h1>
           <p className="page-subtitle">Clock in/out and manage work center queues</p>
@@ -652,23 +649,13 @@ export default function ShopFloor() {
         </div>
       )}
 
-      {/* Work Center Selector */}
-      <div className="flex flex-wrap gap-2" data-tour="sf-clock">
-        {workCenters.map((wc) => (
-          <button
-            key={wc.id}
-            onClick={() => setSelectedWorkCenter(wc.id)}
-            className={`
-              px-3 py-2 rounded-sm font-semibold transition-colors
-              ${selectedWorkCenter === wc.id
-                ? 'bg-werco-600 text-white'
-                : 'bg-fd-panel text-slate-200 border border-fd-line hover:border-werco-400 hover:bg-werco-500/10'
-              }
-            `}
-          >
-            {wc.name}
-          </button>
-        ))}
+      {/* Keep station selection compact so the queue remains the primary task. */}
+      <div className="card p-3 flex flex-wrap items-center gap-3" data-tour="sf-clock">
+        <label htmlFor="time-clock-station" className="text-sm font-medium">Work center</label>
+        <select id="time-clock-station" className="input w-full sm:w-72" value={selectedWorkCenter || ''} onChange={e => setSelectedWorkCenter(Number(e.target.value))}>
+          {workCenters.map(wc => <option key={wc.id} value={wc.id}>{wc.code} · {wc.name}</option>)}
+        </select>
+        <span className="text-xs text-slate-400">{workCenters.length} stations · {queue.length} queued operations</span>
       </div>
 
       {/* Up Next — slim cross-linked strip into the table below. The first 5 of
@@ -695,9 +682,9 @@ export default function ShopFloor() {
                 >
                   <span className="text-xs font-semibold text-surface-500 tabular-nums shrink-0">#{idx + 1}</span>
                   <span className={`px-1.5 py-0.5 rounded-sm text-xs font-semibold tabular-nums shrink-0 ${getPriorityClasses(item.priority)}`}>
-                    P{item.priority}
+                    {getPriorityLabel(item.priority)}
                   </span>
-                  <span className="text-sm font-semibold text-werco-700 truncate">{item.work_order_number}</span>
+                  <span className="text-sm font-semibold text-fd-link truncate">{item.work_order_number}</span>
                   <UnitBadge unitNumber={item.unit_number} size="sm" className="shrink-0" />
                   <span className={`text-xs shrink-0 tabular-nums ${overdue ? 'text-red-600 font-medium' : 'text-surface-500'}`}>
                     {item.due_date ? formatCentralDate(item.due_date, { year: undefined }) : '—'}
@@ -808,20 +795,20 @@ export default function ShopFloor() {
                             >
                               {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((p) => (
                                 <option key={p} value={p}>
-                                  P{p}
+                                  {getPriorityLabel(p)}
                                 </option>
                               ))}
                             </select>
                           ) : (
-                            <span className={`inline-flex items-center justify-center w-10 h-10 rounded-sm text-sm font-bold tabular-nums ${getPriorityClasses(item.priority)}`}>
-                              P{item.priority}
+                            <span className={`inline-flex items-center justify-center px-2 py-1 rounded-sm text-xs font-bold tabular-nums ${getPriorityClasses(item.priority)}`}>
+                              {getPriorityLabel(item.priority)}
                             </span>
                           )}
                         </td>
                         <td>
                           <div className="flex items-center gap-2">
                             <KioskRunOrderChip item={item} size="sm" />
-                            <span className="font-semibold text-werco-600">{item.work_order_number}</span>
+                            <span className="font-semibold text-fd-link">{item.work_order_number}</span>
                             <UnitBadge unitNumber={item.unit_number} size="sm" />
                           </div>
                         </td>
@@ -1068,7 +1055,7 @@ export default function ShopFloor() {
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                   <div className="min-w-0 flex-1 space-y-2">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-semibold text-werco-600">{item.work_order_number}</span>
+                      <span className="font-semibold text-fd-link">{item.work_order_number}</span>
                       <UnitBadge unitNumber={item.unit_number} size="sm" />
                       <span className="text-sm text-surface-700">
                         {formatOperationLabel(item.operation_number)}
@@ -1168,7 +1155,7 @@ export default function ShopFloor() {
             <button
               type="button"
               onClick={() => setClockOutShowMore(true)}
-              className="text-sm text-werco-600 hover:text-werco-700 font-medium"
+              className="text-sm text-fd-link hover:text-sky-200 font-medium"
             >
               + Add scrap count or notes
             </button>

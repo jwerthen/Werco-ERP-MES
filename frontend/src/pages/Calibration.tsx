@@ -1,16 +1,9 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
 import { FormField } from '../components/ui/FormField';
-import {
-  useToast,
-  Button,
-  DataTable,
-  DataTableColumn,
-  StatusBadge,
-  MobileDataCard,
-} from '../components/ui';
+import { useToast, Button, DataTable, DataTableColumn, StatusBadge, MobileDataCard } from '../components/ui';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate, getCentralTodayISODate } from '../utils/centralTime';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
@@ -54,7 +47,7 @@ const equipmentTypes = [
   'Torque Wrench',
   'Pin Gauge',
   'Thread Gauge',
-  'Other'
+  'Other',
 ];
 
 // Blank equipment form. Module-level constant so resetForm and the
@@ -75,19 +68,23 @@ const BLANK_EQUIPMENT_FORM = {
   range_max: '',
   accuracy: '',
   resolution: '',
-  notes: ''
+  notes: '',
 };
 
 // Status values the `?filter=` param may carry — the exact vocabulary of the
 // filter <select> below. Anything else normalizes to "no filter".
-const CALIBRATION_FILTERS: readonly string[] = ['active', 'due', 'overdue', 'out_of_service'];
+const CALIBRATION_FILTERS: readonly string[] = ['active', 'due', 'overdue', 'out_of_service', 'due_soon'];
 
 const normalizeCalibrationFilter = (value: string | null): string =>
   value !== null && CALIBRATION_FILTERS.includes(value) ? value : '';
 
 export default function Calibration() {
   const { showToast } = useToast();
+  const loadSequence = useRef(0);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState('');
   const [searchParams, setSearchParams] = useSearchParams();
+  const [allEquipment, setAllEquipment] = useState<Equipment[]>([]);
   const [equipment, setEquipment] = useState<Equipment[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -95,7 +92,9 @@ export default function Calibration() {
   const [showCalibrationModal, setShowCalibrationModal] = useState(false);
   const [editingEquipment, setEditingEquipment] = useState<Equipment | null>(null);
   const [selectedEquipmentId, setSelectedEquipmentId] = useState<number | null>(null);
-  const [statusFilter, setStatusFilter] = useState<string>(() => normalizeCalibrationFilter(searchParams.get('filter')));
+  const [statusFilter, setStatusFilter] = useState<string>(() =>
+    normalizeCalibrationFilter(searchParams.get('filter'))
+  );
 
   const [formData, setFormData] = useState(BLANK_EQUIPMENT_FORM);
   // Snapshot captured when the equipment modal opens (blank for create, the
@@ -111,7 +110,7 @@ export default function Calibration() {
     as_found: '',
     as_left: '',
     cost: 0,
-    notes: ''
+    notes: '',
   });
   // Snapshot of calibrationData as populated when the record modal opened.
   const [initialCalibrationData, setInitialCalibrationData] = useState<typeof calibrationData | null>(null);
@@ -128,16 +127,23 @@ export default function Calibration() {
   const { confirmDiscard: confirmDiscardCalibration } = useUnsavedChanges(isCalibrationDirty);
 
   const loadEquipment = useCallback(async () => {
+    const request = ++loadSequence.current;
     setLoading(true);
     setLoadError(false);
     try {
-      const response = await api.getEquipment(statusFilter || undefined);
+      const [response, all] = await Promise.all([
+        api.getEquipment(statusFilter || undefined),
+        statusFilter ? api.getEquipment() : Promise.resolve(null),
+      ]);
+      if (request !== loadSequence.current) return;
+      setAllEquipment(all || response);
       setEquipment(response);
     } catch (err) {
+      if (request !== loadSequence.current) return;
       console.error('Failed to load equipment:', err);
       setLoadError(true);
     } finally {
-      setLoading(false);
+      if (request === loadSequence.current) setLoading(false);
     }
   }, [statusFilter]);
 
@@ -162,6 +168,9 @@ export default function Calibration() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (actionBusy) return;
+    setActionBusy(true);
+    setActionError('');
     try {
       if (editingEquipment) {
         await api.updateEquipment(editingEquipment.id, formData);
@@ -172,23 +181,40 @@ export default function Calibration() {
       resetForm();
       loadEquipment();
     } catch (err: any) {
+      setActionError(
+        typeof err.response?.data?.detail === 'string'
+          ? err.response.data.detail
+          : 'Unable to save calibration data. Check your entries and retry.'
+      );
       showToast('error', err.response?.data?.detail || 'Failed to save equipment');
+    } finally {
+      setActionBusy(false);
     }
   };
 
   const handleCalibration = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedEquipmentId) return;
+    if (actionBusy) return;
+    setActionBusy(true);
+    setActionError('');
     try {
       await api.recordCalibration(selectedEquipmentId, {
         ...calibrationData,
-        calibration_date: calibrationData.calibration_date
+        calibration_date: calibrationData.calibration_date,
       });
       setShowCalibrationModal(false);
       setSelectedEquipmentId(null);
       loadEquipment();
     } catch (err: any) {
+      setActionError(
+        typeof err.response?.data?.detail === 'string'
+          ? err.response.data.detail
+          : 'Unable to save calibration data. Check your entries and retry.'
+      );
       showToast('error', err.response?.data?.detail || 'Failed to record calibration');
+    } finally {
+      setActionBusy(false);
     }
   };
 
@@ -203,7 +229,7 @@ export default function Calibration() {
       as_found: '',
       as_left: '',
       cost: 0,
-      notes: ''
+      notes: '',
     };
     setCalibrationData(nextData);
     setInitialCalibrationData(nextData);
@@ -228,7 +254,7 @@ export default function Calibration() {
       range_max: '',
       accuracy: '',
       resolution: '',
-      notes: ''
+      notes: '',
     };
     setFormData(nextForm);
     setInitialFormData(nextForm);
@@ -255,9 +281,9 @@ export default function Calibration() {
   };
 
   // Summary stats
-  const overdueCount = equipment.filter(e => e.status === 'overdue').length;
-  const dueCount = equipment.filter(e => e.status === 'due').length;
-  const activeCount = equipment.filter(e => e.status === 'active').length;
+  const overdueCount = allEquipment.filter(e => e.status === 'overdue').length;
+  const dueCount = allEquipment.filter(e => e.status === 'due').length;
+  const activeCount = allEquipment.filter(e => e.status === 'active').length;
 
   const applyFilter = (value: string) => {
     const next = statusFilter === value ? '' : value;
@@ -270,35 +296,34 @@ export default function Calibration() {
     return eq.days_until_due < 0
       ? `${Math.abs(eq.days_until_due)} days overdue`
       : eq.days_until_due === 0
-      ? 'Due today'
-      : `${eq.days_until_due} days`;
+        ? 'Due today'
+        : `${eq.days_until_due} days`;
   };
 
   const dueColor = (eq: Equipment) =>
     eq.days_until_due === undefined
       ? ''
       : eq.days_until_due < 0
-      ? 'text-red-600'
-      : eq.days_until_due <= 30
-      ? 'text-yellow-600'
-      : 'text-slate-400';
+        ? 'text-red-600'
+        : eq.days_until_due <= 30
+          ? 'text-yellow-600'
+          : 'text-slate-400';
 
   const columns: DataTableColumn<Equipment>[] = [
     {
       key: 'equipment_id',
       header: 'ID',
       sortable: true,
-      accessor: (eq) => eq.equipment_id,
-      render: (eq) => <span className="font-mono text-sm">{eq.equipment_id}</span>,
+      accessor: eq => eq.equipment_id,
+      render: eq => <span className="font-mono text-sm">{eq.equipment_id}</span>,
     },
     {
       key: 'name',
       header: 'Equipment',
       sortable: true,
-      accessor: (eq) => eq.name,
-      csv: (eq) =>
-        eq.manufacturer ? `${eq.name} (${eq.manufacturer} ${eq.model || ''})`.trim() : eq.name,
-      render: (eq) => (
+      accessor: eq => eq.name,
+      csv: eq => (eq.manufacturer ? `${eq.name} (${eq.manufacturer} ${eq.model || ''})`.trim() : eq.name),
+      render: eq => (
         <div>
           <div className="font-medium">{eq.name}</div>
           {eq.manufacturer && (
@@ -313,39 +338,35 @@ export default function Calibration() {
       key: 'equipment_type',
       header: 'Type',
       sortable: true,
-      accessor: (eq) => eq.equipment_type || '',
-      render: (eq) => eq.equipment_type || '-',
+      accessor: eq => eq.equipment_type || '',
+      render: eq => eq.equipment_type || '-',
     },
     {
       key: 'location',
       header: 'Location',
       sortable: true,
-      accessor: (eq) => eq.location || '',
-      render: (eq) => eq.location || '-',
+      accessor: eq => eq.location || '',
+      render: eq => eq.location || '-',
     },
     {
       key: 'last_calibration_date',
       header: 'Last Cal',
       sortable: true,
-      accessor: (eq) => eq.last_calibration_date || '',
-      csv: (eq) => (eq.last_calibration_date ? formatCentralDate(eq.last_calibration_date) : ''),
-      render: (eq) =>
-        eq.last_calibration_date ? formatCentralDate(eq.last_calibration_date) : '-',
+      accessor: eq => eq.last_calibration_date || '',
+      csv: eq => (eq.last_calibration_date ? formatCentralDate(eq.last_calibration_date) : ''),
+      render: eq => (eq.last_calibration_date ? formatCentralDate(eq.last_calibration_date) : '-'),
     },
     {
       key: 'next_calibration_date',
       header: 'Next Due',
       sortable: true,
-      accessor: (eq) =>
-        eq.days_until_due !== undefined ? eq.days_until_due : eq.next_calibration_date || '',
-      csv: (eq) => (eq.next_calibration_date ? formatCentralDate(eq.next_calibration_date) : ''),
-      render: (eq) =>
+      accessor: eq => (eq.days_until_due !== undefined ? eq.days_until_due : eq.next_calibration_date || ''),
+      csv: eq => (eq.next_calibration_date ? formatCentralDate(eq.next_calibration_date) : ''),
+      render: eq =>
         eq.next_calibration_date ? (
           <div>
             <div className="text-sm">{formatCentralDate(eq.next_calibration_date)}</div>
-            {eq.days_until_due !== undefined && (
-              <div className={`text-xs ${dueColor(eq)}`}>{dueText(eq)}</div>
-            )}
+            {eq.days_until_due !== undefined && <div className={`text-xs ${dueColor(eq)}`}>{dueText(eq)}</div>}
           </div>
         ) : (
           '-'
@@ -355,18 +376,18 @@ export default function Calibration() {
       key: 'status',
       header: 'Status',
       sortable: true,
-      accessor: (eq) => eq.status,
-      csv: (eq) => eq.status.replace('_', ' '),
-      render: (eq) => <StatusBadge status={eq.status} />,
+      accessor: eq => eq.status,
+      csv: eq => eq.status.replace('_', ' '),
+      render: eq => <StatusBadge status={eq.status} />,
     },
     {
       key: 'actions',
       header: 'Actions',
       align: 'center',
-      render: (eq) => (
+      render: eq => (
         <div className="flex justify-center gap-2">
           <button
-            onClick={(e) => {
+            onClick={e => {
               e.stopPropagation();
               openCalibrationModal(eq);
             }}
@@ -377,7 +398,7 @@ export default function Calibration() {
             <WrenchIcon className="h-5 w-5" aria-hidden="true" />
           </button>
           <button
-            onClick={(e) => {
+            onClick={e => {
               e.stopPropagation();
               handleEdit(eq);
             }}
@@ -411,9 +432,7 @@ export default function Calibration() {
           value: eq.next_calibration_date ? (
             <div>
               <div>{formatCentralDate(eq.next_calibration_date)}</div>
-              {eq.days_until_due !== undefined && (
-                <div className={`text-xs ${dueColor(eq)}`}>{dueText(eq)}</div>
-              )}
+              {eq.days_until_due !== undefined && <div className={`text-xs ${dueColor(eq)}`}>{dueText(eq)}</div>}
             </div>
           ) : (
             '-'
@@ -429,10 +448,7 @@ export default function Calibration() {
             <WrenchIcon className="h-4 w-4" />
             Record
           </button>
-          <button
-            onClick={() => handleEdit(eq)}
-            className="text-sm text-slate-300 hover:text-slate-100"
-          >
+          <button onClick={() => handleEdit(eq)} className="text-sm text-slate-300 hover:text-slate-100">
             Edit
           </button>
         </>
@@ -445,7 +461,10 @@ export default function Calibration() {
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Calibration Tracking</h1>
         <Button
-          onClick={() => { resetForm(); setShowModal(true); }}
+          onClick={() => {
+            resetForm();
+            setShowModal(true);
+          }}
           className="flex items-center"
         >
           <PlusIcon className="h-5 w-5 mr-2" />
@@ -493,7 +512,7 @@ export default function Calibration() {
       <div className="flex gap-2 items-center">
         <select
           value={statusFilter}
-          onChange={(e) => {
+          onChange={e => {
             setStatusFilter(e.target.value);
             if (e.target.value) {
               setSearchParams({ filter: e.target.value });
@@ -506,6 +525,7 @@ export default function Calibration() {
           <option value="">All Status</option>
           <option value="active">Active/Current</option>
           <option value="due">Due Soon</option>
+          <option value="due_soon">Overdue + due within 30 days</option>
           <option value="overdue">Overdue</option>
           <option value="out_of_service">Out of Service</option>
         </select>
@@ -527,7 +547,7 @@ export default function Calibration() {
       <DataTable
         columns={columns}
         data={equipment}
-        rowKey={(eq) => eq.id}
+        rowKey={eq => eq.id}
         loading={loading}
         error={loadError}
         onRetry={loadEquipment}
@@ -553,275 +573,297 @@ export default function Calibration() {
 
       {/* Add/Edit Equipment Modal */}
       <Modal open={showModal} onClose={requestCloseEquipmentModal} size="2xl" closeOnBackdrop={false}>
-            <h3 className="text-lg font-semibold mb-4">
-              {editingEquipment ? 'Edit Equipment' : 'Add Equipment'}
-            </h3>
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Equipment ID" required>
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="text"
-                      value={formData.equipment_id}
-                      onChange={(e) => setFormData({ ...formData, equipment_id: e.target.value })}
-                      className="input"
-                      required
-                      disabled={!!editingEquipment}
-                      placeholder="e.g., CAL-001"
-                    />
-                  )}
-                </FormField>
-                <FormField label="Name" required>
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="text"
-                      value={formData.name}
-                      onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                      className="input"
-                      required
-                      placeholder="e.g., 6in Digital Caliper"
-                    />
-                  )}
-                </FormField>
-              </div>
+        <h3 className="text-lg font-semibold mb-4">{editingEquipment ? 'Edit Equipment' : 'Add Equipment'}</h3>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Equipment ID" required>
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={formData.equipment_id}
+                  onChange={e => setFormData({ ...formData, equipment_id: e.target.value })}
+                  className="input"
+                  required
+                  disabled={!!editingEquipment}
+                  placeholder="e.g., CAL-001"
+                />
+              )}
+            </FormField>
+            <FormField label="Name" required>
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={formData.name}
+                  onChange={e => setFormData({ ...formData, name: e.target.value })}
+                  className="input"
+                  required
+                  placeholder="e.g., 6in Digital Caliper"
+                />
+              )}
+            </FormField>
+          </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Equipment Type">
-                  {(field) => (
-                    <select
-                      {...field}
-                      value={formData.equipment_type}
-                      onChange={(e) => setFormData({ ...formData, equipment_type: e.target.value })}
-                      className="input"
-                    >
-                      <option value="">Select type...</option>
-                      {equipmentTypes.map(t => (
-                        <option key={t} value={t}>{t}</option>
-                      ))}
-                    </select>
-                  )}
-                </FormField>
-                <FormField label="Calibration Interval (days)">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="number"
-                      value={formData.calibration_interval_days}
-                      onChange={(e) => setFormData({ ...formData, calibration_interval_days: parseInt(e.target.value) })}
-                      className="input"
-                      min={1}
-                    />
-                  )}
-                </FormField>
-              </div>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Equipment Type">
+              {field => (
+                <select
+                  {...field}
+                  value={formData.equipment_type}
+                  onChange={e => setFormData({ ...formData, equipment_type: e.target.value })}
+                  className="input"
+                >
+                  <option value="">Select type...</option>
+                  {equipmentTypes.map(t => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </FormField>
+            <FormField label="Calibration Interval (days)">
+              {field => (
+                <input
+                  {...field}
+                  type="number"
+                  value={formData.calibration_interval_days}
+                  onChange={e => setFormData({ ...formData, calibration_interval_days: parseInt(e.target.value) })}
+                  className="input"
+                  min={1}
+                />
+              )}
+            </FormField>
+          </div>
 
-              <div className="grid grid-cols-3 gap-4">
-                <FormField label="Manufacturer">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="text"
-                      value={formData.manufacturer}
-                      onChange={(e) => setFormData({ ...formData, manufacturer: e.target.value })}
-                      className="input"
-                    />
-                  )}
-                </FormField>
-                <FormField label="Model">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="text"
-                      value={formData.model}
-                      onChange={(e) => setFormData({ ...formData, model: e.target.value })}
-                      className="input"
-                    />
-                  )}
-                </FormField>
-                <FormField label="Serial Number">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="text"
-                      value={formData.serial_number}
-                      onChange={(e) => setFormData({ ...formData, serial_number: e.target.value })}
-                      className="input"
-                    />
-                  )}
-                </FormField>
-              </div>
+          <div className="grid grid-cols-3 gap-4">
+            <FormField label="Manufacturer">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={formData.manufacturer}
+                  onChange={e => setFormData({ ...formData, manufacturer: e.target.value })}
+                  className="input"
+                />
+              )}
+            </FormField>
+            <FormField label="Model">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={formData.model}
+                  onChange={e => setFormData({ ...formData, model: e.target.value })}
+                  className="input"
+                />
+              )}
+            </FormField>
+            <FormField label="Serial Number">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={formData.serial_number}
+                  onChange={e => setFormData({ ...formData, serial_number: e.target.value })}
+                  className="input"
+                />
+              )}
+            </FormField>
+          </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Location">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="text"
-                      value={formData.location}
-                      onChange={(e) => setFormData({ ...formData, location: e.target.value })}
-                      className="input"
-                      placeholder="e.g., QC Lab, Machine Shop"
-                    />
-                  )}
-                </FormField>
-                <FormField label="Calibration Provider">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="text"
-                      value={formData.calibration_provider}
-                      onChange={(e) => setFormData({ ...formData, calibration_provider: e.target.value })}
-                      className="input"
-                      placeholder="e.g., Precision Calibration Inc."
-                    />
-                  )}
-                </FormField>
-              </div>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Location">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={formData.location}
+                  onChange={e => setFormData({ ...formData, location: e.target.value })}
+                  className="input"
+                  placeholder="e.g., QC Lab, Machine Shop"
+                />
+              )}
+            </FormField>
+            <FormField label="Calibration Provider">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={formData.calibration_provider}
+                  onChange={e => setFormData({ ...formData, calibration_provider: e.target.value })}
+                  className="input"
+                  placeholder="e.g., Precision Calibration Inc."
+                />
+              )}
+            </FormField>
+          </div>
 
-              <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
-                <Button type="button" variant="secondary" onClick={requestCloseEquipmentModal}>
-                  Cancel
-                </Button>
-                <Button type="submit">
-                  {editingEquipment ? 'Update' : 'Create'}
-                </Button>
-              </div>
-            </form>
+          <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
+            <Button type="button" variant="secondary" onClick={requestCloseEquipmentModal}>
+              Cancel
+            </Button>
+            <Button disabled={actionBusy} type="submit">
+              {editingEquipment ? 'Update' : 'Create'}
+            </Button>
+          </div>
+        </form>
+        {actionError && (
+          <p role="alert" className="text-red-300 p-3">
+            {actionError}
+          </p>
+        )}
+        {actionBusy && (
+          <p role="status" className="text-slate-400 p-3">
+            Saving…
+          </p>
+        )}
       </Modal>
 
       {/* Record Calibration Modal */}
       <Modal open={showCalibrationModal} onClose={requestCloseCalibrationModal} size="lg" closeOnBackdrop={false}>
-            <h3 className="text-lg font-semibold mb-4">Record Calibration</h3>
-            <form onSubmit={handleCalibration} className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Calibration Date" required>
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="date"
-                      value={calibrationData.calibration_date}
-                      onChange={(e) => setCalibrationData({ ...calibrationData, calibration_date: e.target.value })}
-                      className="input"
-                      required
-                    />
-                  )}
-                </FormField>
-                <FormField label="Result" required>
-                  {(field) => (
-                    <select
-                      {...field}
-                      value={calibrationData.result}
-                      onChange={(e) => setCalibrationData({ ...calibrationData, result: e.target.value })}
-                      className="input"
-                      required
-                    >
-                      <option value="pass">Pass</option>
-                      <option value="fail">Fail</option>
-                      <option value="adjusted">Adjusted</option>
-                    </select>
-                  )}
-                </FormField>
-              </div>
+        <h3 className="text-lg font-semibold mb-4">Record Calibration</h3>
+        <form onSubmit={handleCalibration} className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Calibration Date" required>
+              {field => (
+                <input
+                  {...field}
+                  type="date"
+                  value={calibrationData.calibration_date}
+                  onChange={e => setCalibrationData({ ...calibrationData, calibration_date: e.target.value })}
+                  className="input"
+                  required
+                />
+              )}
+            </FormField>
+            <FormField label="Result" required>
+              {field => (
+                <select
+                  {...field}
+                  value={calibrationData.result}
+                  onChange={e => setCalibrationData({ ...calibrationData, result: e.target.value })}
+                  className="input"
+                  required
+                >
+                  <option value="pass">Pass</option>
+                  <option value="fail">Fail</option>
+                  <option value="adjusted">Adjusted</option>
+                </select>
+              )}
+            </FormField>
+          </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Performed By">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="text"
-                      value={calibrationData.performed_by}
-                      onChange={(e) => setCalibrationData({ ...calibrationData, performed_by: e.target.value })}
-                      className="input"
-                    />
-                  )}
-                </FormField>
-                <FormField label="Certificate #">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="text"
-                      value={calibrationData.certificate_number}
-                      onChange={(e) => setCalibrationData({ ...calibrationData, certificate_number: e.target.value })}
-                      className="input"
-                    />
-                  )}
-                </FormField>
-              </div>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Performed By">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={calibrationData.performed_by}
+                  onChange={e => setCalibrationData({ ...calibrationData, performed_by: e.target.value })}
+                  className="input"
+                />
+              )}
+            </FormField>
+            <FormField label="Certificate #">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={calibrationData.certificate_number}
+                  onChange={e => setCalibrationData({ ...calibrationData, certificate_number: e.target.value })}
+                  className="input"
+                />
+              )}
+            </FormField>
+          </div>
 
-              <FormField label="Calibration Provider">
-                {(field) => (
-                  <input
-                    {...field}
-                    type="text"
-                    value={calibrationData.calibration_provider}
-                    onChange={(e) => setCalibrationData({ ...calibrationData, calibration_provider: e.target.value })}
-                    className="input"
-                  />
-                )}
-              </FormField>
+          <FormField label="Calibration Provider">
+            {field => (
+              <input
+                {...field}
+                type="text"
+                value={calibrationData.calibration_provider}
+                onChange={e => setCalibrationData({ ...calibrationData, calibration_provider: e.target.value })}
+                className="input"
+              />
+            )}
+          </FormField>
 
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="As Found">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="text"
-                      value={calibrationData.as_found}
-                      onChange={(e) => setCalibrationData({ ...calibrationData, as_found: e.target.value })}
-                      className="input"
-                      placeholder="Condition before cal"
-                    />
-                  )}
-                </FormField>
-                <FormField label="As Left">
-                  {(field) => (
-                    <input
-                      {...field}
-                      type="text"
-                      value={calibrationData.as_left}
-                      onChange={(e) => setCalibrationData({ ...calibrationData, as_left: e.target.value })}
-                      className="input"
-                      placeholder="Condition after cal"
-                    />
-                  )}
-                </FormField>
-              </div>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="As Found">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={calibrationData.as_found}
+                  onChange={e => setCalibrationData({ ...calibrationData, as_found: e.target.value })}
+                  className="input"
+                  placeholder="Condition before cal"
+                />
+              )}
+            </FormField>
+            <FormField label="As Left">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={calibrationData.as_left}
+                  onChange={e => setCalibrationData({ ...calibrationData, as_left: e.target.value })}
+                  className="input"
+                  placeholder="Condition after cal"
+                />
+              )}
+            </FormField>
+          </div>
 
-              <FormField label="Cost ($)">
-                {(field) => (
-                  <input
-                    {...field}
-                    type="number"
-                    value={calibrationData.cost}
-                    onChange={(e) => setCalibrationData({ ...calibrationData, cost: parseFloat(e.target.value) || 0 })}
-                    className="input"
-                    step="0.01"
-                    min="0"
-                  />
-                )}
-              </FormField>
+          <FormField label="Cost ($)">
+            {field => (
+              <input
+                {...field}
+                type="number"
+                value={calibrationData.cost}
+                onChange={e => setCalibrationData({ ...calibrationData, cost: parseFloat(e.target.value) || 0 })}
+                className="input"
+                step="0.01"
+                min="0"
+              />
+            )}
+          </FormField>
 
-              <FormField label="Notes">
-                {(field) => (
-                  <textarea
-                    {...field}
-                    value={calibrationData.notes}
-                    onChange={(e) => setCalibrationData({ ...calibrationData, notes: e.target.value })}
-                    className="input"
-                    rows={2}
-                  />
-                )}
-              </FormField>
+          <FormField label="Notes">
+            {field => (
+              <textarea
+                {...field}
+                value={calibrationData.notes}
+                onChange={e => setCalibrationData({ ...calibrationData, notes: e.target.value })}
+                className="input"
+                rows={2}
+              />
+            )}
+          </FormField>
 
-              <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
-                <Button type="button" variant="secondary" onClick={requestCloseCalibrationModal}>
-                  Cancel
-                </Button>
-                <Button type="submit">Record Calibration</Button>
-              </div>
-            </form>
+          <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
+            <Button type="button" variant="secondary" onClick={requestCloseCalibrationModal}>
+              Cancel
+            </Button>
+            <Button disabled={actionBusy} type="submit">
+              Record Calibration
+            </Button>
+          </div>
+        </form>
+        {actionError && (
+          <p role="alert" className="text-red-300 p-3">
+            {actionError}
+          </p>
+        )}
+        {actionBusy && (
+          <p role="status" className="text-slate-400 p-3">
+            Saving…
+          </p>
+        )}
       </Modal>
     </div>
   );

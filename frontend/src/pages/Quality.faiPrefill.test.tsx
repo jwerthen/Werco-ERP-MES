@@ -142,7 +142,7 @@ async function openFaiDetail() {
   );
   // Switch to the FAI tab and open the row (DataTable renders the desktop
   // table AND the mobile cards — click the table row instance).
-  fireEvent.click(await screen.findByRole('button', { name: /^fai$/i }));
+  fireEvent.click(await screen.findByRole('tab', { name: /^fai$/i }));
   fireEvent.click((await screen.findAllByText('FAI-000007'))[0]);
   const dialog = await screen.findByRole('dialog');
   await within(dialog).findByTestId('fai-prefill-button');

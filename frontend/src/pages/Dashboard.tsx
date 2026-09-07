@@ -34,9 +34,7 @@ import {
   UserGroupIcon,
   UsersIcon,
 } from '@heroicons/react/24/outline';
-import {
-  CheckCircleIcon as CheckCircleSolid
-} from '@heroicons/react/24/solid';
+import { CheckCircleIcon as CheckCircleSolid } from '@heroicons/react/24/solid';
 
 // Foundry tactical palette — no purple/indigo/orange; blue · cyan · green · amber · red
 const workCenterTypeColors: Record<string, string> = {
@@ -160,11 +158,54 @@ export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [alerts, setAlerts] = useState<Alert[]>([]);
-  const [openNCRs, setOpenNCRs] = useState(0);
-  const [lowInventory, setLowInventory] = useState(0);
-  const [equipmentDue, setEquipmentDue] = useState(0);
+
+  const [openNCRs, setOpenNCRs] = useState<number | null>(null);
+  const [lowInventory, setLowInventory] = useState<number | null>(null);
+  const [equipmentDue, setEquipmentDue] = useState<number | null>(null);
   const [capacityHeatmap, setCapacityHeatmap] = useState<CapacityHeatmapResponse | null>(null);
+
+  const [widgetErrors, setWidgetErrors] = useState<Record<string, string>>({});
+  const [widgetLoading, setWidgetLoading] = useState<Record<string, boolean>>({
+    quality: true,
+    equipment: true,
+    stock: true,
+    capacity: true,
+  });
+  const requestRef = useRef(0);
+  const dataRef = useRef(data);
+  dataRef.current = data;
+  const alerts = useMemo<Alert[]>(() => {
+    const next: Alert[] = [];
+    if (data?.summary.overdue)
+      next.push({
+        type: 'error',
+        message: `${data.summary.overdue} work order(s) are overdue`,
+        link: '/work-orders?scope=overdue&cots=1',
+        icon: ClockIcon,
+      });
+    if ((openNCRs ?? 0) > 0)
+      next.push({
+        type: 'warning',
+        message: `${openNCRs} open NCR(s) require attention`,
+        link: '/quality?tab=ncr&filter=open',
+        icon: ShieldExclamationIcon,
+      });
+    if ((equipmentDue ?? 0) > 0)
+      next.push({
+        type: 'warning',
+        message: `${equipmentDue} equipment item(s) due for calibration within 30 days`,
+        link: '/calibration?filter=due_soon',
+        icon: WrenchScrewdriverIcon,
+      });
+    if ((lowInventory ?? 0) > 0)
+      next.push({
+        type: 'warning',
+        message: `${lowInventory} part(s) below reorder point`,
+        link: '/warehouse?tab=inventory&filter=low_stock',
+        icon: CubeIcon,
+      });
+    return next;
+  }, [data, openNCRs, equipmentDue, lowInventory]);
 
   // Conditional request state
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -191,97 +232,59 @@ export default function Dashboard() {
   }, []);
 
   const loadDashboard = useCallback(async (isInitial = false) => {
-    if (!isInitial) {
-      setIsRefreshing(true);
-    }
-
-    try {
-      // Use cached request for dashboard (supports ETag/304). Widget data
-      // is fetched in parallel; individual widget failures degrade to a
-      // safe default rather than taking the whole dashboard down. Log
-      // the underlying error so failures are observable during triage
-      // instead of silently disappearing.
-      const logAndFallback = <T,>(widget: string, fallback: T) => (err: unknown): T => {
-
-        console.error(`Dashboard widget "${widget}" failed to load:`, err);
-        return fallback;
-      };
-      const today = getCentralTodayDate();
-      const capacityStart = getCentralDateStamp(today);
-      const capacityEnd = getCentralDateStamp(addDays(today, 6));
-      const [dashboardResult, qualitySummary, equipmentDueData, lowStockData, capacityData] = await Promise.all([
-        api.getDashboardWithCache(),
-        api.getQualitySummary().catch(logAndFallback('quality summary', { open_ncrs: 0 })),
-        api.getEquipmentDueSoon(30).catch(logAndFallback('equipment due soon', [])),
-        api.getLowStockAlerts().catch(logAndFallback('low stock alerts', [])),
-        api.getCapacityHeatmap(capacityStart, capacityEnd).catch(logAndFallback('capacity heatmap', null))
-      ]);
-
-      // Only update state if data actually changed (prevents unnecessary re-renders)
-      if (dashboardResult.changed || isInitial) {
-        setData(dashboardResult.data);
-        setDataChanged(!isInitial && dashboardResult.changed);
-      }
-
-      setOpenNCRs(qualitySummary.open_ncrs || 0);
-      setEquipmentDue(equipmentDueData.length || 0);
-      setLowInventory(lowStockData.length || 0);
-      setCapacityHeatmap(capacityData);
-
-      // Update last refreshed timestamp
-      if (!dashboardResult.fromCache) {
-        setLastUpdated(new Date());
-      }
-
-      const newAlerts: Alert[] = [];
-      const dashboardData = dashboardResult.data;
-
-      if (dashboardData.summary.overdue > 0) {
-        newAlerts.push({
-          type: 'error',
-          message: `${dashboardData.summary.overdue} work order(s) are overdue`,
-          link: '/work-orders',
-          icon: ClockIcon
+    const request = ++requestRef.current;
+    setIsRefreshing(true);
+    const current = () => request === requestRef.current;
+    const today = getCentralTodayDate();
+    const capacityStart = getCentralDateStamp(today);
+    const capacityEnd = getCentralDateStamp(addDays(today, 6));
+    const widget = async <T,>(key: string, promise: Promise<T>, accept: (value: T) => void) => {
+      setWidgetLoading(previous => ({ ...previous, [key]: true }));
+      try {
+        const value = await promise;
+        if (!current()) return;
+        accept(value);
+        setWidgetErrors(previous => {
+          const next = { ...previous };
+          delete next[key];
+          return next;
         });
+      } catch (error: any) {
+        if (current())
+          setWidgetErrors(previous => ({
+            ...previous,
+            [key]: error?.response?.status === 403 ? 'Not available for your role' : 'Could not refresh',
+          }));
+      } finally {
+        if (current()) setWidgetLoading(previous => ({ ...previous, [key]: false }));
       }
-      if (qualitySummary.open_ncrs > 0) {
-        newAlerts.push({
-          type: 'warning',
-          message: `${qualitySummary.open_ncrs} open NCR(s) require attention`,
-          link: '/quality?filter=open',
-          icon: ShieldExclamationIcon
-        });
+    };
+    const main = async () => {
+      try {
+        const result = await api.getDashboardWithCache();
+        if (!current()) return;
+        if (result.changed || isInitial || !dataRef.current) setData(result.data);
+        setDataChanged(!isInitial && result.changed);
+        if (result.stale) setError('Connection interrupted. Showing last verified shop data.');
+        else {
+          setLastUpdated(new Date());
+          setError('');
+        }
+      } catch {
+        if (current())
+          setError('Could not refresh shop data. Last verified information remains visible when available.');
+      } finally {
+        if (current()) setLoading(false); // Slow secondary widgets never gate the shop overview.
       }
-      if (equipmentDueData.length > 0) {
-        const overdue = equipmentDueData.filter((e: any) => e.days_until_due < 0).length;
-        newAlerts.push({
-          type: overdue > 0 ? 'error' : 'warning',
-          message: overdue > 0
-            ? `${overdue} equipment item(s) overdue for calibration`
-            : `${equipmentDueData.length} equipment item(s) due for calibration within 30 days`,
-          link: overdue > 0 ? '/calibration?filter=overdue' : '/calibration?filter=due',
-          icon: WrenchScrewdriverIcon
-        });
-      }
-      if (lowStockData.length > 0) {
-        const critical = lowStockData.filter((i: any) => i.is_critical).length;
-        newAlerts.push({
-          type: critical > 0 ? 'error' : 'warning',
-          message: critical > 0
-            ? `${critical} part(s) at critical inventory levels`
-            : `${lowStockData.length} part(s) below reorder point`,
-          link: '/warehouse?tab=inventory&filter=low_stock',
-          icon: CubeIcon
-        });
-      }
-      setAlerts(newAlerts);
-      setError('');
-    } catch {
-      setError('Failed to load dashboard data');
-    } finally {
-      setLoading(false);
-      setIsRefreshing(false);
-    }
+    };
+    await Promise.allSettled([
+      main(),
+      widget('quality', api.getQualitySummary(), value => setOpenNCRs(value.open_ncrs ?? 0)),
+      widget('equipment', api.getEquipmentDueSoon(30), value => setEquipmentDue(value.length)),
+      widget('stock', api.getLowStockAlerts(), value => setLowInventory(value.length)),
+      widget('capacity', api.getCapacityHeatmap(capacityStart, capacityEnd), value => setCapacityHeatmap(value)),
+    ]);
+    if (current()) setIsRefreshing(false);
   }, []);
 
   const scheduleRealtimeRefresh = useCallback(() => {
@@ -295,18 +298,25 @@ export default function Dashboard() {
   useWebSocket({
     url: realtimeUrl,
     enabled: true,
-    onMessage: (message) => {
+    onMessage: message => {
       if (message.type === 'connected' || message.type === 'ping') return;
-      if (['dashboard_update', 'work_order_update', 'shop_floor_update', 'quality_alert', 'notification'].includes(message.type)) {
+      if (
+        ['dashboard_update', 'work_order_update', 'shop_floor_update', 'quality_alert', 'notification'].includes(
+          message.type
+        )
+      ) {
         scheduleRealtimeRefresh();
       }
-    }
+    },
   });
 
   useEffect(() => {
     loadDashboard(true);
     const interval = setInterval(() => loadDashboard(false), 30000);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      ++requestRef.current;
+    };
   }, [loadDashboard]);
 
   useEffect(() => {
@@ -345,13 +355,13 @@ export default function Dashboard() {
   }, [activeAssignments]);
 
   const signedInUsers = data?.signed_in_users || [];
-  const idleSignedInUsers = signedInUsers.filter((user) => !user.has_active_job);
-  const onJobSignedInUsers = signedInUsers.filter((user) => user.has_active_job);
+  const idleSignedInUsers = signedInUsers.filter(user => !user.has_active_job);
+  const onJobSignedInUsers = signedInUsers.filter(user => user.has_active_job);
   // Crew-station world: one operator can hold SEVERAL open entries at once, so
   // keep every assignment (in the sorted render order), not just the first.
   const timeEntriesByUserId = useMemo(() => {
     const map = new Map<number, number[]>();
-    activeAssignments.forEach((assignment) => {
+    activeAssignments.forEach(assignment => {
       const existing = map.get(assignment.user.id);
       if (existing) {
         existing.push(assignment.time_entry_id);
@@ -378,7 +388,7 @@ export default function Dashboard() {
   }, [assignmentFingerprint]);
   const machineCapacityOverview = useMemo<MachineCapacityOverview[]>(() => {
     return (capacityHeatmap?.work_centers || [])
-      .map((row) => {
+      .map(row => {
         const scheduledHours = row.days.reduce((sum, day) => sum + day.scheduled_hours, 0);
         const capacityHours = row.days.reduce((sum, day) => sum + day.capacity_hours, 0);
         const utilizationPct = capacityHours > 0 ? (scheduledHours / capacityHours) * 100 : 0;
@@ -387,7 +397,7 @@ export default function Dashboard() {
           scheduled_hours: scheduledHours,
           capacity_hours: capacityHours,
           utilization_pct: utilizationPct,
-          overloaded_days: row.days.filter((day) => day.overloaded).length,
+          overloaded_days: row.days.filter(day => day.overloaded).length,
           available_hours: Math.max(0, capacityHours - scheduledHours),
         };
       })
@@ -417,14 +427,8 @@ export default function Dashboard() {
     return <SkeletonDashboard />;
   }
 
-  if (error) {
-    return (
-      <ErrorState
-        title="Error loading dashboard"
-        message={error}
-        onRetry={() => loadDashboard(true)}
-      />
-    );
+  if (error && !data) {
+    return <ErrorState title="Error loading dashboard" message={error} onRetry={() => loadDashboard(true)} />;
   }
 
   return (
@@ -442,14 +446,12 @@ export default function Dashboard() {
             )}
           </div>
           <div className="flex items-center gap-2">
-            <p className="page-subtitle">Live view of shop activity, staffing, and job progress</p>
+            <p className="page-subtitle">Shop activity, staffing, and job progress · refreshes every 30 seconds</p>
             {/* Refresh indicator */}
-            {isRefreshing && (
-              <ArrowPathIcon className="h-4 w-4 text-slate-500 animate-spin" />
-            )}
+            {isRefreshing && <ArrowPathIcon className="h-4 w-4 text-slate-500 animate-spin" />}
             {lastUpdated && !isRefreshing && (
               <span className="text-xs text-slate-500">
-                Updated {formatCentralTime(lastUpdated, { timeZoneName: 'short' })}
+                Checked {formatCentralTime(lastUpdated, { timeZoneName: 'short' })}
               </span>
             )}
           </div>
@@ -461,6 +463,7 @@ export default function Dashboard() {
             disabled={isRefreshing}
             className="btn-ghost btn-sm"
             title="Refresh dashboard"
+            aria-label="Refresh dashboard"
           >
             <ArrowPathIcon className={`h-5 w-5 ${isRefreshing ? 'animate-spin' : ''}`} />
           </button>
@@ -470,6 +473,62 @@ export default function Dashboard() {
           </Link>
         </div>
       </div>
+
+      {error && (
+        <div role="alert" className="rounded border border-amber-500/40 bg-amber-500/10 p-3 text-amber-200">
+          {error}{' '}
+          <button className="underline" onClick={handleManualRefresh}>
+            Retry
+          </button>
+        </div>
+      )}
+      {Object.keys(widgetErrors).length > 0 && (
+        <div role="status" className="rounded border border-amber-500/30 p-3 text-sm text-amber-200">
+          {Object.entries(widgetErrors).map(([key, message]) => (
+            <p key={key}>
+              {
+                (
+                  { quality: 'Quality', equipment: 'Calibration', stock: 'Inventory', capacity: 'Capacity' } as Record<
+                    string,
+                    string
+                  >
+                )[key]
+              }
+              : {message}.{' '}
+              {(
+                {
+                  quality: openNCRs,
+                  equipment: equipmentDue,
+                  stock: lowInventory,
+                  capacity: capacityHeatmap,
+                } as Record<string, unknown>
+              )[key] == null
+                ? 'No verified data is available.'
+                : 'Showing last verified data.'}
+            </p>
+          ))}
+          <button className="underline mt-1" onClick={handleManualRefresh}>
+            Retry unavailable sections
+          </button>
+        </div>
+      )}
+      {alerts[0] && (
+        <section
+          aria-label="First exception to review"
+          className="flex flex-wrap items-center justify-between gap-3 rounded border border-red-500/40 bg-red-500/10 p-4"
+        >
+          <div>
+            <p className="text-sm font-medium text-red-200">Needs attention</p>
+            <p className="font-semibold text-fd-ink">{alerts[0].message}</p>
+            <p className="text-xs text-fd-mute">
+              {error ? 'Based on last verified shop data' : 'Review the affected records and choose the next action.'}
+            </p>
+          </div>
+          <Link className="btn-primary" to={alerts[0].link!}>
+            Review affected records
+          </Link>
+        </section>
+      )}
 
       {/* Setup nudge — admins only, dismissible, deep-links to /setup */}
       <SetupNudge />
@@ -489,8 +548,8 @@ export default function Dashboard() {
                   alert.type === 'error'
                     ? 'bg-red-500/10 border-red-500/30 text-red-300 hover:bg-fd-red/20'
                     : alert.type === 'warning'
-                    ? 'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-fd-amber/20'
-                    : 'bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/20'
+                      ? 'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-fd-amber/20'
+                      : 'bg-blue-500/10 border-blue-500/30 text-blue-300 hover:bg-blue-500/20'
                 }`}
               >
                 <Icon className="h-4 w-4 flex-shrink-0" />
@@ -508,8 +567,9 @@ export default function Dashboard() {
           iconBg="bg-blue-500/20"
           iconColor="text-blue-600"
           label="Active Work Orders"
+          subtitle="In progress"
           value={data?.summary.active_work_orders || 0}
-          href="/work-orders"
+          href="/work-orders?status=in_progress&cots=1"
         />
         <MiniStat
           icon={SignalIcon}
@@ -534,59 +594,61 @@ export default function Dashboard() {
           iconColor="text-amber-600"
           label="Due Today"
           value={data?.summary.due_today || 0}
-          href="/work-orders"
+          href="/work-orders?scope=due_today&cots=1"
         />
         <MiniStat
           icon={ExclamationTriangleIcon}
-          iconBg={data?.summary.overdue ? "bg-red-500/20" : "bg-fd-green/15"}
-          iconColor={data?.summary.overdue ? "text-red-600" : "text-fd-green"}
+          iconBg={data?.summary.overdue ? 'bg-red-500/20' : 'bg-fd-green/15'}
+          iconColor={data?.summary.overdue ? 'text-red-600' : 'text-fd-green'}
           label="Overdue"
           value={data?.summary.overdue || 0}
-          valueColor={data?.summary.overdue ? "text-red-600" : undefined}
-          href="/work-orders"
+          valueColor={data?.summary.overdue ? 'text-red-300' : undefined}
+          href="/work-orders?scope=overdue&cots=1"
         />
         <MiniStat
           icon={UsersIcon}
-          iconBg={(data?.summary.idle_signed_in_users || 0) > 0 ? "bg-amber-500/20" : "bg-slate-800/50"}
-          iconColor={(data?.summary.idle_signed_in_users || 0) > 0 ? "text-amber-600" : "text-slate-400"}
+          iconBg={(data?.summary.idle_signed_in_users || 0) > 0 ? 'bg-amber-500/20' : 'bg-slate-800/50'}
+          iconColor={(data?.summary.idle_signed_in_users || 0) > 0 ? 'text-amber-600' : 'text-slate-400'}
           label="Signed In, Idle"
           value={data?.summary.idle_signed_in_users || 0}
           subtitle="Not clocked into work"
         />
         <MiniStat
           icon={WrenchScrewdriverIcon}
-          iconBg={equipmentDue > 0 ? "bg-amber-500/20" : "bg-fd-green/15"}
-          iconColor={equipmentDue > 0 ? "text-amber-600" : "text-fd-green"}
+          iconBg={(equipmentDue ?? 0) > 0 ? 'bg-amber-500/20' : 'bg-fd-green/15'}
+          iconColor={(equipmentDue ?? 0) > 0 ? 'text-amber-600' : 'text-fd-green'}
           label="Calibration Due"
-          value={equipmentDue}
-          subtitle="Within 30 days"
-          href="/calibration"
+          value={equipmentDue ?? (widgetLoading.equipment ? 'Loading…' : 'Unavailable')}
+          subtitle={widgetErrors.equipment ? 'Last verified · refresh failed' : 'Within 30 days'}
+          href="/calibration?filter=due_soon"
         />
         <MiniStat
           icon={CubeIcon}
-          iconBg={lowInventory > 0 ? "bg-red-500/20" : "bg-fd-green/15"}
-          iconColor={lowInventory > 0 ? "text-red-600" : "text-fd-green"}
+          iconBg={(lowInventory ?? 0) > 0 ? 'bg-red-500/20' : 'bg-fd-green/15'}
+          iconColor={(lowInventory ?? 0) > 0 ? 'text-red-600' : 'text-fd-green'}
           label="Low Stock Items"
-          value={lowInventory}
-          valueColor={lowInventory > 0 ? "text-red-600" : undefined}
-          href="/inventory"
+          subtitle={widgetErrors.stock ? 'Last verified · refresh failed' : undefined}
+          value={lowInventory ?? (widgetLoading.stock ? 'Loading…' : 'Unavailable')}
+          valueColor={(lowInventory ?? 0) > 0 ? 'text-red-600' : undefined}
+          href="/warehouse?tab=inventory&filter=low_stock"
         />
         <MiniStat
           icon={CheckCircleIcon}
           iconBg="bg-fd-green/15"
           iconColor="text-fd-green"
-          label="Completed Today"
+          label="Operations Completed Today"
           value={data?.summary.completed_today ?? data?.recent_completions?.length ?? 0}
-          href="/work-orders"
+          onClick={() => document.getElementById('recent-completions')?.scrollIntoView({ behavior: 'smooth' })}
         />
         <MiniStat
           icon={ShieldExclamationIcon}
-          iconBg={openNCRs > 0 ? "bg-fd-amber/15" : "bg-fd-green/15"}
-          iconColor={openNCRs > 0 ? "text-fd-amber" : "text-fd-green"}
+          iconBg={(openNCRs ?? 0) > 0 ? 'bg-fd-amber/15' : 'bg-fd-green/15'}
+          iconColor={(openNCRs ?? 0) > 0 ? 'text-fd-amber' : 'text-fd-green'}
           label="Open NCRs"
-          value={openNCRs}
-          valueColor={openNCRs > 0 ? "text-fd-amber" : undefined}
-          href="/quality"
+          subtitle={widgetErrors.quality ? 'Last verified · refresh failed' : undefined}
+          value={openNCRs ?? (widgetLoading.quality ? 'Loading…' : 'Unavailable')}
+          valueColor={(openNCRs ?? 0) > 0 ? 'text-fd-amber' : undefined}
+          href="/quality?tab=ncr&filter=open"
         />
       </div>
 
@@ -596,22 +658,28 @@ export default function Dashboard() {
         <CockpitPanel
           className="xl:col-span-7"
           title="Capacity Overview"
-          subtitle="7-day load per machine"
+          subtitle={widgetErrors.capacity ? '7-day load · last verified data' : '7-day load per machine'}
           footer={`${machineCapacityOverview.length} machine${machineCapacityOverview.length === 1 ? '' : 's'}`}
           headerExtra={
             <div className="flex items-center gap-4 text-xs tabular-nums">
               <span className="flex flex-col leading-tight">
                 <span className="text-[10px] uppercase tracking-wide text-slate-500">Sched</span>
-                <span className="font-bold text-white">{totalScheduledHours.toFixed(1)}h</span>
+                <span className="font-bold text-white">
+                  {capacityHeatmap ? `${totalScheduledHours.toFixed(1)}h` : '—'}
+                </span>
               </span>
               <span className="flex flex-col leading-tight">
                 <span className="text-[10px] uppercase tracking-wide text-slate-500">Cap</span>
-                <span className="font-bold text-white">{totalCapacityHours.toFixed(1)}h</span>
+                <span className="font-bold text-white">
+                  {capacityHeatmap ? `${totalCapacityHours.toFixed(1)}h` : '—'}
+                </span>
               </span>
               <span className="flex flex-col leading-tight">
                 <span className="text-[10px] uppercase tracking-wide text-slate-500">Util</span>
-                <span className={`font-bold ${totalCapacityUtilization > 100 ? 'text-red-500' : totalCapacityUtilization >= 90 ? 'text-amber-400' : 'text-emerald-400'}`}>
-                  {Math.round(totalCapacityUtilization)}%
+                <span
+                  className={`font-bold ${totalCapacityUtilization > 100 ? 'text-red-500' : totalCapacityUtilization >= 90 ? 'text-amber-400' : 'text-emerald-400'}`}
+                >
+                  {capacityHeatmap ? `${Math.round(totalCapacityUtilization)}%` : '—'}
                 </span>
               </span>
               <Link to="/scheduling" className="btn-ghost btn-sm whitespace-nowrap">
@@ -620,9 +688,13 @@ export default function Dashboard() {
             </div>
           }
         >
-          {machineCapacityOverview.length > 0 ? (
+          {widgetErrors.capacity && !capacityHeatmap ? (
+            <ErrorState message="Capacity data is unavailable" onRetry={handleManualRefresh} />
+          ) : widgetLoading.capacity && !capacityHeatmap ? (
+            <p role="status">Loading capacity…</p>
+          ) : machineCapacityOverview.length > 0 ? (
             <div className="divide-y divide-fd-line">
-              {machineCapacityOverview.map((machine) => (
+              {machineCapacityOverview.map(machine => (
                 <MachineRow
                   key={machine.work_center_id}
                   machine={machine}
@@ -659,12 +731,8 @@ export default function Dashboard() {
                       </p>
                     </div>
                     <div className="divide-y divide-fd-line">
-                      {assignments.map((assignment) => (
-                        <ActiveAssignmentRow
-                          key={assignment.time_entry_id}
-                          assignment={assignment}
-                          nowMs={nowMs}
-                        />
+                      {assignments.map(assignment => (
+                        <ActiveAssignmentRow key={assignment.time_entry_id} assignment={assignment} nowMs={nowMs} />
                       ))}
                     </div>
                   </div>
@@ -684,7 +752,7 @@ export default function Dashboard() {
         <CockpitPanel
           className="xl:col-span-7"
           title="Work Center Status"
-          subtitle="Real-time station status"
+          subtitle={error ? 'Last verified station status' : 'Station status · 30-second refresh'}
           footer={`${data?.work_centers.length || 0} work center${(data?.work_centers.length || 0) === 1 ? '' : 's'}`}
           headerExtra={
             <Link to="/work-centers" className="btn-ghost btn-sm">
@@ -711,7 +779,7 @@ export default function Dashboard() {
         <CockpitPanel
           className="xl:col-span-5"
           title="Signed In Right Now"
-          subtitle="Live user presence"
+          subtitle={error ? 'Last verified user presence' : 'Connected user presence'}
           footer={`${signedInUsers.length} signed in`}
           headerExtra={
             <div className="flex items-center gap-1.5 text-[10px] font-semibold tabular-nums">
@@ -735,7 +803,7 @@ export default function Dashboard() {
                     On a job ({onJobSignedInUsers.length})
                   </p>
                   <div className="flex flex-wrap gap-1">
-                    {onJobSignedInUsers.map((user) => {
+                    {onJobSignedInUsers.map(user => {
                       const timeEntryIds = timeEntriesByUserId.get(user.id) || [];
                       return (
                         <button
@@ -765,7 +833,7 @@ export default function Dashboard() {
 
               {idleSignedInUsers.length > 0 && (
                 <div className="divide-y divide-fd-line border-t border-fd-line">
-                  {idleSignedInUsers.map((user) => (
+                  {idleSignedInUsers.map(user => (
                     <IdleUserRow key={user.id} user={user} />
                   ))}
                 </div>
@@ -774,7 +842,7 @@ export default function Dashboard() {
               {idleSignedInUsers.length > 0 && (
                 <div className="rounded-sm border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-300">
                   <p className="font-semibold">Signed in but not on a job</p>
-                  <p className="mt-0.5">{idleSignedInUsers.map((user) => user.name).join(', ')}</p>
+                  <p className="mt-0.5">{idleSignedInUsers.map(user => user.name).join(', ')}</p>
                 </div>
               )}
             </div>
@@ -792,7 +860,9 @@ export default function Dashboard() {
       <div className="card card-compact flex flex-col min-w-0">
         <div className="card-header !pb-2 !mb-2">
           <div>
-            <h2 className="card-title">Recent Completions</h2>
+            <h2 id="recent-completions" className="card-title">
+              Recent Completions
+            </h2>
             <p className="card-subtitle">Latest completed operations</p>
           </div>
           <Link to="/work-orders" className="btn-ghost btn-sm">
@@ -803,10 +873,7 @@ export default function Dashboard() {
         {data?.recent_completions.length ? (
           <div className="lg:max-h-[clamp(200px,28vh,360px)] lg:overflow-y-auto divide-y divide-fd-line">
             {data.recent_completions.map((completion, index) => (
-              <div
-                key={index}
-                className="flex items-center gap-3 py-2 first:pt-0"
-              >
+              <div key={index} className="flex items-center gap-3 py-2 first:pt-0">
                 <CheckCircleSolid className="h-4 w-4 flex-shrink-0 text-fd-green" />
                 <div className="min-w-0 flex-1">
                   <span className="font-semibold text-white">{completion.work_order_number || '-'}</span>
@@ -822,9 +889,7 @@ export default function Dashboard() {
                   <span className="w-16 text-slate-400">
                     {completion.completed_at ? formatCentralTime(completion.completed_at) : '-'}
                   </span>
-                  <span className="w-16 font-semibold text-white">
-                    {completion.quantity_complete} units
-                  </span>
+                  <span className="w-16 font-semibold text-white">{completion.quantity_complete} units</span>
                 </div>
               </div>
             ))}
@@ -852,9 +917,13 @@ function MachineRow({
 }) {
   const utilization = machine.utilization_pct;
   const barClass =
-    utilization > 100 ? 'bg-fd-red' :
-    utilization >= 90 ? 'bg-fd-amber' :
-    utilization >= 70 ? 'bg-fd-amber' : 'bg-fd-green';
+    utilization > 100
+      ? 'bg-fd-red'
+      : utilization >= 90
+        ? 'bg-fd-amber'
+        : utilization >= 70
+          ? 'bg-fd-amber'
+          : 'bg-fd-green';
 
   return (
     <div className="py-2 first:pt-0">
@@ -876,13 +945,15 @@ function MachineRow({
           <div className="h-1.5 flex-1 rounded-sm bg-slate-800">
             <div className={`h-1.5 rounded-sm ${barClass}`} style={{ width: `${Math.min(100, utilization)}%` }} />
           </div>
-          <span className={`w-9 text-right text-xs font-bold tabular-nums ${utilization > 100 ? 'text-red-500' : utilization >= 90 ? 'text-amber-400' : 'text-emerald-400'}`}>
+          <span
+            className={`w-9 text-right text-xs font-bold tabular-nums ${utilization > 100 ? 'text-red-500' : utilization >= 90 ? 'text-amber-400' : 'text-emerald-400'}`}
+          >
             {Math.round(utilization)}%
           </span>
         </div>
       </div>
       <div className="mt-1.5 grid grid-cols-7 gap-0.5">
-        {machine.days.map((day) => {
+        {machine.days.map(day => {
           const statusLabel = capacityStatusLabel(day);
           return (
             <Link
@@ -982,7 +1053,9 @@ function ActiveAssignmentRow({ assignment, nowMs }: { assignment: ActiveAssignme
       <div className="flex items-center gap-1.5">
         {isOverdue && <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-fd-red" aria-label="Overdue" />}
         <span className="truncate font-medium text-slate-200">{getOperatorDisplayName(assignment.user)}</span>
-        <span className={`flex-shrink-0 rounded-sm px-1 py-0.5 text-[10px] font-medium ${getRoleBadgeClass(assignment.user.role)}`}>
+        <span
+          className={`flex-shrink-0 rounded-sm px-1 py-0.5 text-[10px] font-medium ${getRoleBadgeClass(assignment.user.role)}`}
+        >
           {assignment.user.role.replace('_', ' ')}
         </span>
         <span className="ml-auto flex-shrink-0 text-xs text-slate-400 tabular-nums">
@@ -993,7 +1066,7 @@ function ActiveAssignmentRow({ assignment, nowMs }: { assignment: ActiveAssignme
       <div className="mt-0.5 flex items-center gap-2">
         <Link
           to={`/work-orders/${assignment.work_order.id}`}
-          className="flex-shrink-0 text-xs font-semibold text-werco-700 hover:text-werco-800"
+          className="flex-shrink-0 text-xs font-semibold text-fd-link hover:text-sky-200"
         >
           {assignment.work_order.work_order_number}
         </Link>
@@ -1060,7 +1133,9 @@ function IdleUserRow({ user }: { user: SignedInUserStatus }) {
       <div className="flex min-w-0 flex-1 items-center gap-1.5">
         <span className="truncate font-medium text-slate-200">{user.name}</span>
         <span className="flex-shrink-0 text-[10px] text-slate-500 tabular-nums">{user.employee_id}</span>
-        <span className={`flex-shrink-0 rounded-sm px-1 py-0.5 text-[10px] font-medium ${getRoleBadgeClass(user.role)}`}>
+        <span
+          className={`flex-shrink-0 rounded-sm px-1 py-0.5 text-[10px] font-medium ${getRoleBadgeClass(user.role)}`}
+        >
           {user.role.replace('_', ' ')}
         </span>
       </div>
@@ -1073,4 +1148,3 @@ function IdleUserRow({ user }: { user: SignedInUserStatus }) {
     </div>
   );
 }
-

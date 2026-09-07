@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   ArrowPathIcon,
   BellAlertIcon,
@@ -90,15 +90,27 @@ const formatDate = (value?: string) => {
   return formatCentralDateTime(value);
 };
 
-const getStoredDismissed = () => {
+const getStoredDismissed = (key: string) => {
   try {
-    return new Set(JSON.parse(localStorage.getItem('actionInboxDismissed') || '[]') as string[]);
+    return new Set(JSON.parse(localStorage.getItem(key) || '[]') as string[]);
   } catch {
     return new Set<string>();
   }
 };
 
 export default function ActionInbox() {
+  const [params, setParams] = useSearchParams();
+  const request = useRef(0);
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const userScope = (() => {
+    try {
+      const user = JSON.parse(sessionStorage.getItem('user') ?? '{}');
+      return `${user.company_id ?? 'workspace'}:${user.id ?? 'anonymous'}`;
+    } catch {
+      return 'anonymous';
+    }
+  })();
+  const dismissedKey = `actionInboxDismissed:${userScope}`;
   const [health, setHealth] = useState<SetupHealth | null>(null);
   const [aiRecommendations, setAiRecommendations] = useState<AIRecommendation[]>([]);
   const [aiAvailable, setAiAvailable] = useState(true);
@@ -106,15 +118,31 @@ export default function ActionInbox() {
   const [actioningId, setActioningId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  const [filter, setFilter] = useState<FilterKey>('open');
-  const [dismissed, setDismissed] = useState<Set<string>>(() => getStoredDismissed());
+  const requestedFilter = params.get('filter');
+  const filter: FilterKey =
+    requestedFilter && Object.prototype.hasOwnProperty.call(filterLabels, requestedFilter)
+      ? (requestedFilter as FilterKey)
+      : 'open';
+  const setFilter = (value: FilterKey) =>
+    setParams(previous => {
+      const next = new URLSearchParams(previous);
+      if (value === 'open') next.delete('filter');
+      else next.set('filter', value);
+      return next;
+    });
+  const [dismissed, setDismissed] = useState<Set<string>>(() => getStoredDismissed(dismissedKey));
 
   const persistDismissed = (next: Set<string>) => {
     setDismissed(next);
-    localStorage.setItem('actionInboxDismissed', JSON.stringify(Array.from(next)));
+    try {
+      localStorage.setItem(dismissedKey, JSON.stringify(Array.from(next)));
+    } catch {
+      /* Optional local preference. */
+    }
   };
 
   const loadInbox = async () => {
+    const seq = ++request.current;
     setLoading(true);
     setError(null);
 
@@ -123,17 +151,18 @@ export default function ActionInbox() {
       api.getAIRecommendations({ status: 'pending', limit: 25 }),
     ]);
 
+    if (seq !== request.current) return;
+    setHasLoaded(true);
     if (healthResult.status === 'fulfilled') {
       setHealth(healthResult.value);
     } else {
-      setError('Setup health is unavailable. Action Inbox is showing AI recommendations only.');
+      setError('Setup health could not be refreshed. Any setup and master-data items below are last verified results.');
     }
 
     if (aiResult.status === 'fulfilled') {
       setAiRecommendations(Array.isArray(aiResult.value) ? aiResult.value : []);
       setAiAvailable(true);
     } else {
-      setAiRecommendations([]);
       setAiAvailable(false);
     }
 
@@ -142,6 +171,9 @@ export default function ActionInbox() {
 
   useEffect(() => {
     loadInbox();
+    return () => {
+      ++request.current;
+    };
   }, []);
 
   // Backend already returns recommendations sorted by the deterministic score; re-sort
@@ -158,15 +190,10 @@ export default function ActionInbox() {
     () => (heroVisible ? rankedRecommendations.slice(0, 3) : []),
     [heroVisible, rankedRecommendations]
   );
-  const queueRecommendations = useMemo(
-    () => (heroVisible ? rankedRecommendations.slice(3) : rankedRecommendations),
-    [heroVisible, rankedRecommendations]
-  );
-
   const items = useMemo<InboxItem[]>(() => {
     const setupItems: InboxItem[] = (health?.steps || [])
-      .filter((step) => step.status !== 'complete')
-      .map((step) => ({
+      .filter(step => step.status !== 'complete')
+      .map(step => ({
         id: `setup:${step.key}`,
         source: 'setup',
         severity: 'medium',
@@ -176,7 +203,7 @@ export default function ActionInbox() {
         href: step.href,
       }));
 
-    const masterDataItems: InboxItem[] = (health?.issues || []).map((issue) => ({
+    const masterDataItems: InboxItem[] = (health?.issues || []).map(issue => ({
       id: `master-data:${issue.key}`,
       source: 'master-data',
       severity: issue.severity,
@@ -187,10 +214,17 @@ export default function ActionInbox() {
     }));
 
     // While the hero is visible the top 3 render above; otherwise every recommendation joins the queue.
-    const aiItems: InboxItem[] = queueRecommendations.map((recommendation) => ({
+    const aiItems: InboxItem[] = rankedRecommendations.map(recommendation => ({
       id: `ai:${recommendation.id}`,
       source: 'ai',
-      severity: recommendation.priority === 'high' ? 'high' : recommendation.priority === 'low' ? 'low' : recommendation.priority === 'info' ? 'info' : 'medium',
+      severity:
+        recommendation.priority === 'high'
+          ? 'high'
+          : recommendation.priority === 'low'
+            ? 'low'
+            : recommendation.priority === 'info'
+              ? 'info'
+              : 'medium',
       title: recommendation.title,
       detail: recommendation.summary,
       timestamp: recommendation.created_at,
@@ -198,14 +232,20 @@ export default function ActionInbox() {
     }));
 
     return [...aiItems, ...masterDataItems, ...setupItems];
-  }, [queueRecommendations, health]);
+  }, [rankedRecommendations, health]);
 
   const filteredItems = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
 
-    return items.filter((item) => {
+    return items.filter(item => {
       const isDismissed = dismissed.has(item.id);
-      if (filter === 'open' && isDismissed) return false;
+      if (filter !== 'dismissed' && isDismissed) return false;
+      if (
+        heroVisible &&
+        item.source === 'ai' &&
+        topThree.some(recommendation => recommendation.id === item.recommendation?.id)
+      )
+        return false;
       if (filter === 'dismissed' && !isDismissed) return false;
       if (filter === 'high' && item.severity !== 'high') return false;
       if (filter === 'ai' && item.source !== 'ai') return false;
@@ -215,10 +255,11 @@ export default function ActionInbox() {
       if (!normalizedQuery) return true;
       return `${item.title} ${item.detail} ${sourceLabels[item.source]}`.toLowerCase().includes(normalizedQuery);
     });
-  }, [dismissed, filter, items, query]);
+  }, [dismissed, filter, items, query, heroVisible, topThree]);
 
-  const openCount = items.filter((item) => !dismissed.has(item.id)).length;
-  const highCount = items.filter((item) => item.severity === 'high' && !dismissed.has(item.id)).length;
+  const firstException = items.find(item => item.severity === 'high' && !dismissed.has(item.id));
+  const openCount = items.filter(item => !dismissed.has(item.id)).length;
+  const highCount = items.filter(item => item.severity === 'high' && !dismissed.has(item.id)).length;
   const aiCount = aiRecommendations.length;
   const setupProgress = health?.progress ?? 0;
 
@@ -246,12 +287,12 @@ export default function ActionInbox() {
 
   const removalMutation = useOptimisticMutation<unknown, RemovalCtx>({
     applyOptimistic: ({ recommendation }) => {
-      setAiRecommendations((current) => current.filter((item) => item.id !== recommendation.id));
+      setAiRecommendations(current => current.filter(item => item.id !== recommendation.id));
     },
     rollback: ({ recommendation, index }) => {
       // Re-insert the card at its original index so the queue order is preserved.
-      setAiRecommendations((current) => {
-        if (current.some((item) => item.id === recommendation.id)) return current;
+      setAiRecommendations(current => {
+        if (current.some(item => item.id === recommendation.id)) return current;
         const next = [...current];
         next.splice(Math.min(index, next.length), 0, recommendation);
         return next;
@@ -261,11 +302,8 @@ export default function ActionInbox() {
     errorFallback: 'Action failed. Please try again.',
   });
 
-  const runRemoval = async (
-    recommendation: AIRecommendation,
-    mutate: () => Promise<unknown>
-  ) => {
-    const index = aiRecommendations.findIndex((item) => item.id === recommendation.id);
+  const runRemoval = async (recommendation: AIRecommendation, mutate: () => Promise<unknown>) => {
+    const index = aiRecommendations.findIndex(item => item.id === recommendation.id);
     setActioningId(recommendation.id);
     try {
       await removalMutation.run({ recommendation, index: index < 0 ? aiRecommendations.length : index, mutate });
@@ -290,9 +328,7 @@ export default function ActionInbox() {
     runRemoval(recommendation, () => api.dismissAIRecommendation(recommendation.id, 'Dismissed from Action Inbox'));
 
   const snoozeAIRecommendation = (recommendation: AIRecommendation, days: number) =>
-    runRemoval(recommendation, () =>
-      api.snoozeAIRecommendation(recommendation.id, days, 'Snoozed from Action Inbox')
-    );
+    runRemoval(recommendation, () => api.snoozeAIRecommendation(recommendation.id, days, 'Snoozed from Action Inbox'));
 
   // Feedback does not remove the card from the queue, so it keeps its own simple
   // in-flight state rather than the optimistic-removal path.
@@ -313,7 +349,9 @@ export default function ActionInbox() {
             <BellAlertIcon className="h-8 w-8 text-cyan-300" />
             <h1 className="text-2xl font-bold text-white">Action Inbox</h1>
           </div>
-          <p className="text-slate-400 mt-1">A focused queue for AI recommendations, setup gaps, and master-data blockers.</p>
+          <p className="text-slate-400 mt-1">
+            A focused queue for AI recommendations, setup gaps, and master-data blockers.
+          </p>
         </div>
         <button onClick={loadInbox} className="btn-secondary flex items-center justify-center" disabled={loading}>
           <ArrowPathIcon className={`h-5 w-5 mr-2 ${loading ? 'animate-spin' : ''}`} />
@@ -321,20 +359,45 @@ export default function ActionInbox() {
         </button>
       </div>
 
+      {firstException && !loading && (
+        <section
+          aria-label="First action to review"
+          className="rounded border border-red-500/40 bg-red-500/10 p-4 flex flex-wrap items-center justify-between gap-3"
+        >
+          <div>
+            <p className="text-sm text-red-200">Review first · high priority</p>
+            <h2 className="font-semibold text-white">{firstException.title}</h2>
+            <p className="text-sm text-fd-body">{firstException.detail}</p>
+          </div>
+          {firstException.href ? (
+            <Link className="btn-primary" to={firstException.href}>
+              Review affected records
+            </Link>
+          ) : (
+            <button className="btn-primary" onClick={() => setFilter('high')}>
+              Review high-priority actions
+            </button>
+          )}
+        </section>
+      )}
+
       <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-4 gap-2">
         <MiniStat
           icon={InboxIcon}
           iconBg="bg-fd-cyan/15"
           iconColor="text-fd-cyan"
           label="Open Actions"
-          value={openCount}
+          value={hasLoaded ? openCount : 'Loading…'}
+          subtitle={error || !aiAvailable ? 'Partial · unavailable sources' : 'Includes featured recommendations'}
+          onClick={() => setFilter('open')}
         />
         <MiniStat
           icon={ExclamationTriangleIcon}
           iconBg={highCount > 0 ? 'bg-fd-red/15' : 'bg-fd-green/15'}
           iconColor={highCount > 0 ? 'text-fd-red' : 'text-fd-green'}
           label="High Priority"
-          value={highCount}
+          value={hasLoaded ? highCount : 'Loading…'}
+          onClick={() => setFilter('high')}
           valueColor={highCount > 0 ? 'text-fd-red' : undefined}
         />
         <MiniStat
@@ -342,7 +405,9 @@ export default function ActionInbox() {
           iconBg="bg-fd-cyan/15"
           iconColor="text-fd-cyan"
           label="AI Suggestions"
-          value={aiCount}
+          value={aiAvailable && hasLoaded ? aiCount : hasLoaded ? 'Unavailable' : 'Loading…'}
+          subtitle="Up to 25 pending recommendations"
+          onClick={() => setFilter('ai')}
           valueColor="text-fd-cyan"
         />
         <div className="card card-compact !p-2.5 flex flex-col gap-1 min-w-0 h-full">
@@ -352,9 +417,12 @@ export default function ActionInbox() {
             </span>
             <p className="stat-label !text-[10px] uppercase tracking-wide truncate">Setup Progress</p>
           </div>
-          <p className="stat-value !text-xl tabular-nums">{setupProgress}%</p>
+          <p className="stat-value !text-xl tabular-nums">{health && !error ? `${setupProgress}%` : 'Unverified'}</p>
           <span className="block h-1.5 w-full rounded-sm bg-fd-line overflow-hidden">
-            <span className="block h-full rounded-sm bg-fd-cyan" style={{ width: `${setupProgress}%` }} />
+            <span
+              className="block h-full rounded-sm bg-fd-cyan"
+              style={{ width: `${health && !error ? `${setupProgress}%` : 'Unverified'}` }}
+            />
           </span>
         </div>
       </MiniStatStrip>
@@ -378,7 +446,7 @@ export default function ActionInbox() {
                 key={recommendation.id}
                 recommendation={recommendation}
                 rank={index + 1}
-                disabled={actioningId === recommendation.id}
+                disabled={!aiAvailable || actioningId === recommendation.id}
                 onAccept={acceptAIRecommendation}
                 onDismiss={dismissAIRecommendation}
                 onFeedback={sendAIFeedback}
@@ -395,7 +463,7 @@ export default function ActionInbox() {
             <MagnifyingGlassIcon className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-500" />
             <input
               value={query}
-              onChange={(event) => setQuery(event.target.value)}
+              onChange={event => setQuery(event.target.value)}
               placeholder="Search actions..."
               aria-label="Search actions"
               className="w-full rounded-sm border border-fd-line bg-slate-950/70 py-2 pl-10 pr-3 text-white placeholder:text-slate-500 focus:border-fd-blue focus:outline-none focus:ring-1 focus:ring-fd-blue"
@@ -403,10 +471,11 @@ export default function ActionInbox() {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <FunnelIcon className="h-5 w-5 text-slate-500" />
-            {(Object.keys(filterLabels) as FilterKey[]).map((key) => (
+            {(Object.keys(filterLabels) as FilterKey[]).map(key => (
               <button
                 key={key}
                 onClick={() => setFilter(key)}
+                aria-pressed={filter === key}
                 className={`rounded-sm px-3 py-1.5 text-sm font-medium transition-colors ${
                   filter === key
                     ? 'bg-fd-blue/20 text-fd-blue border border-fd-blue/50'
@@ -425,7 +494,7 @@ export default function ActionInbox() {
               <ExclamationTriangleIcon className="h-3 w-3 text-fd-amber" />
               AI recommendations
             </span>
-            <span className="text-slate-600">— this source is hidden from the queue.</span>
+            <span className="text-fd-mute">— any recommendations shown are last verified and may be out of date.</span>
           </div>
         )}
       </div>
@@ -438,17 +507,26 @@ export default function ActionInbox() {
           </div>
         ) : filteredItems.length ? (
           <div className="divide-y divide-slate-800">
-            {filteredItems.map((item) => {
+            {filteredItems.map(item => {
               const isDismissed = dismissed.has(item.id);
               return (
-                <div key={item.id} className="flex items-start justify-between gap-4 p-4 transition-colors hover:bg-slate-900/50">
+                <div
+                  key={item.id}
+                  className="flex items-start justify-between gap-4 p-4 transition-colors hover:bg-slate-900/50"
+                >
                   <div className="flex min-w-0 gap-3">
                     <div className={`mt-1 rounded-lg border p-2 ${severityStyles[item.severity]}`}>
-                      {item.severity === 'high' ? <ExclamationTriangleIcon className="h-5 w-5" /> : <InboxIcon className="h-5 w-5" />}
+                      {item.severity === 'high' ? (
+                        <ExclamationTriangleIcon className="h-5 w-5" />
+                      ) : (
+                        <InboxIcon className="h-5 w-5" />
+                      )}
                     </div>
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
-                        <h2 className={`font-semibold ${isDismissed ? 'text-slate-500 line-through' : 'text-white'}`}>{item.title}</h2>
+                        <h2 className={`font-semibold ${isDismissed ? 'text-slate-500 line-through' : 'text-white'}`}>
+                          {item.title}
+                        </h2>
                         <span className="rounded-full border border-slate-700 bg-slate-950/70 px-2 py-0.5 text-xs text-slate-300">
                           {sourceLabels[item.source]}
                         </span>
@@ -468,12 +546,12 @@ export default function ActionInbox() {
                             impact={item.recommendation.impact || {}}
                           />
                           <FeedbackButtons
-                            disabled={actioningId === item.recommendation.id}
+                            disabled={!aiAvailable || actioningId === item.recommendation.id}
                             applyable={recommendationIsApplyable(item.recommendation as AIRecommendation)}
                             onAccept={() => acceptAIRecommendation(item.recommendation as AIRecommendation)}
                             onDismiss={() => dismissAIRecommendation(item.recommendation as AIRecommendation)}
-                            onFeedback={(feedback) => sendAIFeedback(item.recommendation as AIRecommendation, feedback)}
-                            onSnooze={(days) => snoozeAIRecommendation(item.recommendation as AIRecommendation, days)}
+                            onFeedback={feedback => sendAIFeedback(item.recommendation as AIRecommendation, feedback)}
+                            onSnooze={days => snoozeAIRecommendation(item.recommendation as AIRecommendation, days)}
                           />
                         </>
                       )}
@@ -484,16 +562,26 @@ export default function ActionInbox() {
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     {item.href && !isDismissed && (
-                      <Link to={item.href} className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:border-cyan-500/60 hover:text-cyan-200">
+                      <Link
+                        to={item.href}
+                        className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:border-cyan-500/60 hover:text-cyan-200"
+                      >
                         Open
                       </Link>
                     )}
                     {item.source === 'ai' ? null : isDismissed ? (
-                      <button onClick={() => restoreItem(item.id)} className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:border-cyan-500/60 hover:text-cyan-200">
+                      <button
+                        onClick={() => restoreItem(item.id)}
+                        className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:border-cyan-500/60 hover:text-cyan-200"
+                      >
                         Restore
                       </button>
                     ) : (
-                      <button onClick={() => dismissItem(item.id)} className="rounded-lg border border-slate-700 p-2 text-slate-400 hover:border-slate-500 hover:text-white" title="Dismiss">
+                      <button
+                        onClick={() => dismissItem(item.id)}
+                        className="rounded-lg border border-slate-700 p-2 text-slate-400 hover:border-slate-500 hover:text-white"
+                        title="Dismiss"
+                      >
                         <XMarkIcon className="h-5 w-5" />
                       </button>
                     )}
@@ -508,12 +596,15 @@ export default function ActionInbox() {
             <CheckCircleIcon className="mx-auto h-12 w-12 text-emerald-300" />
             <h2 className="mt-4 text-lg font-semibold text-white">No actions in this view</h2>
             <p className="mt-1 text-sm text-slate-400">
-              {filter === 'dismissed' ? 'Dismissed actions will appear here.' : 'There are no matching open actions.'}
+              {error || !aiAvailable
+                ? 'Some sources are unavailable. Retry before concluding there is no work to review.'
+                : filter === 'dismissed'
+                  ? 'Dismissed actions will appear here.'
+                  : 'There are no matching open actions.'}
             </p>
           </div>
         )}
       </div>
-
     </div>
   );
 }

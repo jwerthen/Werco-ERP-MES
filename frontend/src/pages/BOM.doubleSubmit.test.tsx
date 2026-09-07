@@ -61,6 +61,10 @@ describe('BOM Create double-submit guard', () => {
     jest.clearAllMocks();
     mockedApi.getBOMs.mockResolvedValue([]);
     mockedApi.getParts.mockResolvedValue([ASSEMBLY_PART]);
+    // The new stable selection URL reloads the saved document for review.
+    mockedApi.getBOM.mockResolvedValue({
+      id: 99, part_id: ASSEMBLY_PART.id, revision: 'A', bom_type: 'standard', description: '', items: [],
+    });
   });
 
   it('disables the Create button and fires createBOM only once on a double submit', async () => {
@@ -105,5 +109,6 @@ describe('BOM Create double-submit guard', () => {
       expect(screen.queryByRole('heading', { name: /create new bom/i })).not.toBeInTheDocument()
     );
     expect(mockedApi.createBOM).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(mockedApi.getBOM).toHaveBeenCalledWith(99));
   });
 });

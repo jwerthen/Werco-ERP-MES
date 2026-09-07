@@ -83,7 +83,7 @@ beforeEach(() => {
 
 test('Purchase Orders table renders through DataTable after load', async () => {
   renderPurchasing();
-  await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+  await screen.findByRole('heading', { name: 'Purchasing' });
 
   expect(screen.getByTestId('data-table')).toBeInTheDocument();
   // Default sort is po_number asc.
@@ -92,7 +92,7 @@ test('Purchase Orders table renders through DataTable after load', async () => {
 
 test('a sortable header reorders the rows client-side', async () => {
   renderPurchasing();
-  await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+  await screen.findByRole('heading', { name: 'Purchasing' });
 
   // Scope to the table so the "Vendors" tab button isn't matched. The Vendor
   // column header is a sort button inside the DataTable.
@@ -110,7 +110,7 @@ test('a sortable header reorders the rows client-side', async () => {
 
 test('CSV export control is present on the migrated table', async () => {
   renderPurchasing();
-  await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+  await screen.findByRole('heading', { name: 'Purchasing' });
 
   expect(screen.getByRole('button', { name: /Export CSV/i })).toBeInTheDocument();
 });

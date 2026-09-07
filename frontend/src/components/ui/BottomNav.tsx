@@ -1,5 +1,7 @@
 import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
+import { usePermissions } from '../../hooks/usePermissions';
+import { canAccessPath } from '../../utils/routeAccess';
 import { useAuth } from '../../context/AuthContext';
 import {
   HomeIcon,
@@ -71,8 +73,9 @@ interface BottomNavProps {
 export default function BottomNav({ onMenuClick }: BottomNavProps) {
   const location = useLocation();
   const { user } = useAuth();
+  const { can } = usePermissions();
   const isOperator = user?.role === 'operator';
-  const navItems = isOperator ? operatorNavItems : defaultNavItems;
+  const navItems = (isOperator ? operatorNavItems : defaultNavItems).filter(item => canAccessPath(item.href, can));
 
   const isActive = (href: string) => {
     const [path, query] = href.split('?');
@@ -93,16 +96,20 @@ export default function BottomNav({ onMenuClick }: BottomNavProps) {
   };
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-40 bg-fd-panel border-t border-slate-700 pb-safe lg:hidden">
+    <nav
+      aria-label="Mobile navigation"
+      className="fixed bottom-0 left-0 right-0 z-40 bg-fd-panel border-t border-slate-700 pb-safe lg:hidden"
+    >
       <div className="flex items-center justify-around h-16">
-        {navItems.map((item) => {
+        {navItems.map(item => {
           const active = isActive(item.href);
           const Icon = active ? item.activeIcon : item.icon;
-          
+
           return (
             <Link
               key={item.name}
               to={item.href}
+              aria-current={active ? 'page' : undefined}
               className={`
                 flex flex-col items-center justify-center flex-1 h-full
                 transition-colors duration-200
@@ -114,7 +121,7 @@ export default function BottomNav({ onMenuClick }: BottomNavProps) {
             </Link>
           );
         })}
-        
+
         {/* More menu button */}
         <button
           onClick={onMenuClick}

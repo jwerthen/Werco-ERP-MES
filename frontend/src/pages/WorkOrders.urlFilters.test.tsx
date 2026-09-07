@@ -366,3 +366,22 @@ describe('WorkOrders — grouped view exports CSV per group', () => {
     clickSpy.mockRestore();
   });
 });
+
+
+describe('Dashboard work-order drill-down scope', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+  it('includes overdue COTS from the dashboard while excluding completed or future jobs', async () => {
+    mockedApi.getWorkOrders.mockResolvedValue([
+      { ...workOrders[0], due_date: '2000-01-01', part_type: 'purchased' },
+      { ...workOrders[1], due_date: '2099-01-01' },
+      { ...workOrders[0], id: 3, work_order_number: 'WO-DONE', due_date: '2000-01-01', status: 'complete' },
+    ]);
+    renderAt('/work-orders?scope=overdue&cots=1');
+    await waitForLoadedList();
+    expect(screen.queryByRole('link', { name: 'WO-1002' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'WO-DONE' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear dashboard filter' }));
+    expect(await screen.findAllByRole('link', { name: 'WO-1002' })).toHaveLength(2);
+    expect(locationSearch()).toBe('?cots=1');
+  });
+});

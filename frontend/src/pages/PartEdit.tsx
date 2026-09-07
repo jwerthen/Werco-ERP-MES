@@ -84,7 +84,7 @@ export default function PartEdit() {
     if (loading || offered.some(option => option.value === initialForm.part_type)) return offered;
     return [{ value: initialForm.part_type, label: partTypeLabel(initialForm.part_type) }, ...offered];
   }, [loading, initialForm.part_type]);
-  const { confirmDiscard } = useUnsavedChanges(isFormDirty);
+  const { confirmDiscard, markSaved } = useUnsavedChanges(isFormDirty);
 
   const handleCancel = () => {
     if (!confirmDiscard()) return;
@@ -122,6 +122,7 @@ export default function PartEdit() {
     try {
       await api.updatePart(partId, buildUpdatePayload());
       showToast('success', 'Part updated');
+      markSaved();
       navigate(`/parts/${partId}`);
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to update part');

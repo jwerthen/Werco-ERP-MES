@@ -407,6 +407,7 @@ def test_mark_shipped_audits_work_order_close(client: TestClient, db_session: Se
     """mark_shipped closes the WO; the COMPLETE -> CLOSED transition is audited."""
     admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
     wo = make_work_order(db_session, company_id=1, status_=WorkOrderStatus.COMPLETE)
+    wo.quantity_complete = 10
     n = _next()
     shipment = Shipment(
         shipment_number=f"SHP-{n:05d}",

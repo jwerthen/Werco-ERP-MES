@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import api from '../services/api';
+import EntityPicker from '../components/operations/EntityPicker';
 import {
   ClockIcon,
   ExclamationTriangleIcon,
@@ -142,16 +143,44 @@ const statusLabel: Record<CertStatus, string> = {
   pending: 'Pending',
 };
 
-const skillColor = (level: number) => level >= 4 ? 'bg-green-500/100' : level >= 2 ? 'bg-yellow-500/100' : 'bg-red-500/100';
-const skillLabel = (level: number) => level >= 4 ? 'Expert' : level >= 3 ? 'Proficient' : level >= 2 ? 'Competent' : level >= 1 ? 'Beginner' : 'Untrained';
+const skillColor = (level: number) =>
+  level >= 4 ? 'bg-green-500/100' : level >= 2 ? 'bg-yellow-500/100' : 'bg-red-500/100';
+const skillLabel = (level: number) =>
+  level >= 4 ? 'Expert' : level >= 3 ? 'Proficient' : level >= 2 ? 'Competent' : level >= 1 ? 'Beginner' : 'Untrained';
 
-const defaultCertForm: CertCreateForm = { user_id: '', certification_type: '', certification_name: '', issuing_authority: '', certificate_number: '', issue_date: todayISO(), expiration_date: '', status: 'active', level: '', scope: '', notes: '' };
+const defaultCertForm: CertCreateForm = {
+  user_id: '',
+  certification_type: '',
+  certification_name: '',
+  issuing_authority: '',
+  certificate_number: '',
+  issue_date: todayISO(),
+  expiration_date: '',
+  status: 'active',
+  level: '',
+  scope: '',
+  notes: '',
+};
 
-const defaultTrainingForm: TrainingCreateForm = { user_id: '', training_name: '', training_type: '', description: '', trainer: '', training_date: todayISO(), completion_date: '', hours: '', passed: true, score: '', work_center_id: '', notes: '' };
+const defaultTrainingForm: TrainingCreateForm = {
+  user_id: '',
+  training_name: '',
+  training_type: '',
+  description: '',
+  trainer: '',
+  training_date: todayISO(),
+  completion_date: '',
+  hours: '',
+  passed: true,
+  score: '',
+  work_center_id: '',
+  notes: '',
+};
 
 // ── Component ────────────────────────────────────────────────────
 export default function OperatorCertifications() {
   const { showToast } = useToast();
+  const [mutationError, setMutationError] = useState('');
 
   // Data
   const [certifications, setCertifications] = useState<Certification[]>([]);
@@ -242,7 +271,7 @@ export default function OperatorCertifications() {
     if (!searchTerm) return certifications;
     const term = searchTerm.toLowerCase();
     return certifications.filter(
-      (c) =>
+      c =>
         (c.user_name || '').toLowerCase().includes(term) ||
         c.certification_name.toLowerCase().includes(term) ||
         c.certification_type.toLowerCase().includes(term) ||
@@ -254,7 +283,7 @@ export default function OperatorCertifications() {
     if (!searchTerm) return trainingRecords;
     const term = searchTerm.toLowerCase();
     return trainingRecords.filter(
-      (t) =>
+      t =>
         (t.user_name || '').toLowerCase().includes(term) ||
         t.training_name.toLowerCase().includes(term) ||
         (t.trainer || '').toLowerCase().includes(term) ||
@@ -273,10 +302,11 @@ export default function OperatorCertifications() {
     async (e: React.FormEvent) => {
       e.preventDefault();
       if (!certForm.user_id || !certForm.certification_name.trim()) {
-        showToast('error', 'User ID and certification name are required');
+        showToast('error', 'Employee and certification name are required');
         return;
       }
       try {
+        setMutationError('');
         setCertCreateLoading(true);
         const payload: Record<string, unknown> = {
           user_id: parseInt(certForm.user_id, 10),
@@ -298,6 +328,9 @@ export default function OperatorCertifications() {
         loadCertifications();
         loadDashboard();
       } catch (err: any) {
+        setMutationError(
+          typeof err?.response?.data?.detail === 'string' ? err.response.data.detail : 'Failed to create certification'
+        );
         showToast('error', err?.response?.data?.detail || 'Failed to create certification');
       } finally {
         setCertCreateLoading(false);
@@ -317,10 +350,11 @@ export default function OperatorCertifications() {
     async (e: React.FormEvent) => {
       e.preventDefault();
       if (!trainingForm.user_id || !trainingForm.training_name.trim()) {
-        showToast('error', 'User ID and training name are required');
+        showToast('error', 'Employee and training name are required');
         return;
       }
       try {
+        setMutationError('');
         setTrainingCreateLoading(true);
         const payload: Record<string, unknown> = {
           user_id: parseInt(trainingForm.user_id, 10),
@@ -343,6 +377,11 @@ export default function OperatorCertifications() {
         loadTrainingRecords();
         loadDashboard();
       } catch (err: any) {
+        setMutationError(
+          typeof err?.response?.data?.detail === 'string'
+            ? err.response.data.detail
+            : 'Failed to create training record'
+        );
         showToast('error', err?.response?.data?.detail || 'Failed to create training record');
       } finally {
         setTrainingCreateLoading(false);
@@ -358,9 +397,10 @@ export default function OperatorCertifications() {
     const wcsMap = new Map<number, string>();
     const mMap = new Map<string, SkillMatrixEntry>();
 
-    skillMatrix.forEach((entry) => {
+    skillMatrix.forEach(entry => {
       if (!opsMap.has(entry.user_id)) opsMap.set(entry.user_id, entry.user_name || `User ${entry.user_id}`);
-      if (!wcsMap.has(entry.work_center_id)) wcsMap.set(entry.work_center_id, entry.work_center_name || `WC ${entry.work_center_id}`);
+      if (!wcsMap.has(entry.work_center_id))
+        wcsMap.set(entry.work_center_id, entry.work_center_name || `WC ${entry.work_center_id}`);
       mMap.set(`${entry.user_id}-${entry.work_center_id}`, entry);
     });
 
@@ -373,170 +413,186 @@ export default function OperatorCertifications() {
 
   // ── Table columns + mobile cards ───────────────────────────────
 
-  const certColumns = useMemo<Array<DataTableColumn<Certification>>>(() => [
-    {
-      key: 'operator',
-      header: 'Operator',
-      sortable: true,
-      className: 'font-medium text-white',
-      accessor: (c) => c.user_name || `User #${c.user_id}`,
-    },
-    {
-      key: 'certification',
-      header: 'Certification',
-      sortable: true,
-      className: 'text-slate-300',
-      accessor: (c) => c.certification_name,
-    },
-    {
-      key: 'type',
-      header: 'Type',
-      sortable: true,
-      className: 'text-slate-400 capitalize',
-      accessor: (c) => c.certification_type,
-      render: (c) => c.certification_type.replace(/_/g, ' '),
-    },
-    {
-      key: 'status',
-      header: 'Status',
-      sortable: true,
-      accessor: (c) => c.status,
-      csv: (c) => statusLabel[c.status] || c.status,
-      render: (c) => <StatusBadge status={c.status} colorMap={statusBadge} className="rounded-full" />,
-    },
-    {
-      key: 'issued',
-      header: 'Issued',
-      sortable: true,
-      className: 'text-slate-400',
-      accessor: (c) => c.issue_date ?? '',
-      csv: (c) => formatDate(c.issue_date),
-      render: (c) => formatDate(c.issue_date),
-    },
-    {
-      key: 'expires',
-      header: 'Expires',
-      sortable: true,
-      className: 'text-slate-400',
-      accessor: (c) => c.expiration_date ?? '',
-      csv: (c) => formatDate(c.expiration_date),
-      render: (c) => formatDate(c.expiration_date),
-    },
-    {
-      key: 'authority',
-      header: 'Authority',
-      sortable: true,
-      className: 'text-slate-400',
-      accessor: (c) => c.issuing_authority ?? '',
-      render: (c) => c.issuing_authority || '-',
-    },
-  ], []);
+  const certColumns = useMemo<Array<DataTableColumn<Certification>>>(
+    () => [
+      {
+        key: 'operator',
+        header: 'Operator',
+        sortable: true,
+        className: 'font-medium text-white',
+        accessor: c => c.user_name || `User #${c.user_id}`,
+      },
+      {
+        key: 'certification',
+        header: 'Certification',
+        sortable: true,
+        className: 'text-slate-300',
+        accessor: c => c.certification_name,
+      },
+      {
+        key: 'type',
+        header: 'Type',
+        sortable: true,
+        className: 'text-slate-400 capitalize',
+        accessor: c => c.certification_type,
+        render: c => c.certification_type.replace(/_/g, ' '),
+      },
+      {
+        key: 'status',
+        header: 'Status',
+        sortable: true,
+        accessor: c => c.status,
+        csv: c => statusLabel[c.status] || c.status,
+        render: c => <StatusBadge status={c.status} colorMap={statusBadge} className="rounded-full" />,
+      },
+      {
+        key: 'issued',
+        header: 'Issued',
+        sortable: true,
+        className: 'text-slate-400',
+        accessor: c => c.issue_date ?? '',
+        csv: c => formatDate(c.issue_date),
+        render: c => formatDate(c.issue_date),
+      },
+      {
+        key: 'expires',
+        header: 'Expires',
+        sortable: true,
+        className: 'text-slate-400',
+        accessor: c => c.expiration_date ?? '',
+        csv: c => formatDate(c.expiration_date),
+        render: c => formatDate(c.expiration_date),
+      },
+      {
+        key: 'authority',
+        header: 'Authority',
+        sortable: true,
+        className: 'text-slate-400',
+        accessor: c => c.issuing_authority ?? '',
+        render: c => c.issuing_authority || '-',
+      },
+    ],
+    []
+  );
 
-  const renderCertCard = useCallback((c: Certification) => (
-    <MobileDataCard
-      title={c.user_name || `User #${c.user_id}`}
-      subtitle={c.certification_name}
-      badge={<StatusBadge status={c.status} colorMap={statusBadge} className="rounded-full" />}
-      fields={[
-        { label: 'Type', value: <span className="capitalize">{c.certification_type.replace(/_/g, ' ')}</span> },
-        { label: 'Authority', value: c.issuing_authority || '-' },
-        { label: 'Issued', value: formatDate(c.issue_date) },
-        { label: 'Expires', value: formatDate(c.expiration_date) },
-      ]}
-    />
-  ), []);
+  const renderCertCard = useCallback(
+    (c: Certification) => (
+      <MobileDataCard
+        title={c.user_name || `User #${c.user_id}`}
+        subtitle={c.certification_name}
+        badge={<StatusBadge status={c.status} colorMap={statusBadge} className="rounded-full" />}
+        fields={[
+          { label: 'Type', value: <span className="capitalize">{c.certification_type.replace(/_/g, ' ')}</span> },
+          { label: 'Authority', value: c.issuing_authority || '-' },
+          { label: 'Issued', value: formatDate(c.issue_date) },
+          { label: 'Expires', value: formatDate(c.expiration_date) },
+        ]}
+      />
+    ),
+    []
+  );
 
-  const trainingColumns = useMemo<Array<DataTableColumn<TrainingRecord>>>(() => [
-    {
-      key: 'operator',
-      header: 'Operator',
-      sortable: true,
-      className: 'font-medium text-white',
-      accessor: (t) => t.user_name || `User #${t.user_id}`,
-    },
-    {
-      key: 'training',
-      header: 'Training',
-      sortable: true,
-      className: 'text-slate-300',
-      accessor: (t) => t.training_name,
-    },
-    {
-      key: 'type',
-      header: 'Type',
-      sortable: true,
-      className: 'text-slate-400 capitalize',
-      accessor: (t) => t.training_type ?? '',
-      render: (t) => (t.training_type || '-').replace(/_/g, ' '),
-    },
-    {
-      key: 'trainer',
-      header: 'Trainer',
-      sortable: true,
-      className: 'text-slate-400',
-      accessor: (t) => t.trainer ?? '',
-      render: (t) => t.trainer || '-',
-    },
-    {
-      key: 'date',
-      header: 'Date',
-      sortable: true,
-      className: 'text-slate-400',
-      accessor: (t) => t.training_date,
-      csv: (t) => formatDate(t.training_date),
-      render: (t) => formatDate(t.training_date),
-    },
-    {
-      key: 'hours',
-      header: 'Hours',
-      sortable: true,
-      align: 'right',
-      className: 'text-slate-400 tabular-nums',
-      accessor: (t) => t.hours ?? null,
-      csv: (t) => (t.hours != null ? t.hours : ''),
-      render: (t) => (t.hours != null ? `${t.hours}h` : '-'),
-    },
-    {
-      key: 'result',
-      header: 'Result',
-      sortable: true,
-      accessor: (t) => (t.passed ? 'Passed' : 'Failed'),
-      render: (t) => (
-        <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${t.passed ? 'bg-green-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'}`}>
-          {t.passed ? 'Passed' : 'Failed'}
-        </span>
-      ),
-    },
-    {
-      key: 'score',
-      header: 'Score',
-      sortable: true,
-      align: 'right',
-      className: 'text-slate-400 tabular-nums',
-      accessor: (t) => t.score ?? null,
-      csv: (t) => (t.score != null ? t.score : ''),
-      render: (t) => (t.score != null ? `${t.score}%` : '-'),
-    },
-  ], []);
+  const trainingColumns = useMemo<Array<DataTableColumn<TrainingRecord>>>(
+    () => [
+      {
+        key: 'operator',
+        header: 'Operator',
+        sortable: true,
+        className: 'font-medium text-white',
+        accessor: t => t.user_name || `User #${t.user_id}`,
+      },
+      {
+        key: 'training',
+        header: 'Training',
+        sortable: true,
+        className: 'text-slate-300',
+        accessor: t => t.training_name,
+      },
+      {
+        key: 'type',
+        header: 'Type',
+        sortable: true,
+        className: 'text-slate-400 capitalize',
+        accessor: t => t.training_type ?? '',
+        render: t => (t.training_type || '-').replace(/_/g, ' '),
+      },
+      {
+        key: 'trainer',
+        header: 'Trainer',
+        sortable: true,
+        className: 'text-slate-400',
+        accessor: t => t.trainer ?? '',
+        render: t => t.trainer || '-',
+      },
+      {
+        key: 'date',
+        header: 'Date',
+        sortable: true,
+        className: 'text-slate-400',
+        accessor: t => t.training_date,
+        csv: t => formatDate(t.training_date),
+        render: t => formatDate(t.training_date),
+      },
+      {
+        key: 'hours',
+        header: 'Hours',
+        sortable: true,
+        align: 'right',
+        className: 'text-slate-400 tabular-nums',
+        accessor: t => t.hours ?? null,
+        csv: t => (t.hours != null ? t.hours : ''),
+        render: t => (t.hours != null ? `${t.hours}h` : '-'),
+      },
+      {
+        key: 'result',
+        header: 'Result',
+        sortable: true,
+        accessor: t => (t.passed ? 'Passed' : 'Failed'),
+        render: t => (
+          <span
+            className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${t.passed ? 'bg-green-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'}`}
+          >
+            {t.passed ? 'Passed' : 'Failed'}
+          </span>
+        ),
+      },
+      {
+        key: 'score',
+        header: 'Score',
+        sortable: true,
+        align: 'right',
+        className: 'text-slate-400 tabular-nums',
+        accessor: t => t.score ?? null,
+        csv: t => (t.score != null ? t.score : ''),
+        render: t => (t.score != null ? `${t.score}%` : '-'),
+      },
+    ],
+    []
+  );
 
-  const renderTrainingCard = useCallback((t: TrainingRecord) => (
-    <MobileDataCard
-      title={t.user_name || `User #${t.user_id}`}
-      subtitle={t.training_name}
-      badge={
-        <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${t.passed ? 'bg-green-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'}`}>
-          {t.passed ? 'Passed' : 'Failed'}
-        </span>
-      }
-      fields={[
-        { label: 'Type', value: <span className="capitalize">{(t.training_type || '-').replace(/_/g, ' ')}</span> },
-        { label: 'Trainer', value: t.trainer || '-' },
-        { label: 'Date', value: formatDate(t.training_date) },
-        { label: 'Hours', value: t.hours != null ? `${t.hours}h` : '-' },
-        { label: 'Score', value: t.score != null ? `${t.score}%` : '-' },
-      ]}
-    />
-  ), []);
+  const renderTrainingCard = useCallback(
+    (t: TrainingRecord) => (
+      <MobileDataCard
+        title={t.user_name || `User #${t.user_id}`}
+        subtitle={t.training_name}
+        badge={
+          <span
+            className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${t.passed ? 'bg-green-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'}`}
+          >
+            {t.passed ? 'Passed' : 'Failed'}
+          </span>
+        }
+        fields={[
+          { label: 'Type', value: <span className="capitalize">{(t.training_type || '-').replace(/_/g, ' ')}</span> },
+          { label: 'Trainer', value: t.trainer || '-' },
+          { label: 'Date', value: formatDate(t.training_date) },
+          { label: 'Hours', value: t.hours != null ? `${t.hours}h` : '-' },
+          { label: 'Score', value: t.score != null ? `${t.score}%` : '-' },
+        ]}
+      />
+    ),
+    []
+  );
 
   // ── Render ─────────────────────────────────────────────────────
 
@@ -556,12 +612,18 @@ export default function OperatorCertifications() {
         </div>
         <div className="flex gap-2">
           {activeTab === 'certifications' && (
-            <button onClick={openCertModal} className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+            <button
+              onClick={openCertModal}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+            >
               <PlusIcon className="h-4 w-4" /> New Certification
             </button>
           )}
           {activeTab === 'training' && (
-            <button onClick={openTrainingModal} className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+            <button
+              onClick={openTrainingModal}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+            >
               <PlusIcon className="h-4 w-4" /> New Training Record
             </button>
           )}
@@ -607,10 +669,13 @@ export default function OperatorCertifications() {
       {/* Tabs */}
       <div className="border-b border-slate-700">
         <nav className="-mb-px flex gap-6">
-          {tabs.map((tab) => (
+          {tabs.map(tab => (
             <button
               key={tab.key}
-              onClick={() => { setActiveTab(tab.key); setSearchTerm(''); }}
+              onClick={() => {
+                setActiveTab(tab.key);
+                setSearchTerm('');
+              }}
               className={`whitespace-nowrap border-b-2 pb-3 text-sm font-medium transition-colors ${
                 activeTab === tab.key
                   ? 'border-blue-600 text-blue-600'
@@ -630,17 +695,25 @@ export default function OperatorCertifications() {
             <MagnifyingGlassIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
-              aria-label={activeTab === 'certifications' ? 'Search by operator, certification, type' : 'Search by operator, training, trainer'}
-              placeholder={activeTab === 'certifications' ? 'Search by operator, certification, type...' : 'Search by operator, training, trainer...'}
+              aria-label={
+                activeTab === 'certifications'
+                  ? 'Search by operator, certification, type'
+                  : 'Search by operator, training, trainer'
+              }
+              placeholder={
+                activeTab === 'certifications'
+                  ? 'Search by operator, certification, type...'
+                  : 'Search by operator, training, trainer...'
+              }
               value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+              onChange={e => setSearchTerm(e.target.value)}
               className="w-full rounded-lg border border-slate-600 py-2 pl-9 pr-3 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
           </div>
           {activeTab === 'certifications' && (
             <select
               value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
+              onChange={e => setStatusFilter(e.target.value)}
               className="rounded-lg border border-slate-600 py-2 pl-3 pr-8 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
             >
               <option value="">All Statuses</option>
@@ -659,7 +732,7 @@ export default function OperatorCertifications() {
         <DataTable
           columns={certColumns}
           data={filteredCerts}
-          rowKey={(c) => c.id}
+          rowKey={c => c.id}
           loading={loading}
           error={error ?? false}
           onRetry={loadCertifications}
@@ -689,7 +762,7 @@ export default function OperatorCertifications() {
         <DataTable
           columns={trainingColumns}
           data={filteredTraining}
-          rowKey={(t) => t.id}
+          rowKey={t => t.id}
           error={trainingError ?? false}
           onRetry={loadTrainingRecords}
           defaultSort={{ key: 'date', dir: 'desc' }}
@@ -718,9 +791,15 @@ export default function OperatorCertifications() {
         <div className="space-y-4">
           {/* Legend */}
           <div className="flex items-center gap-4 text-xs text-slate-400">
-            <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded bg-green-500/100" /> Expert / Proficient</span>
-            <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded bg-yellow-500/100" /> Competent</span>
-            <span className="flex items-center gap-1"><span className="inline-block h-3 w-3 rounded bg-red-500/100" /> Beginner / Untrained</span>
+            <span className="flex items-center gap-1">
+              <span className="inline-block h-3 w-3 rounded bg-green-500/100" /> Expert / Proficient
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="inline-block h-3 w-3 rounded bg-yellow-500/100" /> Competent
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="inline-block h-3 w-3 rounded bg-red-500/100" /> Beginner / Untrained
+            </span>
           </div>
 
           {skillMatrixError ? (
@@ -736,22 +815,35 @@ export default function OperatorCertifications() {
               <table className="min-w-full divide-y divide-slate-700 text-sm">
                 <thead className="bg-slate-800">
                   <tr>
-                    <th className="sticky left-0 z-10 bg-slate-800 px-4 py-3 text-left font-medium text-slate-400">Operator</th>
-                    {workCenters.map((wc) => (
-                      <th key={wc.id} className="px-4 py-3 text-center font-medium text-slate-400 whitespace-nowrap">{wc.name}</th>
+                    <th className="sticky left-0 z-10 bg-slate-800 px-4 py-3 text-left font-medium text-slate-400">
+                      Operator
+                    </th>
+                    {workCenters.map(wc => (
+                      <th key={wc.id} className="px-4 py-3 text-center font-medium text-slate-400 whitespace-nowrap">
+                        {wc.name}
+                      </th>
                     ))}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {operators.map((op) => (
+                  {operators.map(op => (
                     <tr key={op.id} className="hover:bg-slate-800">
-                      <td className="sticky left-0 z-10 bg-fd-panel px-4 py-3 font-medium text-white whitespace-nowrap">{op.name}</td>
-                      {workCenters.map((wc) => {
+                      <td className="sticky left-0 z-10 bg-fd-panel px-4 py-3 font-medium text-white whitespace-nowrap">
+                        {op.name}
+                      </td>
+                      {workCenters.map(wc => {
                         const entry = matrixMap.get(`${op.id}-${wc.id}`);
                         const level = entry?.skill_level ?? 0;
                         return (
-                          <td key={wc.id} className="px-4 py-3 text-center" aria-label={`${wc.name}: ${skillLabel(level)} (Level ${level})`}>
-                            <div className="flex flex-col items-center gap-0.5" title={`${skillLabel(level)} (Level ${level})`}>
+                          <td
+                            key={wc.id}
+                            className="px-4 py-3 text-center"
+                            aria-label={`${wc.name}: ${skillLabel(level)} (Level ${level})`}
+                          >
+                            <div
+                              className="flex flex-col items-center gap-0.5"
+                              title={`${skillLabel(level)} (Level ${level})`}
+                            >
                               <span className={`inline-block h-4 w-4 rounded-full ${skillColor(level)}`} />
                               <span className="text-[10px] text-slate-400 tabular-nums">{level}</span>
                             </div>
@@ -769,192 +861,337 @@ export default function OperatorCertifications() {
 
       {/* ── Create Certification Modal ────────────────────────────── */}
       <Modal open={showCertModal} onClose={() => setShowCertModal(false)} size="lg" closeOnBackdrop={false}>
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-white">New Certification</h2>
-              <button onClick={() => setShowCertModal(false)} className="text-slate-400 hover:text-slate-400">
-                <XMarkIcon className="h-5 w-5" />
-              </button>
-            </div>
-            <form onSubmit={handleCreateCert} className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="User ID" required labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                  {(field) => (
-                    <input {...field} type="number" required value={certForm.user_id} onChange={(e) => setCertForm({ ...certForm, user_id: e.target.value })}
-                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                  )}
-                </FormField>
-                <FormField label="Status" labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                  {(field) => (
-                    <select {...field} value={certForm.status} onChange={(e) => setCertForm({ ...certForm, status: e.target.value as CertStatus })}
-                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500">
-                      <option value="active">Active</option>
-                      <option value="pending">Pending</option>
-                      <option value="suspended">Suspended</option>
-                    </select>
-                  )}
-                </FormField>
-              </div>
-              <FormField label="Certification Name" required labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                {(field) => (
-                  <input {...field} type="text" required value={certForm.certification_name} onChange={(e) => setCertForm({ ...certForm, certification_name: e.target.value })}
-                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                )}
-              </FormField>
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Type" labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                  {(field) => (
-                    <input {...field} type="text" value={certForm.certification_type} onChange={(e) => setCertForm({ ...certForm, certification_type: e.target.value })}
-                      placeholder="e.g. welding, safety"
-                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                  )}
-                </FormField>
-                <FormField label="Level" labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                  {(field) => (
-                    <input {...field} type="text" value={certForm.level} onChange={(e) => setCertForm({ ...certForm, level: e.target.value })}
-                      placeholder="e.g. Level 1, Advanced"
-                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                  )}
-                </FormField>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Issuing Authority" labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                  {(field) => (
-                    <input {...field} type="text" value={certForm.issuing_authority} onChange={(e) => setCertForm({ ...certForm, issuing_authority: e.target.value })}
-                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                  )}
-                </FormField>
-                <FormField label="Certificate Number" labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                  {(field) => (
-                    <input {...field} type="text" value={certForm.certificate_number} onChange={(e) => setCertForm({ ...certForm, certificate_number: e.target.value })}
-                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                  )}
-                </FormField>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Issue Date" labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                  {(field) => (
-                    <input {...field} type="date" value={certForm.issue_date} onChange={(e) => setCertForm({ ...certForm, issue_date: e.target.value })}
-                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                  )}
-                </FormField>
-                <FormField label="Expiration Date" labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                  {(field) => (
-                    <input {...field} type="date" value={certForm.expiration_date} onChange={(e) => setCertForm({ ...certForm, expiration_date: e.target.value })}
-                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                  )}
-                </FormField>
-              </div>
-              <FormField label="Notes" labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                {(field) => (
-                  <textarea {...field} rows={2} value={certForm.notes} onChange={(e) => setCertForm({ ...certForm, notes: e.target.value })}
-                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                )}
-              </FormField>
-              <div className="flex justify-end gap-2 pt-2">
-                <button type="button" onClick={() => setShowCertModal(false)} className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800">Cancel</button>
-                <button type="submit" disabled={certCreateLoading} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
-                  {certCreateLoading ? 'Creating...' : 'Create Certification'}
-                </button>
-              </div>
-            </form>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-white">New Certification</h2>
+          <button onClick={() => setShowCertModal(false)} className="text-slate-400 hover:text-slate-400">
+            <XMarkIcon className="h-5 w-5" />
+          </button>
+        </div>
+        <form onSubmit={handleCreateCert} className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Employee" required labelClassName="block text-xs font-medium text-slate-400 mb-1">
+              {field => (
+                <EntityPicker
+                  {...field}
+                  kind="user"
+                  value={certForm.user_id}
+                  onChange={value => setCertForm(f => ({ ...f, user_id: value }))}
+                />
+              )}
+            </FormField>
+            <FormField label="Status" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+              {field => (
+                <select
+                  {...field}
+                  value={certForm.status}
+                  onChange={e => setCertForm({ ...certForm, status: e.target.value as CertStatus })}
+                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                >
+                  <option value="active">Active</option>
+                  <option value="pending">Pending</option>
+                  <option value="suspended">Suspended</option>
+                </select>
+              )}
+            </FormField>
+          </div>
+          <FormField label="Certification Name" required labelClassName="block text-xs font-medium text-slate-400 mb-1">
+            {field => (
+              <input
+                {...field}
+                type="text"
+                required
+                value={certForm.certification_name}
+                onChange={e => setCertForm({ ...certForm, certification_name: e.target.value })}
+                className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            )}
+          </FormField>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Type" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={certForm.certification_type}
+                  onChange={e => setCertForm({ ...certForm, certification_type: e.target.value })}
+                  placeholder="e.g. welding, safety"
+                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              )}
+            </FormField>
+            <FormField label="Level" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={certForm.level}
+                  onChange={e => setCertForm({ ...certForm, level: e.target.value })}
+                  placeholder="e.g. Level 1, Advanced"
+                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              )}
+            </FormField>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Issuing Authority" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={certForm.issuing_authority}
+                  onChange={e => setCertForm({ ...certForm, issuing_authority: e.target.value })}
+                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              )}
+            </FormField>
+            <FormField label="Certificate Number" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={certForm.certificate_number}
+                  onChange={e => setCertForm({ ...certForm, certificate_number: e.target.value })}
+                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              )}
+            </FormField>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Issue Date" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="date"
+                  value={certForm.issue_date}
+                  onChange={e => setCertForm({ ...certForm, issue_date: e.target.value })}
+                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              )}
+            </FormField>
+            <FormField label="Expiration Date" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="date"
+                  value={certForm.expiration_date}
+                  onChange={e => setCertForm({ ...certForm, expiration_date: e.target.value })}
+                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              )}
+            </FormField>
+          </div>
+          <FormField label="Notes" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+            {field => (
+              <textarea
+                {...field}
+                rows={2}
+                value={certForm.notes}
+                onChange={e => setCertForm({ ...certForm, notes: e.target.value })}
+                className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            )}
+          </FormField>
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              onClick={() => setShowCertModal(false)}
+              className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={certCreateLoading}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              {certCreateLoading ? 'Creating...' : 'Create Certification'}
+            </button>
+          </div>
+        </form>
+        {mutationError && (
+          <p role="alert" className="text-red-300 p-3">
+            {mutationError}
+          </p>
+        )}
       </Modal>
 
       {/* ── Create Training Record Modal ──────────────────────────── */}
       <Modal open={showTrainingModal} onClose={() => setShowTrainingModal(false)} size="lg" closeOnBackdrop={false}>
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-white">New Training Record</h2>
-              <button onClick={() => setShowTrainingModal(false)} className="text-slate-400 hover:text-slate-400">
-                <XMarkIcon className="h-5 w-5" />
-              </button>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-white">New Training Record</h2>
+          <button onClick={() => setShowTrainingModal(false)} className="text-slate-400 hover:text-slate-400">
+            <XMarkIcon className="h-5 w-5" />
+          </button>
+        </div>
+        <form onSubmit={handleCreateTraining} className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Employee" required labelClassName="block text-xs font-medium text-slate-400 mb-1">
+              {field => (
+                <EntityPicker
+                  {...field}
+                  kind="user"
+                  value={trainingForm.user_id}
+                  onChange={value => setTrainingForm(f => ({ ...f, user_id: value }))}
+                />
+              )}
+            </FormField>
+            <FormField label="Training Type" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={trainingForm.training_type}
+                  onChange={e => setTrainingForm({ ...trainingForm, training_type: e.target.value })}
+                  placeholder="e.g. safety, technical"
+                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              )}
+            </FormField>
+          </div>
+          <FormField label="Training Name" required labelClassName="block text-xs font-medium text-slate-400 mb-1">
+            {field => (
+              <input
+                {...field}
+                type="text"
+                required
+                value={trainingForm.training_name}
+                onChange={e => setTrainingForm({ ...trainingForm, training_name: e.target.value })}
+                className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            )}
+          </FormField>
+          <FormField label="Description" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+            {field => (
+              <textarea
+                {...field}
+                rows={2}
+                value={trainingForm.description}
+                onChange={e => setTrainingForm({ ...trainingForm, description: e.target.value })}
+                className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            )}
+          </FormField>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Trainer" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={trainingForm.trainer}
+                  onChange={e => setTrainingForm({ ...trainingForm, trainer: e.target.value })}
+                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              )}
+            </FormField>
+            <FormField label="Work Center" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+              {field => (
+                <EntityPicker
+                  {...field}
+                  kind="workCenter"
+                  value={trainingForm.work_center_id}
+                  onChange={value => setTrainingForm(f => ({ ...f, work_center_id: value }))}
+                />
+              )}
+            </FormField>
+          </div>
+          <div className="grid grid-cols-3 gap-4">
+            <FormField label="Training Date" required labelClassName="block text-xs font-medium text-slate-400 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="date"
+                  required
+                  value={trainingForm.training_date}
+                  onChange={e => setTrainingForm({ ...trainingForm, training_date: e.target.value })}
+                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              )}
+            </FormField>
+            <FormField label="Completion Date" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="date"
+                  value={trainingForm.completion_date}
+                  onChange={e => setTrainingForm({ ...trainingForm, completion_date: e.target.value })}
+                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              )}
+            </FormField>
+            <FormField label="Hours" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="number"
+                  step="0.5"
+                  value={trainingForm.hours}
+                  onChange={e => setTrainingForm({ ...trainingForm, hours: e.target.value })}
+                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              )}
+            </FormField>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="passed"
+                aria-label="Passed"
+                checked={trainingForm.passed}
+                onChange={e => setTrainingForm({ ...trainingForm, passed: e.target.checked })}
+                className="h-4 w-4 rounded border-slate-600 text-blue-600 focus:ring-blue-500"
+              />
+              <label htmlFor="passed" className="text-sm text-slate-300">
+                Passed
+              </label>
             </div>
-            <form onSubmit={handleCreateTraining} className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="User ID" required labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                  {(field) => (
-                    <input {...field} type="number" required value={trainingForm.user_id} onChange={(e) => setTrainingForm({ ...trainingForm, user_id: e.target.value })}
-                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                  )}
-                </FormField>
-                <FormField label="Training Type" labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                  {(field) => (
-                    <input {...field} type="text" value={trainingForm.training_type} onChange={(e) => setTrainingForm({ ...trainingForm, training_type: e.target.value })}
-                      placeholder="e.g. safety, technical"
-                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                  )}
-                </FormField>
-              </div>
-              <FormField label="Training Name" required labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                {(field) => (
-                  <input {...field} type="text" required value={trainingForm.training_name} onChange={(e) => setTrainingForm({ ...trainingForm, training_name: e.target.value })}
-                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                )}
-              </FormField>
-              <FormField label="Description" labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                {(field) => (
-                  <textarea {...field} rows={2} value={trainingForm.description} onChange={(e) => setTrainingForm({ ...trainingForm, description: e.target.value })}
-                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                )}
-              </FormField>
-              <div className="grid grid-cols-2 gap-4">
-                <FormField label="Trainer" labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                  {(field) => (
-                    <input {...field} type="text" value={trainingForm.trainer} onChange={(e) => setTrainingForm({ ...trainingForm, trainer: e.target.value })}
-                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                  )}
-                </FormField>
-                <FormField label="Work Center ID" labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                  {(field) => (
-                    <input {...field} type="number" value={trainingForm.work_center_id} onChange={(e) => setTrainingForm({ ...trainingForm, work_center_id: e.target.value })}
-                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                  )}
-                </FormField>
-              </div>
-              <div className="grid grid-cols-3 gap-4">
-                <FormField label="Training Date" required labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                  {(field) => (
-                    <input {...field} type="date" required value={trainingForm.training_date} onChange={(e) => setTrainingForm({ ...trainingForm, training_date: e.target.value })}
-                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                  )}
-                </FormField>
-                <FormField label="Completion Date" labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                  {(field) => (
-                    <input {...field} type="date" value={trainingForm.completion_date} onChange={(e) => setTrainingForm({ ...trainingForm, completion_date: e.target.value })}
-                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                  )}
-                </FormField>
-                <FormField label="Hours" labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                  {(field) => (
-                    <input {...field} type="number" step="0.5" value={trainingForm.hours} onChange={(e) => setTrainingForm({ ...trainingForm, hours: e.target.value })}
-                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                  )}
-                </FormField>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="flex items-center gap-2">
-                  <input type="checkbox" id="passed" aria-label="Passed" checked={trainingForm.passed} onChange={(e) => setTrainingForm({ ...trainingForm, passed: e.target.checked })}
-                    className="h-4 w-4 rounded border-slate-600 text-blue-600 focus:ring-blue-500" />
-                  <label htmlFor="passed" className="text-sm text-slate-300">Passed</label>
-                </div>
-                <FormField label="Score (%)" labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                  {(field) => (
-                    <input {...field} type="number" min="0" max="100" value={trainingForm.score} onChange={(e) => setTrainingForm({ ...trainingForm, score: e.target.value })}
-                      className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                  )}
-                </FormField>
-              </div>
-              <FormField label="Notes" labelClassName="block text-xs font-medium text-slate-400 mb-1">
-                {(field) => (
-                  <textarea {...field} rows={2} value={trainingForm.notes} onChange={(e) => setTrainingForm({ ...trainingForm, notes: e.target.value })}
-                    className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                )}
-              </FormField>
-              <div className="flex justify-end gap-2 pt-2">
-                <button type="button" onClick={() => setShowTrainingModal(false)} className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800">Cancel</button>
-                <button type="submit" disabled={trainingCreateLoading} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
-                  {trainingCreateLoading ? 'Creating...' : 'Create Training Record'}
-                </button>
-              </div>
-            </form>
+            <FormField label="Score (%)" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="number"
+                  min="0"
+                  max="100"
+                  value={trainingForm.score}
+                  onChange={e => setTrainingForm({ ...trainingForm, score: e.target.value })}
+                  className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              )}
+            </FormField>
+          </div>
+          <FormField label="Notes" labelClassName="block text-xs font-medium text-slate-400 mb-1">
+            {field => (
+              <textarea
+                {...field}
+                rows={2}
+                value={trainingForm.notes}
+                onChange={e => setTrainingForm({ ...trainingForm, notes: e.target.value })}
+                className="w-full rounded-lg border border-slate-600 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            )}
+          </FormField>
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              onClick={() => setShowTrainingModal(false)}
+              className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={trainingCreateLoading}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              {trainingCreateLoading ? 'Creating...' : 'Create Training Record'}
+            </button>
+          </div>
+        </form>
+        {mutationError && (
+          <p role="alert" className="text-red-300 p-3">
+            {mutationError}
+          </p>
+        )}
       </Modal>
     </div>
   );

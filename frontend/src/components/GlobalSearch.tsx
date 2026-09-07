@@ -34,6 +34,8 @@ import {
   BellAlertIcon,
 } from '@heroicons/react/24/outline';
 import api from '../services/api';
+import { usePermissions } from '../hooks/usePermissions';
+import { canAccessPath } from '../utils/routeAccess';
 
 interface SearchResult {
   id: number;
@@ -144,6 +146,9 @@ interface GlobalSearchProps {
 }
 
 export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
+  const { can } = usePermissions();
+  const [searchError, setSearchError] = useState('');
+  const [recentError, setRecentError] = useState(false);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
   const [recentItems, setRecentItems] = useState<SearchResult[]>([]);
@@ -155,85 +160,74 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
   const recentFetchRef = useRef<number>(0);
   const searchSeqRef = useRef(0);
 
-  // Fetch recent items when dialog opens
+  // Opening owns reset; the asynchronous recents response never clears typed input.
   useEffect(() => {
-    if (isOpen) {
-      const now = Date.now();
-      if (!recentItems.length || now - recentFetchRef.current > 60000) {
-        recentFetchRef.current = now;
-        fetchRecentItems();
-      }
-      setQuery('');
-      setResults([]);
-      setSelectedIndex(0);
-      // Focus input after a short delay to allow animation
-      setTimeout(() => inputRef.current?.focus(), 100);
+    if (!isOpen) return;
+    let active = true;
+    setQuery('');
+    setResults([]);
+    setSearchError('');
+    setSelectedIndex(0);
+    const now = Date.now();
+    if (!recentFetchRef.current || now - recentFetchRef.current > 60000) {
+      api
+        .getRecentItems()
+        .then(data => {
+          if (!active) return;
+          recentFetchRef.current = Date.now();
+          setRecentItems(data);
+          setRecentError(false);
+        })
+        .catch(() => {
+          if (active) setRecentError(true);
+        });
     }
-  }, [isOpen, recentItems.length]);
+    const focusTimer = setTimeout(() => inputRef.current?.focus(), 100);
+    return () => {
+      active = false;
+      clearTimeout(focusTimer);
+    };
+  }, [isOpen]);
 
-  const fetchRecentItems = async () => {
-    try {
-      const data = await api.getRecentItems();
-      setRecentItems(data);
-    } catch (error) {
-      console.error('Failed to fetch recent items:', error);
-    }
-  };
-
-  // Debounced search
-  const search = useCallback(async (searchQuery: string) => {
-    if (!searchQuery.trim()) {
-      setResults([]);
-      return;
-    }
-
+  const search = useCallback(async (searchQuery: string, seq: number) => {
+    if (!searchQuery.trim()) return;
     setIsLoading(true);
-    const seq = ++searchSeqRef.current;
+    setSearchError('');
     try {
-      const shouldTryNaturalLanguage =
+      const natural =
         /\s/.test(searchQuery.trim()) &&
         /(late|overdue|waiting|material|blocked|stuck|hold|laser|weld|brake|hot|rush|critical)/i.test(searchQuery);
-      const data = shouldTryNaturalLanguage
-        ? await api.naturalLanguageSearch(searchQuery)
-        : await api.search(searchQuery);
-      if (seq === searchSeqRef.current) {
-        const nextResults = data.results || [];
-        setResults(nextResults);
-        setSelectedIndex(0);
-        if (nextResults.length === 0) {
-          window.dispatchEvent(
-            new CustomEvent('werco:friction', { detail: { type: 'failed_search', query: searchQuery.trim() } })
-          );
-        }
-      }
-    } catch (error) {
-      console.error('Search failed:', error);
+      const data = natural ? await api.naturalLanguageSearch(searchQuery) : await api.search(searchQuery);
+      if (seq !== searchSeqRef.current) return;
+      const nextResults = data.results || [];
+      setResults(nextResults);
+      setSelectedIndex(0);
+      if (!nextResults.length)
+        window.dispatchEvent(
+          new CustomEvent('werco:friction', { detail: { type: 'failed_search', query: searchQuery.trim() } })
+        );
+    } catch {
       if (seq === searchSeqRef.current) {
         setResults([]);
+        setSearchError('Search is unavailable. Your query is preserved. Try again.');
       }
     } finally {
-      if (seq === searchSeqRef.current) {
-        setIsLoading(false);
-      }
+      if (seq === searchSeqRef.current) setIsLoading(false);
     }
   }, []);
 
-  // Handle query change with debouncing
   useEffect(() => {
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current);
-    }
-
-    debounceRef.current = setTimeout(() => {
-      search(query);
-    }, 200);
-
+    const seq = ++searchSeqRef.current;
+    setResults([]);
+    setSearchError('');
+    setSelectedIndex(0);
+    setIsLoading(isOpen && !!query.trim());
+    if (isOpen && query.trim()) debounceRef.current = setTimeout(() => search(query, seq), 200);
     return () => {
-      if (debounceRef.current) {
-        clearTimeout(debounceRef.current);
-      }
+      ++searchSeqRef.current;
+      if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [query, search]);
+  }, [query, search, isOpen]);
 
   // Handle result selection
   const handleSelect = (result: SearchResult | { url: string }) => {
@@ -243,12 +237,12 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
 
   // Keyboard navigation
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    const items = query ? displayResults : recentItems;
+    const items = showQuickActions ? permittedQuickActions : displayResults;
 
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault();
-        setSelectedIndex(prev => Math.min(prev + 1, items.length - 1));
+        setSelectedIndex(prev => Math.min(prev + 1, Math.max(0, items.length - 1)));
         break;
       case 'ArrowUp':
         e.preventDefault();
@@ -268,16 +262,28 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
 
   const normalizedQuery = query.trim().toLowerCase();
   const matchingCommandActions = normalizedQuery
-    ? commandActions.filter((action) =>
-        `${action.title} ${action.subtitle || ''}`.toLowerCase().includes(normalizedQuery)
+    ? commandActions.filter(
+        action =>
+          canAccessPath(action.url, can) &&
+          `${action.title} ${action.subtitle || ''}`.toLowerCase().includes(normalizedQuery)
       )
     : [];
-  const displayResults = query ? [...matchingCommandActions, ...results] : recentItems;
-  const showQuickActions = !query && recentItems.length === 0;
+  const displayResults = (normalizedQuery ? [...matchingCommandActions, ...results] : recentItems).filter(result =>
+    canAccessPath(result.url, can)
+  );
+  const permittedQuickActions = quickActions.filter(action => canAccessPath(action.url, can));
+  const showQuickActions = !normalizedQuery && displayResults.length === 0;
+  const activeName = showQuickActions
+    ? permittedQuickActions[selectedIndex]?.name
+    : displayResults[selectedIndex]?.title;
+
+  useEffect(() => {
+    document.getElementById(`workspace-search-option-${selectedIndex}`)?.scrollIntoView?.({ block: 'nearest' });
+  }, [selectedIndex]);
 
   return (
     <Transition.Root show={isOpen} as={Fragment}>
-      <Dialog as="div" className="relative z-50" onClose={onClose}>
+      <Dialog as="div" className="relative z-[80]" onClose={onClose}>
         <Transition.Child
           as={Fragment}
           enter="ease-out duration-200"
@@ -304,6 +310,10 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
               className="mx-auto max-w-2xl transform overflow-hidden rounded-sm shadow-2xl transition-all"
               style={{ background: 'var(--fd-panel)', border: '1px solid var(--fd-line-bright)' }}
             >
+              <Dialog.Title className="sr-only">Search workspace and actions</Dialog.Title>
+              <p className="sr-only" role="status" aria-live="polite">
+                {isLoading ? 'Searching' : activeName ? `Selected: ${activeName}` : 'No selection'}
+              </p>
               {/* Search Input */}
               <div className="relative">
                 <MagnifyingGlassIcon className="pointer-events-none absolute left-4 top-4.5 h-5 w-5 text-fd-mute" />
@@ -314,12 +324,19 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
                   placeholder="Search across your workspace..."
                   aria-label="Search across your workspace"
                   value={query}
-                  onChange={e => setQuery(e.target.value)}
+                  onChange={e => {
+                    ++searchSeqRef.current;
+                    setQuery(e.target.value);
+                  }}
                   onKeyDown={handleKeyDown}
                 />
                 {query && (
                   <button
-                    onClick={() => setQuery('')}
+                    onClick={() => {
+                      ++searchSeqRef.current;
+                      setQuery('');
+                      inputRef.current?.focus();
+                    }}
                     className="absolute right-3 top-3.5 p-1.5 rounded-[3px] text-fd-mute hover:text-fd-ink hover:bg-white/5 transition-colors"
                     aria-label="Clear search"
                   >
@@ -330,6 +347,19 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
 
               {/* Results */}
               <div className="max-h-[60vh] overflow-y-auto" style={{ borderTop: '1px solid var(--fd-line)' }}>
+                {searchError && (
+                  <div role="alert" className="p-4 text-amber-200">
+                    <p>{searchError}</p>
+                    <button className="btn-secondary mt-2" onClick={() => search(query, ++searchSeqRef.current)}>
+                      Retry search
+                    </button>
+                  </div>
+                )}
+                {recentError && !query && (
+                  <p role="status" className="px-4 py-2 text-fd-mute">
+                    Recent items are unavailable. Quick actions are still available.
+                  </p>
+                )}
                 {isLoading && (
                   <div className="py-8 text-center">
                     <span className="du-loading du-loading-spinner du-loading-md text-fd-blue" />
@@ -355,7 +385,7 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
                         const isSelected = index === selectedIndex;
 
                         return (
-                          <li key={`${result.type}-${result.id}`}>
+                          <li key={`${result.type}-${result.id}`} id={`workspace-search-option-${index}`}>
                             <button
                               type="button"
                               className={`
@@ -371,14 +401,19 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2">
                                   <span className="font-medium text-fd-ink truncate">{result.title}</span>
-                                  <span className={`inline-flex px-1.5 py-0.5 rounded-[3px] text-[10px] font-mono uppercase tracking-wide ${config.color}`}>{config.label}</span>
+                                  <span
+                                    className={`inline-flex px-1.5 py-0.5 rounded-[3px] text-[10px] font-mono uppercase tracking-wide ${config.color}`}
+                                  >
+                                    {config.label}
+                                  </span>
                                 </div>
-                                {result.subtitle && (
-                                  <p className="text-sm text-fd-mute truncate">{result.subtitle}</p>
-                                )}
+                                {result.subtitle && <p className="text-sm text-fd-mute truncate">{result.subtitle}</p>}
                               </div>
                               {isSelected && (
-                                <kbd className="hidden sm:inline-flex items-center px-1.5 py-0.5 font-mono text-[10px] text-fd-faint rounded-[3px]" style={{ border: '1px solid var(--fd-line)' }}>
+                                <kbd
+                                  className="hidden sm:inline-flex items-center px-1.5 py-0.5 font-mono text-[10px] text-fd-faint rounded-[3px]"
+                                  style={{ border: '1px solid var(--fd-line)' }}
+                                >
                                   Enter
                                 </kbd>
                               )}
@@ -397,11 +432,12 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
                       Quick Actions
                     </div>
                     <ul>
-                      {quickActions.map(action => (
-                        <li key={action.url}>
+                      {permittedQuickActions.map((action, index) => (
+                        <li key={action.url} id={`workspace-search-option-${index}`}>
                           <button
                             type="button"
-                            className="w-full text-left px-4 py-3 cursor-pointer flex items-center gap-3 hover:bg-white/[0.02] transition-colors"
+                            className={`w-full text-left px-4 py-3 cursor-pointer flex items-center gap-3 hover:bg-white/[0.02] transition-colors ${selectedIndex === index ? 'bg-white/[0.06]' : ''}`}
+                            onMouseEnter={() => setSelectedIndex(index)}
                             onClick={() => handleSelect(action)}
                           >
                             <action.icon className="h-5 w-5 text-fd-mute" />
@@ -414,7 +450,7 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
                 )}
 
                 {/* No Results */}
-                {!isLoading && query && displayResults.length === 0 && (
+                {!isLoading && !searchError && normalizedQuery && displayResults.length === 0 && (
                   <div className="py-12 text-center">
                     <MagnifyingGlassIcon className="mx-auto h-10 w-10 text-fd-faint" />
                     <p className="mt-3 text-fd-body">No results found for "{query}"</p>
@@ -432,15 +468,30 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
               >
                 <div className="flex items-center gap-4">
                   <span className="flex items-center gap-1.5">
-                    <kbd className="inline-flex items-center px-1.5 py-0.5 rounded-[3px] text-fd-faint" style={{ border: '1px solid var(--fd-line)' }}>Up/Down</kbd>
+                    <kbd
+                      className="inline-flex items-center px-1.5 py-0.5 rounded-[3px] text-fd-faint"
+                      style={{ border: '1px solid var(--fd-line)' }}
+                    >
+                      Up/Down
+                    </kbd>
                     Navigate
                   </span>
                   <span className="flex items-center gap-1.5">
-                    <kbd className="inline-flex items-center px-1.5 py-0.5 rounded-[3px] text-fd-faint" style={{ border: '1px solid var(--fd-line)' }}>Enter</kbd>
+                    <kbd
+                      className="inline-flex items-center px-1.5 py-0.5 rounded-[3px] text-fd-faint"
+                      style={{ border: '1px solid var(--fd-line)' }}
+                    >
+                      Enter
+                    </kbd>
                     Select
                   </span>
                   <span className="flex items-center gap-1.5">
-                    <kbd className="inline-flex items-center px-1.5 py-0.5 rounded-[3px] text-fd-faint" style={{ border: '1px solid var(--fd-line)' }}>Esc</kbd>
+                    <kbd
+                      className="inline-flex items-center px-1.5 py-0.5 rounded-[3px] text-fd-faint"
+                      style={{ border: '1px solid var(--fd-line)' }}
+                    >
+                      Esc
+                    </kbd>
                     Close
                   </span>
                 </div>

@@ -79,7 +79,7 @@ import api from '../services/api';
 import { usePermissions } from '../hooks/usePermissions';
 import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
 import { Button, EmptyState, ErrorState, StatusBadge, UnitBadge, useToast } from '../components/ui';
-import { formatCentralDate, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../utils/centralTime';
+import { formatCentralDate, formatCentralTime, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../utils/centralTime';
 import {
   changeoverLabel,
   nestChangeover,
@@ -281,6 +281,11 @@ export default function DispatchBoard() {
   // A re-read that did not land: the board on screen may not be what the server
   // (and the kiosks) have, so say so instead of looking authoritative.
   const [staleNotice, setStaleNotice] = useState<string | null>(null);
+  const [lastRefreshed, setLastRefreshed] = useState<string | null>(null);
+  const [updatesDeferred, setUpdatesDeferred] = useState(false);
+  const interactionRef = useRef(false);
+  const interactionEpochRef = useRef(0);
+  const boardRequestRef = useRef(0);
   const [statusMessage, setStatusMessage] = useState('');
   const [dragSource, setDragSource] = useState<DragSource | null>(null);
   const [dropSlot, setDropSlot] = useState<DropSlot | null>(null);
@@ -309,6 +314,9 @@ export default function DispatchBoard() {
   // from where it sits to the bottom of the window. Null until first measured.
   const [boardMaxHeight, setBoardMaxHeight] = useState<number | null>(null);
 
+  interactionRef.current = !!dragSource || movingOperationId !== null || reorderingColumnIds.length > 0;
+  useEffect(() => { interactionEpochRef.current += 1; }, [dragSource, movingOperationId, reorderingColumnIds]);
+
   const nextReorderSeq = useCallback((workCenterId: number) => {
     const seq = (reorderSeqRef.current.get(workCenterId) || 0) + 1;
     reorderSeqRef.current.set(workCenterId, seq);
@@ -321,7 +329,13 @@ export default function DispatchBoard() {
   );
 
   /** Resolves false when the re-read failed — callers must not report success then. */
-  const load = useCallback(async (options?: { silent?: boolean }): Promise<boolean> => {
+  const load = useCallback(async (options?: { silent?: boolean; background?: boolean }): Promise<boolean> => {
+    if (options?.background && interactionRef.current) {
+      setUpdatesDeferred(true);
+      return false;
+    }
+    const requestId = ++boardRequestRef.current;
+    const epoch = interactionEpochRef.current;
     if (options?.silent) {
       setRefreshing(true);
     } else {
@@ -329,24 +343,45 @@ export default function DispatchBoard() {
     }
     try {
       const data = await api.getDispatchBoard();
+      if (requestId !== boardRequestRef.current) return false;
+      if (options?.background && (interactionRef.current || epoch !== interactionEpochRef.current)) {
+        setUpdatesDeferred(true);
+        return false;
+      }
+      setLastRefreshed(new Date().toISOString());
+      setUpdatesDeferred(false);
       setColumns(data?.work_centers || []);
       setError(null);
       setStaleNotice(null);
       return true;
     } catch (err) {
+      if (requestId !== boardRequestRef.current) return false;
       const detail = serverDetail(err, 'Could not load the dispatch board.');
       setError(detail);
       setStaleNotice(detail);
       return false;
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (requestId === boardRequestRef.current) { setLoading(false); setRefreshing(false); }
     }
   }, []);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    const refreshVisible = () => {
+      if (document.visibilityState === 'visible') void load({ silent: true, background: true });
+    };
+    const interval = window.setInterval(refreshVisible, 30000);
+    window.addEventListener('focus', refreshVisible);
+    document.addEventListener('visibilitychange', refreshVisible);
+    return () => { window.clearInterval(interval); window.removeEventListener('focus', refreshVisible); document.removeEventListener('visibilitychange', refreshVisible); };
+  }, [load]);
+
+  useEffect(() => {
+    if (updatesDeferred && !interactionRef.current) void load({ silent: true, background: true });
+  }, [updatesDeferred, dragSource, movingOperationId, reorderingColumnIds, load]);
 
   /**
    * Anomalies first, then work. Deactivated machines that still hold queued
@@ -941,6 +976,7 @@ export default function DispatchBoard() {
 
   return (
     <div className="space-y-3">
+      <p className="text-xs text-slate-400" aria-live="polite">{lastRefreshed ? `Updated ${formatCentralTime(lastRefreshed)} CT · refreshes every 30 seconds while visible` : 'Waiting for current dispatch data'}{updatesDeferred ? ' · Updates deferred until the current interaction finishes' : ''}</p>
       <BoardHeader
         totals={totals}
         statusMessage={statusMessage}
@@ -1307,7 +1343,7 @@ function DispatchCard({
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="font-mono text-sm font-semibold text-slate-100">{row.work_order_number}</span>
+            <a href={`/work-orders/${row.work_order_id}`} className="font-mono text-sm font-semibold text-slate-100 underline decoration-slate-600 underline-offset-2" aria-label={`Open work order ${row.work_order_number}`}>{row.work_order_number}</a>
             <UnitBadge unitNumber={row.unit_number} size="sm" />
             {running ? (
               <span className="rounded border border-blue-400/60 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-widest text-blue-300">

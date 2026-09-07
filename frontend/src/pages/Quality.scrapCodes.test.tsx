@@ -65,7 +65,7 @@ function renderQuality() {
 
 async function openScrapCodesTab() {
   renderQuality();
-  fireEvent.click(await screen.findByRole('button', { name: /scrap codes/i }));
+  fireEvent.click(await screen.findByRole('tab', { name: /scrap codes/i }));
   await waitFor(() => expect(mockedApi.getScrapReasonCodes).toHaveBeenCalled());
 }
 

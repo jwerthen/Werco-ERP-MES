@@ -23,7 +23,7 @@ const OPTIONS: SelectOption<string>[] = [
 ];
 
 function getTrigger() {
-  return screen.getByRole('button', { name: /select an option/i });
+  return screen.getByRole('combobox', { name: /select an option/i });
 }
 
 describe('SelectField', () => {
@@ -31,14 +31,7 @@ describe('SelectField', () => {
     it('opens the listbox on trigger click, renders options, and selects on click', async () => {
       const user = userEvent.setup();
       const onChange = jest.fn();
-      render(
-        <SelectField
-          value=""
-          options={OPTIONS}
-          onChange={onChange}
-          ariaLabel="Select an option"
-        />,
-      );
+      render(<SelectField value="" options={OPTIONS} onChange={onChange} ariaLabel="Select an option" />);
 
       // Closed by default — no listbox rendered.
       expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
@@ -62,14 +55,7 @@ describe('SelectField', () => {
   describe('keyboard navigation from the trigger button', () => {
     it('ArrowDown/ArrowUp move the highlight, Enter selects, Escape closes', () => {
       const onChange = jest.fn();
-      render(
-        <SelectField
-          value=""
-          options={OPTIONS}
-          onChange={onChange}
-          ariaLabel="Select an option"
-        />,
-      );
+      render(<SelectField value="" options={OPTIONS} onChange={onChange} ariaLabel="Select an option" />);
 
       const trigger = getTrigger();
       trigger.focus();
@@ -93,14 +79,7 @@ describe('SelectField', () => {
 
     it('Escape closes the menu without selecting', () => {
       const onChange = jest.fn();
-      render(
-        <SelectField
-          value=""
-          options={OPTIONS}
-          onChange={onChange}
-          ariaLabel="Select an option"
-        />,
-      );
+      render(<SelectField value="" options={OPTIONS} onChange={onChange} ariaLabel="Select an option" />);
 
       const trigger = getTrigger();
       trigger.focus();
@@ -122,15 +101,7 @@ describe('SelectField', () => {
     it('focuses the search input on open', async () => {
       jest.useFakeTimers();
       try {
-        render(
-          <SelectField
-            value=""
-            options={OPTIONS}
-            onChange={jest.fn()}
-            searchable
-            ariaLabel="Select an option"
-          />,
-        );
+        render(<SelectField value="" options={OPTIONS} onChange={jest.fn()} searchable ariaLabel="Select an option" />);
 
         fireEvent.click(getTrigger());
         // Focus move is deferred a tick via setTimeout(…, 0).
@@ -145,15 +116,7 @@ describe('SelectField', () => {
 
     it('ArrowDown then Enter on the search input selects the highlighted filtered option', () => {
       const onChange = jest.fn();
-      render(
-        <SelectField
-          value=""
-          options={OPTIONS}
-          onChange={onChange}
-          searchable
-          ariaLabel="Select an option"
-        />,
-      );
+      render(<SelectField value="" options={OPTIONS} onChange={onChange} searchable ariaLabel="Select an option" />);
 
       fireEvent.click(getTrigger());
       const searchInput = screen.getByPlaceholderText('Search...');
@@ -162,7 +125,7 @@ describe('SelectField', () => {
       fireEvent.change(searchInput, { target: { value: 'b' } });
       const filtered = screen.getAllByRole('option');
       expect(filtered).toHaveLength(2);
-      expect(filtered.map((el) => el.textContent)).toEqual(['Banana', 'Blueberry']);
+      expect(filtered.map(el => el.textContent)).toEqual(['Banana', 'Blueberry']);
 
       // ArrowDown on the SEARCH INPUT moves highlight 0 -> 1 (Blueberry).
       fireEvent.keyDown(searchInput, { key: 'ArrowDown' });
@@ -178,15 +141,7 @@ describe('SelectField', () => {
       // Proves Enter is handled on the input at all — not a no-op — even without
       // an ArrowDown first (highlight defaults to index 0 of the filtered list).
       const onChange = jest.fn();
-      render(
-        <SelectField
-          value=""
-          options={OPTIONS}
-          onChange={onChange}
-          searchable
-          ariaLabel="Select an option"
-        />,
-      );
+      render(<SelectField value="" options={OPTIONS} onChange={onChange} searchable ariaLabel="Select an option" />);
 
       fireEvent.click(getTrigger());
       const searchInput = screen.getByPlaceholderText('Search...');
@@ -199,15 +154,7 @@ describe('SelectField', () => {
 
     it('Escape on the search input closes the menu', () => {
       const onChange = jest.fn();
-      render(
-        <SelectField
-          value=""
-          options={OPTIONS}
-          onChange={onChange}
-          searchable
-          ariaLabel="Select an option"
-        />,
-      );
+      render(<SelectField value="" options={OPTIONS} onChange={onChange} searchable ariaLabel="Select an option" />);
 
       fireEvent.click(getTrigger());
       const searchInput = screen.getByPlaceholderText('Search...');

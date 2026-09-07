@@ -237,7 +237,13 @@ class POCreate(POBase):
     lines: List[POLineCreate] = Field(default_factory=list)
 
 
+class PODraftLineUpdate(POLineBase):
+    id: Optional[int] = Field(None, gt=0)
+
+
 class POUpdate(BaseModel):
+    expected_updated_at: Optional[datetime] = None
+    lines: Optional[List[PODraftLineUpdate]] = Field(None, min_length=1)
     version: int = Field(..., ge=0, description="Version for optimistic locking")
     required_date: Optional[date] = None
     expected_date: Optional[date] = None

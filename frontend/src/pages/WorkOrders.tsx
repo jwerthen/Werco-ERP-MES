@@ -1,3 +1,4 @@
+import { getPriorityClasses, getPriorityLabel } from '../utils/priority';
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import api from '../services/api';
@@ -53,13 +54,7 @@ import SaveAsTemplateModal from '../components/workorders/SaveAsTemplateModal';
 import { createdWorkOrders } from '../components/workorders/UseTemplateModal';
 import WorkOrderTemplatesPanel from '../components/workorders/WorkOrderTemplatesPanel';
 
-const priorityConfig: Record<number, { bg: string; text: string; label: string }> = {
-  1: { bg: 'bg-red-500/20', text: 'text-red-400', label: 'Critical' },
-  2: { bg: 'bg-red-500/10', text: 'text-red-600', label: 'High' },
-  3: { bg: 'bg-amber-500/10', text: 'text-amber-400', label: 'Medium' },
-  4: { bg: 'bg-blue-500/10', text: 'text-blue-600', label: 'Normal' },
-  5: { bg: 'bg-surface-100', text: 'text-surface-600', label: 'Low' },
-};
+
 
 const EXCLUDED_PART_TYPES = ['purchased', 'hardware', 'raw_material'];
 // A finished job's due date is its promise date, and OTD scores against
@@ -132,8 +127,7 @@ function StatusCell({ status }: { status: WorkOrderStatus }) {
 }
 
 function PriorityCell({ priority }: { priority: number }) {
-  const cfg = priorityConfig[priority] || priorityConfig[4];
-  return <span className={`badge ${cfg.bg} ${cfg.text}`}>P{priority}</span>;
+  return <span className={`badge ${getPriorityClasses(priority)}`} title={getPriorityLabel(priority)}>{getPriorityLabel(priority)}</span>;
 }
 
 function ProgressCell({ wo }: { wo: WorkOrderSummary }) {
@@ -363,7 +357,7 @@ function buildWorkOrderColumns({
           <Link
             to={`/work-orders/${wo.id}`}
             onClick={(e) => e.stopPropagation()}
-            className="font-semibold text-werco-600 hover:text-werco-700 hover:underline"
+            className="font-semibold text-fd-link hover:text-sky-200 hover:underline"
           >
             {wo.work_order_number}
           </Link>
@@ -531,6 +525,7 @@ export default function WorkOrders() {
   const [searchParams, setSearchParams] = useSearchParams();
   const statusFilter = searchParams.get('status') ?? '';
   const customerFilter = searchParams.get('customer') ?? '';
+  const dashboardScope = ['overdue', 'due_today'].includes(searchParams.get('scope') || '') ? searchParams.get('scope') : null;
   const hideCOTS = searchParams.get('cots') !== '1';
   const groupParam = searchParams.get('group');
   const groupBy: GroupBy =
@@ -1255,6 +1250,9 @@ export default function WorkOrders() {
 
   const filteredWorkOrders = useMemo(() => {
     return workOrders.filter(wo => {
+      if (dashboardScope && TERMINAL_WO_STATUSES.includes(wo.status)) return false;
+      if (dashboardScope === 'overdue' && !isWorkOrderOverdue(wo)) return false;
+      if (dashboardScope === 'due_today' && !(wo.due_date && isDateTodayInCentral(wo.due_date))) return false;
       if (hideCOTS && wo.part_type && EXCLUDED_PART_TYPES.includes(wo.part_type)) {
         return false;
       }
@@ -1263,7 +1261,7 @@ export default function WorkOrders() {
       }
       return true;
     });
-  }, [workOrders, customerFilter, hideCOTS]);
+  }, [workOrders, customerFilter, hideCOTS, dashboardScope]);
 
   // The row being edited can disappear from the table — a refetch (someone else
   // completed the job), or one of the CLIENT-side filters (customer, hide-COTS)
@@ -1339,6 +1337,10 @@ export default function WorkOrders() {
         <p className="page-subtitle">Manage and track manufacturing orders</p>
       </div>
       <div className="page-actions w-full sm:w-auto" data-tour="wo-create">
+        <Link to="/work-orders/new" className="btn-primary w-full sm:w-auto">
+          <PlusIcon className="h-5 w-5 mr-2 flex-shrink-0" />
+          New Work Order
+        </Link>
         {canImportNests && (
           <Button
             variant="secondary"
@@ -1359,10 +1361,7 @@ export default function WorkOrders() {
             New from template
           </Button>
         )}
-        <Link to="/work-orders/new" className="btn-primary w-full sm:w-auto">
-          <PlusIcon className="h-5 w-5 mr-2 flex-shrink-0" />
-          New Work Order
-        </Link>
+
       </div>
       {canImportNests && (
         <LaserNestImportWizard
@@ -1611,6 +1610,7 @@ export default function WorkOrders() {
         />
       </MiniStatStrip>
 
+      {dashboardScope && <div className="flex flex-wrap items-center gap-3 text-sm text-slate-300" role="status"><span>Dashboard: {dashboardScope === 'overdue' ? 'Overdue' : 'Due today'} work orders · Central time</span><button className="text-blue-300 underline" onClick={() => setFilterParam('scope', '')}>Clear dashboard filter</button></div>}
       {/* Filters */}
       <div className="card rounded-sm border-fd-line p-2.5 sm:p-3" data-tour="wo-filters">
         <div className="grid grid-cols-1 xs:grid-cols-2 lg:grid-cols-[minmax(18rem,1fr)_11rem_13rem_11rem] gap-2 sm:gap-3">
@@ -1945,7 +1945,6 @@ interface WorkOrderMobileCardProps {
 }
 
 const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder: wo, onDelete, onDuplicate, onSaveTemplate, onRelease, isReleasing, isDeleting }: WorkOrderMobileCardProps) {
-  const priority = priorityConfig[wo.priority] || priorityConfig[4];
   const overdue = isWorkOrderOverdue(wo);
   const canRelease = onRelease && wo.status === 'draft';
   const canDelete = Boolean(onDelete);
@@ -1993,7 +1992,7 @@ const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder:
           </div>
           <div>
             <p className="text-xs uppercase tracking-wide text-surface-500">Priority</p>
-            <span className={`badge mt-1 ${priority.bg} ${priority.text}`}>P{wo.priority}</span>
+            <span className={`badge mt-1 ${getPriorityClasses(wo.priority)}`}>{getPriorityLabel(wo.priority)}</span>
           </div>
         </div>
 

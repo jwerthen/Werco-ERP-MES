@@ -12,7 +12,7 @@
  * prune the DOM), so assertions prefer role/anchor queries that stay stable.
  */
 import React from 'react';
-import { render, screen, fireEvent, within } from '@testing-library/react';
+import { render, screen, fireEvent, within, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import Dashboard from './Dashboard';
@@ -123,12 +123,27 @@ const dashboardData = {
         quantity_ordered: 100,
         quantity_complete: 70,
       },
-      operation: { id: 1, operation_number: '10', name: 'Laser cut', status: 'in_progress', sequence: 1, quantity_complete: 70, quantity_scrapped: 0 },
+      operation: {
+        id: 1,
+        operation_number: '10',
+        name: 'Laser cut',
+        status: 'in_progress',
+        sequence: 1,
+        quantity_complete: 70,
+        quantity_scrapped: 0,
+      },
       work_center: { id: 1, code: 'LASER-1', name: 'Laser cell 1', status: 'in_use', type: 'laser' },
     },
   ],
   recent_completions: [
-    { work_order_number: 'WO-2998', operation_name: 'Deburr', work_center_name: 'Finish', operator_name: 'Alex Reyes', completed_at: '2026-06-28T17:00:00Z', quantity_complete: 10 },
+    {
+      work_order_number: 'WO-2998',
+      operation_name: 'Deburr',
+      work_center_name: 'Finish',
+      operator_name: 'Alex Reyes',
+      completed_at: '2026-06-28T17:00:00Z',
+      quantity_complete: 10,
+    },
   ],
 };
 
@@ -143,19 +158,26 @@ const heatmap = {
       work_center_code: 'LASER-1',
       work_center_name: 'Laser cell 1',
       capacity_hours_per_day: 8,
-      days: ['2026-06-28', '2026-06-29', '2026-06-30', '2026-07-01', '2026-07-02', '2026-07-03', '2026-07-04'].map((date, i) => ({
-        date,
-        scheduled_hours: i,
-        capacity_hours: 8,
-        utilization_pct: i * 12,
-        job_count: i,
-        overloaded: false,
-      })),
+      days: ['2026-06-28', '2026-06-29', '2026-06-30', '2026-07-01', '2026-07-02', '2026-07-03', '2026-07-04'].map(
+        (date, i) => ({
+          date,
+          scheduled_hours: i,
+          capacity_hours: 8,
+          utilization_pct: i * 12,
+          job_count: i,
+          overloaded: false,
+        })
+      ),
     },
   ],
 };
 
-const renderDashboard = () => render(<MemoryRouter><Dashboard /></MemoryRouter>);
+const renderDashboard = () =>
+  render(
+    <MemoryRouter>
+      <Dashboard />
+    </MemoryRouter>
+  );
 
 beforeAll(() => {
   // jsdom doesn't implement scrollIntoView; the cross-links call it.
@@ -303,7 +325,7 @@ test('multi-assignment (crew stations): chip clicks CYCLE through every assignme
   expect(chip).toHaveAttribute('title', expect.stringContaining('· 2 jobs'));
 
   const getById = jest.spyOn(document, 'getElementById');
-  const anchorCalls = () => getById.mock.calls.map((c) => c[0]).filter((id) => String(id).startsWith('assign-'));
+  const anchorCalls = () => getById.mock.calls.map(c => c[0]).filter(id => String(id).startsWith('assign-'));
 
   fireEvent.click(chip); // first assignment (sorted by clock_in)
   fireEvent.click(chip); // second assignment
@@ -358,4 +380,37 @@ describe('Live Shop Activity renders the operation number through the shared hel
     expect(row.textContent).not.toContain('Op —');
     expect(row.textContent).not.toContain('·');
   });
+});
+
+it('renders shop data before a slow quality widget and labels its later failure', async () => {
+  let fail!: (reason: Error) => void;
+  mockedApi.getQualitySummary.mockReturnValue(
+    new Promise((_, reject) => {
+      fail = reject;
+    })
+  );
+  renderDashboard();
+  expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeInTheDocument();
+  const qualityTile = screen.getByText('Open NCRs').closest('.card')!;
+  expect(within(qualityTile as HTMLElement).getByText('Loading…')).toBeInTheDocument();
+  await act(async () => {
+    fail(new Error('offline'));
+  });
+  expect(within(qualityTile as HTMLElement).getByText('Unavailable')).toBeInTheDocument();
+  expect(screen.getByText(/Quality: Could not refresh/)).toBeInTheDocument();
+});
+
+it('retains displayed shop data and marks a cache fallback stale after a failed refresh', async () => {
+  renderDashboard();
+  await screen.findByRole('heading', { name: 'Dashboard' });
+  mockedApi.getDashboardWithCache.mockResolvedValue({
+    data: dashboardData as any,
+    changed: false,
+    fromCache: true,
+    stale: true,
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh dashboard' }));
+  expect(await screen.findByText(/Connection interrupted/)).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Live Shop Activity' })).toBeInTheDocument();
+  expect(screen.getByRole('link', { name: /Overdue/ })).toHaveAttribute('href', '/work-orders?scope=overdue&cots=1');
 });

@@ -361,7 +361,7 @@ const vendorRowFor = (code: string): HTMLTableRowElement => {
 
 /** Switch to the Vendors tab and wait for the live book. */
 const openVendorsTab = async () => {
-  fireEvent.click(screen.getByRole('button', { name: /vendors/i }));
+  fireEvent.click(screen.getByRole('tab', { name: /vendors/i }));
   await screen.findByText('VND-005');
 };
 
@@ -411,7 +411,7 @@ describe('Purchasing — PO delete', () => {
   test('confirm dialog calls api.deletePurchaseOrder with the PO id', async () => {
     mockedApi.deletePurchaseOrder.mockResolvedValueOnce({ message: 'deleted', can_restore: true });
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
 
     // Row-level Delete (the desktop DataTable + mobile card both render one; either
     // opens the same confirm dialog). Click the first, then confirm in the dialog.
@@ -425,7 +425,7 @@ describe('Purchasing — PO delete', () => {
     const detail = 'Cannot delete purchase order PO-2001: it has received material. Void the receipt(s) first, then delete.';
     mockedApi.deletePurchaseOrder.mockRejectedValueOnce(http(400, detail));
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Delete' })[0]);
     fireEvent.click(confirmDialogDeleteButton());
@@ -441,10 +441,10 @@ describe('Purchasing — vendor delete', () => {
   test('confirm dialog calls api.deleteVendor with the vendor id', async () => {
     mockedApi.deleteVendor.mockResolvedValueOnce({ message: 'deleted', can_restore: true });
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
 
     // Switch to the Vendors tab, then delete the vendor.
-    fireEvent.click(screen.getByRole('button', { name: /vendors/i }));
+    fireEvent.click(screen.getByRole('tab', { name: /vendors/i }));
     await screen.findByText('VND-005');
     fireEvent.click(screen.getAllByRole('button', { name: 'Delete' })[0]);
     fireEvent.click(confirmDialogDeleteButton());
@@ -457,13 +457,13 @@ describe('Purchasing — RBAC gating', () => {
   test('Delete controls are hidden for a supervisor (below the admin/manager gate)', async () => {
     mockAuthUser = { id: 9, role: 'supervisor' };
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
 
     // No PO Delete trigger on the orders tab.
     expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
 
     // ...and none on the vendors tab either.
-    fireEvent.click(screen.getByRole('button', { name: /vendors/i }));
+    fireEvent.click(screen.getByRole('tab', { name: /vendors/i }));
     await screen.findByText('VND-005');
     expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
     expect(mockedApi.deletePurchaseOrder).not.toHaveBeenCalled();
@@ -483,7 +483,7 @@ describe('Purchasing — RBAC gating', () => {
 describe('Purchasing — the deleted-PO view', () => {
   test('the default page load does NOT send deleted_only — the live list is untouched', async () => {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
 
     // Called with NO arguments at all, exactly as before the param existed. Asserted as
     // zero-args rather than `{ deleted_only: false }` on purpose: axios omits undefined
@@ -498,7 +498,7 @@ describe('Purchasing — the deleted-PO view', () => {
 
   test('switching to Deleted fetches with deleted_only and shows only the deleted book', async () => {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
 
     await openDeletedView();
 
@@ -516,7 +516,7 @@ describe('Purchasing — the deleted-PO view', () => {
   // that, or Restore could never reach exactly the rows people go looking for.
   test('renders a CANCELLED deleted PO — the default status exclusion is not re-applied', async () => {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedView();
 
     expect(screen.getAllByText('PO-3002').length).toBeGreaterThan(0);
@@ -528,7 +528,7 @@ describe('Purchasing — the deleted-PO view', () => {
   // will refuse.
   test('re-fetches the deleted book on every entry into the view', async () => {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
 
     await openDeletedView();
     expect(deletedReads()).toHaveLength(1);
@@ -568,7 +568,7 @@ describe('Purchasing — deleted rows are distinguishable from live ones', () =>
   // of the three, and Restore is the only affordance on it.
   test('deleted rows carry NO Print, Send or Delete — only Restore', async () => {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedView();
 
     expect(screen.queryAllByRole('button', { name: 'Print' })).toHaveLength(0);
@@ -583,7 +583,7 @@ describe('Purchasing — deleted rows are distinguishable from live ones', () =>
   // control that can only ever 400 (the endpoint refuses a PO that is not deleted).
   test('the live view shows no restore control', async () => {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
 
     expect(screen.getAllByText('PO-2001').length).toBeGreaterThan(0);
     expect(screen.getAllByRole('button', { name: 'Delete' }).length).toBeGreaterThan(0);
@@ -600,7 +600,7 @@ describe('Purchasing — deleted rows are distinguishable from live ones', () =>
   // used getAllByText(...).length > 0 and passed with the desktop cell fully broken.
   test('renders deleted_at through the Central-time helper in BOTH renderers, never the raw ISO', async () => {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedView();
 
     const central = formatCentralDateTime(DELETED_AT_3001);
@@ -636,7 +636,7 @@ describe('Purchasing — restoring a deleted PO', () => {
       return { message: 'Purchase order restored' };
     });
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedView();
 
     const activeReadsBefore = mockedApi.getPurchaseOrders.mock.calls.length - deletedReads().length;
@@ -669,7 +669,7 @@ describe('Purchasing — restoring a deleted PO', () => {
     const detail = 'Purchase order PO-3001 is not deleted.';
     mockedApi.restorePurchaseOrder.mockRejectedValueOnce(http(400, detail));
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedView();
 
     fireEvent.click(restoreButtons('PO-3001')[0]);
@@ -694,7 +694,7 @@ describe('Purchasing — restoring a deleted PO', () => {
   test('falls back to a generic message when the server sends no detail, and does NOT re-read', async () => {
     mockedApi.restorePurchaseOrder.mockRejectedValueOnce(http(500));
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedView();
 
     fireEvent.click(restoreButtons('PO-3001')[0]);
@@ -718,7 +718,7 @@ describe('Purchasing — restoring a deleted PO', () => {
         }),
     );
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedView();
 
     fireEvent.click(restoreButtons('PO-3001')[0]);
@@ -773,7 +773,7 @@ describe('Purchasing — restoring a PO the active list will not show', () => {
       return { message: 'Purchase order restored' };
     });
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedView();
 
     fireEvent.click(restoreButtons('PO-3002')[0]);
@@ -793,7 +793,7 @@ describe('Purchasing — restoring a PO the active list will not show', () => {
       return { message: 'Purchase order restored' };
     });
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedView();
 
     fireEvent.click(restoreButtons('PO-3001')[0]);
@@ -812,14 +812,14 @@ describe('Purchasing — restoring a PO the active list will not show', () => {
 describe('Purchasing — the Deleted view does not persist across tabs', () => {
   test('a tab round-trip lands back on the Active book, not a stale archive', async () => {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedView();
     expect(deletedReads()).toHaveLength(1);
 
     // Leave for Vendors and come back to Orders.
-    fireEvent.click(screen.getByRole('button', { name: /vendors/i }));
+    fireEvent.click(screen.getByRole('tab', { name: /vendors/i }));
     await screen.findByText('VND-005');
-    fireEvent.click(screen.getByRole('button', { name: /purchase orders/i }));
+    fireEvent.click(screen.getByRole('tab', { name: /purchase orders/i }));
 
     // The ACTIVE book is what renders. Left as-is, poView would still be 'deleted' and the
     // archive would re-appear with rows nobody re-fetched — the one thing showPOView's
@@ -843,7 +843,7 @@ describe('Purchasing — restore RBAC gating', () => {
   it.each(['admin', 'manager'])('offers Restore on every deleted row for %s', async (role) => {
     mockAuthUser = { id: 1, role };
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedView();
 
     expect(restoreButtons('PO-3001').length).toBeGreaterThan(0);
@@ -858,7 +858,7 @@ describe('Purchasing — restore RBAC gating', () => {
     async (role) => {
       mockAuthUser = { id: 9, role };
       renderPurchasing();
-      await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+      await screen.findByRole('heading', { name: 'Purchasing' });
       await openDeletedView();
 
       // The view opened and the rows are there — the negatives below are about the
@@ -912,7 +912,7 @@ describe('Purchasing — restore RBAC gating', () => {
 describe('Purchasing — the deleted-vendor view', () => {
   test('the default page load does NOT send deleted_only — the live vendor list is untouched', async () => {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
 
     // Called with NO arguments at all, exactly as before the param existed. Asserted as
     // zero-args rather than `{ deleted_only: false }` on purpose: axios omits undefined
@@ -929,7 +929,7 @@ describe('Purchasing — the deleted-vendor view', () => {
 
   test('switching to Deleted fetches with deleted_only ALONE and shows only the deleted book', async () => {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
 
     await openDeletedVendorView();
 
@@ -955,7 +955,7 @@ describe('Purchasing — the deleted-vendor view', () => {
   // will refuse.
   test('re-fetches the deleted vendor book on every entry into the view', async () => {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
 
     await openDeletedVendorView();
     expect(deletedVendorReads()).toHaveLength(1);
@@ -970,14 +970,14 @@ describe('Purchasing — the deleted-vendor view', () => {
 
   test('a tab round-trip lands back on the Active vendor book, not a stale archive', async () => {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedVendorView();
     expect(deletedVendorReads()).toHaveLength(1);
 
     // Leave for Orders and come back to Vendors.
-    fireEvent.click(screen.getByRole('button', { name: /purchase orders/i }));
+    fireEvent.click(screen.getByRole('tab', { name: /purchase orders/i }));
     await screen.findAllByText('PO-2001');
-    fireEvent.click(screen.getByRole('button', { name: /vendors/i }));
+    fireEvent.click(screen.getByRole('tab', { name: /vendors/i }));
 
     await screen.findByText('VND-005');
     expect(screen.getByRole('heading', { name: 'Vendors' })).toBeInTheDocument();
@@ -988,7 +988,7 @@ describe('Purchasing — the deleted-vendor view', () => {
 describe('Purchasing — deleted vendors are distinguishable from live ones', () => {
   test('the deleted view is labelled, banner-marked, dimmed, and states the two books apart', async () => {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedVendorView();
 
     // Heading flips, and the switch reports which book you are in to assistive tech.
@@ -1013,7 +1013,7 @@ describe('Purchasing — deleted vendors are distinguishable from live ones', ()
   // Restore is the only affordance the archive offers.
   test('deleted vendor rows carry NO Edit or Delete — only Restore', async () => {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedVendorView();
 
     expect(screen.queryAllByRole('button', { name: 'Edit' })).toHaveLength(0);
@@ -1027,7 +1027,7 @@ describe('Purchasing — deleted vendors are distinguishable from live ones', ()
   // that can only ever 400 (the endpoint refuses a vendor that is not deleted).
   test('the live vendor view shows no restore control', async () => {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openVendorsTab();
 
     expect(screen.getAllByText('VND-005').length).toBeGreaterThan(0);
@@ -1047,7 +1047,7 @@ describe('Purchasing — deleted vendors are distinguishable from live ones', ()
   // the other can satisfy.
   test('renders deleted_at through the Central-time helper in BOTH renderers, never the raw ISO', async () => {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedVendorView();
 
     const central = formatCentralDateTime(VENDOR_DELETED_AT_901);
@@ -1088,7 +1088,7 @@ describe('Purchasing — deleted vendors are distinguishable from live ones', ()
 describe('Purchasing — a vendor that will restore INACTIVE says so before you click', () => {
   test('the archive flags the pre-delete state per row, in BOTH renderers', async () => {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedVendorView();
 
     // The column exists at all — the header is what makes the badges below legible rather
@@ -1133,7 +1133,7 @@ describe('Purchasing — a vendor that will restore INACTIVE says so before you 
   test('hides the column entirely when the server does not report the prior state', async () => {
     deletedVendorBook = deletedVendorsWithoutRestoreState;
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedVendorView();
 
     expect(screen.queryAllByRole('columnheader', { name: /Restores As/i })).toHaveLength(0);
@@ -1193,7 +1193,7 @@ describe('Purchasing — the inactive-vendor view', () => {
   test('sends active_only=false — the bare call cannot return a deactivated vendor', async () => {
     inactiveVendorBook = inactiveVendors;
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
 
     // The default page load still sends NOTHING. A leaked param here would change what
     // the live vendor list returns, which is the one thing this must not do.
@@ -1212,7 +1212,7 @@ describe('Purchasing — the inactive-vendor view', () => {
   test('lists the deactivated vendor and keeps it off the active list', async () => {
     inactiveVendorBook = inactiveVendors;
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openVendorsTab();
 
     // Not on the selectable list...
@@ -1232,7 +1232,7 @@ describe('Purchasing — the inactive-vendor view', () => {
   test('the row action is the audited edit form, and it opens with is_active unticked', async () => {
     inactiveVendorBook = inactiveVendors;
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openInactiveVendorView();
 
     // Deliberately NOT a "Reactivate" button: reactivating an approved supplier is an
@@ -1252,7 +1252,7 @@ describe('Purchasing — the inactive-vendor view', () => {
   test('explains the state, and points at it from the deleted view', async () => {
     inactiveVendorBook = inactiveVendors;
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
 
     // The archive tells the operator where a restored-inactive vendor will end up —
     // otherwise the restore succeeds into a screen they have no reason to open.
@@ -1271,7 +1271,7 @@ describe('Purchasing — the inactive-vendor view', () => {
   test('an empty book renders the empty state, not a blank panel', async () => {
     inactiveVendorBook = [];
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openVendorsTab();
     fireEvent.click(vendorViewButton('Inactive'));
 
@@ -1291,7 +1291,7 @@ describe('Purchasing — restoring a deleted vendor', () => {
       return { message: 'Vendor restored' };
     });
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedVendorView();
 
     const activeReadsBefore = activeVendorReadCount();
@@ -1324,7 +1324,7 @@ describe('Purchasing — restoring a deleted vendor', () => {
     const detail = 'Vendor is not deleted';
     mockedApi.restoreVendor.mockRejectedValueOnce(http(400, detail));
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedVendorView();
 
     fireEvent.click(restoreVendorButtons('Rusted Fastener Co')[0]);
@@ -1348,7 +1348,7 @@ describe('Purchasing — restoring a deleted vendor', () => {
   test('falls back to a generic message when the server sends no detail, and does NOT re-read', async () => {
     mockedApi.restoreVendor.mockRejectedValueOnce(http(500));
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedVendorView();
 
     fireEvent.click(restoreVendorButtons('Rusted Fastener Co')[0]);
@@ -1372,7 +1372,7 @@ describe('Purchasing — restoring a deleted vendor', () => {
         }),
     );
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedVendorView();
 
     fireEvent.click(restoreVendorButtons('Rusted Fastener Co')[0]);
@@ -1429,7 +1429,7 @@ describe('Purchasing — restoring a vendor the live list will not show', () => 
       return { message: 'Vendor restored' };
     });
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedVendorView();
 
     fireEvent.click(restoreVendorButtons('Rusted Fastener Co')[0]);
@@ -1452,7 +1452,7 @@ describe('Purchasing — restoring a vendor the live list will not show', () => 
       return { message: 'Vendor restored' };
     });
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedVendorView();
 
     fireEvent.click(restoreVendorButtons('Beta Alloys Supply')[0]);
@@ -1478,7 +1478,7 @@ describe('Purchasing — vendor restore RBAC gating', () => {
   it.each(['admin', 'manager'])('offers Restore on every deleted vendor row for %s', async (role) => {
     mockAuthUser = { id: 1, role };
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedVendorView();
 
     expect(restoreVendorButtons('Rusted Fastener Co').length).toBeGreaterThan(0);
@@ -1493,7 +1493,7 @@ describe('Purchasing — vendor restore RBAC gating', () => {
     async (role) => {
       mockAuthUser = { id: 9, role };
       renderPurchasing();
-      await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+      await screen.findByRole('heading', { name: 'Purchasing' });
       await openDeletedVendorView();
 
       // The view opened and the rows are there — the negatives below are about the button,
@@ -1550,7 +1550,7 @@ describe('Purchasing — a vendor whose prior state was never recorded', () => {
   test('a NULL prior state is shown as Inactive, never Active — the owner ruling for legacy rows', async () => {
     deletedVendorBook = legacyDeletedVendors;
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedVendorView();
 
     // The server answered (null IS an answer — COALESCE resolves it to false), so the
@@ -1590,7 +1590,7 @@ describe('Purchasing — a vendor whose prior state was never recorded', () => {
       return { message: 'Vendor restored' };
     });
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedVendorView();
 
     fireEvent.click(restoreVendorButtons('Rusted Fastener Co')[0]);
@@ -1613,7 +1613,7 @@ describe('Purchasing — a vendor whose prior state was never recorded', () => {
   test('a MIXED book shows the column, and makes no claim for the row it has no answer for', async () => {
     deletedVendorBook = [deletedVendors[0], deletedVendorsWithoutRestoreState[1]];
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedVendorView();
 
     expect(screen.getByRole('columnheader', { name: /Restores As/i })).toBeInTheDocument();
@@ -1651,7 +1651,7 @@ describe('Purchasing — the deleted-vendor archive load states', () => {
     });
 
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openVendorsTab();
     fireEvent.click(vendorViewButton('Deleted'));
 
@@ -1677,7 +1677,7 @@ describe('Purchasing — the deleted-vendor archive load states', () => {
   test('an empty archive says so, and offers nothing to restore', async () => {
     deletedVendorBook = [];
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openVendorsTab();
     fireEvent.click(vendorViewButton('Deleted'));
 
@@ -1716,7 +1716,7 @@ describe('Purchasing — a stale archive response cannot paint the view', () => 
     });
 
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openVendorsTab();
 
     // Read #1 — left hanging.
@@ -1780,7 +1780,7 @@ describe('Purchasing — restore when the follow-up reload fails', () => {
     });
 
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
     await openDeletedVendorView();
 
     // VND-901 is the row that WOULD draw the warning on a successful reload — it was

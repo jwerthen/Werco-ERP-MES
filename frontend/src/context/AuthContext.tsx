@@ -28,7 +28,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [sessionWarning, setSessionWarning] = useState(false);
-  
+
+  const sessionWarningRef = useRef(false);
   const idleTimerRef = useRef<NodeJS.Timeout | null>(null);
   const warningTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -54,20 +55,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
     setSessionWarning(false);
     sessionStorage.removeItem('user');
-    window.location.href = '/login?reason=idle';
+    if (window.location.pathname.startsWith('/kiosk')) return;
+    const returnTo = window.location.pathname + window.location.search + window.location.hash;
+    window.location.href = `/login?reason=idle&returnTo=${encodeURIComponent(returnTo)}`;
   }, [clearTimers]);
 
   const resetIdleTimer = useCallback(() => {
     if (!user) return;
-    
+
     clearTimers();
+    sessionWarningRef.current = false;
     setSessionWarning(false);
-    
+
     // Set warning timer (fires 1 minute before logout)
     warningTimerRef.current = setTimeout(() => {
+      sessionWarningRef.current = true;
       setSessionWarning(true);
     }, IDLE_TIMEOUT - IDLE_WARNING);
-    
+
     // Set logout timer
     idleTimerRef.current = setTimeout(() => {
       handleLogoutDueToIdle();
@@ -83,9 +88,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!user) return;
 
     const activityEvents = ['mousedown', 'keydown', 'scroll', 'touchstart'];
-    
+
     const handleActivity = () => {
-      if (!sessionWarning) {
+      if (!sessionWarningRef.current) {
         resetIdleTimer();
       }
     };
@@ -103,7 +108,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
       clearTimers();
     };
-  }, [user, sessionWarning, resetIdleTimer, clearTimers]);
+  }, [user, resetIdleTimer, clearTimers]);
 
   // Kiosk badge-screen fallback wiring: on /kiosk paths the axios 401
   // interceptor clears the session WITHOUT navigating to /login
@@ -267,17 +272,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{
-      user,
-      isAuthenticated: !!user,
-      isLoading,
-      sessionWarning,
-      login,
-      loginWithEmployeeId,
-      logout,
-      logoutWithEmployeeId,
-      extendSession
-    }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        isAuthenticated: !!user,
+        isLoading,
+        sessionWarning,
+        login,
+        loginWithEmployeeId,
+        logout,
+        logoutWithEmployeeId,
+        extendSession,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

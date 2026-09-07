@@ -150,7 +150,7 @@ describe('Quality — CAR and FAI modals share the guard wiring', () => {
   it('New CAR: dirty Cancel prompts and a decline preserves the entry', async () => {
     confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(false);
     renderQuality();
-    fireEvent.click(await screen.findByRole('button', { name: 'CAR' }));
+    fireEvent.click(await screen.findByRole('tab', { name: 'CAR' }));
     // The empty CAR list also renders an EmptyState "New CAR" action — either opens the modal.
     fireEvent.click((await screen.findAllByRole('button', { name: /new car/i }))[0]);
     await screen.findByRole('heading', { name: 'New Corrective Action Request' });
@@ -165,7 +165,7 @@ describe('Quality — CAR and FAI modals share the guard wiring', () => {
   it('New FAI: dirty Cancel prompts; confirming closes without creating', async () => {
     confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
     renderQuality();
-    fireEvent.click(await screen.findByRole('button', { name: 'FAI' }));
+    fireEvent.click(await screen.findByRole('tab', { name: 'FAI' }));
     // The empty FAI list also renders an EmptyState "New FAI" action — either opens the modal.
     fireEvent.click((await screen.findAllByRole('button', { name: /new fai/i }))[0]);
     const heading = await screen.findByRole('heading', { name: /New First Article Inspection/i });

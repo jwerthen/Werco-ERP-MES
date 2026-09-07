@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { ExclamationTriangleIcon } from '@heroicons/react/24/outline';
+import { Modal } from './ui/Modal';
 import { useAuth } from '../context/AuthContext';
 
 export default function SessionWarningModal() {
@@ -28,11 +29,21 @@ export default function SessionWarningModal() {
   if (!sessionWarning) return null;
 
   return (
-    <div className="du-modal du-modal-open">
+    <Modal
+      open={sessionWarning}
+      onClose={extendSession}
+      size="md"
+      ariaLabelledBy="session-warning-title"
+      closeOnBackdrop={false}
+      closeOnEscape={false}
+      padded={false}
+    >
       <div className="du-modal-box max-w-md p-0 overflow-hidden">
         <div className="du-alert du-alert-warning rounded-none border-0 border-b border-amber-200/60">
           <ExclamationTriangleIcon className="h-6 w-6" />
-          <h3 className="text-lg font-semibold">Session Timeout Warning</h3>
+          <h3 id="session-warning-title" className="text-lg font-semibold">
+            Session Timeout Warning
+          </h3>
         </div>
 
         <div className="px-6 py-5 space-y-4">
@@ -52,6 +63,6 @@ export default function SessionWarningModal() {
           </button>
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }

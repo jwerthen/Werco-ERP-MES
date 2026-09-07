@@ -1,6 +1,8 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useConnectionStatus } from '../hooks/useConnectionStatus';
+import { canAccessPath } from '../utils/routeAccess';
 import { useTour } from '../context/TourContext';
 import { getTour, shouldAutoStartGettingStarted } from '../data/tours';
 import CompanySwitcher from './CompanySwitcher';
@@ -266,7 +268,7 @@ function isHrefActive(href: string | undefined, location: { pathname: string; se
     if (!match) return false;
     return true;
   }
-  return location.pathname === href;
+  return location.pathname === href || (href !== '/' && location.pathname.startsWith(`${href}/`));
 }
 
 const NavGroup = React.memo(function NavGroup({
@@ -286,10 +288,7 @@ const NavGroup = React.memo(function NavGroup({
 }) {
   // Filter children based on admin status
   const visibleChildren = useMemo(
-    () => item.children?.filter(child =>
-      (!child.adminOnly || isAdmin) &&
-      (!child.platformOnly || isPlatformAdmin)
-    ),
+    () => item.children?.filter(child => (!child.adminOnly || isAdmin) && (!child.platformOnly || isPlatformAdmin)),
     [item.children, isAdmin, isPlatformAdmin]
   );
 
@@ -305,7 +304,6 @@ const NavGroup = React.memo(function NavGroup({
     if (visibleChildren?.some(child => isHrefActive(child.href, location))) {
       setIsOpen(true);
     }
-
   }, [location.pathname, location.search, visibleChildren]);
 
   const isActive = isHrefActive(item.href, location);
@@ -357,7 +355,9 @@ const NavGroup = React.memo(function NavGroup({
         {!collapsed && (
           <>
             <span className="flex-1 text-left">{item.name}</span>
-            <ChevronDownIcon className={`h-4 w-4 text-fd-mute transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
+            <ChevronDownIcon
+              className={`h-4 w-4 text-fd-mute transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`}
+            />
           </>
         )}
       </button>
@@ -402,20 +402,8 @@ const SidebarPattern = () => (
   <svg className="absolute inset-0 w-full h-full opacity-[0.03]" xmlns="http://www.w3.org/2000/svg">
     <defs>
       <pattern id="sidebar-blueprint" width="40" height="40" patternUnits="userSpaceOnUse">
-        <path
-          d="M0 0h40v40H0z"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="0.5"
-          className="text-blue-300"
-        />
-        <path
-          d="M20 0v40M0 20h40"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="0.25"
-          className="text-blue-300"
-        />
+        <path d="M0 0h40v40H0z" fill="none" stroke="currentColor" strokeWidth="0.5" className="text-blue-300" />
+        <path d="M20 0v40M0 20h40" fill="none" stroke="currentColor" strokeWidth="0.25" className="text-blue-300" />
       </pattern>
     </defs>
     <rect width="100%" height="100%" fill="url(#sidebar-blueprint)" />
@@ -433,7 +421,7 @@ const HudClock = React.memo(function HudClock() {
           minute: '2-digit',
           second: '2-digit',
           hour12: false,
-        }),
+        })
       );
     tick();
     const id = setInterval(tick, 1000);
@@ -467,13 +455,61 @@ export default function Layout({ children }: LayoutProps) {
   // is a stable dependency for the nav memo.
   const { can } = usePermissions();
   const location = useLocation();
+  const updateConnection = useConnectionStatus();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [desktopNavigation, setDesktopNavigation] = useState(() => window.innerWidth >= 1024);
+  const sidebarRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const update = () => setDesktopNavigation(window.innerWidth >= 1024);
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
+  useEffect(() => {
+    if (!sidebarOpen || desktopNavigation) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const controls = () =>
+      Array.from(
+        sidebarRef.current?.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),[tabindex="0"]') ?? []
+      );
+    controls()[0]?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setSidebarOpen(false);
+      }
+      if (event.key !== 'Tab') return;
+      const all = controls();
+      const first = all[0];
+      const last = all[all.length - 1];
+      if (
+        event.shiftKey &&
+        (document.activeElement === first || !sidebarRef.current?.contains(document.activeElement))
+      ) {
+        event.preventDefault();
+        last?.focus();
+      } else if (
+        !event.shiftKey &&
+        (document.activeElement === last || !sidebarRef.current?.contains(document.activeElement))
+      ) {
+        event.preventDefault();
+        first?.focus();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      previous?.focus();
+    };
+  }, [sidebarOpen, desktopNavigation]);
   const [logoutModalOpen, setLogoutModalOpen] = useState(false);
   const [logoutEmployeeId, setLogoutEmployeeId] = useState('');
   const [logoutError, setLogoutError] = useState('');
   const [pendingApprovalCount, setPendingApprovalCount] = useState(0);
   const [copilotOpen, setCopilotOpen] = useState(false);
   const globalSearch = useGlobalSearch();
+  useEffect(() => {
+    if (globalSearch.isOpen) setSidebarOpen(false);
+  }, [globalSearch.isOpen]);
   const keyboardShortcuts = useKeyboardShortcutsContext();
   const { startTour, isTourComplete } = useTour();
   const isKiosk = isKioskMode(location.pathname, location.search) && user?.role === 'operator';
@@ -515,29 +551,25 @@ export default function Layout({ children }: LayoutProps) {
     setSidebarOpen(false);
   }, [location.pathname]);
 
-  // Auto-start the Getting-Started tour once per user on first login.
-  // Fires only when authenticated, on a normal app route (not kiosk —
-  // login/print/wallboard bypass Layout entirely), and only if the tour
-  // hasn't been completed. A per-user "auto-start attempted" flag ensures
-  // it never re-triggers after the user dismisses (skips) the tour, since
-  // skipping does not mark the tour complete.
+  // Automatic onboarding is local to its Dashboard start page. A first-time
+  // sign-in to a record/form must retain that destination; TourHighlight would
+  // otherwise navigate it to the tour's first step. Help can still start tours
+  // explicitly from any page. Deferring here does not consume the first-use flag.
   useEffect(() => {
     const shouldStart = shouldAutoStartGettingStarted({
-      userKey: user?.id ?? user?.email,
+      userKey: user ? `${user.company_id ?? 'workspace'}:${user.id ?? user.email}` : undefined,
+      pathname: location.pathname,
       isKiosk,
       isTourComplete,
     });
     if (!shouldStart) return;
     const tour = getTour('getting-started');
     if (tour) startTour(tour);
-  }, [user, isKiosk, isTourComplete, startTour]);
+  }, [user, location.pathname, isKiosk, isTourComplete, startTour]);
 
   // Get current page title from the shared route-title source so it resolves on
   // detail routes too (not just nav entries) and stays in sync with breadcrumbs.
-  const pageTitle = useMemo(
-    () => getRouteTitle(location),
-    [location.pathname, location.search]
-  );
+  const pageTitle = useMemo(() => getRouteTitle(location), [location.pathname, location.search]);
 
   // Browser-tab title follows the routed page (formatTabTitle keeps the
   // unknown-route fallback as the bare app name — never "X · X").
@@ -566,13 +598,13 @@ export default function Layout({ children }: LayoutProps) {
 
   const visibleNavigation = useMemo(() => {
     // Inject the live pending-approvals badge onto the Administration group.
-    const withApprovalBadge: NavSection[] = navSections.map((section) => ({
+    const withApprovalBadge: NavSection[] = navSections.map(section => ({
       ...section,
-      items: section.items.map((item) => {
+      items: section.items.map(item => {
         if (item.name !== 'Administration' || !item.children) return item;
         return {
           ...item,
-          children: item.children.map((child) =>
+          children: item.children.map(child =>
             child.name === 'User Approvals'
               ? { ...child, badge: pendingApprovalCount > 0 ? pendingApprovalCount : undefined }
               : child
@@ -585,35 +617,35 @@ export default function Layout({ children }: LayoutProps) {
     // lack them, at BOTH levels — a collapsible group whose children all vanish
     // is dropped with them, so no group opens onto nothing. Entries with no
     // `permission` are untouched, so this changes nothing for existing items.
-    const permitted = (item: NavItem): boolean => !item.permission || can(item.permission);
+    const permitted = (item: NavItem): boolean =>
+      (!item.permission || can(item.permission)) &&
+      (!item.href || item.children !== undefined || canAccessPath(item.href, can));
     const withPermissions: NavSection[] = withApprovalBadge
-      .map((section) => ({
+      .map(section => ({
         ...section,
         items: section.items
           .filter(permitted)
-          .map((item) =>
-            item.children ? { ...item, children: item.children.filter(permitted) } : item
-          )
-          .filter((item) => !item.children || item.children.length > 0),
+          .map(item => (item.children ? { ...item, children: item.children.filter(permitted) } : item))
+          .filter(item => !item.children || item.children.length > 0),
       }))
-      .filter((section) => section.items.length > 0);
+      .filter(section => section.items.length > 0);
 
     // RBAC-gated nav visibility: kiosk and operator roles see a streamlined set.
     let allowed: ((item: NavItem) => boolean) | null = null;
     if (isKiosk) {
-      allowed = (item) => item.name === 'Shop Floor';
+      allowed = item => item.name === 'Shop Floor';
     } else if (isOperator) {
       // Operators see a streamlined nav: Dashboard, Shop Floor, Quality, Maintenance.
       const operatorAllowed = new Set(['Dashboard', 'Shop Floor', 'Quality', 'Maintenance']);
-      allowed = (item) => operatorAllowed.has(item.name);
+      allowed = item => operatorAllowed.has(item.name);
     }
 
     if (!allowed) return withPermissions;
 
     // Drop empty sections so no orphan headers render for streamlined roles.
     return withPermissions
-      .map((section) => ({ ...section, items: section.items.filter(allowed!) }))
-      .filter((section) => section.items.length > 0);
+      .map(section => ({ ...section, items: section.items.filter(allowed!) }))
+      .filter(section => section.items.length > 0);
   }, [isKiosk, isOperator, pendingApprovalCount, can]);
 
   useEffect(() => {
@@ -667,7 +699,7 @@ export default function Layout({ children }: LayoutProps) {
         <div
           className="fixed inset-0 z-40 bg-slate-900/60 backdrop-blur-sm lg:hidden"
           role="presentation"
-          onClick={(e) => {
+          onClick={e => {
             if (e.target === e.currentTarget) setSidebarOpen(false);
           }}
         />
@@ -675,11 +707,15 @@ export default function Layout({ children }: LayoutProps) {
 
       {/* Sidebar - Foundry instrument rail */}
       <aside
+        ref={sidebarRef}
+        aria-hidden={!desktopNavigation && !sidebarOpen}
+        inert={!desktopNavigation && !sidebarOpen}
+        aria-label="Workspace navigation"
         className={`
           fixed inset-y-0 left-0 z-50 w-72
           transform transition-transform duration-300 ease-out
           lg:translate-x-0
-          ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
+          ${sidebarOpen ? 'translate-x-0 visible' : '-translate-x-full invisible lg:visible'}
           flex flex-col overflow-hidden
         `}
         style={{
@@ -691,14 +727,22 @@ export default function Layout({ children }: LayoutProps) {
         <SidebarPattern />
 
         {/* Logo header */}
-        <div className="relative flex items-center justify-between h-14 px-4 flex-shrink-0" style={{ borderBottom: '1px solid var(--fd-line)' }}>
+        <div
+          className="relative flex items-center justify-between h-14 px-4 flex-shrink-0"
+          style={{ borderBottom: '1px solid var(--fd-line)' }}
+        >
           <Link to="/" className="flex items-center gap-3">
             <img src="/Werco_Logo-PNG.png" alt="Werco Manufacturing" className="h-6 w-auto brightness-0 invert" />
           </Link>
           <div className="flex items-center gap-2">
-            <span className="hidden lg:inline-flex items-center gap-1.5 font-mono text-[10px] tracking-[0.08em] text-fd-green px-1.5 py-0.5 rounded-[3px]" style={{ border: '1px solid var(--fd-line)' }}>
-              <span className="w-1.5 h-1.5 rounded-full bg-fd-green shadow-[0_0_5px_#3fb950]" />
-              LIVE
+            <span
+              className="hidden lg:inline-flex items-center gap-1.5 font-mono text-[10px] tracking-[0.08em] text-fd-body px-1.5 py-0.5 rounded-[3px]"
+              style={{ border: '1px solid var(--fd-line)' }}
+            >
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${updateConnection.connected ? 'bg-fd-green' : 'bg-fd-amber'}`}
+              />
+              {updateConnection.label}
             </span>
             <button
               onClick={() => setSidebarOpen(false)}
@@ -767,7 +811,9 @@ export default function Layout({ children }: LayoutProps) {
               <p className="text-[12.5px] font-semibold text-fd-ink truncate">
                 {user?.first_name} {user?.last_name}
               </p>
-              <p className="text-[10px] font-mono tracking-[0.05em] uppercase text-fd-mute truncate">{user?.role?.replace('_', ' ')}</p>
+              <p className="text-[10px] font-mono tracking-[0.05em] uppercase text-fd-mute truncate">
+                {user?.role?.replace('_', ' ')}
+              </p>
             </div>
             <button
               onClick={() => {
@@ -816,7 +862,9 @@ export default function Layout({ children }: LayoutProps) {
                     {operatorInitials}
                   </div>
                   <div className="min-w-0">
-                    <p className="text-[11px] leading-3 font-medium uppercase tracking-wide text-slate-400">Signed in</p>
+                    <p className="text-[11px] leading-3 font-medium uppercase tracking-wide text-slate-400">
+                      Signed in
+                    </p>
                     <p className="text-sm leading-5 font-semibold text-slate-100 truncate">{operatorDisplayName}</p>
                   </div>
                 </div>
@@ -855,7 +903,10 @@ export default function Layout({ children }: LayoutProps) {
                 >
                   <MagnifyingGlassIcon className="h-4 w-4" />
                   <span className="hidden md:inline font-mono text-xs">search</span>
-                  <kbd className="hidden md:inline-flex items-center px-1.5 py-0.5 font-mono text-[10px] text-fd-mute rounded-[3px]" style={{ border: '1px solid var(--fd-line)' }}>
+                  <kbd
+                    className="hidden md:inline-flex items-center px-1.5 py-0.5 font-mono text-[10px] text-fd-mute rounded-[3px]"
+                    style={{ border: '1px solid var(--fd-line)' }}
+                  >
                     {isMac ? '⌘K' : 'Ctrl K'}
                   </kbd>
                 </button>
@@ -882,8 +933,13 @@ export default function Layout({ children }: LayoutProps) {
                 <div className="hidden xl:flex items-center gap-3.5 pl-1 font-mono text-[11px]">
                   <div>
                     {/* text-fd-mute (not -faint): 11px labels on the #0c1017 header need >=4.5:1 (WCAG AA) */}
-                    <span className="text-fd-mute">SYNC </span>
-                    <span className="text-fd-green">OK</span>
+                    <span className="text-fd-mute">UPDATES </span>
+                    <span
+                      title="Update connection status. Each page shows its data freshness."
+                      className={updateConnection.connected ? 'text-fd-green' : 'text-amber-300'}
+                    >
+                      {updateConnection.label}
+                    </span>
                   </div>
                   <div>
                     <span className="text-fd-mute">SHIFT </span>
@@ -909,7 +965,7 @@ export default function Layout({ children }: LayoutProps) {
                 </button>
 
                 {/* Help & Tours menu */}
-                <div className="hidden lg:block">
+                <div>
                   <TourMenu />
                 </div>
 
@@ -943,7 +999,10 @@ export default function Layout({ children }: LayoutProps) {
         </main>
 
         {/* Footer - Hidden on mobile, visible on desktop */}
-        <footer className="hidden lg:block flex-shrink-0 py-3 px-6" style={{ borderTop: '1px solid var(--fd-line)', background: 'var(--fd-sunken)' }}>
+        <footer
+          className="hidden lg:block flex-shrink-0 py-3 px-6"
+          style={{ borderTop: '1px solid var(--fd-line)', background: 'var(--fd-sunken)' }}
+        >
           <div className="max-w-7xl mx-auto flex items-center justify-between text-sm text-fd-mute">
             <div className="flex items-center gap-2 font-mono text-xs">
               <span className="font-medium text-fd-body">WERCO MANUFACTURING</span>
@@ -951,7 +1010,9 @@ export default function Layout({ children }: LayoutProps) {
               <span className="text-fd-blue font-semibold">ERP / MES</span>
             </div>
             <div className="flex items-center gap-3 font-mono">
-              <span className="text-[10px] uppercase tracking-[0.14em] text-fd-mute">AS9100D &middot; ISO 9001 &middot; ITAR</span>
+              <span className="text-[10px] uppercase tracking-[0.14em] text-fd-mute">
+                AS9100D &middot; ISO 9001 &middot; ITAR
+              </span>
               <span className="text-fd-faint">·</span>
               <span className="text-[10px] text-fd-mute">v1.0.0</span>
             </div>

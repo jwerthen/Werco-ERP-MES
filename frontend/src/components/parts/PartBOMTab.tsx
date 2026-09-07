@@ -11,6 +11,7 @@ import { StatusBadge } from '../ui/StatusBadge';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { FormField } from '../ui/FormField';
 import { Modal } from '../ui/Modal';
+import { BOMItemEditor } from './BOMItemEditor';
 import { BOMImportWizard } from './BOMImportWizard';
 import {
   PlusIcon,
@@ -48,6 +49,10 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
   const { showToast } = useToast();
 
   // View state
+  const [editingItem, setEditingItem] = useState<BOMItem | null>(null);
+  const [explodeLoading, setExplodeLoading] = useState(false);
+  const [explodeError, setExplodeError] = useState(false);
+  const [explodeRetry, setExplodeRetry] = useState(0);
   const [viewMode, setViewMode] = useState<'single' | 'exploded'>('single');
   const [explodedView, setExplodedView] = useState<BOMItem[]>([]);
   const [expandedItems, setExpandedItems] = useState<Set<number>>(new Set());
@@ -93,12 +98,17 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
   // Create BOM state
   const [creating, setCreating] = useState(false);
 
-  // Load exploded view when switching
   useEffect(() => {
-    if (viewMode === 'exploded' && bom) {
-      api.explodeBOM(bom.id).then(setExplodedView).catch(() => setExplodedView([]));
-    }
-  }, [viewMode, bom]);
+    if (viewMode !== 'exploded' || !bom) return;
+    let cancelled = false;
+    setExplodeLoading(true);
+    setExplodeError(false);
+    api.explodeBOM(bom.id).then(result => {
+      if (!cancelled) setExplodedView(result.items);
+    }).catch(() => { if (!cancelled) setExplodeError(true); })
+      .finally(() => { if (!cancelled) setExplodeLoading(false); });
+    return () => { cancelled = true; };
+  }, [viewMode, bom, explodeRetry]);
 
   // Load parts for add-item dropdown
   useEffect(() => {
@@ -503,6 +513,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                       item={item}
                       isDraft={bom.status === 'draft'}
                       onDelete={handleDeleteItem}
+                      onEdit={setEditingItem}
                       onNavigate={(partId) => navigate(`/parts/${partId}?tab=bom`)}
                     />
                   ))
@@ -514,7 +525,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
                   </tr>
                 )
               ) : (
-                explodedView.length > 0 ? (
+                explodeLoading ? <tr><td colSpan={7}><p role="status">Loading multi-level BOM…</p></td></tr> : explodeError ? <tr><td colSpan={7}><p role="alert">Could not load the multi-level BOM.</p><button className="btn-secondary" onClick={() => setExplodeRetry(n => n + 1)}>Retry multi-level BOM</button></td></tr> : explodedView.length > 0 ? (
                   explodedView.map(item => (
                     <ExplodedRow
                       key={`${item.id}-${item.level}`}
@@ -966,6 +977,7 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
         />
       )}
 
+      {editingItem && <BOMItemEditor item={editingItem} onClose={() => setEditingItem(null)} onSaved={onBOMChanged} />}
       {/* Confirm Dialog */}
       <ConfirmDialog
         open={!!confirmAction}
@@ -993,10 +1005,11 @@ export function PartBOMTab({ part, bom, onBOMChanged }: Props) {
 
 // ── Row Components ─────────────────────────────────────────────────────────
 
-function SingleLevelRow({ item, isDraft, onDelete, onNavigate }: {
+function SingleLevelRow({ item, isDraft, onDelete, onEdit, onNavigate }: {
   item: BOMItem;
   isDraft: boolean;
   onDelete: (id: number) => void;
+  onEdit: (item: BOMItem) => void;
   onNavigate: (partId: number) => void;
 }) {
   return (
@@ -1029,7 +1042,8 @@ function SingleLevelRow({ item, isDraft, onDelete, onNavigate }: {
       <td className="px-4 py-3 text-center text-sm text-slate-400">{item.unit_of_measure}</td>
       {isDraft && (
         <td className="px-4 py-3 text-center">
-          <button onClick={() => onDelete(item.id)} className="text-slate-500 hover:text-red-400 p-1">
+          <button className="text-blue-300 mr-3" onClick={() => onEdit(item)}>Edit</button>
+          <button aria-label={`Delete ${item.component_part?.part_number || "component"}`} onClick={() => onDelete(item.id)} className="text-slate-500 hover:text-red-400 p-1">
             <TrashIcon className="h-4 w-4" />
           </button>
         </td>

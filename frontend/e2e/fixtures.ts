@@ -1,8 +1,8 @@
 /**
  * E2E Test Fixtures
- * 
+ *
  * Shared test utilities and authentication helpers.
- * 
+ *
  * Test credentials are loaded from environment variables:
  * - E2E_ADMIN_EMAIL, E2E_ADMIN_SECRET
  * - E2E_MANAGER_EMAIL, E2E_MANAGER_SECRET
@@ -40,7 +40,7 @@ export const test = base.extend<{
     await loginAs(page, TEST_USERS.operator);
     await use(page);
   },
-  
+
   // Page with admin logged in
   adminPage: async ({ page }, use) => {
     await loginAs(page, TEST_USERS.admin);
@@ -52,13 +52,6 @@ export const test = base.extend<{
  * Login as a specific user
  */
 export async function loginAs(page: Page, user: typeof TEST_USERS.admin) {
-  // Pre-complete the Getting-Started tour. It auto-starts once per user on
-  // first login (per-user localStorage flag — always unset in a fresh E2E
-  // browser context), and its full-screen spotlight overlay intercepts
-  // pointer events, which breaks every post-login click in the suite.
-  await page.addInitScript(() => {
-    window.localStorage.setItem('werco-completed-tours', JSON.stringify(['getting-started']));
-  });
   await page.goto('/login');
   await page.fill('input[name="email"]', user.email);
   await page.fill('input[type="password"]', user.secret);
@@ -66,9 +59,24 @@ export async function loginAs(page: Page, user: typeof TEST_USERS.admin) {
 
   // Wait for the post-login redirect. Operators are redirected to the
   // shop-floor kiosk route (/shop-floor/operations?kiosk=1), everyone else
-  // to the dashboard — so wait for "no longer on /login" rather than a
+  // to their role default — so wait for "no longer on /login" rather than a
   // specific destination URL.
-  await page.waitForURL((url) => !url.pathname.startsWith('/login'), { timeout: 10000 });
+  await page.waitForURL(url => !url.pathname.startsWith('/login'), { timeout: 10000 });
+
+  // Use the actual UI-authenticated identity, before a test opens Dashboard.
+  // TourProvider intentionally ignores the former global preference; only this
+  // user's completion is seeded, and other tours/workspaces remain unchanged.
+  // No token is read or exposed, and the real login/role redirect still runs.
+  await page.evaluate(() => {
+    const user = JSON.parse(sessionStorage.getItem('user') || 'null');
+    if (!user || typeof user.id !== 'number') {
+      throw new Error('E2E login did not persist an authenticated user');
+    }
+    const key = `werco-completed-tours:${user.company_id ?? 'workspace'}:${user.id}`;
+    const saved = JSON.parse(localStorage.getItem(key) || '[]');
+    const completed = Array.isArray(saved) ? saved.filter(item => typeof item === 'string') : [];
+    localStorage.setItem(key, JSON.stringify(Array.from(new Set([...completed, 'getting-started']))));
+  });
 }
 
 /**
@@ -76,7 +84,13 @@ export async function loginAs(page: Page, user: typeof TEST_USERS.admin) {
  */
 export async function logout(page: Page) {
   await page.click('button[title="Sign out"]');
-  await page.waitForURL('**/login');
+  await page.waitForURL(url => url.pathname === '/login');
+  // A pending protected request may retain its destination when logout wins.
+  // Login itself must never become the return destination of a second redirect.
+  const returnTo = new URL(page.url()).searchParams.get('returnTo');
+  if (returnTo) {
+    expect(new URL(returnTo, page.url()).pathname).not.toMatch(/^\/login\/?$/i);
+  }
 }
 
 /**
@@ -167,9 +181,7 @@ export async function expectTableRow(page: Page, text: string) {
  * row CONTENT for the same reason. This is that rule, ported to Playwright.
  */
 export async function firstDataRow(page: Page, timeout = 15000): Promise<Locator | null> {
-  const row = page
-    .locator('table tbody tr:not(.animate-pulse):not([data-testid="group-header"])')
-    .first();
+  const row = page.locator('table tbody tr:not(.animate-pulse):not([data-testid="group-header"])').first();
   await row.waitFor({ state: 'visible', timeout }).catch(() => null);
   return (await row.isVisible().catch(() => false)) ? row : null;
 }

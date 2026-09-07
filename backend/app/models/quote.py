@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import CheckConstraint, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -30,11 +30,14 @@ class Quote(Base, TenantMixin):
     __table_args__ = (
         Index("ix_quotes_status", "status"),
         Index("ix_quotes_updated_at", "updated_at"),
+        UniqueConstraint("company_id", "request_key", name="uq_quotes_company_request_key"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
     quote_number = Column(String(50), unique=True, index=True, nullable=False)
     revision = Column(String(10), default="A")
+    request_key = Column(String(128), nullable=True)
+    request_hash = Column(String(64), nullable=True)
 
     # Customer
     customer_name = Column(String(255), nullable=False)
@@ -72,7 +75,12 @@ class Quote(Base, TenantMixin):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    lines = relationship("QuoteLine", back_populates="quote", cascade="all, delete-orphan")
+    lines = relationship(
+        "QuoteLine",
+        back_populates="quote",
+        cascade="all, delete-orphan",
+        order_by="QuoteLine.line_number, QuoteLine.id",
+    )
     estimates = relationship("QuoteEstimate", back_populates="quote")
 
 
@@ -93,6 +101,11 @@ class QuoteLine(Base, TenantMixin):
 
     # Part reference (optional - could be custom description)
     part_id = Column(Integer, ForeignKey("parts.id"), nullable=True)
+
+    # A conversion belongs to its quoted line, not just the whole document.
+    work_order_id = Column(
+        Integer, ForeignKey("work_orders.id", name="fk_quote_lines_work_order_id"), nullable=True, index=True
+    )
 
     # Line details
     description = Column(Text, nullable=False)
@@ -115,3 +128,4 @@ class QuoteLine(Base, TenantMixin):
 
     quote = relationship("Quote", back_populates="lines")
     part = relationship("Part")
+    work_order = relationship("WorkOrder", foreign_keys=[work_order_id])

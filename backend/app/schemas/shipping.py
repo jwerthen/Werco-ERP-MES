@@ -15,7 +15,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.schemas.base import UTCModel
 
@@ -33,20 +33,28 @@ class ShipmentCreate(BaseModel):
     ship_to_zip: Optional[str] = None
     carrier: Optional[str] = None
     service_type: Optional[str] = None
-    quantity_shipped: float
-    weight_lbs: Optional[float] = None
-    num_packages: int = 1
+    quantity_shipped: float = Field(gt=0, allow_inf_nan=False)
+    weight_lbs: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    num_packages: int = Field(default=1, ge=1)
     packing_notes: Optional[str] = None
     cert_of_conformance: bool = False
 
 
 class ShipmentUpdate(BaseModel):
+    quantity_shipped: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     carrier: Optional[str] = None
     service_type: Optional[str] = None
     tracking_number: Optional[str] = None
     ship_date: Optional[date] = None
     estimated_delivery: Optional[date] = None
-    status: Optional[str] = None
+    status: Optional[Literal["pending", "packed", "shipped", "delivered", "cancelled"]] = None
+
+    @model_validator(mode="after")
+    def reject_null_updates(self):
+        for key in ("quantity_shipped", "status"):
+            if key in self.model_fields_set and getattr(self, key) is None:
+                raise ValueError(f"{key} cannot be null")
+        return self
 
 
 class ShipmentResponse(UTCModel):

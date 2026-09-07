@@ -18,7 +18,7 @@
  * caller compiles and behaves unchanged without it.
  */
 
-import React from 'react';
+import React, { useId } from 'react';
 import { ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import { Modal } from './Modal';
 import { Button } from './Button';
@@ -50,7 +50,7 @@ const confirmButtonVariant: Record<'danger' | 'warning' | 'info', 'danger' | 'pr
 // deterministically (utilities layer comes after components). hover:shadow-none
 // suppresses .btn-primary:hover's blue ring/glow box-shadow, which the bg/text
 // overrides alone would leave rendering around the amber button.
-const warningConfirmClasses = 'bg-amber-500 hover:bg-amber-600 hover:shadow-none text-white';
+const warningConfirmClasses = 'bg-amber-500 hover:bg-amber-600 hover:shadow-none text-slate-950';
 
 export function ConfirmDialog({
   open,
@@ -63,8 +63,10 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  const titleId = useId();
   return (
     <Modal
+      ariaLabelledBy={titleId}
       open={open}
       onClose={onCancel}
       size="sm"
@@ -72,11 +74,17 @@ export function ConfirmDialog({
       closeOnEscape={!pending}
     >
       <div className="flex items-start gap-3">
-        <div className={`p-2 rounded-full ${variant === 'danger' ? 'bg-red-500/20' : variant === 'warning' ? 'bg-amber-500/20' : 'bg-blue-500/20'}`}>
-          <ExclamationTriangleIcon className={`h-5 w-5 ${variant === 'danger' ? 'text-red-600' : variant === 'warning' ? 'text-amber-600' : 'text-blue-600'}`} />
+        <div
+          className={`p-2 rounded-full ${variant === 'danger' ? 'bg-red-500/20' : variant === 'warning' ? 'bg-amber-500/20' : 'bg-blue-500/20'}`}
+        >
+          <ExclamationTriangleIcon
+            className={`h-5 w-5 ${variant === 'danger' ? 'text-red-600' : variant === 'warning' ? 'text-amber-600' : 'text-blue-600'}`}
+          />
         </div>
         <div className="flex-1">
-          <h3 className="text-lg font-semibold text-white">{title}</h3>
+          <h3 id={titleId} className="text-lg font-semibold text-white">
+            {title}
+          </h3>
           {/* pre-line: messages migrated from window.confirm carry intentional
               paragraph breaks (\n\n) that a plain <p> would collapse. */}
           <p className="text-sm text-slate-300 mt-1 whitespace-pre-line">{message}</p>

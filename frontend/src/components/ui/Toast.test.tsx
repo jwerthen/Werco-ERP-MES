@@ -36,7 +36,7 @@ function fireToast(type: ToastType, message: string) {
   render(
     <ToastProvider>
       <ToastHarness type={type} message={message} />
-    </ToastProvider>,
+    </ToastProvider>
   );
   fireEvent.click(screen.getByRole('button', { name: 'fire' }));
 }
@@ -128,7 +128,7 @@ describe('Toast crash-safety on non-string messages', () => {
     render(
       <ToastProvider>
         <BadHarness message={message} />
-      </ToastProvider>,
+      </ToastProvider>
     );
     fireEvent.click(screen.getByRole('button', { name: 'fire' }));
   }
@@ -143,7 +143,7 @@ describe('Toast crash-safety on non-string messages', () => {
 
     // The joined message renders (not "[object Object]" / not a crash)...
     expect(
-      screen.getByText('required_date: Input should be a valid date; lines.0.part_id: Input should be greater than 0'),
+      screen.getByText('required_date: Input should be a valid date; lines.0.part_id: Input should be greater than 0')
     ).toBeInTheDocument();
     // ...and the harness (the app tree) is still mounted — no white-screen unmount.
     expect(screen.getByRole('button', { name: 'fire' })).toBeInTheDocument();
@@ -153,4 +153,23 @@ describe('Toast crash-safety on non-string messages', () => {
     expect(() => fireRaw({ message: 'Something broke' })).not.toThrow();
     expect(screen.getByText('Something broke')).toBeInTheDocument();
   });
+});
+
+it('keeps actionable errors available beyond the success-toast timeout', () => {
+  jest.useFakeTimers();
+  const Harness = () => {
+    const { showToast } = useToast();
+    return <button onClick={() => showToast('error', 'Retry the failed save')}>Error</button>;
+  };
+  render(
+    <ToastProvider>
+      <Harness />
+    </ToastProvider>
+  );
+  fireEvent.click(screen.getByText('Error'));
+  jest.advanceTimersByTime(60_000);
+  expect(screen.getByText('Retry the failed save')).toBeInTheDocument();
+  fireEvent.click(screen.getByLabelText('Dismiss notification'));
+  expect(screen.queryByText('Retry the failed save')).not.toBeInTheDocument();
+  jest.useRealTimers();
 });

@@ -93,7 +93,7 @@ function SheetFormModal({ open, onClose, sheet, onSaved }: SheetFormModalProps) 
     reset({ title: sheet?.title ?? '', description: sheet?.description ?? '' });
   }, [open, sheet, reset]);
 
-  const { confirmDiscard } = useUnsavedChanges(open && isDirty);
+  const { confirmDiscard, markSaved } = useUnsavedChanges(open && isDirty);
   const handleCancel = () => {
     if (confirmDiscard()) onClose();
   };
@@ -108,6 +108,7 @@ function SheetFormModal({ open, onClose, sheet, onSaved }: SheetFormModalProps) 
           description: data.description?.trim() ? data.description.trim() : null,
         });
         showToast('success', 'Process sheet updated');
+        markSaved();
         onSaved(sheet.id);
       } else {
         const created = await api.createProcessSheet({
@@ -115,6 +116,7 @@ function SheetFormModal({ open, onClose, sheet, onSaved }: SheetFormModalProps) 
           description: data.description?.trim() ? data.description.trim() : undefined,
         });
         showToast('success', `Created ${created.sheet_number} Rev ${created.revision}`);
+        markSaved();
         onSaved(created.id);
       }
       onClose();

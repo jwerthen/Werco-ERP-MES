@@ -31,6 +31,7 @@ a distinct outcome, and still surfaces the command's output.
 
 import configparser
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -851,3 +852,159 @@ class TestFrontendReleaseMarkerShipsWithTheArtifact:
             f"{workflow_name} job {job_key} stamps {FRONTEND_RELEASE_MARKER} at step {min(stamps)} "
             f"but uploads the frontend at step {min(uploads)} -- the stamp must precede the upload."
         )
+
+
+def _classify_frontend_release(repo: Path, output: Path, *, event: str, before: str, head: str) -> bool:
+    """Execute the actual workflow shell against isolated git fixtures, without a deploy."""
+    workflow = _load_workflow('deploy-frontend-production.yml')
+    step = next(step for step in workflow['jobs']['classify']['steps'] if step.get('id') == 'classify')
+    result = subprocess.run(
+        ['bash', '-e', '-o', 'pipefail', '-c', step['run']],
+        cwd=repo,
+        env={**os.environ, 'EVENT_NAME': event, 'BEFORE_SHA': before, 'HEAD_SHA': head, 'GITHUB_OUTPUT': str(output)},
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    return output.read_text().strip() == 'standalone=true'
+
+
+@pytest.fixture
+def release_git_repo(tmp_path):
+    """Only this temporary repository receives synthetic commits; the checkout is read-only."""
+    repo = tmp_path / 'release-fixture'
+    repo.mkdir()
+
+    def git(*args):
+        result = subprocess.run(
+            [
+                'git',
+                '-c',
+                'user.name=Release Fixture',
+                '-c',
+                'user.email=fixture@example.test',
+                '-c',
+                'commit.gpgsign=false',
+                '-c',
+                'core.hooksPath=/dev/null',
+                *args,
+            ],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        return result.stdout.strip()
+
+    git('init', '-q')
+    for path in ('frontend/app.ts', 'backend/app.py'):
+        file = repo / path
+        file.parent.mkdir(exist_ok=True)
+        file.write_text('initial\n')
+    git('add', '.')
+    git('commit', '-qm', 'initial fixture')
+    return repo, git('rev-parse', 'HEAD'), git
+
+
+class TestCoordinatedProductionReleaseOrdering:
+    def test_backend_release_is_verified_before_frontend_or_worker_upload(self):
+        steps = _load_workflow('ci-cd.yml')['jobs']['deploy-production']['steps']
+        backend_upload = next(
+            i for i, step in enumerate(steps) if 'railway up --service werco-api ' in step.get('run', '')
+        )
+        receipt = next(
+            i
+            for i, step in enumerate(steps)
+            if 'grep -q "Build Logs:"' in step.get('run', '') and 'deploy-backend.log' in step.get('run', '')
+        )
+        backend_gate = next(
+            i
+            for i, step in enumerate(steps)
+            if 'verify_release.py' in step.get('run', '') and '--label backend' in step['run']
+        )
+        dependent_uploads = [
+            i
+            for i, step in enumerate(steps)
+            if 'railway up' in step.get('run', '')
+            and ('--service werco-frontend ' in step['run'] or '--service werco-worker ' in step['run'])
+        ]
+        assert dependent_uploads
+        assert backend_upload < receipt < backend_gate < min(dependent_uploads)
+        gate = steps[backend_gate]
+        assert not gate.get('continue-on-error')
+        assert not gate.get('if'), 'Do not conditionally skip API readiness before dependent uploads'
+        assert '/health/detailed' in gate['run']
+        assert '--json-path checks.application.release' in gate['run']
+        assert '--expect "${GITHUB_SHA}"' in gate['run']
+        assert gate['env']['PRODUCTION_API_URL'] == '${{ vars.PRODUCTION_API_URL }}'
+
+    def test_frontend_upload_requires_classification_with_complete_push_history(self):
+        workflow = _load_workflow('deploy-frontend-production.yml')
+        job = workflow['jobs']['deploy-frontend']
+        assert job['needs'] == 'classify'
+        assert job['if'] == "needs.classify.outputs.standalone == 'true'"
+        classify = workflow['jobs']['classify']
+        assert classify['outputs']['standalone'] == '${{ steps.classify.outputs.standalone }}'
+        checkout = next(step for step in classify['steps'] if step.get('uses', '').startswith('actions/checkout@'))
+        assert checkout['with']['fetch-depth'] == 0
+        step = next(step for step in classify['steps'] if step.get('id') == 'classify')
+        assert step['env'] == {
+            'EVENT_NAME': '${{ github.event_name }}',
+            'BEFORE_SHA': '${{ github.event.before }}',
+            'HEAD_SHA': '${{ github.sha }}',
+        }
+
+    @pytest.mark.parametrize(
+        'change,expected',
+        [
+            ('frontend', True),
+            ('mixed', False),
+            ('delete_backend', False),
+            ('rename_backend', False),
+        ],
+    )
+    def test_classifies_backend_edits_deletions_and_renames(self, release_git_repo, tmp_path, change, expected):
+        repo, before, git = release_git_repo
+        (repo / 'frontend/app.ts').write_text('new frontend\n')
+        backend = repo / 'backend/app.py'
+        if change == 'mixed':
+            backend.write_text('new endpoint\n')
+        elif change == 'delete_backend':
+            backend.unlink()
+        elif change == 'rename_backend':
+            backend.rename(repo / 'frontend/archived.py')
+        git('add', '-A')
+        git('commit', '-qm', 'release changes')
+        assert (
+            _classify_frontend_release(
+                repo, tmp_path / 'output', event='push', before=before, head=git('rev-parse', 'HEAD')
+            )
+            is expected
+        )
+
+    def test_compares_the_entire_push_not_only_the_latest_frontend_commit(self, release_git_repo, tmp_path):
+        repo, before, git = release_git_repo
+        (repo / 'backend/app.py').write_text('new backend endpoint\n')
+        git('add', '-A')
+        git('commit', '-qm', 'backend fixture change')
+        (repo / 'frontend/app.ts').write_text('dependent frontend\n')
+        git('add', '-A')
+        git('commit', '-qm', 'frontend fixture change')
+        assert not _classify_frontend_release(
+            repo, tmp_path / 'output', event='push', before=before, head=git('rev-parse', 'HEAD')
+        )
+
+    @pytest.mark.parametrize('before', ['', '0' * 40, 'f' * 40, 'not-a-commit'])
+    def test_unknown_push_base_defers_to_full_pipeline(self, release_git_repo, tmp_path, before):
+        repo, head, _ = release_git_repo
+        assert not _classify_frontend_release(repo, tmp_path / 'output', event='push', before=before, head=head)
+
+    def test_unknown_head_defers_to_full_pipeline(self, release_git_repo, tmp_path):
+        repo, before, _ = release_git_repo
+        assert not _classify_frontend_release(repo, tmp_path / 'output', event='push', before=before, head='f' * 40)
+
+    def test_explicit_manual_frontend_release_remains_available(self, release_git_repo, tmp_path):
+        repo, _, _ = release_git_repo
+        assert _classify_frontend_release(repo, tmp_path / 'output', event='workflow_dispatch', before='', head='')

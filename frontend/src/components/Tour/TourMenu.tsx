@@ -59,15 +59,9 @@ export default function TourMenu() {
   const navigate = useNavigate();
 
   // Get role-filtered tours and tips
-  const roleTours = useMemo(
-    () => getToursForRole(role, isSuperuser),
-    [role, isSuperuser]
-  );
+  const roleTours = useMemo(() => getToursForRole(role, isSuperuser), [role, isSuperuser]);
 
-  const helpTips = useMemo(
-    () => getHelpTipsForRole(role, isSuperuser),
-    [role, isSuperuser]
-  );
+  const helpTips = useMemo(() => getHelpTipsForRole(role, isSuperuser), [role, isSuperuser]);
 
   // Group tours by category
   const toursByCategory = useMemo(() => {
@@ -81,13 +75,13 @@ export default function TourMenu() {
   }, [roleTours]);
 
   // Completion stats
-  const completedCount = roleTours.filter((t) => isTourComplete(t.id)).length;
+  const completedCount = roleTours.filter(t => isTourComplete(t.id)).length;
   const totalCount = roleTours.length;
   const progressPct = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
 
   const handleStartTour = (tourId: string) => {
     // Use the role-filtered tour (with customized descriptions/steps)
-    const filteredTour = roleTours.find((t) => t.id === tourId);
+    const filteredTour = roleTours.find(t => t.id === tourId);
     const tour = filteredTour || getTour(tourId);
     if (tour) {
       setIsOpen(false);
@@ -123,13 +117,13 @@ export default function TourMenu() {
           <div
             className="fixed inset-0 z-40"
             role="presentation"
-            onClick={(e) => {
+            onClick={e => {
               if (e.target === e.currentTarget) setIsOpen(false);
             }}
           />
 
           {/* Menu */}
-          <div className="absolute right-0 top-full mt-2 w-96 bg-fd-panel rounded-2xl shadow-2xl border border-slate-700 overflow-hidden z-50 animate-slide-down">
+          <div className="absolute right-0 top-full mt-2 w-96 max-w-[calc(100vw-2rem)] max-h-[80vh] overflow-y-auto bg-fd-panel rounded-2xl shadow-2xl border border-slate-700 overflow-hidden z-50 animate-slide-down">
             {/* Header with role badge */}
             <div className="bg-gradient-to-r from-werco-navy-600 to-blue-700 px-5 py-4">
               <div className="flex items-center justify-between mb-3">
@@ -139,6 +133,7 @@ export default function TourMenu() {
                 </div>
                 <button
                   onClick={() => setIsOpen(false)}
+                  aria-label="Close help and tours"
                   className="text-white/70 hover:text-white p-1 rounded-lg hover:bg-white/10"
                 >
                   <XMarkIcon className="h-5 w-5" />
@@ -149,11 +144,8 @@ export default function TourMenu() {
               <div className="flex items-center gap-2 bg-white/10 rounded-xl px-3 py-2">
                 <UserCircleIcon className="h-4 w-4 text-white/80 flex-shrink-0" />
                 <span className="text-white/90 text-sm">
-                  Showing help for{' '}
-                  <span className="font-semibold text-white">{roleLabel}</span>
-                  {user?.first_name && (
-                    <span className="text-white/70"> — {user.first_name}</span>
-                  )}
+                  Showing help for <span className="font-semibold text-white">{roleLabel}</span>
+                  {user?.first_name && <span className="text-white/70"> — {user.first_name}</span>}
                 </span>
               </div>
 
@@ -189,9 +181,7 @@ export default function TourMenu() {
                 <RocketLaunchIcon className="h-4 w-4" />
                 Guided Tours
                 {totalCount > 0 && (
-                  <span className="text-xs bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded-full">
-                    {totalCount}
-                  </span>
+                  <span className="text-xs bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded-full">{totalCount}</span>
                 )}
               </button>
               <button
@@ -216,84 +206,71 @@ export default function TourMenu() {
             <div className="max-h-80 overflow-y-auto">
               {activeTab === 'tours' && (
                 <div className="p-3">
-                  {CATEGORY_ORDER.filter((cat) => toursByCategory[cat]).map(
-                    (category) => (
-                      <div key={category} className="mb-3 last:mb-0">
-                        <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider px-3 mb-1">
-                          {CATEGORY_LABELS[category]}
-                        </h4>
-                        {toursByCategory[category].map((tour) => {
-                          const isComplete = isTourComplete(tour.id);
-                          const IconComponent =
-                            tour.icon && ICON_MAP[tour.icon]
-                              ? ICON_MAP[tour.icon]
-                              : RocketLaunchIcon;
-                          return (
-                            <button
-                              key={tour.id}
-                              onClick={() => handleStartTour(tour.id)}
-                              className="w-full flex items-start gap-3 p-3 rounded-xl hover:bg-slate-700/50 transition-colors text-left group"
+                  {CATEGORY_ORDER.filter(cat => toursByCategory[cat]).map(category => (
+                    <div key={category} className="mb-3 last:mb-0">
+                      <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider px-3 mb-1">
+                        {CATEGORY_LABELS[category]}
+                      </h4>
+                      {toursByCategory[category].map(tour => {
+                        const isComplete = isTourComplete(tour.id);
+                        const IconComponent = tour.icon && ICON_MAP[tour.icon] ? ICON_MAP[tour.icon] : RocketLaunchIcon;
+                        return (
+                          <button
+                            key={tour.id}
+                            onClick={() => handleStartTour(tour.id)}
+                            className="w-full flex items-start gap-3 p-3 rounded-xl hover:bg-slate-700/50 transition-colors text-left group"
+                          >
+                            <div
+                              className={`flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center ${
+                                isComplete
+                                  ? 'bg-emerald-500/20 text-emerald-400'
+                                  : 'bg-blue-500/10 text-blue-400 group-hover:bg-blue-500/20'
+                              }`}
                             >
-                              <div
-                                className={`flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center ${
-                                  isComplete
-                                    ? 'bg-emerald-500/20 text-emerald-400'
-                                    : 'bg-blue-500/10 text-blue-400 group-hover:bg-blue-500/20'
-                                }`}
-                              >
-                                {isComplete ? (
-                                  <CheckCircleIcon className="h-4.5 w-4.5" />
-                                ) : (
-                                  <IconComponent className="h-4.5 w-4.5" />
+                              {isComplete ? (
+                                <CheckCircleIcon className="h-4.5 w-4.5" />
+                              ) : (
+                                <IconComponent className="h-4.5 w-4.5" />
+                              )}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="font-medium text-sm text-slate-100">{tour.name}</span>
+                                {isComplete && (
+                                  <CheckCircleIcon className="h-3.5 w-3.5 text-emerald-500 flex-shrink-0" />
                                 )}
                               </div>
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2">
-                                  <span className="font-medium text-sm text-slate-100">
-                                    {tour.name}
+                              <p className="text-xs text-slate-400 mt-0.5 line-clamp-2">{tour.description}</p>
+                              <div className="flex items-center gap-2 mt-1">
+                                <span className="text-xs text-slate-400">{tour.steps.length} steps</span>
+                                {!isComplete && (
+                                  <span className="flex items-center gap-0.5 text-xs text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity">
+                                    <PlayIcon className="h-3 w-3" />
+                                    Start
                                   </span>
-                                  {isComplete && (
-                                    <CheckCircleIcon className="h-3.5 w-3.5 text-emerald-500 flex-shrink-0" />
-                                  )}
-                                </div>
-                                <p className="text-xs text-slate-400 mt-0.5 line-clamp-2">
-                                  {tour.description}
-                                </p>
-                                <div className="flex items-center gap-2 mt-1">
-                                  <span className="text-xs text-slate-400">
-                                    {tour.steps.length} steps
+                                )}
+                                {isComplete && (
+                                  <span className="flex items-center gap-0.5 text-xs text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity">
+                                    <ArrowPathIcon className="h-3 w-3" />
+                                    Replay
                                   </span>
-                                  {!isComplete && (
-                                    <span className="flex items-center gap-0.5 text-xs text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity">
-                                      <PlayIcon className="h-3 w-3" />
-                                      Start
-                                    </span>
-                                  )}
-                                  {isComplete && (
-                                    <span className="flex items-center gap-0.5 text-xs text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity">
-                                      <ArrowPathIcon className="h-3 w-3" />
-                                      Replay
-                                    </span>
-                                  )}
-                                </div>
+                                )}
                               </div>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )
-                  )}
-                  {roleTours.length === 0 && (
-                    <div className="text-center py-6 text-slate-400 text-sm">
-                      No tours available for your role.
+                            </div>
+                          </button>
+                        );
+                      })}
                     </div>
+                  ))}
+                  {roleTours.length === 0 && (
+                    <div className="text-center py-6 text-slate-400 text-sm">No tours available for your role.</div>
                   )}
                 </div>
               )}
 
               {activeTab === 'tips' && (
                 <div className="p-3 space-y-1">
-                  {helpTips.map((tip) => (
+                  {helpTips.map(tip => (
                     <div
                       key={tip.id}
                       className="flex items-start gap-3 p-3 rounded-xl hover:bg-amber-500/5 transition-colors"
@@ -303,25 +280,19 @@ export default function TourMenu() {
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
-                          <span className="font-medium text-sm text-slate-100">
-                            {tip.title}
-                          </span>
+                          <span className="font-medium text-sm text-slate-100">{tip.title}</span>
                           {tip.shortcut && (
                             <kbd className="text-xs bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded border border-slate-600 font-mono">
                               {tip.shortcut}
                             </kbd>
                           )}
                         </div>
-                        <p className="text-xs text-slate-400 mt-0.5">
-                          {tip.description}
-                        </p>
+                        <p className="text-xs text-slate-400 mt-0.5">{tip.description}</p>
                       </div>
                     </div>
                   ))}
                   {helpTips.length === 0 && (
-                    <div className="text-center py-6 text-slate-400 text-sm">
-                      No tips available for your role.
-                    </div>
+                    <div className="text-center py-6 text-slate-400 text-sm">No tips available for your role.</div>
                   )}
                 </div>
               )}

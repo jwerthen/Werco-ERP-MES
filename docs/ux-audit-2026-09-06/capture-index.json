@@ -1,0 +1,302 @@
+[
+  {
+    "step": 1,
+    "title": "Sign-in",
+    "health": "Limited",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/01-sign-in.jpg",
+    "observed": "The initial Railway sign-in surface was captured before the user signed in on wercomfg.app.",
+    "assessment": "Clear sign-in entry point. Current-source review finds the recovery button has no action; this was not exercised after authentication.",
+    "recommendation": "Implement real account recovery and preserve the requested destination through sign-in.",
+    "limit": "No password reset, session expiry, or alternate role sign-in tested."
+  },
+  {
+    "step": 2,
+    "title": "Action Inbox",
+    "health": "Needs improvement",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/02-action-inbox.jpg",
+    "observed": "The inbox presents urgent issue categories and affected-item counts.",
+    "assessment": "Useful consolidation of exceptions. Generic Open actions lose the affected-record scope; setup completion and operational blockers need distinct explanations.",
+    "recommendation": "Open a filtered affected-record queue with an explicit count, owner and next action.",
+    "limit": "Counts are a point-in-time sample; no blockers were changed."
+  },
+  {
+    "step": 3,
+    "title": "Dashboard",
+    "health": "Needs improvement",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/03-dashboard.jpg",
+    "observed": "Ten similarly weighted metrics and a large machine-capacity section occupy the overview.",
+    "assessment": "Broad operational visibility, but the screen requires scanning many equally prominent cards. An overdue count of 7 does not carry its scope into the destination.",
+    "recommendation": "Lead with exceptions and actionable queues, then supporting capacity and trends. Label period, filters and freshness.",
+    "limit": "No latency or failure injection performed in production."
+  },
+  {
+    "step": 4,
+    "title": "Overdue \u2192 work orders",
+    "health": "Needs improvement",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/04-work-orders-from-overdue.jpg",
+    "observed": "Clicking the overdue dashboard link opens the work-order list in All Active with Hide COTS selected; this list shows overdue 1.",
+    "assessment": "Existing filters and table controls are useful. The count and destination scope are hard to reconcile, and long identifiers wrap repeatedly.",
+    "recommendation": "Pass the actual overdue predicate into the URL; show inherited filter chips and count scope. Give identifiers more room.",
+    "limit": "The audit does not establish which count is mathematically correct; filters differ."
+  },
+  {
+    "step": 5,
+    "title": "Work-order detail",
+    "health": "Needs improvement",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/05-work-order-detail.jpg",
+    "observed": "The detail header has nine metric cards with truncated labels. Sample quantity completion is 1/1 while operation progress is 1/4.",
+    "assessment": "Rich job context exists. Completion measures and the strong Complete action need a clearer relationship.",
+    "recommendation": "Lead with next operation, blockers, due date and readiness. Explain quantity completion versus operation completion and any authorized override.",
+    "limit": "Completion was not activated; the sample may reflect an intentional admin workflow."
+  },
+  {
+    "step": 6,
+    "title": "Work-order secondary panels",
+    "health": "Needs improvement",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/06-work-order-secondary-panels.jpg",
+    "observed": "Large empty drawing/upload/preview and supporting panels precede the routing work farther down the page.",
+    "assessment": "Documents and blocker reporting belong in job context, but empty optional panels consume task space.",
+    "recommendation": "Collapse empty/supporting panels and surface current operation first. Replace implementation-oriented material/backflush prose with operator-facing consequences.",
+    "limit": "This image shows secondary panels, not the operations table."
+  },
+  {
+    "step": 7,
+    "title": "Scheduling",
+    "health": "Needs improvement",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/07-scheduling.jpg",
+    "observed": "The initial view expands capacity for 24 machines before the main planning work; the shown Aug 31\u2013Sep 5 window excludes the current Sunday.",
+    "assessment": "Capacity can be collapsed. Selection and mutation issues identified in source are described separately.",
+    "recommendation": "Default to relevant machines and a useful planning window; preserve a compact capacity toggle and visible queue.",
+    "limit": "No jobs selected for a bulk action or rescheduled."
+  },
+  {
+    "step": 8,
+    "title": "Dispatch Board",
+    "health": "Usable; freshness gap",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/08-dispatch-board.jpg",
+    "observed": "The board hides 22 idle machines and shows two active machine columns with 10 jobs.",
+    "assessment": "Strong focus on machines with work, keyboard equivalents and material/changeover context. Source shows no automatic cross-station refresh.",
+    "recommendation": "Add truthful updated-at state and safe reconciliation; expose due dates, remaining duration and job-detail links where useful.",
+    "limit": "No reordering or cross-session mutation tested."
+  },
+  {
+    "step": 9,
+    "title": "Time Clock initial selection",
+    "health": "Needs improvement",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/09-time-clock.jpg",
+    "observed": "The initial machine selection has an empty queue while work exists on other machines.",
+    "assessment": "Machine choice is explicit, but 24 buttons do not reveal where the work is.",
+    "recommendation": "Remember the station or user preference; show queue counts and relevant/favorite machines.",
+    "limit": "Initial selection observed in this session only; do not infer every user gets the same default."
+  },
+  {
+    "step": 10,
+    "title": "Time Clock populated queue",
+    "health": "Usable; hierarchy gap",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/10-time-clock-populated.jpg",
+    "observed": "Selecting Fit Up Station #1 reveals six jobs and an Up Next strip.",
+    "assessment": "The queue supports direct production work. The top strip repeats jobs without enough operation context.",
+    "recommendation": "Prioritize current operation and start/hold/complete context; include operation names in previews.",
+    "limit": "No timers started or stopped."
+  },
+  {
+    "step": 11,
+    "title": "Time Clock at 390 px",
+    "health": "Needs improvement",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/11-time-clock-mobile.jpg",
+    "observed": "Machine buttons fill the first screen. DOM measurement puts Up Next near y=972 and Job Queue near y=1252.",
+    "assessment": "Mobile bottom navigation exists. The actual task is more than a screen below machine selection.",
+    "recommendation": "Use a compact searchable station picker with queue counts; keep active job/next job in the first viewport.",
+    "limit": "390\u00d7844 browser viewport, not physical-device or glove testing."
+  },
+  {
+    "step": 12,
+    "title": "Work orders at 390 px",
+    "health": "Needs improvement",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/12-work-orders-mobile.jpg",
+    "observed": "New WO extends to x\u2248414.7 in a 390 px viewport. Header and filters push the first job card down to about y=710.",
+    "assessment": "Mobile cards already exist. The primary create action clips beyond the viewport.",
+    "recommendation": "Wrap the primary action or give it its own row; move secondary actions into overflow and collapse optional filters.",
+    "limit": "Measured one narrow viewport; 320 px and larger-device sweeps remain acceptance work."
+  },
+  {
+    "step": 13,
+    "title": "New work order: part picker",
+    "health": "Usable; hierarchy gap",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/13-new-work-order.jpg",
+    "observed": "The form provides a searchable part picker with part type/revision metadata.",
+    "assessment": "A useful entity selector. Optional serial information occupies substantial space before routing review.",
+    "recommendation": "Group essential planning inputs first; reveal traceability fields when applicable and provide a compact review summary.",
+    "limit": "No work order submitted."
+  },
+  {
+    "step": 14,
+    "title": "New work order: selected part",
+    "health": "Needs improvement",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/14-new-work-order-selected.jpg",
+    "observed": "Part selection loads customer/routing context and an existing-open-work-order warning. Create was visible during routing loading.",
+    "assessment": "Reuse of master data saves typing. Readiness needs an explicit current/loading/failed state; source confirms request-order risk.",
+    "recommendation": "Tie preview and submit eligibility to the current part request. Keep the selected routing and deviations visible in final review.",
+    "limit": "Cancel triggered a browser-tool/native-dialog stall; user reload restored access. No app-freeze conclusion or create outcome is claimed."
+  },
+  {
+    "step": 15,
+    "title": "Warehouse receiving",
+    "health": "Needs improvement",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/15-receiving.jpg",
+    "observed": "Nested Warehouse/Receiving tabs, summary cards and a long PO list leave a large empty detail region in the first viewport.",
+    "assessment": "PO-based receiving is a sensible starting point. The selection prompt is displaced by the long list.",
+    "recommendation": "Keep the prompt at the top of the detail panel and add quick PO/vendor lookup plus expected/overdue filters.",
+    "limit": "No receipts or inspections recorded."
+  },
+  {
+    "step": 16,
+    "title": "Receiving \u2192 Inspection Queue",
+    "health": "Broken",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/16-inspection-tab-lands-in-inventory.jpg",
+    "observed": "Clicking Inspection Queue changes the URL to /warehouse?tab=queue and renders Inventory.",
+    "assessment": "The wrong module opens. Current source confirms the outer Warehouse tab and inner Receiving tab use the same query key.",
+    "recommendation": "Use distinct URL state, such as tab=receiving&receivingTab=queue, and test refresh/Back/deep links.",
+    "limit": "Browser-confirmed read-only navigation defect."
+  },
+  {
+    "step": 17,
+    "title": "Shipping",
+    "health": "Needs improvement",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/17-shipping.jpg",
+    "observed": "Ready to Ship shows 43 rows with repeated Schedule Shipment actions and little visible narrowing support.",
+    "assessment": "Status queues are useful. Similar part rows need unit/WO identity, remaining quantity and useful date/customer filters.",
+    "recommendation": "Add fulfillment context and a searchable queue; clarify Manual versus schedule-from-WO. Preserve partial-shipment remainder until fulfilled.",
+    "limit": "Partial-shipment failure is source-traced, not executed live."
+  },
+  {
+    "step": 18,
+    "title": "Purchasing",
+    "health": "Needs improvement",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/18-purchasing.jpg",
+    "observed": "The title says Purchasing & Receiving although receiving is elsewhere. Open POs shows 54 while the table includes received records. The Deleted segment is cramped.",
+    "assessment": "PO statuses and vendor context are visible. The current Open POs value is the whole loaded list length.",
+    "recommendation": "Correct summary scope and terminology, give filters adequate space, format currency consistently, and make row click open PO detail.",
+    "limit": "Source verifies list-length count and print-focused row interaction; no print or vendor message triggered."
+  },
+  {
+    "step": 19,
+    "title": "New PO dialog",
+    "health": "Usable; picker improvement",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/19-new-po-dialog.jpg",
+    "observed": "The clean dialog opens with vendor selection, date, line items and notes.",
+    "assessment": "A coherent contained form. The native vendor list has many options, making known-vendor lookup slower.",
+    "recommendation": "Use the established searchable entity picker; validate at the field/line and keep submit progress in the dialog.",
+    "limit": "Opened and dismissed without entering or saving a PO."
+  },
+  {
+    "step": 20,
+    "title": "MRP empty state",
+    "health": "Needs improvement",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/20-mrp.jpg",
+    "observed": "No runs exist; the first metric says Run undefined while cards show zeros.",
+    "assessment": "The main empty state explains how to begin, but undefined and pre-run zeros imply an analysis that has not occurred.",
+    "recommendation": "Show Not analyzed until a run succeeds; remove redundant empty panels. Make action resolution describe actual supply creation or manual follow-up.",
+    "limit": "MRP was not run; Process behavior and run races are source-only."
+  },
+  {
+    "step": 21,
+    "title": "Quality management",
+    "health": "Needs improvement",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/21-quality.jpg",
+    "observed": "NCR/CAR/FAI navigation and summary filters are present. The sampled void NCR still offers Void and pending disposition.",
+    "assessment": "Shared table and status filters exist. NCR/CAR lifecycle detail remains missing in current source; the void row needs terminal-state treatment.",
+    "recommendation": "Provide review, disposition, owner, evidence and closure flows; disable irrelevant terminal actions and paginate the server dataset.",
+    "limit": "Sample contains a pre-existing test record. No record was voided or edited; FAI has more complete detail behavior."
+  },
+  {
+    "step": 22,
+    "title": "Traceability no-match search",
+    "health": "Needs improvement",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/22-traceability-no-match.jpg",
+    "observed": "Submitting AUDIT-NO-MATCH-20260906 leaves only the search field and Trace button with no result or no-match message.",
+    "assessment": "The lookup supports several useful identifiers. Silence gives no confirmation that the search completed.",
+    "recommendation": "Distinguish initial/searching/no match/error states; offer query guidance and linked related records. Dispatch serial matches to serial tracing.",
+    "limit": "No-match behavior observed; serial endpoint mismatch is source-only."
+  },
+  {
+    "step": 23,
+    "title": "Quotes list",
+    "health": "Needs improvement",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/23-quotes.jpg",
+    "observed": "The table shows two saved quotes, dates, line counts and a Send to Customer icon for the draft.",
+    "assessment": "The summary is compact. History/status search is missing and send wording overstates the verified status-only endpoint.",
+    "recommendation": "Provide Open/Converted/Expired views and truthful send/delivery states. Review the exact recipient/document only if sending is implemented.",
+    "limit": "No customer message was sent or quote status changed."
+  },
+  {
+    "step": 24,
+    "title": "Selected quote",
+    "health": "Incomplete",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/24-quote-selected.jpg",
+    "observed": "Selecting a 13-line quote opens a summary with number, customer and total; the lines remain inaccessible here.",
+    "assessment": "Selection is reflected visibly, but the next review step is absent.",
+    "recommendation": "Open a full detail page with lines, terms, revision history and draft edits; preview line-to-WO conversion explicitly.",
+    "limit": "Browser-confirmed summary limitation. Conversion defects are source-only."
+  },
+  {
+    "step": 25,
+    "title": "Documents",
+    "health": "Usable; workflow gap",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/25-documents.jpg",
+    "observed": "The library has search/type filtering and 203 records, with Download and Delete row actions.",
+    "assessment": "Catalog search and pagination are useful. Reviewing documents requires download and revisions lack a visible navigation flow.",
+    "recommendation": "Add in-app preview, linked part/revision history and current/superseded status. Keep destructive actions secondary.",
+    "limit": "No files downloaded, uploaded or deleted; no document contents audited."
+  },
+  {
+    "step": 26,
+    "title": "Reports dashboard",
+    "health": "Usable; clarity gap",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/26-reports.jpg",
+    "observed": "The screen combines period-based metrics, a separately labelled 14-day chart, 90-day vendor data, and machine utilization.",
+    "assessment": "Individual panel windows are labelled. Utilization at 133.2% needs its denominator/meaning explained; chart labels are crowded.",
+    "recommendation": "Expose metric definitions, consistent number formatting and accessible chart values; persist tab/period in URLs and make all employee entries reachable.",
+    "limit": "No financial accuracy conclusion. Employee entry truncation and history-state behavior are source-traced."
+  },
+  {
+    "step": 27,
+    "title": "Parts catalog",
+    "health": "Usable; readability gap",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/27-parts.jpg",
+    "observed": "Search, filters, saved filters, table/grid options and component visibility are available.",
+    "assessment": "The hidden-component explanation is helpful. Dark blue identifiers and heavily wrapped part numbers impede scanning.",
+    "recommendation": "Use a brighter dark-surface link token and allocate identifier width; preserve the existing catalog controls.",
+    "limit": "No part edited. Screenshot rendering softness is not treated as a product defect."
+  },
+  {
+    "step": 28,
+    "title": "Part BOM: Single Level",
+    "health": "Usable",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/28-part-bom-single-level.jpg",
+    "observed": "Released Rev A has one item: WERCO-001-01, quantity 1 each.",
+    "assessment": "Part identity, release state, revision and quantity are visible together.",
+    "recommendation": "Preserve this context in all BOM views and support controlled draft-item editing.",
+    "limit": "Read-only inspection of an existing test part."
+  },
+  {
+    "step": 29,
+    "title": "Part BOM: Multi-Level",
+    "health": "Broken",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/29-part-bom-multi-level.jpg",
+    "observed": "Switching the same BOM to Multi-Level shows No items to display while its header still says 1 item.",
+    "assessment": "This contradicts the prior view. Source confirms the response object is stored where the UI expects its items array.",
+    "recommendation": "Use a typed explode response and display its items; distinguish failed reads from valid empty results.",
+    "limit": "Browser-confirmed; no BOM changed or unreleased."
+  },
+  {
+    "step": 30,
+    "title": "Visitor dialog Purpose picker",
+    "health": "Broken",
+    "file": "/Users/jonwerthen/Documents/Werco-ERP-MES/docs/ux-audit-2026-09-06/screenshots/30-visitor-purpose-picker.jpg",
+    "observed": "Purpose is expanded and the DOM contains six options, but the options render behind the Add visit modal. Escape closes the full dialog.",
+    "assessment": "The dialog has a name and clear time context. The required picker cannot be visually used as intended.",
+    "recommendation": "Share overlay layers across Modal/SelectField/ComboBox; close the topmost popup first and retain form focus.",
+    "limit": "Opened clean and dismissed; no visitor record created. Other SelectField-in-modal callers need regression coverage."
+  }
+]

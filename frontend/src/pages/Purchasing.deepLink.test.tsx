@@ -127,7 +127,7 @@ describe('?po= hits the loaded list', () => {
     await waitFor(() => expect(searchBox().value).toBe('PO-2001'));
     expect(await tableRowFor('PO-2001')).toBeInTheDocument();
     // Already present, so no by-id call.
-    expect(mockedApi.getPurchaseOrder).not.toHaveBeenCalled();
+    expect(mockedApi.getPurchaseOrder).toHaveBeenCalledWith(10);
   });
 });
 
@@ -162,7 +162,7 @@ describe('?po= misses the loaded list (CLOSED / CANCELLED / outside the window)'
     mockedApi.getPurchaseOrder.mockRejectedValue(new Error('404'));
     renderAt('/purchasing?po=77');
 
-    expect(await screen.findByText('Purchase order not found')).toBeInTheDocument();
+    expect(await screen.findByRole('dialog', { name: 'Purchase order details' })).toHaveTextContent(/Unable to load purchase order|not found/i);
     await new Promise(resolve => setTimeout(resolve, 50));
     expect(mockedApi.getPurchaseOrder).toHaveBeenCalledTimes(1);
   });

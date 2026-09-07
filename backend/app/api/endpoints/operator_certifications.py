@@ -33,6 +33,25 @@ SKILL_MATRIX_WRITE_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISO
 router = APIRouter()
 
 
+@router.get("/people")
+def list_qualification_people(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Minimal employee directory for tenant-scoped assignment pickers; no account/admin fields."""
+    people = (
+        db.query(User.id, User.first_name, User.last_name)
+        .filter(User.company_id == company_id, User.is_active == True)
+        .order_by(User.last_name, User.first_name)
+        .all()
+    )
+    return [
+        {"id": person.id, "full_name": f"{person.first_name or ''} {person.last_name or ''}".strip()}
+        for person in people
+    ]
+
+
 # ==================== FK Validation Helpers ====================
 
 

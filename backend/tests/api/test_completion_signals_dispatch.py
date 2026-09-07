@@ -228,6 +228,8 @@ def make_closed_time_entry(
 
 
 def make_shipment(db: Session, *, wo: WorkOrder, company_id: int = COMPANY_A) -> Shipment:
+    # Dispatch tests exercise the final completed allocation.
+    wo.quantity_complete = wo.quantity_ordered
     n = _next()
     shipment = Shipment(
         shipment_number=f"DISP-SHP-{n:05d}",

@@ -18,7 +18,7 @@
  */
 
 import React from 'react';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import api from '../services/api';
 import WorkOrderDetail from './WorkOrderDetail';
@@ -105,6 +105,54 @@ describe('FEPERF-4: WorkOrderDetail Complete double-submit guard', () => {
     mockedApi.getDocuments.mockResolvedValue([]);
   });
 
+  it('keeps secondary fetch failures distinct from verified empty engineering data', async () => {
+    mockedApi.getMaterialRequirements.mockRejectedValueOnce(new Error('Offline'));
+    mockedApi.getWorkOrderBlockers.mockRejectedValueOnce(new Error('Offline'));
+    mockedApi.getDocuments.mockRejectedValue(new Error('Offline'));
+    renderDetail();
+    expect(await screen.findByText(/Could not verify material requirements/)).toBeInTheDocument();
+    expect(screen.getByText(/Could not verify attached drawings/)).toBeInTheDocument();
+    expect(screen.getByText(/Could not verify blockers/)).toBeInTheDocument();
+  });
+
+  it('renders the primary work order and settled support while drawings are still loading', async () => {
+    let resolveDrawings!: (value: unknown[]) => void;
+    mockedApi.getDocuments.mockImplementation((params: any) => params?.work_order_id
+      ? new Promise(resolve => { resolveDrawings = resolve; })
+      : Promise.resolve([]));
+    renderDetail();
+    expect(await screen.findByRole('button', { name: /^Complete$/ })).toBeEnabled();
+    expect(await screen.findByText('No blockers reported')).toBeInTheDocument();
+    expect(screen.getByText('Loading attached drawings…')).toBeInTheDocument();
+    expect(screen.queryByText('No drawing PDF attached')).not.toBeInTheDocument();
+    await act(async () => { resolveDrawings([]); });
+    expect(await screen.findByText('No drawing PDF attached')).toBeInTheDocument();
+  });
+
+  it('keeps last-good drawings and blockers visible when a background refresh fails', async () => {
+    mockedApi.getDocuments.mockImplementation((params: any) => Promise.resolve(params?.work_order_id ? [{
+      id: 11, title: 'Fixture drawing', document_number: 'DOC-11', revision: 'A',
+      file_name: 'fixture.pdf', mime_type: 'application/pdf', file_size: 100, work_order_id: 42,
+    }] as never : []));
+    mockedApi.getWorkOrderBlockers.mockResolvedValue([{
+      id: 12, title: 'Fixture material missing', status: 'open', severity: 'high',
+      category: 'material_missing', description: 'Waiting for plate', work_order_id: 42,
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    }] as never);
+    renderDetail();
+    expect(await screen.findByRole('button', { name: 'Preview Fixture drawing' })).toBeInTheDocument();
+    expect(await screen.findByText('Fixture material missing')).toBeInTheDocument();
+    mockedApi.getDocuments.mockRejectedValue(new Error('Offline'));
+    mockedApi.getWorkOrderBlockers.mockRejectedValue(new Error('Offline'));
+    fireEvent(window, new Event('focus'));
+    expect(await screen.findByText(/Could not verify attached drawings/)).toBeInTheDocument();
+    expect(await screen.findByText(/Could not verify blockers/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Preview Fixture drawing' })).toBeInTheDocument();
+    expect(screen.getByText('Fixture material missing')).toBeInTheDocument();
+    expect(screen.getByText('Unknown open issues')).toBeInTheDocument();
+    expect(screen.getByText('Attachments unverified')).toBeInTheDocument();
+  });
+
   // Opens the CompleteWorkModal from the header button and returns the dialog.
   async function openCompleteModal() {
     const headerButton = await screen.findByRole('button', { name: /^Complete$/ });
@@ -179,7 +227,7 @@ describe('FEPERF-4: WorkOrderDetail Complete double-submit guard', () => {
     // Choose a scrap reason from the SelectField, then submit succeeds. The
     // SelectField commits a choice on mousedown (it preventDefaults to keep
     // focus), so drive it with mouseDown rather than click.
-    fireEvent.click(within(dialog).getByRole('button', { name: /scrap reason/i }));
+    fireEvent.click(within(dialog).getByRole('combobox', { name: /scrap reason/i }));
     fireEvent.mouseDown(await screen.findByRole('option', { name: /Out of tolerance/i }));
 
     await waitFor(() => expect(submit).toBeEnabled());

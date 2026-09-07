@@ -418,7 +418,7 @@ def test_ship_succeeds_even_if_coc_generation_fails(client: TestClient, db_sessi
     user = make_user(db_session)
     part = make_part(db_session)
     wo = make_wo(db_session, part)
-    shipment = make_shipment(db_session, wo, cert_of_conformance=True)
+    shipment = make_shipment(db_session, wo, cert_of_conformance=True, quantity_shipped=10)
     db_session.commit()
 
     with patch(

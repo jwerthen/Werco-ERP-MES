@@ -131,8 +131,9 @@ describe('ShopFloor cockpit: station header + operations grid render', () => {
     // Page heading from the cockpit header.
     expect(await screen.findByRole('heading', { name: /Shop Floor/i })).toBeInTheDocument();
 
-    // Work-center selector button for the loaded station.
-    expect(await screen.findByRole('button', { name: 'CNC Mill 1' })).toBeInTheDocument();
+    // Compact selector keeps the queue below a single station control.
+    const station = await screen.findByRole('combobox', { name: 'Work center' });
+    expect(within(station).getByRole('option', { name: /CNC Mill 1/ })).toBeInTheDocument();
 
     // Job Queue section header.
     const queueHeading = screen.getByRole('heading', { name: /Job Queue/i });

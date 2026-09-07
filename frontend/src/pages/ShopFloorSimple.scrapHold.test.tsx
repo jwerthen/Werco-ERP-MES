@@ -129,7 +129,7 @@ function renderShopFloor() {
 // listbox of role="option" buttons selected via onMouseDown. Open by clicking
 // the labelled button, then mouseDown the option carrying `label`.
 function pickReason(ariaLabel: string, label: string) {
-  fireEvent.click(screen.getByRole('button', { name: ariaLabel }));
+  fireEvent.click(screen.getByRole('combobox', { name: ariaLabel }));
   const option = screen.getByRole('option', { name: new RegExp(label, 'i') });
   fireEvent.mouseDown(option);
 }
@@ -179,7 +179,7 @@ describe('ShopFloorSimple check-out scrap reason', () => {
     await openCheckOut();
 
     // No scrap yet: no reason picker, save enabled.
-    expect(screen.queryByRole('button', { name: 'Scrap reason' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: 'Scrap reason' })).not.toBeInTheDocument();
     const save = screen.getByRole('button', { name: /end time and save/i });
     expect(save).toBeEnabled();
 
@@ -187,7 +187,7 @@ describe('ShopFloorSimple check-out scrap reason', () => {
     const scrapInput = numberInputByLabel('Scrap');
     fireEvent.change(scrapInput, { target: { value: '2' } });
 
-    expect(screen.getByRole('button', { name: 'Scrap reason' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Scrap reason' })).toBeInTheDocument();
     expect(screen.getByText(/required when scrap is greater than zero/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /end time and save/i })).toBeDisabled();
     expect(mockedApi.clockOut).not.toHaveBeenCalled();
@@ -253,12 +253,12 @@ describe('ShopFloorSimple production-report scrap reason', () => {
     await openProductionModal();
 
     // Default state: 1 good part, 0 scrap -> submit enabled, no reason picker.
-    expect(screen.queryByRole('button', { name: 'Scrap reason' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: 'Scrap reason' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /add to completed/i })).toBeEnabled();
 
     fireEvent.change(numberInputByLabel(/scrap to add/i), { target: { value: '4' } });
 
-    expect(screen.getByRole('button', { name: 'Scrap reason' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Scrap reason' })).toBeInTheDocument();
     expect(screen.getByText(/required when scrap is greater than zero/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /add to completed/i })).toBeDisabled();
     expect(mockedApi.reportOperationProduction).not.toHaveBeenCalled();

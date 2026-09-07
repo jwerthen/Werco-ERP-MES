@@ -364,13 +364,13 @@ class LocationCreate(BaseModel):
 # negative receive would remove stock, and a negative transfer would move dest->source
 # against locations/lots the response never named. Direction is the verb, never the sign.
 class ReceiveItemRequest(BaseModel):
-    part_id: int
-    quantity: float = Field(gt=0)
-    location_code: str
+    part_id: int = Field(gt=0)
+    quantity: float = Field(gt=0, allow_inf_nan=False)
+    location_code: str = Field(min_length=1)
     lot_number: Optional[str] = None
     serial_number: Optional[str] = None
     po_number: Optional[str] = None
-    unit_cost: float = 0.0
+    unit_cost: float = Field(default=0, ge=0, allow_inf_nan=False)
     cert_number: Optional[str] = None
     heat_lot: Optional[str] = None
     notes: Optional[str] = None
@@ -378,15 +378,15 @@ class ReceiveItemRequest(BaseModel):
 
 class IssueItemRequest(BaseModel):
     inventory_item_id: int
-    quantity: float = Field(gt=0)
+    quantity: float = Field(gt=0, allow_inf_nan=False)
     work_order_number: Optional[str] = None
     notes: Optional[str] = None
 
 
 class TransferRequest(BaseModel):
     inventory_item_id: int
-    quantity: float = Field(gt=0)
-    to_location_code: str
+    quantity: float = Field(gt=0, allow_inf_nan=False)
+    to_location_code: str = Field(min_length=1)
     notes: Optional[str] = None
 
 
@@ -886,6 +886,9 @@ def transfer_inventory(
 
     if inv_item.quantity_available < transfer_in.quantity:
         raise HTTPException(status_code=400, detail="Insufficient quantity")
+
+    if inv_item.location == transfer_in.to_location_code:
+        raise HTTPException(status_code=422, detail="Choose a different destination location")
 
     from_location = inv_item.location
     source_old_quantity = inv_item.quantity_on_hand

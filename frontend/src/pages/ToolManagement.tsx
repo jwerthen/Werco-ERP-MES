@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import api from '../services/api';
+import EntityPicker from '../components/operations/EntityPicker';
 import {
   PlusIcon,
   MagnifyingGlassIcon,
@@ -63,10 +64,15 @@ type Tab = 'all' | 'checked_out' | 'replacement' | 'inspection';
 
 export default function ToolManagement() {
   const { showToast } = useToast();
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState('');
   const [tools, setTools] = useState<Tool[]>([]);
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const tabRequest = useRef(0);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState(false);
   const [tabError, setTabError] = useState(false);
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search, 250);
@@ -82,33 +88,36 @@ export default function ToolManagement() {
   const [toolHistory, setToolHistory] = useState<any[]>([]);
 
   const [createForm, setCreateForm] = useState({
-    tool_number: '', name: '', description: '', tool_type: 'cutting_tool',
-    location: '', manufacturer: '', model_number: '', serial_number: '',
-    purchase_cost: '', max_uses: '', max_life_hours: '',
+    tool_number: '',
+    name: '',
+    description: '',
+    tool_type: 'cutting_tool',
+    location: '',
+    manufacturer: '',
+    model_number: '',
+    serial_number: '',
+    purchase_cost: '',
+    max_uses: '',
+    max_life_hours: '',
   });
   const [checkoutForm, setCheckoutForm] = useState({ checked_out_to: '', work_order_id: '', notes: '' });
   const [checkinForm, setCheckinForm] = useState({ condition: 'good', notes: '', uses_this_session: '' });
 
   const loadData = useCallback(async () => {
     try {
-      setLoading(true);
       setError('');
-      const [dashData, toolsData] = await Promise.all([
-        api.getToolDashboard().catch(() => null),
-        api.getTools({ include_inactive: false }),
-      ]);
-      setDashboard(dashData);
-      setTools(toolsData || []);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to load tools');
-    } finally {
-      setLoading(false);
+      setDashboard(await api.getToolDashboard());
+    } catch {
+      setError('Unable to load tool dashboard.');
     }
   }, []);
-
-  useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   const loadTabData = useCallback(async (tab: Tab) => {
+    const request = ++tabRequest.current;
+    setLoading(true);
     try {
       setTabError(false);
       let data: Tool[] = [];
@@ -116,14 +125,18 @@ export default function ToolManagement() {
       else if (tab === 'replacement') data = await api.getToolsReplacementDue();
       else if (tab === 'inspection') data = await api.getToolsInspectionDue();
       else data = await api.getTools({ include_inactive: false });
-      setTools(data || []);
+      if (request === tabRequest.current) setTools(data || []);
     } catch (err) {
       console.error('Failed to load tab data:', err);
-      setTabError(true);
+      if (request === tabRequest.current) setTabError(true);
+    } finally {
+      if (request === tabRequest.current) setLoading(false);
     }
   }, []);
 
-  useEffect(() => { loadTabData(activeTab); }, [activeTab, loadTabData]);
+  useEffect(() => {
+    loadTabData(activeTab);
+  }, [activeTab, loadTabData]);
 
   const filteredTools = useMemo(() => {
     return tools.filter(t => {
@@ -143,6 +156,9 @@ export default function ToolManagement() {
   }, [tools, statusFilter, typeFilter, debouncedSearch]);
 
   const handleCreate = async () => {
+    if (actionBusy) return;
+    setActionBusy(true);
+    setActionError('');
     try {
       await api.createTool({
         ...createForm,
@@ -151,15 +167,41 @@ export default function ToolManagement() {
         max_life_hours: createForm.max_life_hours ? parseFloat(createForm.max_life_hours) : undefined,
       });
       setShowCreateModal(false);
-      setCreateForm({ tool_number: '', name: '', description: '', tool_type: 'cutting_tool', location: '', manufacturer: '', model_number: '', serial_number: '', purchase_cost: '', max_uses: '', max_life_hours: '' });
+      setCreateForm({
+        tool_number: '',
+        name: '',
+        description: '',
+        tool_type: 'cutting_tool',
+        location: '',
+        manufacturer: '',
+        model_number: '',
+        serial_number: '',
+        purchase_cost: '',
+        max_uses: '',
+        max_life_hours: '',
+      });
       loadData();
+      loadTabData(activeTab);
     } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      setActionError(
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((item: any) => item.msg).join('; ')
+            : 'Unable to save. Check your entries and try again.'
+      );
       showToast('error', err.response?.data?.detail || 'Failed to create tool');
+    } finally {
+      setActionBusy(false);
     }
   };
 
   const handleCheckout = async () => {
     if (!selectedTool) return;
+    if (actionBusy) return;
+    setActionBusy(true);
+    setActionError('');
     try {
       await api.checkoutTool(selectedTool.id, {
         ...checkoutForm,
@@ -168,13 +210,27 @@ export default function ToolManagement() {
       setShowCheckoutModal(false);
       setCheckoutForm({ checked_out_to: '', work_order_id: '', notes: '' });
       loadData();
+      loadTabData(activeTab);
     } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      setActionError(
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((item: any) => item.msg).join('; ')
+            : 'Unable to save. Check your entries and try again.'
+      );
       showToast('error', err.response?.data?.detail || 'Failed to checkout tool');
+    } finally {
+      setActionBusy(false);
     }
   };
 
   const handleCheckin = async () => {
     if (!selectedTool) return;
+    if (actionBusy) return;
+    setActionBusy(true);
+    setActionError('');
     try {
       await api.checkinTool(selectedTool.id, {
         ...checkinForm,
@@ -183,8 +239,19 @@ export default function ToolManagement() {
       setShowCheckinModal(false);
       setCheckinForm({ condition: 'good', notes: '', uses_this_session: '' });
       loadData();
+      loadTabData(activeTab);
     } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      setActionError(
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((item: any) => item.msg).join('; ')
+            : 'Unable to save. Check your entries and try again.'
+      );
       showToast('error', err.response?.data?.detail || 'Failed to checkin tool');
+    } finally {
+      setActionBusy(false);
     }
   };
 
@@ -192,17 +259,27 @@ export default function ToolManagement() {
     setDetailTool(tool);
     setShowDetailModal(true);
     setToolHistory([]);
+    setHistoryLoading(true);
+    setHistoryError(false);
     try {
       const history = await api.getToolHistory(tool.id);
       setToolHistory(history || []);
-    } catch { setToolHistory([]); }
+    } catch {
+      setHistoryError(true);
+    } finally {
+      setHistoryLoading(false);
+    }
   };
 
   const renderRowActions = (tool: Tool) => (
     <div className="flex gap-1">
       {tool.status === 'available' && (
         <button
-          onClick={(e) => { e.stopPropagation(); setSelectedTool(tool); setShowCheckoutModal(true); }}
+          onClick={e => {
+            e.stopPropagation();
+            setSelectedTool(tool);
+            setShowCheckoutModal(true);
+          }}
           className="text-xs px-2 py-1 bg-blue-500/100 text-white rounded hover:bg-blue-600"
           title="Checkout"
           aria-label="Checkout tool"
@@ -212,7 +289,11 @@ export default function ToolManagement() {
       )}
       {(tool.status === 'checked_out' || tool.status === 'in_use') && (
         <button
-          onClick={(e) => { e.stopPropagation(); setSelectedTool(tool); setShowCheckinModal(true); }}
+          onClick={e => {
+            e.stopPropagation();
+            setSelectedTool(tool);
+            setShowCheckinModal(true);
+          }}
           className="text-xs px-2 py-1 bg-green-500/100 text-white rounded hover:bg-green-600"
           title="Check In"
           aria-label="Check in tool"
@@ -228,50 +309,50 @@ export default function ToolManagement() {
       key: 'tool_number',
       header: 'Tool #',
       sortable: true,
-      accessor: (t) => t.tool_number,
+      accessor: t => t.tool_number,
       className: 'font-medium text-blue-400',
     },
     {
       key: 'name',
       header: 'Name',
       sortable: true,
-      accessor: (t) => t.name,
+      accessor: t => t.name,
     },
     {
       key: 'tool_type',
       header: 'Type',
       sortable: true,
-      accessor: (t) => t.tool_type,
+      accessor: t => t.tool_type,
       className: 'capitalize',
-      render: (t) => t.tool_type?.replace(/_/g, ' '),
+      render: t => t.tool_type?.replace(/_/g, ' '),
     },
     {
       key: 'status',
       header: 'Status',
       sortable: true,
-      accessor: (t) => t.status,
-      render: (t) => <StatusBadge status={t.status} />,
+      accessor: t => t.status,
+      render: t => <StatusBadge status={t.status} />,
     },
     {
       key: 'location',
       header: 'Location',
       sortable: true,
-      accessor: (t) => t.location ?? '',
-      render: (t) => t.location || '-',
+      accessor: t => t.location ?? '',
+      render: t => t.location || '-',
     },
     {
       key: 'uses',
       header: 'Uses',
       sortable: true,
       align: 'right',
-      accessor: (t) => t.current_uses,
-      csv: (t) => `${t.current_uses}${t.max_uses ? ` / ${t.max_uses}` : ''}`,
-      render: (t) => `${t.current_uses}${t.max_uses ? ` / ${t.max_uses}` : ''}`,
+      accessor: t => t.current_uses,
+      csv: t => `${t.current_uses}${t.max_uses ? ` / ${t.max_uses}` : ''}`,
+      render: t => `${t.current_uses}${t.max_uses ? ` / ${t.max_uses}` : ''}`,
     },
     {
       key: 'actions',
       header: 'Actions',
-      render: (t) => renderRowActions(t),
+      render: t => renderRowActions(t),
     },
   ];
 
@@ -291,7 +372,19 @@ export default function ToolManagement() {
   );
 
   if (loading) {
-    return <div className="p-6"><div className="animate-pulse space-y-4"><div className="h-8 bg-gray-200 rounded w-1/4" /><div className="grid grid-cols-4 gap-4">{[...Array(4)].map((_, i) => <div key={i} className="h-24 bg-gray-200 rounded" />)}</div><div className="h-64 bg-gray-200 rounded" /></div></div>;
+    return (
+      <div className="p-6">
+        <div className="animate-pulse space-y-4">
+          <div className="h-8 bg-gray-200 rounded w-1/4" />
+          <div className="grid grid-cols-4 gap-4">
+            {[...Array(4)].map((_, i) => (
+              <div key={i} className="h-24 bg-gray-200 rounded" />
+            ))}
+          </div>
+          <div className="h-64 bg-gray-200 rounded" />
+        </div>
+      </div>
+    );
   }
 
   if (error) {
@@ -315,7 +408,8 @@ export default function ToolManagement() {
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Tool & Fixture Management</h1>
         <Button onClick={() => setShowCreateModal(true)} className="inline-flex items-center">
-          <PlusIcon className="w-5 h-5 mr-2" />New Tool
+          <PlusIcon className="w-5 h-5 mr-2" />
+          New Tool
         </Button>
       </div>
 
@@ -323,9 +417,17 @@ export default function ToolManagement() {
       <div className="border-b border-fd-line">
         <nav className="flex -mb-px space-x-6">
           {tabs.map(tab => (
-            <button key={tab.key} onClick={() => setActiveTab(tab.key)}
-              className={`py-3 px-1 border-b-2 text-sm font-medium ${activeTab === tab.key ? 'border-fd-blue text-fd-blue' : 'border-transparent text-slate-400 hover:text-slate-300'}`}>
-              {tab.label}{tab.count !== undefined && <span className="ml-1.5 text-xs tabular-nums bg-fd-panel border border-fd-line text-slate-300 rounded-sm px-1.5 py-0.5">{tab.count}</span>}
+            <button
+              key={tab.key}
+              onClick={() => setActiveTab(tab.key)}
+              className={`py-3 px-1 border-b-2 text-sm font-medium ${activeTab === tab.key ? 'border-fd-blue text-fd-blue' : 'border-transparent text-slate-400 hover:text-slate-300'}`}
+            >
+              {tab.label}
+              {tab.count !== undefined && (
+                <span className="ml-1.5 text-xs tabular-nums bg-fd-panel border border-fd-line text-slate-300 rounded-sm px-1.5 py-0.5">
+                  {tab.count}
+                </span>
+              )}
             </button>
           ))}
         </nav>
@@ -335,10 +437,20 @@ export default function ToolManagement() {
       <div className="flex gap-3 flex-wrap">
         <div className="relative flex-1 min-w-[200px]">
           <MagnifyingGlassIcon className="absolute left-3 top-2.5 w-5 h-5 text-slate-400" />
-          <input type="text" placeholder="Search tools..." aria-label="Search tools" value={search} onChange={e => setSearch(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500" />
+          <input
+            type="text"
+            placeholder="Search tools..."
+            aria-label="Search tools"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            className="w-full pl-10 pr-4 py-2 border border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500"
+          />
         </div>
-        <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className="px-3 py-2 border border-slate-600 rounded-lg">
+        <select
+          value={statusFilter}
+          onChange={e => setStatusFilter(e.target.value)}
+          className="px-3 py-2 border border-slate-600 rounded-lg"
+        >
           <option value="">All Statuses</option>
           <option value="available">Available</option>
           <option value="checked_out">Checked Out</option>
@@ -346,7 +458,11 @@ export default function ToolManagement() {
           <option value="needs_repair">Needs Repair</option>
           <option value="retired">Retired</option>
         </select>
-        <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)} className="px-3 py-2 border border-slate-600 rounded-lg">
+        <select
+          value={typeFilter}
+          onChange={e => setTypeFilter(e.target.value)}
+          className="px-3 py-2 border border-slate-600 rounded-lg"
+        >
           <option value="">All Types</option>
           <option value="cutting_tool">Cutting Tool</option>
           <option value="fixture">Fixture</option>
@@ -356,14 +472,21 @@ export default function ToolManagement() {
           <option value="mold">Mold</option>
           <option value="other">Other</option>
         </select>
-        <button onClick={loadData} className="p-2 text-slate-400 hover:text-slate-300" title="Refresh" aria-label="Refresh tools"><ArrowPathIcon className="w-5 h-5" aria-hidden="true" /></button>
+        <button
+          onClick={loadData}
+          className="p-2 text-slate-400 hover:text-slate-300"
+          title="Refresh"
+          aria-label="Refresh tools"
+        >
+          <ArrowPathIcon className="w-5 h-5" aria-hidden="true" />
+        </button>
       </div>
 
       {/* Table */}
       <DataTable
         columns={columns}
         data={filteredTools}
-        rowKey={(t) => t.id}
+        rowKey={t => t.id}
         onRowClick={openDetail}
         defaultSort={{ key: 'tool_number', dir: 'asc' }}
         pageSize={25}
@@ -383,45 +506,91 @@ export default function ToolManagement() {
       />
 
       {/* Tool Detail Modal */}
-      <Modal
-        open={showDetailModal && !!detailTool}
-        onClose={() => setShowDetailModal(false)}
-        size="lg"
-        padded={false}
-      >
+      <Modal open={showDetailModal && !!detailTool} onClose={() => setShowDetailModal(false)} size="lg" padded={false}>
+        {actionError && (
+          <p role="alert" className="text-red-300 p-3">
+            {actionError}
+          </p>
+        )}
+        {actionBusy && (
+          <p role="status" className="text-slate-400 p-3">
+            Saving…
+          </p>
+        )}
         {detailTool && (
           <>
             <div className="flex justify-between items-center p-4 border-b">
               <div className="flex items-center gap-3">
-                <h3 className="text-lg font-semibold">{detailTool.tool_number} — {detailTool.name}</h3>
+                <h3 className="text-lg font-semibold">
+                  {detailTool.tool_number} — {detailTool.name}
+                </h3>
                 <StatusBadge status={detailTool.status} />
               </div>
-              <button onClick={() => setShowDetailModal(false)} aria-label="Close"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
+              <button onClick={() => setShowDetailModal(false)} aria-label="Close">
+                <XMarkIcon className="w-5 h-5" aria-hidden="true" />
+              </button>
             </div>
             <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
               <div>
                 <h4 className="font-medium text-slate-300 mb-2">Details</h4>
                 <div className="space-y-1 text-sm">
-                  <div><span className="text-slate-400">Manufacturer:</span> {detailTool.manufacturer || '-'}</div>
-                  <div><span className="text-slate-400">Model:</span> {detailTool.model_number || '-'}</div>
-                  <div><span className="text-slate-400">Serial:</span> {detailTool.serial_number || '-'}</div>
-                  <div><span className="text-slate-400">Purchase Cost:</span> {detailTool.purchase_cost ? `$${detailTool.purchase_cost.toFixed(2)}` : '-'}</div>
-                  <div><span className="text-slate-400">Purchase Date:</span> {detailTool.purchase_date ? formatCentralDate(detailTool.purchase_date) : '-'}</div>
+                  <div>
+                    <span className="text-slate-400">Manufacturer:</span> {detailTool.manufacturer || '-'}
+                  </div>
+                  <div>
+                    <span className="text-slate-400">Model:</span> {detailTool.model_number || '-'}
+                  </div>
+                  <div>
+                    <span className="text-slate-400">Serial:</span> {detailTool.serial_number || '-'}
+                  </div>
+                  <div>
+                    <span className="text-slate-400">Purchase Cost:</span>{' '}
+                    {detailTool.purchase_cost ? `$${detailTool.purchase_cost.toFixed(2)}` : '-'}
+                  </div>
+                  <div>
+                    <span className="text-slate-400">Purchase Date:</span>{' '}
+                    {detailTool.purchase_date ? formatCentralDate(detailTool.purchase_date) : '-'}
+                  </div>
                 </div>
               </div>
               <div>
                 <h4 className="font-medium text-slate-300 mb-2">Usage &amp; Life</h4>
                 <div className="space-y-1 text-sm">
-                  <div><span className="text-slate-400">Uses:</span> {detailTool.current_uses}{detailTool.max_uses ? ` / ${detailTool.max_uses}` : ''}</div>
-                  <div><span className="text-slate-400">Life Hours:</span> {detailTool.current_life_hours.toFixed(1)}{detailTool.max_life_hours ? ` / ${detailTool.max_life_hours}` : ''} hrs</div>
-                  <div><span className="text-slate-400">Last Inspection:</span> {detailTool.last_inspection_date ? formatCentralDate(detailTool.last_inspection_date) : '-'}</div>
-                  <div><span className="text-slate-400">Next Inspection:</span> {detailTool.next_inspection_date ? formatCentralDate(detailTool.next_inspection_date) : '-'}</div>
-                  {detailTool.notes && <div><span className="text-slate-400">Notes:</span> {detailTool.notes}</div>}
+                  <div>
+                    <span className="text-slate-400">Uses:</span> {detailTool.current_uses}
+                    {detailTool.max_uses ? ` / ${detailTool.max_uses}` : ''}
+                  </div>
+                  <div>
+                    <span className="text-slate-400">Life Hours:</span> {detailTool.current_life_hours.toFixed(1)}
+                    {detailTool.max_life_hours ? ` / ${detailTool.max_life_hours}` : ''} hrs
+                  </div>
+                  <div>
+                    <span className="text-slate-400">Last Inspection:</span>{' '}
+                    {detailTool.last_inspection_date ? formatCentralDate(detailTool.last_inspection_date) : '-'}
+                  </div>
+                  <div>
+                    <span className="text-slate-400">Next Inspection:</span>{' '}
+                    {detailTool.next_inspection_date ? formatCentralDate(detailTool.next_inspection_date) : '-'}
+                  </div>
+                  {detailTool.notes && (
+                    <div>
+                      <span className="text-slate-400">Notes:</span> {detailTool.notes}
+                    </div>
+                  )}
                 </div>
               </div>
               <div>
                 <h4 className="font-medium text-slate-300 mb-2">Recent History</h4>
-                {toolHistory.length === 0 ? (
+                {historyLoading ? (
+                  <p role="status">Loading history…</p>
+                ) : historyError ? (
+                  <p role="alert">
+                    Unable to load history.{' '}
+                    <button className="underline" onClick={() => openDetail(detailTool)}>
+                      Retry
+                    </button>
+                  </p>
+                ) : toolHistory.length === 0 ? (
                   <p className="text-sm text-slate-400">No history</p>
                 ) : (
                   <div className="space-y-2 max-h-40 overflow-y-auto">
@@ -439,16 +608,30 @@ export default function ToolManagement() {
             <div className="flex justify-end gap-2 p-4 border-t">
               {detailTool.status === 'available' && (
                 <Button
-                  onClick={() => { setSelectedTool(detailTool); setShowDetailModal(false); setShowCheckoutModal(true); }}
-                >Checkout</Button>
+                  onClick={() => {
+                    setSelectedTool(detailTool);
+                    setShowDetailModal(false);
+                    setShowCheckoutModal(true);
+                  }}
+                >
+                  Checkout
+                </Button>
               )}
               {(detailTool.status === 'checked_out' || detailTool.status === 'in_use') && (
                 <button
-                  onClick={() => { setSelectedTool(detailTool); setShowDetailModal(false); setShowCheckinModal(true); }}
+                  onClick={() => {
+                    setSelectedTool(detailTool);
+                    setShowDetailModal(false);
+                    setShowCheckinModal(true);
+                  }}
                   className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
-                >Check In</button>
+                >
+                  Check In
+                </button>
               )}
-              <Button variant="secondary" onClick={() => setShowDetailModal(false)}>Close</Button>
+              <Button variant="secondary" onClick={() => setShowDetailModal(false)}>
+                Close
+              </Button>
             </div>
           </>
         )}
@@ -462,77 +645,144 @@ export default function ToolManagement() {
         closeOnBackdrop={false}
         padded={false}
       >
-            <div className="flex justify-between items-center p-4 border-b">
-              <h3 className="text-lg font-semibold">New Tool</h3>
-              <button onClick={() => setShowCreateModal(false)} aria-label="Close"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
-            </div>
-            <div className="p-4 space-y-3">
-              <div className="grid grid-cols-2 gap-3">
-                <FormField label="Tool Number" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
-                    <input {...field} type="text" value={createForm.tool_number} onChange={e => setCreateForm(f => ({ ...f, tool_number: e.target.value }))}
-                      className="w-full px-3 py-2 border rounded-lg" />
-                  )}
-                </FormField>
-                <FormField label="Name" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
-                    <input {...field} type="text" value={createForm.name} onChange={e => setCreateForm(f => ({ ...f, name: e.target.value }))}
-                      className="w-full px-3 py-2 border rounded-lg" />
-                  )}
-                </FormField>
-              </div>
-              <FormField label="Type" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
-                  <select {...field} value={createForm.tool_type} onChange={e => setCreateForm(f => ({ ...f, tool_type: e.target.value }))} className="w-full px-3 py-2 border rounded-lg">
-                    <option value="cutting_tool">Cutting Tool</option>
-                    <option value="fixture">Fixture</option>
-                    <option value="jig">Jig</option>
-                    <option value="gauge">Gauge</option>
-                    <option value="die">Die</option>
-                    <option value="mold">Mold</option>
-                    <option value="other">Other</option>
-                  </select>
-                )}
-              </FormField>
-              <FormField label="Description" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
-                  <textarea {...field} value={createForm.description} onChange={e => setCreateForm(f => ({ ...f, description: e.target.value }))} rows={2} className="w-full px-3 py-2 border rounded-lg" />
-                )}
-              </FormField>
-              <div className="grid grid-cols-2 gap-3">
-                <FormField label="Location" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
-                    <input {...field} type="text" value={createForm.location} onChange={e => setCreateForm(f => ({ ...f, location: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                  )}
-                </FormField>
-                <FormField label="Manufacturer" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
-                    <input {...field} type="text" value={createForm.manufacturer} onChange={e => setCreateForm(f => ({ ...f, manufacturer: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                  )}
-                </FormField>
-              </div>
-              <div className="grid grid-cols-3 gap-3">
-                <FormField label="Purchase Cost" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
-                    <input {...field} type="number" value={createForm.purchase_cost} onChange={e => setCreateForm(f => ({ ...f, purchase_cost: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                  )}
-                </FormField>
-                <FormField label="Max Uses" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
-                    <input {...field} type="number" value={createForm.max_uses} onChange={e => setCreateForm(f => ({ ...f, max_uses: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                  )}
-                </FormField>
-                <FormField label="Max Life (hrs)" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                  {(field) => (
-                    <input {...field} type="number" value={createForm.max_life_hours} onChange={e => setCreateForm(f => ({ ...f, max_life_hours: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
-                  )}
-                </FormField>
-              </div>
-            </div>
-            <div className="flex justify-end gap-2 p-4 border-t">
-              <Button variant="secondary" onClick={() => setShowCreateModal(false)}>Cancel</Button>
-              <Button onClick={handleCreate} disabled={!createForm.tool_number || !createForm.name}>Create</Button>
-            </div>
+        {actionError && (
+          <p role="alert" className="text-red-300 p-3">
+            {actionError}
+          </p>
+        )}
+        {actionBusy && (
+          <p role="status" className="text-slate-400 p-3">
+            Saving…
+          </p>
+        )}
+        <div className="flex justify-between items-center p-4 border-b">
+          <h3 className="text-lg font-semibold">New Tool</h3>
+          <button onClick={() => setShowCreateModal(false)} aria-label="Close">
+            <XMarkIcon className="w-5 h-5" aria-hidden="true" />
+          </button>
+        </div>
+        <div className="p-4 space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <FormField label="Tool Number" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={createForm.tool_number}
+                  onChange={e => setCreateForm(f => ({ ...f, tool_number: e.target.value }))}
+                  className="w-full px-3 py-2 border rounded-lg"
+                />
+              )}
+            </FormField>
+            <FormField label="Name" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={createForm.name}
+                  onChange={e => setCreateForm(f => ({ ...f, name: e.target.value }))}
+                  className="w-full px-3 py-2 border rounded-lg"
+                />
+              )}
+            </FormField>
+          </div>
+          <FormField label="Type" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+            {field => (
+              <select
+                {...field}
+                value={createForm.tool_type}
+                onChange={e => setCreateForm(f => ({ ...f, tool_type: e.target.value }))}
+                className="w-full px-3 py-2 border rounded-lg"
+              >
+                <option value="cutting_tool">Cutting Tool</option>
+                <option value="fixture">Fixture</option>
+                <option value="jig">Jig</option>
+                <option value="gauge">Gauge</option>
+                <option value="die">Die</option>
+                <option value="mold">Mold</option>
+                <option value="other">Other</option>
+              </select>
+            )}
+          </FormField>
+          <FormField label="Description" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+            {field => (
+              <textarea
+                {...field}
+                value={createForm.description}
+                onChange={e => setCreateForm(f => ({ ...f, description: e.target.value }))}
+                rows={2}
+                className="w-full px-3 py-2 border rounded-lg"
+              />
+            )}
+          </FormField>
+          <div className="grid grid-cols-2 gap-3">
+            <FormField label="Location" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={createForm.location}
+                  onChange={e => setCreateForm(f => ({ ...f, location: e.target.value }))}
+                  className="w-full px-3 py-2 border rounded-lg"
+                />
+              )}
+            </FormField>
+            <FormField label="Manufacturer" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={createForm.manufacturer}
+                  onChange={e => setCreateForm(f => ({ ...f, manufacturer: e.target.value }))}
+                  className="w-full px-3 py-2 border rounded-lg"
+                />
+              )}
+            </FormField>
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            <FormField label="Purchase Cost" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="number"
+                  value={createForm.purchase_cost}
+                  onChange={e => setCreateForm(f => ({ ...f, purchase_cost: e.target.value }))}
+                  className="w-full px-3 py-2 border rounded-lg"
+                />
+              )}
+            </FormField>
+            <FormField label="Max Uses" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="number"
+                  value={createForm.max_uses}
+                  onChange={e => setCreateForm(f => ({ ...f, max_uses: e.target.value }))}
+                  className="w-full px-3 py-2 border rounded-lg"
+                />
+              )}
+            </FormField>
+            <FormField label="Max Life (hrs)" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+              {field => (
+                <input
+                  {...field}
+                  type="number"
+                  value={createForm.max_life_hours}
+                  onChange={e => setCreateForm(f => ({ ...f, max_life_hours: e.target.value }))}
+                  className="w-full px-3 py-2 border rounded-lg"
+                />
+              )}
+            </FormField>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 p-4 border-t">
+          <Button variant="secondary" onClick={() => setShowCreateModal(false)}>
+            Cancel
+          </Button>
+          <Button onClick={handleCreate} disabled={actionBusy || !createForm.tool_number || !createForm.name}>
+            Create
+          </Button>
+        </div>
       </Modal>
 
       {/* Checkout Modal */}
@@ -543,32 +793,65 @@ export default function ToolManagement() {
         closeOnBackdrop={false}
         padded={false}
       >
+        {actionError && (
+          <p role="alert" className="text-red-300 p-3">
+            {actionError}
+          </p>
+        )}
+        {actionBusy && (
+          <p role="status" className="text-slate-400 p-3">
+            Saving…
+          </p>
+        )}
         {selectedTool && (
           <>
             <div className="flex justify-between items-center p-4 border-b">
               <h3 className="text-lg font-semibold">Checkout: {selectedTool.tool_number}</h3>
-              <button onClick={() => setShowCheckoutModal(false)} aria-label="Close"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
+              <button onClick={() => setShowCheckoutModal(false)} aria-label="Close">
+                <XMarkIcon className="w-5 h-5" aria-hidden="true" />
+              </button>
             </div>
             <div className="p-4 space-y-3">
               <FormField label="Checked Out To" required labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
-                  <input {...field} type="text" value={checkoutForm.checked_out_to} onChange={e => setCheckoutForm(f => ({ ...f, checked_out_to: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" placeholder="Operator name or ID" />
+                {field => (
+                  <EntityPicker
+                    {...field}
+                    kind="user"
+                    valueMode="label"
+                    value={checkoutForm.checked_out_to}
+                    onChange={value => setCheckoutForm(f => ({ ...f, checked_out_to: value }))}
+                  />
                 )}
               </FormField>
-              <FormField label="Work Order ID" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
-                  <input {...field} type="number" value={checkoutForm.work_order_id} onChange={e => setCheckoutForm(f => ({ ...f, work_order_id: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
+              <FormField label="Work Order" labelClassName="block text-sm font-medium text-slate-300 mb-1">
+                {field => (
+                  <EntityPicker
+                    {...field}
+                    kind="workOrder"
+                    value={checkoutForm.work_order_id}
+                    onChange={value => setCheckoutForm(f => ({ ...f, work_order_id: value }))}
+                  />
                 )}
               </FormField>
               <FormField label="Notes" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
-                  <textarea {...field} value={checkoutForm.notes} onChange={e => setCheckoutForm(f => ({ ...f, notes: e.target.value }))} rows={2} className="w-full px-3 py-2 border rounded-lg" />
+                {field => (
+                  <textarea
+                    {...field}
+                    value={checkoutForm.notes}
+                    onChange={e => setCheckoutForm(f => ({ ...f, notes: e.target.value }))}
+                    rows={2}
+                    className="w-full px-3 py-2 border rounded-lg"
+                  />
                 )}
               </FormField>
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
-              <Button variant="secondary" onClick={() => setShowCheckoutModal(false)}>Cancel</Button>
-              <Button onClick={handleCheckout} disabled={!checkoutForm.checked_out_to}>Checkout</Button>
+              <Button variant="secondary" onClick={() => setShowCheckoutModal(false)}>
+                Cancel
+              </Button>
+              <Button onClick={handleCheckout} disabled={actionBusy || !checkoutForm.checked_out_to}>
+                Checkout
+              </Button>
             </div>
           </>
         )}
@@ -582,16 +865,33 @@ export default function ToolManagement() {
         closeOnBackdrop={false}
         padded={false}
       >
+        {actionError && (
+          <p role="alert" className="text-red-300 p-3">
+            {actionError}
+          </p>
+        )}
+        {actionBusy && (
+          <p role="status" className="text-slate-400 p-3">
+            Saving…
+          </p>
+        )}
         {selectedTool && (
           <>
             <div className="flex justify-between items-center p-4 border-b">
               <h3 className="text-lg font-semibold">Check In: {selectedTool.tool_number}</h3>
-              <button onClick={() => setShowCheckinModal(false)} aria-label="Close"><XMarkIcon className="w-5 h-5" aria-hidden="true" /></button>
+              <button onClick={() => setShowCheckinModal(false)} aria-label="Close">
+                <XMarkIcon className="w-5 h-5" aria-hidden="true" />
+              </button>
             </div>
             <div className="p-4 space-y-3">
               <FormField label="Condition" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
-                  <select {...field} value={checkinForm.condition} onChange={e => setCheckinForm(f => ({ ...f, condition: e.target.value }))} className="w-full px-3 py-2 border rounded-lg">
+                {field => (
+                  <select
+                    {...field}
+                    value={checkinForm.condition}
+                    onChange={e => setCheckinForm(f => ({ ...f, condition: e.target.value }))}
+                    className="w-full px-3 py-2 border rounded-lg"
+                  >
                     <option value="good">Good</option>
                     <option value="worn">Worn</option>
                     <option value="damaged">Damaged</option>
@@ -600,19 +900,38 @@ export default function ToolManagement() {
                 )}
               </FormField>
               <FormField label="Uses This Session" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
-                  <input {...field} type="number" value={checkinForm.uses_this_session} onChange={e => setCheckinForm(f => ({ ...f, uses_this_session: e.target.value }))} className="w-full px-3 py-2 border rounded-lg" />
+                {field => (
+                  <input
+                    {...field}
+                    type="number"
+                    value={checkinForm.uses_this_session}
+                    onChange={e => setCheckinForm(f => ({ ...f, uses_this_session: e.target.value }))}
+                    className="w-full px-3 py-2 border rounded-lg"
+                  />
                 )}
               </FormField>
               <FormField label="Notes" labelClassName="block text-sm font-medium text-slate-300 mb-1">
-                {(field) => (
-                  <textarea {...field} value={checkinForm.notes} onChange={e => setCheckinForm(f => ({ ...f, notes: e.target.value }))} rows={2} className="w-full px-3 py-2 border rounded-lg" />
+                {field => (
+                  <textarea
+                    {...field}
+                    value={checkinForm.notes}
+                    onChange={e => setCheckinForm(f => ({ ...f, notes: e.target.value }))}
+                    rows={2}
+                    className="w-full px-3 py-2 border rounded-lg"
+                  />
                 )}
               </FormField>
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
-              <Button variant="secondary" onClick={() => setShowCheckinModal(false)}>Cancel</Button>
-              <button onClick={handleCheckin} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">Check In</button>
+              <Button variant="secondary" onClick={() => setShowCheckinModal(false)}>
+                Cancel
+              </Button>
+              <button
+                onClick={handleCheckin}
+                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+              >
+                Check In
+              </button>
             </div>
           </>
         )}

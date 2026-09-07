@@ -26,7 +26,7 @@ function renderDialog(overrides: Partial<React.ComponentProps<typeof ConfirmDial
       onConfirm={onConfirm}
       onCancel={onCancel}
       {...overrides}
-    />,
+    />
   );
   return { onConfirm, onCancel, ...utils };
 }
@@ -102,7 +102,7 @@ describe('ConfirmDialog', () => {
     // Amber utilities override the underlying btn-primary chrome (utilities
     // layer beats the components layer, so this is deterministic), including
     // suppressing .btn-primary:hover's blue ring/glow box-shadow.
-    expect(confirm).toHaveClass('bg-amber-500', 'hover:bg-amber-600', 'hover:shadow-none', 'text-white');
+    expect(confirm).toHaveClass('bg-amber-500', 'hover:bg-amber-600', 'hover:shadow-none', 'text-slate-950');
   });
 
   it('renders nothing when closed', () => {

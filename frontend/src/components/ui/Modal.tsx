@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 export type ModalSize = 'sm' | 'md' | 'lg' | 'xl' | '2xl' | '3xl' | '4xl' | '5xl' | '6xl' | '7xl';
@@ -15,6 +15,7 @@ interface ModalProps {
   // Forwarded to the dialog panel as `aria-labelledby`. Named distinctly from
   // the DOM `aria-labelledby` attribute so it stays explicit at call sites.
   ariaLabelledBy?: string;
+  ariaLabel?: string;
   children: React.ReactNode;
 }
 
@@ -41,6 +42,9 @@ const MAX_WIDTH: Record<ModalSize, string> = {
 // from "Add Item") close one layer at a time and only the frontmost layer keeps
 // focus rather than all at once.
 const modalStack: symbol[] = [];
+const ModalPortalContext = createContext<HTMLElement | null>(null);
+/** Popups stay outside the scroll panel but inside the owning focus trap. */
+export const useModalPortal = () => useContext(ModalPortalContext);
 
 // Selector for tabbable elements inside the panel. Used both to seed initial
 // focus and to wrap Tab/Shift+Tab at the panel edges.
@@ -55,7 +59,7 @@ const FOCUSABLE_SELECTOR = [
 
 function getFocusable(container: HTMLElement): HTMLElement[] {
   return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
-    (el) => el.offsetParent !== null || el === document.activeElement
+    el => el.offsetParent !== null || el === document.activeElement
   );
 }
 
@@ -69,8 +73,21 @@ export function Modal({
   scroll = true,
   className,
   ariaLabelledBy,
+  ariaLabel,
   children,
 }: ModalProps) {
+  const generatedTitleId = useId();
+  const [headingId, setHeadingId] = useState<string>();
+  const [portalContainer, setPortalContainer] = useState<HTMLDivElement | null>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!open || ariaLabelledBy || ariaLabel) return;
+    const heading = panelRef.current?.querySelector<HTMLElement>('h1,h2,h3,h4,[role="heading"]');
+    if (heading) {
+      if (!heading.id) heading.id = generatedTitleId;
+      setHeadingId(heading.id);
+    }
+  }, [open, ariaLabelledBy, ariaLabel, generatedTitleId, children]);
   // One stable identity per Modal instance, shared by the stack push/pop effect
   // and the Escape handler. Created lazily so it never changes across the
   // instance's life — crucial for nested modals, where a parent re-render must
@@ -100,7 +117,7 @@ export function Modal({
   useEffect(() => {
     if (!open || !closeOnEscape) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
       if (modalStack[modalStack.length - 1] !== tokenRef.current) return; // not topmost
       onClose();
     };
@@ -123,7 +140,7 @@ export function Modal({
     const focusTimer = window.setTimeout(() => {
       const panel = panelRef.current;
       if (!panel) return;
-      const focusable = getFocusable(panel);
+      const focusable = getFocusable(overlayRef.current ?? panel);
       (focusable[0] ?? panel).focus();
     }, 0);
 
@@ -133,7 +150,7 @@ export function Modal({
       if (modalStack[modalStack.length - 1] !== token) return;
       const panel = panelRef.current;
       if (!panel) return;
-      const focusable = getFocusable(panel);
+      const focusable = getFocusable(overlayRef.current ?? panel);
       if (focusable.length === 0) {
         // Nothing tabbable — keep focus pinned to the panel.
         e.preventDefault();
@@ -144,11 +161,11 @@ export function Modal({
       const last = focusable[focusable.length - 1];
       const activeEl = document.activeElement as HTMLElement | null;
       if (e.shiftKey) {
-        if (activeEl === first || !panel.contains(activeEl)) {
+        if (activeEl === first || !overlayRef.current?.contains(activeEl)) {
           e.preventDefault();
           last.focus();
         }
-      } else if (activeEl === last || !panel.contains(activeEl)) {
+      } else if (activeEl === last || !overlayRef.current?.contains(activeEl)) {
         e.preventDefault();
         first.focus();
       }
@@ -184,9 +201,10 @@ export function Modal({
     // close to clicks that land directly on the backdrop (target === currentTarget)
     // replaces the panel-level stopPropagation handler.
     <div
+      ref={overlayRef}
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4"
       role="presentation"
-      onClick={(e) => {
+      onClick={e => {
         if (closeOnBackdrop && e.target === e.currentTarget) onClose();
       }}
     >
@@ -195,11 +213,13 @@ export function Modal({
         className={panelClasses}
         role="dialog"
         aria-modal="true"
-        aria-labelledby={ariaLabelledBy}
+        aria-labelledby={ariaLabelledBy ?? headingId}
+        aria-label={ariaLabel}
         tabIndex={-1}
       >
-        {children}
+        <ModalPortalContext.Provider value={portalContainer}>{children}</ModalPortalContext.Provider>
       </div>
+      <div ref={setPortalContainer} />
     </div>
   );
 

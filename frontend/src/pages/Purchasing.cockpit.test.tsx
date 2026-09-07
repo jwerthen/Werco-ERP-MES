@@ -96,7 +96,7 @@ beforeEach(() => {
 
 test('mounts with the heading and the Purchase Orders table after load', async () => {
   renderPurchasing();
-  expect(await screen.findByRole('heading', { name: 'Purchasing & Receiving' })).toBeInTheDocument();
+  expect(await screen.findByRole('heading', { name: 'Purchasing' })).toBeInTheDocument();
   // Orders tab is the default view — its rows render. The list renders both a
   // desktop <table> and a parallel mobile-card list (DataTable.mobileCards), so
   // each PO number appears twice in jsdom; scope to the desktop table.
@@ -107,7 +107,7 @@ test('mounts with the heading and the Purchase Orders table after load', async (
 
 test('MiniStat summary strip renders its derived counts', async () => {
   renderPurchasing();
-  await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+  await screen.findByRole('heading', { name: 'Purchasing' });
 
   // Open POs == purchaseOrders.length (2). The label sits in its own tile.
   const openPos = screen.getByText('Open POs').closest('div')!.parentElement!;
@@ -120,11 +120,11 @@ test('MiniStat summary strip renders its derived counts', async () => {
 
 test('tab badges carry the orders and vendors counts', async () => {
   renderPurchasing();
-  await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+  await screen.findByRole('heading', { name: 'Purchasing' });
 
-  const ordersTab = screen.getByRole('button', { name: /Purchase Orders/i });
+  const ordersTab = screen.getByRole('tab', { name: /Purchase Orders/i });
   expect(within(ordersTab).getByText('2')).toBeInTheDocument();
 
-  const vendorsTab = screen.getByRole('button', { name: /^Vendors/i });
+  const vendorsTab = screen.getByRole('tab', { name: /^Vendors/i });
   expect(within(vendorsTab).getByText('2')).toBeInTheDocument();
 });

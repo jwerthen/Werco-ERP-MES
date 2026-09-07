@@ -9,9 +9,8 @@
  *   - confirmDiscard() short-circuits true when clean and defers to
  *     window.confirm when dirty.
  *
- * In-app SPA-nav blocking is intentionally NOT covered: the app uses the
- * component <BrowserRouter>, so react-router's useBlocker is unavailable. See
- * the hook's doc comment.
+ * Data-router Link/Back blocking and saved navigation are covered separately
+ * in context/UnsavedChangesContext.test.tsx.
  */
 
 import { renderHook, act } from '@testing-library/react';

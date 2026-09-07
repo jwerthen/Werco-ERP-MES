@@ -162,3 +162,46 @@ describe('MRP cockpit: MiniStat strip + shared ActionRow de-dup', () => {
     });
   });
 });
+
+
+describe('MRP request scope and review semantics', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockedApi.getMRPRuns.mockResolvedValue([latestRun, { ...latestRun, id: 8, run_number: 'MRP-2026-008' }]);
+    mockedApi.getMRPShortages.mockResolvedValue(shortagesSummary);
+    mockedApi.getMRPActions.mockResolvedValue(runActions);
+  });
+  it('marks reviewed with the server follow-up message and prevents duplicate review', async () => {
+    let resolveReview!: (value: { message: string }) => void;
+    mockedApi.processMRPAction.mockImplementation(() => new Promise(resolve => { resolveReview = resolve; }));
+    renderMRP();
+    const button = await screen.findByRole('button', { name: 'Mark reviewed' });
+    fireEvent.click(button);
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(mockedApi.processMRPAction).toHaveBeenCalledTimes(1);
+    resolveReview({ message: 'Marked reviewed. Create a purchase order manually.' });
+    expect(await screen.findByText('Marked reviewed. Create a purchase order manually.')).toBeInTheDocument();
+    expect(screen.getByText('Reviewed')).toBeInTheDocument();
+  });
+  it('ignores an older run response after a different run is selected', async () => {
+    let resolveOld!: (value: typeof runActions) => void;
+    mockedApi.getMRPActions.mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve; }));
+    mockedApi.getMRPActions.mockResolvedValueOnce([{ ...runActions[0], id: 777, part: { ...runActions[0].part, part_number: 'CURRENT-RUN-PART' } }]);
+    renderMRP();
+    fireEvent.click(await screen.findByRole('button', { name: /View MRP run MRP-2026-009/ }));
+    fireEvent.click(screen.getByRole('button', { name: /View MRP run MRP-2026-008/ }));
+    expect(await screen.findByText('CURRENT-RUN-PART')).toBeInTheDocument();
+    resolveOld(runActions);
+    await waitFor(() => expect(screen.getByText('CURRENT-RUN-PART')).toBeInTheDocument());
+    expect(document.querySelectorAll('[data-action-id="777"]')).toHaveLength(1);
+    expect(document.querySelectorAll('[data-action-id="501"]')).toHaveLength(1);
+  });
+  it('shows analysis has not run when the response has no run identifier or shortage count', async () => {
+    mockedApi.getMRPRuns.mockResolvedValue([]);
+    mockedApi.getMRPShortages.mockResolvedValue({ message: 'No MRP runs found', shortages: [] });
+    renderMRP();
+    expect(await screen.findByText('No shortage analysis yet')).toBeInTheDocument();
+    expect(screen.queryByText('No shortages in this run')).not.toBeInTheDocument();
+  });
+});

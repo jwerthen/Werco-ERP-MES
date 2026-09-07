@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import api from '../services/api';
 import { formatCentralDate, formatCentralDateTime } from '../utils/centralTime';
 import { MiniStat, MiniStatStrip, CockpitPanel } from '../components/cockpit';
@@ -102,11 +102,13 @@ function ActionRow({
   data,
   onProcess,
   highlight,
+  pending = false,
 }: {
   data: ActionRowData;
   onProcess?: (actionId: number) => void;
   /** Marks this action as also surfaced in the other panel (same actionId). */
   highlight?: boolean;
+  pending?: boolean;
 }) {
   const config = actionTypeConfig[data.actionType] || actionTypeConfig.order;
   const Icon = config.icon;
@@ -133,18 +135,19 @@ function ActionRow({
           {data.orderByDate && <span>order {formatCentralDate(data.orderByDate, { year: undefined })}</span>}
         </div>
       </div>
-      <div className="flex-shrink-0 w-16 text-right">
+      <div className="flex-shrink-0 w-28 text-right">
         {!data.isProcessed && onProcess ? (
           <button
             onClick={() => onProcess(data.actionId)}
+            disabled={pending}
             className="text-werco-primary hover:text-blue-400 text-xs font-medium"
           >
-            Process
+            {pending ? 'Saving…' : 'Mark reviewed'}
           </button>
         ) : data.isProcessed ? (
           <span className="inline-flex items-center justify-end text-fd-green text-xs">
             <CheckCircleIcon className="h-3.5 w-3.5 mr-1" />
-            Done
+            Reviewed
           </span>
         ) : null}
       </div>
@@ -162,8 +165,16 @@ export default function MRPPage() {
   const [runningMRP, setRunningMRP] = useState(false);
   const [selectedRun, setSelectedRun] = useState<MRPRun | null>(null);
   const [runActions, setRunActions] = useState<MRPAction[]>([]);
+  const [actionsLoading, setActionsLoading] = useState(false);
+  const [reviewingIds, setReviewingIds] = useState<Set<number>>(new Set());
+  const reviewingRef = useRef(new Set<number>());
+  const actionsRequestRef = useRef(0);
+  const [reviewNotice, setReviewNotice] = useState('');
 
   // Run parameters
+  const runPendingRef = useRef(false);
+  const dataRequestRef = useRef(0);
+  const [reviewedIds, setReviewedIds] = useState<Set<number>>(new Set());
   const [horizonDays, setHorizonDays] = useState(90);
   const [includeSafetyStock, setIncludeSafetyStock] = useState(true);
 
@@ -172,23 +183,27 @@ export default function MRPPage() {
   }, []);
 
   const loadData = async () => {
+    const requestId = ++dataRequestRef.current;
     setLoadError(false);
     try {
       const [runsRes, shortagesRes] = await Promise.all([
         api.getMRPRuns(),
         api.getMRPShortages()
       ]);
+      if (requestId !== dataRequestRef.current) return;
       setRuns(runsRes);
       setShortages(shortagesRes);
     } catch (err) {
       console.error('Failed to load MRP data:', err);
-      setLoadError(true);
+      if (requestId === dataRequestRef.current) setLoadError(true);
     } finally {
-      setLoading(false);
+      if (requestId === dataRequestRef.current) setLoading(false);
     }
   };
 
   const runMRP = async () => {
+    if (runPendingRef.current || !Number.isFinite(horizonDays) || horizonDays < 7 || horizonDays > 365) return;
+    runPendingRef.current = true;
     setRunningMRP(true);
     try {
       const result = await api.runMRP({
@@ -196,37 +211,47 @@ export default function MRPPage() {
         include_safety_stock: includeSafetyStock,
         include_allocated: true
       });
-      setRuns([result, ...runs]);
-      loadData(); // Refresh shortages
+      setRuns(previous => [result, ...previous]);
+      await loadData(); // Refresh shortages
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to run MRP');
     } finally {
+      runPendingRef.current = false;
       setRunningMRP(false);
     }
   };
 
   const loadRunActions = async (run: MRPRun) => {
+    const requestId = ++actionsRequestRef.current;
     setSelectedRun(run);
     setActionsError(false);
+    setActionsLoading(true);
+    setRunActions([]);
     try {
       const actions = await api.getMRPActions(run.id);
-      setRunActions(actions);
-    } catch (err) {
-      console.error('Failed to load actions:', err);
-      setActionsError(true);
+      if (requestId === actionsRequestRef.current) setRunActions(actions);
+    } catch {
+      if (requestId === actionsRequestRef.current) setActionsError(true);
+    } finally {
+      if (requestId === actionsRequestRef.current) setActionsLoading(false);
     }
   };
 
   const processAction = async (actionId: number) => {
+    if (reviewingRef.current.has(actionId)) return;
+    reviewingRef.current.add(actionId);
+    setReviewingIds(new Set(reviewingRef.current));
     try {
-      await api.processMRPAction(actionId);
-      // Reload actions
-      if (selectedRun) {
-        loadRunActions(selectedRun);
-      }
-      loadData();
+      const result = await api.processMRPAction(actionId);
+      setReviewedIds(previous => new Set(previous).add(actionId));
+      setReviewNotice(result?.message || 'Marked reviewed. Create the required supply order or complete the recommended action separately.');
+      setRunActions((rows) => rows.map((row) => row.id === actionId ? { ...row, is_processed: true } : row));
+      await loadData();
     } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to process action');
+      showToast('error', err.response?.data?.detail || 'Could not mark action reviewed');
+    } finally {
+      reviewingRef.current.delete(actionId);
+      setReviewingIds(new Set(reviewingRef.current));
     }
   };
 
@@ -276,7 +301,7 @@ export default function MRPPage() {
             />
             <span className="text-sm">Safety Stock</span>
           </label>
-          <button onClick={runMRP} disabled={runningMRP} className="btn-primary btn-sm flex items-center">
+          <button onClick={runMRP} disabled={runningMRP || !Number.isFinite(horizonDays) || horizonDays < 7 || horizonDays > 365} className="btn-primary btn-sm flex items-center">
             {runningMRP ? (
               <>
                 <div className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full mr-2" />
@@ -299,7 +324,7 @@ export default function MRPPage() {
           iconBg={totalShortages > 0 ? 'bg-amber-500/20' : 'bg-fd-green/15'}
           iconColor={totalShortages > 0 ? 'text-amber-600' : 'text-fd-green'}
           label="Total Shortages"
-          value={totalShortages}
+          value={shortages?.total_shortages ?? '—'}
           valueColor={totalShortages > 0 ? 'text-fd-amber' : undefined}
           subtitle={shortages ? `Run ${shortages.mrp_run_number}` : undefined}
         />
@@ -308,7 +333,7 @@ export default function MRPPage() {
           iconBg={expediteCount > 0 ? 'bg-red-500/20' : 'bg-fd-green/15'}
           iconColor={expediteCount > 0 ? 'text-red-600' : 'text-fd-green'}
           label="Need Expedite"
-          value={expediteCount}
+          value={shortages?.expedite_count ?? '—'}
           valueColor={expediteCount > 0 ? 'text-fd-red' : undefined}
         />
         <MiniStat
@@ -335,6 +360,10 @@ export default function MRPPage() {
         />
       </MiniStatStrip>
 
+      <div className="card p-3 text-sm text-slate-300">
+        Reviewing a recommendation does not create a purchase order or work order. Complete the recommended supply action separately.
+        {reviewNotice && <p role="status" className="mt-2 text-amber-300">{reviewNotice}</p>}
+      </div>
       {/* Page-level load failure: surface an error + retry instead of a blank cockpit. */}
       {loadError && (
         <ErrorState message="Could not load MRP runs and shortages." onRetry={loadData} />
@@ -373,16 +402,19 @@ export default function MRPPage() {
                     quantity: shortage.quantity,
                     requiredDate: shortage.required_date,
                     orderByDate: shortage.order_by_date,
-                    isProcessed: false,
+                    isProcessed: reviewedIds.has(shortage.action_id),
                     isExpedite: shortage.is_expedite,
                   }}
                   onProcess={processAction}
+                  pending={reviewingIds.has(shortage.action_id)}
                 />
               ))}
             </div>
           </CockpitPanel>
         )}
 
+        {!loadError && shortages?.total_shortages === 0 && <div className="card p-4 xl:col-span-7"><h2 className="font-semibold">No shortages in this run</h2><p className="text-sm text-slate-400">Run {shortages.mrp_run_number} has no material shortage recommendations. Review its planning horizon before placing new orders.</p></div>}
+        {!loadError && !shortages?.mrp_run_id && <div className="card p-4 xl:col-span-7"><h2 className="font-semibold">No shortage analysis yet</h2><p className="text-sm text-slate-400">Run MRP to check material requirements for the selected horizon.</p></div>}
         {/* Recent Runs */}
         <CockpitPanel
           title="Recent MRP Runs"
@@ -453,6 +485,8 @@ export default function MRPPage() {
               title="No run selected"
               description="Select a run from Recent MRP Runs to view its actions."
             />
+          ) : actionsLoading ? (
+            <p role="status" className="p-4">Loading actions for {selectedRun.run_number}…</p>
           ) : actionsError ? (
             <ErrorState
               message="Could not load actions for this run."
@@ -472,9 +506,10 @@ export default function MRPPage() {
                     quantity: action.quantity,
                     requiredDate: action.required_date,
                     orderByDate: action.suggested_order_date,
-                    isProcessed: action.is_processed,
+                    isProcessed: action.is_processed || reviewedIds.has(action.id),
                   }}
                   onProcess={processAction}
+                  pending={reviewingIds.has(action.id)}
                   highlight={shortageActionIds.has(action.id)}
                 />
               ))}

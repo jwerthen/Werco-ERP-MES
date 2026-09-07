@@ -44,6 +44,7 @@ class Document(Base, TenantMixin):
     # so the SQLite create_all path builds the same partial shape (the 076
     # dialect-parity convention, see inventory.py).
     __table_args__ = (
+        Index("ix_documents_company_previous_revision", "company_id", "previous_revision_id"),
         Index(
             "ix_documents_company_part",
             "company_id",
@@ -65,6 +66,10 @@ class Document(Base, TenantMixin):
     )
 
     id = Column(Integer, primary_key=True, index=True)
+
+    previous_revision_id = Column(
+        Integer, ForeignKey("documents.id", name="fk_documents_previous_revision"), nullable=True
+    )
 
     # Document identification
     document_number = Column(String(100), unique=True, index=True, nullable=False)

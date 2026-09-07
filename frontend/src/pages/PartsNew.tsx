@@ -130,7 +130,7 @@ export default function PartsPage() {
       (JSON.stringify(createForm) !== JSON.stringify(initialCreateForm) || createDrawingPdf !== null),
     [showCreateModal, createForm, initialCreateForm, createDrawingPdf]
   );
-  const { confirmDiscard } = useUnsavedChanges(isCreateFormDirty);
+  const { confirmDiscard, markSaved } = useUnsavedChanges(isCreateFormDirty);
 
   const loadParts = useCallback(async () => {
     try {
@@ -507,6 +507,7 @@ export default function PartsPage() {
       setCreateForm(INITIAL_CREATE_FORM);
       setCreateDrawingPdf(null);
       setCreateDrawingInputKey(key => key + 1);
+      markSaved();
       navigate(`/parts/${newPart.id}`);
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to create part');

@@ -94,7 +94,7 @@ const query = () => screen.getByTestId('query').textContent;
  * ('NCR' / 'CAR' / 'FAI'), and an exact-name match is required so it never
  * picks up the sibling "New NCR" action button.
  */
-const tabButton = (label: string) => screen.getByRole('button', { name: label });
+const tabButton = (label: string) => screen.getByRole('tab', { name: label });
 
 /** The strip marks the active tab with the brand underline. */
 const isActive = (label: string) => tabButton(label).className.includes('border-werco-primary');
@@ -188,7 +188,7 @@ describe('arriving while already mounted (the lazy-initializer bug class)', () =
    */
   const renderThenNavigate = async (from: string, to: string) => {
     renderAt(from);
-    await screen.findByRole('button', { name: 'NCR' });
+    await screen.findByRole('tab', { name: 'NCR' });
     // Same router, same mounted page — only the query string changes.
     act(() => navigateTo(to));
   };

@@ -1,0 +1,20 @@
+{
+  "environment": "localhost:5174 frontend; localhost:8001 API; isolated SQLite synthetic seed data",
+  "quote_id": 1,
+  "quote_number": "QTE-202609-0001",
+  "part_line_quantity": 20,
+  "custom_line_quantity": 1,
+  "converted_work_order_id": 6,
+  "work_centers": 24,
+  "operations": {
+    "work_order_id": 5,
+    "shipment_id": 1,
+    "shipment_quantity": 2,
+    "completed_quantity": 10,
+    "po_id": 1,
+    "ncr_id": 1,
+    "car_id": 1,
+    "document_revision_a_id": 1,
+    "document_revision_b_id": 2
+  }
+}

@@ -1098,6 +1098,9 @@ def update_purchase_order(
     404s on a soft-deleted PO -- see ``_live_po_or_404``. Also refuses (400) a ``status``
     change that would make the order LIVE again while its vendor is soft-deleted -- see the
     guard below."""
+    db.query(PurchaseOrder.id).filter(
+        PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id
+    ).with_for_update().first()
     po = _live_po_or_404(db, po_id, company_id)
 
     # The third door into "a live PO against a removed supplier". ``create_purchase_order``
@@ -1130,6 +1133,52 @@ def update_purchase_order(
 
     previous_status = po.status
     update_data = po_in.model_dump(exclude_unset=True)
+    expected = update_data.pop("expected_updated_at", None)
+    update_data.pop("version", None)
+    if expected and po.updated_at and expected.replace(tzinfo=None) != po.updated_at.replace(tzinfo=None):
+        raise HTTPException(
+            status_code=409, detail="This purchase order changed. Reload the current record before saving."
+        )
+    draft_lines = update_data.pop("lines", None)
+    if draft_lines is not None:
+        if po.status != POStatus.DRAFT or any(float(line.quantity_received or 0) > 0 for line in po.lines):
+            raise HTTPException(
+                status_code=409, detail="Only an unreceived draft purchase order can have its lines edited"
+            )
+        current_lines = {line.id: line for line in po.lines}
+        supplied_ids = [line["id"] for line in draft_lines if line.get("id")]
+        if len(supplied_ids) != len(set(supplied_ids)) or any(line_id not in current_lines for line_id in supplied_ids):
+            raise HTTPException(status_code=422, detail="Line items do not belong to this purchase order")
+        part_ids = {line["part_id"] for line in draft_lines}
+        valid_parts = {
+            row[0] for row in db.query(Part.id).filter(Part.company_id == company_id, Part.id.in_(part_ids)).all()
+        }
+        if valid_parts != part_ids:
+            raise HTTPException(status_code=404, detail="One or more selected parts no longer exist")
+        next_lines = []
+        for index, values in enumerate(draft_lines, 1):
+            line = current_lines.get(values.get("id")) or PurchaseOrderLine(
+                company_id=company_id, purchase_order_id=po.id, quantity_received=0
+            )
+            for key, value in values.items():
+                if key != "id":
+                    setattr(line, key, float(value) if key in ("quantity_ordered", "unit_price") else value)
+            line.line_number = index
+            line.line_total = float(line.quantity_ordered) * float(line.unit_price)
+            next_lines.append(line)
+        po.lines = next_lines
+        # A child-only edit must invalidate the parent token even when totals are unchanged.
+        po.updated_at = datetime.utcnow()
+        po.subtotal = sum(line.line_total for line in next_lines)
+        po.total = po.subtotal + float(po.tax or 0) + float(po.shipping or 0)
+        audit.log_update(
+            "purchase_order",
+            po.id,
+            po.po_number,
+            old_values={"lines": list(current_lines)},
+            new_values={"lines": draft_lines},
+            extra_data={"action": "draft_lines_updated"},
+        )
     for field, value in update_data.items():
         if field == "status":
             setattr(po, field, POStatus(value))
@@ -1170,11 +1219,11 @@ def send_purchase_order(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Issue a draft/approved PO to the vendor (status -> sent, stamps order_date).
+    """Record a draft/approved PO as sent (status -> sent, stamps order_date).
     Writes a tamper-evident audit_log STATUS_CHANGE row.
 
-    404s on a soft-deleted PO -- see ``_live_po_or_404``. Mailing a deleted order to a
-    vendor is the worst thing this router could do."""
+    This records the workflow status and internal event; it does not dispatch vendor email.
+    Soft-deleted POs return 404 -- see ``_live_po_or_404``."""
     po = _live_po_or_404(db, po_id, company_id)
 
     if po.status not in [POStatus.DRAFT, POStatus.APPROVED]:
@@ -1209,7 +1258,11 @@ def send_purchase_order(
     )
     db.commit()
 
-    return {"message": "PO sent", "po_number": po.po_number}
+    return {
+        "message": "PO marked as sent; send the document to the supplier using your communication channel",
+        "po_number": po.po_number,
+        "delivery_status": "not_dispatched",
+    }
 
 
 @router.post("/purchase-orders/{po_id}/lines", response_model=POLineResponse)

@@ -153,6 +153,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
         items: derivedItems,
         create_missing_parts: createMissingParts,
       });
+      markSaved();
       // The SECOND surface for the same commit endpoint (Parts → BOM tab), and
       // it owes the planner what the BOM page's copy owes them: `warning`
       // (role="alert") rather than `info` (role="status"), because every
@@ -189,7 +190,7 @@ export function BOMImportWizard({ onComplete, onClose }: Props) {
   // is covered while dirty. A successful commit closes through the host's
   // onComplete, never through requestClose, so finishing never prompts.
   const isDirty = file !== null || step === 'preview';
-  const { confirmDiscard } = useUnsavedChanges(isDirty);
+  const { confirmDiscard, markSaved } = useUnsavedChanges(isDirty);
   const requestClose = () => {
     if (!confirmDiscard()) return;
     onClose();

@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { PRIORITY_OPTIONS } from '../utils/priority';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import {
@@ -143,6 +144,10 @@ export default function WorkOrderNew() {
   const [routing, setRouting] = useState<Routing | null>(null);
   const [operations, setOperations] = useState<OperationPreview[]>([]);
   const [showManualEntry, setShowManualEntry] = useState(false);
+  const [operationsOverridden, setOperationsOverridden] = useState(false);
+  const [routingLoadError, setRoutingLoadError] = useState('');
+  const partRequestRef = useRef(0);
+  const submitPendingRef = useRef(false);
   const [customerOptions, setCustomerOptions] = useState<CustomerOption[]>([]);
   const [customerSearch, setCustomerSearch] = useState('');
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
@@ -190,7 +195,7 @@ export default function WorkOrderNew() {
       serialsText.trim() !== '',
     [form, initialForm, operations, serialsText]
   );
-  const { confirmDiscard } = useUnsavedChanges(isFormDirty);
+  const { confirmDiscard, markSaved } = useUnsavedChanges(isFormDirty);
 
   // Parsed serial lines (trimmed, blanks dropped) + the violations the server
   // would 422 on. Providing NO serials is always valid (serials are optional).
@@ -339,14 +344,7 @@ export default function WorkOrderNew() {
   }, [parts, componentUsageByPartId, normalizedPartSearch]);
 
   const selectedPartUsage = selectedPart ? componentUsageByPartId.get(selectedPart.id) || [] : [];
-  const priorityOptions: SelectOption<number>[] = [
-    { value: 1, label: '1 - Critical' },
-    { value: 2, label: '2 - Urgent' },
-    { value: 3, label: '3 - High' },
-    { value: 5, label: '5 - Normal' },
-    { value: 7, label: '7 - Low' },
-    { value: 10, label: '10 - Lowest' },
-  ];
+  const priorityOptions: SelectOption<number>[] = PRIORITY_OPTIONS;
   const workCenterOptions = useMemo<SelectOption<number>[]>(() => (
     workCenters.map((workCenter) => ({
       value: workCenter.id,
@@ -504,6 +502,10 @@ export default function WorkOrderNew() {
   };
 
   const handlePartChange = async (partId: number) => {
+    const requestId = ++partRequestRef.current;
+    const isCurrent = () => requestId === partRequestRef.current;
+    setOperationsOverridden(false);
+    setRoutingLoadError('');
     const selectedPart = parts.find(p => p.id === partId);
     const partCustomerName = selectedPart?.customer_name || '';
     setForm((prev) => ({
@@ -519,7 +521,7 @@ export default function WorkOrderNew() {
     setShowManualEntry(false);
     setPartReadiness(null);
 
-    if (!partId) return;
+    if (!partId) { setLoadingRouting(false); return; }
 
     // Find the selected part to check if it's an assembly
     const isAssembly = normalizePartType(selectedPart?.part_type) === 'assembly' || bomPartIds.has(partId);
@@ -527,8 +529,12 @@ export default function WorkOrderNew() {
     setLoadingRouting(true);
     try {
       try {
-        setPartReadiness(await api.getPartReadiness(partId));
+        const readiness = await api.getPartReadiness(partId);
+        if (!isCurrent()) return;
+        setPartReadiness(readiness);
       } catch (readinessErr) {
+        if (!isCurrent()) return;
+        setRoutingLoadError('Could not verify part readiness. Retry before creating the work order.');
         console.error('Failed to load part readiness:', readinessErr);
         setPartReadiness(null);
       }
@@ -536,6 +542,7 @@ export default function WorkOrderNew() {
       if (isAssembly) {
         // For assemblies, use the preview endpoint to get combined operations from BOM components
         const previewRes = await api.previewWorkOrderOperations(partId, form.quantity_ordered);
+        if (!isCurrent()) return;
         if (previewRes && previewRes.operations_preview?.length > 0) {
           // Create a fake routing object to indicate we have operations
           setRouting({ id: 0, part_id: partId, revision: 'BOM', status: 'released', operations: [] } as any);
@@ -571,6 +578,7 @@ export default function WorkOrderNew() {
       } else {
         // For non-assemblies, use the standard routing lookup
         const routingRes = await api.getRoutingByPart(partId);
+        if (!isCurrent()) return;
         if (routingRes && routingRes.operations?.length > 0) {
           setRouting(routingRes);
           const ops: OperationPreview[] = routingRes.operations
@@ -599,10 +607,11 @@ export default function WorkOrderNew() {
         }
       }
     } catch (err) {
+      if (!isCurrent()) return;
       console.error('Failed to load routing:', err);
-      setShowManualEntry(true);
+      setRoutingLoadError('Could not load operations. Retry to check the released routing.');
     } finally {
-      setLoadingRouting(false);
+      if (isCurrent()) setLoadingRouting(false);
     }
   };
 
@@ -707,10 +716,11 @@ export default function WorkOrderNew() {
   };
 
   const removeOperation = (index: number) => {
+    setOperationsOverridden(true);
     setOperations(ops => ops.filter((_, i) => i !== index));
   };
 
-  const hasManualOperations = operations.length > 0 && (showManualEntry || operations.some(op => !op.fromRouting));
+  const hasManualOperations = operations.length > 0 && (operationsOverridden || showManualEntry || operations.some(op => !op.fromRouting));
   const manualOperationsAreValid = hasManualOperations
     && operations.every(op => op.name.trim().length > 0 && op.work_center_id > 0);
   const readinessBlockers = partReadiness?.blockers || [];
@@ -726,6 +736,11 @@ export default function WorkOrderNew() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitPendingRef.current || loadingRouting || routingLoadError) return;
+    if (operationsOverridden && operations.length === 0) {
+      showToast('error', 'Add at least one operation before creating this work order.');
+      return;
+    }
     if (!form.part_id) {
       showToast('error', 'Please select a part');
       return;
@@ -744,6 +759,7 @@ export default function WorkOrderNew() {
       return;
     }
 
+    submitPendingRef.current = true;
     setSubmitting(true);
     try {
       const normalizedCustomerName = form.customer_name.trim();
@@ -803,6 +819,7 @@ export default function WorkOrderNew() {
       }
 
       const result = await api.createWorkOrder(payload);
+      markSaved();
       navigate(`/work-orders/${result.id}`);
     } catch (err: any) {
       // Surface the server refusal VERBATIM. A 422 arrives as Pydantic's
@@ -818,6 +835,7 @@ export default function WorkOrderNew() {
             : 'Failed to create work order';
       showToast('error', message);
     } finally {
+      submitPendingRef.current = false;
       setSubmitting(false);
     }
   };
@@ -832,7 +850,7 @@ export default function WorkOrderNew() {
 
   if (loadError) {
     return (
-      <div className="max-w-4xl mx-auto">
+      <div className="max-w-4xl mx-auto min-w-0">
         {/* Breadcrumbs — Work Orders › New Work Order */}
         {woNewParent && <Breadcrumbs crumbs={[woNewParent, { label: 'New Work Order' }]} />}
         <h1 className="text-2xl font-bold text-white mb-6">New Work Order</h1>
@@ -845,7 +863,7 @@ export default function WorkOrderNew() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto">
+    <div className="max-w-4xl mx-auto min-w-0">
       {/* Breadcrumbs — Work Orders › New Work Order */}
       {woNewParent && <Breadcrumbs crumbs={[woNewParent, { label: 'New Work Order' }]} />}
       <h1 className="text-2xl font-bold text-white mb-6">New Work Order</h1>
@@ -869,6 +887,10 @@ export default function WorkOrderNew() {
                       setPartSearch(e.target.value);
                       setShowPartDropdown(true);
                       if (form.part_id) {
+                        partRequestRef.current += 1;
+                        setLoadingRouting(false);
+                        setRoutingLoadError('');
+                        setOperationsOverridden(false);
                         setForm((prev) => ({ ...prev, part_id: 0 }));
                         setRouting(null);
                         setOperations([]);
@@ -995,14 +1017,15 @@ export default function WorkOrderNew() {
               )}
             </FormField>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <FormField label="Quantity" required>
                 {(field) => (
                   <input
                     {...field}
                     type="number"
                     value={form.quantity_ordered}
-                    onChange={(e) => handleQuantityChange(parseInt(e.target.value) || 1)}
+                    disabled={loadingRouting}
+                  onChange={(e) => handleQuantityChange(parseInt(e.target.value) || 1)}
                     className="input"
                     min={1}
                     required
@@ -1056,7 +1079,7 @@ export default function WorkOrderNew() {
               </FormField>
             )}
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <FormField label="Customer Name" className="relative">
                 {(field) => (
                 <>
@@ -1228,11 +1251,20 @@ export default function WorkOrderNew() {
           </div>
         )}
 
+        {routingLoadError && (
+          <div role="alert" className="card border border-red-500/40 p-4">
+            <p>{routingLoadError}</p>
+            <button type="button" className="btn-secondary mt-2" onClick={() => handlePartChange(form.part_id)}>Retry readiness and routing</button>
+          </div>
+        )}
+        {operationsOverridden && operations.length === 0 && (
+          <p role="alert" className="text-amber-300">All preview operations were removed. Add an operation to continue.</p>
+        )}
         {/* Operations Card */}
         <div className="card">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
             <h2 className="text-lg font-semibold text-white">Operations</h2>
-            {operations.length > 0 && (
+            {(operations.length > 0 || operationsOverridden) && (
               <button
                 type="button"
                 onClick={addManualOperation}
@@ -1353,7 +1385,7 @@ export default function WorkOrderNew() {
                         <tr className={!op.fromRouting ? 'bg-amber-500/10' : ''}>
                           <td aria-label="Spacer"></td>
                           <td colSpan={5} className="pb-3">
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <details><summary className="cursor-pointer text-sm text-slate-300 mb-2">Setup and run instructions</summary><div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                               <div>
                                 <label id={`routing-op-${index}-setup-instructions-label`} htmlFor={`routing-op-${index}-setup-instructions`} className="label text-xs">Setup Instructions</label>
                                 <textarea
@@ -1374,7 +1406,7 @@ export default function WorkOrderNew() {
                                   aria-labelledby={`routing-op-${index}-run-instructions-label`}
                                 />
                               </div>
-                            </div>
+                            </div></details>
                             <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-300">
                               <input
                                 type="checkbox"
@@ -1401,7 +1433,7 @@ export default function WorkOrderNew() {
             </>
           )}
 
-          {!loadingRouting && form.part_id > 0 && !routing && (
+          {!loadingRouting && !routingLoadError && form.part_id > 0 && !routing && (
             <>
               <div className="flex items-center gap-2 mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-400">
                 <ExclamationTriangleIcon className="h-5 w-5 flex-shrink-0" />
@@ -1414,7 +1446,7 @@ export default function WorkOrderNew() {
                 <button
                   type="button"
                   onClick={addManualOperation}
-                  className="w-full py-8 border-2 border-dashed border-slate-700 rounded-xl text-slate-400 hover:border-werco-400 hover:text-werco-600 transition-colors"
+                  className="w-full py-8 border-2 border-dashed border-slate-700 rounded-xl text-slate-400 hover:border-werco-400 hover:text-sky-200 transition-colors"
                 >
                   <PlusIcon className="h-6 w-6 mx-auto mb-2" />
                   Add First Operation
@@ -1549,7 +1581,7 @@ export default function WorkOrderNew() {
         </div>
 
         {/* Actions */}
-        <div className="flex justify-end gap-3">
+        <div className="flex flex-wrap justify-end gap-3">
           <button
             type="button"
             onClick={() => {
@@ -1562,7 +1594,7 @@ export default function WorkOrderNew() {
           </button>
           <button
             type="submit"
-            disabled={submitting || !form.part_id}
+            disabled={submitting || !form.part_id || loadingRouting || !!routingLoadError || (operationsOverridden && operations.length === 0)}
             className="btn-primary"
           >
             {submitting ? 'Creating...' : 'Create Work Order'}

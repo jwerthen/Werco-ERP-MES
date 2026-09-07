@@ -71,7 +71,7 @@ describe('ActionInbox Top 3 hero', () => {
     const hero = await screen.findByRole('region', { name: 'Top 3 today' });
     const heroHeadings = within(hero)
       .getAllByRole('heading', { level: 3 })
-      .map((heading) => heading.textContent);
+      .map(heading => heading.textContent);
     expect(heroHeadings).toEqual(['Best action', 'Second best', 'Third best']);
     expect(within(hero).getByText('#1')).toBeInTheDocument();
     expect(within(hero).getByText('#2')).toBeInTheDocument();
@@ -131,9 +131,7 @@ describe('ActionInbox Top 3 hero', () => {
   });
 
   it('snoozes a hero recommendation through the API and removes it', async () => {
-    mockApi.getAIRecommendations.mockResolvedValue([
-      makeRecommendation({ id: 21, title: 'Snooze me', score: 0.9 }),
-    ]);
+    mockApi.getAIRecommendations.mockResolvedValue([makeRecommendation({ id: 21, title: 'Snooze me', score: 0.9 })]);
     mockApi.snoozeAIRecommendation.mockResolvedValue(
       makeRecommendation({ id: 21, title: 'Snooze me', status: 'snoozed' })
     );
@@ -151,14 +149,12 @@ describe('ActionInbox Top 3 hero', () => {
   });
 
   it('optimistically removes a dismissed recommendation before the API resolves', async () => {
-    mockApi.getAIRecommendations.mockResolvedValue([
-      makeRecommendation({ id: 51, title: 'Dismiss me', score: 0.9 }),
-    ]);
+    mockApi.getAIRecommendations.mockResolvedValue([makeRecommendation({ id: 51, title: 'Dismiss me', score: 0.9 })]);
     // A pending promise that never resolves during the assertion window: the card
     // must disappear from the optimistic update alone, not from the server response.
     let resolveDismiss: (value: AIRecommendation) => void = () => {};
     mockApi.dismissAIRecommendation.mockReturnValue(
-      new Promise<AIRecommendation>((resolve) => {
+      new Promise<AIRecommendation>(resolve => {
         resolveDismiss = resolve;
       })
     );
@@ -195,4 +191,18 @@ describe('ActionInbox Top 3 hero', () => {
     // The optimistic removal is undone — the card is restored to the view.
     await waitFor(() => expect(screen.getByText('Sticky action')).toBeInTheDocument());
   });
+});
+
+it('counts featured recommendations in Open Actions consistently across filter views', async () => {
+  jest.clearAllMocks();
+  localStorage.clear();
+  mockApi.getSetupHealth.mockResolvedValue(emptyHealth);
+  mockApi.getAIRecommendations.mockResolvedValue(
+    [1, 2, 3, 4].map(id => makeRecommendation({ id, title: `Counted ${id}`, score: 1 / id }))
+  );
+  renderInbox();
+  await screen.findByRole('region', { name: 'Top 3 today' });
+  expect(within(screen.getByRole('button', { name: /Open Actions/ })).getByText('4')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'AI' }));
+  expect(within(screen.getByRole('button', { name: /Open Actions/ })).getByText('4')).toBeInTheDocument();
 });

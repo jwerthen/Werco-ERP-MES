@@ -101,7 +101,7 @@ describe('CopilotPanel', () => {
     let finish: (value: CopilotChatResponse) => void = () => undefined;
     api.copilotChatStream.mockImplementation((_request, handlers: CopilotStreamHandlers) => {
       capturedHandlers = handlers;
-      return new Promise<CopilotChatResponse>((resolve) => {
+      return new Promise<CopilotChatResponse>(resolve => {
         finish = resolve;
       });
     });
@@ -198,4 +198,36 @@ describe('CopilotPanel', () => {
     expect(screen.getByLabelText('Send message')).toBeDisabled();
     expect(api.copilotChatStream).toHaveBeenCalledTimes(1);
   });
+});
+
+it('removes the closed drawer from keyboard use and restores focus when closed', () => {
+  jest.useFakeTimers();
+  const close = jest.fn();
+  const trigger = document.createElement('button');
+  document.body.appendChild(trigger);
+  trigger.focus();
+  const { rerender } = render(
+    <MemoryRouter>
+      <CopilotPanel isOpen={false} onClose={close} />
+    </MemoryRouter>
+  );
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  expect(screen.getByRole('dialog', { hidden: true })).toHaveAttribute('inert');
+  rerender(
+    <MemoryRouter>
+      <CopilotPanel isOpen onClose={close} />
+    </MemoryRouter>
+  );
+  act(() => jest.advanceTimersByTime(150));
+  expect(screen.getByLabelText('Ask the copilot')).toHaveFocus();
+  fireEvent.keyDown(screen.getByLabelText('Ask the copilot'), { key: 'Escape' });
+  expect(close).toHaveBeenCalledTimes(1);
+  rerender(
+    <MemoryRouter>
+      <CopilotPanel isOpen={false} onClose={close} />
+    </MemoryRouter>
+  );
+  expect(trigger).toHaveFocus();
+  trigger.remove();
+  jest.useRealTimers();
 });

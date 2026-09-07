@@ -1,3 +1,4 @@
+import { getPriorityClasses, getPriorityLabel } from '../utils/priority';
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
@@ -463,11 +464,7 @@ export default function ShopFloorSimple() {
   };
   const canEditPriority = can('work_orders:edit');
 
-  const getPriorityClasses = (priority: number) => {
-    if (priority <= 2) return 'bg-red-500/20 text-red-400';
-    if (priority <= 5) return 'bg-amber-500/20 text-amber-400';
-    return 'bg-slate-800 text-slate-400';
-  };
+
 
   const workCenterBuckets = useMemo(() => {
     const buckets = new Map<number, {
@@ -1108,7 +1105,7 @@ export default function ShopFloorSimple() {
         <div className="flex items-center justify-between gap-3">
           <div>
             <h1 className="text-xl font-bold text-white flex items-center gap-2">
-              <WrenchScrewdriverIcon className="h-6 w-6 text-werco-600" />
+              <WrenchScrewdriverIcon className="h-6 w-6 text-fd-link" />
               Shop Floor
             </h1>
             <p className="text-xs text-slate-400">
@@ -1275,7 +1272,7 @@ export default function ShopFloorSimple() {
       <div className="page-header hidden md:flex">
         <div>
           <h1 className="page-title flex items-center gap-3">
-            <WrenchScrewdriverIcon className="h-8 w-8 text-werco-600" />
+            <WrenchScrewdriverIcon className="h-8 w-8 text-fd-link" />
             Shop Floor Operations
           </h1>
           <p className="page-subtitle">Check in and out of work order operations</p>
@@ -1456,14 +1453,16 @@ export default function ShopFloorSimple() {
             <button
               type="button"
               onClick={() => setShowMobileCenters((prev) => !prev)}
-              className="md:hidden text-sm font-semibold text-werco-700 hover:text-werco-800"
+              className="text-sm font-semibold text-fd-link hover:text-sky-200"
+              aria-expanded={showMobileCenters}
+              aria-controls="shop-floor-station-status"
             >
-              {showMobileCenters ? 'Hide Stations' : 'Change Station'}
+              {showMobileCenters ? 'Hide station status' : 'Show station status'}
             </button>
             <button
               type="button"
               onClick={() => focusOperations('')}
-              className="hidden md:inline text-sm font-semibold text-werco-700 hover:text-werco-800"
+              className="hidden md:inline text-sm font-semibold text-fd-link hover:text-sky-200"
             >
               View All
             </button>
@@ -1540,7 +1539,7 @@ export default function ShopFloorSimple() {
             Due Today
           </button>
         </div>
-        <div className={`${showMobileCenters ? 'grid' : 'hidden'} md:grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 lg:max-h-[19rem] lg:overflow-y-auto lg:pr-1`}>
+        <div id="shop-floor-station-status" className={`${showMobileCenters ? 'grid' : 'hidden'} grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 lg:max-h-[19rem] lg:overflow-y-auto lg:pr-1`}>
           {workCenterBuckets.map((bucket) => {
             const isActive = bucket.inProgress > 0;
             const hasQueue = bucket.open > 0;
@@ -1625,7 +1624,7 @@ export default function ShopFloorSimple() {
                     </p>
                   </div>
                   <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${getPriorityClasses(op.priority)}`}>
-                    P{op.priority}
+                    {getPriorityLabel(op.priority)}
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-sm text-slate-400">
@@ -1845,13 +1844,13 @@ export default function ShopFloorSimple() {
                       >
                         {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((p) => (
                           <option key={p} value={p}>
-                            P{p}
+                            {getPriorityLabel(p)}
                           </option>
                         ))}
                       </select>
                     ) : (
                       <span className={`px-2 py-0.5 rounded text-xs font-medium ${getPriorityClasses(op.priority)}`}>
-                        P{op.priority}
+                        {getPriorityLabel(op.priority)}
                       </span>
                     )}
                   </div>

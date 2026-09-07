@@ -437,57 +437,22 @@ def test_ship_with_missing_fg_lot_succeeds_and_records_discrepancy(client: TestC
 # ---------------------------------------------------------------------------
 
 
-def test_over_ship_succeeds_and_records_over_ship(client: TestClient, db_session: Session):
-    """A single shipment whose quantity exceeds ``WorkOrder.quantity_complete`` still
-    SUCCEEDS (no 400) and writes an ``OVER_SHIP`` audit row + an ``over_ship`` warning
-    OperationalEvent (warn-and-record posture).
-
-    Produced (quantity_complete) = 10; a single shipment of 12 pushes cumulative shipped
-    to 12 > 10 -> the over-ship is recorded but the ship/close proceeds.
-
-    NOTE: this exercises the SINGLE-shipment over-ship path. The MULTI-shipment cumulative
-    over-ship path (a second distinct shipment on an already-CLOSED WO pushing the running
-    total past produced) is now reachable through the endpoint and is covered by
-    ``test_second_distinct_shipment_decrements_and_does_not_reclose_wo``.
-    """
+def test_over_ship_is_rejected_before_allocation(client: TestClient, db_session: Session):
+    """New allocations cannot reserve more units than production completed."""
     admin = make_user(db_session)
     part = make_part(db_session, standard_cost=6.0)
     wo = make_wo(db_session, part, quantity_ordered=10)
     wc = make_work_center(db_session)
     op = make_op(db_session, wo, wc, sequence=10)
     db_session.commit()
-
-    complete_wo_via_op(client, admin, op, 10)  # quantity_complete = 10, FG lot of 10 on hand
-    db_session.expire_all()
-    wo = db_session.get(WorkOrder, wo.id)
-
-    # A single shipment of 12 over the produced 10 -> over-ship recorded, ship still OK.
-    ship = create_shipment(client, admin, wo, quantity_shipped=12)
-    resp = client.post(f"/api/v1/shipping/{ship['id']}/ship", headers=headers_for(admin))
-    assert resp.status_code == status.HTTP_200_OK, resp.text
-
-    db_session.expire_all()
-    over_audits = (
-        db_session.query(AuditLog)
-        .filter(
-            AuditLog.company_id == COMPANY_A,
-            AuditLog.action == OVER_SHIP_AUDIT_ACTION,
-            AuditLog.resource_type == "shipment",
-            AuditLog.resource_id == ship["id"],
-        )
-        .all()
+    complete_wo_via_op(client, admin, op, 10)
+    response = client.post(
+        "/api/v1/shipping/", headers=headers_for(admin), json={"work_order_id": wo.id, "quantity_shipped": 12}
     )
-    assert len(over_audits) == 1, "exactly one OVER_SHIP audit row on the over-shipping shipment"
-    extra = over_audits[0].extra_data or {}
-    assert extra.get("cumulative_shipped") == pytest.approx(12.0)
-    assert extra.get("quantity_complete") == pytest.approx(10.0)
-    assert extra.get("overage") == pytest.approx(2.0)
-
-    events = OperationalEventService(db_session).list_events(
-        company_id=COMPANY_A, event_type=OVER_SHIP_EVENT_TYPE, work_order_id=wo.id
-    )
-    assert len(events) == 1, "exactly one over_ship OperationalEvent"
-    assert events[0].severity == "warning"
+    assert response.status_code == 409
+    assert "10" in response.json()["detail"]
+    assert db_session.query(Shipment).filter(Shipment.work_order_id == wo.id).count() == 0
+    assert fg_item(db_session, part.id, wo.lot_number).quantity_on_hand == 10
 
 
 def test_within_bounds_single_ship_records_no_over_ship(client: TestClient, db_session: Session):
@@ -522,146 +487,43 @@ def test_within_bounds_single_ship_records_no_over_ship(client: TestClient, db_s
     )
 
 
-def test_second_distinct_shipment_decrements_and_does_not_reclose_wo(client: TestClient, db_session: Session):
-    """FIX (was ``test_second_shipment_is_short_circuited_by_wo_closed_guard``): a second
-    DISTINCT, not-yet-shipped shipment on a WO that an EARLIER shipment already CLOSED
-    must STILL ship and decrement finished goods. The endpoint's idempotency early-return
-    is keyed ONLY on ``shipment.status == SHIPPED`` (a same-shipment resubmit), NOT on the
-    WO being closed -- so partial / multi-shipment WOs are supported.
-
-    Flow: complete a WO (quantity_complete = 10, FG lot of 10), ship a FIRST shipment of 4
-    (WO -> CLOSED, FG -> 6), then ship a SECOND distinct shipment of 8 on the same
-    now-CLOSED WO. The second ship MUST:
-      - succeed (200, NOT short-circuited / no ``already_shipped`` flag),
-      - write its OWN SHIP txn (reference_id = ship2.id, qty = -8),
-      - decrement FG on-hand by 8 (6 -> -2; FG can go negative -- warn-and-record posture,
-        not a hard stop),
-      - record an OVER_SHIP audit row + over_ship event, since cumulative shipped
-        (4 + 8 = 12) now exceeds quantity_complete (10) by 2.
-    AND the WO must NOT be re-closed: exactly ONE work_order STATUS_CHANGE audit row exists
-    across both ships (the close fired once, on ship1), and no duplicate close handling
-    runs on ship2.
-    Same-shipment re-ship remains a no-op (one SHIP txn per shipment).
-    """
+def test_partial_shipments_close_only_after_final_dispatch(client: TestClient, db_session: Session):
+    """Partial dispatch keeps remainder available; final dispatch closes once and is idempotent."""
     admin = make_user(db_session)
     part = make_part(db_session, standard_cost=6.0)
     wo = make_wo(db_session, part, quantity_ordered=10)
     wc = make_work_center(db_session)
     op = make_op(db_session, wo, wc, sequence=10)
     db_session.commit()
-
     complete_wo_via_op(client, admin, op, 10)
-    db_session.expire_all()
-    wo = db_session.get(WorkOrder, wo.id)
-
-    # --- First shipment: closes the WO, decrements FG, no over-ship (4 <= 10). ---
     ship1 = create_shipment(client, admin, wo, quantity_shipped=4)
     mark_shipped(client, admin, ship1["id"])
     db_session.expire_all()
-    assert db_session.get(WorkOrder, wo.id).status == WorkOrderStatus.CLOSED
-    assert len(ship_txns(db_session, ship1["id"])) == 1  # first ship DID decrement
-    assert fg_item(db_session, part.id, wo.lot_number).quantity_on_hand == 6  # 10 - 4
-
-    # Baseline of work_order STATUS_CHANGE audit rows after ship1 has closed the WO.
-    # (The operation-completion path writes IN_PROGRESS->COMPLETE; ship1 writes the
-    # COMPLETE->CLOSED close -- so >=1 here. What matters for the "not re-closed" contract
-    # is that ship2 adds ZERO further status-change rows; we assert that delta below.)
-    def _wo_status_change_count() -> int:
-        return (
-            db_session.query(AuditLog)
-            .filter(
-                AuditLog.company_id == COMPANY_A,
-                AuditLog.action == "STATUS_CHANGE",
-                AuditLog.resource_type == "work_order",
-                AuditLog.resource_id == wo.id,
-            )
-            .count()
-        )
-
-    wo_status_changes_after_ship1 = _wo_status_change_count()
-    # Exactly one work_order_closed event so far (from ship1).
-    assert (
-        len(
-            OperationalEventService(db_session).list_events(
-                company_id=COMPANY_A, event_type="work_order_closed", work_order_id=wo.id
-            )
-        )
-        == 1
-    ), "ship1 closes the WO exactly once"
-    # No over-ship recorded for the within-bounds first shipment.
-    assert (
-        db_session.query(AuditLog)
-        .filter(AuditLog.company_id == COMPANY_A, AuditLog.action == OVER_SHIP_AUDIT_ACTION)
-        .count()
-        == 0
+    assert db_session.get(WorkOrder, wo.id).status == WorkOrderStatus.COMPLETE
+    assert fg_item(db_session, part.id, wo.lot_number).quantity_on_hand == 6
+    ready = client.get("/api/v1/shipping/ready-to-ship", headers=headers_for(admin)).json()
+    row = next(row for row in ready if row["work_order_id"] == wo.id)
+    assert row["quantity_remaining"] == 6
+    assert row["quantity_shipped"] == 4
+    over = client.post(
+        "/api/v1/shipping/", headers=headers_for(admin), json={"work_order_id": wo.id, "quantity_shipped": 8}
     )
-
-    # --- Second DISTINCT shipment on the already-CLOSED WO: ships + decrements. ---
-    ship2 = create_shipment(client, admin, wo, quantity_shipped=8)  # pushes cumulative to 12 > 10
-    resp = client.post(f"/api/v1/shipping/{ship2['id']}/ship", headers=headers_for(admin))
-    assert resp.status_code == status.HTTP_200_OK, resp.text
-    body = resp.json()
-    assert body.get("already_shipped") is not True, "a distinct unshipped shipment is NOT short-circuited"
-
+    assert over.status_code == 409
+    ship2 = create_shipment(client, admin, wo, quantity_shipped=6)
+    mark_shipped(client, admin, ship2["id"])
     db_session.expire_all()
-
-    # Second shipment writes its OWN SHIP txn keyed to ship2 (qty = -8).
-    txns2 = ship_txns(db_session, ship2["id"])
-    assert len(txns2) == 1, "second distinct shipment writes exactly one SHIP txn"
-    assert txns2[0].quantity == -8, "SHIP txn quantity = negative quantity_shipped for ship2"
-    assert txns2[0].reference_id == ship2["id"], "SHIP txn keyed to the SECOND shipment"
-    assert txns2[0].reference_type == "shipment"
-    assert txns2[0].transaction_type == TransactionType.SHIP
-    # ship1's single SHIP txn is undisturbed.
-    assert len(ship_txns(db_session, ship1["id"])) == 1, "ship1 SHIP txn unchanged by ship2"
-
-    # FG on-hand decremented by the second quantity (6 - 8 = -2; can go negative).
-    assert fg_item(db_session, part.id, wo.lot_number).quantity_on_hand == pytest.approx(
-        -2.0
-    ), "FG on-hand decremented by the second shipment quantity"
-
-    # Cumulative over-ship (4 + 8 = 12 > 10) recorded on the SECOND shipment.
-    over_audits = (
-        db_session.query(AuditLog)
-        .filter(
-            AuditLog.company_id == COMPANY_A,
-            AuditLog.action == OVER_SHIP_AUDIT_ACTION,
-            AuditLog.resource_type == "shipment",
-            AuditLog.resource_id == ship2["id"],
-        )
-        .all()
-    )
-    assert len(over_audits) == 1, "exactly one OVER_SHIP audit row on the over-shipping second shipment"
-    extra = over_audits[0].extra_data or {}
-    assert extra.get("cumulative_shipped") == pytest.approx(12.0)
-    assert extra.get("quantity_complete") == pytest.approx(10.0)
-    assert extra.get("overage") == pytest.approx(2.0)
-    over_events = OperationalEventService(db_session).list_events(
-        company_id=COMPANY_A, event_type=OVER_SHIP_EVENT_TYPE, work_order_id=wo.id
-    )
-    assert len(over_events) == 1, "exactly one over_ship OperationalEvent on the cumulative over-ship"
-    assert over_events[0].severity == "warning"
-
-    # The WO is NOT re-closed: ship2 adds ZERO further work_order STATUS_CHANGE audit rows
-    # (no CLOSED->CLOSED row), because the close-once block is gated on `wo.status != CLOSED`.
-    assert (
-        _wo_status_change_count() == wo_status_changes_after_ship1
-    ), "ship2 must NOT write a second CLOSED->CLOSED status-change audit row"
-    # Exactly ONE work_order_closed event total (the close-once side effects skip on ship2).
-    closed_events = OperationalEventService(db_session).list_events(
+    assert db_session.get(WorkOrder, wo.id).status == WorkOrderStatus.CLOSED
+    assert fg_item(db_session, part.id, wo.lot_number).quantity_on_hand == 0
+    assert len(ship_txns(db_session, ship1["id"])) == 1
+    assert len(ship_txns(db_session, ship2["id"])) == 1
+    closed = OperationalEventService(db_session).list_events(
         company_id=COMPANY_A, event_type="work_order_closed", work_order_id=wo.id
     )
-    assert len(closed_events) == 1, "work_order_closed handling fired once (on ship1), not again on ship2"
-
-    # --- Idempotency still holds: re-shipping the SAME (already-SHIPPED) shipment is a no-op. ---
-    re_resp = client.post(f"/api/v1/shipping/{ship2['id']}/ship", headers=headers_for(admin))
-    assert re_resp.status_code == status.HTTP_200_OK, re_resp.text
-    assert re_resp.json().get("already_shipped") is True, "re-shipping the SAME shipment is short-circuited"
+    assert len(closed) == 1
+    assert mark_shipped(client, admin, ship2["id"])["already_shipped"] is True
     db_session.expire_all()
-    assert len(ship_txns(db_session, ship2["id"])) == 1, "same-shipment re-ship writes NO second SHIP txn"
-    assert fg_item(db_session, part.id, wo.lot_number).quantity_on_hand == pytest.approx(
-        -2.0
-    ), "same-shipment re-ship does not decrement again"
+    assert fg_item(db_session, part.id, wo.lot_number).quantity_on_hand == 0
+    assert len(ship_txns(db_session, ship2["id"])) == 1
 
 
 # ---------------------------------------------------------------------------

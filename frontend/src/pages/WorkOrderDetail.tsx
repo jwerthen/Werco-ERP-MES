@@ -540,6 +540,13 @@ export default function WorkOrderDetail() {
   const canEditDueDate =
     canCorrectCount && !['complete', 'closed', 'cancelled'].includes(workOrder?.status ?? '');
   const [loading, setLoading] = useState(true);
+  const [secondaryErrors, setSecondaryErrors] = useState({ materials: false, blockers: false, documents: false, documentChoices: false });
+  const [secondaryLoading, setSecondaryLoading] = useState({ materials: true, blockers: true, documents: true, documentChoices: true });
+  const [secondaryCheckedAt, setSecondaryCheckedAt] = useState<Record<keyof typeof secondaryErrors, string | null>>({ materials: null, blockers: null, documents: null, documentChoices: null });
+  const lastVerifiedSuffix = (key: keyof typeof secondaryErrors) => {
+    const checkedAt = secondaryCheckedAt[key];
+    return checkedAt ? ` Last verified ${formatDateTimeCT(checkedAt)}.` : '';
+  };
   const [error, setError] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -724,45 +731,32 @@ export default function WorkOrderDetail() {
       const hydratedWorkOrder = await hydrateOperationsFromShopFloor(response);
       if (requestId !== loadRequestRef.current) return;
       setWorkOrder(hydratedWorkOrder);
-      
-      // Load material requirements
-      try {
-        const matReqs = await api.getMaterialRequirements(currentWorkOrderId);
-        if (requestId !== loadRequestRef.current) return;
-        setMaterialReqs(matReqs);
-      } catch {
-        if (requestId !== loadRequestRef.current) return;
-        // Material requirements may not exist for all parts
-        setMaterialReqs(null);
-      }
-      try {
-        const blockerRows = await api.getWorkOrderBlockers({ work_order_id: currentWorkOrderId, limit: 50 });
-        if (requestId !== loadRequestRef.current) return;
-        setBlockers(blockerRows);
-      } catch {
-        if (requestId !== loadRequestRef.current) return;
-        setBlockers([]);
-      }
-      try {
-        const [attachedRows, availableRows] = await Promise.all([
-          api.getDocuments({ work_order_id: currentWorkOrderId, limit: 100 }),
-          api.getDocuments({ limit: 500 }),
-        ]);
-        if (requestId !== loadRequestRef.current) return;
+      setLoading(false);
+      setSecondaryLoading({ materials: true, blockers: true, documents: true, documentChoices: true });
 
-        const attachedPdfRows = (attachedRows as WorkOrderDocument[]).filter(isPdfDocument);
-        const attachedIds = new Set(attachedPdfRows.map((document) => document.id));
-        setWorkOrderDocuments(attachedPdfRows);
-        setAvailablePdfDocuments(
-          (availableRows as WorkOrderDocument[])
-            .filter(isPdfDocument)
-            .filter((document) => !document.work_order_id && !attachedIds.has(document.id))
-        );
-      } catch {
-        if (requestId !== loadRequestRef.current) return;
-        setWorkOrderDocuments([]);
-        setAvailablePdfDocuments([]);
-      }
+      // The primary job is usable immediately. Each supporting section publishes
+      // its own result, while a failed refresh leaves last-good content visible.
+      const settleSecondary = async <T,>(key: keyof typeof secondaryErrors, request: Promise<T>, apply: (value: T) => void) => {
+        try {
+          const value = await request;
+          if (requestId !== loadRequestRef.current) return;
+          apply(value);
+          setSecondaryErrors(previous => ({ ...previous, [key]: false }));
+          setSecondaryCheckedAt(previous => ({ ...previous, [key]: new Date().toISOString() }));
+        } catch {
+          if (requestId !== loadRequestRef.current) return;
+          setSecondaryErrors(previous => ({ ...previous, [key]: true }));
+        } finally {
+          if (requestId === loadRequestRef.current) setSecondaryLoading(previous => ({ ...previous, [key]: false }));
+        }
+      };
+      await Promise.all([
+        settleSecondary('materials', api.getMaterialRequirements(currentWorkOrderId), setMaterialReqs),
+        settleSecondary('blockers', api.getWorkOrderBlockers({ work_order_id: currentWorkOrderId, limit: 50 }), setBlockers),
+        settleSecondary('documents', api.getDocuments({ work_order_id: currentWorkOrderId, limit: 100 }), value => setWorkOrderDocuments((value as WorkOrderDocument[]).filter(isPdfDocument))),
+        settleSecondary('documentChoices', api.getDocuments({ limit: 500 }), value => setAvailablePdfDocuments((value as WorkOrderDocument[]).filter(isPdfDocument).filter(document => !document.work_order_id))),
+      ]);
+
     } catch {
       if (requestId !== loadRequestRef.current) return;
       setError('Failed to load work order');
@@ -808,6 +802,9 @@ export default function WorkOrderDetail() {
     setNotesEditing(false);
     setFieldConflict(null);
     setWorkOrderDocuments([]);
+    setSecondaryErrors({ materials: false, blockers: false, documents: false, documentChoices: false });
+    setSecondaryLoading({ materials: true, blockers: true, documents: true, documentChoices: true });
+    setSecondaryCheckedAt({ materials: null, blockers: null, documents: null, documentChoices: null });
     setAvailablePdfDocuments([]);
     setDocumentUploadFile(null);
     setDocumentTitle('');
@@ -1958,7 +1955,7 @@ export default function WorkOrderDetail() {
       />
 
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center">
           <button onClick={() => navigate(woParent.href)} className="mr-4 text-slate-400 hover:text-slate-300">
             <ArrowLeftIcon className="h-6 w-6" />
@@ -2216,6 +2213,380 @@ export default function WorkOrderDetail() {
         />
       </MiniStatStrip>
 
+      {/* Operations */}
+      <div className="card card-compact">
+        <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <h2 className="card-title">Operations / Routing</h2>
+          {/* Operation sequencing mode. Rendered beside the routing it governs,
+              because the Status column below is what it changes. */}
+          {!sequencingApplies ? (
+            <p className="flex items-start gap-2 rounded-sm border border-fd-line bg-fd-sunken px-3 py-2 text-xs text-fd-mute lg:max-w-md">
+              <InformationCircleIcon className="h-4 w-4 flex-shrink-0" aria-hidden="true" />
+              <span>
+                Nest work orders are always pooled — nests can be run in any order, so
+                operation sequencing does not apply here.
+              </span>
+            </p>
+          ) : (
+            <div className="flex items-start gap-3 rounded-sm border border-fd-line bg-fd-sunken px-3 py-2 lg:max-w-md">
+              {canEditSequencing ? (
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={sequentialOperations}
+                  aria-label="Sequential operations"
+                  aria-describedby="wo-sequencing-help"
+                  disabled={savingSequencing}
+                  onClick={handleSequencingToggle}
+                  className={`relative mt-0.5 h-[22px] w-[40px] shrink-0 rounded-full border transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-50 ${
+                    sequentialOperations
+                      ? 'border-fd-blue bg-fd-blue'
+                      : 'border-fd-line-bright bg-slate-800'
+                  }`}
+                >
+                  <span
+                    aria-hidden="true"
+                    className={`absolute top-[2px] h-4 w-4 rounded-full bg-white transition-all duration-150 ease-out ${
+                      sequentialOperations ? 'right-[2px]' : 'left-[2px]'
+                    }`}
+                  />
+                </button>
+              ) : (
+                // Read-only viewers still need to know WHICH rule the floor is
+                // working under to read the Status column, so the mode is shown
+                // even where the control is not offered.
+                <span
+                  className={`mt-0.5 inline-flex shrink-0 rounded-sm px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide ${
+                    sequentialOperations ? 'bg-fd-blue/15 text-fd-blue' : 'bg-slate-800 text-slate-300'
+                  }`}
+                >
+                  {sequentialOperations ? 'On' : 'Off'}
+                </span>
+              )}
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase tracking-wide text-fd-ink">
+                  Sequential operations
+                </p>
+                <p id="wo-sequencing-help" className="mt-0.5 text-xs text-fd-mute">
+                  {sequentialOperations
+                    ? 'Each operation unlocks when the previous one is complete'
+                    : 'Operations at the same work center can run in any order'}
+                </p>
+              </div>
+              {savingSequencing && <Spinner size="sm" className="mt-0.5 shrink-0" />}
+            </div>
+          )}
+        </div>
+
+        {workOrder.operations.length === 0 ? (
+          <EmptyState
+            icon={WrenchScrewdriverIcon}
+            title="No operations defined"
+            description="This work order has no routing operations yet."
+          />
+        ) : (
+          <div className="overflow-x-auto lg:max-h-[clamp(360px,55vh,640px)] lg:overflow-y-auto">
+            <table className="min-w-full divide-y divide-slate-700">
+              <thead className="bg-slate-800/50">
+                <tr>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Seq</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Group</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Operation</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Qty</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Est. Hours</th>
+                  {isAdminView && (
+                    <>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Started By</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Started At (CT)</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Completed By</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Completed At (CT)</th>
+                    </>
+                  )}
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="bg-fd-panel divide-y divide-slate-700">
+                {(() => {
+                  let lastGroup = '';
+                  return workOrder.operations.map((op) => {
+                    const isNewGroup = op.operation_group && op.operation_group !== lastGroup;
+                    if (op.operation_group) lastGroup = op.operation_group;
+                    const operationTarget = operationRunTarget(op, workOrder.quantity_ordered);
+                    // Non-null only while the SERVER would refuse this operation's
+                    // office verbs — see `lowestIncompleteOperation`. Doubles as the
+                    // hover explanation, so the disabled control says why it is
+                    // disabled instead of looking broken. Strict `>` mirrors the
+                    // gate's `sequence < candidate.sequence`: operations sharing a
+                    // sequence number do not block each other, and the blocking
+                    // operation never blocks itself.
+                    const sequenceBlockReason =
+                      lowestIncompleteOperation && op.sequence > lowestIncompleteOperation.sequence
+                        ? `Previous operations must be completed first — this work order runs its operations in sequence, and operation ${lowestIncompleteOperation.sequence} (${lowestIncompleteOperation.name}) is not complete.`
+                        : null;
+
+                    // WHY this row is held, for the compact in-row disclosure below.
+                    // Computed once and reused by the confirm dialog's copy so the
+                    // pre-click reason and the in-dialog reason cannot diverge.
+                    // Non-null only for an ON_HOLD row -- `hold_context` is null on
+                    // every other one, by construction on the server.
+                    const holdSummary = op.status === 'on_hold' ? summarizeHold(op.hold_context) : null;
+
+                    const groupColors: Record<string, string> = {
+                      'LASER': 'bg-fd-red/15 text-fd-red',
+                      'MACHINE': 'bg-fd-blue/15 text-fd-blue',
+                      'BEND': 'bg-fd-amber/15 text-fd-amber',
+                      'WELD': 'bg-amber-500/15 text-amber-300',
+                      'FINISH': 'bg-fd-cyan/15 text-fd-cyan',
+                      'ASSEMBLY': 'bg-fd-green/15 text-fd-green',
+                      'INSPECT': 'bg-fd-blue/15 text-fd-blue',
+                    };
+
+                    return (
+                      <React.Fragment key={op.id}>
+                      <tr
+                        className={`hover:bg-slate-800/50 ${isNewGroup ? 'border-t-2 border-slate-600' : ''}`}
+                      >
+                        <td className="px-4 py-3 font-medium text-sm">{op.sequence}</td>
+                        <td className="px-4 py-3">
+                          {op.operation_group && (
+                            <span className={`inline-flex px-2 py-1 rounded text-xs font-bold ${groupColors[op.operation_group] || 'bg-slate-800 text-slate-100'}`}>
+                              {op.operation_group}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div>
+                            <div className="font-medium text-sm">{op.name}</div>
+                            {op.description && (
+                              <div className="text-xs text-slate-400 mt-0.5">{op.description}</div>
+                            )}
+                            {op.laser_nest && nestPanelShown ? (
+                              // De-dup: full nest detail lives once in the Laser
+                              // Nest Package card; cross-link here by stable id.
+                              <a
+                                href={`#nest-${op.laser_nest.id}`}
+                                className="mt-2 inline-flex flex-wrap items-center gap-1.5 rounded-sm border border-fd-line bg-slate-900/50 px-2 py-1 text-xs font-medium text-fd-red hover:border-fd-line-bright"
+                                title="View nest detail in Laser Nest Package"
+                              >
+                                <DocumentTextIcon className="h-4 w-4" />
+                                {op.laser_nest.cnc_number ? (
+                                  <span className="font-mono">CNC# {op.laser_nest.cnc_number}</span>
+                                ) : (
+                                  op.laser_nest.nest_name
+                                )}
+                                {op.laser_nest.has_document && (
+                                  <PaperClipIcon className="h-3.5 w-3.5 text-fd-blue" title="Reference PDF attached" />
+                                )}
+                                <span className="tabular-nums text-slate-400">
+                                  {op.laser_nest.completed_runs}/{op.laser_nest.planned_runs}
+                                </span>
+                              </a>
+                            ) : op.laser_nest ? (
+                              <div className="mt-2 rounded-sm border border-fd-line bg-slate-900/50 px-2 py-1.5 text-xs text-slate-300">
+                                <div className="flex flex-wrap items-center gap-1.5 font-medium text-fd-red">
+                                  <DocumentTextIcon className="h-4 w-4" />
+                                  {op.laser_nest.cnc_number ? (
+                                    <span className="font-mono">CNC# {op.laser_nest.cnc_number}</span>
+                                  ) : (
+                                    op.laser_nest.nest_name
+                                  )}
+                                  {op.laser_nest.has_document && (
+                                    <PaperClipIcon className="h-3.5 w-3.5 text-fd-blue" title="Reference PDF attached" />
+                                  )}
+                                </div>
+                                <div className="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1">
+                                  {op.laser_nest.cnc_file_name && <span>File: {op.laser_nest.cnc_file_name}</span>}
+                                  <span>Runs: {op.laser_nest.completed_runs}/{op.laser_nest.planned_runs}</span>
+                                  {(op.laser_nest.material || op.laser_nest.thickness) && (
+                                    <span>{[op.laser_nest.material, op.laser_nest.thickness].filter(Boolean).join(' • ')}</span>
+                                  )}
+                                  {op.laser_nest.sheet_size && <span>Sheet: {op.laser_nest.sheet_size}</span>}
+                                </div>
+                              </div>
+                            ) : null}
+                            {/* WHY IT IS HELD -- disclosed on the row, BEFORE anyone
+                                clicks Clear Hold. Reason and attribution render on
+                                their own terms: a bare hold (mis-tap at the kiosk --
+                                no note, category OTHER) files no blocker, so it has a
+                                holder and no reason, and gating one on the other would
+                                make exactly that case read as anonymous AND reasonless.
+                                Free text is read straight off note/title: this response
+                                withholds nothing, and `has_note` is not sent. */}
+                            {holdSummary && (
+                              <div className="mt-2 rounded-sm border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs">
+                                <div className="flex flex-wrap items-center gap-1.5 font-semibold text-amber-300">
+                                  <ExclamationTriangleIcon className="h-4 w-4 flex-shrink-0" aria-hidden="true" />
+                                  <span>{holdSummary.headline ?? 'On hold \u2014 reason not recorded'}</span>
+                                </div>
+                                {holdSummary.title && (
+                                  <div className="mt-1 text-amber-100">{holdSummary.title}</div>
+                                )}
+                                {holdSummary.note && (
+                                  <p className="mt-1 text-amber-100">{holdSummary.note}</p>
+                                )}
+                                <div className="mt-1 text-amber-200/70">
+                                  {holdSummary.attribution ?? 'Who placed the hold was not recorded'}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3">
+                          {op.component_part_number ? (
+                            <div>
+                              <div className="font-medium text-sm text-blue-600">{op.component_part_number}</div>
+                              {op.component_part_name && (
+                                <div className="text-xs text-slate-400">{op.component_part_name}</div>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-slate-500 text-sm">-</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div>
+                            <span className="font-medium text-sm">{op.quantity_complete}</span>
+                            <span className="text-slate-400 text-sm">/{operationTarget}</span>
+                            {op.laser_nest && <div className="text-xs text-slate-400">runs</div>}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-sm">
+                          {(Number(op.setup_time_hours || 0) + Number(op.run_time_hours || 0)).toFixed(2)}
+                        </td>
+                        {isAdminView && (
+                          <>
+                            <td className="px-4 py-3 text-sm text-slate-300">
+                              {op.started_by ? (userNameById[op.started_by] || `User #${op.started_by}`) : '-'}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-slate-300">
+                              {formatDateTimeCT(op.actual_start)}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-slate-300">
+                              {op.completed_by ? (userNameById[op.completed_by] || `User #${op.completed_by}`) : '-'}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-slate-300">
+                              {formatDateTimeCT(op.actual_end)}
+                            </td>
+                          </>
+                        )}
+                        <td className="px-4 py-3">
+                          <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium capitalize ${statusColor(op.status)}`}>
+                            {op.status.replace('_', ' ')}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          <div className="flex items-center justify-center gap-3">
+                            {/* CLEAR HOLD -- first in the group because on a held row
+                                it is the only action that moves the job. Ungated on
+                                purpose: `PUT /shop-floor/operations/{id}/resume` takes
+                                `get_current_user`, i.e. any authenticated tenant user,
+                                so gating it here would hide a control the server allows.
+                                Styled like its siblings (icon + text) rather than as a
+                                <Button>, which is the established chrome for this cell. */}
+                            {op.status === 'on_hold' && (
+                              <button
+                                type="button"
+                                onClick={() => setClearHoldTarget(op)}
+                                disabled={clearingHoldOpId !== null}
+                                className="text-amber-400 hover:text-amber-300 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                title="Lift the hold on this operation"
+                              >
+                                {clearingHoldOpId === op.id ? (
+                                  <>
+                                    <ArrowPathIcon className="h-5 w-5 inline animate-spin" /> Clearing...
+                                  </>
+                                ) : (
+                                  <>
+                                    <PlayIcon className="h-5 w-5 inline" /> Clear hold
+                                  </>
+                                )}
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => setStepsOpenOpId(stepsOpenOpId === op.id ? null : op.id)}
+                              aria-expanded={stepsOpenOpId === op.id}
+                              className="text-fd-cyan hover:text-cyan-300 text-sm font-medium"
+                              title="Process steps evidence"
+                            >
+                              <ClipboardDocumentCheckIcon className="h-5 w-5 inline" /> Steps
+                            </button>
+                            {/* Per-operation material tie. Gated on
+                                `canEditMaterialTies` (work_orders:edit — the
+                                same trio the tie endpoints enforce), NOT on
+                                `canCompleteOperation`, which is a larger set:
+                                QUALITY may complete an operation but may not
+                                decide what stock it eats. The dialog is always
+                                OPERATION-scoped; it never creates a
+                                whole-work-order tie. */}
+                            {canEditMaterialTies && (
+                              <button
+                                type="button"
+                                onClick={() => setTieTarget(op)}
+                                className="text-fd-blue hover:text-blue-300 text-sm font-medium"
+                                title="Tie stock material to this operation"
+                              >
+                                <CubeIcon className="h-5 w-5 inline" /> Material
+                              </button>
+                            )}
+                            {canCompleteOperation && op.status !== 'complete' && workOrder.status !== 'draft' && (
+                              <button
+                                onClick={() => handleCompleteOperation(op)}
+                                disabled={completingOpId === op.id || sequenceBlockReason !== null}
+                                className="text-green-600 hover:text-green-300 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                title={sequenceBlockReason ?? 'Complete Operation'}
+                              >
+                                {completingOpId === op.id ? (
+                                  <>
+                                    <ArrowPathIcon className="h-5 w-5 inline animate-spin" /> Completing...
+                                  </>
+                                ) : (
+                                  <>
+                                    <CheckCircleIcon className="h-5 w-5 inline" /> Complete
+                                  </>
+                                )}
+                              </button>
+                            )}
+                            {op.status === 'complete' && (
+                              <span className="text-slate-500 text-sm">Done</span>
+                            )}
+                            {/* Supervisor over-count correction — only when there is
+                                a recorded count to walk back. The server decides what
+                                is actually correctable (non-optimistic). */}
+                            {canCorrectCount && Number(op.quantity_complete || 0) > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => openCorrectModal(op)}
+                                disabled={correctingOpId === op.id}
+                                className="text-amber-400 hover:text-amber-300 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                                title="Correct over-counted quantity"
+                              >
+                                <MinusCircleIcon className="h-5 w-5 inline" /> Correct count
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                      {stepsOpenOpId === op.id && (
+                        <tr className={isNewGroup ? '' : 'border-t-0'}>
+                          <td colSpan={isAdminView ? 12 : 8} className="bg-slate-900/40 p-0">
+                            <OperationStepsPanel operationId={op.id} />
+                          </td>
+                        </tr>
+                      )}
+                      </React.Fragment>
+                    );
+                  });
+                })()}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+
       {/* Notes & Instructions — folded into a compact panel, editable in place
           at ANY status (see the notesEditing state block for why). */}
       <CockpitPanel
@@ -2330,7 +2701,7 @@ export default function WorkOrderDetail() {
             </div>
           </div>
           <span className="text-xs font-semibold px-2 py-1 rounded-sm bg-fd-blue/15 text-fd-blue w-fit flex-shrink-0">
-            {workOrderDocuments.length} attached
+            {secondaryLoading.documents ? 'Checking attachments' : secondaryErrors.documents ? 'Attachments unverified' : `${workOrderDocuments.length} attached`}
           </span>
         </div>
 
@@ -2347,14 +2718,16 @@ export default function WorkOrderDetail() {
                 <h3 className="text-sm font-semibold text-white">Attached PDFs</h3>
               </div>
               <div className="divide-y divide-slate-700">
-                {workOrderDocuments.length === 0 ? (
+                {secondaryErrors.documents && <ErrorState message={`Could not verify attached drawings. Previously loaded drawings may be out of date.${lastVerifiedSuffix('documents')}`} onRetry={loadWorkOrder} />}
+                {secondaryLoading.documents && <p role="status" className="p-4 text-sm text-slate-400">Loading attached drawings…</p>}
+                {workOrderDocuments.length === 0 ? (!secondaryErrors.documents && !secondaryLoading.documents && (
                   <EmptyState
                     icon={DocumentTextIcon}
                     title="No drawing PDF attached"
                     description="Upload a PDF or attach an existing drawing to preview the part here."
                     className="px-4 py-5"
                   />
-                ) : (
+                )) : (
                   workOrderDocuments.map((document) => (
                     <button
                       key={document.id}
@@ -2778,13 +3151,15 @@ export default function WorkOrderDetail() {
         headerExtra={
           <span className="text-xs font-semibold px-2 py-1 rounded-sm bg-amber-500/20 text-amber-300 w-fit flex items-center gap-1">
             <ExclamationTriangleIcon className="h-3.5 w-3.5" />
-            {blockers.filter((item) => item.status === 'open' || item.status === 'acknowledged').length} open
+            {secondaryLoading.blockers ? 'Checking open issues' : secondaryErrors.blockers ? 'Unknown open issues' : `${blockers.filter((item) => item.status === 'open' || item.status === 'acknowledged').length} open`}
           </span>
         }
       >
         <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-4">
           <div className="space-y-3 xl:max-h-[440px] xl:overflow-y-auto pr-1">
-            {blockers.length === 0 ? (
+            {secondaryErrors.blockers && <ErrorState message={`Could not verify blockers. Previously loaded issues below may be out of date.${lastVerifiedSuffix('blockers')}`} onRetry={loadWorkOrder} />}
+            {secondaryLoading.blockers && <p role="status" className="text-sm text-slate-400">Loading blockers…</p>}
+            {blockers.length === 0 ? (!secondaryErrors.blockers && !secondaryLoading.blockers && (
               <div className="rounded-sm border border-fd-line bg-slate-900/40">
                 <EmptyState
                   icon={CheckCircleIcon}
@@ -2792,7 +3167,7 @@ export default function WorkOrderDetail() {
                   description="This work order has no open issues. Use the form to report one if the job is stuck."
                 />
               </div>
-            ) : (
+            )) : (
               blockers.map((blocker) => (
                 <div key={blocker.id} className="rounded-sm border border-fd-line bg-slate-900/40 p-3">
                   <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
@@ -2929,379 +3304,6 @@ export default function WorkOrderDetail() {
       </CockpitPanel>
       </div>
 
-      {/* Operations */}
-      <div className="card card-compact">
-        <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <h2 className="card-title">Operations / Routing</h2>
-          {/* Operation sequencing mode. Rendered beside the routing it governs,
-              because the Status column below is what it changes. */}
-          {!sequencingApplies ? (
-            <p className="flex items-start gap-2 rounded-sm border border-fd-line bg-fd-sunken px-3 py-2 text-xs text-fd-mute lg:max-w-md">
-              <InformationCircleIcon className="h-4 w-4 flex-shrink-0" aria-hidden="true" />
-              <span>
-                Nest work orders are always pooled — nests can be run in any order, so
-                operation sequencing does not apply here.
-              </span>
-            </p>
-          ) : (
-            <div className="flex items-start gap-3 rounded-sm border border-fd-line bg-fd-sunken px-3 py-2 lg:max-w-md">
-              {canEditSequencing ? (
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={sequentialOperations}
-                  aria-label="Sequential operations"
-                  aria-describedby="wo-sequencing-help"
-                  disabled={savingSequencing}
-                  onClick={handleSequencingToggle}
-                  className={`relative mt-0.5 h-[22px] w-[40px] shrink-0 rounded-full border transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-50 ${
-                    sequentialOperations
-                      ? 'border-fd-blue bg-fd-blue'
-                      : 'border-fd-line-bright bg-slate-800'
-                  }`}
-                >
-                  <span
-                    aria-hidden="true"
-                    className={`absolute top-[2px] h-4 w-4 rounded-full bg-white transition-all duration-150 ease-out ${
-                      sequentialOperations ? 'right-[2px]' : 'left-[2px]'
-                    }`}
-                  />
-                </button>
-              ) : (
-                // Read-only viewers still need to know WHICH rule the floor is
-                // working under to read the Status column, so the mode is shown
-                // even where the control is not offered.
-                <span
-                  className={`mt-0.5 inline-flex shrink-0 rounded-sm px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide ${
-                    sequentialOperations ? 'bg-fd-blue/15 text-fd-blue' : 'bg-slate-800 text-slate-300'
-                  }`}
-                >
-                  {sequentialOperations ? 'On' : 'Off'}
-                </span>
-              )}
-              <div className="min-w-0">
-                <p className="text-xs font-semibold uppercase tracking-wide text-fd-ink">
-                  Sequential operations
-                </p>
-                <p id="wo-sequencing-help" className="mt-0.5 text-xs text-fd-mute">
-                  {sequentialOperations
-                    ? 'Each operation unlocks when the previous one is complete'
-                    : 'Operations at the same work center can run in any order'}
-                </p>
-              </div>
-              {savingSequencing && <Spinner size="sm" className="mt-0.5 shrink-0" />}
-            </div>
-          )}
-        </div>
-
-        {workOrder.operations.length === 0 ? (
-          <EmptyState
-            icon={WrenchScrewdriverIcon}
-            title="No operations defined"
-            description="This work order has no routing operations yet."
-          />
-        ) : (
-          <div className="overflow-x-auto lg:max-h-[clamp(360px,55vh,640px)] lg:overflow-y-auto">
-            <table className="min-w-full divide-y divide-slate-700">
-              <thead className="bg-slate-800/50">
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Seq</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Group</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Operation</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Qty</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Est. Hours</th>
-                  {isAdminView && (
-                    <>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Started By</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Started At (CT)</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Completed By</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Completed At (CT)</th>
-                    </>
-                  )}
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Status</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-slate-400 uppercase">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="bg-fd-panel divide-y divide-slate-700">
-                {(() => {
-                  let lastGroup = '';
-                  return workOrder.operations.map((op) => {
-                    const isNewGroup = op.operation_group && op.operation_group !== lastGroup;
-                    if (op.operation_group) lastGroup = op.operation_group;
-                    const operationTarget = operationRunTarget(op, workOrder.quantity_ordered);
-                    // Non-null only while the SERVER would refuse this operation's
-                    // office verbs — see `lowestIncompleteOperation`. Doubles as the
-                    // hover explanation, so the disabled control says why it is
-                    // disabled instead of looking broken. Strict `>` mirrors the
-                    // gate's `sequence < candidate.sequence`: operations sharing a
-                    // sequence number do not block each other, and the blocking
-                    // operation never blocks itself.
-                    const sequenceBlockReason =
-                      lowestIncompleteOperation && op.sequence > lowestIncompleteOperation.sequence
-                        ? `Previous operations must be completed first — this work order runs its operations in sequence, and operation ${lowestIncompleteOperation.sequence} (${lowestIncompleteOperation.name}) is not complete.`
-                        : null;
-                    
-                    // WHY this row is held, for the compact in-row disclosure below.
-                    // Computed once and reused by the confirm dialog's copy so the
-                    // pre-click reason and the in-dialog reason cannot diverge.
-                    // Non-null only for an ON_HOLD row -- `hold_context` is null on
-                    // every other one, by construction on the server.
-                    const holdSummary = op.status === 'on_hold' ? summarizeHold(op.hold_context) : null;
-
-                    const groupColors: Record<string, string> = {
-                      'LASER': 'bg-fd-red/15 text-fd-red',
-                      'MACHINE': 'bg-fd-blue/15 text-fd-blue',
-                      'BEND': 'bg-fd-amber/15 text-fd-amber',
-                      'WELD': 'bg-amber-500/15 text-amber-300',
-                      'FINISH': 'bg-fd-cyan/15 text-fd-cyan',
-                      'ASSEMBLY': 'bg-fd-green/15 text-fd-green',
-                      'INSPECT': 'bg-fd-blue/15 text-fd-blue',
-                    };
-                    
-                    return (
-                      <React.Fragment key={op.id}>
-                      <tr
-                        className={`hover:bg-slate-800/50 ${isNewGroup ? 'border-t-2 border-slate-600' : ''}`}
-                      >
-                        <td className="px-4 py-3 font-medium text-sm">{op.sequence}</td>
-                        <td className="px-4 py-3">
-                          {op.operation_group && (
-                            <span className={`inline-flex px-2 py-1 rounded text-xs font-bold ${groupColors[op.operation_group] || 'bg-slate-800 text-slate-100'}`}>
-                              {op.operation_group}
-                            </span>
-                          )}
-                        </td>
-                        <td className="px-4 py-3">
-                          <div>
-                            <div className="font-medium text-sm">{op.name}</div>
-                            {op.description && (
-                              <div className="text-xs text-slate-400 mt-0.5">{op.description}</div>
-                            )}
-                            {op.laser_nest && nestPanelShown ? (
-                              // De-dup: full nest detail lives once in the Laser
-                              // Nest Package card; cross-link here by stable id.
-                              <a
-                                href={`#nest-${op.laser_nest.id}`}
-                                className="mt-2 inline-flex flex-wrap items-center gap-1.5 rounded-sm border border-fd-line bg-slate-900/50 px-2 py-1 text-xs font-medium text-fd-red hover:border-fd-line-bright"
-                                title="View nest detail in Laser Nest Package"
-                              >
-                                <DocumentTextIcon className="h-4 w-4" />
-                                {op.laser_nest.cnc_number ? (
-                                  <span className="font-mono">CNC# {op.laser_nest.cnc_number}</span>
-                                ) : (
-                                  op.laser_nest.nest_name
-                                )}
-                                {op.laser_nest.has_document && (
-                                  <PaperClipIcon className="h-3.5 w-3.5 text-fd-blue" title="Reference PDF attached" />
-                                )}
-                                <span className="tabular-nums text-slate-400">
-                                  {op.laser_nest.completed_runs}/{op.laser_nest.planned_runs}
-                                </span>
-                              </a>
-                            ) : op.laser_nest ? (
-                              <div className="mt-2 rounded-sm border border-fd-line bg-slate-900/50 px-2 py-1.5 text-xs text-slate-300">
-                                <div className="flex flex-wrap items-center gap-1.5 font-medium text-fd-red">
-                                  <DocumentTextIcon className="h-4 w-4" />
-                                  {op.laser_nest.cnc_number ? (
-                                    <span className="font-mono">CNC# {op.laser_nest.cnc_number}</span>
-                                  ) : (
-                                    op.laser_nest.nest_name
-                                  )}
-                                  {op.laser_nest.has_document && (
-                                    <PaperClipIcon className="h-3.5 w-3.5 text-fd-blue" title="Reference PDF attached" />
-                                  )}
-                                </div>
-                                <div className="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1">
-                                  {op.laser_nest.cnc_file_name && <span>File: {op.laser_nest.cnc_file_name}</span>}
-                                  <span>Runs: {op.laser_nest.completed_runs}/{op.laser_nest.planned_runs}</span>
-                                  {(op.laser_nest.material || op.laser_nest.thickness) && (
-                                    <span>{[op.laser_nest.material, op.laser_nest.thickness].filter(Boolean).join(' • ')}</span>
-                                  )}
-                                  {op.laser_nest.sheet_size && <span>Sheet: {op.laser_nest.sheet_size}</span>}
-                                </div>
-                              </div>
-                            ) : null}
-                            {/* WHY IT IS HELD -- disclosed on the row, BEFORE anyone
-                                clicks Clear Hold. Reason and attribution render on
-                                their own terms: a bare hold (mis-tap at the kiosk --
-                                no note, category OTHER) files no blocker, so it has a
-                                holder and no reason, and gating one on the other would
-                                make exactly that case read as anonymous AND reasonless.
-                                Free text is read straight off note/title: this response
-                                withholds nothing, and `has_note` is not sent. */}
-                            {holdSummary && (
-                              <div className="mt-2 rounded-sm border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs">
-                                <div className="flex flex-wrap items-center gap-1.5 font-semibold text-amber-300">
-                                  <ExclamationTriangleIcon className="h-4 w-4 flex-shrink-0" aria-hidden="true" />
-                                  <span>{holdSummary.headline ?? 'On hold \u2014 reason not recorded'}</span>
-                                </div>
-                                {holdSummary.title && (
-                                  <div className="mt-1 text-amber-100">{holdSummary.title}</div>
-                                )}
-                                {holdSummary.note && (
-                                  <p className="mt-1 text-amber-100">{holdSummary.note}</p>
-                                )}
-                                <div className="mt-1 text-amber-200/70">
-                                  {holdSummary.attribution ?? 'Who placed the hold was not recorded'}
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          {op.component_part_number ? (
-                            <div>
-                              <div className="font-medium text-sm text-blue-600">{op.component_part_number}</div>
-                              {op.component_part_name && (
-                                <div className="text-xs text-slate-400">{op.component_part_name}</div>
-                              )}
-                            </div>
-                          ) : (
-                            <span className="text-slate-500 text-sm">-</span>
-                          )}
-                        </td>
-                        <td className="px-4 py-3">
-                          <div>
-                            <span className="font-medium text-sm">{op.quantity_complete}</span>
-                            <span className="text-slate-400 text-sm">/{operationTarget}</span>
-                            {op.laser_nest && <div className="text-xs text-slate-400">runs</div>}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3 text-sm">
-                          {(Number(op.setup_time_hours || 0) + Number(op.run_time_hours || 0)).toFixed(2)}
-                        </td>
-                        {isAdminView && (
-                          <>
-                            <td className="px-4 py-3 text-sm text-slate-300">
-                              {op.started_by ? (userNameById[op.started_by] || `User #${op.started_by}`) : '-'}
-                            </td>
-                            <td className="px-4 py-3 text-sm text-slate-300">
-                              {formatDateTimeCT(op.actual_start)}
-                            </td>
-                            <td className="px-4 py-3 text-sm text-slate-300">
-                              {op.completed_by ? (userNameById[op.completed_by] || `User #${op.completed_by}`) : '-'}
-                            </td>
-                            <td className="px-4 py-3 text-sm text-slate-300">
-                              {formatDateTimeCT(op.actual_end)}
-                            </td>
-                          </>
-                        )}
-                        <td className="px-4 py-3">
-                          <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium capitalize ${statusColor(op.status)}`}>
-                            {op.status.replace('_', ' ')}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          <div className="flex items-center justify-center gap-3">
-                            {/* CLEAR HOLD -- first in the group because on a held row
-                                it is the only action that moves the job. Ungated on
-                                purpose: `PUT /shop-floor/operations/{id}/resume` takes
-                                `get_current_user`, i.e. any authenticated tenant user,
-                                so gating it here would hide a control the server allows.
-                                Styled like its siblings (icon + text) rather than as a
-                                <Button>, which is the established chrome for this cell. */}
-                            {op.status === 'on_hold' && (
-                              <button
-                                type="button"
-                                onClick={() => setClearHoldTarget(op)}
-                                disabled={clearingHoldOpId !== null}
-                                className="text-amber-400 hover:text-amber-300 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                                title="Lift the hold on this operation"
-                              >
-                                {clearingHoldOpId === op.id ? (
-                                  <>
-                                    <ArrowPathIcon className="h-5 w-5 inline animate-spin" /> Clearing...
-                                  </>
-                                ) : (
-                                  <>
-                                    <PlayIcon className="h-5 w-5 inline" /> Clear hold
-                                  </>
-                                )}
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => setStepsOpenOpId(stepsOpenOpId === op.id ? null : op.id)}
-                              aria-expanded={stepsOpenOpId === op.id}
-                              className="text-fd-cyan hover:text-cyan-300 text-sm font-medium"
-                              title="Process steps evidence"
-                            >
-                              <ClipboardDocumentCheckIcon className="h-5 w-5 inline" /> Steps
-                            </button>
-                            {/* Per-operation material tie. Gated on
-                                `canEditMaterialTies` (work_orders:edit — the
-                                same trio the tie endpoints enforce), NOT on
-                                `canCompleteOperation`, which is a larger set:
-                                QUALITY may complete an operation but may not
-                                decide what stock it eats. The dialog is always
-                                OPERATION-scoped; it never creates a
-                                whole-work-order tie. */}
-                            {canEditMaterialTies && (
-                              <button
-                                type="button"
-                                onClick={() => setTieTarget(op)}
-                                className="text-fd-blue hover:text-blue-300 text-sm font-medium"
-                                title="Tie stock material to this operation"
-                              >
-                                <CubeIcon className="h-5 w-5 inline" /> Material
-                              </button>
-                            )}
-                            {canCompleteOperation && op.status !== 'complete' && workOrder.status !== 'draft' && (
-                              <button
-                                onClick={() => handleCompleteOperation(op)}
-                                disabled={completingOpId === op.id || sequenceBlockReason !== null}
-                                className="text-green-600 hover:text-green-300 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                                title={sequenceBlockReason ?? 'Complete Operation'}
-                              >
-                                {completingOpId === op.id ? (
-                                  <>
-                                    <ArrowPathIcon className="h-5 w-5 inline animate-spin" /> Completing...
-                                  </>
-                                ) : (
-                                  <>
-                                    <CheckCircleIcon className="h-5 w-5 inline" /> Complete
-                                  </>
-                                )}
-                              </button>
-                            )}
-                            {op.status === 'complete' && (
-                              <span className="text-slate-500 text-sm">Done</span>
-                            )}
-                            {/* Supervisor over-count correction — only when there is
-                                a recorded count to walk back. The server decides what
-                                is actually correctable (non-optimistic). */}
-                            {canCorrectCount && Number(op.quantity_complete || 0) > 0 && (
-                              <button
-                                type="button"
-                                onClick={() => openCorrectModal(op)}
-                                disabled={correctingOpId === op.id}
-                                className="text-amber-400 hover:text-amber-300 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                                title="Correct over-counted quantity"
-                              >
-                                <MinusCircleIcon className="h-5 w-5 inline" /> Correct count
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                      {stepsOpenOpId === op.id && (
-                        <tr className={isNewGroup ? '' : 'border-t-0'}>
-                          <td colSpan={isAdminView ? 12 : 8} className="bg-slate-900/40 p-0">
-                            <OperationStepsPanel operationId={op.id} />
-                          </td>
-                        </tr>
-                      )}
-                      </React.Fragment>
-                    );
-                  });
-                })()}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
       {/* Material Ties — the optional link between this work order (or one of
           its operations) and the stock material it depletes. Its own stacked
           section, deliberately not a tab: this page's content is all co-visible.
@@ -3373,6 +3375,10 @@ export default function WorkOrderDetail() {
           see them together. */}
       <BackflushPreviewPanel workOrderId={workOrder.id} />
 
+      {secondaryErrors.materials && <ErrorState message={`Could not verify material requirements. Any previously loaded requirements below may be out of date.${lastVerifiedSuffix('materials')}`} onRetry={loadWorkOrder} />}
+      {secondaryLoading.materials && <p role="status" className="text-sm text-slate-400">Loading material requirements…</p>}
+      {secondaryErrors.documentChoices && <ErrorState message={`Could not load available drawings to attach.${lastVerifiedSuffix('documentChoices')}`} onRetry={loadWorkOrder} />}
+      {secondaryLoading.documentChoices && <p role="status" className="text-sm text-slate-400">Loading available drawings…</p>}
       {/* Material Requirements */}
       {materialReqs && materialReqs.has_bom && materialReqs.materials.length > 0 && (
         <div className="card card-compact">
@@ -3439,7 +3445,7 @@ export default function WorkOrderDetail() {
       {/* Part-less (standalone laser nest) WOs have no part to hang a BOM on —
           skip the "No BOM" nudge entirely rather than pointing at a part that
           doesn't exist. */}
-      {materialReqs && !materialReqs.has_bom && workOrder.part_id != null && (
+      {materialReqs && !materialReqs.has_bom && !secondaryErrors.materials && !secondaryLoading.materials && workOrder.part_id != null && (
         <div className="card card-compact">
           <EmptyState
             icon={CubeIcon}

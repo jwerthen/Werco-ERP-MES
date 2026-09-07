@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useModalPortal } from './Modal';
 import { CheckIcon, ChevronUpDownIcon, XMarkIcon } from '@heroicons/react/20/solid';
 
 /**
@@ -78,8 +79,7 @@ export interface ComboBoxProps {
   noResultsLabel?: string;
 }
 
-const OPTION_BASE =
-  'flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-sm text-fd-body';
+const OPTION_BASE = 'flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-sm text-fd-body';
 
 /** Case- and whitespace-insensitive substring match over label + hint. */
 function optionMatches(option: ComboBoxOption, needle: string): boolean {
@@ -91,7 +91,7 @@ function optionMatches(option: ComboBoxOption, needle: string): boolean {
     .toLowerCase()
     .split(/\s+/)
     .filter(Boolean)
-    .every((term) => haystack.includes(term));
+    .every(term => haystack.includes(term));
 }
 
 export function ComboBox({
@@ -109,6 +109,7 @@ export function ComboBox({
   footer,
   noResultsLabel = 'No matches',
 }: ComboBoxProps) {
+  const modalPortal = useModalPortal();
   const generatedId = useId();
   const inputId = id ?? `combobox-${generatedId}`;
   const listId = `${inputId}-listbox`;
@@ -131,10 +132,10 @@ export function ComboBox({
     [options, emptyOptionLabel]
   );
 
-  const selected = useMemo(() => allOptions.find((option) => option.value === value), [allOptions, value]);
+  const selected = useMemo(() => allOptions.find(option => option.value === value), [allOptions, value]);
   const selectedLabel = value && selected ? selected.label : '';
 
-  const filtered = useMemo(() => allOptions.filter((option) => optionMatches(option, query)), [allOptions, query]);
+  const filtered = useMemo(() => allOptions.filter(option => optionMatches(option, query)), [allOptions, query]);
 
   // Anchor the portaled popup to the trigger. Recomputed on open and on any
   // scroll/resize — `true` (capture) is what catches the table's own scroll
@@ -216,21 +217,19 @@ export function ComboBox({
   // refuses to commit and looks broken.
   useEffect(() => {
     if (filtered.length === 0) return;
-    setActiveIndex((i) => Math.min(i, filtered.length - 1));
+    setActiveIndex(i => Math.min(i, filtered.length - 1));
   }, [filtered.length]);
 
   // Keep the active option in view as the arrow keys walk past the fold.
   useEffect(() => {
     if (!open) return;
-    listRef.current
-      ?.querySelector(`[data-index="${activeIndex}"]`)
-      ?.scrollIntoView?.({ block: 'nearest' });
+    listRef.current?.querySelector(`[data-index="${activeIndex}"]`)?.scrollIntoView?.({ block: 'nearest' });
   }, [open, activeIndex]);
 
   const openList = () => {
     if (disabled) return;
     setOpen(true);
-    const index = filtered.findIndex((option) => option.value === value);
+    const index = filtered.findIndex(option => option.value === value);
     setActiveIndex(index >= 0 ? index : 0);
   };
 
@@ -259,11 +258,11 @@ export function ComboBox({
       case 'ArrowDown':
         event.preventDefault();
         if (!open) return openList();
-        return setActiveIndex((i) => Math.min(i + 1, filtered.length - 1));
+        return setActiveIndex(i => Math.min(i + 1, filtered.length - 1));
       case 'ArrowUp':
         event.preventDefault();
         if (!open) return openList();
-        return setActiveIndex((i) => Math.max(i - 1, 0));
+        return setActiveIndex(i => Math.max(i - 1, 0));
       case 'Home':
         if (!open) return;
         event.preventDefault();
@@ -371,7 +370,7 @@ export function ComboBox({
         // needs more than it needs an always-empty search box.
         value={open ? query : selectedLabel}
         placeholder={placeholder}
-        onChange={(e) => {
+        onChange={e => {
           setQuery(e.target.value);
           setActiveIndex(0);
           if (!open) setOpen(true);
@@ -410,7 +409,7 @@ export function ComboBox({
         className="pointer-events-none absolute right-1.5 top-1/2 h-4 w-4 -translate-y-1/2 text-fd-mute"
         aria-hidden="true"
       />
-      {popup && createPortal(popup, document.body)}
+      {popup && createPortal(popup, modalPortal ?? document.body)}
     </div>
   );
 }

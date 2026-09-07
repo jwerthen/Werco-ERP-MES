@@ -27,18 +27,40 @@ import {
 import type { ScrapReasonCode } from '../../types/scrapReason';
 
 const CODES: ScrapReasonCode[] = [
-  { id: 7, code: 'OT', name: 'Out of tolerance', category: 'operator', description: null, is_active: true, display_order: 1 },
-  { id: 9, code: 'MAT', name: 'Material defect', category: 'material', description: null, is_active: true, display_order: 2 },
+  {
+    id: 7,
+    code: 'OT',
+    name: 'Out of tolerance',
+    category: 'operator',
+    description: null,
+    is_active: true,
+    display_order: 1,
+  },
+  {
+    id: 9,
+    code: 'MAT',
+    name: 'Material defect',
+    category: 'material',
+    description: null,
+    is_active: true,
+    display_order: 2,
+  },
 ];
 
 /** Controlled harness so selections persist across interactions. */
-function Harness({ codes, onChangeSpy }: { codes: ScrapReasonCode[]; onChangeSpy?: (next: ScrapReasonSelection) => void }) {
+function Harness({
+  codes,
+  onChangeSpy,
+}: {
+  codes: ScrapReasonCode[];
+  onChangeSpy?: (next: ScrapReasonSelection) => void;
+}) {
   const [value, setValue] = useState<ScrapReasonSelection>(EMPTY_SCRAP_SELECTION);
   return (
     <ScrapReasonFields
       codes={codes}
       value={value}
-      onChange={(next) => {
+      onChange={next => {
         onChangeSpy?.(next);
         setValue(next);
       }}
@@ -51,12 +73,12 @@ describe('ScrapReasonFields — fallback mode (no active codes)', () => {
     render(<Harness codes={[]} />);
 
     // Legacy SelectField carries the same accessible name as before.
-    expect(screen.getByRole('button', { name: 'Scrap reason' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Scrap reason' })).toBeInTheDocument();
     expect(screen.getByText(/required when scrap is greater than zero/i)).toBeInTheDocument();
     expect(screen.queryByLabelText(/scrap detail/i)).not.toBeInTheDocument();
 
     // Legacy vocabulary, stored verbatim as text.
-    fireEvent.click(screen.getByRole('button', { name: 'Scrap reason' }));
+    fireEvent.click(screen.getByRole('combobox', { name: 'Scrap reason' }));
     fireEvent.mouseDown(screen.getByRole('option', { name: /Out of tolerance/i }));
 
     expect(screen.queryByText(/required when scrap is greater than zero/i)).not.toBeInTheDocument();
@@ -75,7 +97,7 @@ describe('ScrapReasonFields — codes mode', () => {
   it('renders CODE — Name options plus an optional detail field', () => {
     render(<Harness codes={CODES} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Scrap reason' }));
+    fireEvent.click(screen.getByRole('combobox', { name: 'Scrap reason' }));
     expect(screen.getByRole('option', { name: /OT — Out of tolerance/ })).toBeInTheDocument();
     fireEvent.mouseDown(screen.getByRole('option', { name: /MAT — Material defect/ }));
 

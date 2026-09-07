@@ -7,7 +7,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
@@ -32,10 +32,21 @@ router = APIRouter()
 UPLOAD_DIR = resolve_upload_dir()
 
 
+class DocumentPartResponse(BaseModel):
+    part_number: str
+    name: str
+
+    class Config:
+        from_attributes = True
+
+
 class DocumentResponse(BaseModel):
+    part: Optional[DocumentPartResponse] = None
     id: int
     document_number: str
     revision: str
+    previous_revision_id: Optional[int] = None
+    revision_notes: Optional[str] = None
     title: str
     document_type: str
     description: Optional[str] = None
@@ -88,7 +99,7 @@ def list_documents(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    query = db.query(Document).filter(Document.company_id == company_id)
+    query = db.query(Document).options(joinedload(Document.part)).filter(Document.company_id == company_id)
 
     if part_id:
         query = query.filter(Document.part_id == part_id)
@@ -121,6 +132,8 @@ async def upload_document(
     work_order_id: int = Form(None),
     vendor_id: int = Form(None),
     revision: str = Form("A"),
+    previous_revision_id: Optional[int] = Form(None),
+    revision_notes: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
@@ -165,6 +178,55 @@ async def upload_document(
         if not vendor:
             raise HTTPException(status_code=404, detail="Vendor not found")
 
+    previous = None
+    if previous_revision_id:
+        previous = (
+            db.query(Document)
+            .filter(Document.id == previous_revision_id, Document.company_id == company_id)
+            .with_for_update()
+            .first()
+        )
+        if not previous:
+            raise HTTPException(status_code=404, detail="Previous document revision not found")
+        # Lock the selected predecessor so concurrent uploads cannot create sibling revisions.
+        if (
+            db.query(Document.id)
+            .filter(Document.company_id == company_id, Document.previous_revision_id == previous.id)
+            .first()
+        ):
+            raise HTTPException(
+                status_code=409, detail="A newer revision exists. Open the latest revision before uploading."
+            )
+        ancestor = previous
+        seen = set()
+        while ancestor and ancestor.id not in seen:
+            seen.add(ancestor.id)
+            if revision.strip().casefold() == ancestor.revision.strip().casefold():
+                raise HTTPException(
+                    status_code=422, detail="This revision label already exists in the document history"
+                )
+            ancestor = (
+                db.query(Document)
+                .filter(Document.id == ancestor.previous_revision_id, Document.company_id == company_id)
+                .first()
+                if ancestor.previous_revision_id
+                else None
+            )
+        if not revision_notes or not revision_notes.strip():
+            raise HTTPException(status_code=422, detail="Describe what changed in this revision")
+        if (
+            previous.document_type != parsed_document_type
+            or previous.part_id != normalized_part_id
+            or previous.work_order_id != normalized_work_order_id
+            or previous.vendor_id != normalized_vendor_id
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="A revision must retain the document type and linked records of the previous revision",
+            )
+    if not revision.strip() or len(revision.strip()) > 20:
+        raise HTTPException(status_code=422, detail="Revision must contain 1–20 characters")
+
     # Generate unique filename and persist through the configured storage backend.
     content = await file.read()
     storage = get_storage()
@@ -182,7 +244,9 @@ async def upload_document(
 
     document = Document(
         document_number=doc_number,
-        revision=revision,
+        revision=revision.strip(),
+        previous_revision_id=previous_revision_id,
+        revision_notes=revision_notes,
         title=title,
         document_type=parsed_document_type,
         description=description,
@@ -208,6 +272,31 @@ async def upload_document(
 @router.get("/types/list")
 def list_document_types(current_user: User = Depends(get_current_user)):
     return [{"value": t.value, "label": t.value.replace("_", " ").title()} for t in DocumentType]
+
+
+@router.get("/{document_id}/revisions", response_model=List[DocumentResponse])
+def get_document_revisions(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    documents = db.query(Document).options(joinedload(Document.part)).filter(Document.company_id == company_id).all()
+    by_id = {doc.id: doc for doc in documents}
+    if document_id not in by_id:
+        raise HTTPException(status_code=404, detail="Document not found")
+    root_id = document_id
+    seen = set()
+    while root_id not in seen and by_id[root_id].previous_revision_id in by_id:
+        seen.add(root_id)
+        root_id = by_id[root_id].previous_revision_id
+    linked = {root_id}
+    while True:
+        children = {doc.id for doc in documents if doc.previous_revision_id in linked}
+        if children.issubset(linked):
+            break
+        linked.update(children)
+    return sorted((by_id[id] for id in linked), key=lambda doc: doc.created_at, reverse=True)
 
 
 @router.get("/{document_id}", response_model=DocumentResponse)
@@ -297,6 +386,16 @@ def delete_document(
     document = db.query(Document).filter(Document.id == document_id, Document.company_id == company_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
+    if (
+        document.previous_revision_id
+        or db.query(Document.id)
+        .filter(Document.company_id == company_id, Document.previous_revision_id == document.id)
+        .first()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="This document belongs to a revision history and cannot be deleted. Its prior files must remain available.",
+        )
 
     # Delete stored bytes if they exist (per-ref dispatch covers local and s3 rows).
     # Document is hard-deleted today (no SoftDeleteMixin), so removing the bytes

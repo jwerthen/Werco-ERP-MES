@@ -68,7 +68,7 @@ const renderPurchasing = () =>
 /** Load the page and open the Create PO modal; returns the modal form. */
 async function openCreatePOForm(): Promise<HTMLFormElement> {
   renderPurchasing();
-  await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+  await screen.findByRole('heading', { name: 'Purchasing' });
   fireEvent.click(screen.getByRole('button', { name: /new po/i }));
   await screen.findByRole('heading', { name: 'Create Purchase Order' });
   return screen.getByLabelText(/vendor/i).closest('form') as HTMLFormElement;
@@ -137,7 +137,7 @@ describe('Purchasing — RBAC action gating', () => {
   test('viewer sees no New PO / New Vendor buttons and no Send action', async () => {
     mockAuthUser = { id: 2, role: 'viewer' };
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
 
     expect(screen.queryByRole('button', { name: /new po/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /new vendor/i })).toBeNull();
@@ -145,26 +145,26 @@ describe('Purchasing — RBAC action gating', () => {
     // Draft PO row renders without the Send action (send is admin/manager only).
     const table = screen.getByTestId('data-table');
     expect(within(table).getByText('PO-1001')).toBeInTheDocument();
-    expect(within(table).queryByRole('button', { name: /^send$/i })).toBeNull();
+    expect(within(table).queryByRole('button', { name: /^mark as sent$/i })).toBeNull();
   });
 
   test('supervisor sees New PO (purchasing:create) but not New Vendor or Send', async () => {
     mockAuthUser = { id: 3, role: 'supervisor' };
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
 
     expect(screen.getByRole('button', { name: /new po/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /new vendor/i })).toBeNull();
 
     const table = screen.getByTestId('data-table');
-    expect(within(table).queryByRole('button', { name: /^send$/i })).toBeNull();
+    expect(within(table).queryByRole('button', { name: /^mark as sent$/i })).toBeNull();
   });
 
   test('manager sees the Send action on a draft PO', async () => {
     renderPurchasing();
-    await screen.findByRole('heading', { name: 'Purchasing & Receiving' });
+    await screen.findByRole('heading', { name: 'Purchasing' });
 
     const table = screen.getByTestId('data-table');
-    expect(within(table).getByRole('button', { name: /^send$/i })).toBeInTheDocument();
+    expect(within(table).getByRole('button', { name: /^mark as sent$/i })).toBeInTheDocument();
   });
 });

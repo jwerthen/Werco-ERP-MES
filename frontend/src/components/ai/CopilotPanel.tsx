@@ -11,13 +11,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import {
-  ArrowPathIcon,
-  PaperAirplaneIcon,
-  SparklesIcon,
-  TrashIcon,
-  XMarkIcon,
-} from '@heroicons/react/24/outline';
+import { ArrowPathIcon, PaperAirplaneIcon, SparklesIcon, TrashIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import api from '../../services/api';
 import { CopilotMessage, CopilotReference, CopilotToolTraceEntry } from '../../types/copilot';
 
@@ -41,8 +35,8 @@ const SUGGESTIONS = ["What's blocked right now?", 'How loaded is the laser this 
 
 function toApiMessages(entries: ChatEntry[]): CopilotMessage[] {
   return entries
-    .filter((entry) => !entry.error && entry.content.trim().length > 0)
-    .map((entry) => ({ role: entry.role, content: entry.content }))
+    .filter(entry => !entry.error && entry.content.trim().length > 0)
+    .map(entry => ({ role: entry.role, content: entry.content }))
     .slice(-MAX_HISTORY_SENT);
 }
 
@@ -53,6 +47,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
   const [busy, setBusy] = useState(false);
   const [activity, setActivity] = useState<string | null>(null);
   const [streamText, setStreamText] = useState('');
+  const panelRef = useRef<HTMLElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -66,12 +61,42 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
   const contextHint = useMemo(() => `viewing ${location.pathname}${location.search}`, [location]);
 
   useEffect(() => {
-    if (isOpen) {
-      const id = window.setTimeout(() => inputRef.current?.focus(), 150);
-      return () => window.clearTimeout(id);
-    }
-    return undefined;
-  }, [isOpen]);
+    if (!isOpen) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const timer = window.setTimeout(() => inputRef.current?.focus(), 150);
+    const keydown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const controls = Array.from(
+        panelRef.current?.querySelectorAll<HTMLElement>(
+          'a[href],button:not([disabled]),textarea:not([disabled]),[tabindex="0"]'
+        ) ?? []
+      );
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && (document.activeElement === first || !panelRef.current?.contains(document.activeElement))) {
+        event.preventDefault();
+        last?.focus();
+      } else if (
+        !event.shiftKey &&
+        (document.activeElement === last || !panelRef.current?.contains(document.activeElement))
+      ) {
+        event.preventDefault();
+        first?.focus();
+      }
+    };
+    document.addEventListener('keydown', keydown);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener('keydown', keydown);
+      if (previous && document.contains(previous)) previous.focus();
+    };
+  }, [isOpen, onClose]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -94,14 +119,14 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
           { messages: toApiMessages(history), context_hint: contextHint },
           {
             onToolUse: (_tool, summary) => setActivity(summary),
-            onDelta: (text) => {
+            onDelta: text => {
               setActivity(null);
-              setStreamText((prev) => prev + text);
+              setStreamText(prev => prev + text);
             },
           },
           controller.signal
         );
-        setEntries((prev) => [
+        setEntries(prev => [
           ...prev,
           {
             role: 'assistant',
@@ -113,7 +138,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
         ]);
       } catch (err: unknown) {
         if (!(err instanceof DOMException && err.name === 'AbortError')) {
-          setEntries((prev) => [
+          setEntries(prev => [
             ...prev,
             {
               role: 'assistant',
@@ -167,9 +192,6 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
       event.preventDefault();
       send(input);
     }
-    if (event.key === 'Escape') {
-      onClose();
-    }
   };
 
   const lastEntryFailed = entries.length > 0 && entries[entries.length - 1].error;
@@ -185,13 +207,21 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
         />
       )}
       <aside
+        ref={panelRef}
+        inert={!isOpen}
+        hidden={!isOpen}
+        aria-modal={isOpen ? true : undefined}
         role="dialog"
         aria-label="Werco Copilot"
         aria-hidden={!isOpen}
         className={`fixed inset-y-0 right-0 z-50 w-full max-w-md flex flex-col transform transition-transform duration-200 ease-out ${
           isOpen ? 'translate-x-0' : 'translate-x-full pointer-events-none'
         }`}
-        style={{ background: 'var(--fd-panel)', borderLeft: '1px solid var(--fd-line)' }}
+        style={{
+          display: isOpen ? 'flex' : 'none',
+          background: 'var(--fd-panel)',
+          borderLeft: '1px solid var(--fd-line)',
+        }}
       >
         {/* Header */}
         <div
@@ -235,11 +265,11 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
           {entries.length === 0 && !busy && (
             <div className="space-y-3">
               <p className="text-sm text-fd-body">
-                Ask about jobs, blockers, schedule load, inventory, or customers. The copilot only reads data — it
-                never changes anything.
+                Ask about jobs, blockers, schedule load, inventory, or customers. The copilot only reads data — it never
+                changes anything.
               </p>
               <div className="space-y-1.5">
-                {SUGGESTIONS.map((suggestion) => (
+                {SUGGESTIONS.map(suggestion => (
                   <button
                     key={suggestion}
                     type="button"
@@ -294,7 +324,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
                   )}
                   {!!entry.references?.length && (
                     <div className="mt-2 flex flex-wrap gap-1.5">
-                      {entry.references.map((reference) => (
+                      {entry.references.map(reference => (
                         <Link
                           key={`${reference.type}-${reference.id}`}
                           to={reference.url}
@@ -309,7 +339,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
                   )}
                   {!!entry.toolTrace?.length && (
                     <p className="mt-1.5 font-mono text-[10px] text-fd-faint truncate">
-                      {entry.toolTrace.map((trace) => trace.summary).join(' · ')}
+                      {entry.toolTrace.map(trace => trace.summary).join(' · ')}
                     </p>
                   )}
                 </div>
@@ -345,7 +375,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
             <textarea
               ref={inputRef}
               value={input}
-              onChange={(event) => setInput(event.target.value)}
+              onChange={event => setInput(event.target.value)}
               onKeyDown={handleKeyDown}
               rows={1}
               maxLength={8000}

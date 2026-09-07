@@ -178,7 +178,7 @@ def update_ncr(
     ncr_id: int,
     ncr_in: NCRUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
     company_id: int = Depends(get_current_company_id),
 ):
     """Update an NCR"""
@@ -189,6 +189,7 @@ def update_ncr(
             NonConformanceReport.company_id == company_id,
             NonConformanceReport.is_deleted == False,  # noqa: E712
         )
+        .with_for_update()
         .first()
     )
     if not ncr:
@@ -197,6 +198,14 @@ def update_ncr(
     previous_status = ncr.status
     previous_disposition = ncr.disposition
     update_data = ncr_in.model_dump(exclude_unset=True)
+    expected = update_data.pop("expected_updated_at", None)
+    update_data.pop("version", None)  # legacy schema field; models use updated_at for conflict detection
+    if expected and ncr.updated_at and expected.replace(tzinfo=None) != ncr.updated_at.replace(tzinfo=None):
+        raise HTTPException(status_code=409, detail="This record changed since you opened it. Reload it before saving.")
+    if update_data.get("status") == NCRStatus.VOID:
+        raise HTTPException(status_code=422, detail="Use the reasoned void action to void a quality record")
+    if update_data.get("quantity_rejected", ncr.quantity_rejected or 0) > ncr.quantity_affected:
+        raise HTTPException(status_code=422, detail="Rejected quantity cannot exceed affected quantity")
 
     # Handle status transitions
     if "status" in update_data and update_data["status"] == NCRStatus.CLOSED:
@@ -487,13 +496,14 @@ def update_car(
     car_id: int,
     car_in: CARUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
     company_id: int = Depends(get_current_company_id),
 ):
     """Update a CAR"""
     car = (
         db.query(CorrectiveActionRequest)
         .filter(CorrectiveActionRequest.id == car_id, CorrectiveActionRequest.company_id == company_id)
+        .with_for_update()
         .first()
     )
     if not car:
@@ -501,6 +511,20 @@ def update_car(
 
     previous_status = car.status
     update_data = car_in.model_dump(exclude_unset=True)
+    expected = update_data.pop("expected_updated_at", None)
+    update_data.pop("version", None)  # legacy schema field; models use updated_at for conflict detection
+    if expected and car.updated_at and expected.replace(tzinfo=None) != car.updated_at.replace(tzinfo=None):
+        raise HTTPException(status_code=409, detail="This record changed since you opened it. Reload it before saving.")
+    if update_data.get("status") == CARStatus.VOID:
+        raise HTTPException(status_code=422, detail="Use the reasoned void action to void a quality record")
+    if update_data.get("status") == CARStatus.CLOSED:
+        missing = [
+            field.replace("_", " ")
+            for field in ("root_cause", "corrective_action", "verification_method", "verification_results")
+            if not str(update_data.get(field, getattr(car, field)) or "").strip()
+        ]
+        if missing:
+            raise HTTPException(status_code=422, detail="Closure requires " + ", ".join(missing))
 
     if "status" in update_data:
         if update_data["status"] == CARStatus.VERIFICATION:

@@ -1,5 +1,10 @@
 import React, { createContext, useCallback, useContext, useState } from 'react';
-import { CheckCircleIcon, ExclamationTriangleIcon, InformationCircleIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import {
+  CheckCircleIcon,
+  ExclamationTriangleIcon,
+  InformationCircleIcon,
+  XMarkIcon,
+} from '@heroicons/react/24/outline';
 import { toDisplayString } from '../../utils/apiError';
 
 interface Toast {
@@ -42,9 +47,12 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     // would blank the whole app. Coerce to a renderable string here so it can't.
     const text = toDisplayString(message);
     setToasts(prev => [...prev, { id, type, message: text }]);
-    setTimeout(() => {
-      setToasts(prev => prev.filter(t => t.id !== id));
-    }, 4000);
+    // Partial results and errors remain available until explicitly dismissed.
+    if (type === 'success' || type === 'info') {
+      setTimeout(() => {
+        setToasts(prev => prev.filter(t => t.id !== id));
+      }, 4000);
+    }
   }, []);
 
   const dismiss = useCallback((id: number) => {
@@ -69,7 +77,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     <ToastContext.Provider value={{ showToast }}>
       {children}
       <div
-        className="fixed top-4 right-4 z-[100] space-y-2 pointer-events-none"
+        className="fixed top-4 right-4 left-4 sm:left-auto z-[100] space-y-2 pointer-events-none max-h-[80vh] overflow-y-auto"
         aria-live="polite"
         aria-atomic="false"
       >

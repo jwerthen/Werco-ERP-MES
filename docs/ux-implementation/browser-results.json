@@ -1,0 +1,107 @@
+{
+  "environment": "Local synthetic fixtures; September 7, 2026",
+  "workflow": {
+    "checks": [
+      "Fresh sign-in restores the selected quote URL and onboarding does not redirect it",
+      "Custom first line remains quote-only; production line converts quantity20 and displays its WO link",
+      "Receiving queue/history keep parent route and browser Back restores the nested tab",
+      {
+        "check": "Selected-part New WO validation and mobile actions fit",
+        "viewport": 390,
+        "width": 390,
+        "actionLeft": 199.953125,
+        "actionRight": 374
+      },
+      {
+        "check": "Warning confirmation rendered colors",
+        "color": "oklch(0.129 0.042 264.695)",
+        "background": "oklch(0.769 0.188 70.08)",
+        "textRGB": [
+          2,
+          6,
+          24
+        ],
+        "backgroundRGB": [
+          254,
+          154,
+          0
+        ],
+        "contrast": 9.441554410367594
+      },
+      "Real work-order form preserves selected part and notes on Stay and navigates on deliberate discard",
+      {
+        "check": "Mobile Time Clock queue and identifier color",
+        "viewport": 390,
+        "width": 390,
+        "queueTop": 523.5,
+        "colors": [
+          {
+            "color": "rgb(147, 197, 253)",
+            "classes": "text-sm font-semibold text-fd-link truncate"
+          },
+          {
+            "color": "rgb(147, 197, 253)",
+            "classes": "font-semibold text-fd-link"
+          }
+        ]
+      },
+      "Dispatching2 of10 completed units leaves8 available, no pending reservation, and WO complete",
+      "NCR deep link opens full investigation and authorized correction form",
+      "PO deep link opens detail without automatically launching print",
+      "Document B opens a PDF preview with A/B history and current revision context",
+      "Visitor Purpose popup remains usable at390x600; Escape closes only the popup"
+    ],
+    "errors": [],
+    "fixture": {
+      "quote_id": 1,
+      "work_order_id": 6
+    }
+  },
+  "calculator": {
+    "checks": [
+      "Changing 20 to 30 retains the quantity-20 snapshot and disables Create and Print",
+      "Returning input to 20 allows exact snapshot handoff",
+      "Review preserves quantity20 and rounded total; Cancel restores calculator inputs and result"
+    ],
+    "total": "Quote Result\n\nTotal Quote\n\n$908.20\n\n$45.41 per unit x 20\n\nEstimated Lead Time\n10 days\nCost Breakdown\nMaterial\n$130.90\nMachining\n$492.19\nSetup\n$85.00\nSubtotal\n$708.09\nMarkup\n$247.83\nQuantity Discount\n-$47.80\nUnit-price rounding\n+$0.08\n\nCalculation Details\n\nStock Dimensions\n4.50 x 3.50 x 1.50\n\nStock Volume Ci\n23.62\n\nMachining Hours\n0.20\n\nSetup Hours\n1.00\n\nMachine Rate\n125.00\n\nComplexity Multiplier\n1.00\n\nTolerance Multiplier\n1.00\n\nFinish Multiplier\n1.00\n\nCREATE QUOTE\nPRINT",
+    "review": "Create Quote\n\nCalculation carried over. Select the business part and customer before saving; the original calculation is retained in the internal record.\n\nCustomer Name*\n(required)\nContact\nEmail\nCustomer Phone\nCustomer PO\nValid Days\nLead Time (days)\nLine Items\n+ Add Line\nPart\nDescription\nQty\nUnit Price\nTotal\n$908.20\n\u00d7\nTotal: $908.20\nPayment terms\nNotes\nCANCEL\nCREATE QUOTE",
+    "errors": []
+  },
+  "renderedContrast": {
+    "quoteProductionLink": {
+      "text": "WO-20260906-001",
+      "foreground": "rgb(147, 197, 253)",
+      "textRGB": [
+        147,
+        197,
+        253
+      ],
+      "backgroundRGB": [
+        22,
+        34,
+        60
+      ],
+      "contrast": 8.768034427257115
+    },
+    "timeClockIdentifier": {
+      "text": "WO-20260102-002",
+      "foreground": "rgb(147, 197, 253)",
+      "textRGB": [
+        147,
+        197,
+        253
+      ],
+      "backgroundRGB": [
+        20,
+        27,
+        38
+      ],
+      "contrast": 9.588657007768212
+    }
+  },
+  "documentPreview": {
+    "browser": "Full Chromium with built-in PDF viewer",
+    "result": "Synthetic revision B visibly rendered, with A/B history",
+    "runtimeErrors": []
+  }
+}

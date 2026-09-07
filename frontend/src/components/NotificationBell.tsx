@@ -12,11 +12,11 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { BellIcon, CheckIcon, Cog6ToothIcon } from '@heroicons/react/24/outline';
 import api from '../services/api';
+import { useNotificationState } from '../hooks/useNotificationState';
 import { NotificationItem } from '../types/notification';
 import { EmptyState, StatusBadge, useToast } from './ui';
 import { SEVERITY_COLOR_MAP, formatNotificationTime } from '../utils/notificationSeverity';
 
-const POLL_INTERVAL_MS = 60_000;
 const RECENT_LIMIT = 20;
 
 export default function NotificationBell() {
@@ -24,7 +24,9 @@ export default function NotificationBell() {
   const { showToast } = useToast();
 
   const [open, setOpen] = useState(false);
-  const [unreadCount, setUnreadCount] = useState(0);
+  const notificationState = useNotificationState();
+  const unreadCount = notificationState.unreadCount ?? 0;
+  const request = useRef(0);
   const [items, setItems] = useState<NotificationItem[]>([]);
   const [listLoading, setListLoading] = useState(false);
   const [listError, setListError] = useState(false);
@@ -32,42 +34,27 @@ export default function NotificationBell() {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
 
-  // --- Unread-count poll (mount + every 60s) --------------------------------
-  useEffect(() => {
-    let cancelled = false;
-    const loadCount = async () => {
-      try {
-        const count = await api.getUnreadCount();
-        if (!cancelled) setUnreadCount(count);
-      } catch {
-        // Transient failure — keep the last known count rather than zeroing it.
-      }
-    };
-    loadCount();
-    const interval = setInterval(loadCount, POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, []);
-
   const loadRecent = useCallback(async () => {
+    const seq = ++request.current;
     setListLoading(true);
     setListError(false);
     try {
       const res = await api.getNotifications({ pageSize: RECENT_LIMIT });
-      setItems(res.items);
+      if (seq === request.current) setItems(res.items);
     } catch {
-      setListError(true);
+      if (seq === request.current) setListError(true);
     } finally {
-      setListLoading(false);
+      if (seq === request.current) setListLoading(false);
     }
   }, []);
 
   // Fetch the recent list each time the popover opens.
   useEffect(() => {
     if (open) loadRecent();
-  }, [open, loadRecent]);
+    return () => {
+      ++request.current;
+    };
+  }, [open, loadRecent, notificationState.revision]);
 
   // Close on outside click + Escape while open.
   useEffect(() => {
@@ -93,14 +80,12 @@ export default function NotificationBell() {
     async (item: NotificationItem) => {
       if (item.is_read) return;
       // Optimistic: flip read + decrement the badge before the server responds.
-      setItems((current) => current.map((n) => (n.id === item.id ? { ...n, is_read: true } : n)));
-      setUnreadCount((c) => Math.max(0, c - 1));
+      setItems(current => current.map(n => (n.id === item.id ? { ...n, is_read: true } : n)));
       try {
-        await api.markNotificationRead(item.id);
+        await notificationState.markRead(item.id);
       } catch (err: any) {
         // Roll back the optimistic change; never a success toast for a failed call.
-        setItems((current) => current.map((n) => (n.id === item.id ? { ...n, is_read: false } : n)));
-        setUnreadCount((c) => c + 1);
+        setItems(current => current.map(n => (n.id === item.id ? { ...n, is_read: false } : n)));
         showToast('error', err?.response?.data?.detail || 'Could not mark the notification read.');
       }
     },
@@ -115,15 +100,12 @@ export default function NotificationBell() {
 
   const markAllRead = useCallback(async () => {
     const snapshot = items;
-    const prevCount = unreadCount;
     // Optimistic: clear all unread locally, then reconcile with the server.
-    setItems((current) => current.map((n) => ({ ...n, is_read: true })));
-    setUnreadCount(0);
+    setItems(current => current.map(n => ({ ...n, is_read: true })));
     try {
-      await api.markAllNotificationsRead();
+      await notificationState.markAllRead();
     } catch (err: any) {
       setItems(snapshot);
-      setUnreadCount(prevCount);
       showToast('error', err?.response?.data?.detail || 'Could not mark all notifications read.');
     }
   }, [items, unreadCount, showToast]);
@@ -136,7 +118,7 @@ export default function NotificationBell() {
       <button
         ref={buttonRef}
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setOpen(v => !v)}
         className="relative flex items-center justify-center h-[34px] w-[34px] rounded-[3px] text-fd-mute hover:text-fd-body transition-all duration-150"
         style={{ background: 'var(--fd-sunken)', border: '1px solid var(--fd-line)' }}
         aria-label={hasUnread ? `Notifications, ${unreadCount} unread` : 'Notifications'}
@@ -167,13 +149,11 @@ export default function NotificationBell() {
             className="flex items-center justify-between px-3 py-2.5"
             style={{ borderBottom: '1px solid var(--fd-line)' }}
           >
-            <span className="font-mono text-[11px] uppercase tracking-[0.12em] text-fd-body">
-              Notifications
-            </span>
+            <span className="font-mono text-[11px] uppercase tracking-[0.12em] text-fd-body">Notifications</span>
             <button
               type="button"
               onClick={markAllRead}
-              disabled={!hasUnread}
+              disabled={!hasUnread || notificationState.pending}
               className="inline-flex items-center gap-1 text-[11px] font-medium text-fd-blue hover:text-fd-ink disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
               <CheckIcon className="h-3.5 w-3.5" aria-hidden="true" />
@@ -206,7 +186,7 @@ export default function NotificationBell() {
               </div>
             ) : (
               <ul className="divide-y divide-fd-line">
-                {items.map((item) => {
+                {items.map(item => {
                   const rowClass = `flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-white/[0.03] ${
                     item.is_read ? '' : 'bg-fd-blue/[0.06]'
                   }`;

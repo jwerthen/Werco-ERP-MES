@@ -13,6 +13,7 @@ jest.mock('../services/api', () => ({
   default: {
     searchLots: jest.fn(),
     traceLot: jest.fn(),
+    traceSerial: jest.fn(),
   },
 }));
 
@@ -61,4 +62,28 @@ test('a failed search renders ErrorState and Retry re-runs the search to success
   expect(mockedApi.searchLots).toHaveBeenLastCalledWith('LOT-100');
   expect(await screen.findByText('LOT-100')).toBeInTheDocument();
   expect(screen.queryByTestId('error-state')).not.toBeInTheDocument();
+});
+
+
+test('a serial result uses the serial endpoint and keeps loading until its history arrives', async () => {
+  let resolveTrace: (value: any) => void = () => {};
+  mockedApi.searchLots.mockResolvedValue([{ type: 'serial', number: 'SER-9' }] as any);
+  mockedApi.traceSerial.mockReturnValue(new Promise(resolve => { resolveTrace = resolve; }));
+  renderPage();
+  fireEvent.change(screen.getByLabelText(/search by lot/i), { target: { value: 'SER-9' } });
+  fireEvent.click(screen.getByRole('button', { name: /trace/i }));
+  await waitFor(() => expect(mockedApi.traceSerial).toHaveBeenCalledWith('SER-9'));
+  expect(mockedApi.traceLot).not.toHaveBeenCalled();
+  expect(screen.getByRole('status')).toHaveTextContent('Loading trace');
+  resolveTrace({ serial_number: 'SER-9', lot_number: 'LOT-1', status: 'available', history: [], work_orders_used: [], ncrs: [] });
+  expect(await screen.findByRole('heading', { name: 'Serial: SER-9' })).toBeInTheDocument();
+  expect(screen.queryByRole('status')).not.toBeInTheDocument();
+});
+
+test('a successful search with no matches has an explicit recovery message', async () => {
+  mockedApi.searchLots.mockResolvedValue([]);
+  renderPage();
+  fireEvent.change(screen.getByLabelText(/search by lot/i), { target: { value: 'NO-MATCH' } });
+  fireEvent.click(screen.getByRole('button', { name: /trace/i }));
+  expect(await screen.findByText(/No matching lot or serial records/)).toBeInTheDocument();
 });
