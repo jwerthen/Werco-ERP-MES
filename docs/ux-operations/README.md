@@ -3,7 +3,7 @@
 This round follows PR 266. Its eight packages are distinct from the earlier saved-draft,
 review-before-posting, operational-inbox and document-delivery work.
 
-The same implementation branch now also contains the next eight
+This implementation also includes the next eight
 [warehouse, purchasing and planning improvements](../ux-workflows/README.md).
 
 | Package | Result | Implementation and evidence |
@@ -34,16 +34,18 @@ All eight implementations are present. Local validation includes:
 - PostgreSQL CI executes two migration cycles, verifies private table/sequence grants
   against inherited Data API permissions, and checks exact percentile cohorts.
 
-Merging requires every protected check to pass and the release setup below to be
-complete. Screenshots and package-specific limitations are linked above.
+Merging requires every protected check to pass. Screenshots and package-specific
+limitations are linked above; current deployment status comes from the
+[release workflow and live receipts](release-coordination.md#deployment-status).
 
 The isolated browser environment uses synthetic data on ports 8005/5178. No live
 customer documents or email recipients are used. Screenshots in this directory show
 synthetic fixtures or browser measurements of that local environment.
 
-The coordinated Vercel release needs a project-scoped credential in the GitHub
-production environment and auto-assignment disabled on the existing ERP project.
-The three project/team/public-domain environment variables are configured.
-The Vercel CLI's OAuth session cannot create that credential (`403: Cannot create
-tokens for this app`). The account browser session is required to complete setup.
-Production auto-assignment remains unchanged until the credential and gate are ready.
+The coordinated Vercel release setup was completed on September 8, 2026: the
+project-scoped credential is stored in the GitHub production environment, the
+project/team/public-domain variables are configured, and production auto-assignment
+is disabled on the existing ERP project. A check-only rehearsal validated a staged
+artifact against its matching live API without promoting it. See the
+[configuration and rehearsal record](release-coordination.md#configuration-and-rehearsal)
+for the evidence; this setup record does not assert that these packages are deployed.

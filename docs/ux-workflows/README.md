@@ -23,6 +23,10 @@ table/sequence grants. PostgreSQL CI verifies migrations 095–100 through repea
 upgrade/downgrade cycles, including populated import and receiving records.
 
 No new feature environment variables are required. Existing database, signing and
-document-storage configuration is reused. Vercel setup and production deployment
-remain pending separately; implementation and local screenshots do not indicate a
-production release.
+document-storage configuration is reused. Vercel credentials and staged production
+assignment were configured on September 8, 2026, and a check-only rehearsal validated
+a staged website against its matching live API without promotion. See the
+[configuration record](../ux-operations/release-coordination.md#configuration-and-rehearsal).
+Current production status is established by the
+[deployment workflows and live release receipts](../ux-operations/release-coordination.md#deployment-status);
+implementation and local screenshots do not establish a production release.
