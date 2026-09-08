@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import re
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,7 +24,12 @@ def evidence():
     deployment = {"id": "new-deployment", "status": "SUCCESS", "createdAt": (now - timedelta(seconds=60)).isoformat()}
     manifest = {
         "protocol": 1,
-        "solver_version": "werco-contour-v4",
+        # Read the kernel's declared version so a stale deployment pin fails this
+        # verifier's full-path tests when a future solver profile ships.
+        "solver_version": re.search(
+            r"export const SOLVER_VERSION = '([^']+)'",
+            (ROOT / "frontend/src/features/nesting/lib/run-manifest.ts").read_text(),
+        ).group(1),
         "bundle_sha256": "b" * 64,
         "node_version": "v22.23.2",
     }
@@ -151,6 +157,18 @@ def test_verifier_rechecks_platform_state_after_reading_heartbeat(evidence, tmp_
     else:
         release.verify(args)
         assert "Active worker verified" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("solver", ["werco-contour-v4", "unknown-solver"])
+def test_verifier_rejects_old_or_unknown_manifest_before_platform_reads(evidence, tmp_path, monkeypatch, solver):
+    _, _, manifest, _ = evidence
+    manifest["solver_version"] = solver
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest))
+    monkeypatch.setattr(release, "command", lambda _args: pytest.fail("Invalid manifest must not query Railway"))
+    args = SimpleNamespace(manifest=path, expect="a" * 40, timeout=1, service="werco-worker", environment="production")
+    with pytest.raises(ValueError, match="Invalid expected release or CI runtime manifest"):
+        release.verify(args)
 
 
 def test_image_and_postdeploy_runtime_gates_are_enforced_before_promotion():
