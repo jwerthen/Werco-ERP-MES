@@ -485,6 +485,14 @@ or migration. API/frontend/shared-worker support for quote 11/project 12 and sol
 Do not encode exclusion geometry or clearances in deployment variables. Legacy job
 13 is a local file format; stored server revisions retain their original project format.
 
+Physical-piece observations are database evidence, not deployment variables. Additive
+migration `104_stock_piece_observations` follows `103_nesting_spacing_policies` and
+creates no seed records. The register adds no secret, environment variable, cron,
+dependency or runtime/profile override; existing database configuration and inventory
+permissions apply. Recording or withdrawing an observation does not mark a piece
+available, reserve it, feed a nest or award quote credit. Do not introduce service
+variables to claim physical verification or bypass the explicit observation workflow.
+
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `WORKER_CRON_JOBS` | No | all | Which scheduled jobs the worker registers. Unset or `all` → every cron (12 of them). `none` → no crons; the worker still drains enqueue-driven jobs (notifications, webhooks, labels, completion signals). A comma-separated list of job names arms **exactly** those (allowlist). A `-` prefix **excludes** a job from the full set (denylist): `all,-run_mrp_auto_draft_job`. The two shapes may not be mixed. **An unrecognised name is a hard startup error, not a silent skip — a negated one included.** `none` is the correct value for a first-ever boot — several crons write or email in bulk on their first run. Full syntax below |

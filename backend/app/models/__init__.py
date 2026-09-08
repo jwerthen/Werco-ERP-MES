@@ -165,6 +165,7 @@ from .shipping import (
 )
 from .signin_station import SigninStation
 from .spc import ChartType, SPCCharacteristic, SPCControlLimit, SPCMeasurement, SPCProcessCapability
+from .stock_piece import StockPiece, StockPieceObservation
 from .supplier_part import SupplierPartMapping
 from .supplier_scorecard import ApprovedSupplierList, ScorecardPeriod, SupplierAudit, SupplierScorecard
 from .time_entry import TimeEntry
@@ -186,6 +187,8 @@ from .work_order_template import WorkOrderTemplate
 from .working_calendar import WorkingCalendar
 
 __all__ = [
+    "StockPiece",
+    "StockPieceObservation",
     "QuoteNestingDraft",
     "QuoteNestingRevision",
     "QuoteNestingRun",

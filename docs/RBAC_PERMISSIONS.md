@@ -23,6 +23,7 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 - **Writes / state changes** (Create, Edit, Delete, Approve, Release, Send, Adjust, Transfer, Complete, Inspect, …) are enforced **server-side** via the `require_role` dependency on the endpoint. These are the authoritative access controls and match the matrix below.
 - **Operational/domain reads** — the **View** rows for the operational modules below (e.g. Work Orders, Parts, BOMs, Routings, Inventory, Purchasing, Receiving, Customers, Quotes) — are **tenant-scoped** (every query is filtered to the caller's active company via `get_current_company_id`) and are available to **any authenticated user within that tenant**. The list/detail GET endpoints depend on `get_current_user` only and do **not** restrict reads by role. The **View** columns therefore describe the *intended in-app navigation* (which the frontend gates for usability), not a server-enforced read restriction. This is the current intended design: **read-broad / write-restricted**.
 - **Administrative / governance reads are the exception and _are_ enforced server-side:** **Users** (`require_role([ADMIN, MANAGER])`), **Admin Settings** (`ADMIN`), and **Audit Logs** (`require_role([ADMIN, MANAGER])`).
+- **Advisory stock-piece observation evidence is also server-gated:** its source/history routes require effective `inventory:view`, including company role overrides. This separate register does not change the read-broad gates on existing operational inventory endpoints. Recording requires the existing stock-mutator roles as detailed under Inventory below.
 - **Bulk data export is its own access category, not a domain read, and _is_ enforced server-side** — `require_role([ADMIN, MANAGER])` plus an `EXPORT` audit row on every one of them. See [Bulk data export is not a domain read](#bulk-data-export-is-not-a-domain-read) immediately below, and [Bulk Data Export](#bulk-data-export) in the matrix for the route list.
 
 > If the business requires least-privilege on domain reads (e.g. hiding vendor pricing / PO financials from Operator/Quality/Shipping at the API), enforce it **uniformly** by adding `require_role` to the read endpoints across modules, with authorization tests — not per-router. Until then, treat the **View** columns for operational modules as UI-visibility, not as a server-enforced control.
@@ -1027,6 +1028,32 @@ and `/api-tokens` so it can never mint another credential.
 | Assign counter / review / post reviewed count adjustments | ✓ | ✓ | ✓ | | | | |
 | Start (open) cycle count | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | Record count on an item | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
+
+**Advisory physical-piece observations — separate evidence register.** The following
+gates apply to `/api/v1/inventory/stock-piece-sources` and
+`/api/v1/inventory/stock-pieces`, including observation history. They do not grant
+availability, reservation, consumption, remnant valuation or certification powers.
+
+| Action | Authoritative server gate |
+|---|---|
+| Read source candidates, latest observations or immutable history | Active authenticated company context plus effective `inventory:view`. Company role overrides replace the default permission list; a missing/revoked permission returns 403. |
+| Register a label, append corrected measurements or withdraw an observation | Effective `inventory:view` **and** existing `ADMIN`, `MANAGER` or `SUPERVISOR` stock-mutator role. A read-only company context refuses writes. No `purchasing:*`, quote approval, spacing-policy approval or cycle-count grant substitutes for this role gate. |
+| Reserve, consume, approve eligibility or assign credit | Not provided by this register. |
+
+The existing Superuser/Platform Admin role bypass remains subject to the active
+company and read-only write fence. Kiosk credentials cannot use these routes.
+API tokens use their bound tenant/user permissions and are checked for revocation
+and expiry; each recorded command retains token attribution. Source/history page
+envelopes contain the active `company_id` and server-computed `can_record`, allowing
+the UI to hide write controls without inventing a second permission policy.
+
+Every command requires `expected_company_id`; corrections/withdrawals additionally
+require the expected observation version. UUID replay is scoped to the same
+company, actor, credential and command content. A stale version or conflicting
+request returns 409; foreign/unknown history/source IDs return 404. Required audit
+failure rolls back the entire command. Withdrawal preserves prior evidence and
+does not write off inventory. See [the API contract](API.md#advisory-physical-piece-observations)
+and [the observation architecture](STOCK_OBSERVATION_ARCHITECTURE.md).
 
 > **Issue — now enforced in code (Admin / Manager / Supervisor).** `POST /api/v1/inventory/issue`
 > (`app/api/endpoints/inventory.py`) was previously gated only by `get_current_user` — **any**

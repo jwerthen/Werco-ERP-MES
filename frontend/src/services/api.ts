@@ -2676,6 +2676,30 @@ class ApiService {
     return response.data;
   }
 
+  async getStockPieceSources(params: { page?: number; per_page?: number; q?: string; inventory_item_id?: number }, signal?: AbortSignal): Promise<import('../types/stockPiece').StockPiecePage<import('../types/stockPiece').StockPieceSource>> {
+    return (await this.api.get('/inventory/stock-piece-sources', { params, signal })).data;
+  }
+
+  async getStockPieces(page = 1, signal?: AbortSignal): Promise<import('../types/stockPiece').StockPiecePage<import('../types/stockPiece').StockPieceSummary>> {
+    return (await this.api.get('/inventory/stock-pieces', { params: { page, per_page: 20 }, signal })).data;
+  }
+
+  async getStockPieceHistory(pieceId: number, page = 1, signal?: AbortSignal): Promise<import('../types/stockPiece').StockPiecePage<import('../types/stockPiece').StockPieceSummary>> {
+    return (await this.api.get(`/inventory/stock-pieces/${pieceId}/observations`, { params: { page, per_page: 20 }, signal })).data;
+  }
+
+  async getStockPieceObservation(pieceId: number, observation: number, signal?: AbortSignal): Promise<import('../types/stockPiece').StockPieceDetail> {
+    return (await this.api.get(`/inventory/stock-pieces/${pieceId}/observations/${observation}`, { signal })).data;
+  }
+
+  async createStockPiece(request: import('../types/stockPiece').CreateStockPiece, signal?: AbortSignal): Promise<import('../types/stockPiece').StockPieceDetail> {
+    return (await this.api.post('/inventory/stock-pieces', request, { signal })).data;
+  }
+
+  async appendStockPieceObservation(pieceId: number, request: import('../types/stockPiece').AppendStockPieceObservation, signal?: AbortSignal): Promise<import('../types/stockPiece').StockPieceDetail> {
+    return (await this.api.post(`/inventory/stock-pieces/${pieceId}/observations`, request, { signal })).data;
+  }
+
   // Inventory
   async getInventory(params?: any) {
     const response = await this.api.get('/inventory/', { params });

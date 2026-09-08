@@ -347,6 +347,22 @@ is quoting-policy precision, not configurable geometry tolerance or machine data
 Policy approval does not approve a nest, grade/certification, remnant or quote.
 See `docs/API.md`, `docs/RBAC_PERMISSIONS.md` and `docs/MATERIAL_NESTING.md`.
 
+### Advisory physical-piece observations
+
+`/inventory/stock-piece-sources` and `/inventory/stock-pieces` record reported
+measurements only. Migration104 and model bootstrap protect company-unique labels,
+immutable observations, source snapshots and monotonic counters. The service owns
+required-audit transactions, command version CAS and actor/credential-bound UUID
+recovery. Require effective `inventory:view`
+and the existing inventory mutator roles for writes; preserve token, kiosk and
+read-only company fences. New RECORDED evidence verifies the exact tenant item/Part
+relationship. Source IDs deliberately have no operational FK: withdrawal preserves
+earlier evidence even after live source removal. Do not turn these observations
+into availability, reservations, nesting stock, physical lineage or quote credit.
+Canonical reported inch strings are distinct from nesting-kernel geometry approval.
+Source drift reads are pure and never reconcile inventory. See
+`docs/STOCK_OBSERVATION_ARCHITECTURE.md` and `docs/STOCK_OBSERVATIONS.md`.
+
 ## Conventions worth matching
 
 - Backend line length is 120 (flake8/black configured to it). Status/priority/role values are `str`-backed `enum.Enum` classes co-located with their model.

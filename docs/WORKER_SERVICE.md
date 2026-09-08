@@ -527,8 +527,17 @@ an old queued run cannot silently execute a new release/profile. Historical v4/v
 checkpoints retain their recorded validation and are never recomputed during display.
 No database migration, secret, environment variable or cron change is introduced.
 
-Rollback uses a compatible API/worker/frontend release, retains migrations 101/102/103 and
-immutable policy/draft/run history, and does not change cron settings. A failed runtime can
+The physical-piece observation register adds migration104 after103 through API boot;
+model-bootstrap DDL mirrors its PostgreSQL source/tenant, immutable-history and RLS/
+privilege guards. It adds no ARQ job, cron, environment variable, dependency or solver/
+profile revision. Existing saved nesting calculations continue to require the same
+active-release and fresh post-Redis runtime proof. **Warehouse → Inventory → Piece
+observations** records or withdraws advisory evidence only; no observed piece becomes
+nesting stock, reserved inventory, certified material or material credit through this
+release.
+
+Rollback uses a compatible API/worker/frontend release, retains migrations 101–104 and
+immutable policy/draft/run/piece-observation history, and does not change cron settings. A failed runtime can
 still leave history readable, but new calculations remain unavailable. No successful
 calculation, stock reservation, manufacturing approval or automatic material credit is
 implied by a worker startup or a completed deployment.

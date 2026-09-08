@@ -39,6 +39,18 @@
 > retains policy/draft/run history and restores compatible images; do not downgrade 103
 > or rewrite saved format versions as an ordinary rollback.
 
+> **Piece observations.** Apply additive `104_stock_piece_observations` after
+> `103_nesting_spacing_policies` in the API before frontend promotion. The PostgreSQL
+> operations gate must verify both Alembic and model-bootstrap guards, RLS and table/
+> sequence privilege revocation, plus real API tenant, idempotency and version races.
+> Verify **Warehouse → Inventory → Piece observations**: explicit record, revision
+> history and withdrawal with existing inventory permissions. This is an advisory
+> register; it changes no inventory balance, availability, reservation, nesting input,
+> certification eligibility or quote credit. There are no seeds, new secrets,
+> dependencies, environment settings, crons or solver/profile changes. Keep the existing
+> exact-release/runtime gates. On application rollback retain migration104, piece and
+> observation records and audit history; do not invoke its destructive downgrade.
+
 > **Stock exclusions.** This increment adds no migration, permission, environment or
 > cron change. Release the quote 11/project 12 API/frontend contract with the compiled
 > `werco-contour-v5` worker through the same backend-first, exact-image/readiness gate.

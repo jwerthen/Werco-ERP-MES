@@ -155,6 +155,26 @@ material/thickness band, and a new saved revision after custom spacing edits. Pr
 saved reports must remain unchanged. Policy approval records a tenant quoting policy;
 it is not machine-program or manufacturing approval.
 
+The physical-piece observation register additionally requires additive migration
+`104_stock_piece_observations` after `103_nesting_spacing_policies`, applied through
+the normal API boot migration before public frontend promotion. It creates
+`stock_pieces` and `stock_piece_observations`; it does not seed pieces or change
+operational inventory balances. PostgreSQL model-bootstrap hooks mirror the Alembic
+tenant/source integrity guards, immutable observation/identity controls, RLS and
+PUBLIC/anon/authenticated table/sequence privilege revocations. The operations E2E
+verifier exercises both DDL paths and disposable-schema API races; a SQLite pass
+alone does not establish these PostgreSQL controls.
+
+After the normal release and exact public receipt checks, verify **Warehouse →
+Inventory → Piece observations** with an authorized account: explicit source
+selection, record/history, same-request recovery, stale-version conflict and
+withdrawal. Withdrawal appends evidence and can preserve history after an operational
+source is removed. Records remain reported observations, not available stock or
+material certification. This increment does not feed a nest, reserve or consume a
+piece, alter quote totals, or create remnant credit. No new environment variable,
+secret, dependency, cron or runtime geometry profile is introduced. Existing saved-run
+worker identity gates remain unchanged; observation records need no new worker job.
+
 Configured stock exclusions add no migration, permission, environment variable or
 cron setting. The API, frontend and shared worker must understand quote 11/project 12
 and solver `werco-contour-v5` together. The API bounds the saved structural payload;
@@ -255,6 +275,14 @@ alongside migrations 101/102. Restore a compatible API/frontend/worker release t
 Keep project 10/quote 9 files and saved revisions intact; older readers must reject them
 rather than drop policy snapshots, custom-spacing reasons or constraints. Do not strip
 fields/change version numbers or seed replacement policies to force compatibility.
+
+On an observation-register application rollback, retain migration 104 and all piece
+identities, observations, withdrawals and transactional audit history alongside the
+existing nesting history schema. Restore compatible application images; an older UI
+may omit the register. Do not run the destructive migration104 downgrade or remove
+its integrity/RLS guards as an ordinary application rollback. Any separately requested
+schema removal requires a record-retention decision; withdrawal is the append-only
+application action, not a history deletion.
 
 An exclusions rollback also retains quote 11/project 12 inputs and local job 13 files.
 Restore compatible API, frontend and worker images; do not erase exclusion outlines,

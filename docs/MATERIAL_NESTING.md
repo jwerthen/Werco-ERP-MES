@@ -1,5 +1,11 @@
 # Material Nesting
 
+The separate **Warehouse → Inventory → Piece observations** register can retain
+reported sheet/remnant measurements and immutable source history. It does not
+make observed pieces available for nesting or assign them credit. See
+[the observation workflow](STOCK_OBSERVATIONS.md). Material Nesting still starts
+with a fresh empty estimate; no observed or predicted stock is automatically loaded.
+
 Open **Sales & Quoting → Material Nesting** or `/nest` in the signed-in ERP.
 The tool estimates separate sheet orders for multiple material/thickness groups,
 with optional USD prices for comparing material cost. Access uses `purchasing:view`,
