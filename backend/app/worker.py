@@ -388,6 +388,9 @@ async def dispatch_notification_direct_job(
 # line is the schedule in the CONTAINER's local timezone -- arq defaults to
 # `datetime.now().astimezone().tzinfo`, which on Railway is UTC unless TZ is set, so "6 AM"
 # means 06:00 UTC (01:00 Central) until somebody sets TZ. See docs/WORKER_SERVICE.md.
+# Sentry wraps CronJob.coroutine in place before on_startup. Keep the configured
+# schedule object as the readiness identity rather than comparing its callable.
+NESTING_RELAY_CRON = cron(relay_quote_nesting_runs_job, second={0, 30})
 ALL_CRON_JOBS: List[CronJob] = [
     cron(run_mrp_auto_draft_job, hour=6, minute=0),  # 6 AM daily (MRP AUTO_DRAFT) -- WRITES draft POs/WOs
     cron(send_daily_digest_job, hour=8, minute=0),  # 8 AM daily -- sends email
@@ -404,7 +407,7 @@ ALL_CRON_JOBS: List[CronJob] = [
     # Notification relay sweeper: every 5 min re-enqueue catalog-mapped events whose
     # after_commit enqueue was lost (e.g. Redis outage). See notification_jobs.
     cron(relay_pending_notifications_job, minute=set(range(0, 60, 5))),
-    cron(relay_quote_nesting_runs_job, second={0, 30}),  # internal ID-only queue/lease relay
+    NESTING_RELAY_CRON,  # internal ID-only queue/lease relay
 ]
 
 
@@ -703,7 +706,7 @@ async def startup(ctx):
 
     from app.jobs.quote_nesting_runs import startup_nesting_runtime
 
-    ctx["nesting_relay_enabled"] = any(job.coroutine is relay_quote_nesting_runs_job for job in registered)
+    ctx["nesting_relay_enabled"] = any(job is NESTING_RELAY_CRON for job in registered)
     await startup_nesting_runtime(ctx)
     logger.info("ARQ worker ready (%d job functions registered)", len(WorkerSettings.functions))
 
