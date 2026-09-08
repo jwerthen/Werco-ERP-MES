@@ -146,36 +146,18 @@ describe('DXF batch boundaries in the native ERP feature', () => {
     ).toBe(true);
   });
 
-  it('propagates footprint warnings and persists their geometry basis without discarding valid neighboring files', async () => {
+  it('rejects unclosed drawings without discarding valid neighboring contours and reports stable part IDs', async () => {
     const imported = await importDXFBatch(
-      [file('exact.dxf', linePlate), file('open.dxf', openDrawing), file('invalid.dxf', 'invalid')],
+      [file('same.dxf', linePlate), file('same.dxf', openDrawing), file('same.dxf', linePlate)],
       [],
       options
     );
-    expect(imported.results.map(result => result.status)).toEqual(['imported', 'imported', 'skipped']);
-    expect(imported.results[0].footprintOnly).toBe(false);
-    expect(imported.results[1]).toMatchObject({ name: 'open.dxf', designs: 1, footprintOnly: true });
-    expect(imported.results[1].warnings?.join(' ')).toMatch(/open|footprint/i);
-    expect(imported.parts[1].importMode).toBe('drawing-bounds');
-    const restored = quoteFromFile(
-      JSON.parse(
-        JSON.stringify(
-          quoteToFile({
-            ...demoQuote,
-            parts: imported.parts.map(part => ({ ...part, quantity: 3 })),
-          })
-        )
-      )
-    );
-    expect(restored.parts[0].importMode).toBeUndefined();
-    expect(restored.parts[1].importMode).toBe('drawing-bounds');
-    expect(bounds(restored.parts[1].loops[0]).x).toBe(0);
-    expect(bounds(restored.parts[1].loops[0]).y).toBe(0);
-    expect(bounds(restored.parts[1].loops[0]).width).toBeCloseTo(15, 12);
-    expect(bounds(restored.parts[1].loops[0]).height).toBeCloseTo(10, 12);
-    expect(
-      compareSheets(restored).results.every(result => result.complete && result.nest?.placements.length === 6)
-    ).toBe(true);
+    expect(imported.results.map(result => result.status)).toEqual(['imported', 'skipped', 'imported']);
+    expect(imported.results[1].message).toMatch(/no closed cutting outline/i);
+    expect(imported.parts).toHaveLength(2);
+    expect(imported.results[0].partIds).toEqual([imported.parts[0].id]);
+    expect(imported.results[2].partIds).toEqual([imported.parts[1].id]);
+    expect(imported.parts.every(part => part.importMode === undefined)).toBe(true);
   });
 
   it('counts existing quantities, imports only complete files that fit, and keeps the saved estimate nestable at 300 instances', async () => {

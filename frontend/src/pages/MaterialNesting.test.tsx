@@ -3,7 +3,8 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import userEvent from '@testing-library/user-event';
 import MaterialNesting from './MaterialNesting';
 import { bounds } from '../features/nesting/lib/nesting';
-import { compareSheets, quoteFromFile } from '../features/nesting/lib/quoting';
+import { compareSheets } from '../features/nesting/lib/quoting';
+import { projectFromFile } from '../features/nesting/lib/quote-project';
 
 // Vite supplies this CSS as text. Keep the real shadow host, workspace and
 // Base UI portals; only the build-time CSS transform and ERP toast are stubbed.
@@ -158,6 +159,10 @@ describe('Material Nesting inside the ERP shadow host', () => {
     expect(input.multiple).toBe(true);
     fireEvent.change(input, { target: { files: files.map(({ file }) => file) } });
 
+    const assignment = await ui.findByRole('dialog', { name: 'Assign DXF materials and thicknesses' });
+    expect(assignment.getRootNode()).toBe(shadow);
+    expect(files.every(({ text }) => text.mock.calls.length === 0)).toBe(true);
+    fireEvent.click(within(assignment).getByRole('button', { name: 'Import all 100 files' }));
     const dialog = await ui.findByRole('dialog', { name: 'Importing DXF files' });
     expect(dialog.getRootNode()).toBe(shadow);
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
@@ -189,7 +194,9 @@ describe('Material Nesting inside the ERP shadow host', () => {
     fireEvent.click(ui.getByRole('button', { name: 'Save' }));
     const blob = createURL.mock.calls[0]?.[0];
     if (!(blob instanceof Blob)) throw new Error('Save did not create an estimate Blob.');
-    const saved = quoteFromFile(JSON.parse(await readBlob(blob)));
+    const project = projectFromFile(JSON.parse(await readBlob(blob)));
+    expect(project.groups).toHaveLength(1);
+    const saved = project.groups[0].quote;
     expect(saved.parts).toHaveLength(100);
     expect(new Set(saved.parts.map(part => part.id)).size).toBe(100);
     expect(saved.parts.reduce((total, part) => total + part.quantity, 0)).toBe(100);
@@ -239,7 +246,9 @@ describe('Material Nesting inside the ERP shadow host', () => {
     fireEvent.click(ui.getByRole('button', { name: 'Save' }));
     const blob = createURL.mock.calls[0]?.[0];
     if (!(blob instanceof Blob)) throw new Error('Save did not create an estimate Blob.');
-    const saved = quoteFromFile(JSON.parse(await readBlob(blob)));
+    const project = projectFromFile(JSON.parse(await readBlob(blob)));
+    expect(project.groups).toHaveLength(1);
+    const saved = project.groups[0].quote;
     expect(saved.parts.find(part => part.name === 'Round spacer')).toMatchObject({
       quantity: 3,
       loops: [{ type: 'circle', r: 31.75 }],

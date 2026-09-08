@@ -1,3 +1,4 @@
+import { autoQuotingSpacing } from './spacing';
 import { bounds, validatePart, validateJob, nestParts, type Part, type Stock, type Nest, demoJob } from './nesting';
 import { jobFromFile, jobToFile, mmToIn, inToMm } from './units';
 export type SheetOption = {
@@ -16,6 +17,7 @@ export function editSheetOption(option: SheetOption, patch: Partial<SheetOption>
 }
 export type Quote = {
   version: 1;
+  spacingMode?: 'auto' | 'manual';
   name: string;
   material: string;
   thickness: number;
@@ -68,8 +70,8 @@ export function createBlankQuote(): Quote {
     material: 'Carbon steel',
     thickness: inToMm(0.125),
     parts: [],
-    margin: inToMm(0.375),
-    gap: inToMm(0.1875),
+    ...autoQuotingSpacing(inToMm(0.125)),
+    spacingMode: 'auto',
     objective: 'area',
     options: standardOptions.map(option => ({ ...option })),
   };
@@ -88,6 +90,7 @@ export const demoQuote: Quote = {
 export function validateQuote(value: unknown): Quote {
   const q = value as Quote;
   check(q && q.version === 1, 'Unsupported estimate version.');
+  check(q.spacingMode === undefined || ['auto', 'manual'].includes(q.spacingMode), 'Invalid spacing mode.');
   check(typeof q.name === 'string' && q.name.length > 0 && q.name.length < 200, 'Enter an estimate name.');
   check(['Carbon steel', 'Stainless steel', 'Aluminum'].includes(q.material), 'Choose a supported material.');
   check(
@@ -99,8 +102,13 @@ export function validateQuote(value: unknown): Quote {
   check(new Set(q.parts.map(p => p.id)).size === q.parts.length, 'Duplicate part IDs.');
   check(q.parts.reduce((a, p) => a + p.quantity, 0) <= 300, 'Maximum 300 total parts per estimate.');
   check(
-    q.parts.reduce((a, p) => a + p.loops.reduce((a, l) => a + (l.type === 'circle' ? 1 : l.points.length), 0), 0) <=
-      20000,
+    q.parts.reduce(
+      (a, p) =>
+        a +
+        p.loops.reduce((a, l) => a + (l.type === 'circle' ? 1 : l.points.length), 0) +
+        (p.referencePaths?.reduce((n, path) => n + path.length, 0) ?? 0),
+      0
+    ) <= 20000,
     'Maximum 20,000 geometry vertices.'
   );
   check(
@@ -240,6 +248,7 @@ export function quoteToFile(q: Quote) {
     version: 3,
     units: 'in',
     currency: 'USD',
+    spacingMode: q.spacingMode ?? 'manual',
     name: q.name,
     material: q.material,
     thickness: mmToIn(q.thickness),
@@ -280,6 +289,7 @@ export function quoteFromFile(input: unknown): Quote {
     return validateQuote({
       version: 1,
       name: d.name,
+      spacingMode: d.spacingMode ?? 'manual',
       material: d.material,
       thickness: inToMm(dim(d.thickness)),
       parts,

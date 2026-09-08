@@ -1,5 +1,6 @@
+import { createBlankQuote, quoteToFile, quoteFromFile } from './quoting';
 import { DXF_JOIN_TOLERANCE_MM, readDXFGeometry } from './dxf';
-import { bounds, importDXF, importDXFWithReport, partArea, type Point } from './nesting';
+import { bounds, importDXF, importDXFWithReport, partArea, validatePart, type Point } from './nesting';
 
 // Synthetic drawings only. Customer drawings stay outside the repository.
 type Group = readonly [number, number | string];
@@ -183,29 +184,25 @@ describe('physical scale and endpoint tolerance', () => {
   it.each([
     { units: 4, gap: 0.01 },
     { units: 1, gap: 0.001 },
-  ])('labels a real gap in units $units as a whole-drawing footprint rather than a closed part', ({ units, gap }) => {
+  ])('rejects a real outer gap in units $units without fabricating a rectangle', ({ units, gap }) => {
     const source = drawing(
       [line([0, 0], [10, 0]), line([10 + gap, 0], [10, 5]), line([10, 5], [0, 5]), line([0, 5], [0, 0])],
       units
     );
-    const report = importDXFWithReport(source, 'gapped.dxf');
-    expect(report.footprintOnly).toBe(true);
-    expect(report.warnings.join(' ')).toMatch(/open|branch|footprint/i);
-    expect(report.parts).toHaveLength(1);
-    expect(report.parts[0].importMode).toBe('drawing-bounds');
-    expect(bounds(report.parts[0].loops[0]).width).toBeCloseTo((10 + gap) * (units === 1 ? 25.4 : 1), 10);
+    expect(() => importDXFWithReport(source, 'gapped.dxf')).toThrow(/no closed cutting outline/i);
   });
 
-  it.each([
-    ['duplicate', line([0, 0], [10, 0]), 10, 5],
-    ['branch', line([0, 0], [-5, 10]), 15, 10],
-  ] as const)('uses all geometry in a warned footprint for %s edges', (_label, extra, width, height) => {
-    const report = importDXFWithReport(drawing([...rectangle(), extra]), 'ambiguous.dxf');
-    expect(report.footprintOnly).toBe(true);
-    expect(report.warnings.length).toBeGreaterThan(0);
-    expect(report.parts).toHaveLength(1);
-    expect(report.parts[0].importMode).toBe('drawing-bounds');
-    expect(bounds(report.parts[0].loops[0])).toEqual({ x: 0, y: 0, width, height });
+  it('deduplicates reversed coincident edges without changing the outline', () => {
+    const report = importDXFWithReport(drawing([...rectangle(), line([10, 0], [0, 0])]), 'duplicate.dxf');
+    expect(report.footprintOnly).toBe(false);
+    expect(report.warnings.join(' ')).toMatch(/duplicate/i);
+    expect(partArea(report.parts[0])).toBe(50);
+  });
+
+  it('rejects an external branch instead of swallowing it in a bounding rectangle', () => {
+    expect(() => importDXFWithReport(drawing([...rectangle(), line([0, 0], [-5, 10])]), 'branch.dxf')).toThrow(
+      /open geometry extends outside/i
+    );
   });
 });
 
@@ -314,14 +311,14 @@ describe('drawing metadata and flat coordinate systems', () => {
   it('reflects ARC geometry but keeps LINE endpoints in WCS when joining a -Z profile', () => {
     const source = drawing([arc(5, 0, 2, 0, 180, [230, -1]), line([-7, 0], [-3, 0], [230, -1])]);
     const geometry = readDXFGeometry(source, 'mm');
-    expect(geometry.footprintOnly).toBe(false);
+    expect(geometry.referencePaths).toHaveLength(0);
     expect(bounds(geometry.loops[0]).x).toBeCloseTo(-7, 12);
     expect(bounds(geometry.loops[0]).width).toBeCloseTo(4, 12);
     expect(bounds(geometry.loops[0]).height).toBeCloseTo(2, 12);
     expect(importDXFWithReport(source, 'ocs-arc.dxf').footprintOnly).toBe(false);
   });
 
-  it('accepts a translated Z plane, rejects slopes, and marks several parallel elevations as a projected footprint', () => {
+  it('accepts translated parallel Z planes without replacing their individual outlines', () => {
     const elevated = rectangle().map(edge => [...edge, [30, 7] as const, [31, 7] as const]);
     const report = importDXFWithReport(drawing(elevated), 'elevated.dxf');
     expect(report.footprintOnly).toBe(false);
@@ -333,50 +330,39 @@ describe('drawing metadata and flat coordinate systems', () => {
       drawing([circle(0, 0, 1, [30, 0]), circle(5, 0, 1, [30, 1])]),
       'two-planes.dxf'
     );
-    expect(projected.footprintOnly).toBe(true);
-    expect(projected.warnings.join(' ')).toMatch(/elevation|projection/i);
-    expect(projected.parts).toHaveLength(1);
-    expect(bounds(projected.parts[0].loops[0])).toEqual({ x: 0, y: 0, width: 7, height: 2 });
+    expect(projected.footprintOnly).toBe(false);
+    expect(projected.warnings.join(' ')).toMatch(/parallel/i);
+    expect(projected.parts).toHaveLength(2);
+    expect(projected.parts.every(part => part.loops[0].type === 'circle')).toBe(true);
   });
 });
 
-describe('conservative whole-drawing fallback', () => {
+describe('true spline profiles and strict cut geometry', () => {
   it.each([
     [
       'self-crossing path',
       [line([0, 0], [10, 10]), line([10, 10], [0, 10]), line([0, 10], [10, 0]), line([10, 0], [0, 0])],
-      10,
     ],
-    ['intersecting contours', [...rectangle(0, 0, 10, 10), circle(10, 5, 1)], 11],
-  ] as const)(
-    'retains every extent of %s and clearly marks its rectangular approximation',
-    (_label, entities, width) => {
-      const report = importDXFWithReport(drawing(entities), 'topology.dxf');
-      expect(report.footprintOnly).toBe(true);
-      expect(report.warnings.length).toBeGreaterThan(0);
-      expect(report.parts).toHaveLength(1);
-      expect(report.parts[0].importMode).toBe('drawing-bounds');
-      expect(report.parts[0].loops).toHaveLength(1);
-      expect(bounds(report.parts[0].loops[0])).toEqual({ x: 0, y: 0, width, height: 10 });
-    }
-  );
-
-  it('uses positive-weight spline control bounds and all other geometry in one warned footprint', () => {
-    const report = importDXFWithReport(
-      drawing([spline(undefined, undefined, [1, 0.5, 1]), ...rectangle(20, -5, 5, 5)]),
-      'spline-and-plate.dxf'
-    );
-    expect(report.footprintOnly).toBe(true);
-    expect(report.warnings.join(' ')).toMatch(/spline.*control.*bounds/i);
-    expect(report.parts).toHaveLength(1);
-    expect(report.parts[0].importMode).toBe('drawing-bounds');
-    // The actual rational curve lies below its y=20 control point. Using a
-    // sampled curve as the bounds would make this estimate less conservative.
-    expect(bounds(report.parts[0].loops[0])).toEqual({ x: 0, y: 0, width: 25, height: 25 });
-    expect(partArea(report.parts[0])).toBe(625);
+    ['intersecting contours', [...rectangle(0, 0, 10, 10), circle(10, 5, 1)]],
+  ] as const)('requires review for %s instead of substituting a rectangle', (_label, entities) => {
+    expect(() => importDXFWithReport(drawing(entities), 'topology.dxf')).toThrow(/intersect/i);
   });
 
-  it('keeps spline control points in WCS even with a -Z normal', () => {
+  it('evaluates a rational curve instead of returning its control-point hull', () => {
+    const report = importDXFWithReport(
+      drawing([spline(undefined, undefined, [1, 0.5, 1]), line([10, 0], [0, 0]), ...rectangle(20, -5, 5, 5)]),
+      'spline-and-plate.dxf'
+    );
+    expect(report.footprintOnly).toBe(false);
+    expect(report.parts).toHaveLength(2);
+    const curve = report.parts.find(part => bounds(part.loops[0]).width === 10)!;
+    expect(bounds(curve.loops[0]).height).toBeCloseTo(20 / 3, 10);
+    expect(curve.geometryToleranceMm).toBe(0.0001 * 25.4);
+    expect(curve.importMode).toBeUndefined();
+    expect(curve.loops[0].type === 'poly' && curve.loops[0].points.length).toBeGreaterThan(8);
+  });
+
+  it('keeps spline coordinates in WCS even with a negative-Z normal', () => {
     const geometry = readDXFGeometry(
       drawing([
         spline(
@@ -390,14 +376,35 @@ describe('conservative whole-drawing fallback', () => {
           2,
           [[230, -1]]
         ),
+        line([12, 0], [2, 0]),
       ]),
       'mm'
     );
-    expect(geometry.footprintOnly).toBe(true);
-    expect(bounds(geometry.footprint)).toEqual({ x: 2, y: 0, width: 10, height: 20 });
+    expect(bounds(geometry.loops[0])).toEqual({ x: 2, y: 0, width: 10, height: 10 });
   });
 
-  it('accepts repeated knots and positive rational weights on a closed periodic-flagged spline', () => {
+  it('inserts an internal knot to resolve separate quadratic Bezier spans', () => {
+    const report = importDXFWithReport(
+      drawing([
+        spline(
+          [
+            [0, 0],
+            [5, 10],
+            [10, 10],
+            [15, 0],
+          ],
+          [0, 0, 0, 1, 2, 2, 2]
+        ),
+        line([15, 0], [0, 0]),
+      ]),
+      'multispan.dxf'
+    );
+    expect(bounds(report.parts[0].loops[0])).toEqual({ x: 0, y: 0, width: 15, height: 10 });
+    expect(partArea(report.parts[0])).toBeGreaterThan(90);
+    expect(partArea(report.parts[0])).toBeLessThan(120);
+  });
+
+  it('resolves a rational closed spline as a round profile instead of a square', () => {
     const controls: XY[] = [
       [1, 0],
       [1, 1],
@@ -415,8 +422,9 @@ describe('conservative whole-drawing fallback', () => {
       controls.map((_, i) => (i % 2 ? Math.SQRT1_2 : 1))
     ).map(group => (group[0] === 70 ? ([70, 15] as const) : group));
     const report = importDXFWithReport(drawing([rational]), 'rational-closed.dxf');
-    expect(report.footprintOnly).toBe(true);
+    expect(report.footprintOnly).toBe(false);
     expect(bounds(report.parts[0].loops[0])).toEqual({ x: 0, y: 0, width: 2, height: 2 });
+    expect(Math.abs(partArea(report.parts[0]) - Math.PI)).toBeLessThan(0.02);
   });
 
   it.each([
@@ -437,7 +445,7 @@ describe('conservative whole-drawing fallback', () => {
       ]),
       /flat|planar|plane/i,
     ],
-  ] as const)('does not hide %s behind a bounding-box fallback', (_label, invalid, error) => {
+  ] as const)('rejects %s without importing a partial file', (_label, invalid, error) => {
     expect(() => importDXFWithReport(drawing([...rectangle(), invalid]), 'invalid-spline.dxf')).toThrow(error);
   });
 });
@@ -456,12 +464,13 @@ describe('supplied SPLINE fit-point validation', () => {
           [21, 0],
           [31, 0],
         ]),
+        line([10, 0], [0, 0]),
       ]),
       'fit-points.dxf'
     );
-    expect(report.footprintOnly).toBe(true);
-    expect(report.parts[0].importMode).toBe('drawing-bounds');
-    expect(bounds(report.parts[0].loops[0])).toEqual({ x: 0, y: 0, width: 10, height: 20 });
+    expect(report.footprintOnly).toBe(false);
+    expect(report.parts[0].importMode).toBeUndefined();
+    expect(bounds(report.parts[0].loops[0])).toEqual({ x: 0, y: 0, width: 10, height: 10 });
   });
 
   it.each([
@@ -523,6 +532,92 @@ describe('supplied SPLINE fit-point validation', () => {
     expect(() => importDXFWithReport(drawing([fittedSpline(fits, 2001)]), 'too-many-fits.dxf')).toThrow(
       /fit-point count/i
     );
+  });
+});
+
+describe('internal reference lines and saved curve precision', () => {
+  it('keeps internal unclosed geometry separate from the part outline and holes', () => {
+    const report = importDXFWithReport(
+      drawing([...rectangle(-20, -10, 20, 10), circle(-15, -5, 1), line([-20, -10], [-5, -2])]),
+      'reference.dxf'
+    );
+    expect(report.parts).toHaveLength(1);
+    expect(report.parts[0].referencePaths).toEqual([
+      [
+        { x: 0, y: 0 },
+        { x: 15, y: 8 },
+      ],
+    ]);
+    expect(report.parts[0].loops).toHaveLength(2);
+    expect(partArea(report.parts[0])).toBeCloseTo(200 - Math.PI, 10);
+    expect(report.warnings.join(' ')).toMatch(/unclosed internal.*reference/i);
+  });
+
+  it('rejects a reference segment that exits a concave profile even when its endpoints are inside', () => {
+    const outer = polyline([
+      [0, 0],
+      [6, 0],
+      [6, 2],
+      [2, 2],
+      [2, 6],
+      [0, 6],
+    ]);
+    expect(() => importDXFWithReport(drawing([outer, line([1, 5], [5, 1])]), 'crosses-void.dxf')).toThrow(
+      /extends outside/i
+    );
+  });
+
+  it('deduplicates identical holes without subtracting their area twice', () => {
+    const report = importDXFWithReport(
+      drawing([...rectangle(), circle(3, 2, 1), circle(3, 2, 1)]),
+      'duplicate-hole.dxf'
+    );
+    expect(report.parts[0].loops).toHaveLength(2);
+    expect(partArea(report.parts[0])).toBeCloseTo(50 - Math.PI, 10);
+    expect(report.warnings.join(' ')).toMatch(/duplicate closed contour/i);
+  });
+
+  it('retains reference coordinates and curve allowance through inch-file save and reopen', () => {
+    const report = importDXFWithReport(
+      drawing([spline(), line([10, 0], [0, 0]), line([4, 2], [6, 2])]),
+      'saved-profile.dxf'
+    );
+    const saved = quoteToFile({ ...createBlankQuote(), parts: report.parts });
+    const serialized = JSON.parse(JSON.stringify(saved));
+    expect(serialized.parts[0].geometryToleranceMm).toBeUndefined();
+    expect(serialized.parts[0].geometryTolerance).toBeCloseTo(0.0001, 12);
+    expect(serialized.parts[0].referencePaths[0][0].x).toBeCloseTo(4 / 25.4, 12);
+    const restored = quoteFromFile(serialized);
+    expect(restored.parts[0].geometryToleranceMm).toBeCloseTo(0.00254, 12);
+    expect(restored.parts[0].referencePaths?.[0][0].x).toBeCloseTo(4, 12);
+    expect(bounds(restored.parts[0].loops[0]).height).toBeCloseTo(10, 12);
+  });
+
+  it('validates loaded reference geometry and disallows a hidden unbounded tolerance', () => {
+    const [part] = importDXF(drawing(rectangle()), 'part.dxf');
+    expect(() =>
+      validatePart({
+        ...part,
+        referencePaths: [
+          [
+            { x: 1, y: 1 },
+            { x: NaN, y: 2 },
+          ],
+        ],
+      })
+    ).toThrow(/finite coordinates/i);
+    expect(() =>
+      validatePart({
+        ...part,
+        referencePaths: [
+          [
+            { x: 1, y: 1 },
+            { x: 100, y: 2 },
+          ],
+        ],
+      })
+    ).toThrow(/extends outside/i);
+    expect(() => validatePart({ ...part, geometryToleranceMm: 10 })).toThrow(/tolerance/i);
   });
 });
 

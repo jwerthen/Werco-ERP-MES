@@ -1,63 +1,118 @@
 # Material Nesting
 
-After deploying the updated frontend, open **Sales & Quoting → Material Nesting**
-or `/nest` in the signed-in ERP.
-The tool estimates sheet quantities for one material and thickness, with
-optional USD prices for comparing material cost. Access uses `purchasing:view`,
+Open **Sales & Quoting → Material Nesting** or `/nest` in the signed-in ERP.
+The tool estimates separate sheet orders for multiple material/thickness groups,
+with optional USD prices for comparing material cost. Access uses `purchasing:view`,
 the same permission as Quote Calculator; see [RBAC_PERMISSIONS.md](RBAC_PERMISSIONS.md#material-nesting).
 
 ## Prepare and compare an estimate
 
 1. Each entry to Material Nesting starts with an empty estimate. Begin entering
-   parts, or use **Open** to restore a saved estimate file. Set the name,
-   material, thickness, part spacing, and edge margin. Dimension fields accept
-   decimal inches and fractions such as `1/4` or `1 1/2`.
-2. Upload or drop DXFs, or add rectangles and circles by size. Confirm each
+   parts, or use **Open** to restore a saved estimate file. Set the project name
+   and the active group's material, thickness, part spacing, and edge margin.
+   Dimension fields accept decimal inches and fractions such as `1/4` or `1 1/2`.
+2. Upload or drop DXFs, or add rectangles and circles by size. Before files are
+   parsed, select filename rows and apply their material and thickness. All files
+   are imported with the assignments shown, including unchecked rows. Files with
+   the same material and thickness join the same group; different thicknesses
+   never share a sheet. Duplicate filenames remain separate rows. Confirm each
    imported part's dimensions and quantity, and set rotation/grain constraints.
-   Read the import report: valid files stay in the estimate when other files
-   are skipped. A **Footprint** result represents the entire drawing as one
-   rectangular design; verify its overall size and set quantity for the whole
-   drawing, rather than for one of its internal contours.
+   Read the import report: valid files stay when other files are skipped.
 3. In **Stock sizes & prices**, enable the sheet sizes available to your shop
-   and enter optional prices per sheet. Changing a sheet's dimensions clears
-   its price, so enter a price for the new size.
+   for the active group and enter optional prices per sheet. Changing a sheet's
+   dimensions clears its price. Changing a group's material/thickness clears
+   its prices; matching groups combine their parts. New groups copy active stock
+   sizes and enabled flags with independent options and blank prices.
 4. Choose **Least material to buy** or **Lowest material cost**, then **Compare sheets**.
+   All populated groups calculate separately in a background worker. Progress
+   identifies the current group; **Cancel comparison** stops the current run.
+   Completed group results remain available after cancellation. A group has a
+   two-minute calculation limit; split a job into separate estimates if needed.
    Only options that fit every requested part can be recommended. Cost
    comparison needs a price for every complete option. Select a result to
-   inspect each sheet; recalculate after editing inputs.
-5. **Save** downloads an editable `.estimate.json` file. **Save summary**
-   downloads the material comparison as CSV; **Save nest preview** downloads
-   the selected sheet as SVG.
+   inspect each sheet; use the group selector/cards to review every separate
+   order. Results are cached per group; changing inputs makes them stale until
+   the next comparison. Opening a project or selecting a group does not run nesting.
+5. **Save** downloads every group and the active selection in one editable
+   `.estimate.json` file. **Save summary** downloads the active group's material
+   comparison as CSV; **Save nest preview** downloads its selected sheet as SVG,
+   including reference lines.
 
-The layout uses conservative rectangles around each part and tries three part
-orderings per sheet size. It establishes a feasible estimate, but may use more
-material than irregular-shape nesting and does not prove the minimum sheet
-count. Each comparison uses one stock size for the entire order; it does not
-combine stock sizes. For closed contours, utilization uses contour area less
-holes divided by total purchased sheet area. A whole-drawing footprint uses
-its full rectangle, including openings and empty space: part area and
-utilization may be overstated, and unused area understated. The workspace
-labels the combined area **Estimated footprint area** whenever any part uses
-this fallback; the CSV summary also identifies each part's geometry basis.
-Material prices exclude freight, tax, labor, cutting time, and consumables;
+The layout places actual outer contours, including concave profiles, using
+multiple part orderings and allowed quarter-turn rotations. It checks contour
+separation and sheet margins for the resulting placements. It establishes a
+feasible estimate, but does not prove the minimum sheet count. Holes remain
+visible and subtract from part area; other parts are not placed inside them.
+Each group's comparison uses one stock size for its entire order and does not
+combine stock sizes. Utilization uses contour area less holes divided by total
+purchased sheet area. The preview and exports are estimating layouts, not
+production toolpaths. Material prices exclude freight, tax, labor, cutting time, and consumables;
 weight uses typical material density. Check dimensions, quantities, supplier
 sheet sizes, and your shop's handling capacity before ordering.
+
+## Quoting spacing allowances
+
+Automatic spacing uses the group's material thickness `t`, in inches:
+
+- Part-to-part gap: `max(0.125, t)` inches, measured between part contours.
+- Sheet edge margin: `max(0.375, 2 × t)` inches, reserved at each sheet edge.
+
+| Thickness | Part gap | Edge margin |
+|-----------|----------|-------------|
+| 1/16 in | 1/8 in | 3/8 in |
+| 1/8 in | 1/8 in | 3/8 in |
+| 3/16 in | 3/16 in | 3/8 in |
+| 1/4 in | 1/4 in | 1/2 in |
+| 1/2 in | 1/2 in | 1 in |
+| 1 in | 1 in | 2 in |
+
+These are estimator-chosen conservative starting allowances, not a universal
+fiber-laser standard or an Ermaksan 6 kW cutting recipe. Carbon steel,
+stainless steel, and aluminum start with the same formula. Use manual values
+for each material/thickness group when the shop's validated allowances differ.
+Editing either allowance switches that group to manual mode. Manual values
+remain when its thickness changes; **Auto quoting allowance** restores the
+formula and follows future thickness edits. If changing a specification merges
+parts into an existing group, that destination group's spacing settings remain;
+review them and re-enter its cleared sheet prices.
+The estimator does not calculate kerf compensation, pierce locations, leads,
+thermal behavior, clamps, or automatic part handling. A production CAM setup
+must account for those conditions separately.
+
+The source documents establish configurable CAM behavior, not these numeric
+defaults:
+
+- [Lantek Expert Cut](https://www.lantek.com/ca/cad-cam-nesting-software-oxycut-plasma-laser-waterjet)
+  configures separation and leads using material/thickness tables and cutting
+  quality. It does not publish a universal separation formula there.
+- [AMADA AP100US Sheet Wizard](https://amada.com/amadasoftware/ap100us_help_file/Sheet_Wizard.htm)
+  distinguishes geometry-to-geometry spacing and sheet borders from optional
+  beam diameter and lead-in/out allowances. Borders can reserve clamp zones.
+- [Friendess CypCutE manual, section 3.17](https://d.fscut.com/wordpress-fscut/2022/12/CypCutE-User-Manual-7.0-2.pdf)
+  provides independent part-gap and plate-margin fields. Its example shows
+  2 mm (0.078740 in) for both with thickness set to zero; that screenshot is
+  not a thickness-dependent recommendation.
+- [Ermaksan HAWK LASER](https://www.ermaksan.com.tr/en-US/products/laser-cutting-machines/hawk-laser-en)
+  lists Lantek CAD/CAM options without a public thickness-based spacing table.
+- [Hypertherm Plate Saver for XPR](https://xnet.hypertherm.com/Xnet/library/download/?file=HYP258264)
+  describes a ProNest part-separation default of `0.75 × thickness` for its
+  plasma context. That value is not used as fiber-laser guidance here.
 
 ## Import limits and units
 
 | Input | Limit or behavior |
 |-------|-------------------|
 | DXF batch | Up to 100 files; each file smaller than 5,000,000 bytes |
-| Estimate | Up to 300 designs and 300 total parts, including quantities |
-| Geometry | Up to 2,000 vertices per contour after curve conversion, 20,000 geometry vertices per parsed file and estimate, and 300 closed contours per file |
+| Estimate | Up to 300 designs and 300 total parts, including quantities, across all groups |
+| Geometry | Up to 2,000 vertices per contour/reference path after curve conversion, 20,000 geometry vertices including reference paths per parsed file and project, and 300 closed contours per file |
 | DXF records | Up to 20,000 entity records per file, including legacy polyline vertex records |
-| Stock options | Up to 12 |
-| Contour import | ASCII DXF model-space `LINE`, `ARC`, `CIRCLE`, `LWPOLYLINE`, and ordinary legacy 2D `POLYLINE`/`VERTEX`/`SEQEND`; polylines may include circular bulges |
-| Footprint import | Open, branching, touching, or intersecting paths; supported planar `SPLINE` geometry; or otherwise flat geometry on several parallel Z planes produce one rectangle around the whole drawing |
-| Omitted metadata | `VIEWPORT` records; `TEXT` and `LEADER` only on the `FORMAT` layer, with an import warning for those annotations |
-| Rejected files | Malformed coordinates or entity data, unknown/unsupported cut entities, blocks/`INSERT`, wide polylines, sloped or nonplanar geometry, tilted extrusion directions, or paper-space cut geometry; other text/annotation entities are not silently discarded |
+| Stock options | Up to 12 per group |
+| Contour import | ASCII DXF model-space `LINE`, `ARC`, `CIRCLE`, `LWPOLYLINE`, ordinary legacy 2D `POLYLINE`/`VERTEX`/`SEQEND`, and supported clamped planar `SPLINE`; polylines may include circular bulges |
+| Open internal geometry | Paths contained by exactly one outer profile are retained as visible reference lines, with a warning to review their marking/cutting intent |
+| Omitted metadata | `VIEWPORT` records and all entities on the `FORMAT` annotation layer, with an import warning for omitted FORMAT entities |
+| Rejected files | Open or ambiguous outer profiles, touching/intersecting contours, reference paths outside or spanning parts, malformed data, unsupported entities, blocks/`INSERT`, wide polylines, sloped/nonplanar geometry, tilted extrusion, or paper-space cut geometry; other text/annotations are not silently discarded |
 | DXF units | Inch and millimeter files retain their physical size; unitless files default to inches unless millimeters is selected before import |
-| Saved estimates | Inches with optional USD prices; whole-drawing parts retain `importMode: "drawing-bounds"` when saved and reopened; supported legacy job files can also be opened |
+| Saved estimates | Version 4 projects wrap one version 3 inch/USD estimate per group; older single estimates/jobs open as one group. Legacy `drawing-bounds` parts can be opened but must be removed and their DXFs re-imported before nesting |
 
 Split larger jobs into estimates. Malformed or unsupported files and files
 that exceed a resource or size limit are skipped as a whole with an explanation;
@@ -70,38 +125,44 @@ remain holes. Uniquely paired endpoints within **0.0001 inch** join into closed
 paths. Small join gaps retain both endpoints instead of snapping the drawing
 smaller. Circular arcs and polyline bulges are approximated by straight segments
 at **0.0001-inch curve tolerance**, with exact X/Y extrema included to preserve
-their sheet-fit bounds. Circles remain circles. These physical tolerances apply
-equally to inch and millimeter files; highly detailed curves can reach the
-vertex limit during conversion.
+their sheet-fit bounds. Supported spline spans are adaptively converted within
+the same tolerance. Curved imports carry an approximation allowance, reserved
+in addition to the selected gap and sheet margin. Circles remain circles. These
+physical tolerances apply equally to inch and millimeter files; highly detailed
+curves can reach the vertex limit during conversion.
 
 Flat geometry may be translated away from Z=0. Both +Z and -Z object-coordinate
 systems are supported: -Z circular/polyline geometry is transformed into world
 coordinates, while `LINE` endpoints already use world coordinates. Geometry
 on one common XY-parallel plane can form contours. Several parallel elevations
-use the full XY projection as one footprint, with an import warning; a sloped
+are aligned in Z without changing X/Y profiles, with an import warning; a sloped
 entity or an entity whose points do not share a flat plane is rejected.
 
-If paths cannot form unambiguous closed contours, or contours overlap or
-intersect, the importer uses the bounds of **all supported geometry in the
-file** as one footprint. It does not infer separate parts from that drawing.
-The import report explains the fallback, and the parts list labels it
-**Whole drawing footprint · verify size**. Verify the overall dimensions and
-quantity even if some internal contours look like individual parts.
+If paths cannot form unambiguous closed outer contours, or contours overlap or
+intersect, the importer rejects that file. It never substitutes a rectangular
+drawing footprint. Duplicate lines/closed contours may be removed with
+an import warning. Open internal paths are retained as thin contrasting lines;
+they do not define holes or part area, and the importer does not claim they are
+etching. Review their intent before production.
 
-Supported splines also force a whole-drawing footprint. The importer accepts
-validated planar `SPLINE` data with degree 1–10, control points, valid knots,
-and positive weights (or omitted weights, treated as 1). It uses the bounding
-rectangle of the control-point hull, which encloses the curve but can be larger
-than the curve itself. It does not reconstruct an exact spline profile or
-subtract spline-shaped openings. Unsupported or malformed spline data is
-rejected rather than approximated from incomplete data.
+The importer accepts validated planar `SPLINE` data with degree 1–10, control points, valid knots,
+clamped end knots, and positive weights (or omitted weights, treated as 1).
+Rational spans are converted to their actual curved profiles within the stated
+tolerance; their control-hull rectangles are not used as parts. Unsupported,
+discontinuous, malformed, or excessively detailed spline data is rejected.
+
+Material groups use exact material labels and thickness rounded to
+0.000001 mm for their grouping key; displayed dimensions and saved files remain
+in inches. Duplicate group/part IDs, duplicate stock specifications, incomplete
+upload assignments, and project-wide resource overruns are rejected without
+partially applying the assignment.
 
 ## Storage and ERP integration
 
 Material Nesting starts with a fresh, empty estimate each time you enter the
 section, without demo parts or an automatically restored draft. Edits remain
-while you work within the page, including switching its workspace, stock, and
-help tabs. Leaving for another ERP page clears the current estimate; returning
+while you work within the page, including switching material groups and its
+workspace, stock, and help tabs. Leaving for another ERP page clears the current estimate; returning
 starts empty. Changing the user or active company also starts a fresh estimate.
 There is no localStorage, sessionStorage, or server-side save.
 

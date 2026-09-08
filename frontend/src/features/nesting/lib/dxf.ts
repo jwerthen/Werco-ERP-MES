@@ -23,7 +23,7 @@ class TopologyError extends Error {
 function topologyCheck(ok: unknown, message: string): asserts ok {
   if (!ok) throw new TopologyError(message);
 }
-export type DXFGeometry = { loops: Loop[]; footprint: Loop; warnings: string[]; footprintOnly: boolean };
+export type DXFGeometry = { loops: Loop[]; referencePaths: Point[][]; warnings: string[]; geometryToleranceMm: number };
 
 function check(ok: unknown, message: string): asserts ok {
   if (!ok) throw new Error(message);
@@ -129,7 +129,10 @@ function arcPoints(center: Point, radius: number, start: number, sweep: number, 
     result.every(p => Number.isFinite(p.x) && Number.isFinite(p.y)),
     'Invalid circular arc coordinates.'
   );
-  return result;
+  const distinct: Point[] = [];
+  for (const point of result)
+    if (!distinct.length || separation(point, distinct[distinct.length - 1]) > NUMERIC_EPS) distinct.push(point);
+  return distinct;
 }
 function bulgePoints(a: Vertex, b: Vertex): Point[] {
   if (a.bulge === 0) return [a, b];
@@ -159,8 +162,8 @@ function polyline(vertices: Vertex[], closed: boolean): Point[] {
   return result;
 }
 
-/** Positive-weight B-splines stay inside their control hull; use that hull's bounds for quoting. */
-function splineControls(entity: Entity, scale: number): (Point & { z: number })[] {
+type Spline = { controls: (Point & { z: number })[]; knots: number[]; weights: number[]; degree: number };
+function readSpline(entity: Entity, scale: number): Spline {
   const splineFlags = value(entity, 70);
   const degree = required(entity, 71);
   check(Number.isInteger(splineFlags) && splineFlags >= 0 && splineFlags <= 31, 'Unsupported SPLINE flags.');
@@ -212,7 +215,7 @@ function splineControls(entity: Entity, scale: number): (Point & { z: number })[
   const weights = entity.data.filter(pair => pair.code === 41).map(pair => number(pair.value));
   check(
     (weights.length === 0 || weights.length === controls.length) && weights.every(weight => weight > 0),
-    'SPLINE bounds require one positive weight per control point, or omitted unit weights.'
+    'SPLINE needs positive weights for every control point, or omitted unit weights.'
   );
   const fitCount = value(entity, 74);
   const fits: (Point & { z: number })[] = [];
@@ -244,68 +247,199 @@ function splineControls(entity: Entity, scale: number): (Point & { z: number })[
     fits.every(p => Math.abs(p.z - controls[0].z) <= NUMERIC_EPS),
     'SPLINE fit points must share the control-point XY plane.'
   );
-  return controls;
+  return { controls, knots, weights: weights.length ? weights : controls.map(() => 1), degree };
 }
 
-/** Join only unique endpoint pairs. Spatial buckets bound work even for large line-only exports. */
-function stitch(paths: Path[]): Loop[] {
-  const endpoints = paths.flatMap(path => [path.points[0], path.points[path.points.length - 1]]);
-  const buckets = new Map<string, number[]>();
-  const key = (x: number, y: number) => `${x},${y}`;
-  const bucket = (p: Point) => [Math.floor(p.x / DXF_JOIN_TOLERANCE_MM), Math.floor(p.y / DXF_JOIN_TOLERANCE_MM)];
-  for (let i = 0; i < endpoints.length; i++) {
-    const [x, y] = bucket(endpoints[i]);
-    const list = buckets.get(key(x, y)) ?? [];
-    // More than four points in a tolerance-sized square cannot all form unambiguous pairs.
-    topologyCheck(
-      list.length < 4,
-      'Ambiguous DXF junction: several endpoints meet. Remove duplicate or branching cut lines.'
-    );
-    list.push(i);
-    buckets.set(key(x, y), list);
+type Homogeneous = { x: number; y: number; w: number };
+const blend = (a: Homogeneous, b: Homogeneous, t: number): Homogeneous => ({
+  x: a.x + (b.x - a.x) * t,
+  y: a.y + (b.y - a.y) * t,
+  w: a.w + (b.w - a.w) * t,
+});
+const project = (p: Homogeneous): Point => ({ x: p.x / p.w, y: p.y / p.w });
+function segmentDistance(p: Point, a: Point, b: Point) {
+  const dx = b.x - a.x,
+    dy = b.y - a.y,
+    length2 = dx * dx + dy * dy;
+  const t = length2 === 0 ? 0 : Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / length2));
+  return Math.hypot(p.x - a.x - t * dx, p.y - a.y - t * dy);
+}
+
+/** Knot insertion makes rational Bezier spans; their positive control hull bounds subdivision error. */
+function splinePoints(spline: Spline): Point[] {
+  const { degree } = spline;
+  const knots = [...spline.knots];
+  let controls: Homogeneous[] = spline.controls.map((p, i) => ({
+    x: p.x * spline.weights[i],
+    y: p.y * spline.weights[i],
+    w: spline.weights[i],
+  }));
+  check(
+    controls.every(p => Number.isFinite(p.x) && Number.isFinite(p.y)),
+    'SPLINE weighted coordinates exceed the supported numeric range.'
+  );
+  check(
+    knots.slice(0, degree + 1).every(k => k === knots[degree]) &&
+      knots.slice(-degree - 1).every(k => k === knots[controls.length]),
+    'This SPLINE needs clamped end knots for contour import. Re-export it as clamped splines or arcs.'
+  );
+  const internal = Array.from(new Set(knots.slice(degree + 1, -degree - 1)));
+  for (const knot of internal) {
+    let multiplicity = knots.filter(k => k === knot).length;
+    check(multiplicity <= degree, 'Discontinuous SPLINE spans need separate cut contours.');
+    while (multiplicity < degree) {
+      const span = knots.findIndex((k, i) => k <= knot && knots[i + 1] > knot);
+      const next: Homogeneous[] = [];
+      for (let i = 0; i <= span - degree; i++) next[i] = controls[i];
+      for (let i = span - multiplicity; i < controls.length; i++) next[i + 1] = controls[i];
+      for (let i = span - degree + 1; i <= span - multiplicity; i++) {
+        const alpha = (knot - knots[i]) / (knots[i + degree] - knots[i]);
+        next[i] = blend(controls[i - 1], controls[i], alpha);
+      }
+      controls = next;
+      knots.splice(span + 1, 0, knot);
+      multiplicity++;
+      check(controls.length <= MAX_VERTICES, 'SPLINE subdivision exceeds the geometry limit.');
+    }
   }
-  const partners = endpoints.map((p, i) => {
-    const [x, y] = bucket(p);
-    let partner = -1;
+  const result: Point[] = [project(controls[0])];
+  const flatten = (span: Homogeneous[], depth: number) => {
+    const points = span.map(project),
+      a = points[0],
+      b = points[points.length - 1];
+    if (points.every(p => segmentDistance(p, a, b) <= DXF_CURVE_TOLERANCE_MM)) {
+      if (separation(result[result.length - 1], b) > NUMERIC_EPS) result.push(b);
+      check(
+        result.length <= MAX_LOOP_VERTICES + 1,
+        'SPLINE exceeds the 2,000-vertex limit at 0.0001-inch curve tolerance.'
+      );
+      return;
+    }
+    check(depth < 24, 'SPLINE cannot be resolved within the 0.0001-inch curve tolerance.');
+    const left = [span[0]],
+      right = [span[span.length - 1]];
+    let row = span;
+    while (row.length > 1) {
+      row = row.slice(1).map((p, i) => blend(row[i], p, 0.5));
+      left.push(row[0]);
+      right.push(row[row.length - 1]);
+    }
+    flatten(left, depth + 1);
+    flatten(right.reverse(), depth + 1);
+  };
+  for (let i = 0; i + degree < controls.length; i += degree) flatten(controls.slice(i, i + degree + 1), 0);
+  check(result.length >= 2, 'SPLINE has no resolvable curve.');
+  return result;
+}
+
+/** Keep closed cycles and separate graph bridges as unresolved reference paths. Never close a gap. */
+function stitch(input: Path[], warnings: string[]): { loops: Loop[]; referencePaths: Point[][] } {
+  const paths: Path[] = [],
+    signatures = new Set<string>();
+  let duplicates = 0;
+  for (const path of input) {
+    const coords = path.points.map(p => `${Math.round(p.x / NUMERIC_EPS)},${Math.round(p.y / NUMERIC_EPS)}`);
+    const forward = coords.join(';'),
+      reverse = [...coords].reverse().join(';');
+    const signature = forward < reverse ? forward : reverse;
+    if (signatures.has(signature)) {
+      duplicates++;
+      continue;
+    }
+    signatures.add(signature);
+    paths.push(path);
+  }
+  if (duplicates)
+    warnings.push(
+      `Removed ${duplicates} geometrically duplicate path${duplicates === 1 ? '' : 's'} without changing the outline.`
+    );
+  const nodes: Point[] = [],
+    buckets = new Map<string, number[]>();
+  const nodeFor = (point: Point) => {
+    const x = Math.floor(point.x / DXF_JOIN_TOLERANCE_MM),
+      y = Math.floor(point.y / DXF_JOIN_TOLERANCE_MM);
+    const nearby: number[] = [];
     for (let dx = -1; dx <= 1; dx++)
       for (let dy = -1; dy <= 1; dy++) {
-        for (const candidate of buckets.get(key(x + dx, y + dy)) ?? []) {
-          if (candidate === i || separation(p, endpoints[candidate]) > DXF_JOIN_TOLERANCE_MM) continue;
-          topologyCheck(
-            partner < 0,
-            'Ambiguous DXF junction: several endpoints meet. Remove duplicate or branching cut lines.'
-          );
-          partner = candidate;
-        }
+        for (const node of buckets.get(`${x + dx},${y + dy}`) ?? [])
+          if (separation(point, nodes[node]) <= DXF_JOIN_TOLERANCE_MM) nearby.push(node);
       }
     topologyCheck(
-      partner >= 0,
-      'Open DXF contour: endpoints do not join within 0.0001 inch. Check for gaps or construction lines.'
+      nearby.length <= 1,
+      'Several distinct DXF junctions are within 0.0001 inch. Review the touching cut paths.'
     );
-    return partner;
+    if (nearby.length) return nearby[0];
+    const id = nodes.length;
+    nodes.push(point);
+    const key = `${x},${y}`,
+      list = buckets.get(key) ?? [];
+    check(list.length < 16, 'DXF endpoint density exceeds the geometry limit.');
+    list.push(id);
+    buckets.set(key, list);
+    return id;
+  };
+  const endpoints = paths.map(path => [nodeFor(path.points[0]), nodeFor(path.points[path.points.length - 1])]);
+  const adjacency: { to: number; edge: number }[][] = nodes.map(() => []);
+  endpoints.forEach(([a, b], edge) => {
+    adjacency[a].push({ to: b, edge });
+    adjacency[b].push({ to: a, edge });
   });
-  const used = new Set<number>();
-  const loops: Loop[] = [];
-  for (let index = 0; index < paths.length; index++) {
-    if (used.has(index)) continue;
-    const points = [...paths[index].points];
-    used.add(index);
-    let end = index * 2 + 1;
-    while (partners[end] !== index * 2) {
-      const nextEndpoint = partners[end];
-      const nextIndex = Math.floor(nextEndpoint / 2);
-      topologyCheck(!used.has(nextIndex), 'Ambiguous closed DXF chain.');
-      used.add(nextIndex);
-      const next = nextEndpoint % 2 === 0 ? paths[nextIndex].points : [...paths[nextIndex].points].reverse();
-      // Keep both ends of a small join gap instead of snapping/shrinking the drawing.
-      points.push(...next.slice(separation(points[points.length - 1], next[0]) <= NUMERIC_EPS ? 1 : 0));
-      check(points.length <= MAX_LOOP_VERTICES + 1, 'Contour exceeds the 2,000-vertex limit.');
-      end = nextEndpoint ^ 1;
+  const discovered = nodes.map(() => -1),
+    low = [...discovered],
+    bridges = new Set<number>();
+  let clock = 0;
+  for (let first = 0; first < nodes.length; first++) {
+    if (discovered[first] >= 0) continue;
+    discovered[first] = low[first] = clock++;
+    const stack = [{ node: first, parent: -1, parentEdge: -1, next: 0 }];
+    while (stack.length) {
+      const frame = stack[stack.length - 1];
+      if (frame.next === adjacency[frame.node].length) {
+        stack.pop();
+        if (frame.parent >= 0) {
+          low[frame.parent] = Math.min(low[frame.parent], low[frame.node]);
+          if (low[frame.node] > discovered[frame.parent]) bridges.add(frame.parentEdge);
+        }
+        continue;
+      }
+      const next = adjacency[frame.node][frame.next++];
+      if (next.edge === frame.parentEdge) continue;
+      if (discovered[next.to] >= 0) low[frame.node] = Math.min(low[frame.node], discovered[next.to]);
+      else {
+        discovered[next.to] = low[next.to] = clock++;
+        stack.push({ node: next.to, parent: frame.node, parentEdge: next.edge, next: 0 });
+      }
     }
+  }
+  const cutting = adjacency.map(edges => edges.filter(({ edge }) => !bridges.has(edge)));
+  topologyCheck(
+    cutting.every(edges => edges.length === 0 || edges.length === 2),
+    'Cut paths form ambiguous overlapping or branching closed contours. Separate the intended outlines before importing.'
+  );
+  const used = new Set<number>(),
+    loops: Loop[] = [];
+  for (let first = 0; first < paths.length; first++) {
+    if (bridges.has(first) || used.has(first)) continue;
+    const start = endpoints[first][0];
+    let node = start,
+      edge = first;
+    const points: Point[] = [];
+    do {
+      check(!used.has(edge), 'DXF cycle traversal failed.');
+      used.add(edge);
+      const [a, b] = endpoints[edge];
+      const segment = a === node ? paths[edge].points : [...paths[edge].points].reverse();
+      points.push(
+        ...segment.slice(points.length && separation(points[points.length - 1], segment[0]) <= NUMERIC_EPS ? 1 : 0)
+      );
+      check(points.length <= MAX_LOOP_VERTICES + 1, 'Contour exceeds the 2,000-vertex limit.');
+      node = a === node ? b : a;
+      if (node !== start) edge = cutting[node].find(next => next.edge !== edge)!.edge;
+    } while (node !== start);
     if (separation(points[0], points[points.length - 1]) <= NUMERIC_EPS) points.pop();
     loops.push({ type: 'poly', points });
   }
-  return loops;
+  return { loops, referencePaths: Array.from(bridges).map(edge => paths[edge].points) };
 }
 
 export function readDXFGeometry(text: string, unitless: 'mm' | 'in'): DXFGeometry {
@@ -352,11 +486,10 @@ export function readDXFGeometry(text: string, unitless: 'mm' | 'in'): DXFGeometr
   check(entities.length > 0, 'DXF contains no model-space cut geometry.');
   const loops: Loop[] = [];
   const paths: Path[] = [];
-  const extentPoints: Point[] = [];
   const warnings: string[] = [];
-  let footprintOnly = false;
   let annotationCount = 0;
   let hasSplines = false;
+  let hasCurves = false;
   let verticesUsed = 0;
   let planeMin = Infinity;
   let planeMax = -Infinity;
@@ -369,10 +502,8 @@ export function readDXFGeometry(text: string, unitless: 'mm' | 'in'): DXFGeometr
       planeMin = Math.min(planeMin, height);
       planeMax = Math.max(planeMax, height);
     }
-    if (planeMax - planeMin > NUMERIC_EPS) footprintOnly = true;
   };
   const addPath = (points: Point[], closed: boolean) => {
-    extentPoints.push(...points);
     verticesUsed += points.length;
     check(verticesUsed <= MAX_VERTICES, 'File geometry limit: 20,000 vertices.');
     if (closed) {
@@ -386,10 +517,7 @@ export function readDXFGeometry(text: string, unitless: 'mm' | 'in'): DXFGeometr
     if (entity.type === 'VIEWPORT') continue;
     // FORMAT is an explicitly named drawing-annotation layer in these CAD exports.
     // Text on arbitrary layers might be engraving, so it remains unsupported.
-    if (
-      ['TEXT', 'LEADER'].includes(entity.type) &&
-      entity.data.some(pair => pair.code === 8 && pair.value.toUpperCase() === 'FORMAT')
-    ) {
+    if (entity.data.some(pair => pair.code === 8 && pair.value.toUpperCase() === 'FORMAT')) {
       annotationCount++;
       continue;
     }
@@ -413,26 +541,21 @@ export function readDXFGeometry(text: string, unitless: 'mm' | 'in'): DXFGeometr
       const radius = physical(required(entity, 40), scale);
       check(radius > 0, 'Circle or arc radius must be positive.');
       if (entity.type === 'CIRCLE') {
-        extentPoints.push(
-          { x: center.x * ocsSign - radius, y: center.y - radius },
-          { x: center.x * ocsSign + radius, y: center.y + radius }
-        );
         loops.push({ type: 'circle', cx: center.x * ocsSign, cy: center.y, r: radius });
         verticesUsed++;
         check(verticesUsed <= MAX_VERTICES, 'File geometry limit: 20,000 vertices.');
       } else {
+        hasCurves = true;
         const start = normalizeAngle((required(entity, 50) * Math.PI) / 180);
         const end = normalizeAngle((required(entity, 51) * Math.PI) / 180);
         addPath(fromOCS(arcPoints(center, radius, start, normalizeAngle(end - start))), false);
       }
     } else if (entity.type === 'SPLINE') {
-      const controls = splineControls(entity, scale);
+      const spline = readSpline(entity, scale);
       hasSplines = true;
-      onPlane(controls.map(p => p.z));
-      extentPoints.push(...controls);
-      verticesUsed += controls.length;
-      check(verticesUsed <= MAX_VERTICES, 'File geometry limit: 20,000 vertices.');
-      footprintOnly = true;
+      hasCurves = true;
+      onPlane(spline.controls.map(p => p.z));
+      addPath(splinePoints(spline), false);
     } else {
       onPlane([physical(value(entity, entity.type === 'LWPOLYLINE' ? 38 : 30), scale) * ocsSign]);
       const closed = (flags(entity, 129) & 1) === 1;
@@ -480,47 +603,54 @@ export function readDXFGeometry(text: string, unitless: 'mm' | 'in'): DXFGeometr
         check(entities[i + 1]?.type === 'SEQEND', 'Legacy POLYLINE is missing SEQEND.');
         validateFlat(entities[++i], scale);
       }
+      if (vertices.some(vertex => vertex.bulge !== 0)) hasCurves = true;
       addPath(fromOCS(polyline(vertices, closed)), closed);
     }
   }
-  check(extentPoints.length > 0, 'DXF contains no model-space cut geometry.');
-  check(loops.length <= 300, 'DXF contour limit: 300 closed contours.');
-  if (annotationCount)
-    warnings.push(
-      `Ignored ${annotationCount} text/leader annotation${annotationCount === 1 ? '' : 's'} on the FORMAT layer.`
-    );
+  if (annotationCount) warnings.push(`Ignored ${annotationCount} drawing-annotation entities on the FORMAT layer.`);
   if (planeMax - planeMin > NUMERIC_EPS)
-    warnings.push(
-      'Flat geometry occurs at several Z elevations; its full XY projection is imported as one rectangular footprint.'
-    );
-  if (hasSplines)
-    warnings.push(
-      'Spline geometry uses its conservative control-point bounds; the preview is a rectangular footprint, not the spline profile.'
-    );
-  if (!footprintOnly) {
-    try {
-      loops.push(...stitch(paths));
-    } catch (error) {
-      if (!(error instanceof TopologyError)) throw error;
-      footprintOnly = true;
-      warnings.push(
-        'Open or branching cut/etch paths were found; all supported geometry is included in one rectangular footprint.'
-      );
+    warnings.push('Parallel XY geometry was aligned in Z without changing its X/Y outline.');
+  if (hasSplines) warnings.push('Spline curves were resolved to their actual profile within 0.0001 inch.');
+  const stitched = stitch(paths, warnings);
+  loops.push(...stitched.loops);
+  const loopSignatures = new Set<string>();
+  let duplicateLoops = 0;
+  const uniqueLoops = loops.filter(loop => {
+    let signature: string;
+    if (loop.type === 'circle')
+      signature = `C:${Math.round(loop.cx / NUMERIC_EPS)},${Math.round(loop.cy / NUMERIC_EPS)},${Math.round(loop.r / NUMERIC_EPS)}`;
+    else {
+      const coordinates = loop.points.map(p => `${Math.round(p.x / NUMERIC_EPS)},${Math.round(p.y / NUMERIC_EPS)}`);
+      const canonical = (items: string[]) => {
+        let smallest = 0;
+        for (let i = 1; i < items.length; i++) if (items[i] < items[smallest]) smallest = i;
+        return [...items.slice(smallest), ...items.slice(0, smallest)].join(';');
+      };
+      const forward = canonical(coordinates),
+        reverse = canonical([...coordinates].reverse());
+      signature = `P:${forward < reverse ? forward : reverse}`;
     }
-  }
+    if (loopSignatures.has(signature)) {
+      duplicateLoops++;
+      return false;
+    }
+    loopSignatures.add(signature);
+    return true;
+  });
+  if (duplicateLoops)
+    warnings.push(
+      `Removed ${duplicateLoops} geometrically duplicate closed contour${duplicateLoops === 1 ? '' : 's'} without changing the outline.`
+    );
+
+  check(
+    loops.length > 0,
+    'No closed cutting outline was found. Close the intended outer contour or separate the reference geometry.'
+  );
   check(loops.length <= 300, 'DXF contour limit: 300 closed contours.');
-  const minX = Math.min(...extentPoints.map(p => p.x));
-  const minY = Math.min(...extentPoints.map(p => p.y));
-  const maxX = Math.max(...extentPoints.map(p => p.x));
-  const maxY = Math.max(...extentPoints.map(p => p.y));
-  const footprint: Loop = {
-    type: 'poly',
-    points: [
-      { x: minX, y: minY },
-      { x: maxX, y: minY },
-      { x: maxX, y: maxY },
-      { x: minX, y: maxY },
-    ],
+  return {
+    loops: uniqueLoops,
+    referencePaths: stitched.referencePaths,
+    warnings,
+    geometryToleranceMm: hasCurves ? DXF_CURVE_TOLERANCE_MM : 0,
   };
-  return { loops, footprint, warnings, footprintOnly };
 }

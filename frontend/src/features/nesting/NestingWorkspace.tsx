@@ -35,14 +35,18 @@ import { importDXFBatch, MAX_DXF_FILES, type ImportProgress, type ImportResult }
 import { Switch } from './ui/switch';
 import { Input } from './ui/input';
 import { useToast } from '../../components/ui/Toast';
-import { bounds, normalizeLoops, rect, svgPath, transformLoops, validatePart, type Part } from './lib/nesting';
+import {
+  bounds,
+  normalizeLoops,
+  rect,
+  svgPath,
+  transformLoops,
+  transformReferencePaths,
+  validatePart,
+  type Part,
+} from './lib/nesting';
 import { inToMm, mmToIn, formatIn, parseInches, LB_PER_KG } from './lib/units';
 import {
-  createBlankQuote,
-  compareSheets,
-  validateQuote,
-  quoteToFile,
-  quoteFromFile,
   oversizeParts,
   editSheetOption,
   type Quote,
@@ -50,6 +54,30 @@ import {
   type SheetOption,
   type OptionResult,
 } from './lib/quoting';
+import {
+  addImportedParts,
+  createBlankProject,
+  materialThicknessKey,
+  projectFromFile,
+  projectToFile,
+  validateProject,
+  type QuoteProject,
+} from './lib/quote-project';
+import { autoQuotingSpacing } from './lib/spacing';
+import { compareSheetsInWorker } from './lib/nesting-worker-client';
+import DXFAssignments, { type DXFFileAssignment } from './DXFAssignments';
+
+type CachedComparison = { comparison: Comparison; signature: string };
+const legacyFootprintNotice =
+  'This saved estimate contains legacy rectangular DXF footprints. Remove those parts and re-import their DXFs to nest actual contours.';
+const emptyComparison: Comparison = {
+  results: [],
+  recommendedId: null,
+  reason: 'Add parts, then compare sheets to calculate an order.',
+  requested: 0,
+};
+const referencePath = (points: { x: number; y: number }[]) =>
+  points.map((point, index) => `${index ? 'L' : 'M'}${point.x} ${point.y}`).join(' ');
 const colors = [
   { fill: '#1e40af', stroke: '#93c5fd' },
   { fill: '#334155', stroke: '#cbd5e1' },
@@ -173,17 +201,24 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
     }),
     [showToast]
   );
-  const [quote, setQuote] = useState<Quote>(() => initialQuote ?? createBlankQuote()),
+  const [project, setProject] = useState<QuoteProject>(() => createBlankProject(initialQuote)),
     [tab, setTab] = useState('nest');
-  const [savedSignature, setSavedSignature] = useState(() => JSON.stringify(quote));
-  const [snapshot, setSnapshot] = useState<{
-    comparison: Comparison;
-    signature: string;
-  }>(() => ({
-    comparison: compareSheets(quote),
-    signature: JSON.stringify(quote),
-  }));
-  const [previewId, setPreviewId] = useState(() => snapshot.comparison.recommendedId),
+  const quote = project.groups.find(group => group.id === project.activeGroupId)!.quote;
+  const setQuote = (action: React.SetStateAction<Quote>) =>
+    setProject(current => ({
+      ...current,
+      groups: current.groups.map(group =>
+        group.id === current.activeGroupId
+          ? { ...group, quote: typeof action === 'function' ? action(group.quote) : action }
+          : group
+      ),
+    }));
+  const [savedSignature, setSavedSignature] = useState(() => JSON.stringify(project));
+  const [snapshots, setSnapshots] = useState<Record<string, CachedComparison>>({});
+  const [compareProgress, setCompareProgress] = useState({ completed: 0, total: 0, name: '' });
+  const compareController = useRef<AbortController | null>(null);
+  const comparingRef = useRef(false);
+  const [previewId, setPreviewId] = useState<string | null>(null),
     [sheet, setSheet] = useState(0),
     [selected, setSelected] = useState<string | null>(null),
     [zoom, setZoom] = useState(1),
@@ -200,6 +235,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
     quantity: 1,
   });
   const [importing, setImporting] = useState(false);
+  const [pendingFiles, setPendingFiles] = useState<File[] | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [importProgress, setImportProgress] = useState<ImportProgress>({
     completed: 0,
@@ -216,84 +252,179 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
     return () => {
       mountedRef.current = false;
       importController.current?.abort();
+      compareController.current?.abort();
     };
   }, []);
   const importRef = useRef<HTMLInputElement>(null),
     loadRef = useRef<HTMLInputElement>(null);
-  useUnsavedChanges(JSON.stringify(quote) !== savedSignature);
+  useUnsavedChanges(JSON.stringify(project) !== savedSignature);
+  const snapshot = snapshots[project.activeGroupId];
   const signature = JSON.stringify(quote),
-    stale = signature !== snapshot.signature,
-    comparison = snapshot.comparison;
-  const hasDrawingBounds = quote.parts.some(part => part.importMode === 'drawing-bounds');
-  const active = comparison.results.find(r => r.option.id === previewId) ?? comparison.results[0];
+    stale = !!quote.parts.length && signature !== snapshot?.signature,
+    comparison = quote.parts.length ? (snapshot?.comparison ?? emptyComparison) : emptyComparison;
+  const active =
+    comparison.results.find(r => r.option.id === previewId) ??
+    comparison.results.find(r => r.option.id === comparison.recommendedId) ??
+    comparison.results[0];
   const nest = active?.nest,
     stock = active?.option,
-    visible = nest?.placements.filter(p => p.sheet === sheet) ?? [];
+    visible = stale ? [] : (nest?.placements.filter(p => p.sheet === sheet) ?? []);
   const requested = quote.parts.reduce((a, p) => a + p.quantity, 0),
     enabled = quote.options.filter(o => o.enabled).length;
   const error = useMemo(() => {
     try {
-      validateQuote(quote);
+      validateProject(project);
+      if (project.groups.some(group => group.quote.parts.some(part => part.importMode === 'drawing-bounds')))
+        throw new Error(legacyFootprintNotice);
       return '';
     } catch (e) {
       return (e as Error).message;
     }
-  }, [quote]);
+  }, [project]);
   const density = quote.material === 'Carbon steel' ? 7850 : quote.material === 'Stainless steel' ? 7930 : 2700;
   const mass = active ? (active.area * quote.thickness * density * LB_PER_KG) / 1e9 : 0;
-  const update = (patch: Partial<Quote>) => setQuote(q => ({ ...q, ...patch }));
-  const changeMaterial = (patch: Partial<Quote>) =>
-    setQuote(q => ({
-      ...q,
-      ...patch,
-      options: q.options.map(o => ({ ...o, price: null })),
-    }));
+  const update = (patch: Partial<Quote>) => {
+    if (patch.name !== undefined)
+      setProject(current => ({
+        ...current,
+        name: patch.name!,
+        groups: current.groups.map(group => ({ ...group, quote: { ...group.quote, name: patch.name! } })),
+      }));
+    else setQuote(q => ({ ...q, ...patch }));
+  };
+  const changeMaterial = (patch: Partial<Quote>) => {
+    const changed = { ...quote, ...patch, options: quote.options.map(option => ({ ...option, price: null })) };
+    if (changed.spacingMode === 'auto' && Number.isFinite(changed.thickness) && changed.thickness > 0)
+      Object.assign(changed, autoQuotingSpacing(changed.thickness));
+    if (!Number.isFinite(changed.thickness) || changed.thickness <= 0 || changed.thickness > 100)
+      return setQuote(changed);
+    try {
+      const key = materialThicknessKey(changed.material, changed.thickness);
+      const target = project.groups.find(
+        group =>
+          group.id !== project.activeGroupId &&
+          materialThicknessKey(group.quote.material, group.quote.thickness) === key
+      );
+      const next = target
+        ? {
+            ...project,
+            activeGroupId: target.id,
+            groups: project.groups
+              .filter(group => group.id !== project.activeGroupId)
+              .map(group =>
+                group.id === target.id
+                  ? {
+                      ...group,
+                      quote: {
+                        ...group.quote,
+                        parts: [...group.quote.parts, ...changed.parts],
+                        options: group.quote.options.map(option => ({ ...option, price: null })),
+                      },
+                    }
+                  : group
+              ),
+          }
+        : {
+            ...project,
+            groups: project.groups.map(group =>
+              group.id === project.activeGroupId ? { ...group, quote: changed } : group
+            ),
+          };
+      validateProject(next);
+      setProject(next);
+      if (target)
+        toast.success('Parts combined with the matching material group. Review spacing and re-enter sheet prices.');
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  };
   const changeOption = (id: string, patch: Partial<SheetOption>) =>
     setQuote(q => ({
       ...q,
       options: q.options.map(o => (o.id === id ? editSheetOption(o, patch) : o)),
     }));
-  const stateRef = useRef({ quote, comparison, stale });
-  stateRef.current = { quote, comparison, stale };
-  function calculate() {
+  const stateRef = useRef({ project, quote, comparison, stale, snapshots });
+  stateRef.current = { project, quote, comparison, stale, snapshots };
+  useEffect(() => {
+    setPreviewId(null);
+    setSheet(0);
+    setZoom(1);
+    setSelected(null);
+  }, [project.activeGroupId]);
+  async function calculate() {
+    if (comparingRef.current || importingRef.current) return null;
+    const controller = new AbortController();
+    compareController.current = controller;
+    comparingRef.current = true;
+    setBusy(true);
     try {
-      const current = stateRef.current.quote;
-      validateQuote(current);
-      const next = compareSheets(current);
-      setSnapshot({ comparison: next, signature: JSON.stringify(current) });
-      setPreviewId(
-        next.recommendedId ?? next.results.find(r => r.complete)?.option.id ?? next.results[0]?.option.id ?? null
-      );
+      const current = stateRef.current.project;
+      validateProject(current);
+      if (current.groups.some(group => group.quote.parts.some(part => part.importMode === 'drawing-bounds')))
+        throw new Error(legacyFootprintNotice);
+      const groups = current.groups.filter(group => group.quote.parts.length);
+      const results: { id: string; material: string; thickness: number; comparison: Comparison }[] = [];
+      for (let index = 0; index < groups.length; index++) {
+        const group = groups[index];
+        setCompareProgress({
+          completed: index,
+          total: groups.length,
+          name: `${group.quote.material} · ${formatIn(group.quote.thickness)} in`,
+        });
+        const next = await compareSheetsInWorker(group.quote, { signal: controller.signal });
+        if (!mountedRef.current || controller.signal.aborted) return null;
+        setSnapshots(previous => ({
+          ...previous,
+          [group.id]: { comparison: next, signature: JSON.stringify(group.quote) },
+        }));
+        results.push({
+          id: group.id,
+          material: group.quote.material,
+          thickness: group.quote.thickness,
+          comparison: next,
+        });
+        setCompareProgress({
+          completed: index + 1,
+          total: groups.length,
+          name: `${group.quote.material} · ${formatIn(group.quote.thickness)} in`,
+        });
+      }
+      setPreviewId(null);
       setSheet(0);
       setZoom(1);
-      toast.success(`${next.results.length} sheet sizes compared.`);
-      return next;
+      toast.success(`${groups.length} material groups compared. Review each sheet order.`);
+      return results;
     } catch (e) {
-      toast.error((e as Error).message);
+      if (!controller.signal.aborted && mountedRef.current) toast.error((e as Error).message);
       return null;
+    } finally {
+      comparingRef.current = false;
+      compareController.current = null;
+      if (mountedRef.current) setBusy(false);
     }
   }
   function compare() {
-    setBusy(true);
-    setTimeout(() => {
-      calculate();
-      setBusy(false);
-    }, 30);
+    void calculate();
   }
   function preview(result: OptionResult) {
     setPreviewId(result.option.id);
     setSheet(0);
     setZoom(1);
   }
-  async function importFiles(files: FileList | null) {
-    if (!files?.length || importingRef.current) return;
+  function importFiles(files: FileList | null) {
+    if (!files?.length || importingRef.current || comparingRef.current) return;
     const selectedFiles = Array.from(files);
     if (importRef.current) importRef.current.value = '';
     if (selectedFiles.length > MAX_DXF_FILES) {
       toast.error('Select up to 100 DXF files at a time. No files were imported.', { duration: 9000 });
       return;
     }
-    const existing = stateRef.current.quote.parts;
+    setPendingFiles(selectedFiles);
+  }
+  async function confirmImport(selectedFiles: File[], assignments: DXFFileAssignment[]) {
+    if (importingRef.current || comparingRef.current) return;
+    setPendingFiles(null);
+    const existing = stateRef.current.project.groups.flatMap(group => group.quote.parts);
     importingRef.current = true;
     const controller = new AbortController();
     importController.current = controller;
@@ -309,13 +440,16 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
       const result = await importDXFBatch(selectedFiles, existing, {
         units: unitless as 'in' | 'mm',
         signal: controller.signal,
-        onProgress: setImportProgress,
+        onProgress: progress => {
+          if (mountedRef.current) setImportProgress(progress);
+        },
       });
       if (!mountedRef.current) return;
-      setQuote(current => ({
-        ...current,
-        parts: [...current.parts, ...result.parts],
-      }));
+      const rows = result.results.flatMap((file, index) =>
+        file.status === 'imported' && file.partIds?.length ? [{ ...assignments[index], partIds: file.partIds }] : []
+      );
+      const next = addImportedParts(stateRef.current.project, rows, result.parts);
+      setProject(next);
       setImportResults(result.results);
       setSelected(result.parts[0]?.id ?? null);
       const successful = result.results.filter(file => file.status === 'imported').length;
@@ -324,6 +458,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
       else if (successful) toast.success(`${successful} files imported · ${result.parts.length} designs added.`);
       else toast.error('No files were imported. Review the file results.');
     } catch (error) {
+      if (!mountedRef.current) return;
       toast.error((error as Error).message, { duration: 9000 });
       setImportOpen(false);
     } finally {
@@ -359,9 +494,14 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
         color: quote.parts.length % 4,
       };
       validatePart(p);
-      const next = { ...quote, parts: [...quote.parts, p] };
-      validateQuote(next);
-      setQuote(next);
+      const next = {
+        ...project,
+        groups: project.groups.map(group =>
+          group.id === project.activeGroupId ? { ...group, quote: { ...quote, parts: [...quote.parts, p] } } : group
+        ),
+      };
+      validateProject(next);
+      setProject(next);
       setShowAdd(false);
       toast.success('Part added. Compare sheets to update the estimate.');
     } catch (e) {
@@ -371,12 +511,12 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
   function save() {
     try {
       download(
-        JSON.stringify(quoteToFile(quote), null, 2),
-        safeName(quote.name) + '.estimate.json',
+        JSON.stringify(projectToFile(project), null, 2),
+        safeName(project.name) + '.estimate.json',
         'application/json'
       );
-      setSavedSignature(JSON.stringify(quote));
-      toast.success('Editable estimate saved in inches.');
+      setSavedSignature(JSON.stringify(project));
+      toast.success('All material groups saved in inches.');
     } catch (e) {
       toast.error((e as Error).message);
     }
@@ -385,9 +525,14 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
     if (!file) return;
     try {
       if (file.size > 5_000_000) throw new Error('Estimate limit: 5 MB.');
-      const loaded = quoteFromFile(JSON.parse(await file.text()));
-      if (importingRef.current) throw new Error('Finish the DXF import before opening another estimate.');
-      setQuote(loaded);
+      const loaded = projectFromFile(JSON.parse(await file.text()));
+      if (!mountedRef.current) return;
+      if (importingRef.current || comparingRef.current)
+        throw new Error('Finish the current operation before opening another estimate.');
+      setProject(loaded);
+      setSnapshots({});
+      setPreviewId(null);
+      setSheet(0);
       setSavedSignature(JSON.stringify(loaded));
       setSelected(null);
       toast.success('Estimate loaded. Compare sheets to calculate requirements.');
@@ -417,7 +562,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
       ['Required parts', requested],
       ['Placed parts', nest.placements.length],
       ['Purchased area ft2', squareFeet(active.area)],
-      [hasDrawingBounds ? 'Estimated footprint area ft2' : 'Net part area ft2', squareFeet(nest.area)],
+      ['Net part area ft2', squareFeet(nest.area)],
       ['Unused area ft2', squareFeet(active.area - nest.area)],
       ['Utilization %', nest.utilization],
       ['Approx stock weight lb', mass],
@@ -425,10 +570,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
       ['Estimated material total USD', active.cost === null ? 'Not entered' : active.cost.toFixed(2)],
       [
         'Basis',
-        'Conservative rectangular-envelope estimate; one stock size per option. Freight, tax, labor and consumables excluded.' +
-          (hasDrawingBounds
-            ? ' Whole-drawing footprints include openings and may overstate part area and utilization.'
-            : ''),
+        'Actual-contour estimating layout; one material, thickness and stock size per order option. Holes are not used for part placement. Freight, tax, labor and consumables excluded.',
       ],
       [],
       ['Compared sheet size', 'Fits all parts', 'Sheets', 'Purchased ft2', 'Utilization %', 'Material cost USD'],
@@ -449,8 +591,8 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
           p.quantity,
           mmToIn(b.width),
           mmToIn(b.height),
-          p.rotate ? '0 / 90 degrees' : '0 degrees',
-          p.importMode === 'drawing-bounds' ? 'Whole drawing footprint; verify dimensions' : 'Closed contours',
+          p.rotate ? '0 / 90 / 180 / 270 degrees' : '0 degrees',
+          p.importMode === 'drawing-bounds' ? 'Legacy footprint; re-import DXF before nesting' : 'Closed contours',
         ];
       }),
     ];
@@ -464,15 +606,14 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
   function exportPreview() {
     if (stale || !stock || !nest) return;
     const paths = visible
-      .map(
-        pl =>
-          `<path d="${svgPath(
-            transformLoops(
-              quote.parts.find(p => p.id === pl.partId)!,
-              pl
-            )
-          )}" fill="#dbeafe" fill-rule="evenodd" stroke="#1d4ed8" stroke-width="1"/>`
-      )
+      .map(pl => {
+        const part = quote.parts.find(p => p.id === pl.partId)!;
+        const outline = `<path d="${svgPath(transformLoops(part, pl))}" fill="#dbeafe" fill-rule="evenodd" stroke="#1d4ed8" stroke-width="1"/>`;
+        const references = transformReferencePaths(part, pl)
+          .map(path => `<path d="${referencePath(path)}" fill="none" stroke="#b45309" stroke-width="0.4"/>`)
+          .join('');
+        return outline + references;
+      })
       .join('');
     download(
       `<svg xmlns="http://www.w3.org/2000/svg" width="${mmToIn(stock.width)}in" height="${mmToIn(stock.height)}in" viewBox="0 0 ${stock.width} ${stock.height}"><rect width="100%" height="100%" fill="white"/><g transform="translate(0 ${stock.height}) scale(1 -1)">${paths}</g></svg>`,
@@ -500,14 +641,15 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
     for (const tool of [
       {
         name: 'read_material_estimate',
-        description: 'Read current parts and enabled sheet sizes in inches, plus calculation state.',
+        description:
+          'Read all material groups, parts and enabled sheet sizes in inches, plus the active calculation state.',
         inputSchema: schema,
         annotations: { readOnlyHint: true, untrustedContentHint: true },
         execute: (p: unknown) => {
           check(p);
           const s = stateRef.current;
           return {
-            estimate: quoteToFile(s.quote),
+            estimate: projectToFile(s.project),
             stale: s.stale,
             recommendedId: s.comparison.recommendedId,
           };
@@ -516,23 +658,28 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
       {
         name: 'compare_sheet_sizes',
         description:
-          'Compare enabled sheet sizes for the current visible parts and quantities; update the material order estimate. Does not order stock.',
+          'Compare enabled sheet sizes separately for every material and thickness group; update the estimated sheet orders. Does not order stock.',
         inputSchema: schema,
         annotations: { readOnlyHint: false, untrustedContentHint: true },
         execute: async (p: unknown) => {
           check(p);
-          const result = actionsRef.current();
+          const result = await actionsRef.current();
           if (!result) throw new Error('Check estimate inputs.');
           await new Promise<void>(r => requestAnimationFrame(() => r()));
           return {
-            recommendedId: result.recommendedId,
-            reason: result.reason,
-            options: result.results.map(r => ({
-              size: sheetLabel(r.option),
-              sheets: r.nest?.sheets ?? null,
-              complete: r.complete,
-              purchasedSquareFeet: r.complete ? squareFeet(r.area) : null,
-              materialCostUSD: r.complete ? r.cost : null,
+            groups: result.map(group => ({
+              id: group.id,
+              material: group.material,
+              thicknessInches: mmToIn(group.thickness),
+              recommendedId: group.comparison.recommendedId,
+              reason: group.comparison.reason,
+              options: group.comparison.results.map(r => ({
+                size: sheetLabel(r.option),
+                sheets: r.nest?.sheets ?? null,
+                complete: r.complete,
+                purchasedSquareFeet: r.complete ? squareFeet(r.area) : null,
+                materialCostUSD: r.complete ? r.cost : null,
+              })),
             })),
           };
         },
@@ -580,7 +727,69 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
           </div>
         </div>
       </header>
-      <fieldset className="workspace-controls" disabled={importing}>
+      {busy && (
+        <div className="compare-progress" role="status">
+          <span>
+            Comparing group {Math.min(compareProgress.completed + 1, compareProgress.total)} of {compareProgress.total}{' '}
+            · {compareProgress.name}
+          </span>
+          <button className="secondary compact" onClick={() => compareController.current?.abort()}>
+            Cancel comparison
+          </button>
+        </div>
+      )}
+      <fieldset className="workspace-controls" disabled={importing || busy}>
+        <div className="material-groups">
+          <label className="field-label" htmlFor={fieldId + '-group'}>
+            <span>Material &amp; thickness group</span>
+            <select
+              id={fieldId + '-group'}
+              className="assignment-select"
+              value={project.activeGroupId}
+              onChange={event => setProject(current => ({ ...current, activeGroupId: event.target.value }))}
+            >
+              {project.groups.map(group => (
+                <option key={group.id} value={group.id}>
+                  {group.quote.material} · {formatIn(group.quote.thickness)} in ·{' '}
+                  {group.quote.parts.reduce((count, part) => count + part.quantity, 0)} parts
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="group-orders" aria-label="Sheet orders by material and thickness">
+            {project.groups.map(group => {
+              const cached = snapshots[group.id];
+              const current = cached?.signature === JSON.stringify(group.quote);
+              const result = current
+                ? cached.comparison.results.find(option => option.option.id === cached.comparison.recommendedId)
+                : undefined;
+              const count = group.quote.parts.reduce((total, part) => total + part.quantity, 0);
+              return (
+                <button
+                  key={group.id}
+                  className={'group-order' + (group.id === project.activeGroupId ? ' selected' : '')}
+                  aria-pressed={group.id === project.activeGroupId}
+                  onClick={() => setProject(previous => ({ ...previous, activeGroupId: group.id }))}
+                >
+                  <strong>
+                    {group.quote.material} · {formatIn(group.quote.thickness)} in
+                  </strong>
+                  <span>
+                    {count} parts ·{' '}
+                    {result?.complete && result.nest
+                      ? `${result.nest.sheets} × ${sheetLabel(result.option)}`
+                      : count
+                        ? current
+                          ? 'Review stock options'
+                          : 'Compare to calculate'
+                        : 'Empty group'}
+                  </span>
+                  {result?.complete && result.cost !== null && <small>{money(result.cost)}</small>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
         <Tabs value={tab} onValueChange={v => setTab(v as string)}>
           <div className="nav-row">
             <TabsList variant="line">
@@ -588,7 +797,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
               <TabsTrigger value="stock">Stock sizes & prices</TabsTrigger>
               <TabsTrigger value="about">How estimates work</TabsTrigger>
             </TabsList>
-            <span className="subtle">One material · one thickness · a clear sheet order</span>
+            <span className="subtle">Actual contours · separate material sheet orders</span>
           </div>
           <TabsContent value="nest">
             <h1 className="sr-only">Sheet material quoting workspace</h1>
@@ -613,7 +822,12 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                 <button
                   className="secondary compact"
                   onClick={() => {
-                    update({ name: 'Untitled estimate', parts: [] });
+                    const next = createBlankProject();
+                    setProject(next);
+                    setSavedSignature(JSON.stringify(next));
+                    setSnapshots({});
+                    setImportResults([]);
+                    setPreviewId(null);
                     setSelected(null);
                   }}
                 >
@@ -625,7 +839,11 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                 <button className="secondary compact" onClick={save}>
                   <FileJson size={16} /> Save
                 </button>
-                <button className="primary" onClick={compare} disabled={busy || !!error || !quote.parts.length}>
+                <button
+                  className="primary"
+                  onClick={compare}
+                  disabled={busy || !!error || !project.groups.some(group => group.quote.parts.length)}
+                >
                   <Play size={16} fill="currentColor" />
                   {busy ? 'Comparing…' : 'Compare sheets'}
                 </button>
@@ -741,6 +959,9 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                         >
                           <svg viewBox={`-20 -20 ${b.width + 40} ${b.height + 40}`}>
                             <path d={svgPath(p.loops)} fill="currentColor" fillRule="evenodd" />
+                            {p.referencePaths?.map((path, index) => (
+                              <path key={index} d={referencePath(path)} fill="none" stroke="#fbbf24" strokeWidth={1} />
+                            ))}
                           </svg>
                         </button>
                         <div className="part-details">
@@ -750,7 +971,10 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                           <small>
                             {formatIn(b.width)} × {formatIn(b.height)} in
                           </small>
-                          {p.importMode === 'drawing-bounds' && <small>Whole drawing footprint · verify size</small>}
+                          {p.importMode === 'drawing-bounds' && <small>Legacy footprint · re-import DXF</small>}
+                          {!!p.referencePaths?.length && (
+                            <small>{p.referencePaths.length} internal reference paths · review intent</small>
+                          )}
                           <div className="part-controls">
                             <Input
                               aria-label={`Quantity for ${p.name}`}
@@ -775,7 +999,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                               className={`icon-button ${p.rotate ? 'active' : ''}`}
                               aria-label={`${p.rotate ? 'Lock' : 'Allow'} rotation for ${p.name}`}
                               aria-pressed={p.rotate}
-                              title={p.rotate ? '90° rotation allowed' : 'Grain locked'}
+                              title={p.rotate ? '0°, 90°, 180° and 270° rotation allowed' : 'Grain locked'}
                               onClick={() =>
                                 update({
                                   parts: quote.parts.map(a => (a.id === p.id ? { ...a, rotate: !a.rotate } : a)),
@@ -923,6 +1147,18 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                                   strokeWidth={selected === p.id ? 5 : 2.5}
                                   opacity={selected && selected !== p.id ? 0.4 : 1}
                                 />
+                                {transformReferencePaths(p, pl).map((path, index) => (
+                                  <path
+                                    key={index}
+                                    d={referencePath(path)}
+                                    fill="none"
+                                    stroke="#fbbf24"
+                                    strokeWidth={0.8}
+                                    opacity={0.95}
+                                  >
+                                    <title>Internal reference path · verify marking or cut intent</title>
+                                  </path>
+                                ))}
                                 {labels && (
                                   <text
                                     transform={`translate(${pl.x + pl.width / 2} ${pl.y + pl.height / 2}) scale(1 -1)`}
@@ -953,7 +1189,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                 )}
                 <div className="canvas-footer">
                   <span>
-                    {selected ? quote.parts.find(p => p.id === selected)?.name : 'One-inch grid · conservative nest'}
+                    {selected ? quote.parts.find(p => p.id === selected)?.name : 'One-inch grid · actual part contours'}
                   </span>
                   <label className="switch-inline" htmlFor={fieldId + '-labels'}>
                     Labels
@@ -996,10 +1232,38 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                       label="Edge margin"
                       value={quote.margin}
                       unit="in"
-                      onChange={v => update({ margin: v })}
+                      onChange={v => update({ margin: v, spacingMode: 'manual' })}
                     />
-                    <NumberField label="Part gap" value={quote.gap} unit="in" onChange={v => update({ gap: v })} />
+                    <NumberField
+                      label="Part gap"
+                      value={quote.gap}
+                      unit="in"
+                      onChange={v => update({ gap: v, spacingMode: 'manual' })}
+                    />
                   </div>
+                  <label className="switch-inline" htmlFor={fieldId + '-auto-spacing'}>
+                    <span id={fieldId + '-auto-spacing-label'}>Auto quoting allowance</span>
+                    <Switch
+                      id={fieldId + '-auto-spacing'}
+                      aria-labelledby={fieldId + '-auto-spacing-label'}
+                      checked={quote.spacingMode === 'auto'}
+                      onCheckedChange={auto => {
+                        try {
+                          update(
+                            auto
+                              ? { ...autoQuotingSpacing(quote.thickness), spacingMode: 'auto' }
+                              : { spacingMode: 'manual' }
+                          );
+                        } catch (e) {
+                          toast.error((e as Error).message);
+                        }
+                      }}
+                    />
+                  </label>
+                  <p className="helper inset-free">
+                    Starting estimate: gap = max(1/8 in, thickness); edge = max(3/8 in, twice thickness). Editable
+                    quoting allowances, not machine cutting parameters.
+                  </p>
                   <label className="field-label" htmlFor={fieldId + '-priority'}>
                     <span>Compare by</span>
                     <Picker
@@ -1130,7 +1394,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
               {!stale && active?.complete && nest && (
                 <div className="quote-metrics">
                   <div>
-                    <span>{hasDrawingBounds ? 'Estimated footprint area' : 'Net part area'}</span>
+                    <span>Net part area</span>
                     <b>{fmt(squareFeet(nest.area), 2)} ft²</b>
                   </div>
                   <div>
@@ -1152,9 +1416,8 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
             </section>
             <div className="workspace-bottom">
               <p>
-                <Info size={15} /> Conservative rectangular bounds may require more sheets than irregular-shape nesting.
-                {hasDrawingBounds &&
-                  ' Whole-drawing footprints include openings; part area and utilization may be overstated.'}
+                <Info size={15} /> Actual contours are nested with the selected gap and margins. The search does not
+                prove the minimum sheet count, and it does not place parts inside holes.
               </p>
               <div>
                 <button disabled={stale || !visible.length} onClick={exportPreview}>
@@ -1268,7 +1531,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                 <p>Each result is a complete order using a single stock size. Mixed-size orders are not compared.</p>
                 <button
                   className="primary"
-                  disabled={busy || !!error || !quote.parts.length}
+                  disabled={busy || !!error || !project.groups.some(group => group.quote.parts.length)}
                   onClick={() => {
                     setTab('nest');
                     compare();
@@ -1305,15 +1568,15 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                 <section className="section-card">
                   <h2>What the estimate means</h2>
                   <p>
-                    Counts come from a feasible layout with conservative rectangular bounds around each part. Three
-                    orderings are tested per stock size. The result may require more material than an advanced
-                    irregular-shape nest; it is not proof of the smallest possible sheet order.
+                    Counts come from feasible placements of the actual outer profiles, including concave shapes. Circles
+                    remain circles and curves are approximated within the import tolerance. Different orderings and
+                    allowed quarter-turn rotations are tried. This search does not prove the smallest possible sheet
+                    order.
                   </p>
                   <p>
-                    Utilization is contour area minus holes, divided by full purchased sheet area. Whole-drawing
-                    footprints use their full rectangular area, including openings, and can overstate utilization.
-                    “Unused area” includes spaces and holes, some of which may be reusable. Approximate weight uses
-                    typical material density.
+                    Utilization is contour area minus holes, divided by full purchased sheet area. Parts are not nested
+                    inside holes. “Unused area” includes spaces and holes, some of which may be reusable. Approximate
+                    weight uses typical material density.
                   </p>
                   <p>
                     Optional prices cover sheet material only. They exclude freight, tax, labor, cutting time and
@@ -1331,25 +1594,27 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                   files default to inches unless you select millimeters before import.
                 </p>
                 <p>
-                  Drawings with open or intersecting paths, or supported splines, use one conservative rectangular
-                  footprint for the whole file. These parts are labeled “Whole drawing footprint”; check the overall
-                  size and set quantity for the whole drawing. Spline bounds can be larger than the curve. Text and
-                  leader annotations on the FORMAT layer are omitted with an import note. Unsupported geometry,
-                  including blocks, wide polylines and sloped 3D paths, is reported without adding a partial file.
-                  Before ordering, check imported part dimensions against your drawing.
+                  Supported splines are converted to their curved profiles. Unclosed paths fully contained by one part
+                  are shown as thin reference lines: review whether they are markings or incomplete cuts. Ambiguous,
+                  open outer, touching or intersecting outlines are rejected with an explanation. The FORMAT annotation
+                  layer is omitted with a warning. Blocks, wide polylines and sloped 3D paths are reported without
+                  adding a partial file. Older saved rectangular footprints must be removed and their DXFs re-imported.
+                  Check imported dimensions and reference-path intent against your drawing.
                 </p>
                 <p>
-                  Save the estimate to retain parts, quantities, stock options and prices. Files use inches. Legacy job
-                  files remain supported. Material Nesting starts with a fresh, empty estimate each time you open the
-                  section. Save a file before leaving, refreshing, signing out, or switching companies. Use Open to
-                  continue a saved estimate.
+                  Assign material and thickness to selected file rows before import. Each matching group keeps its own
+                  stock options, prices and spacing. Save retains all groups and the active selection in inches; older
+                  single-material files open as one group. Material Nesting starts with a fresh, empty estimate each
+                  time you open the section. Save a file before leaving, refreshing, signing out, or switching
+                  companies. Use Open to continue a saved estimate.
                 </p>
               </section>
               <section className="section-card">
                 <h2>Current scope</h2>
                 <p>
-                  One material and thickness per estimate. Up to 100 files per upload, 300 designs, 300 total parts, 12
-                  stock options, 2,000 vertices per contour and 20,000 vertices per job. One stock size per order
+                  Multiple material and thickness groups per estimate, with separate sheet orders. Up to 100 files per
+                  upload, 300 designs and total parts across all groups, 12 stock options per group, 2,000 vertices per
+                  contour and 20,000 vertices including reference paths across the project. One stock size per order
                   option. There is no machine connection, cutting technology library, postprocessor or purchase
                   submission.
                 </p>
@@ -1362,6 +1627,14 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
           </TabsContent>
         </Tabs>
       </fieldset>
+      {pendingFiles && (
+        <DXFAssignments
+          files={pendingFiles}
+          initial={{ material: quote.material, thickness: quote.thickness }}
+          onClose={() => setPendingFiles(null)}
+          onConfirm={assignments => void confirmImport(pendingFiles, assignments)}
+        />
+      )}
       <Dialog
         open={importOpen}
         onOpenChange={open => {
@@ -1404,9 +1677,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                   <div className={'import-result ' + result.status} key={i}>
                     <div>
                       <strong>{result.name}</strong>
-                      <span>
-                        {result.status === 'imported' ? (result.footprintOnly ? 'Footprint' : 'Imported') : 'Skipped'}
-                      </span>
+                      <span>{result.status === 'imported' ? 'Imported' : 'Skipped'}</span>
                     </div>
                     <p>{result.message}</p>
                     {result.warnings?.map((warning, index) => (
@@ -1416,8 +1687,8 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                 ))}
               </div>
               <p className="import-footnote">
-                New designs start at quantity 1. Closed outer profiles create separate designs. A whole-drawing
-                footprint counts as one design for the entire file. Skipped files add no parts.
+                New designs start at quantity 1. Closed outer profiles create separate designs in their assigned
+                material and thickness groups. Skipped files add no parts.
               </p>
               <button className="primary" onClick={() => setImportOpen(false)}>
                 Review parts
@@ -1479,10 +1750,10 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
         <DialogContent className="app-dialog">
           <DialogHeader>
             <DialogTitle>Get your sheet order in a few steps</DialogTitle>
-            <DialogDescription>One estimate covers one material and thickness.</DialogDescription>
+            <DialogDescription>Each material and thickness has its own nest and sheet order.</DialogDescription>
           </DialogHeader>
           <ol className="help-list">
-            <li>Add part shapes or import DXFs. Check dimensions in inches.</li>
+            <li>Add part shapes or import DXFs. Assign file materials and thicknesses in inches.</li>
             <li>Set quantities, grain locks, edge margin and spacing.</li>
             <li>Enable stock sizes you can buy. Add supplier prices if needed.</li>
             <li>Compare sheets and review the recommended size and quantity.</li>
