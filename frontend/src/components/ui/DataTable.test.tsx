@@ -751,3 +751,20 @@ describe('DataTable — rowClassName', () => {
     expect(byName('Alpha')).not.toHaveClass('opacity-60');
   });
 });
+
+
+test('external grouped sorting preserves server row order without a duplicate pager', () => {
+  const changed = jest.fn();
+  render(<DataTable columns={columns} data={rows} rowKey={row => row.id} manualSorting sort={{ key: 'name', dir: 'asc' }} onSortChange={changed} csvExport={{ filename: 'loaded', label: 'Export loaded rows' }} />);
+  expect(getDataRowNames()).toEqual(['Charlie', 'Alpha', 'Bravo']);
+  fireEvent.click(screen.getByRole('button', { name: /Name/i }));
+  expect(changed).toHaveBeenCalledWith({ key: 'name', dir: 'desc' });
+  expect(screen.queryByRole('button', { name: 'Next page' })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Export loaded rows' })).toBeInTheDocument();
+});
+
+test('both server paging directions are disabled while a page request is pending', () => {
+  render(<DataTable columns={columns} data={rows} rowKey={row => row.id} serverPagination={{ page: 2, pageSize: 50, hasNext: true, onPageChange: jest.fn(), loading: true }} />);
+  expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled();
+});

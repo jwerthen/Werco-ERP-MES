@@ -405,7 +405,7 @@ Coverage: 73 page files; 68 map to at least one catalog tool. The five that do n
 
 Every operation in `app.openapi()` that **declares `security`** and carries none of the
 `EXCLUDED_TAGS` — `Authentication`, `Carrier Webhooks`, `Error Logging`, its router-level twin
-`errors`, and `WebSocket` (listed for completeness; WebSocket routes never appear in OpenAPI) —
+`errors`, `Import Batches`, and `WebSocket` (listed for completeness; WebSocket routes never appear in OpenAPI) —
 minus two further, named sets:
 
 - **`PUBLIC_OPERATIONS`** — the 17 routes with no `security` block (station logins,
@@ -421,6 +421,11 @@ minus two further, named sets:
   mints purchase orders SENT — exactly the side door around "create lands DRAFT, release is
   explicit" (§9) and "never fake shop-floor time" that the convenience tools exist to close.
   They stay an Import Center action for an admin at cutover (`EXCEL_MIGRATION_RUNBOOK.md`).
+
+The `Import Batches` tag also excludes the recoverable Import Center review, receipt,
+correction and commit routes. These wrap the same cutover loaders, including their
+historical status transitions, so exposing a generic batch commit would reopen the
+excluded-loader path. File correction and credential input stay in Import Center.
 
 On the commit that shipped API tokens: 706 operations, 689 secured, 680 candidates, 16 shadowed
 (§8), 2 excluded → **662 generated tools**.

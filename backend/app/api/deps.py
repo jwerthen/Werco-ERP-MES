@@ -36,7 +36,11 @@ KIOSK_TOKEN_PATH_PREFIXES = ("/api/v1/shop-floor",)
 # unauthenticated audit-forgery and cross-tenant badge-enumeration surface; this
 # entry is therefore now load-bearing rather than defensive — it is what lets a
 # badge-minted crew-station token record its own logout.
-KIOSK_TOKEN_EXACT_PATHS = ("/api/v1/auth/employee-logout",)
+KIOSK_TOKEN_EXACT_PATHS = (
+    "/api/v1/auth/employee-logout",
+    "/api/v1/runtime-metrics/config",
+    "/api/v1/runtime-metrics/samples",
+)
 # Deny-list carved out of the shop-floor prefix: the crew station never needs
 # these, and a badge-minted 5-minute token for a MANAGER/ADMIN must not be able
 # to persist access (station PIN reset/revoke), approve labor (G5-A is a

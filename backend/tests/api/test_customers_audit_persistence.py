@@ -37,10 +37,8 @@ Handlers covered (the ones that emit audit rows):
 - ``DELETE /customers/{id}?hard_delete``-> hard delete -> action "DELETE"
 - ``POST   /customers/{id}/restore``    -> restore     -> action "RESTORE"
 
-``create_customer`` / ``update_customer`` do not invoke ``AuditService`` at all
-in this router, so there is no commit-ordering invariant to probe there; a
-guard test documents that absence rather than asserting a row that is never
-written.
+Customer partial updates now record supplied-field old/new values before commit.
+The update test probes their durability as well.
 
 We do NOT insert ``AuditLog`` rows directly (tamper-evident hash chain); they
 are produced by the endpoints and only read back here. The default seeded
@@ -258,16 +256,12 @@ def test_restore_customer_persists_restore_audit(client: TestClient, db_session:
 
 
 # ---------------------------------------------------------------------------
-# Guard: create/update in this router emit no audit row (no invariant to probe)
+# Partial edits preserve a committed audit of only supplied fields
 # ---------------------------------------------------------------------------
 
 
-def test_create_and_update_customer_emit_no_audit_rows(client: TestClient, db_session: Session):
-    """Documents that ``create_customer`` and ``update_customer`` do NOT log to
-    ``AuditService`` in this router, so there is no commit-ordering invariant to
-    assert for them. If audit logging is later added to these handlers, this guard
-    will fail and prompt committed-row coverage like the delete/restore tests above.
-    """
+def test_customer_partial_update_persists_supplied_field_audit(client: TestClient, db_session: Session):
+    """A phone-only edit durably records that change without replacing account fields."""
     admin = _make_user(db_session, role=UserRole.ADMIN)
 
     create_resp = client.post(
@@ -285,7 +279,8 @@ def test_create_and_update_customer_emit_no_audit_rows(client: TestClient, db_se
     )
     assert update_resp.status_code == status.HTTP_200_OK, update_resp.text
 
-    # No audit rows of any action for this resource (read after a rollback so we
-    # only count committed rows -- and there should be none at all).
-    rows = _committed_audit_rows(db_session, resource_id=new_id)
-    assert rows == [], "create/update do not log audit in this router -- add committed-row coverage if that changes"
+    rows = _committed_audit_rows(db_session, resource_id=new_id, action="UPDATE")
+    assert len(rows) == 1
+    assert rows[0].company_id == COMPANY_A
+    assert rows[0].old_values == {"phone": None}
+    assert rows[0].new_values == {"phone": "555-0100"}

@@ -1,3 +1,4 @@
+import { workOrderBrowseFixture } from '../testUtils/workOrderBrowseFixture';
 /**
  * WorkOrders — URL-param filters, shared debounced search, grouped CSV export.
  *
@@ -34,7 +35,7 @@ import WorkOrders from './WorkOrders';
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {
-    getWorkOrders: jest.fn(),
+    browseWorkOrders: jest.fn(),
     deleteWorkOrder: jest.fn(),
     releaseWorkOrder: jest.fn(),
   },
@@ -57,6 +58,7 @@ jest.mock('../services/realtime', () => ({
   buildWsUrl: () => 'ws://localhost/ws/test',
 }));
 
+const mockRows = jest.fn();
 const mockedApi = api as jest.Mocked<typeof api>;
 
 const workOrders = [
@@ -136,11 +138,24 @@ async function waitForLoadedList() {
 describe('WorkOrders — filters round-trip through URL params', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockedApi.getWorkOrders.mockResolvedValue(workOrders);
+    mockedApi.browseWorkOrders.mockImplementation(async params => {
+      const sourceParams: Record<string,string> = {};
+      if (params?.status) sourceParams.status = params.status;
+      if (params?.search) sourceParams.search = params.search;
+      return workOrderBrowseFixture(await mockRows(sourceParams), params);
+    });
+    mockRows.mockResolvedValue(workOrders);
   });
 
   afterEach(() => {
     jest.useRealTimers();
+  });
+
+  it('restores a bookmarked text search and sends it to the bounded endpoint', async () => {
+    renderAt('/work-orders?search=WO-1001&customer=Acme+Aero');
+    expect(screen.getByLabelText('Search work orders')).toHaveValue('WO-1001');
+    await waitForLoadedList();
+    expect(mockedApi.browseWorkOrders).toHaveBeenCalledWith(expect.objectContaining({ search: 'WO-1001', customer: 'Acme Aero', limit: 50, skip: 0 }));
   });
 
   it('reflects an incoming ?status=in_progress in the status select and the fetch', async () => {
@@ -148,7 +163,7 @@ describe('WorkOrders — filters round-trip through URL params', () => {
     await waitForLoadedList();
 
     expect(screen.getByLabelText('Status filter')).toHaveValue('in_progress');
-    expect(mockedApi.getWorkOrders).toHaveBeenCalledWith({ status: 'in_progress' });
+    expect(mockRows).toHaveBeenCalledWith({ status: 'in_progress' });
   });
 
   it('writes select changes to the URL and clears the param back to a clean URL', async () => {
@@ -161,7 +176,7 @@ describe('WorkOrders — filters round-trip through URL params', () => {
     fireEvent.change(screen.getByLabelText('Status filter'), { target: { value: 'released' } });
     expect(locationSearch()).toBe('?status=released');
     await waitFor(() =>
-      expect(mockedApi.getWorkOrders).toHaveBeenLastCalledWith({ status: 'released' })
+      expect(mockRows).toHaveBeenLastCalledWith({ status: 'released' })
     );
 
     // Back to the default ("All Active") deletes the param entirely.
@@ -232,7 +247,7 @@ describe('WorkOrders — filters round-trip through URL params', () => {
     expect(screen.getByLabelText('Customer filter')).toHaveValue('Beta & Defense, Inc.');
     expect(screen.getByLabelText('Group work orders')).toHaveValue('part');
     // ...the fetch carried the status...
-    expect(mockedApi.getWorkOrders).toHaveBeenCalledWith({ status: 'in_progress' });
+    expect(mockRows).toHaveBeenCalledWith({ status: 'in_progress' });
     // ...and only the matching row renders, grouped under its part.
     expect(await screen.findByRole('heading', { name: 'PN-BBB' })).toBeInTheDocument();
     expect(screen.getAllByRole('link', { name: 'WO-1002' }).length).toBeGreaterThan(0);
@@ -241,6 +256,7 @@ describe('WorkOrders — filters round-trip through URL params', () => {
   });
 
   it('browser Back reverts both the controls and the visible rows', async () => {
+    mockRows.mockResolvedValue(workOrders.map(row => ({ ...row, status: 'in_progress' })));
     renderAt('/work-orders');
     await waitForLoadedList();
 
@@ -250,9 +266,9 @@ describe('WorkOrders — filters round-trip through URL params', () => {
     fireEvent.change(screen.getByLabelText('Customer filter'), { target: { value: 'Acme Aero' } });
     expect(locationSearch()).toBe('?status=in_progress&customer=Acme+Aero');
 
-    // The client-side customer filter hides the other customer's rows.
-    await waitFor(() => expect(screen.queryAllByRole('link', { name: 'WO-1002' })).toHaveLength(0));
-    expect(screen.getAllByRole('link', { name: 'WO-1001' }).length).toBeGreaterThan(0);
+    // Wait for the server-filtered response before asserting the displayed population.
+    expect((await screen.findAllByRole('link', { name: 'WO-1001' })).length).toBeGreaterThan(0);
+    expect(screen.queryAllByRole('link', { name: 'WO-1002' })).toHaveLength(0);
 
     // Back: the URL is the single source of truth, so BOTH the select and the
     // rows revert — a mount-read useState copy of the params would keep
@@ -275,7 +291,13 @@ describe('WorkOrders — filters round-trip through URL params', () => {
 describe('WorkOrders — search debounced through the shared hook', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockedApi.getWorkOrders.mockResolvedValue(workOrders);
+    mockedApi.browseWorkOrders.mockImplementation(async params => {
+      const sourceParams: Record<string,string> = {};
+      if (params?.status) sourceParams.status = params.status;
+      if (params?.search) sourceParams.search = params.search;
+      return workOrderBrowseFixture(await mockRows(sourceParams), params);
+    });
+    mockRows.mockResolvedValue(workOrders);
   });
 
   afterEach(() => {
@@ -285,7 +307,7 @@ describe('WorkOrders — search debounced through the shared hook', () => {
   it('does not refetch while typing; a single fetch fires 250ms after the last keystroke', async () => {
     renderAt('/work-orders');
     await waitForLoadedList();
-    expect(mockedApi.getWorkOrders).toHaveBeenCalledTimes(1);
+    expect(mockRows).toHaveBeenCalledTimes(1);
 
     jest.useFakeTimers();
     const input = screen.getByLabelText('Search work orders') as HTMLInputElement;
@@ -293,7 +315,7 @@ describe('WorkOrders — search debounced through the shared hook', () => {
     // Keystrokes update the input immediately but trigger no fetch.
     fireEvent.change(input, { target: { value: 'WO-1' } });
     expect(input.value).toBe('WO-1');
-    expect(mockedApi.getWorkOrders).toHaveBeenCalledTimes(1);
+    expect(mockRows).toHaveBeenCalledTimes(1);
 
     // Part-way through the window, keep typing — the timer resets, still no fetch.
     act(() => {
@@ -303,21 +325,27 @@ describe('WorkOrders — search debounced through the shared hook', () => {
     act(() => {
       jest.advanceTimersByTime(249);
     });
-    expect(mockedApi.getWorkOrders).toHaveBeenCalledTimes(1);
+    expect(mockRows).toHaveBeenCalledTimes(1);
 
     // Crossing 250ms idle fires exactly ONE fetch, with the FINAL query.
     await act(async () => {
       jest.advanceTimersByTime(1);
     });
-    expect(mockedApi.getWorkOrders).toHaveBeenCalledTimes(2);
-    expect(mockedApi.getWorkOrders).toHaveBeenLastCalledWith({ search: 'WO-1002' });
+    expect(mockRows).toHaveBeenCalledTimes(2);
+    expect(mockRows).toHaveBeenLastCalledWith({ search: 'WO-1002' });
   });
 });
 
 describe('WorkOrders — grouped view exports CSV per group', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockedApi.getWorkOrders.mockResolvedValue(workOrders);
+    mockedApi.browseWorkOrders.mockImplementation(async params => {
+      const sourceParams: Record<string,string> = {};
+      if (params?.status) sourceParams.status = params.status;
+      if (params?.search) sourceParams.search = params.search;
+      return workOrderBrowseFixture(await mockRows(sourceParams), params);
+    });
+    mockRows.mockResolvedValue(workOrders);
   });
 
   it('renders an Export CSV control per group with the sanitized filename and ONLY that group\'s rows', async () => {
@@ -342,7 +370,7 @@ describe('WorkOrders — grouped view exports CSV per group', () => {
     // One group card per customer (sorted), each with its own export control.
     expect(screen.getByRole('heading', { name: 'Acme Aero' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Beta & Defense, Inc.' })).toBeInTheDocument();
-    const exportButtons = screen.getAllByRole('button', { name: /Export CSV/i });
+    const exportButtons = screen.getAllByRole('button', { name: /Export loaded rows/i });
     expect(exportButtons).toHaveLength(2);
 
     // Each button downloads under the sanitized `work-orders-<group>` filename:
@@ -369,9 +397,15 @@ describe('WorkOrders — grouped view exports CSV per group', () => {
 
 
 describe('Dashboard work-order drill-down scope', () => {
-  beforeEach(() => { jest.clearAllMocks(); });
+  beforeEach(() => { jest.clearAllMocks();
+    mockedApi.browseWorkOrders.mockImplementation(async params => {
+      const sourceParams: Record<string,string> = {};
+      if (params?.status) sourceParams.status = params.status;
+      if (params?.search) sourceParams.search = params.search;
+      return workOrderBrowseFixture(await mockRows(sourceParams), params);
+    }); });
   it('includes overdue COTS from the dashboard while excluding completed or future jobs', async () => {
-    mockedApi.getWorkOrders.mockResolvedValue([
+    mockRows.mockResolvedValue([
       { ...workOrders[0], due_date: '2000-01-01', part_type: 'purchased' },
       { ...workOrders[1], due_date: '2099-01-01' },
       { ...workOrders[0], id: 3, work_order_number: 'WO-DONE', due_date: '2000-01-01', status: 'complete' },

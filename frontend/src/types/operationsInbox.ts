@@ -4,7 +4,8 @@ export type OperationalSource =
   | 'low_stock'
   | 'quality_ncr'
   | 'overdue_po_line'
-  | 'mrp_shortage';
+  | 'mrp_shortage'
+  | 'supplier_follow_up';
 
 export interface OperationalInboxItem {
   key: string;

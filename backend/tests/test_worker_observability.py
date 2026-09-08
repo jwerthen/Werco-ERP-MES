@@ -235,6 +235,7 @@ class TestTheCronInventoryIsStable:
             "aggregate_ai_learning_job",
             "run_oee_auto_calc_job",
             "cleanup_old_logs_job",
+            "cleanup_runtime_metrics_job",
             "archive_aged_audit_logs_job",
             "poll_tracking_job",
             "relay_pending_notifications_job",
@@ -397,7 +398,7 @@ class TestCronSelectionRegressionsBeforeExclusions:
             # It must NOT claim the keyword is an unknown cron job -- that was the old defect.
             assert "unknown cron job" not in message, spec
         # The exclusion form tolerates it.
-        assert len(select_cron_jobs("-run_mrp_auto_draft_job,")) == 11
+        assert len(select_cron_jobs("-run_mrp_auto_draft_job,")) == len(_all_names()) - 1
 
     def test_a_spec_that_is_only_separators_is_refused_rather_than_arming_nothing(self):
         """The one malformed input that used to return a SET instead of raising.
@@ -676,16 +677,16 @@ class TestAmbiguousCronSpecsAreRefused:
 
 class TestTheOwnersMrpCutover:
     """End to end on the actual value going into Railway. This is the test that says the
-    migration is safe: the short form and the long form arm the same eleven crons today."""
+    exclusion follows new retention jobs while the historical allowlist stays frozen."""
 
-    def test_the_exclusion_form_arms_exactly_the_other_eleven_crons(self):
+    def test_the_exclusion_form_arms_all_other_crons(self):
         from app.worker import ALL_CRON_JOBS, select_cron_jobs
 
         selected = select_cron_jobs(OWNER_EXCLUSION_VALUE)
         names = {job.name.removeprefix("cron:") for job in selected}
 
-        assert len(selected) == 11
-        assert len(ALL_CRON_JOBS) == 12
+        assert len(selected) == 12
+        assert len(ALL_CRON_JOBS) == 13
         assert "run_mrp_auto_draft_job" not in names
         assert names == {
             "send_daily_digest_job",
@@ -696,21 +697,23 @@ class TestTheOwnersMrpCutover:
             "aggregate_ai_learning_job",
             "run_oee_auto_calc_job",
             "cleanup_old_logs_job",
+            "cleanup_runtime_metrics_job",
             "archive_aged_audit_logs_job",
             "poll_tracking_job",
             "relay_pending_notifications_job",
         }
 
-    def test_the_exclusion_form_and_the_eleven_name_allowlist_arm_the_same_set(self):
-        """The migration proof. Same crons, so pasting the short value changes nothing that
-        runs tonight -- only what happens when cron thirteen ships."""
+    def test_exclusion_follows_new_cleanup_while_legacy_allowlist_stays_frozen(self):
+        """The newly shipped retention cron is picked up only by the exclusion policy."""
         from app.worker import select_cron_jobs
 
         by_exclusion = select_cron_jobs(OWNER_EXCLUSION_VALUE)
         by_allowlist = select_cron_jobs(OWNER_ALLOWLIST_VALUE)
 
-        assert {job.name for job in by_exclusion} == {job.name for job in by_allowlist}
-        assert {id(job) for job in by_exclusion} == {id(job) for job in by_allowlist}
+        assert {job.name for job in by_exclusion} - {job.name for job in by_allowlist} == {
+            "cron:cleanup_runtime_metrics_job"
+        }
+        assert {id(job) for job in by_allowlist} < {id(job) for job in by_exclusion}
 
     def test_turning_the_cron_off_does_not_unregister_the_job_function(self, monkeypatch: pytest.MonkeyPatch):
         """MRP stays runnable on demand (the API enqueues ``run_mrp_auto_draft_job``); only
@@ -723,7 +726,7 @@ class TestTheOwnersMrpCutover:
 
         worker = importlib.reload(worker)
         try:
-            assert len(worker.WorkerSettings.cron_jobs) == 11
+            assert len(worker.WorkerSettings.cron_jobs) == 12
             assert MRP_CRON not in [job.name for job in worker.WorkerSettings.cron_jobs]
             assert worker.run_mrp_auto_draft_job in worker.WorkerSettings.functions
         finally:
@@ -746,9 +749,9 @@ class TestTheOwnersMrpCutover:
                 await worker.startup({})
             text = caplog.text
 
-            assert "1 of 12 cron jobs SUPPRESSED" in text
+            assert "1 of 13 cron jobs SUPPRESSED" in text
             assert repr(OWNER_EXCLUSION_VALUE) in text
-            assert "11 job(s) armed" in text
+            assert "12 job(s) armed" in text
             # Once, in the SUPPRESSED warning -- never among the armed "next run" lines.
             assert text.count(MRP_CRON) == 1
             assert "cron:poll_tracking_job -> next run" in text
@@ -759,8 +762,7 @@ class TestTheOwnersMrpCutover:
 
 class TestExclusionsSurviveANewCronBeingAdded:
     """WHY exclusions exist. An allowlist is a frozen snapshot of the schedule at the moment
-    it was pasted; the exclusion form is a rule that keeps applying. Both forms agree today
-    (proved above) and diverge the moment a cron is added -- which is the whole point."""
+    it was pasted; the exclusion form is a rule that keeps applying when another job ships."""
 
     def test_a_newly_added_cron_registers_under_the_exclusion_form(self):
         from app.worker import select_cron_jobs

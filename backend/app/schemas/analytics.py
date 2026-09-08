@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from app.schemas.base import UTCModel
+from app.schemas.material_readiness import MaterialReadiness
 
 
 class DateGranularity(str, Enum):
@@ -330,8 +331,8 @@ class OperationPrediction(UTCModel):
     operation_id: int
     operation_name: str
     work_center_name: str
-    predicted_start: datetime
-    predicted_end: datetime
+    predicted_start: Optional[datetime]
+    predicted_end: Optional[datetime]
     queue_position: int
     estimated_hours: float
 
@@ -342,9 +343,12 @@ class DeliveryPrediction(UTCModel):
     part_number: str
     quantity: float
     due_date: Optional[date]
-    predicted_completion: datetime
+    predicted_completion: Optional[datetime]
     confidence: float
-    on_time_probability: float
+    on_time_probability: Optional[float]
+    materials: Optional[MaterialReadiness] = None
+    warnings: List[str] = Field(default_factory=list)
+    basis: str = "Calendar-day estimate using historical queue time; not a committed promise."
     operations: List[OperationPrediction]
     bottleneck_work_center: Optional[str] = None
 

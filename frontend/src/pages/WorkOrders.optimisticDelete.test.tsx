@@ -1,3 +1,4 @@
+import { workOrderBrowseFixture } from '../testUtils/workOrderBrowseFixture';
 /**
  * Batch 10 — perceived performance: WorkOrders optimistic delete.
  *
@@ -9,8 +10,8 @@
  *
  *   1. SUCCESS — the row disappears immediately (while the API call is still in
  *      flight, before it resolves), and STAYS gone after it resolves. The page
- *      does NOT refetch the list to confirm (no extra api.getWorkOrders call);
- *      the optimistic removal is the source of truth on success.
+ *      refreshes the bounded server page after confirmation so exact counts
+ *      and the remaining row window reflect the deletion.
  *   2. FAILURE — the row is RESTORED at its original position (a rejected delete
  *      of the first of two rows brings it back ahead of the second), and the
  *      server's verbatim `response.data.detail` surfaces as an error toast.
@@ -33,7 +34,7 @@ import { ToastProvider } from '../components/ui/Toast';
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {
-    getWorkOrders: jest.fn(),
+    browseWorkOrders: jest.fn(),
     deleteWorkOrder: jest.fn(),
     releaseWorkOrder: jest.fn(),
   },
@@ -59,6 +60,7 @@ jest.mock('../services/realtime', () => ({
   buildWsUrl: () => 'ws://localhost/ws/test',
 }));
 
+const mockRows = jest.fn();
 const mockedApi = api as jest.Mocked<typeof api>;
 
 const firstWorkOrder = {
@@ -125,7 +127,13 @@ function renderWorkOrders() {
 describe('WorkOrders optimistic delete (Batch 10)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockedApi.getWorkOrders.mockResolvedValue([firstWorkOrder, secondWorkOrder]);
+    mockedApi.browseWorkOrders.mockImplementation(async params => {
+      const sourceParams: Record<string,string> = {};
+      if (params?.status) sourceParams.status = params.status;
+      if (params?.search) sourceParams.search = params.search;
+      return workOrderBrowseFixture(await mockRows(sourceParams), params);
+    });
+    mockRows.mockResolvedValue([firstWorkOrder, secondWorkOrder]);
     mockedApi.releaseWorkOrder.mockResolvedValue({});
   });
 
@@ -143,7 +151,7 @@ describe('WorkOrders optimistic delete (Batch 10)', () => {
     return within(dialog).getByRole('button', { name: 'Delete' });
   }
 
-  it('confirm dialog: drops the row immediately on confirm, blocks re-click while pending, closes on settle, never refetches', async () => {
+  it('confirm dialog: drops the row immediately on confirm, blocks re-click while pending, closes on settle, refreshes authoritative totals', async () => {
     // A delete that stays in flight through the first assertion window: the row
     // must vanish from the OPTIMISTIC update alone, before the API resolves.
     let resolveDelete: (value: unknown) => void = () => {};
@@ -155,7 +163,7 @@ describe('WorkOrders optimistic delete (Batch 10)', () => {
 
     renderWorkOrders();
     const table = await getDesktopTable();
-    expect(mockedApi.getWorkOrders).toHaveBeenCalledTimes(1); // mount load only
+    expect(mockRows).toHaveBeenCalledTimes(1); // mount load only
 
     // Delete the first row — the row control only OPENS the dialog.
     const confirmButton = await openDeleteDialog(table, 0);
@@ -178,7 +186,8 @@ describe('WorkOrders optimistic delete (Batch 10)', () => {
     fireEvent.click(confirmButton);
     expect(mockedApi.deleteWorkOrder).toHaveBeenCalledTimes(1);
 
-    // Resolve the server call; flush the trailing pending-state update.
+    // The confirmed delete changes the server population and its exact totals.
+    mockRows.mockResolvedValue([secondWorkOrder]);
     await act(async () => {
       resolveDelete({});
     });
@@ -186,10 +195,10 @@ describe('WorkOrders optimistic delete (Batch 10)', () => {
     // The dialog closes on settle.
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
 
-    // Stays gone — the optimistic removal is kept, and the page does NOT refetch
+    // Stays gone after the bounded authoritative refresh
     // the list to confirm the delete (no second api.getWorkOrders call).
     expect(within(table).queryByRole('link', { name: 'WO-1001' })).not.toBeInTheDocument();
-    expect(mockedApi.getWorkOrders).toHaveBeenCalledTimes(1);
+    expect(mockRows).toHaveBeenCalledTimes(2);
     // No error toast on the happy path.
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
@@ -229,7 +238,7 @@ describe('WorkOrders optimistic delete (Batch 10)', () => {
     // success toast would render with role="status"; none exists.
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
     // The row was never confirmed-removed by a refetch either.
-    expect(mockedApi.getWorkOrders).toHaveBeenCalledTimes(1);
+    expect(mockRows).toHaveBeenCalledTimes(1);
   });
 
   it('stale-target guard: confirming after a background refresh removed the row skips the API and never inserts a phantom row', async () => {
@@ -238,7 +247,7 @@ describe('WorkOrders optimistic delete (Batch 10)', () => {
     // another session deletes the WO while our dialog is open, confirm must
     // NOT fire the API: the refusal would make the optimistic rollback
     // re-insert a phantom row.
-    mockedApi.getWorkOrders
+    mockRows
       .mockResolvedValueOnce([firstWorkOrder, secondWorkOrder]) // mount load
       .mockResolvedValue([secondWorkOrder]); // background refresh: WO-1001 gone
 

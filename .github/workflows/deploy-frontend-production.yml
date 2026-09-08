@@ -64,7 +64,7 @@ jobs:
     name: Deploy Frontend (Railway Production)
     runs-on: ubuntu-latest
     needs: classify
-    if: needs.classify.outputs.standalone == 'true'
+    if: github.ref == 'refs/heads/main' && needs.classify.outputs.standalone == 'true'
     env:
       # Use explicit environment secrets to avoid stale fallback tokens.
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
@@ -75,6 +75,21 @@ jobs:
       url: ${{ vars.PRODUCTION_URL }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Skip superseded production releases before any mutation
+        id: release_head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          if [ "$main_sha" = "$GITHUB_SHA" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "Superseded release: a newer main commit owns production. No services will be changed."
+          fi
 
       # PINNED. An unpinned CLI in a deploy path is a silent breakage waiting for a
       # release: this workflow's success contract is a STRING -- the "Build Logs:" line
@@ -92,9 +107,11 @@ jobs:
       # Note the pin fixes the CLI, not its two floating runtime deps (node-fetch, tar);
       # a global npm install has no lockfile, so that residue is accepted.
       - name: Install Railway CLI
+        if: steps.release_head.outputs.current == 'true'
         run: npm install -g @railway/cli@5.41.2
 
       - name: Validate Railway token secret
+        if: steps.release_head.outputs.current == 'true'
         run: |
           if [ -z "${RAILWAY_TOKEN}" ]; then
             echo "RAILWAY_TOKEN is empty or missing"
@@ -102,6 +119,7 @@ jobs:
           fi
 
       - name: Validate Railway project ID secret
+        if: steps.release_head.outputs.current == 'true'
         run: |
           if [ -z "${RAILWAY_PROJECT_ID}" ]; then
             echo "RAILWAY_PROJECT_ID is empty or missing"
@@ -109,6 +127,7 @@ jobs:
           fi
 
       - name: Validate Railway token authentication
+        if: steps.release_head.outputs.current == 'true'
         run: |
           # Informational pre-check only. Account/workspace tokens pass `whoami`;
           # project-scoped tokens (what this workflow uses) do NOT, and the current
@@ -124,11 +143,26 @@ jobs:
             echo "Skipping offline validation; 'railway up --project' below is the real auth check."
           fi
 
+      - name: Verify live API compatibility before a frontend-only release
+        if: steps.release_head.outputs.current == 'true'
+        env:
+          PRODUCTION_API_URL: ${{ vars.PRODUCTION_API_URL }}
+        run: |
+          python3 - <<'PYCODE'
+          import importlib.util
+          import os
+          spec = importlib.util.spec_from_file_location("promote_vercel", ".github/scripts/promote_vercel.py")
+          release = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(release)
+          release.require_compatible_api(os.environ["PRODUCTION_API_URL"], os.environ["GITHUB_SHA"])
+          PYCODE
+
       # Mirrors the stamp in ci-cd.yml's deploy-production job. Vite copies
       # frontend/public/* into the build output verbatim and nginx serves it, so this
       # lands at /release.txt and makes "is production this commit?" a single GET.
       # Must stay un-gitignored (`railway up` honors .gitignore) and uncommitted.
       - name: Stamp release SHA into the frontend artifact
+        if: steps.release_head.outputs.current == 'true'
         run: |
           printf '%s' "$GITHUB_SHA" > frontend/public/release.txt
           echo "Stamped frontend/public/release.txt = $(cat frontend/public/release.txt)"
@@ -149,6 +183,7 @@ jobs:
       # receipt's verdict: "Build Logs:" is printed on stdout, so merging stderr in can
       # only ADD lines to what the grep sees.
       - name: Deploy frontend service from frontend root
+        if: steps.release_head.outputs.current == 'true'
         continue-on-error: true
         run: |
           set -o pipefail
@@ -157,6 +192,7 @@ jobs:
           railway up . --path-as-root --environment production --project "${RAILWAY_PROJECT_ID}" --service "${service_name}" 2>&1 | tee "$RUNNER_TEMP/deploy-frontend.log"
 
       - name: Confirm Railway accepted the upload
+        if: steps.release_head.outputs.current == 'true'
         # A "Build Logs:" URL is printed only once the upload is accepted and a build
         # queued, so its absence means the upload itself failed (bad token/project) and
         # the release poll below would only time out slowly on the same fact.
@@ -175,6 +211,7 @@ jobs:
           echo "Railway accepted the upload and queued a build."
 
       - name: Verify the deployed bundle is this commit
+        if: steps.release_head.outputs.current == 'true'
         env:
           PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
         # Compared by BODY, not status code: nginx serves index.html with a 200 for any
@@ -186,6 +223,7 @@ jobs:
             --expect "${GITHUB_SHA}"
 
       - name: Verify deployment serves the Vite frontend bundle
+        if: steps.release_head.outputs.current == 'true'
         env:
           PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
         run: |
@@ -238,6 +276,20 @@ jobs:
           sys.exit(1)
           PY
 
+      - name: Promote the public Vercel website after the API gate
+        if: steps.release_head.outputs.current == 'true'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+          VERCEL_TEAM_ID: ${{ vars.VERCEL_TEAM_ID }}
+          PUBLIC_APP_URL: ${{ vars.PUBLIC_APP_URL }}
+          PRODUCTION_API_URL: ${{ vars.PRODUCTION_API_URL }}
+        run: |
+          python3 .github/scripts/promote_vercel.py \
+            --sha "$GITHUB_SHA" --project "$VERCEL_PROJECT_ID" --team "$VERCEL_TEAM_ID" \
+            --api-url "$PRODUCTION_API_URL" --public-url "$PUBLIC_APP_URL" --apply
+
       # FAILURE PATH ONLY. `if: failure()` keeps this off every green deploy, so the happy
       # path is byte-identical to before. It exists because the 2026-08-20 failure left
       # nothing in the log that could separate "token revoked" from "quota exhausted" from
@@ -253,6 +305,6 @@ jobs:
       # logs are world-readable. That redaction is an extra layer, not a replacement for
       # GitHub's own masking of RAILWAY_TOKEN / RAILWAY_PROJECT_ID, which still applies.
       - name: Diagnose the Railway failure
-        if: failure()
+        if: steps.release_head.outputs.current == 'true' && (failure())
         continue-on-error: true
         run: bash .github/scripts/railway_diagnostics.sh "$RUNNER_TEMP/deploy-frontend.log"

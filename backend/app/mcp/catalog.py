@@ -30,7 +30,7 @@ from app.mcp.naming import assign_tool_names, function_name_from_operation_id
 # in -- Data Export, Users, Audit, Platform Administration included: their own
 # ``require_role`` gates and audit rows are the control, not the catalog.
 EXCLUDED_TAGS: FrozenSet[str] = frozenset(
-    {"Authentication", "Carrier Webhooks", "Error Logging", "errors", "WebSocket"}
+    {"Authentication", "Carrier Webhooks", "Error Logging", "errors", "WebSocket", "Import Batches"}
 )
 
 # Secured operations that are deliberately NOT tools and have no convenience twin: the

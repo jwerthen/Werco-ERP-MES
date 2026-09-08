@@ -144,6 +144,7 @@ is set**, so "6 AM" means 06:00 UTC = **01:00 Central**.
 | `send_daily_digest_job` | 08:00 daily | One digest email per opted-in user. |
 | `aggregate_ai_learning_job` | 05:30 daily | Writes `AIRecommendation` rows and emits `work_order_blocker_escalated` events, which re-enter the outbox and generate more notifications. |
 | `run_oee_auto_calc_job` | 02:30 daily | Writes `OEERecord` (`calculation_source='auto'`) for **yesterday only**; never overwrites `manual`. No backfill. Quiet. |
+| `cleanup_runtime_metrics_job` | Daily 02:15 | **Physical DELETEs**: anonymous browser performance samples older than 30 days. No business records or audit logs. |
 | `cleanup_old_logs_job` | Sun 02:00 | **Physical DELETEs**: completed jobs, notification logs, read notifications >90 d. Audit logs explicitly excluded. |
 | `archive_aged_audit_logs_job` | 1st of month 03:00 | Exports aged audit rows to NDJSON in `AUDIT_ARCHIVE_DIR`. **Never deletes.** Needs a durable volume — see §8. |
 | `poll_tracking_job` | every 30 min | Outbound carrier traffic, gated on `allow_carrier_egress` (default off). |
@@ -177,7 +178,7 @@ allowlist), or start from everything and subtract the ones you don't (a denylist
   accepted for exclusions exactly as they already are for inclusions.
 
 **Why the exclusion form exists.** Switching one cron off with an allowlist means listing the
-other eleven, which **freezes the set**: a cron added to `ALL_CRON_JOBS` in a later release
+other twelve, which **freezes the set**: a cron added to `ALL_CRON_JOBS` in a later release
 silently never registers on that worker. That is "I enabled the cron and nothing happened" —
 precisely the failure this module exists to eliminate — arriving one deploy late instead of
 immediately. A denylist subtracts from whatever the release declares, so new crons arrive
@@ -196,7 +197,7 @@ case/whitespace rules: `docs/ENVIRONMENT_VARIABLES.md` → Background worker (AR
 > **The `SUPPRESSED` log line reads correctly for either shape.** It diffs the registered
 > crons against `ALL_CRON_JOBS` by object identity, and the denylist path filters that same
 > list rather than rebuilding it, so what it prints is exact:
-> `ARQ worker cron: 1 of 12 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_auto_draft_job': cron:run_mrp_auto_draft_job`
+> `ARQ worker cron: 1 of 13 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_auto_draft_job': cron:run_mrp_auto_draft_job`
 
 ---
 

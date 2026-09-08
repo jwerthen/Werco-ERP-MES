@@ -141,9 +141,11 @@ export interface StockMovementsPanelProps {
   parts?: Array<{ id: number; part_number?: string; name?: string }>;
   /** Preselect a part (e.g. drilled in from a summary row). */
   initialPartId?: number | null;
+  initialWorkOrderId?: number | null;
+  onWorkOrderFilterClear?: () => void;
 }
 
-export default function StockMovementsPanel({ parts, initialPartId = null }: StockMovementsPanelProps) {
+export default function StockMovementsPanel({ parts, initialPartId = null, initialWorkOrderId = null, onWorkOrderFilterClear }: StockMovementsPanelProps) {
   const [rows, setRows] = useState<InventoryTransaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -151,6 +153,8 @@ export default function StockMovementsPanel({ parts, initialPartId = null }: Sto
   const [hasNext, setHasNext] = useState(false);
 
   const [partId, setPartId] = useState<number | ''>(initialPartId ?? '');
+  const [workOrderId, setWorkOrderId] = useState<number | null>(initialWorkOrderId);
+  useEffect(() => { setWorkOrderId(initialWorkOrderId); setPage(0); }, [initialWorkOrderId]);
   const [typeFilter, setTypeFilter] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -180,6 +184,7 @@ export default function StockMovementsPanel({ parts, initialPartId = null }: Sto
       };
       if (partId !== '') params.part_id = Number(partId);
       if (typeFilter) params.transaction_type = typeFilter;
+      if (workOrderId && Number.isSafeInteger(workOrderId) && workOrderId > 0) params.work_order_id = workOrderId;
       // Central day boundaries → UTC instants. A bare date would be read as UTC
       // midnight and mis-bucket second-shift movements.
       const startUtc = startDate ? centralWallClockToUtcISO(`${startDate}T00:00:00`) : null;
@@ -198,7 +203,7 @@ export default function StockMovementsPanel({ parts, initialPartId = null }: Sto
     } finally {
       setLoading(false);
     }
-  }, [endDate, page, partId, startDate, typeFilter]);
+  }, [endDate, page, partId, startDate, typeFilter, workOrderId]);
 
   useEffect(() => {
     load();
@@ -474,6 +479,7 @@ export default function StockMovementsPanel({ parts, initialPartId = null }: Sto
         </div>
 
         <div className="flex flex-wrap items-center gap-2 text-xs">
+          {workOrderId && <button type="button" className="text-fd-link underline" onClick={() => { setWorkOrderId(null); onWorkOrderFilterClear?.(); resetToFirstPage(); }}>Work order #{workOrderId} · clear job filter</button>}
           {QUICK_RANGES.map((range) => (
             <button
               key={range.id}

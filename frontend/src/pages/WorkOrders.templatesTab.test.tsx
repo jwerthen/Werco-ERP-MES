@@ -1,3 +1,4 @@
+import { workOrderBrowseFixture } from '../testUtils/workOrderBrowseFixture';
 /**
  * WorkOrders — the Templates tab.
  *
@@ -41,7 +42,7 @@ import type { WorkOrderTemplate } from '../types';
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {
-    getWorkOrders: jest.fn(),
+    browseWorkOrders: jest.fn(),
     deleteWorkOrder: jest.fn(),
     releaseWorkOrder: jest.fn(),
     listWorkOrderTemplates: jest.fn(),
@@ -69,6 +70,7 @@ jest.mock('../services/realtime', () => ({
   buildWsUrl: () => 'ws://localhost/ws/test',
 }));
 
+const mockRows = jest.fn();
 const mockedApi = api as jest.Mocked<typeof api>;
 
 const workOrders = [
@@ -146,8 +148,14 @@ const findWorkOrderRow = () => screen.findAllByText('WO-1001');
 
 beforeEach(() => {
   jest.clearAllMocks();
+    mockedApi.browseWorkOrders.mockImplementation(async params => {
+      const sourceParams: Record<string,string> = {};
+      if (params?.status) sourceParams.status = params.status;
+      if (params?.search) sourceParams.search = params.search;
+      return workOrderBrowseFixture(await mockRows(sourceParams), params);
+    });
   mockRole.current = 'admin';
-  mockedApi.getWorkOrders.mockResolvedValue(workOrders);
+  mockRows.mockResolvedValue(workOrders);
   mockedApi.listWorkOrderTemplates.mockResolvedValue({ templates: [template], total: 1 });
 });
 
@@ -165,7 +173,7 @@ describe('WorkOrders: ?tab=templates renders the catalog', () => {
     // THE trap. The page early-returns a full-page skeleton while `loading` is
     // true, and only the work-order fetch clears it — so a templates branch below
     // that gate would leave this deep link on a skeleton forever.
-    mockedApi.getWorkOrders.mockReturnValue(new Promise(() => {}));
+    mockRows.mockReturnValue(new Promise(() => {}));
 
     renderAt('/work-orders?tab=templates');
 
@@ -322,7 +330,7 @@ describe('WorkOrders: where a template use hands off to', () => {
       skipped_material_allocations: [],
     });
     await openTheUseDialog();
-    const listReadsBefore = mockedApi.getWorkOrders.mock.calls.length;
+    const listReadsBefore = mockRows.mock.calls.length;
 
     await userEvent.clear(screen.getByLabelText('Work orders to create'));
     await userEvent.type(screen.getByLabelText('Work orders to create'), '2');
@@ -334,7 +342,7 @@ describe('WorkOrders: where a template use hands off to', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Done' }));
 
     // Never onto one of the two: the other would be the one nobody saw.
-    await waitFor(() => expect(mockedApi.getWorkOrders.mock.calls.length).toBeGreaterThan(listReadsBefore));
+    await waitFor(() => expect(mockRows.mock.calls.length).toBeGreaterThan(listReadsBefore));
     expect(locationPathname()).toBe('/work-orders');
     expect(locationSearch()).toBe('?tab=templates');
   });

@@ -12,6 +12,18 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+class EmailSubmissionUnknown(Exception):
+    """Submission may have reached SMTP; automatic resend could duplicate mail."""
+
+
+class EmailBeforeSubmissionFailure(Exception):
+    """SMTP connection/authentication failed before message submission."""
+
+
+class EmailRejected(Exception):
+    """SMTP explicitly refused the sender, recipient or message."""
+
+
 class EmailService:
     """Email sending service with template support.
 
@@ -37,15 +49,15 @@ class EmailService:
         template: str = None,
         context: Dict = None,
         html: bool = True,
+        message_id: str = None,
     ) -> bool:
         """
         Send email.
 
-        Returns True if sent. Returns False (WITHOUT raising) only when SMTP is not
-        configured -- so an unconfigured dev/test environment logs a skip instead of
-        spamming ARQ retries. On a real transport failure the exception PROPAGATES so the
-        enqueuing job (``send_email_job``) can retry and record the terminal outcome
-        (fixes the swallow-all defect §9.2).
+        Returns True when SMTP accepted the message, not proof of inbox delivery.
+        Returns False when SMTP is unconfigured. Typed transport failures distinguish
+        safe pre-submission retry from explicit rejection and uncertain submission;
+        callers must not automatically retry the latter.
 
         Args:
             to: Recipient email(s)
@@ -68,6 +80,8 @@ class EmailService:
         msg["Subject"] = subject
         msg["From"] = f"{settings.SMTP_FROM_NAME} <{settings.SMTP_FROM}>"
         msg["To"] = ", ".join(recipients)
+        if message_id:
+            msg["Message-ID"] = f"<{message_id}@werco-background>"
 
         # Render body
         if template:
@@ -82,13 +96,42 @@ class EmailService:
         if html and html_body:
             msg.attach(MIMEText(html_body, "html"))
 
-        # Send email -- a transport failure raises out of this call so the job retries.
-        async with aiosmtplib.SMTP(hostname=settings.SMTP_HOST, port=settings.SMTP_PORT) as smtp:
-            await smtp.starttls()
-            await smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-            await smtp.send_message(msg)
-
-        logger.info(f"Email sent to {recipients}: {subject}")
+        # Disable aiosmtplib's implicit opportunistic STARTTLS. Negotiate TLS
+        # exactly once: implicit TLS on 465, explicit STARTTLS otherwise.
+        submitted = False
+        try:
+            implicit_tls = settings.SMTP_PORT == 465
+            async with aiosmtplib.SMTP(
+                hostname=settings.SMTP_HOST,
+                port=settings.SMTP_PORT,
+                timeout=30,
+                start_tls=False,
+                use_tls=implicit_tls,
+            ) as smtp:
+                if not implicit_tls:
+                    await smtp.starttls()
+                await smtp.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+                submitted = True
+                errors, _ = await smtp.send_message(msg)
+                if errors:
+                    # A list send can accept some recipients and refuse others.
+                    # Never retry the accepted recipients as a whole batch.
+                    raise EmailSubmissionUnknown(
+                        'The mail server accepted only some recipients. Check its logs before resending.'
+                    )
+        except (aiosmtplib.SMTPRecipientsRefused, aiosmtplib.SMTPSenderRefused, aiosmtplib.SMTPDataError) as exc:
+            raise EmailRejected('The mail server rejected the recipient, sender or message.') from exc
+        except Exception as exc:
+            if not submitted:
+                raise EmailBeforeSubmissionFailure(
+                    'Email connection or authentication failed before submission.'
+                ) from exc
+            if isinstance(exc, EmailSubmissionUnknown):
+                raise
+            raise EmailSubmissionUnknown(
+                'The mail server outcome is unknown. Check its logs before resending.'
+            ) from exc
+        logger.info('Mail server accepted background email')
         return True
 
     def _render_template(self, template_name: str, context: Dict) -> str:

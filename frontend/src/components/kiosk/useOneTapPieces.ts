@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { productionRequestId } from '../../utils/productionRequestId';
 
 /**
  * The one-tap `+1 PIECE` state machine — tap once per finished part, and the
@@ -54,9 +55,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  * server saying no is how you get four reports for one part. Beyond that, an
  * AMBIGUOUS failure (a network error or a timeout — anything that leaves it
  * unknown whether the row was written) is barred from every AUTOMATIC path as
- * well: the endpoint is purely additive with no idempotency key, so a request
- * that reached the server but whose answer was never seen is counted twice if
- * anything re-sends it on its own. Only a human tapping RETRY may send it again.
+ * well: a human checks the original immutable request with RETRY. The server's
+ * durable receipt returns its original result without counting it again; new
+ * taps buffered behind it are sent separately under a new request identity.
  * An explicit HTTP refusal is definitive — nothing was written — so it keeps the
  * automatic path.
  */
@@ -81,6 +82,7 @@ export interface OneTapBinding<T = unknown> {
    * the sending.
    */
   target: T;
+  identity?: { operatorId: number; operationId: number };
 }
 
 /**
@@ -141,6 +143,8 @@ export type OneTapPhase =
   | 'orphaned';
 
 export interface OneTapPiecesOptions<T = unknown> {
+  /** Tab-scoped recovery; stores quantities/identity only, never badge tokens. */
+  storageKey?: string;
   /**
    * The (operator, operation) pair currently bound. Stamped onto a delta at tap
    * time; a delta only posts while its stamp still matches. `null` means nothing
@@ -154,7 +158,7 @@ export interface OneTapPiecesOptions<T = unknown> {
    * `keepalive` is set only on the page-unload flush, where the caller should
    * hand it to `fetch` so the request outlives the document.
    */
-  post: (pieces: number, opts: { keepalive: boolean; binding: OneTapBinding<T> }) => Promise<void>;
+  post: (pieces: number, opts: { keepalive: boolean; binding: OneTapBinding<T>; requestId: string }) => Promise<void>;
   /** Render a rejection as operator-readable text (server `detail`, verbatim). */
   toMessage: (err: unknown) => string;
   /**
@@ -208,6 +212,11 @@ export interface OneTapPieces {
   windowMs: number;
   /** Verbatim server `detail` while `phase === 'failed'`. */
   error: string | null;
+  /** A submitted batch of unknown outcome is immutable until checked. */
+  lockedPending?: number;
+  uncertain?: boolean;
+  recovery?: { operatorId: number; operationId: number; pieces: number } | null;
+  recover?: (operatorId: number, post: (operationId: number, pieces: number, requestId: string) => Promise<unknown>) => Promise<void>;
   /** Everything not yet accepted by the server — what the ceiling must clamp. */
   unbanked: number;
   /** +1. Re-arms the window. */
@@ -230,26 +239,36 @@ export function useOneTapPieces<T = unknown>({
   onRecorded,
   onFailed,
   onStranded,
+  storageKey,
   canPost = true,
   blockedMessage = 'Not saved yet — waiting for the connection.',
   windowMs = ONE_TAP_WINDOW_MS,
 }: OneTapPiecesOptions<T>): OneTapPieces {
-  const [phase, setPhase] = useState<OneTapPhase>('idle');
-  const [pending, setPending] = useState(0);
+  const restored = useRef<{ key: string; label: string; pieces: number; requestId?: string; lockedPieces?: number; identity?: { operatorId: number; operationId: number } } | null>(null);
+  const initialized = useRef(false);
+  if (!initialized.current) {
+    initialized.current = true;
+    try {
+      const value = storageKey ? JSON.parse(sessionStorage.getItem(storageKey) || 'null') : null;
+      if (value && typeof value.key === 'string' && typeof value.label === 'string' && Number.isInteger(value.pieces) && value.pieces > 0 && (!value.requestId || (typeof value.requestId === 'string' && Number.isInteger(value.lockedPieces) && value.lockedPieces > 0 && value.lockedPieces <= value.pieces))) restored.current = value;
+    } catch { /* The mounted lane still works when tab storage is unavailable. */ }
+  }
+  const [phase, setPhase] = useState<OneTapPhase>(restored.current ? 'orphaned' : 'idle');
+  const [pending, setPending] = useState(restored.current?.pieces ?? 0);
   const [inFlight, setInFlight] = useState(0);
   const [lastRecorded, setLastRecorded] = useState(0);
-  const [pendingLabel, setPendingLabel] = useState<string | null>(null);
+  const [pendingLabel, setPendingLabel] = useState<string | null>(restored.current?.label ?? null);
   const [error, setError] = useState<string | null>(null);
   const [remainingMs, setRemainingMs] = useState(0);
   const [armedAt, setArmedAt] = useState<number | null>(null);
 
   // Mirrors, so the teardown flush and the timer callback read TODAY's numbers
   // rather than whatever was closed over when they were scheduled.
-  const pendingRef = useRef(0);
+  const pendingRef = useRef(restored.current?.pieces ?? 0);
   const inFlightRef = useRef(0);
   // The stamp. Set on the first tap of a batch, cleared only when the batch is
   // banked or discarded — never rewritten by a new binding arriving.
-  const pendingBindingRef = useRef<OneTapBinding<T> | null>(null);
+  const pendingBindingRef = useRef<OneTapBinding<T> | null>(restored.current ? { key: restored.current.key, label: restored.current.label, target: undefined as T, identity: restored.current.identity } : null);
   // The stamp of the delta CURRENTLY ON THE WIRE. `setPendingBoth(0)` clears
   // `pendingBindingRef` when the delta leaves, so without this the flight is a
   // window in which the delta carries no stamp at all — and a failure landing
@@ -259,7 +278,20 @@ export function useOneTapPieces<T = unknown>({
   const bindingRef = useRef<OneTapBinding<T> | null>(binding);
   const canPostRef = useRef(canPost);
   const blockedMessageRef = useRef(blockedMessage);
-  const ambiguousRef = useRef(false);
+  const ambiguousRef = useRef(!!restored.current?.requestId);
+  const retryBatchRef = useRef<{ requestId: string; pieces: number } | null>(restored.current?.requestId ? { requestId: restored.current.requestId, pieces: restored.current.lockedPieces! } : null);
+  const inFlightBatchRef = useRef<{ requestId: string; pieces: number } | null>(null);
+  const checkingRef = useRef(false);
+  const persistSnapshot = useCallback(() => {
+    if (!storageKey) return;
+    const count = pendingRef.current + (checkingRef.current ? 0 : inFlightRef.current);
+    const stamp = inFlightBindingRef.current ?? pendingBindingRef.current;
+    const batch = inFlightBatchRef.current ?? retryBatchRef.current;
+    try {
+      if (count > 0 && stamp) sessionStorage.setItem(storageKey, JSON.stringify({ key: stamp.key, label: stamp.label, pieces: count, requestId: batch?.requestId, lockedPieces: batch?.pieces, identity: stamp.identity }));
+      else sessionStorage.removeItem(storageKey);
+    } catch { /* The mounted recovery control remains available. */ }
+  }, [storageKey]);
   const postRef = useRef(post);
   const toMessageRef = useRef(toMessage);
   const isAmbiguousRef = useRef(isAmbiguousFailure);
@@ -322,7 +354,7 @@ export function useOneTapPieces<T = unknown>({
   const flush = useCallback(
     (opts?: { keepalive?: boolean }): Promise<void> => {
       clearTimer();
-      const pieces = pendingRef.current;
+      const pieces = retryBatchRef.current?.pieces ?? pendingRef.current;
       if (pieces <= 0) return Promise.resolve();
       if (inFlightRef.current > 0) {
         // A post is already carrying a batch, so this delta waits its turn —
@@ -366,16 +398,23 @@ export function useOneTapPieces<T = unknown>({
       // the credential behind it may be renewed.
       const sending = live;
       inFlightBindingRef.current = sending;
-      setPendingBoth(0);
+      const retrying = retryBatchRef.current != null;
+      const batch = retryBatchRef.current ?? { requestId: productionRequestId(), pieces };
+      inFlightBatchRef.current = batch;
+      setPendingBoth(Math.max(0, pendingRef.current - pieces));
       setInFlightBoth(pieces);
       setError(null);
       setPhase('saving');
-      return postRef.current(pieces, { keepalive: opts?.keepalive === true, binding: sending })
+      persistSnapshot();
+      return postRef.current(pieces, { keepalive: opts?.keepalive === true, binding: sending, requestId: batch.requestId })
         .then(() => {
           inFlightBindingRef.current = null;
+          inFlightBatchRef.current = null;
           setInFlightBoth(0);
           setLastRecorded(pieces);
+          retryBatchRef.current = null;
           ambiguousRef.current = false;
+          persistSnapshot();
           onRecordedRef.current?.(pieces);
           if (pendingRef.current > 0) {
             // Taps landed while this request was on the wire. They are NOT
@@ -396,7 +435,9 @@ export function useOneTapPieces<T = unknown>({
           const message = toMessageRef.current(err);
           const sentUnder = inFlightBindingRef.current;
           inFlightBindingRef.current = null;
-          ambiguousRef.current = isAmbiguousRef.current(err);
+          inFlightBatchRef.current = null;
+          ambiguousRef.current = retrying || isAmbiguousRef.current(err);
+          retryBatchRef.current = ambiguousRef.current ? batch : null;
           setInFlightBoth(0);
 
           const buffered = pendingBindingRef.current;
@@ -405,6 +446,7 @@ export function useOneTapPieces<T = unknown>({
             // honest pile to put these back on: merging would produce one report
             // that is wrong for whoever it posted as. Write the failed batch off
             // as its own record and leave the new batch untouched.
+            retryBatchRef.current = null;
             onStrandedRef.current?.({ pieces, key: sentUnder.key, label: sentUnder.label });
             setError(message);
             setPhase('failed');
@@ -420,6 +462,7 @@ export function useOneTapPieces<T = unknown>({
           pendingBindingRef.current = sentUnder ?? buffered;
           setPendingBoth(pendingRef.current + pieces);
           setPendingLabel(pendingBindingRef.current?.label ?? null);
+          persistSnapshot();
           setError(message);
 
           // The world may have moved while this was on the wire.
@@ -433,8 +476,48 @@ export function useOneTapPieces<T = unknown>({
           onFailedRef.current?.(pieces, message, err);
         });
     },
-    [clearTimer, setPendingBoth, setInFlightBoth]
+    [clearTimer, setPendingBoth, setInFlightBoth, persistSnapshot]
   );
+
+  // Queue-independent receipt recovery: completed/held jobs can leave the board
+  // before an uncertain answer returns. Only the original operator may check.
+  const recover = useCallback(async (operatorId: number, send: (operationId: number, pieces: number, requestId: string) => Promise<unknown>) => {
+    const stamp = pendingBindingRef.current;
+    if (!stamp?.identity || stamp.identity.operatorId !== operatorId) throw new Error('The original operator must check these pieces.');
+    if (inFlightRef.current > 0) throw new Error('This report is already being checked.');
+    const count = retryBatchRef.current?.pieces ?? pendingRef.current;
+    if (count <= 0) return;
+    clearTimer();
+    const batch = retryBatchRef.current ?? { requestId: productionRequestId(), pieces: count };
+    retryBatchRef.current = batch;
+    ambiguousRef.current = true;
+    setPhase('saving');
+    // Keep the total pending count and binding intact while this explicit check
+    // is outstanding; the ref blocks a second click without relying on render.
+    persistSnapshot();
+    checkingRef.current = true;
+    inFlightRef.current = count;
+    try {
+      await send(stamp.identity.operationId, count, batch.requestId);
+      inFlightRef.current = 0;
+      checkingRef.current = false;
+      retryBatchRef.current = null;
+      ambiguousRef.current = false;
+      setPendingBoth(pendingRef.current - count);
+      setLastRecorded(count);
+      setError(null);
+      setPhase(pendingRef.current > 0 ? (bindingMatches() ? 'pending' : 'orphaned') : 'recorded');
+      persistSnapshot();
+      if (pendingRef.current > 0 && bindingMatches()) armRef.current?.();
+    } catch (err) {
+      inFlightRef.current = 0;
+      checkingRef.current = false;
+      setError(toMessageRef.current(err));
+      setPhase('failed');
+      persistSnapshot();
+      throw err;
+    }
+  }, [bindingMatches, clearTimer, persistSnapshot, setPendingBoth]);
 
   /** (Re)start the grace period. */
   const arm = useCallback(() => {
@@ -453,6 +536,10 @@ export function useOneTapPieces<T = unknown>({
   const tap = useCallback(() => {
     const current = bindingRef.current;
     if (current == null) return; // nothing bound — the lane's button is disabled too
+    if (inFlightBindingRef.current && inFlightBindingRef.current.key !== current.key) {
+      setPhase('orphaned');
+      return;
+    }
     if (pendingRef.current > 0 && !bindingMatches()) {
       // Somebody else's pieces are still held. Merging this tap into them would
       // produce one report that is wrong for whoever it posted as, so the lane
@@ -467,15 +554,21 @@ export function useOneTapPieces<T = unknown>({
     if (pendingRef.current <= 0) pendingBindingRef.current = current;
     setPendingLabel(pendingBindingRef.current?.label ?? null);
     setPendingBoth(pendingRef.current + 1);
+    persistSnapshot();
+    if (retryBatchRef.current) { setPhase('failed'); return; }
     ambiguousRef.current = false;
     setError(null);
     setPhase('pending');
     arm();
-  }, [arm, bindingMatches, setPendingBoth]);
+  }, [arm, bindingMatches, setPendingBoth, persistSnapshot]);
 
   const undoOne = useCallback(() => {
-    const next = Math.max(0, pendingRef.current - 1);
+    const locked = retryBatchRef.current?.pieces ?? 0;
+    if (pendingRef.current <= locked) return;
+    const next = Math.max(locked, pendingRef.current - 1);
     setPendingBoth(next);
+    persistSnapshot();
+    if (retryBatchRef.current) { setPhase('failed'); return; }
     setError(null);
     if (next <= 0) {
       clearTimer();
@@ -490,7 +583,7 @@ export function useOneTapPieces<T = unknown>({
     }
     setPhase('pending');
     arm();
-  }, [arm, bindingMatches, clearTimer, setPendingBoth]);
+  }, [arm, bindingMatches, clearTimer, setPendingBoth, persistSnapshot]);
 
   const retry = useCallback(() => {
     if (pendingRef.current <= 0) return;
@@ -522,10 +615,12 @@ export function useOneTapPieces<T = unknown>({
       onStrandedRef.current?.({ pieces, key: stamp?.key ?? '', label: stamp?.label ?? '' });
     }
     ambiguousRef.current = false;
+    retryBatchRef.current = null;
     setPendingBoth(0);
+    persistSnapshot();
     setError(null);
     setPhase('idle');
-  }, [clearTimer, setPendingBoth]);
+  }, [clearTimer, setPendingBoth, persistSnapshot]);
 
   /**
    * Bank the delta if it can go, and write it down if it cannot.
@@ -554,9 +649,10 @@ export function useOneTapPieces<T = unknown>({
         void flush(opts);
         return;
       }
-      onStrandedRef.current?.({ pieces, key: stamp?.key ?? '', label: stamp?.label ?? '' });
+      if (storageKey) persistSnapshot();
+      else onStrandedRef.current?.({ pieces, key: stamp?.key ?? '', label: stamp?.label ?? '' });
     },
-    [flush]
+    [flush, persistSnapshot, storageKey]
   );
 
   // Countdown repaint. Only runs while a window is armed.
@@ -628,6 +724,11 @@ export function useOneTapPieces<T = unknown>({
     () => () => {
       if (timerRef.current != null) window.clearTimeout(timerRef.current);
       if (recordedTimerRef.current != null) window.clearTimeout(recordedTimerRef.current);
+      if (storageKey) {
+        persistSnapshot();
+        if (pendingRef.current > 0 && inFlightRef.current === 0 && !ambiguousRef.current) void flush({ keepalive: true });
+        return;
+      }
       // A delta still ON THE WIRE at teardown has an unknowable outcome and
       // nothing left to render the answer into, so it gets a record too — it is
       // exactly the case where an operator would otherwise never learn.
@@ -647,14 +748,18 @@ export function useOneTapPieces<T = unknown>({
         canPostRef.current && !ambiguousRef.current && stamped != null && live != null && live.key === stamped.key;
       pendingRef.current = 0;
       if (sendable && live != null) {
-        void postRef.current(pieces, { keepalive: true, binding: live }).catch(() => {
+        const retryBatch = retryBatchRef.current;
+        const count = retryBatch?.pieces ?? pieces;
+        void postRef.current(count, { keepalive: true, binding: live, requestId: retryBatch?.requestId ?? productionRequestId() }).then(async () => {
+          if (pieces > count) await postRef.current(pieces - count, { keepalive: true, binding: live, requestId: productionRequestId() });
+        }).catch(() => {
           /* nothing is mounted to show it — onStranded cannot run post-teardown */
         });
         return;
       }
       onStrandedRef.current?.({ pieces, key: stamped?.key ?? '', label: stamped?.label ?? '' });
     },
-    []
+    [flush, persistSnapshot, storageKey]
   );
 
   return {
@@ -670,6 +775,10 @@ export function useOneTapPieces<T = unknown>({
     tap,
     undoOne,
     flush,
+    lockedPending: retryBatchRef.current?.pieces ?? 0,
+    uncertain: retryBatchRef.current != null,
+    recovery: pendingBindingRef.current?.identity ? { ...pendingBindingRef.current.identity, pieces: retryBatchRef.current?.pieces ?? pending } : null,
+    recover,
     retry,
     discard,
   };

@@ -99,6 +99,10 @@ jobs:
 
       # Creates the schema (Base.metadata.create_all) and seeds the default
       # company, users, work centers, parts, and work orders the specs expect.
+      - name: Verify operations migrations and percentiles on PostgreSQL
+        working-directory: ./backend
+        run: python -m scripts.verify_operations_postgres
+
       - name: Seed database
         working-directory: ./backend
         run: python -m scripts.seed_data

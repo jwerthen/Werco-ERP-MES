@@ -113,6 +113,7 @@ def test_live_sources_exclude_resolved_and_outside_tenant(client, db_session, au
         'low_stock',
         'quality_ncr',
         'overdue_po_line',
+        'supplier_follow_up',
     }
     assert all(item['source_id'] != foreign['blocker'].id for item in items if item['source_kind'] == 'blocker')
     assert next(item for item in items if item['source_kind'] == 'overdue_po_line')['detail'].startswith('7 units')

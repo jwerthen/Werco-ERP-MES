@@ -219,6 +219,38 @@ const CACHE_TTL = 5 * 60 * 1000;
 const importTimeout = (dryRun: boolean): number => (dryRun ? 120_000 : 600_000);
 
 class ApiService {
+  async getRuntimeMetricSummary(params: { days?: number; page?: number; device?: string; release?: string; route?: string }): Promise<import('../types/runtimeMetrics').RuntimeMetricSummary> {
+    return (await this.api.get('/runtime-metrics/summary', { params })).data;
+  }
+
+  async setRuntimeMetricsEnabled(enabled: boolean): Promise<{ enabled: boolean; retention_days: number }> {
+    const response = await this.changeRuntimeMetrics('PUT', '/config', { enabled });
+    return response.json();
+  }
+
+  async clearRuntimeMetrics(): Promise<void> {
+    await this.changeRuntimeMetrics('DELETE', '/samples');
+  }
+
+  private async changeRuntimeMetrics(method: 'PUT' | 'DELETE', path: string, body?: { enabled: boolean }) {
+    // These company-wide actions must never be replayed by the shared Axios
+    // refresh interceptor using a different company selected while they waited.
+    const token = this.token;
+    if (!token) throw new Error('Sign in before changing performance settings.');
+    const response = await fetch(`${API_BASE_URL.replace(/\/$/, '')}/runtime-metrics${path}`, {
+      method,
+      credentials: 'omit',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!response.ok) throw new Error('Performance settings could not be changed. Refresh and try again.');
+    return response;
+  }
+
   async previewDocumentDelivery(entityType: import('../types/documentDelivery').DeliveryEntity, entityId: number, newAttempt = false): Promise<import('../types/documentDelivery').DocumentDelivery> {
     return (await this.api.post('/document-deliveries/preview', { entity_type: entityType, entity_id: entityId, new_attempt: newAttempt })).data;
   }
@@ -238,6 +270,14 @@ class ApiService {
   async reconcileDocumentDelivery(id: number, data: { expected_version: number; outcome: 'accepted' | 'failed'; verification_note: string }): Promise<import('../types/documentDelivery').DocumentDelivery> {
     return (await this.api.post(`/document-deliveries/${id}/reconcile`, data)).data;
   }
+  async getWorkingCalendar(workCenterId: number): Promise<import('../types/workingCalendar').WorkingCalendar> {
+    return (await this.api.get(`/scheduling/work-centers/${workCenterId}/calendar`)).data;
+  }
+
+  async updateWorkingCalendar(workCenterId: number, data: import('../types/workingCalendar').WorkingCalendarUpdate): Promise<import('../types/workingCalendar').WorkingCalendar> {
+    return (await this.api.put(`/scheduling/work-centers/${workCenterId}/calendar`, data)).data;
+  }
+
   async previewSchedulingImpact(data: import('../types/schedulingImpact').SchedulingImpactRequest): Promise<import('../types/schedulingImpact').SchedulingImpactResponse> {
     return (await this.api.post('/scheduling/impact-preview', data)).data;
   }
@@ -264,6 +304,26 @@ class ApiService {
 
   async deleteWorkspaceRecord(namespace: string, key: string, kind: 'view' | 'draft', version: number): Promise<void> {
     await this.api.delete(`/user-workspaces/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}`, { params: { kind, version } });
+  }
+
+  async listTeamWorkspaceRecords<T>(namespace: string): Promise<{ items: import('../types/workspace').WorkspaceRecord<T>[]; can_manage: boolean }> {
+    return (await this.api.get(`/user-workspaces/team/${encodeURIComponent(namespace)}`)).data;
+  }
+  async saveTeamWorkspaceRecord<T>(namespace: string, key: string, value: import('../types/workspace').WorkspaceWrite<T>): Promise<import('../types/workspace').WorkspaceRecord<T>> {
+    return (await this.api.put(`/user-workspaces/team/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}`, value)).data;
+  }
+  async deleteTeamWorkspaceRecord(namespace: string, key: string, version: number): Promise<void> {
+    await this.api.delete(`/user-workspaces/team/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}`, { params: { version } });
+  }
+
+  async reviewMRPPurchaseBatch(actionIds: number[]): Promise<{ lines: import('../types/mrpBatch').MRPPurchaseReviewLine[]; max_lines: number }> {
+    const params = new URLSearchParams();
+    actionIds.forEach(id => params.append('action_ids', String(id)));
+    return (await this.api.get('/mrp/purchase-batch/review', { params })).data;
+  }
+
+  async createMRPPurchaseBatch(payload: import('../types/mrpBatch').MRPPurchaseBatchPayload): Promise<import('../types/mrpBatch').MRPPurchaseBatchResult> {
+    return (await this.api.post('/mrp/purchase-batch/drafts', payload)).data;
   }
 
   async getMRPSupplyReview(actionId: number) {
@@ -1070,6 +1130,10 @@ class ApiService {
     return allWorkOrders;
   }
 
+  async browseWorkOrders(params: import('../types/workOrderBrowse').WorkOrderBrowseParams = {}): Promise<import('../types/workOrderBrowse').WorkOrderBrowseResponse> {
+    return (await this.api.get('/work-orders/browse', { params })).data;
+  }
+
   async getWorkOrder(id: number) {
     const response = await this.api.get(`/work-orders/${id}`, {
       params: { _ts: Date.now() },
@@ -1851,7 +1915,7 @@ class ApiService {
     return response.data;
   }
 
-  async getNotificationLogs(params?: { limit?: number; status?: string }) {
+  async getNotificationLogs(params?: { limit?: number; status?: string; mine_only?: boolean; channel?: 'email' | 'sms'; delivery_id?: number }) {
     const response = await this.api.get('/notifications/logs', { params });
     return response.data;
   }
@@ -2167,7 +2231,7 @@ class ApiService {
     return response.data;
   }
 
-  async reportOperationProduction(operationId: number, data: { quantity_complete_delta?: number; quantity_scrapped_delta?: number; notes?: string; scrap_reason?: string; scrap_reason_code_id?: number; source?: string }) {
+  async reportOperationProduction(operationId: number, data: { request_id?: string; quantity_complete_delta?: number; quantity_scrapped_delta?: number; notes?: string; scrap_reason?: string; scrap_reason_code_id?: number; source?: string }) {
     const response = await this.api.post(`/shop-floor/operations/${operationId}/production`, data);
     this.invalidateDashboardCache();
     return response.data;
@@ -2736,8 +2800,55 @@ class ApiService {
     return response.data;
   }
 
-  async createCycleCount(data: any) {
+  async createCycleCount(data: import('../types/cycleCount').CycleCountCreate) {
     const response = await this.api.post('/inventory/cycle-counts', data);
+    this.invalidateCache('/inventory/cycle-counts');
+    return response.data;
+  }
+
+  async getCycleCountWorkspace(params: { status?: string; assigned_to?: number; offset?: number; limit?: number }) {
+    const response = await this.api.get<{
+      items: import('../types/cycleCount').CycleCountSummary[]; total: number; has_more: boolean;
+    }>('/inventory/cycle-counts/workspace', { params });
+    return response.data;
+  }
+
+  async getCycleCount(id: number) {
+    const response = await this.api.get<import('../types/cycleCount').CycleCountDetail>(`/inventory/cycle-counts/${id}`);
+    return response.data;
+  }
+
+  async getCycleCountCounters() {
+    const response = await this.api.get<Array<{ id: number; name: string }>>('/inventory/cycle-counts/counters');
+    return response.data;
+  }
+
+  async assignCycleCount(id: number, assigned_to: number | null) {
+    const response = await this.api.put<import('../types/cycleCount').CycleCountDetail>(`/inventory/cycle-counts/${id}/assignment`, { assigned_to });
+    this.invalidateCache('/inventory/cycle-counts');
+    return response.data;
+  }
+
+  async startCycleCount(id: number) {
+    const response = await this.api.post(`/inventory/cycle-counts/${id}/start`);
+    this.invalidateCache('/inventory/cycle-counts');
+    return response.data;
+  }
+
+  async recordCycleCount(id: number, itemId: number, data: { counted_quantity: number; notes: string; expected_counted_at: string | null }) {
+    const response = await this.api.post(`/inventory/cycle-counts/${id}/items/${itemId}/count`, data);
+    this.invalidateCache('/inventory/cycle-counts');
+    return response.data;
+  }
+
+  async reviewCycleCount(id: number) {
+    const response = await this.api.post<import('../types/cycleCount').CycleCountReview>(`/inventory/cycle-counts/${id}/review`);
+    return response.data;
+  }
+
+  async postReviewedCycleCount(id: number, review_token: string) {
+    const response = await this.api.post<{ message: string; items_adjusted: number; total_variance_value: number }>(`/inventory/cycle-counts/${id}/post-reviewed`, { review_token });
+    this.invalidateCache('/inventory');
     return response.data;
   }
 
@@ -2813,6 +2924,12 @@ class ApiService {
 
   async createPurchaseOrder(data: any) {
     const response = await this.api.post('/purchasing/purchase-orders', data);
+    return response.data;
+  }
+
+  async updateSupplierConfirmation(id: number, data: import('../types/receivingDelivery').SupplierConfirmationSubmission) {
+    const response = await this.api.put(`/purchasing/purchase-orders/${id}/supplier-confirmation`, data);
+    this.invalidateCache('/purchasing'); this.invalidateCache('/receiving'); this.invalidateCache('/operations-inbox');
     return response.data;
   }
 
@@ -3959,7 +4076,21 @@ class ApiService {
     return response.data;
   }
 
+  async receiveDelivery(data: import('../types/receivingDelivery').DeliverySubmission): Promise<import('../types/receivingDelivery').DeliveryOutcome> {
+    const response = await this.api.post('/receiving/deliveries', data);
+    this.invalidateCache('/receiving');
+    this.invalidateCache('/inventory');
+    this.invalidateCache('/purchasing');
+    return response.data;
+  }
+
+  async uploadReceivingCertificate(lineId: number, file: File, receiptId?: number): Promise<import('../types/receivingDelivery').ReceivingCertificate> {
+    const form = new FormData(); form.append('po_line_id', String(lineId)); form.append('file', file); if (receiptId) form.append('receipt_id', String(receiptId));
+    return (await this.api.post('/receiving/certificates', form, { headers: { 'Content-Type': 'multipart/form-data' } })).data;
+  }
+
   async receiveNewMaterial(data: {
+    certificate_document_id?: number;
     po_line_id: number;
     quantity_received: number;
     // Optional — when omitted the backend auto-assigns the receipt number as the lot.
@@ -4210,7 +4341,11 @@ class ApiService {
     return response.data;
   }
 
-  async predictDelivery(workOrderId: number) {
+  async getWorkOrderTimeline(workOrderId: number, params: { category?: import('../types/jobPlanning').TimelineCategory; actor_id?: number; start_at?: string; end_at?: string; cursor?: string; limit?: number } = {}): Promise<import('../types/jobPlanning').JobTimelineResponse> {
+    return (await this.api.get(`/work-orders/${workOrderId}/timeline`, { params })).data;
+  }
+
+  async predictDelivery(workOrderId: number): Promise<import('../types/jobPlanning').DeliveryPrediction> {
     const response = await this.api.get(`/analytics/predict/delivery/${workOrderId}`);
     return response.data;
   }
@@ -4314,9 +4449,59 @@ class ApiService {
     return response.data;
   }
 
+  async listImportBatches(entity?: string, offset = 0): Promise<import('../types/importBatch').ImportBatchHistory> {
+    return (await this.api.get('/import/batches', { params: { entity, offset } })).data;
+  }
+
+  async getImportBatch(id: number, rowOffset = 0): Promise<import('../types/importBatch').ImportBatch> {
+    return (await this.api.get(`/import/batches/${id}`, { params: { row_offset: rowOffset } })).data;
+  }
+
+  async downloadFailedImportRows(id: number): Promise<Blob> {
+    return (await this.api.get(`/import/batches/${id}/failed-rows.csv`, { responseType: 'blob' })).data;
+  }
+
+  private async mutateImportBatch(path: string, data: FormData): Promise<import('../types/importBatch').ImportBatch> {
+    // A file reviewed in company A must never be replayed in company B by the
+    // shared 401 interceptor while a tenant switch is in progress.
+    const token = this.token;
+    if (!token) throw new Error('Sign in before changing an import batch.');
+    const response = await fetch(`${API_BASE_URL.replace(/\/$/, '')}/import/batches${path}`, {
+      method: 'POST', credentials: 'omit', body: data,
+      headers: { Authorization: `Bearer ${token}`, 'X-Requested-With': 'XMLHttpRequest' },
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Import request failed. Refresh its receipt before continuing.' }));
+      throw Object.assign(new Error(typeof error.detail === 'string' ? error.detail : 'Import request failed'), {
+        response: { status: response.status, data: error },
+      });
+    }
+    return response.json();
+  }
+
+  async prepareImportBatch(entity: string, file: File, requestKey: string, defaultPassword = '') {
+    const data = new FormData();
+    data.append('entity', entity); data.append('file', file); data.append('request_key', requestKey);
+    if (defaultPassword) data.append('default_password', defaultPassword);
+    return this.mutateImportBatch('/prepare', data);
+  }
+
+  async commitImportBatch(id: number, version: number, credentialsFile?: File | null, defaultPassword = '') {
+    const data = new FormData(); data.append('expected_version', String(version));
+    if (credentialsFile) data.append('credentials_file', credentialsFile);
+    if (defaultPassword) data.append('default_password', defaultPassword);
+    return this.mutateImportBatch(`/${id}/commit`, data);
+  }
+
+  async correctImportBatch(id: number, version: number, file: File, defaultPassword = '') {
+    const data = new FormData(); data.append('expected_version', String(version)); data.append('file', file);
+    if (defaultPassword) data.append('default_password', defaultPassword);
+    return this.mutateImportBatch(`/${id}/corrections`, data);
+  }
+
   // Search
-  async search(query: string, type?: string) {
-    const response = await this.api.get('/search/', { params: { q: query, types: type } });
+  async search(query: string, type?: string, page?: { offset?: number; limit?: number }): Promise<import('../types/search').EntitySearchResponse> {
+    const response = await this.api.get('/search/', { params: { q: query, types: type, ...page } });
     return response.data;
   }
 

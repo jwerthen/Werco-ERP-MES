@@ -18,6 +18,7 @@ export interface SchedulingImpactOperation {
   after_status: string;
 }
 export interface SchedulingImpactJob {
+  materials?: import('./jobPlanning').MaterialReadiness;
   work_order_id: number;
   work_order_number: string;
   due_date: string | null;

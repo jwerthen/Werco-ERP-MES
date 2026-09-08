@@ -286,6 +286,7 @@ export async function reportProduction(
   operatorToken: string,
   operationId: number,
   data: {
+    request_id?: string;
     quantity_complete_delta?: number;
     quantity_scrapped_delta?: number;
     scrap_reason?: string;

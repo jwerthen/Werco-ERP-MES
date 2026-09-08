@@ -130,6 +130,7 @@ describe('OperatorKiosk', () => {
 
     await waitFor(() =>
       expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(31, {
+        request_id: expect.any(String),
         quantity_complete_delta: 3,
         quantity_scrapped_delta: 0,
         source: 'kiosk',
@@ -156,6 +157,7 @@ describe('OperatorKiosk', () => {
 
     await waitFor(() =>
       expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(31, {
+        request_id: expect.any(String),
         quantity_complete_delta: 0,
         quantity_scrapped_delta: 2,
         // Structured field, not the old `notes: 'Scrap reason: …'` workaround.
@@ -183,6 +185,7 @@ describe('OperatorKiosk', () => {
 
     await waitFor(() =>
       expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(31, {
+        request_id: expect.any(String),
         quantity_complete_delta: 0,
         quantity_scrapped_delta: 2,
         scrap_reason: 'Material defect',

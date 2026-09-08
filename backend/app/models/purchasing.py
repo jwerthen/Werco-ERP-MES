@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, Column, Date, DateTime
+from sqlalchemy import JSON, Boolean, CheckConstraint, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
@@ -140,6 +140,7 @@ class PurchaseOrder(Base, SoftDeleteMixin, TenantMixin):
         Index("ix_purchase_orders_status", "status"),
         Index("ix_purchase_orders_vendor_status", "vendor_id", "status"),
         Index("ix_purchase_orders_required_date", "required_date"),
+        Index("ix_po_company_follow_up", "company_id", "follow_up_due_date", "status"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -153,6 +154,14 @@ class PurchaseOrder(Base, SoftDeleteMixin, TenantMixin):
     order_date = Column(Date, nullable=True)
     required_date = Column(Date, nullable=True)
     expected_date = Column(Date, nullable=True)
+    # Supplier evidence is separate from the requested date and legacy estimate.
+    supplier_confirmed_date = Column(Date, nullable=True)
+    supplier_acknowledged_at = Column(DateTime, nullable=True)
+    supplier_acknowledged_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    supplier_confirmation_reference = Column(String(100), nullable=True)
+    supplier_confirmation_note = Column(Text, nullable=True)
+    follow_up_owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    follow_up_due_date = Column(Date, nullable=True)
 
     # Totals
     subtotal = Column(Float, default=0.0)
@@ -267,6 +276,8 @@ class POReceipt(Base, SoftDeleteMixin, TenantMixin):
     serial_numbers = Column(Text)  # Comma-separated or JSON
     heat_number = Column(String(100))  # For metals
     cert_number = Column(String(100))  # Cert of conformance
+    certificate_document_id = Column(Integer, ForeignKey("documents.id"), nullable=True, index=True)
+    delivery_batch_id = Column(Integer, ForeignKey("receiving_delivery_batches.id"), nullable=True, index=True)
     coc_attached = Column(Boolean, default=False)  # Certificate of Conformance attached
 
     # Location
@@ -313,3 +324,20 @@ class POReceipt(Base, SoftDeleteMixin, TenantMixin):
     inspector = relationship("User", foreign_keys=[inspected_by])
     receiver = relationship("User", foreign_keys=[received_by])
     label_document = relationship("Document", foreign_keys=[label_document_id])
+
+
+class ReceivingDeliveryBatch(Base, TenantMixin):
+    """Immutable request receipt: a retry returns the original batch outcome."""
+
+    __tablename__ = "receiving_delivery_batches"
+    __table_args__ = (
+        UniqueConstraint("company_id", "request_key", name="uq_receiving_delivery_request"),
+        Index("ix_delivery_company_po", "company_id", "purchase_order_id"),
+    )
+    id = Column(Integer, primary_key=True)
+    purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=False)
+    request_key = Column(String(80), nullable=False)
+    payload_hash = Column(String(64), nullable=False)
+    response = Column(JSON, nullable=False)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

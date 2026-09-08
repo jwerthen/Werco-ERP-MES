@@ -35,15 +35,17 @@ import {
 } from '@heroicons/react/24/outline';
 import api from '../services/api';
 import { usePermissions } from '../hooks/usePermissions';
+import { SEARCH_TYPES, SEARCH_TYPE_PATHS } from '../types/search';
 import { canAccessPath } from '../utils/routeAccess';
 
 interface SearchResult {
   id: number;
   type: string;
   title: string;
-  subtitle?: string;
+  subtitle?: string | null;
   url: string;
   icon: string;
+  matched_alias?: string | null;
 }
 
 // Icon mapping
@@ -151,6 +153,7 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
   const [recentError, setRecentError] = useState(false);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [recordTotal, setRecordTotal] = useState<number | null>(null);
   const [recentItems, setRecentItems] = useState<SearchResult[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -189,36 +192,48 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
     };
   }, [isOpen]);
 
-  const search = useCallback(async (searchQuery: string, seq: number) => {
-    if (!searchQuery.trim()) return;
-    setIsLoading(true);
-    setSearchError('');
-    try {
-      const natural =
-        /\s/.test(searchQuery.trim()) &&
-        /(late|overdue|waiting|material|blocked|stuck|hold|laser|weld|brake|hot|rush|critical)/i.test(searchQuery);
-      const data = natural ? await api.naturalLanguageSearch(searchQuery) : await api.search(searchQuery);
-      if (seq !== searchSeqRef.current) return;
-      const nextResults = data.results || [];
-      setResults(nextResults);
-      setSelectedIndex(0);
-      if (!nextResults.length)
-        window.dispatchEvent(
-          new CustomEvent('werco:friction', { detail: { type: 'failed_search', query: searchQuery.trim() } })
-        );
-    } catch {
-      if (seq === searchSeqRef.current) {
-        setResults([]);
-        setSearchError('Search is unavailable. Your query is preserved. Try again.');
+  const permittedTypes = SEARCH_TYPES.filter(([key]) => canAccessPath(SEARCH_TYPE_PATHS[key], can))
+    .map(([key]) => key)
+    .join(',');
+  const search = useCallback(
+    async (searchQuery: string, seq: number) => {
+      if (!searchQuery.trim()) return;
+      setIsLoading(true);
+      setSearchError('');
+      try {
+        const natural =
+          /\s/.test(searchQuery.trim()) &&
+          /(late|overdue|waiting|material|blocked|stuck|hold|laser|weld|brake|hot|rush|critical)/i.test(searchQuery);
+        const data = natural
+          ? await api.naturalLanguageSearch(searchQuery)
+          : permittedTypes
+            ? await api.search(searchQuery, permittedTypes)
+            : { results: [], total: 0 };
+        if (seq !== searchSeqRef.current) return;
+        const nextResults = data.results || [];
+        setResults(nextResults);
+        setRecordTotal('total' in data ? data.total : null);
+        setSelectedIndex(0);
+        if (!nextResults.length)
+          window.dispatchEvent(
+            new CustomEvent('werco:friction', { detail: { type: 'failed_search', query: searchQuery.trim() } })
+          );
+      } catch {
+        if (seq === searchSeqRef.current) {
+          setResults([]);
+          setSearchError('Search is unavailable. Your query is preserved. Try again.');
+        }
+      } finally {
+        if (seq === searchSeqRef.current) setIsLoading(false);
       }
-    } finally {
-      if (seq === searchSeqRef.current) setIsLoading(false);
-    }
-  }, []);
+    },
+    [permittedTypes]
+  );
 
   useEffect(() => {
     const seq = ++searchSeqRef.current;
     setResults([]);
+    setRecordTotal(null);
     setSearchError('');
     setSelectedIndex(0);
     setIsLoading(isOpen && !!query.trim());
@@ -346,6 +361,14 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
               </div>
 
               {/* Results */}
+              {query.trim() && recordTotal !== null && !isLoading && !searchError && (
+                <button
+                  className="w-full px-4 py-3 text-left text-fd-blue hover:bg-white/5"
+                  onClick={() => handleSelect({ url: `/search?q=${encodeURIComponent(query.trim())}` })}
+                >
+                  See all {recordTotal} record matches
+                </button>
+              )}
               <div className="max-h-[60vh] overflow-y-auto" style={{ borderTop: '1px solid var(--fd-line)' }}>
                 {searchError && (
                   <div role="alert" className="p-4 text-amber-200">
@@ -408,6 +431,9 @@ export default function GlobalSearch({ isOpen, onClose }: GlobalSearchProps) {
                                   </span>
                                 </div>
                                 {result.subtitle && <p className="text-sm text-fd-mute truncate">{result.subtitle}</p>}
+                                {result.matched_alias && (
+                                  <p className="text-xs text-fd-mute">Formerly {result.matched_alias}</p>
+                                )}
                               </div>
                               {isSelected && (
                                 <kbd

@@ -161,9 +161,9 @@ export default function KioskOneTapLane({
             <div className="min-w-0">
               <p className={`${LABEL_CLASSES} text-fd-red`}>
                 <span className="font-mono text-3xl font-bold tabular-nums">{pending}</span>
-                <span className="ml-2">pcs not saved</span>
+                <span className="ml-2">{oneTap.uncertain ? "pcs — status unknown" : "pcs not saved"}</span>
               </p>
-              <p className="mt-1 text-sm text-fd-body">{error}</p>
+              <p className="mt-1 text-sm text-fd-body">{oneTap.uncertain ? "Retry checks the original report without adding it twice. " : ""}{error}</p>
             </div>
             {/* RETRY lives INSIDE the status block, never in the button row —
                 see the fixed-geometry note on that row. */}
@@ -261,7 +261,7 @@ export default function KioskOneTapLane({
           type="button"
           data-testid="kiosk-onetap-undo"
           aria-label="Undo one piece"
-          disabled={pending <= 0 || phase === 'orphaned'}
+          disabled={pending <= (oneTap.lockedPending ?? 0) || phase === 'orphaned'}
           onClick={oneTap.undoOne}
           className="min-h-[76px] w-[150px] shrink-0 whitespace-nowrap rounded-[4px] border border-fd-line-bright bg-fd-sunken font-mono text-lg font-bold uppercase tracking-[0.08em] text-fd-body transition-transform duration-150 ease-out active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-30"
         >

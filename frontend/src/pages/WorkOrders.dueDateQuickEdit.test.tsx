@@ -1,3 +1,4 @@
+import { workOrderBrowseFixture } from '../testUtils/workOrderBrowseFixture';
 /**
  * Inline due-date quick edit on the work-order list.
  *
@@ -34,7 +35,7 @@ import { formatCentralDate } from '../utils/centralTime';
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {
-    getWorkOrders: jest.fn(),
+    browseWorkOrders: jest.fn(),
     updateWorkOrder: jest.fn(),
     deleteWorkOrder: jest.fn(),
     releaseWorkOrder: jest.fn(),
@@ -62,6 +63,7 @@ jest.mock('../services/realtime', () => ({
   buildWsUrl: () => 'ws://localhost/ws/test',
 }));
 
+const mockRows = jest.fn();
 const mockedApi = api as jest.Mocked<typeof api>;
 
 const openWorkOrder = {
@@ -120,9 +122,15 @@ async function openEditor(): Promise<HTMLElement> {
 describe('WorkOrders inline due-date quick edit', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockedApi.browseWorkOrders.mockImplementation(async params => {
+      const sourceParams: Record<string,string> = {};
+      if (params?.status) sourceParams.status = params.status;
+      if (params?.search) sourceParams.search = params.search;
+      return workOrderBrowseFixture(await mockRows(sourceParams), params);
+    });
     mockNavigate.mockClear();
     mockRole = 'manager';
-    mockedApi.getWorkOrders.mockResolvedValue([openWorkOrder, finishedWorkOrder]);
+    mockRows.mockResolvedValue([openWorkOrder, finishedWorkOrder]);
     mockedApi.updateWorkOrder.mockResolvedValue({});
   });
 
@@ -144,7 +152,7 @@ describe('WorkOrders inline due-date quick edit', () => {
     });
 
     // Non-optimistic: the change is confirmed by a refetch, not painted locally.
-    await waitFor(() => expect(mockedApi.getWorkOrders).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockRows).toHaveBeenCalledTimes(2));
     expect(await screen.findByText(/WO-1001 due/)).toBeInTheDocument();
   });
 
@@ -191,12 +199,12 @@ describe('WorkOrders inline due-date quick edit', () => {
     // Someone else reschedules the job; the list's refresh loop picks it up while
     // the editor is open — which also refreshes `version`, so the server-side lock
     // would NOT catch this.
-    mockedApi.getWorkOrders.mockResolvedValue([
+    mockRows.mockResolvedValue([
       { ...openWorkOrder, version: 8, due_date: '2099-04-01' },
       finishedWorkOrder,
     ]);
     fireEvent.focus(window);
-    await waitFor(() => expect(mockedApi.getWorkOrders).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockRows).toHaveBeenCalledTimes(2));
 
     fireEvent.click(
       within(await getDesktopTable()).getByRole('button', { name: 'Save due date for WO-1001' })
@@ -225,12 +233,12 @@ describe('WorkOrders inline due-date quick edit', () => {
       target: { value: '2099-03-11' },
     });
 
-    mockedApi.getWorkOrders.mockResolvedValue([
+    mockRows.mockResolvedValue([
       { ...openWorkOrder, version: 8, due_date: '2099-04-01' },
       finishedWorkOrder,
     ]);
     fireEvent.focus(window);
-    await waitFor(() => expect(mockedApi.getWorkOrders).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockRows).toHaveBeenCalledTimes(2));
 
     fireEvent.click(
       within(await getDesktopTable()).getByRole('button', { name: 'Save due date for WO-1001' })
@@ -326,12 +334,12 @@ describe('WorkOrders inline due-date quick edit', () => {
       target: { value: '2099-03-11' },
     });
 
-    mockedApi.getWorkOrders.mockResolvedValue([
+    mockRows.mockResolvedValue([
       { ...openWorkOrder, version: 8, due_date: '2099-04-01' },
       finishedWorkOrder,
     ]);
     fireEvent.focus(window);
-    await waitFor(() => expect(mockedApi.getWorkOrders).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockRows).toHaveBeenCalledTimes(2));
     fireEvent.click(
       within(await getDesktopTable()).getByRole('button', { name: 'Save due date for WO-1001' })
     );

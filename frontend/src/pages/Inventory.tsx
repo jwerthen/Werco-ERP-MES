@@ -1,3 +1,5 @@
+import { useTableWorkspace } from '../hooks/useTableWorkspace';
+import { TableWorkspaceControls } from '../components/ui/TableWorkspaceControls';
 import { PageHeader } from '../components/ui/PageHeader';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useSearchParams } from 'react-router-dom';
@@ -25,6 +27,7 @@ import {
 } from '../components/ui';
 import { getBreadcrumbParent, getRouteTitle } from '../utils/routeMeta';
 import StockMovementsPanel from '../components/inventory/StockMovementsPanel';
+import CycleCountsPanel from '../components/inventory/CycleCountsPanel';
 import CombineInventoryDialog from '../components/inventory/CombineInventoryDialog';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
@@ -62,7 +65,7 @@ interface InventorySummary {
  * (`StockMovementsPanel`); it replaces a long-dead `transactions` member that was
  * declared here but never given a tab or a panel.
  */
-type TabType = 'summary' | 'details' | 'receive' | 'movements';
+type TabType = 'summary' | 'details' | 'receive' | 'movements' | 'counts';
 type InventoryGroup = 'all' | 'parts' | 'materials';
 
 const MATERIAL_TYPES = new Set(['raw_material', 'purchased', 'hardware', 'consumable']);
@@ -94,7 +97,12 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   // POST /inventory/combine, so the hidden button and a refused call agree.
   const canCombine = hasPermission(user?.role, 'inventory:combine') || !!user?.is_superuser;
   const [searchParams, setSearchParams] = useSearchParams();
-  const [activeTab, setActiveTab] = useState<TabType>('summary');
+  const requestedInventoryTab = searchParams.get('inventory_tab');
+  const activeTab: TabType = ['summary', 'details', 'movements', 'counts'].includes(requestedInventoryTab || '')
+    ? (requestedInventoryTab as TabType)
+    : searchParams.has('cycle_count')
+      ? 'counts'
+      : 'summary';
   const [groupFilter, setGroupFilter] = useState<InventoryGroup>(() => {
     const group = searchParams.get('group');
     return group === 'parts' || group === 'materials' ? group : 'all';
@@ -674,6 +682,36 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       {pageHeader}
     </>
   );
+  const inventoryFilters = { search: filterText, group: groupFilter, low_stock: showLowStockOnly ? '1' : '' };
+  const applyInventoryFilters = (filters: Record<string, string>) => {
+    setFilterText(filters.search || '');
+    const group = filters.group === 'parts' || filters.group === 'materials' ? filters.group : 'all';
+    setGroupFilter(group);
+    setShowLowStockOnly(filters.low_stock === '1');
+    const next = new URLSearchParams(searchParams);
+    if (group === 'all') next.delete('group');
+    else next.set('group', group);
+    if (filters.low_stock === '1') next.set('filter', 'low_stock');
+    else next.delete('filter');
+    setSearchParams(next);
+  };
+  const summaryWorkspace = useTableWorkspace(
+    'inventory',
+    'summary',
+    summaryColumns,
+    inventoryFilters,
+    applyInventoryFilters,
+    { key: 'part', dir: 'asc' }
+  );
+  const detailWorkspace = useTableWorkspace(
+    'inventory',
+    'details',
+    detailColumns,
+    inventoryFilters,
+    applyInventoryFilters,
+    { key: 'part', dir: 'asc' }
+  );
+
   if (loading || loadError) {
     return (
       <div className="space-y-4">
@@ -731,7 +769,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
           the on-hand lists; the Stock Movements tab is a server-paged ledger with
           its own filters, and the "Showing N of M items" counter here would be
           counting a different set than the one on screen. */}
-      {activeTab !== 'movements' && (
+      {activeTab !== 'movements' && activeTab !== 'counts' && (
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-col gap-3 w-full sm:max-w-xl">
             <div className="relative">
@@ -833,16 +871,23 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
 
       {/* Tabs */}
       <div className="border-b border-slate-700">
-        <nav className="-mb-px flex space-x-8">
+        <nav className="-mb-px flex gap-6 overflow-x-auto" aria-label="Inventory views">
           {[
             { id: 'summary', label: 'Summary by Part' },
             { id: 'details', label: 'Detail by Location' },
             { id: 'movements', label: 'Stock Movements' },
+            { id: 'counts', label: 'Cycle Counts' },
           ].map(tab => (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id as TabType)}
-              className={`py-4 px-1 border-b-2 font-medium text-sm ${
+              onClick={() => {
+                const next = new URLSearchParams(searchParams);
+                next.set('inventory_tab', tab.id);
+                if (tab.id !== 'counts') next.delete('cycle_count');
+                setSearchParams(next);
+              }}
+              aria-current={activeTab === tab.id ? 'page' : undefined}
+              className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
                 activeTab === tab.id
                   ? 'border-werco-primary text-werco-primary'
                   : 'border-transparent text-slate-400 hover:text-slate-300'
@@ -854,11 +899,14 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         </nav>
       </div>
 
+      {activeTab === 'summary' && <TableWorkspaceControls workspace={summaryWorkspace} />}
+      {activeTab === 'details' && <TableWorkspaceControls workspace={detailWorkspace} />}
       {/* Tab Content */}
       <div>
         {activeTab === 'summary' && (
           <DataTable
-            columns={summaryColumns}
+            columns={summaryWorkspace.displayColumns(summaryColumns)}
+            {...summaryWorkspace.tableProps}
             data={filteredSummary}
             rowKey={item => item.part_id}
             defaultSort={{ key: 'part', dir: 'asc' }}
@@ -876,7 +924,8 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
 
         {activeTab === 'details' && (
           <DataTable
-            columns={detailColumns}
+            columns={detailWorkspace.displayColumns(detailColumns)}
+            {...detailWorkspace.tableProps}
             data={filteredInventory}
             rowKey={item => item.id}
             defaultSort={{ key: 'part', dir: 'asc' }}
@@ -896,7 +945,28 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
             page-level filter bar above is a client-side filter over the on-hand
             snapshot and does not apply to it, which is why that bar is HIDDEN on
             this tab rather than left sitting there implying it filters these rows. */}
-        {activeTab === 'movements' && <StockMovementsPanel parts={parts} />}
+        {activeTab === 'movements' && (
+          <StockMovementsPanel
+            parts={parts}
+            initialWorkOrderId={
+              Number(searchParams.get('work_order_id')) > 0 ? Number(searchParams.get('work_order_id')) : undefined
+            }
+            onWorkOrderFilterClear={() => {
+              const next = new URLSearchParams(searchParams);
+              next.delete('work_order_id');
+              setSearchParams(next, { replace: true });
+            }}
+          />
+        )}
+        {activeTab === 'counts' && (
+          <CycleCountsPanel
+            locations={locations}
+            parts={parts}
+            onPosted={() => {
+              void loadData();
+            }}
+          />
+        )}
       </div>
 
       {/* Combine SKUs — server-GATED, therefore NON-OPTIMISTIC. Nothing here is

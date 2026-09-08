@@ -1,4 +1,6 @@
-import React, { useEffect, useState, useMemo, useCallback } from 'react';
+import { useTableWorkspace } from '../hooks/useTableWorkspace';
+import { TableWorkspaceControls } from '../components/ui/TableWorkspaceControls';
+import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { Part, PartType } from '../types';
@@ -86,6 +88,10 @@ export default function PartsPage() {
 
   const [parts, setParts] = useState<Part[]>([]);
   const [loading, setLoading] = useState(true);
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const listRequest = useRef(0);
+  useEffect(() => () => { ++listRequest.current; }, []);
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search.trim(), 250);
   const [typeFilter, setTypeFilter] = useState<string>('');
@@ -133,8 +139,10 @@ export default function PartsPage() {
   const { confirmDiscard, markSaved } = useUnsavedChanges(isCreateFormDirty);
 
   const loadParts = useCallback(async () => {
+    const request = ++listRequest.current;
     try {
       setLoading(true);
+      setLoadError(false);
       const params: any = { include_bom_components: showBOMComponents };
       if (typeFilter) params.part_type = typeFilter;
       if (debouncedSearch) params.search = debouncedSearch;
@@ -143,6 +151,7 @@ export default function PartsPage() {
         api.getBOMs({ active_only: true, limit: 5000 }),
       ]);
 
+      if (listRequest.current !== request) return;
       if (partsResult.status === 'fulfilled') {
         setParts(partsResult.value);
       } else {
@@ -164,9 +173,9 @@ export default function PartsPage() {
         setComponentPartIds(new Set());
       }
     } catch {
-      showToast('error', 'Failed to load parts');
+      if (listRequest.current === request) { setLoadError(true); showToast('error', 'Failed to load parts'); }
     } finally {
-      setLoading(false);
+      if (listRequest.current === request) { setLoading(false); setHasLoaded(true); }
     }
   }, [typeFilter, showBOMComponents, debouncedSearch, showToast]);
 
@@ -199,6 +208,13 @@ export default function PartsPage() {
       setSavedFilters([]);
     }
   }, []);
+
+  const workspace = useTableWorkspace<Part>('parts', 'catalog', [{ key: 'part_number', header: 'Part' }],
+    { search, typeFilter, statusFilter, showBOMComponents: showBOMComponents ? '1' : '', viewMode }, filters => {
+      setSearch(filters.search || ''); setTypeFilter(filters.typeFilter || ''); setStatusFilter(filters.statusFilter || '');
+      setShowBOMComponents(filters.showBOMComponents === '1'); setViewMode(filters.viewMode === 'grid' ? 'grid' : 'table');
+      setSelectedPartIds(new Set()); setExpandedParts(new Set());
+    });
 
   const filteredParts = useMemo(() => {
     let result = parts;
@@ -584,7 +600,7 @@ export default function PartsPage() {
     }
   };
 
-  if (loading) {
+  if (loading && !hasLoaded) {
     return (
       <div className="space-y-6">
         <div className="flex justify-between items-center">
@@ -598,6 +614,8 @@ export default function PartsPage() {
 
   return (
     <div className="space-y-5" data-tour="eng-parts">
+      {loading && <p aria-live="polite" className="text-sm text-surface-500">Updating parts…</p>}
+      {loadError && <p role="alert" className="text-amber-300">The parts list could not refresh. Displayed data may be out of date. <button className="underline" onClick={() => void loadParts()}>Retry</button></p>}
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
@@ -677,7 +695,7 @@ export default function PartsPage() {
             className="btn-secondary flex items-center gap-2 text-sm"
           >
             <BookmarkIcon className="h-4 w-4" />
-            Save Filter
+            Save on device
           </button>
           {hasActiveFilters && (
             <button type="button" onClick={clearFilters} className="btn-secondary flex items-center gap-2 text-sm">
@@ -688,9 +706,10 @@ export default function PartsPage() {
         </div>
       </div>
 
+      <TableWorkspaceControls workspace={workspace} tableOptions={false} />
       {savedFilters.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs uppercase tracking-wide text-slate-500">Saved</span>
+          <span className="text-xs uppercase tracking-wide text-slate-500">On this device</span>
           {savedFilters.map(filter => (
             <div
               key={filter.id}
@@ -703,6 +722,11 @@ export default function PartsPage() {
                 title={`Apply ${filter.name}`}
               >
                 {filter.name}
+              </button>
+              <button type="button" className="px-2 py-1 text-fd-link" disabled={workspace.busy || workspace.loading || !workspace.enabled}
+                aria-label={`Import ${filter.name} into my private views`}
+                onClick={() => void workspace.saveView(filter.name, 'private', { search: filter.search, typeFilter: filter.typeFilter, statusFilter: filter.statusFilter, showBOMComponents: filter.showBOMComponents ? '1' : '', viewMode: filter.viewMode })}>
+                Import to my account
               </button>
               <button
                 type="button"
@@ -1226,7 +1250,7 @@ export default function PartsPage() {
       <InputDialog
         open={saveFilterDialogOpen}
         title="Save Parts Filter"
-        message="Saves the current search, type, status, and view settings as a reusable filter."
+        message="Saves these filters in this browser. Use Save current view to keep a private account view or a team view."
         label="Filter name"
         defaultValue={search || typeFilter || statusFilter || 'Parts filter'}
         submitLabel="Save"

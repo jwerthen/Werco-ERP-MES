@@ -5,7 +5,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.schemas.base import UTCModel
 
-SourceKind = Literal['late_work_order', 'blocker', 'low_stock', 'quality_ncr', 'overdue_po_line', 'mrp_shortage']
+SourceKind = Literal[
+    'late_work_order', 'blocker', 'low_stock', 'quality_ncr', 'overdue_po_line', 'mrp_shortage', 'supplier_follow_up'
+]
 
 
 class InboxAssignee(BaseModel):

@@ -27,6 +27,7 @@ from app.schemas.purchasing import (
     POListResponse,
     POResponse,
     POUpdate,
+    SupplierConfirmationUpdate,
     VendorCreate,
     VendorResponse,
     VendorUpdate,
@@ -1466,3 +1467,25 @@ def restore_purchase_order(
 # The receiving / inspection endpoints live in app/api/endpoints/receiving.py
 # (mounted at /api/v1/receiving). The duplicate copies that previously lived here
 # were removed; purchasing.py now owns only vendor and purchase-order endpoints.
+
+
+@router.put("/purchase-orders/{po_id}/supplier-confirmation", response_model=POResponse)
+def update_supplier_confirmation(
+    po_id: int,
+    body: SupplierConfirmationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Record supplier acknowledgment, confirmed arrival and buyer follow-up.
+
+    Requires admin/manager/supervisor and purchasing view/create permissions for
+    the current company. Only issued/partially received POs are eligible. The
+    expected_updated_at version prevents lost updates (409 when stale), and the
+    follow-up owner must have company purchasing access. Requested/estimated dates
+    remain unchanged. Withdrawal clears confirmation; no supplier message is sent.
+    """
+    from app.services.supplier_followup_service import update_supplier_confirmation as update_confirmation
+
+    return update_confirmation(db, current_user, company_id, po_id, body, audit)

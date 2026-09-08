@@ -566,7 +566,7 @@ easy to miss.
 | `DATABASE_URL` + the `SUPABASE_*` / `POSTGRES_*` set | Every job opens its own DB session. |
 | `SECRET_KEY`, `REFRESH_TOKEN_SECRET_KEY` | Config validation requires them. |
 | `ENVIRONMENT=production` | Arms the fail-fast Redis guard. |
-| ★ **`WORKER_CRON_JOBS=none`** | **Set this now.** Without it, all 12 crons are live the moment the container boots. |
+| ★ **`WORKER_CRON_JOBS=none`** | **Set this now.** Without it, all 13 crons are live the moment the container boots. |
 | ★ `SENTRY_DSN` | Otherwise a crashing cron is a log line nobody reads. Events are tagged `component=worker`. |
 | ★ `FRONTEND_BASE_URL` | Every notification email builds its deep link from it. |
 | `SMTP_*` | Email delivery. |
@@ -596,7 +596,7 @@ Watch the deploy log. **You are looking for exactly this shape:**
 ```
 ARQ worker starting up (environment=production, release=<sha>)
 ARQ worker Redis: redis://<host>:6379/0 [source=REDIS_URL, auth=password] | queue=arq:queue
-ARQ worker cron: 12 of 12 cron jobs SUPPRESSED by WORKER_CRON_JOBS='none': cron:aggregate_ai_learning_job, …
+ARQ worker cron: 13 of 13 cron jobs SUPPRESSED by WORKER_CRON_JOBS='none': cron:aggregate_ai_learning_job, …
 ARQ worker cron: none armed; draining enqueue-driven jobs only
 ARQ worker ready (23 job functions registered)
 ```
@@ -606,7 +606,7 @@ ARQ worker ready (23 job functions registered)
 | The Redis host **matches** what the API reports | **Correct.** This is the whole point of the line. |
 | The Redis host **differs** from the API's | **STOP.** Two different Redis instances — the exact silent failure this cutover exists to prevent. |
 | `RedisConfigurationError … Refusing to start` and a crash loop | `REDIS_URL` is missing or wrong on the worker. Fix and redeploy. Working as designed. |
-| Fewer than `12 of 12 … SUPPRESSED` | `WORKER_CRON_JOBS` is not `none`. **STOP** and set it before crons fire. |
+| Fewer than `13 of 13 … SUPPRESSED` | `WORKER_CRON_JOBS` is not `none`. **STOP** and set it before crons fire. |
 | A uvicorn banner / `Application startup complete` | You are running the API image. **STOP** — this is the second-API-replica trap. |
 | Nothing after "starting up" | The process died before `startup`. Check Sentry (`component:worker`). |
 
@@ -671,7 +671,7 @@ the others. §6.4.
 | Goal | Action | Effect |
 |---|---|---|
 | Stop scheduled work, keep request-driven jobs | Set `WORKER_CRON_JOBS=none`, redeploy | Crons stop. Notifications, webhooks, labels still process. |
-| Stop **one** cron, keep the other eleven | Set `WORKER_CRON_JOBS=all,-<job>`, redeploy | That cron stops. Everything else — **including crons added in future releases** — stays armed. §6.4. |
+| Stop **one** cron, keep the other twelve | Set `WORKER_CRON_JOBS=all,-<job>`, redeploy | That cron stops. Everything else — **including crons added in future releases** — stays armed. §6.4. |
 | Stop everything | Railway → `werco-worker` → **Remove** / pause the service | No background work at all. **The API is unaffected** — it logs its queue target and serves normally without a worker. |
 | Undo the whole change | Revert the branch and redeploy `werco-api` | Back to enqueues failing against localhost. Nothing is corrupted by this. |
 
@@ -726,16 +726,16 @@ WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job
 Redeploy, then confirm on the startup log — this line is the receipt:
 
 ```
-ARQ worker cron: 1 of 12 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_auto_draft_job': cron:run_mrp_auto_draft_job
-ARQ worker cron: 11 job(s) armed, times in UTC
+ARQ worker cron: 1 of 13 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_auto_draft_job': cron:run_mrp_auto_draft_job
+ARQ worker cron: 12 job(s) armed, times in UTC
 ```
 
 (`UTC` is whatever the container's zone resolves to — see point 1 below.)
 
 | What you see | Verdict |
 |---|---|
-| `1 of 12 … SUPPRESSED`, naming `cron:run_mrp_auto_draft_job` | **Correct.** |
-| `0 of 12` / no SUPPRESSED line at all | The variable did not take. The cron is still armed. **STOP.** |
+| `1 of 13 … SUPPRESSED`, naming `cron:run_mrp_auto_draft_job` | **Correct.** |
+| `0 of 13` / no SUPPRESSED line at all | The variable did not take. The cron is still armed. **STOP.** |
 | `ValueError: WORKER_CRON_JOBS names unknown cron job(s): -…` and a crash loop | Typo in the excluded name. The refusal is working as designed — an exclusion that matches nothing would have left the job armed. **But while it crash-loops there is NO worker at all, not just that one cron off:** see below. Fix the spelling and redeploy. |
 | `ValueError: … uses all as a cron NAME …` and a crash loop | A stray comma, usually `all,` left behind after deleting the exclusion. Same blast radius as the row above. Delete the comma (or set the value to bare `all`). |
 | More than 1 suppressed | You excluded more than you meant to, or the variable still holds an older allowlist. |
@@ -753,7 +753,7 @@ enqueue-driven queue stops draining too**: emails, webhooks, receiving labels, W
 signals. If the correct spelling is not immediately to hand, set `WORKER_CRON_JOBS=none` to get a
 healthy worker back first, then re-apply the exclusion.
 
-**Do not use an allowlist of the other eleven.** It arms the same eleven crons today and rots
+**Do not use an allowlist of the other twelve.** An older explicit list omits the new daily performance-retention job and rots
 at the next release: a thirteenth cron added to `ALL_CRON_JOBS` would silently never register
 on this worker, and nothing in the log would say so — "I enabled the cron and nothing
 happened", one deploy late. The `-` form subtracts from whatever the release declares, so
@@ -829,7 +829,7 @@ serves no HTTP — verify it from its startup log (§5.5).
 6. **Whether `run_mrp_auto_draft_job` should run at all.** It is `AUTO_DRAFT`, not
    `AUTO_SUBMIT`, so nothing is sent to a supplier — but it creates records daily that someone
    must triage. If no one owns that triage, leave it off indefinitely: that is
-   `WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job`, **not** an allowlist of the other eleven.
+   `WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job`, **not** an allowlist of the other twelve.
    Leaving it off is a supported, permanent configuration — §6.4 has the procedure, the
    receipt to look for in the log, and what MRP does and does not still do without it.
 7. **Replicas.** `numReplicas = 1` is in the config and must stay there. The cron scheduler is
@@ -876,9 +876,13 @@ railway logs --service werco-worker --environment production
 | Queue name | `arq:queue` (a Redis **sorted set** — `ZCARD`, not `LLEN`) |
 | Job body TTL | ~24 h (`arq:job:<id>`); expired jobs are logged `job … expired` and discarded |
 | Registered job functions | 23 |
-| Declared crons | 12 |
+| Declared crons | 13 |
 | Cron timezone | container-local; **UTC unless `TZ` is set** |
 | Sweeper bounds | 24 h max age, 2 min grace, 500 per 5-minute pass |
 | Cron selector | `WORKER_CRON_JOBS` — unset/`all` / `none` / comma-separated names (allowlist) / `-name` exclusions (`all,-run_mrp_auto_draft_job`). The two shapes cannot be mixed; an unknown name, **negated or not**, is a hard startup error |
 | Worker start command | `arq app.worker.WorkerSettings` |
 | Worker healthcheck | **none, by design** — the worker serves no HTTP |
+
+### Browser performance retention
+
+The daily `cleanup_runtime_metrics_job` deletes anonymous runtime measurements older than 30 days. An explicit cron allowlist must include it; exclusion policies such as `all,-run_mrp_auto_draft_job` include it automatically. The job does not email, modify business documents or delete audit records.

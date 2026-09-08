@@ -904,6 +904,8 @@ if settings.RATE_LIMIT_ENABLED:
             # flushes at most every 5s (12/min). Too tight a cap silently drops
             # error reports during exactly the mass-failure incident you want them.
             "/api/v1/errors/log": "60/minute",
+            # Batched first-party measurements share this limit across the shop NAT.
+            "/api/v1/runtime-metrics/samples": "60/minute",
         }
         # Single merged source of truth for the path-specific resolver below.
         PATH_RATE_LIMITS = {**AUTH_RATE_LIMITS, **ENDPOINT_RATE_LIMITS}

@@ -805,3 +805,89 @@ describe('useOneTapPieces', () => {
     });
   });
 });
+
+describe('receipt-backed batch recovery', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  it('retries the exact failed batch separately from taps buffered while it was in flight', async () => {
+    const flight = deferred();
+    const post = jest.fn((_pieces: number, _opts: { requestId: string }) => Promise.resolve());
+    post.mockReturnValueOnce(flight.promise);
+    const { result } = renderHook(() => useOneTapPieces({ binding: BINDING, post, toMessage }));
+    act(() => { result.current.tap(); result.current.tap(); });
+    let flushing!: Promise<void>;
+    act(() => { flushing = result.current.flush(); });
+    act(() => result.current.tap());
+    await act(async () => { flight.reject(new Error('response lost')); await flushing; });
+    expect(result.current.pending).toBe(3);
+    expect(result.current.lockedPending).toBe(2);
+    const firstId = post.mock.calls[0][1].requestId;
+    act(() => result.current.retry());
+    await act(async () => { jest.advanceTimersByTime(ONE_TAP_WINDOW_MS); });
+    expect(post.mock.calls[1]).toEqual([2, expect.objectContaining({ requestId: firstId })]);
+    expect(result.current.pending).toBe(1);
+    await act(async () => { jest.advanceTimersByTime(ONE_TAP_WINDOW_MS); });
+    expect(post.mock.calls[2][0]).toBe(1);
+    expect(post.mock.calls[2][1].requestId).not.toBe(firstId);
+  });
+
+  it('cannot undo an uncertain submitted batch or change its ID after an expired-badge retry', async () => {
+    const post = jest.fn((_pieces: number, _opts: { requestId: string }) => Promise.resolve());
+    post.mockRejectedValueOnce(new Error('lost')).mockRejectedValueOnce({ status: 401 });
+    const { result } = renderHook(() => useOneTapPieces({ binding: BINDING, post, toMessage }));
+    act(() => result.current.tap());
+    await act(async () => { await result.current.flush(); });
+    act(() => result.current.undoOne());
+    expect(result.current.pending).toBe(1);
+    act(() => result.current.retry());
+    await act(async () => { jest.advanceTimersByTime(ONE_TAP_WINDOW_MS); });
+    expect(result.current.uncertain).toBe(true);
+    act(() => result.current.retry());
+    await act(async () => { jest.advanceTimersByTime(ONE_TAP_WINDOW_MS); });
+    expect(post.mock.calls.map(call => call[1].requestId)).toEqual(Array(3).fill(post.mock.calls[0][1].requestId));
+  });
+});
+
+test('reload restores an immutable failed batch plus separate buffered taps; only the original operator can check it', async () => {
+  const storageKey = 'onetap-reload-regression';
+  sessionStorage.removeItem(storageKey);
+  const identity = { operatorId: 7, operationId: 31 };
+  const firstPost = jest.fn().mockRejectedValue(new Error('response lost'));
+  const first = renderHook(() => useOneTapPieces({ binding: { ...BINDING, identity }, storageKey, post: firstPost, toMessage }));
+  act(() => { first.result.current.tap(); first.result.current.tap(); });
+  await act(async () => { await first.result.current.flush(); });
+  const originalId = firstPost.mock.calls[0][1].requestId;
+  act(() => { first.result.current.tap(); });
+  first.unmount();
+  const afterReload = jest.fn().mockResolvedValue(undefined);
+  const restored = renderHook(() => useOneTapPieces({ binding: null, storageKey, post: afterReload, toMessage }));
+  expect(restored.result.current.pending).toBe(3);
+  expect(restored.result.current.lockedPending).toBe(2);
+  expect(restored.result.current.recovery).toEqual({ ...identity, pieces: 2 });
+  await act(async () => { await expect(restored.result.current.recover!(8, afterReload)).rejects.toThrow('original operator'); });
+  await act(async () => { await restored.result.current.recover!(7, afterReload); });
+  expect(afterReload).toHaveBeenCalledTimes(1);
+  expect(afterReload).toHaveBeenCalledWith(31, 2, originalId);
+  expect(restored.result.current.pending).toBe(1);
+  expect(restored.result.current.phase).toBe('orphaned'); // remaining buffer stays recoverable without opening the job
+  expect(JSON.parse(sessionStorage.getItem(storageKey)!)).toMatchObject({ pieces: 1, identity });
+  expect(JSON.parse(sessionStorage.getItem(storageKey)!)).not.toHaveProperty('requestId');
+  restored.unmount();
+  sessionStorage.removeItem(storageKey);
+});
+
+test('reload during an in-flight check retains the original quantity without double-counting it in storage', async () => {
+  const storageKey = 'onetap-reload-inflight-regression';
+  const identity = { operatorId: 7, operationId: 31 };
+  sessionStorage.setItem(storageKey, JSON.stringify({ ...BINDING, identity, pieces: 2, requestId: 'original-key', lockedPieces: 2 }));
+  const pending = deferred();
+  const post = jest.fn(() => pending.promise);
+  const hook = renderHook(() => useOneTapPieces({ binding: null, storageKey, post: makePost(), toMessage }));
+  let response!: Promise<void>;
+  act(() => { response = hook.result.current.recover!(7, post); });
+  hook.unmount();
+  expect(JSON.parse(sessionStorage.getItem(storageKey)!)).toMatchObject({ pieces: 2, requestId: 'original-key', lockedPieces: 2 });
+  await act(async () => { pending.resolve(); await response; });
+  expect(sessionStorage.getItem(storageKey)).toBeNull();
+});

@@ -63,6 +63,7 @@ export interface DataTableSelection<K extends string | number = string | number>
 }
 
 export interface DataTableServerPagination {
+  loading?: boolean;
   page: number;
   pageSize: number;
   hasNext: boolean;
@@ -95,6 +96,8 @@ export interface DataTableProps<T> {
   /** Client-side page size. Ignored when `serverPagination` is set. */
   pageSize?: number;
   serverPagination?: DataTableServerPagination;
+  /** Rows are already ordered by the server; an outer pager owns grouped navigation. */
+  manualSorting?: boolean;
   /**
    * Partition rows into ordered groups, each preceded by a full-width section
    * header row. Sorting applies WITHIN each group (group order stays fixed) and
@@ -105,7 +108,7 @@ export interface DataTableProps<T> {
   groupBy?: DataTableGroupBy<T>;
   selection?: DataTableSelection;
   bulkActions?: React.ReactNode;
-  csvExport?: { filename: string };
+  csvExport?: { filename: string; label?: string };
   stickyHeader?: boolean;
   dense?: boolean;
   className?: string;
@@ -220,6 +223,7 @@ export function DataTable<T>({
   onSortChange,
   pageSize,
   serverPagination,
+  manualSorting = false,
   groupBy,
   selection,
   bulkActions,
@@ -245,7 +249,7 @@ export function DataTable<T>({
   // Pure sort applied to an arbitrary row set (never mutates its input).
   const sortRows = useCallback(
     (rows: T[]): T[] => {
-      if (serverPagination || !sort) return rows;
+      if (serverPagination || manualSorting || !sort) return rows;
       const col = columnByKey.get(sort.key);
       if (!col?.accessor) return rows;
       const copy = [...rows];
@@ -255,7 +259,7 @@ export function DataTable<T>({
       });
       return copy;
     },
-    [serverPagination, sort, columnByKey]
+    [serverPagination, manualSorting, sort, columnByKey]
   );
 
   // ---- Grouping (additive). When set, rows partition into ordered groups and
@@ -391,7 +395,7 @@ export function DataTable<T>({
           className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-semibold uppercase tracking-wider text-slate-300 border border-fd-line rounded-sm hover:bg-slate-700/40 transition-colors duration-150 shrink-0"
         >
           <ArrowDownTrayIcon className="h-4 w-4" aria-hidden="true" />
-          {serverPagination ? 'Export page' : 'Export CSV'}
+          {csvExport?.label || (serverPagination ? 'Export page' : 'Export CSV')}
         </button>
       )}
     </div>
@@ -585,7 +589,7 @@ export function DataTable<T>({
           <button
             type="button"
             className="p-1.5 rounded-sm border border-fd-line text-slate-300 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-700/40 transition-colors"
-            disabled={serverPagination.page <= 1}
+            disabled={serverPagination.loading || serverPagination.page <= 1}
             onClick={() => serverPagination.onPageChange(serverPagination.page - 1)}
             aria-label="Previous page"
           >
@@ -594,7 +598,7 @@ export function DataTable<T>({
           <button
             type="button"
             className="p-1.5 rounded-sm border border-fd-line text-slate-300 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-700/40 transition-colors"
-            disabled={!serverPagination.hasNext}
+            disabled={serverPagination.loading || !serverPagination.hasNext}
             onClick={() => serverPagination.onPageChange(serverPagination.page + 1)}
             aria-label="Next page"
           >

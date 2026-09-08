@@ -1,23 +1,10 @@
+import { Button } from '../components/ui/Button';
 import React, { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import api from '../services/api';
-import {
-  ArrowDownTrayIcon,
-  ArrowUpTrayIcon,
-  CheckCircleIcon,
-  DocumentMagnifyingGlassIcon,
-  DocumentTextIcon,
-  ExclamationTriangleIcon,
-} from '@heroicons/react/24/outline';
-import {
-  ImportRowError,
-  ImportTemplateSummary,
-  PurchaseOrderImportRowResult,
-  WorkOrderImportRowResult,
-} from '../types/importKit';
-import { importTimeoutMessage, ImportPhase } from '../utils/apiError';
-import { FormField } from '../components/ui/FormField';
-
+import { ImportTemplateSummary } from '../types/importKit';
+import RecoverableImport, { saveImportDownload } from '../components/imports/RecoverableImport';
+import { useAuth } from '../context/AuthContext';
 interface ImportTypeConfig {
   label: string;
   /** Server template entity key (GET /import/templates/{entity}); null = no server template. */
@@ -130,521 +117,90 @@ const importTypes: Record<string, ImportTypeConfig> = {
   },
 };
 
-const INVENTORY_FALLBACK_CSV =
-  'part_number,warehouse,location,quantity_on_hand,lot_number,unit_cost\n' +
-  '10001,MAIN,A-01-01,25,LOT-001,12.50\n';
-
-interface NormalizedResult {
-  dryRun: boolean;
-  totalRows: number;
-  created: number;
-  createdLineCount?: number;
-  skipped: number;
-  errors: Array<{ row: number; identifier?: string; reason: string }>;
-  workOrders?: WorkOrderImportRowResult[];
-  purchaseOrders?: PurchaseOrderImportRowResult[];
-}
-
-function errorIdentifier(error: ImportRowError): string | undefined {
-  const docNumber = error.wo_number || error.po_number;
-  const item =
-    error.identifier || error.part_number || error.code || error.name || error.employee_id || error.email;
-  return [docNumber, item].filter(Boolean).join(' / ') || undefined;
-}
-
-function normalizeErrors(errors: ImportRowError[] | undefined): NormalizedResult['errors'] {
-  return (errors || []).map((error) => ({
-    row: error.row,
-    identifier: errorIdentifier(error),
-    reason: error.reason,
-  }));
-}
-
-function extractApiError(err: any, phase?: ImportPhase): string {
-  // Axios timeouts carry a raw "timeout of Nms exceeded" message — translate that into
-  // phase-aware guidance via the shared helper (validate: slim the file; commit: the
-  // server may still be importing).
-  const timeoutMessage = importTimeoutMessage(err, phase);
-  if (timeoutMessage) return timeoutMessage;
-  const detail = err?.response?.data?.detail;
-  if (typeof detail === 'string') return detail;
-  return err?.message || 'Import request failed';
-}
-
-function triggerBlobDownload(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(url);
-}
-
 export default function ImportCenter() {
-  const [searchParams, setSearchParams] = useSearchParams();
-  const selectedType = searchParams.get('type') || 'employees';
-  const selected = importTypes[selectedType] || importTypes.employees;
-  const selectedKey = importTypes[selectedType] ? selectedType : 'employees';
-
-  const [templateIndex, setTemplateIndex] = useState<ImportTemplateSummary[]>([]);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [fileInputKey, setFileInputKey] = useState(0);
-  const [defaultPassword, setDefaultPassword] = useState('');
-  const [busy, setBusy] = useState<'preview' | 'commit' | null>(null);
+  const [params, setParams] = useSearchParams();
+  const key = params.get('type') || 'employees';
+  const selectedKey = importTypes[key] ? key : 'employees';
+  const selected = importTypes[selectedKey];
+  const { user } = useAuth();
+  const [templates, setTemplates] = useState<ImportTemplateSummary[]>([]);
   const [downloading, setDownloading] = useState(false);
-  const [preview, setPreview] = useState<NormalizedResult | null>(null);
-  const [committed, setCommitted] = useState<NormalizedResult | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-
+  const [error, setError] = useState('');
   useEffect(() => {
-    let cancelled = false;
+    let active = true;
     api
       .getImportTemplates()
-      .then((data) => {
-        if (!cancelled) setTemplateIndex(data.templates || []);
+      .then(data => {
+        if (active) setTemplates(data.templates || []);
       })
-      .catch(() => {
-        /* Column hints are progressive enhancement — downloads still work. */
-      });
+      .catch(() => {});
     return () => {
-      cancelled = true;
+      active = false;
     };
   }, []);
-
-  const templateInfo = selected.entity
-    ? templateIndex.find((template) => template.entity === selected.entity)
-    : undefined;
-
-  const resetUpload = () => {
-    setSelectedFile(null);
-    setFileInputKey((key) => key + 1);
-    setDefaultPassword('');
-    setPreview(null);
-    setCommitted(null);
-    setErrorMessage(null);
-  };
-
-  const handleTypeSelect = (key: string) => {
-    setSearchParams({ type: key });
-    resetUpload();
-  };
-
-  const handleFileChange = (file: File | null) => {
-    setSelectedFile(file);
-    // A new file invalidates any previous dry run — force a fresh preview.
-    setPreview(null);
-    setCommitted(null);
-    setErrorMessage(null);
-  };
-
-  const handleTemplateDownload = async () => {
-    setErrorMessage(null);
-    if (!selected.entity) {
-      // Inventory has no server template yet — keep the legacy CSV starter file.
-      triggerBlobDownload(new Blob([INVENTORY_FALLBACK_CSV], { type: 'text/csv;charset=utf-8' }), 'inventory_template.csv');
-      return;
-    }
+  const isAdmin = user?.is_superuser || ['admin', 'platform_admin'].includes(user?.role || '');
+  const roles =
+    selected.entity === 'users'
+      ? ['admin']
+      : ['parts', 'materials', 'work-orders'].includes(selected.entity || '')
+        ? ['admin', 'manager', 'supervisor']
+        : ['admin', 'manager'];
+  const canImport = !!isAdmin || roles.includes(user?.role || '');
+  const template = templates.find(item => item.entity === selected.entity);
+  const download = async () => {
+    if (!selected.entity) return;
     setDownloading(true);
+    setError('');
     try {
       const { blob, filename } = await api.downloadImportTemplate(selected.entity);
-      triggerBlobDownload(blob, filename);
-    } catch (err: any) {
-      setErrorMessage(extractApiError(err));
+      saveImportDownload(blob, filename);
+    } catch {
+      setError('Template download failed. Try again.');
     } finally {
       setDownloading(false);
     }
   };
-
-  const runImport = async (file: File, dryRun: boolean): Promise<NormalizedResult> => {
-    if (selectedKey === 'employees') {
-      const data = await api.importUsersCsv(file, defaultPassword, dryRun);
-      return {
-        dryRun: data.dry_run,
-        totalRows: data.total_rows,
-        created: data.created_count ?? 0,
-        skipped: data.skipped_count,
-        errors: normalizeErrors(data.errors),
-      };
-    }
-    if (selectedKey === 'work_orders') {
-      const data = await api.importWorkOrders(file, dryRun);
-      return {
-        dryRun: data.dry_run,
-        totalRows: data.total_rows,
-        created: data.created_count,
-        skipped: data.skipped_count,
-        errors: normalizeErrors(data.errors),
-        workOrders: data.results,
-      };
-    }
-    if (selectedKey === 'purchase_orders') {
-      const data = await api.importPurchaseOrders(file, dryRun);
-      return {
-        dryRun: data.dry_run,
-        totalRows: data.total_rows,
-        created: data.created_count,
-        createdLineCount: data.created_line_count,
-        skipped: data.skipped_count,
-        errors: normalizeErrors(data.errors),
-        purchaseOrders: data.results,
-      };
-    }
-
-    const importer =
-      selectedKey === 'parts'
-        ? api.importPartsCsv
-        : selectedKey === 'materials'
-          ? api.importMaterialsCsv
-          : selectedKey === 'customers'
-            ? api.importCustomersCsv
-            : selectedKey === 'vendors'
-              ? api.importVendorsCsv
-              : api.importWorkCentersCsv;
-    const data = await importer.call(api, file, dryRun);
-    return {
-      dryRun: data.dry_run,
-      totalRows: data.total_rows,
-      created: data.created_count ?? data.imported_count ?? 0,
-      skipped: data.skipped_count,
-      errors: normalizeErrors(data.errors),
-    };
-  };
-
-  const handleValidate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedFile) return;
-    setBusy('preview');
-    setErrorMessage(null);
-    setCommitted(null);
-    try {
-      setPreview(await runImport(selectedFile, true));
-    } catch (err: any) {
-      setPreview(null);
-      setErrorMessage(extractApiError(err, 'validate'));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const handleCommit = async () => {
-    if (!selectedFile || !preview) return;
-    setBusy('commit');
-    setErrorMessage(null);
-    try {
-      const result = await runImport(selectedFile, false);
-      setCommitted(result);
-      setPreview(null);
-      setSelectedFile(null);
-      setFileInputKey((key) => key + 1);
-      setDefaultPassword('');
-    } catch (err: any) {
-      setErrorMessage(extractApiError(err, 'commit'));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const commitBlocked = preview !== null && preview.created === 0;
-
-  const renderCounts = (result: NormalizedResult) => (
-    <div className="flex flex-wrap items-center gap-4 text-sm tabular-nums">
-      <span className="text-slate-300">Rows: {result.totalRows}</span>
-      <span className="text-fd-green flex items-center gap-1">
-        <CheckCircleIcon className="h-4 w-4" />
-        {result.dryRun ? 'Would create' : 'Created'}: {result.created}
-        {result.createdLineCount !== undefined ? ` POs (${result.createdLineCount} lines)` : ''}
-      </span>
-      <span className="text-fd-amber flex items-center gap-1">
-        <ExclamationTriangleIcon className="h-4 w-4" /> Skipped: {result.skipped}
-      </span>
-      <span className={result.errors.length > 0 ? 'text-fd-red' : 'text-slate-400'}>
-        Errors: {result.errors.length}
-      </span>
-    </div>
-  );
-
-  const renderErrorTable = (errors: NormalizedResult['errors']) =>
-    errors.length > 0 && (
-      <div className="mt-4 overflow-x-auto border border-fd-red/30 rounded-sm max-h-60 overflow-y-auto">
-        <table className="min-w-full text-sm">
-          <thead>
-            <tr className="bg-fd-red/10 text-red-200 text-left">
-              <th className="px-3 py-2 font-medium">Row</th>
-              <th className="px-3 py-2 font-medium">Identifier</th>
-              <th className="px-3 py-2 font-medium">Problem</th>
-            </tr>
-          </thead>
-          <tbody>
-            {errors.map((error, index) => (
-              <tr key={`${error.row}-${index}`} className="border-t border-fd-line text-slate-300">
-                <td className="px-3 py-2 whitespace-nowrap tabular-nums">{error.row}</td>
-                <td className="px-3 py-2 whitespace-nowrap">{error.identifier || '-'}</td>
-                <td className="px-3 py-2">{error.reason}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    );
-
-  const renderWorkOrderRows = (rows: WorkOrderImportRowResult[]) =>
-    rows.length > 0 && (
-      <div className="mt-4 overflow-x-auto border border-fd-line rounded-sm max-h-60 overflow-y-auto">
-        <table className="min-w-full text-sm">
-          <thead>
-            <tr className="bg-fd-sunken text-slate-300 text-left">
-              <th className="px-3 py-2 font-medium">Row</th>
-              <th className="px-3 py-2 font-medium">WO #</th>
-              <th className="px-3 py-2 font-medium">Part</th>
-              <th className="px-3 py-2 font-medium">Qty</th>
-              <th className="px-3 py-2 font-medium">Due</th>
-              <th className="px-3 py-2 font-medium">Ops complete</th>
-              <th className="px-3 py-2 font-medium">Next op</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.row} className="border-t border-fd-line text-slate-400">
-                <td className="px-3 py-2 whitespace-nowrap tabular-nums">{row.row}</td>
-                <td className="px-3 py-2 whitespace-nowrap tabular-nums">{row.wo_number || '(generated at commit)'}</td>
-                <td className="px-3 py-2 whitespace-nowrap">{row.part_number}</td>
-                <td className="px-3 py-2 whitespace-nowrap tabular-nums">{row.quantity}</td>
-                <td className="px-3 py-2 whitespace-nowrap tabular-nums">{row.due_date || '-'}</td>
-                <td className="px-3 py-2 whitespace-nowrap tabular-nums">
-                  {row.completed_operation_count}/{row.operation_count}
-                </td>
-                <td className="px-3 py-2 whitespace-nowrap tabular-nums">
-                  {row.next_operation_sequence !== null ? `Seq ${row.next_operation_sequence}` : '-'}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    );
-
-  const renderPurchaseOrderRows = (rows: PurchaseOrderImportRowResult[]) =>
-    rows.length > 0 && (
-      <div className="mt-4 overflow-x-auto border border-fd-line rounded-sm max-h-60 overflow-y-auto">
-        <table className="min-w-full text-sm">
-          <thead>
-            <tr className="bg-fd-sunken text-slate-300 text-left">
-              <th className="px-3 py-2 font-medium">PO #</th>
-              <th className="px-3 py-2 font-medium">Vendor</th>
-              <th className="px-3 py-2 font-medium">Lines</th>
-              <th className="px-3 py-2 font-medium">Total</th>
-              <th className="px-3 py-2 font-medium">Source rows</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, index) => (
-              <tr key={`${row.po_number || 'new'}-${index}`} className="border-t border-fd-line text-slate-400">
-                <td className="px-3 py-2 whitespace-nowrap tabular-nums">{row.po_number || '(generated at commit)'}</td>
-                <td className="px-3 py-2 whitespace-nowrap">{row.vendor_code}</td>
-                <td className="px-3 py-2 whitespace-nowrap tabular-nums">{row.line_count}</td>
-                <td className="px-3 py-2 whitespace-nowrap tabular-nums">${row.total.toFixed(2)}</td>
-                <td className="px-3 py-2 whitespace-nowrap tabular-nums">{row.rows.join(', ')}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    );
-
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-white">Import Center</h1>
-        <p className="text-slate-400 mt-1">
-          Move off spreadsheets safely: download an Excel template, validate your file with a dry run, see exactly
-          what would happen, then commit.
-        </p>
-      </div>
-
-      <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
-        <div className="xl:col-span-1 bg-fd-panel border border-fd-line rounded-sm p-2.5 space-y-1.5">
-          {Object.entries(importTypes).map(([key, config]) => (
-            <button
-              key={key}
-              onClick={() => handleTypeSelect(key)}
-              title={config.entity ? `werco-import-template-${config.entity}.xlsx` : 'inventory_template.csv'}
-              className={`w-full text-left rounded-sm px-3 py-2 transition-colors ${
-                key === selectedKey
-                  ? 'bg-fd-cyan/15 border border-fd-cyan/40 text-white'
-                  : 'border border-transparent hover:bg-fd-sunken text-slate-300'
-              }`}
-            >
-              <div className="font-medium truncate">{config.label}</div>
-            </button>
+    <div className="space-y-5">
+      <h1 className="text-2xl font-semibold">Import Center</h1>
+      <p className="text-fd-mute">
+        Review spreadsheet data, import approved rows, and return to saved receipts to resolve the rest.
+      </p>
+      <nav aria-label="Import record types" className="flex flex-wrap gap-2">
+        {Object.entries(importTypes).map(([id, config]) => (
+          <Button
+            key={id}
+            variant={id === selectedKey ? 'primary' : 'secondary'}
+            aria-current={id === selectedKey ? 'page' : undefined}
+            onClick={() => setParams({ type: id })}
+          >
+            {config.label}
+          </Button>
+        ))}
+      </nav>
+      <section className="card space-y-3">
+        <h2 className="text-xl font-semibold">{selected.label}</h2>
+        <ul className="list-disc pl-5">
+          {selected.notes.map(note => (
+            <li key={note}>{note}</li>
           ))}
-        </div>
-
-        <div className="xl:col-span-3 space-y-3">
-          <div className="bg-fd-panel border border-fd-line rounded-sm p-3">
-            <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
-              <div>
-                <div className="flex items-center gap-2">
-                  <DocumentTextIcon className="h-6 w-6 text-fd-cyan" />
-                  <h2 className="text-xl font-semibold text-white">{selected.label}</h2>
-                </div>
-                <ul className="mt-3 space-y-1 text-sm text-slate-400">
-                  {selected.notes.map((note) => (
-                    <li key={note}>{note}</li>
-                  ))}
-                </ul>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  onClick={handleTemplateDownload}
-                  disabled={downloading}
-                  className="btn-secondary flex items-center"
-                >
-                  <ArrowDownTrayIcon className="h-5 w-5 mr-2" />
-                  {downloading
-                    ? 'Downloading...'
-                    : selected.entity
-                      ? 'Download template (.xlsx)'
-                      : 'Download template (.csv)'}
-                </button>
-                {selected.href && (
-                  <Link to={selected.href} className="btn-secondary">
-                    Open Page
-                  </Link>
-                )}
-              </div>
-            </div>
-
-            {templateInfo && (
-              <div className="mt-4 border border-fd-line rounded-sm p-3">
-                <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">Columns</div>
-                <div className="flex flex-wrap gap-1.5">
-                  {templateInfo.columns.map((column) => (
-                    <code
-                      key={column}
-                      className="px-2 py-0.5 text-xs rounded-sm bg-fd-sunken border border-fd-line text-slate-300"
-                    >
-                      {column}
-                    </code>
-                  ))}
-                </div>
-                <p className="mt-2 text-xs text-slate-500">{templateInfo.description}</p>
-              </div>
-            )}
-          </div>
-
-          {selected.mode === 'direct' ? (
-            <form onSubmit={handleValidate} className="bg-fd-panel border border-fd-line rounded-sm p-3 space-y-4">
-              <div className="flex items-center gap-2">
-                <ArrowUpTrayIcon className="h-5 w-5 text-fd-cyan" />
-                <h3 className="font-semibold text-white">Upload {selected.label}</h3>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <FormField label="File (.csv or .xlsx)">
-                  {(field) => (
-                    <input
-                      {...field}
-                      key={fileInputKey}
-                      type="file"
-                      accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                      // Keep the original "Import file" accessible name (the visible
-                      // FormField label reads "File (.csv or .xlsx)"); aria-label
-                      // sets the accessible name while htmlFor/id still associates
-                      // the label so jsx-a11y/label-has-associated-control passes.
-                      aria-label="Import file"
-                      className="input"
-                      onChange={(e) => handleFileChange(e.target.files?.[0] || null)}
-                    />
-                  )}
-                </FormField>
-                {selectedKey === 'employees' && (
-                  <FormField label="Default Password">
-                    {(field) => (
-                      <input
-                        {...field}
-                        type="password"
-                        className="input"
-                        value={defaultPassword}
-                        onChange={(e) => setDefaultPassword(e.target.value)}
-                        placeholder="Required for non-operator rows without a password"
-                      />
-                    )}
-                  </FormField>
-                )}
-              </div>
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  type="submit"
-                  className="btn-primary flex items-center"
-                  disabled={busy !== null || !selectedFile}
-                >
-                  <DocumentMagnifyingGlassIcon className="h-5 w-5 mr-2" />
-                  {busy === 'preview' ? 'Validating...' : 'Validate file (dry run)'}
-                </button>
-                <span className="text-xs text-slate-500">
-                  Nothing is written during validation — you review the result first, then commit.
-                </span>
-              </div>
-            </form>
-          ) : (
-            <div className="bg-fd-sunken border border-fd-line rounded-sm p-3 text-sm text-slate-400">
-              This template uses a specialized workflow. Use the linked module page for document review, commit, or
-              inventory movement tools.
-            </div>
-          )}
-
-          {errorMessage && (
-            <div className="bg-fd-red/10 border border-fd-red/40 rounded-sm p-3 text-sm text-red-200">
-              {errorMessage}
-            </div>
-          )}
-
-          {preview && (
-            <div className="bg-fd-panel border border-fd-cyan/40 rounded-sm p-3">
-              <div className="flex items-center gap-2">
-                <DocumentMagnifyingGlassIcon className="h-5 w-5 text-fd-cyan" />
-                <h3 className="font-semibold text-white">Dry run preview</h3>
-                <span className="text-xs px-2 py-0.5 rounded-sm bg-fd-cyan/15 border border-fd-cyan/40 text-cyan-200">
-                  Nothing written yet
-                </span>
-              </div>
-              <div className="mt-3">{renderCounts(preview)}</div>
-              {preview.workOrders && renderWorkOrderRows(preview.workOrders)}
-              {preview.purchaseOrders && renderPurchaseOrderRows(preview.purchaseOrders)}
-              {renderErrorTable(preview.errors)}
-              <div className="mt-4 flex flex-wrap items-center gap-3">
-                <button
-                  onClick={handleCommit}
-                  className="btn-primary flex items-center"
-                  disabled={busy !== null || commitBlocked || !selectedFile}
-                >
-                  <ArrowUpTrayIcon className="h-5 w-5 mr-2" />
-                  {busy === 'commit' ? 'Committing...' : 'Commit import'}
-                </button>
-                {commitBlocked ? (
-                  <span className="text-sm text-red-300">
-                    Nothing would be created — fix the rows above and validate again.
-                  </span>
-                ) : (
-                  <span className="text-xs text-slate-500">Commits this exact file. Rows with errors stay skipped.</span>
-                )}
-              </div>
-            </div>
-          )}
-
-          {committed && (
-            <div className="bg-fd-panel border border-fd-green/40 rounded-sm p-3">
-              <div className="flex items-center gap-2">
-                <CheckCircleIcon className="h-5 w-5 text-fd-green" />
-                <h3 className="font-semibold text-white">Import committed</h3>
-              </div>
-              <div className="mt-3">{renderCounts(committed)}</div>
-              {committed.workOrders && renderWorkOrderRows(committed.workOrders)}
-              {committed.purchaseOrders && renderPurchaseOrderRows(committed.purchaseOrders)}
-              {renderErrorTable(committed.errors)}
-            </div>
-          )}
-        </div>
-      </div>
+        </ul>
+        {selected.entity && (
+          <Button variant="secondary" onClick={download} disabled={downloading}>
+            {downloading ? 'Downloading…' : 'Download template (.xlsx)'}
+          </Button>
+        )}
+        {template && <p className="text-sm text-fd-mute">Columns: {template.columns.join(', ')}</p>}
+        {selected.mode === 'linked' && selected.href && (
+          <Link className="text-fd-blue underline" to={selected.href}>
+            Open {selected.label}
+          </Link>
+        )}
+        {error && <p role="alert">{error}</p>}
+      </section>
+      {selected.mode === 'direct' && selected.entity && (
+        <RecoverableImport key={selected.entity} entity={selected.entity} canImport={canImport} />
+      )}
     </div>
   );
 }

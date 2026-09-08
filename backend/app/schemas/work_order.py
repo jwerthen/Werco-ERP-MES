@@ -1164,3 +1164,21 @@ class WorkOrderSummary(UTCModel):
 
     class Config:
         from_attributes = True
+
+
+class WorkOrderBrowseStats(BaseModel):
+    overdue: int
+    in_progress: int
+    due_today: int
+
+
+class WorkOrderBrowseResponse(BaseModel):
+    items: List[WorkOrderSummary]
+    total: int
+    skip: int
+    limit: int
+    has_next: bool
+    stats: WorkOrderBrowseStats
+    customers: List[str]
+    customers_truncated: bool = False
+    group_totals: Dict[str, int]

@@ -323,3 +323,21 @@ describe('Scheduling bulk actions apply the reviewed visible selection', () => {
     expect(mockedApi.updateWorkOrderPriority.mock.calls[4]).toEqual([1, 5, undefined]);
   });
 });
+
+test('backend midnight schedule dates remain the reviewed calendar date in the board, queue and date editor', async () => {
+  jest.useFakeTimers().setSystemTime(new Date('2026-09-07T17:00:00Z'));
+  jest.clearAllMocks();
+  mockedApi.getWorkCenters.mockResolvedValue(workCenters as never);
+  mockedApi.getCapacityHeatmap.mockResolvedValue(emptyHeatmap as never);
+  mockedApi.getSchedulableWorkOrders.mockResolvedValue([{ ...serverOrderedJobs[0], scheduled_start: '2026-09-09T00:00:00', scheduled_end: '2026-09-11T00:00:00' }] as never);
+  try {
+    renderScheduling();
+    const card = await screen.findByRole('button', { name: /WO-7001/ });
+    expect(card.closest('td')).toHaveAttribute('data-capacity-cell', '7-2026-09-09');
+    const table = screen.getByRole('columnheader', { name: 'Run' }).closest('table')!;
+    const row = getWoRow(table, 'WO-7001');
+    expect(within(row).getByText('Sep 9')).toBeInTheDocument();
+    fireEvent.click(within(row).getByText('Sep 9'));
+    expect(row.querySelector('input[type="date"]')).toHaveValue('2026-09-09');
+  } finally { jest.useRealTimers(); }
+});

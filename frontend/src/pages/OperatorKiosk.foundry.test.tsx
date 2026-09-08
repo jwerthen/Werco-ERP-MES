@@ -283,6 +283,7 @@ describe('OperatorKiosk — Foundry flows', () => {
 
       await waitFor(() =>
         expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(31, {
+          request_id: expect.any(String),
           quantity_complete_delta: 0,
           quantity_scrapped_delta: 2,
           scrap_reason: 'Out of tolerance',

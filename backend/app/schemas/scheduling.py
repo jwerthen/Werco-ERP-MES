@@ -1,7 +1,31 @@
 from datetime import date
-from typing import List, Literal, Optional
+from typing import Annotated, List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
+
+from app.schemas.material_readiness import MaterialReadiness
+
+CalendarHours = Annotated[float, Field(ge=0, le=24)]
+
+
+class WorkingCalendarOverride(BaseModel):
+    date: date
+    hours: CalendarHours
+    reason: str = Field(min_length=1, max_length=200)
+
+
+class WorkingCalendarUpdate(BaseModel):
+    expected_version: int = Field(ge=0)
+    weekly_hours: List[CalendarHours] = Field(min_length=7, max_length=7)
+    overrides: List[WorkingCalendarOverride] = Field(default_factory=list, max_length=400)
+
+    @model_validator(mode="after")
+    def validate_dates(self):
+        if len({row.date for row in self.overrides}) != len(self.overrides):
+            raise ValueError("Each override date must be unique")
+        if any(not row.reason.strip() for row in self.overrides):
+            raise ValueError("Describe each calendar exception")
+        return self
 
 
 class SchedulingRunRequest(BaseModel):
@@ -66,6 +90,7 @@ class SchedulingImpactOperation(BaseModel):
 
 
 class SchedulingImpactJob(BaseModel):
+    materials: Optional[MaterialReadiness] = None
     work_order_id: int
     work_order_number: str
     due_date: Optional[str] = None

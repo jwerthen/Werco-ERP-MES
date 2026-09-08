@@ -315,15 +315,22 @@ def _enqueued_email_context(monkeypatch, *, base_url: str, link) -> dict:
     monkeypatch.setattr(dispatch.settings, "FRONTEND_BASE_URL", base_url)
     asyncio.run(
         dispatch._enqueue_email(
-            user=SimpleNamespace(email="who@example.test"),
+            user=SimpleNamespace(id=17, email="who@example.test"),
             title="t",
             body="b",
             link=link,
             template=None,
             context=None,
+            notification_log_id=23,
+            company_id=5,
         )
     )
     assert spy.await_count == 1
+    # The button is built before the durable worker resolves this recipient in
+    # this company. Keep the fixture consistent with the production enqueue.
+    assert spy.await_args.kwargs["user_id"] == 17
+    assert spy.await_args.kwargs["company_id"] == 5
+    assert spy.await_args.kwargs["notification_log_id"] == 23
     return spy.await_args.kwargs["context"]
 
 

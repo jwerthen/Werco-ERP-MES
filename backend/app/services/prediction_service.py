@@ -5,7 +5,9 @@ Prediction Service - Delivery dates, capacity forecasting, inventory demand
 import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session, contains_eager
@@ -25,6 +27,9 @@ from app.schemas.analytics import (
     StockoutPrediction,
     WorkCenterForecast,
 )
+from app.services.material_readiness_service import material_readiness
+from app.services.scheduling_projection import _project_work_order_schedule
+from app.services.working_calendar_service import load_working_calendars, working_hours
 
 logger = logging.getLogger(__name__)
 
@@ -107,11 +112,31 @@ class PredictionService:
         cycle_times = self._get_historical_cycle_times()
 
         # Get current queue depth per work center
-        queue_depths = self._get_queue_depths()
+        queue_depths = self._get_queue_depths(exclude_work_order_id=work_order_id)
+        calendars = load_working_calendars(self.db, self.company_id, list(wc_names))
+        today = datetime.now(ZoneInfo("America/Chicago")).date()
+        materials = material_readiness(self.db, self.company_id, [wo], today)["jobs"][wo.id]
+        if all(op.status == OperationStatus.COMPLETE for op in operations):
+            materials = {
+                "status": "not_defined",
+                "ready_date": None,
+                "lines": [],
+                "warnings": [],
+                "basis": "Completed operations have no future material requirement in this forecast.",
+            }
+        warnings = list(materials["warnings"])
+        if materials["status"] == "unknown":
+            warnings.append(
+                "Material-ready date is unknown; resolve shortages or unconfirmed arrivals before promising completion."
+            )
 
         # Predict each operation
         predicted_ops = []
-        current_time = datetime.utcnow()
+        current_time = datetime.combine(
+            max(today, date.fromisoformat(materials["ready_date"]) if materials["ready_date"] else today),
+            datetime.min.time(),
+        )
+        forecast_unknown = materials["status"] == "unknown"
         bottleneck = None
         max_queue_wait = 0
 
@@ -123,20 +148,28 @@ class PredictionService:
                         operation_id=op.id,
                         operation_name=op.name,
                         work_center_name=wc_names.get(op.work_center_id, "Unknown"),
-                        predicted_start=op.actual_start or current_time,
-                        predicted_end=op.actual_end or current_time,
+                        predicted_start=op.actual_start,
+                        predicted_end=op.actual_end,
                         queue_position=0,
                         estimated_hours=op.actual_run_hours + op.actual_setup_hours,
                     )
                 )
                 if op.actual_end:
-                    current_time = op.actual_end
+                    current_time = max(current_time, op.actual_end.replace(tzinfo=None))
                 continue
 
             wc_id = op.work_center_id
 
             # Estimated hours for this operation
-            est_hours = op.setup_time_hours + (op.run_time_per_piece * wo.quantity_ordered)
+            remaining_qty = max(0, float(wo.quantity_ordered or 0) - float(op.quantity_complete or 0))
+            run_hours = max(0, float(op.run_time_per_piece or 0)) * remaining_qty
+            if not op.run_time_per_piece and wo.quantity_ordered:
+                run_hours = max(0, float(op.run_time_hours or 0)) * remaining_qty / float(wo.quantity_ordered)
+            est_hours = max(0, float(op.setup_time_hours or 0) - float(op.actual_setup_hours or 0)) + run_hours
+
+            if est_hours <= 0 and remaining_qty > 0:
+                forecast_unknown = True
+                warnings.append(f"{op.name} has no remaining time estimate; completion is unknown.")
 
             # Apply historical efficiency factor
             if wc_id in cycle_times and cycle_times[wc_id]["count"] > 0:
@@ -153,12 +186,54 @@ class PredictionService:
                 max_queue_wait = queue_wait_hours
                 bottleneck = wc_names.get(op.work_center_id)
 
-            # Calculate start and end times (8-hour work days)
-            queue_wait_days = queue_wait_hours / 8
-            op_days = est_hours / 8
-
-            predicted_start = current_time + timedelta(days=queue_wait_days)
-            predicted_end = predicted_start + timedelta(days=op_days)
+            # Date-level forecasts use the same working-day allocator as reviewed
+            # schedules. Queue hours remain an explicitly labelled estimate.
+            predicted_start = predicted_end = None
+            if not forecast_unknown and wc_id in calendars:
+                try:
+                    start_day = current_time.date()
+                    if queue_wait_hours > 0:
+                        queue_op = SimpleNamespace(
+                            id=-1,
+                            sequence=0,
+                            status=OperationStatus.PENDING,
+                            work_center_id=wc_id,
+                            setup_time_hours=0,
+                            run_time_hours=queue_wait_hours,
+                        )
+                        queue_projection = _project_work_order_schedule(
+                            [queue_op], queue_op, start_day, calendars=calendars
+                        )[0]
+                        start_day = queue_projection["scheduled_end"] + timedelta(days=1)
+                    forecast_op = SimpleNamespace(
+                        id=op.id,
+                        sequence=op.sequence,
+                        status=op.status,
+                        work_center_id=wc_id,
+                        setup_time_hours=0,
+                        run_time_hours=est_hours,
+                    )
+                    projected = _project_work_order_schedule(
+                        [forecast_op], forecast_op, start_day, calendars=calendars
+                    )[0]
+                    predicted_start = datetime.combine(projected["scheduled_start"], datetime.min.time())
+                    predicted_end = datetime.combine(projected["scheduled_end"], datetime.min.time())
+                    if any(
+                        source.get("expires_on") and source["expires_on"] < predicted_start.date().isoformat()
+                        for line in materials["lines"]
+                        for source in line["sources"]
+                    ):
+                        forecast_unknown = True
+                        predicted_start = predicted_end = None
+                        warnings.append("Covered stock expires before the forecast start; review replacement supply.")
+                except ValueError:
+                    forecast_unknown = True
+                    warnings.append(
+                        f"No working capacity available for {wc_names.get(wc_id, 'this operation')} within the calendar horizon."
+                    )
+            elif wc_id not in calendars:
+                forecast_unknown = True
+                warnings.append("An operation has no available work center calendar.")
 
             predicted_ops.append(
                 OperationPrediction(
@@ -172,17 +247,18 @@ class PredictionService:
                 )
             )
 
-            current_time = predicted_end
+            if predicted_end is not None:
+                current_time = predicted_end + timedelta(days=1)
 
         # Final prediction
-        predicted_completion = predicted_ops[-1].predicted_end if predicted_ops else datetime.utcnow()
+        predicted_completion = predicted_ops[-1].predicted_end if predicted_ops and not forecast_unknown else None
 
         # Calculate confidence based on queue variability
         confidence = self._calculate_confidence(operations, cycle_times)
 
         # On-time probability
-        on_time_prob = 1.0
-        if wo.due_date:
+        on_time_prob = None if predicted_completion is None else 1.0
+        if wo.due_date and predicted_completion:
             days_margin = (wo.due_date - predicted_completion.date()).days
             if days_margin < 0:
                 on_time_prob = 0.1  # Very unlikely
@@ -216,7 +292,9 @@ class PredictionService:
             due_date=wo.due_date,
             predicted_completion=predicted_completion,
             confidence=round(confidence, 2),
-            on_time_probability=round(on_time_prob, 2),
+            on_time_probability=round(on_time_prob, 2) if on_time_prob is not None else None,
+            materials=materials,
+            warnings=warnings,
             operations=predicted_ops,
             bottleneck_work_center=bottleneck,
         )
@@ -292,7 +370,7 @@ class PredictionService:
             for r in results
         }
 
-    def _get_queue_depths(self) -> Dict[int, int]:
+    def _get_queue_depths(self, exclude_work_order_id: Optional[int] = None) -> Dict[int, int]:
         """Get number of jobs waiting at each work center.
 
         Counts operations on LIVE work orders only. The join is load-bearing twice over --
@@ -311,6 +389,7 @@ class PredictionService:
                 # so into every downstream predicted date.
                 WorkOrder.company_id == self.company_id,
                 WorkOrder.is_deleted.is_(False),
+                WorkOrder.id != exclude_work_order_id if exclude_work_order_id is not None else True,
                 WorkOrderOperation.status.in_([OperationStatus.PENDING, OperationStatus.READY]),
             )
             .group_by(WorkOrderOperation.work_center_id)
@@ -384,16 +463,21 @@ class PredictionService:
             )
             for op in open_ops:
                 quantity_ordered = ordered_qty_by_wo[op.work_order_id]
-                hours = op.setup_time_hours + (op.run_time_per_piece * quantity_ordered)
+                hours = float(op.setup_time_hours or 0) + (
+                    float(op.run_time_per_piece) * quantity_ordered
+                    if op.run_time_per_piece
+                    else float(op.run_time_hours or 0)
+                )
                 # Subtract already completed portion
-                if op.quantity_complete > 0:
-                    hours *= 1 - op.quantity_complete / quantity_ordered
+                if op.quantity_complete > 0 and quantity_ordered > 0:
+                    hours *= max(0, 1 - op.quantity_complete / quantity_ordered)
                 op_hours_by_wc[op.work_center_id] += hours
 
         # Build weekly forecasts
         weeks = []
         alerts = []
-        today = date.today()
+        today = datetime.now(ZoneInfo("America/Chicago")).date()
+        calendars = load_working_calendars(self.db, self.company_id, [wc.id for wc in work_centers])
 
         for week_num in range(weeks_ahead):
             week_start = today + timedelta(weeks=week_num)
@@ -402,13 +486,13 @@ class PredictionService:
             wc_forecasts = []
             for wc in work_centers:
                 # Available hours
-                available = wc.capacity_hours_per_day * 5 * wc.efficiency_factor  # 5-day week
+                available = sum(working_hours(calendars, wc.id, week_start + timedelta(days=day)) for day in range(7))
 
                 # Committed hours (spread evenly across weeks for simplicity)
                 committed = op_hours_by_wc.get(wc.id, 0) / weeks_ahead
 
                 utilization = (committed / available * 100) if available > 0 else 0
-                is_overloaded = utilization > 90
+                is_overloaded = utilization > 90 or (available <= 0 and committed > 0)
 
                 wc_forecasts.append(
                     WorkCenterForecast(
@@ -428,7 +512,11 @@ class PredictionService:
                             "severity": "high" if utilization > 110 else "medium",
                             "work_center": wc.name,
                             "utilization": round(utilization, 1),
-                            "message": f"{wc.name} is at {round(utilization, 1)}% capacity this week",
+                            "message": (
+                                f"{wc.name} has committed work but no working hours this week"
+                                if available <= 0
+                                else f"{wc.name} is at {round(utilization, 1)}% capacity this week"
+                            ),
                         }
                     )
 

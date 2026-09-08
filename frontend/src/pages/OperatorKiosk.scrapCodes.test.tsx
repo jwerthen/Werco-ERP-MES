@@ -108,6 +108,7 @@ describe('OperatorKiosk scrap-code payloads', () => {
     // Category "operator" is not quality-related → the NCR toggle stays OFF.
     await waitFor(() =>
       expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(31, {
+        request_id: expect.any(String),
         quantity_complete_delta: 0,
         quantity_scrapped_delta: 2,
         scrap_reason: undefined,
@@ -128,6 +129,7 @@ describe('OperatorKiosk scrap-code payloads', () => {
 
     await waitFor(() =>
       expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(31, {
+        request_id: expect.any(String),
         quantity_complete_delta: 0,
         quantity_scrapped_delta: 2,
         scrap_reason: 'porosity on face',
@@ -178,6 +180,7 @@ describe('OperatorKiosk scrap-code payloads', () => {
 
     await waitFor(() =>
       expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(31, {
+        request_id: expect.any(String),
         quantity_complete_delta: 0,
         quantity_scrapped_delta: 2,
         scrap_reason: 'Material defect',

@@ -11,6 +11,42 @@ from app.models.work_order import WorkOrder, WorkOrderStatus
 @pytest.mark.api
 @pytest.mark.requires_db
 class TestCustomersAPI:
+    def test_customer_details_and_partial_edit_preserve_shipping_requirements(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        fields = dict(
+            address_line2="Suite 12",
+            country="Canada",
+            ship_to_name="Receiving",
+            ship_address_line1="10 Dock St",
+            ship_address_line2="Door B",
+            ship_city="Toronto",
+            ship_state="ON",
+            ship_zip_code="M1M 1M1",
+            ship_country="Canada",
+            special_requirements="Keep <REF> marking",
+            notes="Call receiving first",
+        )
+        customer = Customer(
+            name="Full Account", code="FULL1", company_id=1, phone="111", email="buyer@example.com", **fields
+        )
+        db_session.add(customer)
+        db_session.commit()
+        detail = client.get(f"/api/v1/customers/{customer.id}", headers=auth_headers)
+        assert detail.status_code == 200
+        assert {key: detail.json()[key] for key in fields} == fields
+        response = client.put(f"/api/v1/customers/{customer.id}", headers=auth_headers, json={"phone": "222"})
+        assert response.status_code == 200
+        assert {key: response.json()[key] for key in fields} == fields
+        db_session.refresh(customer)
+        assert customer.phone == "222"
+        assert customer.ship_address_line2 == "Door B"
+        cleared = client.put(f"/api/v1/customers/{customer.id}", headers=auth_headers, json={"notes": "", "email": ""})
+        assert cleared.status_code == 200
+        assert cleared.json()["notes"] == ""
+        assert cleared.json()["email"] is None
+        assert cleared.json()["special_requirements"] == fields["special_requirements"]
+
     def test_get_customer_names(self, client: TestClient, auth_headers: dict, db_session: Session):
         customer = Customer(name="Acme Aerospace", code="ACM001", is_active=True, company_id=1)
         db_session.add(customer)

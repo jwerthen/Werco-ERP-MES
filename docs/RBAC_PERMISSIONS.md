@@ -1024,6 +1024,7 @@ and `/api-tokens` so it can never mint another credential.
 | **Combine two SKUs** (`inventory:combine`) | ✓ | ✓ | | | | | |
 | Create location | ✓ | ✓ | | | | | |
 | Create / complete cycle count | ✓ | ✓ | ✓ | | | | |
+| Assign counter / review / post reviewed count adjustments | ✓ | ✓ | ✓ | | | | |
 | Start (open) cycle count | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 | Record count on an item | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
 
@@ -1160,8 +1161,13 @@ and `/api-tokens` so it can never mint another credential.
 | View | ✓ | ✓ | ✓ | | | | ✓ |
 | Create | ✓ | ✓ | ✓ | | | | |
 | Approve | ✓ | ✓ | | | | | |
+| Record supplier confirmation / assign follow-up | ✓ | ✓ | ✓ | | | | |
 | Delete / restore vendor (soft) | ✓ | ✓ | | | | | |
 | Delete / restore purchase order (soft) | ✓ | ✓ | | | | | |
+
+Supplier confirmation also rechecks the company's `purchasing:view` and
+`purchasing:create` permissions at save time and refuses read-only company contexts.
+Follow-up owners must be active users in the same company with purchasing access.
 
 > **Read enforcement:** Per the [Access enforcement model](#access-enforcement-model),
 > Purchasing list/detail reads (`list_vendors`, `list_purchase_orders`, and the
@@ -1295,12 +1301,18 @@ data export grant. See [MATERIAL_NESTING.md](MATERIAL_NESTING.md).
 |------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
 | View | ✓ | ✓ | ✓ | | ✓ | | ✓ |
 | Create | ✓ | ✓ | ✓ | | | | |
+| Post multi-line delivery / upload linked certificate | ✓ | ✓ | ✓ | | | | |
 | Inspect | ✓ | ✓ | ✓ | | ✓ | | |
 | Correct receipt (in place) | ✓ | ✓ | ✓ | | | | |
 | Void receipt (soft-delete) | ✓ | ✓ | | | | | |
 | Clear inspection hold (waive) | ✓ | ✓ | ✓ | | ✓ | | |
 | Print / reprint receiving label | ✓ | ✓ | ✓ | | | | |
 | Configure print profile | ✓ | | | | | | |
+
+The new multi-line delivery and certificate writes also recheck the company's
+`receiving:view` and `receiving:create` permissions at submission time and refuse
+read-only company contexts. Platform/superuser exemptions follow the existing role
+contract; they do not bypass tenant scoping or the read-only context fence.
 
 > **Write enforcement:** The Create and Inspect rows above are now enforced **in code** on
 > the canonical `/api/v1/receiving` endpoints (`app/api/endpoints/receiving.py`):
@@ -1681,6 +1693,12 @@ data export grant. See [MATERIAL_NESTING.md](MATERIAL_NESTING.md).
 > note directly above.
 
 ### Bulk Imports (Import Center / Excel Migration Kit)
+
+Recoverable `/import/batches*` history, review, correction exports and resume calls
+enforce the same entity-specific import roles below. A batch ID does not grant access
+to an entity the current user cannot import. Successful input rows cannot be changed
+through correction uploads. These multipart batch routes are excluded from MCP's
+generated catalog, matching the existing import boundary.
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
 |------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|

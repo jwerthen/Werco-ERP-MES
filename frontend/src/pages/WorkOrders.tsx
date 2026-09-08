@@ -1,8 +1,11 @@
+import { useQueuedSearchParams } from '../hooks/useQueuedSearchParams';
+import { useWorkOrderBrowse } from '../hooks/useWorkOrderBrowse';
+import { WorkOrderBrowseParams } from '../types/workOrderBrowse';
 import { useTableWorkspace } from '../hooks/useTableWorkspace';
 import { TableWorkspaceControls } from '../components/ui/TableWorkspaceControls';
 import { getPriorityClasses, getPriorityLabel } from '../utils/priority';
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { WorkOrderSummary, WorkOrderStatus } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -14,7 +17,6 @@ import {
   formatCentralDateTime,
   getCentralDateStamp,
   isDateBeforeTodayInCentral,
-  isDateTodayInCentral,
 } from '../utils/centralTime';
 import {
   PlusIcon,
@@ -33,7 +35,7 @@ import {
   XMarkIcon,
   BookmarkSquareIcon,
 } from '@heroicons/react/24/outline';
-import { SkeletonTable, SkeletonCard } from '../components/ui/Skeleton';
+import { SkeletonTable } from '../components/ui/Skeleton';
 import {
   ConfirmDialog,
   EmptyState,
@@ -59,7 +61,6 @@ import WorkOrderTemplatesPanel from '../components/workorders/WorkOrderTemplates
 
 
 
-const EXCLUDED_PART_TYPES = ['purchased', 'hardware', 'raw_material'];
 // A finished job's due date is its promise date, and OTD scores against
 // `coalesce(must_ship_by, due_date)` -- moving it retroactively rewrites a delivery
 // result that is already recorded. `PUT /work-orders/{id}` REFUSES that change with
@@ -484,9 +485,7 @@ export default function WorkOrders() {
   const canDuplicateWorkOrders = canEditWorkOrders;
   const canEditDueDate = canEditWorkOrders;
   const [nestWizardOpen, setNestWizardOpen] = useState(false);
-  const [workOrders, setWorkOrders] = useState<WorkOrderSummary[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState(false);
+  const [browseSort, setBrowseSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>({ key: 'priority', dir: 'asc' });
   // --- The deleted book -----------------------------------------------------
   // Its OWN state, NEVER merged into `workOrders`, and that is load-bearing rather
   // than tidy. Everything this page reports derives from `workOrders`: the customer
@@ -515,8 +514,14 @@ export default function WorkOrders() {
   const debouncedDeletedSearch = useDebouncedValue(deletedSearch.trim(), 250);
   const [restoreTarget, setRestoreTarget] = useState<WorkOrderSummary | null>(null);
   const [restorePending, setRestorePending] = useState(false);
-  // Free-text search stays local state; only the debounced value drives the fetch.
-  const [search, setSearch] = useState('');
+  const [searchParams, setSearchParams] = useQueuedSearchParams();
+  // Keep the search in the bookmark while debouncing only its server request.
+  const search = searchParams.get('search') || '';
+  const setSearch = (value: string) => setSearchParams(previous => {
+    const next = new URLSearchParams(previous);
+    if (value) next.set('search', value); else next.delete('search');
+    return next;
+  }, { replace: true });
   const debouncedSearch = useDebouncedValue(search.trim(), 250);
 
   // Structured filters live in the URL (the ProcessSheets idiom) so a filtered
@@ -525,7 +530,6 @@ export default function WorkOrders() {
   // groupBy defaults none — `group` appears only when grouping), so the default
   // state keeps a clean URL and existing bookmarks are unaffected. Rapid param
   // changes are handled by the loadRequestRef race guard below.
-  const [searchParams, setSearchParams] = useSearchParams();
   const statusFilter = searchParams.get('status') ?? '';
   const customerFilter = searchParams.get('customer') ?? '';
   const dashboardScope = ['overdue', 'due_today'].includes(searchParams.get('scope') || '') ? searchParams.get('scope') : null;
@@ -535,15 +539,11 @@ export default function WorkOrders() {
     groupParam === 'customer' || groupParam === 'part' || groupParam === 'status' ? groupParam : 'none';
 
   // Copy-and-set setter: an empty value deletes the param (default = clean URL).
-  const setFilterParam = (key: string, value: string) => {
-    const next = new URLSearchParams(searchParams);
-    if (value) {
-      next.set(key, value);
-    } else {
-      next.delete(key);
-    }
-    setSearchParams(next);
-  };
+  const setFilterParam = (key: string, value: string) => setSearchParams(previous => {
+    const next = new URLSearchParams(previous);
+    if (value) next.set(key, value); else next.delete(key);
+    return next;
+  });
   const setStatusFilter = (value: string) => setFilterParam('status', value);
   // Templates is a TAB here, not a route: `/work-orders/templates` is matched by
   // App.tsx's `/work-orders/:id` route AND by routeMeta's WO-detail pattern, so a
@@ -555,6 +555,26 @@ export default function WorkOrders() {
   const setCustomerFilter = (value: string) => setFilterParam('customer', value);
   const setHideCOTS = (hide: boolean) => setFilterParam('cots', hide ? '' : '1');
   const setGroupBy = (value: GroupBy) => setFilterParam('group', value === 'none' ? '' : value);
+
+  const browse = useWorkOrderBrowse({
+    status: statusFilter || undefined, search: debouncedSearch || undefined,
+    customer: customerFilter || undefined, hide_cots: hideCOTS,
+    scope: dashboardScope as 'overdue' | 'due_today' | undefined || undefined,
+    sort: (browseSort?.key || 'priority') as WorkOrderBrowseParams['sort'],
+    direction: browseSort?.dir || 'asc', group: groupBy,
+  });
+  const { workOrders, setWorkOrders, loading, loadError, loadWorkOrders } = browse;
+  const pageWindow = useRef(browse);
+  pageWindow.current = browse;
+  useEffect(() => {
+    const matchDesktop = () => {
+      const current = pageWindow.current;
+      if (window.innerWidth >= 1024 && current.workOrders.length > 50) current.setPage(current.page);
+    };
+    matchDesktop();
+    window.addEventListener('resize', matchDesktop);
+    return () => window.removeEventListener('resize', matchDesktop);
+  }, [workOrders.length]);
 
   // A deep link to ?tab=templates from someone WITHOUT work_orders:edit falls
   // back to the list: every template verb (reads included) is role-gated to the
@@ -576,34 +596,11 @@ export default function WorkOrders() {
   const [savingDueDate, setSavingDueDate] = useState(false);
   const [dueDateConflict, setDueDateConflict] = useState<{ wo: WorkOrderSummary; serverStamp: string } | null>(null);
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
-  const loadRequestRef = useRef(0);
   const deletedRequestRef = useRef(0);
   const realtimeUrl = useMemo(() => {
     const token = getAccessToken();
     return buildWsUrl('/ws/updates', token ? { token } : undefined);
   }, [user?.id]);
-
-  const loadWorkOrders = useCallback(async () => {
-    const requestId = loadRequestRef.current + 1;
-    loadRequestRef.current = requestId;
-
-    try {
-      const params: any = {};
-      if (statusFilter) params.status = statusFilter;
-      if (debouncedSearch) params.search = debouncedSearch;
-      const response = await api.getWorkOrders(params);
-      if (requestId !== loadRequestRef.current) return;
-      setWorkOrders(response);
-      setLoadError(false);
-    } catch (err) {
-      if (requestId !== loadRequestRef.current) return;
-      console.error('Failed to load work orders:', err);
-      setLoadError(true);
-    } finally {
-      if (requestId !== loadRequestRef.current) return;
-      setLoading(false);
-    }
-  }, [statusFilter, debouncedSearch]);
 
   const scheduleRealtimeRefresh = useCallback(() => {
     if (realtimeRefreshRef.current) return;
@@ -673,14 +670,20 @@ export default function WorkOrders() {
   // *release* stays non-optimistic below — it is server-gated by readiness checks.)
   // Mirror the latest list so handleDelete can read the row's current index
   // without depending on (and re-creating) the callback on every list change.
+  const deletionScope = `${browse.scope}:${browse.skip}`;
+  const currentDeletionScope = useRef(deletionScope);
+  currentDeletionScope.current = deletionScope;
+  const currentReload = useRef(loadWorkOrders);
+  currentReload.current = loadWorkOrders;
   const workOrdersRef = useRef(workOrders);
   workOrdersRef.current = workOrders;
 
-  const { run: runDelete, pending: deletePending } = useOptimisticMutation<unknown, { wo: WorkOrderSummary; index: number }>({
+  const { run: runDelete, pending: deletePending } = useOptimisticMutation<unknown, { wo: WorkOrderSummary; index: number; scope: string }>({
     applyOptimistic: ({ wo }) => {
       setWorkOrders((prev) => prev.filter((w) => w.id !== wo.id));
     },
-    rollback: ({ wo, index }) => {
+    rollback: ({ wo, index, scope }) => {
+      if (scope !== currentDeletionScope.current) return;
       setWorkOrders((prev) => {
         if (prev.some((w) => w.id === wo.id)) return prev;
         const next = [...prev];
@@ -689,6 +692,7 @@ export default function WorkOrders() {
       });
     },
     mutate: ({ wo }) => api.deleteWorkOrder(wo.id),
+    reconcile: () => { void currentReload.current(); },
     errorFallback: 'Failed to delete work order',
   });
 
@@ -736,11 +740,11 @@ export default function WorkOrders() {
       return;
     }
     try {
-      await runDelete({ wo, index });
+      await runDelete({ wo, index, scope: deletionScope });
     } finally {
       setDeleteTarget(null);
     }
-  }, [deleteTarget, deletePending, runDelete, showToast]);
+  }, [deleteTarget, deletePending, runDelete, showToast, deletionScope]);
 
   // Standalone nest import: the wizard created a fresh released laser WO (no
   // parent, no part) — route to it, mirroring WorkOrderDetail's handler.
@@ -1249,8 +1253,8 @@ export default function WorkOrders() {
   const workspace = useTableWorkspace('work-orders', 'orders', workOrderColumns,
     { search, status: statusFilter, customer: customerFilter, scope: dashboardScope || '', cots: hideCOTS ? '' : '1', group: groupBy === 'none' ? '' : groupBy },
     filters => {
-      setSearch(typeof filters.search === 'string' ? filters.search : '');
       const next = new URLSearchParams(searchParams);
+      if (filters.search) next.set('search', filters.search); else next.delete('search');
       for (const key of ['status', 'customer', 'scope', 'cots', 'group']) {
         const value = filters[key];
         if (typeof value === 'string' && value) next.set(key, value); else next.delete(key);
@@ -1258,25 +1262,9 @@ export default function WorkOrders() {
       setSearchParams(next);
     }, { key: 'priority', dir: 'asc' });
 
-  const customers = useMemo(() => {
-    const unique = new Set(workOrders.map(wo => wo.customer_name).filter(Boolean));
-    return Array.from(unique).sort() as string[];
-  }, [workOrders]);
-
-  const filteredWorkOrders = useMemo(() => {
-    return workOrders.filter(wo => {
-      if (dashboardScope && TERMINAL_WO_STATUSES.includes(wo.status)) return false;
-      if (dashboardScope === 'overdue' && !isWorkOrderOverdue(wo)) return false;
-      if (dashboardScope === 'due_today' && !(wo.due_date && isDateTodayInCentral(wo.due_date))) return false;
-      if (hideCOTS && wo.part_type && EXCLUDED_PART_TYPES.includes(wo.part_type)) {
-        return false;
-      }
-      if (customerFilter && wo.customer_name !== customerFilter) {
-        return false;
-      }
-      return true;
-    });
-  }, [workOrders, customerFilter, hideCOTS, dashboardScope]);
+  useEffect(() => { setBrowseSort(workspace.layout.sort); }, [workspace.layout.sort]);
+  const customers = browse.customers;
+  const filteredWorkOrders = workOrders;
 
   // The row being edited can disappear from the table — a refetch (someone else
   // completed the job), or one of the CLIENT-side filters (customer, hide-COTS)
@@ -1323,15 +1311,7 @@ export default function WorkOrders() {
     return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b));
   }, [filteredWorkOrders, groupBy]);
 
-  // Stats
-  const stats = useMemo(() => {
-    const overdue = filteredWorkOrders.filter(wo => 
-      wo.due_date && isDateBeforeTodayInCentral(wo.due_date) && !TERMINAL_WO_STATUSES.includes(wo.status)
-    ).length;
-    const inProgress = filteredWorkOrders.filter(wo => wo.status === 'in_progress').length;
-    const dueToday = filteredWorkOrders.filter(wo => Boolean(wo.due_date && isDateTodayInCentral(wo.due_date))).length;
-    return { overdue, inProgress, dueToday };
-  }, [filteredWorkOrders]);
+  const stats = { overdue: browse.stats.overdue, inProgress: browse.stats.in_progress, dueToday: browse.stats.due_today };
 
   // The page header and the tab strip are built here, ABOVE the work-order
   // loading gate below, and rendered by every branch. A deep link to
@@ -1351,7 +1331,7 @@ export default function WorkOrders() {
         <h1 className="page-title">Work Orders</h1>
         <p className="page-subtitle">Manage and track manufacturing orders</p>
       </div>
-      <div className="page-actions w-full sm:w-auto" data-tour="wo-create">
+      <div className="page-actions w-full flex-wrap sm:w-auto" data-tour="wo-create">
         <Link to="/work-orders/new" className="btn-primary w-full sm:w-auto">
           <PlusIcon className="h-5 w-5 mr-2 flex-shrink-0" />
           New Work Order
@@ -1572,27 +1552,6 @@ export default function WorkOrders() {
     );
   }
 
-  if (loading) {
-    return (
-      <div className="space-y-5 sm:space-y-6">
-        {pageHeader}
-        {tabStrip}
-
-        {/* Stats skeleton */}
-        <div className="grid grid-cols-3 gap-4">
-          {[1, 2, 3].map((i) => (
-            <SkeletonCard key={i} className="h-24" />
-          ))}
-        </div>
-        
-        {/* Table skeleton */}
-        <div className="card overflow-hidden">
-          <SkeletonTable rows={8} columns={8} />
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-5 sm:space-y-6">
       {pageHeader}
@@ -1636,6 +1595,7 @@ export default function WorkOrders() {
               type="text"
               placeholder="Search by WO#, unit #, part, or customer..."
               aria-label="Search work orders"
+              maxLength={200}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="input pl-11"
@@ -1704,19 +1664,27 @@ export default function WorkOrders() {
           </label>
           <span className="text-xs text-surface-500 tabular-nums xs:text-right">
             <span className="sm:hidden">
-              <span className="font-semibold text-surface-700">{filteredWorkOrders.length}</span> of {workOrders.length} shown
+              <span className="font-semibold text-surface-700">{filteredWorkOrders.length}</span> of {browse.total} matching
             </span>
             <span className="hidden sm:inline">
-              Showing <span className="font-semibold text-surface-700">{filteredWorkOrders.length}</span> of {workOrders.length} work orders
+              Showing <span className="font-semibold text-surface-700">{filteredWorkOrders.length}</span> of {browse.total} matching work orders
             </span>
           </span>
         </div>
       </div>
 
+      <div className="flex flex-wrap items-center gap-2">
+        <label htmlFor="work-order-sort" className="text-sm text-surface-500">Sort by</label>
+        <select id="work-order-sort" aria-label="Sort work orders" className="input w-auto max-w-full" value={`${workspace.layout.sort?.key || 'priority'}:${workspace.layout.sort?.dir || 'asc'}`}
+          onChange={event => { const [key, dir] = event.target.value.split(':'); workspace.change({ ...workspace.layout, sort: { key, dir: dir as 'asc' | 'desc' } }); }}>
+          {[['priority','Priority'], ['due_date','Due date'], ['work_order_number','Work order'], ['part','Part'], ['customer','Customer'], ['status','Status']].flatMap(([key, label]) =>
+            [<option key={`${key}:asc`} value={`${key}:asc`}>{label} · ascending</option>, <option key={`${key}:desc`} value={`${key}:desc`}>{label} · descending</option>])}
+        </select>
+      </div>
       <TableWorkspaceControls workspace={workspace} />
 
       {/* Work Orders List */}
-      {loadError && workOrders.length === 0 ? (
+      {loading ? <div aria-label="Loading work orders"><SkeletonTable rows={6} columns={8} /></div> : loadError && workOrders.length === 0 ? (
         <ErrorState
           message="Could not load work orders."
           onRetry={loadWorkOrders}
@@ -1732,7 +1700,7 @@ export default function WorkOrders() {
                     {groupBy === 'status' ? formatStatusLabel(groupName) : groupName}
                   </h3>
                   <span className="badge badge-neutral">
-                    {orders.length} order{orders.length !== 1 ? 's' : ''}
+                    {orders.length} of {browse.group_totals[groupName] ?? orders.length} orders loaded
                   </span>
                 </div>
               </div>
@@ -1752,16 +1720,17 @@ export default function WorkOrders() {
                   }))}
                   {...workspace.tableProps}
                   data={orders}
+                  manualSorting
                   rowKey={(wo) => wo.id}
                   onRowClick={(wo) => navigate(`/work-orders/${wo.id}`)}
                   className="border-0"
-                  csvExport={{ filename: `work-orders-${groupCsvSlug(groupName)}` }}
+                  csvExport={{ filename: `work-orders-${groupCsvSlug(groupName)}`, label: 'Export loaded rows' }}
                 />
               </div>
                 }
                 mobile={
               <WorkOrderMobileList
-                workOrders={workspace.sortRows(orders)}
+                workOrders={orders}
                 onDelete={canDeleteWorkOrders ? handleDelete : undefined}
                 onDuplicate={canDuplicateWorkOrders ? handleDuplicate : undefined}
                 onSaveTemplate={canEditWorkOrders ? handleSaveTemplate : undefined}
@@ -1793,14 +1762,14 @@ export default function WorkOrders() {
                   rowKey={(wo) => wo.id}
                   onRowClick={(wo) => navigate(`/work-orders/${wo.id}`)}
                   defaultSort={{ key: 'priority', dir: 'asc' }}
-                  pageSize={25}
+                  serverPagination={{ page: browse.page, pageSize: 50, hasNext: browse.has_next, onPageChange: browse.setPage, loading: browse.refreshing }}
                   csvExport={{ filename: 'work-orders' }}
                 />
               </div>
                 }
                 mobile={
               <WorkOrderMobileList
-                workOrders={workspace.sortRows(filteredWorkOrders)}
+                workOrders={filteredWorkOrders}
                 onDelete={canDeleteWorkOrders ? handleDelete : undefined}
                 onDuplicate={canDuplicateWorkOrders ? handleDuplicate : undefined}
                 onSaveTemplate={canEditWorkOrders ? handleSaveTemplate : undefined}
@@ -1815,6 +1784,16 @@ export default function WorkOrders() {
           )}
         </div>
       )}
+
+      {!loading && workOrders.length > 0 && <div className="flex flex-wrap items-center justify-between gap-3" aria-label="Work order pagination">
+        <p className="text-sm text-surface-500" aria-live="polite">{workOrders.length} loaded · {browse.total} matches{browse.refreshing ? ' · Updating…' : ''}</p>
+        <div className="hidden lg:flex gap-2">
+          {groupBy !== 'none' && <><button className="btn-secondary" disabled={browse.refreshing || browse.page <= 1} onClick={() => browse.setPage(browse.page - 1)}>Previous page</button>
+          <button className="btn-secondary" disabled={browse.refreshing || !browse.has_next} onClick={() => browse.setPage(browse.page + 1)}>Next page</button></>}
+        </div>
+        <button className="btn-secondary lg:hidden" disabled={browse.refreshing || !browse.has_next} onClick={browse.loadMore}>{browse.refreshing ? 'Loading…' : browse.has_next ? 'Load 50 more' : 'All matching orders loaded'}</button>
+      </div>}
+      {loadError && workOrders.length > 0 && <div role="alert" className="text-amber-300">The update failed. Displayed orders may be out of date. <button className="underline" onClick={() => void loadWorkOrders()}>Retry</button></div>}
 
       {/* Duplicate a work order's plan onto a new draft. On success we navigate
           to the new WO rather than refreshing this list — a draft that nobody
@@ -2042,11 +2021,11 @@ const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder:
         </div>
       </div>
 
-      <div className="px-4 py-3 bg-slate-800/50 border-t border-slate-700/50 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+      <div className="px-4 py-3 bg-slate-800/50 border-t border-slate-700/50 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           {overdue && <span className="badge badge-danger">Overdue</span>}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           {canRelease && (
             <button
               onClick={() => onRelease?.(wo)}

@@ -1,300 +1,226 @@
-/**
- * A0.2 Excel migration kit — Import Center preview-before-commit flow.
- *
- * Guards the heart of the migration kit: uploads always run dry_run=true
- * first, the results panel shows would-create / skipped / row-level errors,
- * and "Commit import" re-submits the same file with dry_run=false — and is
- * disabled when the dry run shows nothing would be created.
- */
-
+/** Durable import review, reconciliation, and correction contracts through the actual page. */
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import ImportCenter from './ImportCenter';
+import { ImportBatch } from '../types/importBatch';
 
+let mockRole = 'admin';
+let mockCompanyId = 1;
+jest.mock('../context/AuthContext', () => ({ useAuth: () => ({ user: { id: 1, role: mockRole } }) }));
+jest.mock('../context/CompanyContext', () => ({ useCompany: () => ({ currentCompany: { id: mockCompanyId } }) }));
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {
     getImportTemplates: jest.fn(),
     downloadImportTemplate: jest.fn(),
-    importUsersCsv: jest.fn(),
-    importPartsCsv: jest.fn(),
-    importMaterialsCsv: jest.fn(),
-    importCustomersCsv: jest.fn(),
-    importVendorsCsv: jest.fn(),
-    importWorkCentersCsv: jest.fn(),
-    importWorkOrders: jest.fn(),
-    importPurchaseOrders: jest.fn(),
+    listImportBatches: jest.fn(),
+    getImportBatch: jest.fn(),
+    prepareImportBatch: jest.fn(),
+    commitImportBatch: jest.fn(),
+    correctImportBatch: jest.fn(),
+    downloadFailedImportRows: jest.fn(),
   },
 }));
-
-const mockedApi = api as jest.Mocked<typeof api>;
-
-const xlsxFile = new File(['stub'], 'legacy.xlsx', {
-  type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+const mocked = api as jest.Mocked<typeof api>;
+const file = new File(['part_number,name,part_type\nP-1,Plate,manufactured'], 'legacy.csv', { type: 'text/csv' });
+const fixture = (extra: Partial<ImportBatch> = {}): ImportBatch => ({
+  id: 1,
+  entity: 'parts',
+  filename: file.name,
+  version: 1,
+  created_at: '2026-09-07T12:00:00Z',
+  updated_at: '2026-09-07T12:00:00Z',
+  total_rows: 1,
+  counts: { ready: 1 },
+  created_records: 0,
+  row_offset: 0,
+  has_more_rows: false,
+  requires_credentials: false,
+  rows: [
+    {
+      row_key: 'row-1',
+      source_row: 2,
+      status: 'ready',
+      data: { part_number: 'P-1', name: 'Plate', part_type: 'manufactured' },
+    },
+  ],
+  ...extra,
 });
-
-function renderImportCenter(query = '') {
-  return render(
+const renderPage = (query = '?type=parts') =>
+  render(
     <MemoryRouter initialEntries={[`/import-center${query}`]}>
       <ImportCenter />
     </MemoryRouter>
   );
+const attach = () => fireEvent.change(screen.getByLabelText('Import file'), { target: { files: [file] } });
+async function prepare() {
+  attach();
+  fireEvent.click(screen.getByRole('button', { name: 'Validate file (dry run)' }));
+  await screen.findByRole('heading', { name: 'Import receipt #1' });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh receipt' })).toBeEnabled());
 }
-
-function chooseFile(file: File) {
-  fireEvent.change(screen.getByLabelText('Import file'), { target: { files: [file] } });
+async function approve() {
+  fireEvent.click(screen.getByRole('checkbox', { name: /I reviewed the ready rows/ }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Commit ready rows' })).toBeEnabled());
 }
-
-function validateButton() {
-  return screen.getByRole('button', { name: /validate file \(dry run\)/i });
-}
-
 beforeAll(() => {
-  (URL as any).createObjectURL = jest.fn(() => 'blob:mock');
-  (URL as any).revokeObjectURL = jest.fn();
+  Object.defineProperty(crypto, 'randomUUID', {
+    configurable: true,
+    value: () => '12345678-1234-4234-8234-123456789abc',
+  });
+  URL.createObjectURL = jest.fn(() => 'blob:review');
+  URL.revokeObjectURL = jest.fn();
   jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
 });
-
 beforeEach(() => {
   jest.clearAllMocks();
-  mockedApi.getImportTemplates.mockResolvedValue({
-    templates: [
-      {
-        entity: 'parts',
-        title: 'Engineering parts',
-        description: 'Manufactured/assembly part master.',
-        columns: ['part_number', 'name', 'part_type'],
-        download_path: '/api/v1/import/templates/parts',
-      },
-      {
-        entity: 'work-orders',
-        title: 'Open work orders',
-        description: 'Open (in-flight) work orders for go-live.',
-        columns: ['wo_number', 'part_number', 'quantity', 'completed_through_seq'],
-        download_path: '/api/v1/import/templates/work-orders',
-      },
-    ],
-  });
+  mockRole = 'admin';
+  mockCompanyId = 1;
+  mocked.getImportTemplates.mockResolvedValue({ templates: [] });
+  mocked.listImportBatches.mockResolvedValue({ batches: [], has_more: false });
+  mocked.getImportBatch.mockResolvedValue(fixture());
+  mocked.prepareImportBatch.mockResolvedValue(fixture());
 });
 
-describe('ImportCenter preview-before-commit flow', () => {
-  it('runs dry_run=true, renders row-level errors, and disables commit when nothing would be created', async () => {
-    mockedApi.importPartsCsv.mockResolvedValue({
-      dry_run: true,
-      total_rows: 2,
-      imported_count: 0,
-      skipped_count: 2,
-      created_ids: [],
-      errors: [
-        { row: 2, part_number: 'P-100', reason: 'duplicate part_number' },
-        { row: 3, reason: 'name is required' },
-      ],
-    });
+it('saves a dry-run receipt and requires explicit review before committing its version', async () => {
+  mocked.commitImportBatch.mockResolvedValue(
+    fixture({
+      version: 2,
+      counts: { created: 1 },
+      created_records: 1,
+      rows: [{ ...fixture().rows[0], status: 'created', result: { record_id: 11, entity: 'parts' } }],
+    })
+  );
+  renderPage();
+  await prepare();
+  expect(mocked.prepareImportBatch).toHaveBeenCalledWith('parts', file, expect.any(String), '');
+  expect(mocked.commitImportBatch).not.toHaveBeenCalled();
+  expect(screen.getByRole('button', { name: 'Commit ready rows' })).toBeDisabled();
+  await approve();
+  fireEvent.click(screen.getByRole('button', { name: 'Commit ready rows' }));
+  expect(await screen.findByRole('link', { name: 'Open created record' })).toHaveAttribute('href', '/parts/11');
+  expect(mocked.commitImportBatch).toHaveBeenCalledTimes(1);
+  expect(mocked.commitImportBatch).toHaveBeenCalledWith(1, 1, null, '');
+});
 
-    renderImportCenter('?type=parts');
+it('retains the same prepare key after a lost response', async () => {
+  mocked.prepareImportBatch.mockRejectedValueOnce(new Error('Connection lost')).mockResolvedValueOnce(fixture());
+  renderPage();
+  attach();
+  fireEvent.click(screen.getByRole('button', { name: 'Validate file (dry run)' }));
+  await screen.findByText('Connection lost');
+  fireEvent.click(screen.getByRole('button', { name: 'Validate file (dry run)' }));
+  await screen.findByRole('heading', { name: 'Import receipt #1' });
+  expect(mocked.prepareImportBatch.mock.calls[0][2]).toBe(mocked.prepareImportBatch.mock.calls[1][2]);
+});
 
-    const input = screen.getByLabelText('Import file');
-    expect(input.getAttribute('accept')).toContain('.xlsx');
-    expect(input.getAttribute('accept')).toContain('.csv');
+it('requires reconciliation after a lost commit response and never blindly resends', async () => {
+  mocked.commitImportBatch.mockRejectedValueOnce(new Error('Connection lost'));
+  renderPage();
+  await prepare();
+  await approve();
+  fireEvent.click(screen.getByRole('button', { name: 'Commit ready rows' }));
+  await screen.findByText(/Refresh the receipt to see which rows committed/);
+  expect(screen.getByRole('button', { name: 'Commit ready rows' })).toBeDisabled();
+  mocked.getImportBatch.mockResolvedValue(
+    fixture({ version: 2, counts: { created: 1 }, created_records: 1, rows: [] })
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh receipt' }));
+  await screen.findByText(/1 records created/);
+  expect(mocked.commitImportBatch).toHaveBeenCalledTimes(1);
+});
 
-    chooseFile(xlsxFile);
-    fireEvent.click(validateButton());
+it('opens a saved receipt after reload without writing', async () => {
+  renderPage('?type=parts&batch=1');
+  await screen.findByRole('heading', { name: 'Import receipt #1' });
+  expect(mocked.prepareImportBatch).not.toHaveBeenCalled();
+  expect(mocked.commitImportBatch).not.toHaveBeenCalled();
+});
 
-    await screen.findByText('Dry run preview');
-    expect(mockedApi.importPartsCsv).toHaveBeenCalledTimes(1);
-    expect(mockedApi.importPartsCsv).toHaveBeenCalledWith(xlsxFile, true);
+it('validates failed-row corrections separately from the created records', async () => {
+  mocked.getImportBatch.mockResolvedValue(
+    fixture({ counts: { invalid: 1 }, rows: [{ ...fixture().rows[0], status: 'invalid', error: 'Fix quantity' }] })
+  );
+  mocked.correctImportBatch.mockResolvedValue(fixture({ version: 2 }));
+  renderPage('?type=parts&batch=1');
+  await screen.findByText('Fix quantity');
+  expect(screen.getByRole('button', { name: 'Commit ready rows' })).toBeDisabled();
+  const correction = new File(['_import_row_id,quantity\nrow-1,2'], 'fixed.csv');
+  fireEvent.change(screen.getByLabelText('Corrected failed-row file'), { target: { files: [correction] } });
+  fireEvent.click(screen.getByRole('button', { name: 'Validate corrections' }));
+  await waitFor(() => expect(mocked.correctImportBatch).toHaveBeenCalledWith(1, 1, correction, ''));
+  await screen.findByText(/1 ready/);
+  expect(mocked.commitImportBatch).not.toHaveBeenCalled();
+});
 
-    // Row-level errors render with row number, identifier, and reason.
-    expect(screen.getByText('duplicate part_number')).toBeInTheDocument();
-    expect(screen.getByText('P-100')).toBeInTheDocument();
-    expect(screen.getByText('name is required')).toBeInTheDocument();
+it('keeps failed history loading distinct from an empty history', async () => {
+  mocked.listImportBatches.mockRejectedValueOnce(new Error('Unavailable'));
+  renderPage();
+  await screen.findByText(/Batch history is unavailable/);
+  expect(screen.queryByText(/No saved batches/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Retry history' }));
+  await screen.findByText(/No saved batches/);
+});
 
-    // All-errors dry run: commit is blocked.
-    expect(screen.getByRole('button', { name: /commit import/i })).toBeDisabled();
-    expect(screen.getByText(/nothing would be created/i)).toBeInTheDocument();
-  });
+it('keeps specialized BOM imports on their existing wizard', async () => {
+  renderPage('?type=boms');
+  expect(screen.getByRole('link', { name: 'Open Bill of Materials' })).toHaveAttribute('href', '/bom');
+  expect(screen.queryByLabelText('Import file')).not.toBeInTheDocument();
+  await waitFor(() => expect(mocked.getImportTemplates).toHaveBeenCalled());
+});
 
-  it('commit re-submits the same file with dry_run=false and shows the committed panel', async () => {
-    mockedApi.importPartsCsv
-      .mockResolvedValueOnce({
-        dry_run: true,
-        total_rows: 2,
-        imported_count: 2,
-        skipped_count: 0,
-        created_ids: [],
-        errors: [],
+it('uses the server template and prevents supervisors from importing employees', async () => {
+  mockRole = 'supervisor';
+  mocked.downloadImportTemplate.mockResolvedValue({ blob: new Blob(['template']), filename: 'users.xlsx' });
+  renderPage('?type=employees');
+  expect(screen.getByLabelText('Import file')).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Download template (.xlsx)' }));
+  await waitFor(() => expect(mocked.downloadImportTemplate).toHaveBeenCalledWith('users'));
+});
+
+it('clears stale company receipts and drops the old read response', async () => {
+  let finish!: (batch: ImportBatch) => void;
+  mocked.getImportBatch
+    .mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          finish = resolve;
+        })
+    )
+    .mockRejectedValueOnce(new Error('Receipt is not in this company'));
+  const view = renderPage('?type=parts&batch=1');
+  await waitFor(() => expect(mocked.getImportBatch).toHaveBeenCalledTimes(1));
+  mockCompanyId = 2;
+  view.rerender(
+    <MemoryRouter>
+      <ImportCenter />
+    </MemoryRouter>
+  );
+  await screen.findByText('Receipt is not in this company');
+  await act(async () => finish(fixture()));
+  expect(screen.queryByRole('heading', { name: 'Import receipt #1' })).not.toBeInTheDocument();
+  expect(mocked.commitImportBatch).not.toHaveBeenCalled();
+});
+
+it('stops queued chunks immediately on token replacement before CompanyContext changes', async () => {
+  let finish!: (batch: ImportBatch) => void;
+  mocked.commitImportBatch.mockImplementationOnce(
+    () =>
+      new Promise(resolve => {
+        finish = resolve;
       })
-      .mockResolvedValueOnce({
-        dry_run: false,
-        total_rows: 2,
-        imported_count: 2,
-        skipped_count: 0,
-        created_ids: [11, 12],
-        errors: [],
-      });
-
-    renderImportCenter('?type=parts');
-    chooseFile(xlsxFile);
-    fireEvent.click(validateButton());
-
-    await screen.findByText('Dry run preview');
-    const commitButton = screen.getByRole('button', { name: /commit import/i });
-    expect(commitButton).toBeEnabled();
-
-    fireEvent.click(commitButton);
-    await screen.findByText('Import committed');
-
-    expect(mockedApi.importPartsCsv).toHaveBeenCalledTimes(2);
-    expect(mockedApi.importPartsCsv).toHaveBeenLastCalledWith(xlsxFile, false);
-    expect(screen.getByText(/created: 2/i)).toBeInTheDocument();
-  });
-
-  it('previews and commits open work orders, showing paper-history operation state per row', async () => {
-    mockedApi.importWorkOrders
-      .mockResolvedValueOnce({
-        dry_run: true,
-        total_rows: 2,
-        created_count: 1,
-        skipped_count: 1,
-        created_ids: [],
-        results: [
-          {
-            row: 2,
-            wo_number: null,
-            part_number: '1042-100',
-            quantity: 25,
-            due_date: '2026-07-15',
-            customer_name: 'Acme Aero',
-            status: 'in_progress',
-            operation_count: 4,
-            completed_operation_count: 2,
-            next_operation_sequence: 30,
-          },
-        ],
-        errors: [{ row: 3, part_number: 'BAD-1', reason: 'part not found' }],
-      })
-      .mockResolvedValueOnce({
-        dry_run: false,
-        total_rows: 2,
-        created_count: 1,
-        skipped_count: 1,
-        created_ids: [501],
-        results: [
-          {
-            row: 2,
-            wo_number: 'WO-2026-0100',
-            part_number: '1042-100',
-            quantity: 25,
-            due_date: '2026-07-15',
-            customer_name: 'Acme Aero',
-            status: 'in_progress',
-            operation_count: 4,
-            completed_operation_count: 2,
-            next_operation_sequence: 30,
-          },
-        ],
-        errors: [{ row: 3, part_number: 'BAD-1', reason: 'part not found' }],
-      });
-
-    renderImportCenter('?type=work_orders');
-
-    // The hub section carries the plain-English explainer for nervous migrators.
-    expect(screen.getByText(/paper-history/i)).toBeInTheDocument();
-
-    chooseFile(xlsxFile);
-    fireEvent.click(validateButton());
-
-    await screen.findByText('Dry run preview');
-    expect(mockedApi.importWorkOrders).toHaveBeenCalledWith(xlsxFile, true);
-
-    // Preview row: generated number placeholder, ops complete, next ready op, and the error row.
-    expect(screen.getByText('(generated at commit)')).toBeInTheDocument();
-    expect(screen.getByText('2/4')).toBeInTheDocument();
-    expect(screen.getByText('Seq 30')).toBeInTheDocument();
-    expect(screen.getByText('part not found')).toBeInTheDocument();
-
-    const commitButton = screen.getByRole('button', { name: /commit import/i });
-    expect(commitButton).toBeEnabled();
-    fireEvent.click(commitButton);
-
-    await screen.findByText('Import committed');
-    expect(mockedApi.importWorkOrders).toHaveBeenLastCalledWith(xlsxFile, false);
-    expect(screen.getByText('WO-2026-0100')).toBeInTheDocument();
-  });
-
-  it('renders slim-the-file guidance when a dry-run validation times out (ECONNABORTED)', async () => {
-    // Axios timeout shape: code ECONNABORTED + raw "timeout of Nms exceeded" message.
-    mockedApi.importPartsCsv.mockRejectedValue(
-      Object.assign(new Error('timeout of 120000ms exceeded'), { code: 'ECONNABORTED' })
-    );
-
-    renderImportCenter('?type=parts');
-    chooseFile(xlsxFile);
-    fireEvent.click(validateButton());
-
-    // Validation parses are bounded server-side, so the advice is to slim the file down.
-    await screen.findByText(/the server took too long to read this file/i);
-    expect(screen.getByText(/trim empty rows\/columns or re-save as CSV/i)).toBeInTheDocument();
-    // The raw axios message must not leak through.
-    expect(screen.queryByText(/timeout of 120000ms exceeded/i)).not.toBeInTheDocument();
-    expect(screen.queryByText('Dry run preview')).not.toBeInTheDocument();
-  });
-
-  it('renders may-still-be-processing guidance when a commit times out', async () => {
-    mockedApi.importPartsCsv
-      .mockResolvedValueOnce({
-        dry_run: true,
-        total_rows: 2,
-        imported_count: 2,
-        skipped_count: 0,
-        created_ids: [],
-        errors: [],
-      })
-      .mockRejectedValueOnce(Object.assign(new Error('timeout of 600000ms exceeded'), { code: 'ECONNABORTED' }));
-
-    renderImportCenter('?type=parts');
-    chooseFile(xlsxFile);
-    fireEvent.click(validateButton());
-
-    await screen.findByText('Dry run preview');
-    fireEvent.click(screen.getByRole('button', { name: /commit import/i }));
-
-    // A commit timeout must NOT claim the import failed — the server may still be
-    // writing rows. Steer the user back through a fresh dry run instead of a blind retry.
-    await screen.findByText(/the import may still be processing/i);
-    expect(screen.getByText(/re-run "Validate file \(dry run\)" before retrying/i)).toBeInTheDocument();
-    expect(screen.queryByText(/timeout of 600000ms exceeded/i)).not.toBeInTheDocument();
-    // No false "Import committed" panel either.
-    expect(screen.queryByText('Import committed')).not.toBeInTheDocument();
-  });
-
-  it('surfaces the backend detail message for non-timeout import failures', async () => {
-    mockedApi.importPartsCsv.mockRejectedValue({
-      message: 'Request failed with status code 400',
-      response: { data: { detail: 'Unsupported file type' } },
-    });
-
-    renderImportCenter('?type=parts');
-    chooseFile(xlsxFile);
-    fireEvent.click(validateButton());
-
-    await screen.findByText('Unsupported file type');
-  });
-
-  it('downloads the server XLSX template for the selected entity', async () => {
-    mockedApi.downloadImportTemplate.mockResolvedValue({
-      blob: new Blob(['xlsx-bytes']),
-      filename: 'werco-import-template-parts.xlsx',
-    });
-
-    renderImportCenter('?type=parts');
-    fireEvent.click(screen.getByRole('button', { name: /download template \(\.xlsx\)/i }));
-
-    await waitFor(() => {
-      expect(mockedApi.downloadImportTemplate).toHaveBeenCalledWith('parts');
-    });
-    expect(URL.createObjectURL).toHaveBeenCalled();
-  });
+  );
+  renderPage();
+  await prepare();
+  await approve();
+  fireEvent.click(screen.getByRole('button', { name: 'Commit ready rows' }));
+  expect(mocked.commitImportBatch).toHaveBeenCalledTimes(1);
+  mocked.getImportBatch.mockRejectedValueOnce(new Error('Receipt is not in this company'));
+  act(() => window.dispatchEvent(new Event('werco:auth-token-changed')));
+  await screen.findByText('Receipt is not in this company');
+  await act(async () => finish(fixture({ version: 2, counts: { ready: 1, created: 25 }, created_records: 25 })));
+  expect(mocked.commitImportBatch).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole('heading', { name: 'Import receipt #1' })).not.toBeInTheDocument();
 });

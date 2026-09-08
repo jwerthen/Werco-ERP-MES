@@ -60,6 +60,8 @@ import {
   stepsIncompleteMessage,
 } from '../utils/processSheetErrors';
 import type { MissingStepInfo, QualityHoldResult } from '../types/processSheet';
+import ProductionRecoveryNotice from '../components/kiosk/ProductionRecoveryNotice';
+import { useProductionReportRequest } from '../components/kiosk/useProductionReportRequest';
 import { useScrapReasonCodes } from '../hooks/useScrapReasonCodes';
 
 const POLL_INTERVAL_MS = 15_000;
@@ -219,6 +221,7 @@ export default function OperatorKiosk() {
   const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [view, setView] = useState<KioskView>({ name: 'queue' });
   const [busy, setBusy] = useState(false);
+  const reportRequest = useProductionReportRequest('kiosk_production_unconfirmed_operator');
   // Server refusal for the over-count correction, rendered INLINE on the
   // correction screen (verbatim, next to the confirm button) — mirrors the crew
   // station's badgeError pattern. A toast alone proved unreadable on the floor.
@@ -340,6 +343,7 @@ export default function OperatorKiosk() {
     if (userId == null || activeOperationId == null) return null;
     return {
       key: `user:${userId}|op:${activeOperationId}`,
+      identity: { operatorId: userId, operationId: activeOperationId },
       label: `${operatorName} · ${activeJob?.work_order_number || '—'} ${formatOperationLabel(
         activeJob?.operation_number
       )}`,
@@ -400,6 +404,7 @@ export default function OperatorKiosk() {
   }, []);
 
   const oneTap = useOneTapPieces<OperatorOneTapTarget>({
+    storageKey: 'kiosk_onetap_pending_operator',
     binding,
     // No session ⇒ no post can land, so an armed window parks instead of burning
     // the delta on a request that would 401. The idle logout depends on this
@@ -418,11 +423,11 @@ export default function OperatorKiosk() {
     // Addressed from the binding the hook just validated — never from a page
     // ref. The operation id and the stamp are one object, so they cannot come
     // apart between the guard and the request.
-    post: (pieces, { binding: sending }) => {
+    post: (pieces, { binding: sending, requestId }) => {
       postedBindingRef.current = sending;
       return api
         .reportOperationProduction(sending.target.operationId, {
-          quantity_complete_delta: pieces,
+          request_id: requestId, quantity_complete_delta: pieces,
           quantity_scrapped_delta: 0,
           source: KIOSK_SOURCE,
         })
@@ -605,14 +610,14 @@ export default function OperatorKiosk() {
   /** GOOD-tab entry: additive good delta only. */
   const handleReportGood = useCallback(
     async (job: ActiveJob, good: number) => {
-      if (!job.operation_id) return;
+      if (!job.operation_id || !user) return;
       setBusy(true);
       try {
-        await api.reportOperationProduction(job.operation_id, {
+        await reportRequest.submit(user.id, job.operation_id, {
           quantity_complete_delta: good,
           quantity_scrapped_delta: 0,
           source: KIOSK_SOURCE,
-        });
+        }, data => api.reportOperationProduction(job.operation_id!, data));
         showToast('success', `Saved ${good} good`);
         setView({ name: 'queue' });
         await refresh();
@@ -623,7 +628,7 @@ export default function OperatorKiosk() {
         setBusy(false);
       }
     },
-    [refresh, showToast]
+    [refresh, showToast, user, reportRequest]
   );
 
   /** SCRAP-tab entry: scrap delta + required reason, optional NCR (decision 5). */
@@ -636,10 +641,10 @@ export default function OperatorKiosk() {
       openNcr: boolean,
       ncrDescription: string | null
     ) => {
-      if (!job.operation_id) return;
+      if (!job.operation_id || !user) return;
       setBusy(true);
       try {
-        const res: unknown = await api.reportOperationProduction(job.operation_id, {
+        const res: unknown = await reportRequest.submit(user.id, job.operation_id, {
           quantity_complete_delta: 0,
           quantity_scrapped_delta: scrap,
           // Structured scrap reason (same TimeEntry.scrap_reason column clock-out
@@ -648,7 +653,7 @@ export default function OperatorKiosk() {
           scrap_reason_code_id: scrapReasonCodeId != null ? scrapReasonCodeId : undefined,
           ...(openNcr ? { open_ncr: true, ...(ncrDescription ? { ncr_description: ncrDescription } : {}) } : {}),
           source: KIOSK_SOURCE,
-        });
+        }, data => api.reportOperationProduction(job.operation_id!, data));
         const ncrNumber = (res as { ncr?: { ncr_number?: string } | null })?.ncr?.ncr_number;
         if (ncrNumber) {
           setSessionNcr(job.operation_id != null ? { operationId: job.operation_id, ncrNumber } : null);
@@ -665,8 +670,21 @@ export default function OperatorKiosk() {
         setBusy(false);
       }
     },
-    [refresh, showToast]
+    [refresh, showToast, user, reportRequest]
   );
+
+  const retryProductionReport = async () => {
+    if (!user || mutationsBlocked) return;
+    setBusy(true);
+    try {
+      await reportRequest.retry(user.id, (operationId, body) => api.reportOperationProduction(operationId, body));
+      showToast('success', 'Original production report confirmed. Counts refreshed.');
+      setView({ name: 'queue' });
+      await refresh();
+    } catch (error) {
+      showToast('error', kioskErrorMessage(error, 'Could not confirm the original report. Retry when connected.'));
+    } finally { setBusy(false); }
+  };
 
   const handleCorrectProduction = useCallback(
     async (job: ActiveJob, quantity: number, reason: string) => {
@@ -1680,6 +1698,15 @@ export default function OperatorKiosk() {
         </main>
       )}
 
+      {oneTap.recovery && (oneTap.uncertain || oneTap.phase === 'orphaned') && <div role="alert" className="rounded border border-fd-amber p-4"><p>{oneTap.pendingLabel} · {oneTap.recovery.pieces} pieces need confirmation.</p><button type="button" className="btn-secondary mt-2" disabled={mutationsBlocked} onClick={async () => {
+        if (!user || busy) return;
+        setBusy(true);
+        try { await oneTap.recover?.(user.id, (operationId, pieces, requestId) => api.reportOperationProduction(operationId, { request_id: requestId, quantity_complete_delta: pieces, quantity_scrapped_delta: 0, source: KIOSK_SOURCE })); showToast('success', 'Original pieces confirmed. Refreshing counts.'); await refresh(); }
+        catch (err) { showToast('error', kioskErrorMessage(err, 'Could not confirm the original pieces. Try again.')); }
+        finally { setBusy(false); }
+      }}>Check original pieces</button></div>}
+      {view.name !== 'production' && <ProductionRecoveryNotice report={reportRequest.unconfirmed} busy={mutationsBlocked} onRetry={() => void retryProductionReport()} />}
+
       {/* Overlays (1c/1d, 1f, 1g) — the state machine still owns which is open */}
       {view.name === 'production' && (
         <KioskReportModal
@@ -1705,6 +1732,7 @@ export default function OperatorKiosk() {
           busy={mutationsBlocked}
           online={online}
           offlineHintId={OFFLINE_HINT_ID}
+          recoveryNotice={<ProductionRecoveryNotice report={reportRequest.unconfirmed} busy={mutationsBlocked} onRetry={() => void retryProductionReport()} />}
           initialTab={view.tab}
           onCancel={() => setView({ name: 'queue' })}
           onConfirmGood={(good) => void handleReportGood(view.job, good)}

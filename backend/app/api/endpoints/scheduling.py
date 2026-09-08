@@ -1,11 +1,13 @@
 from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.cache import invalidate_work_centers_cache
 from app.core.queue import enqueue_job
 from app.core.realtime import safe_broadcast
 from app.core.websocket import (
@@ -18,6 +20,7 @@ from app.models.time_entry import TimeEntry
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
+from app.models.working_calendar import WorkingCalendar
 from app.schemas.scheduling import (
     LoadChartDataPoint,
     LoadChartRequest,
@@ -27,18 +30,26 @@ from app.schemas.scheduling import (
     SchedulingImpactRequest,
     SchedulingImpactResponse,
     SchedulingRunRequest,
+    WorkingCalendarUpdate,
 )
 from app.services import dispatch_service
 from app.services.audit_service import AuditService
+from app.services.material_readiness_service import (
+    load_locked_material_readiness,
+    material_start_date,
+    validate_material_start,
+)
 from app.services.operational_event_service import OperationalEventService
 from app.services.scheduling_impact_service import SchedulingImpactService
 from app.services.scheduling_projection import (
     _build_daily_load_for_work_center,
     _operation_total_hours,
     _project_work_order_schedule,
+    _projection_daily_load,
 )
 from app.services.scheduling_service import SchedulingService
 from app.services.work_center_type_service import get_work_center_group
+from app.services.working_calendar_service import load_working_calendars, working_hours
 
 router = APIRouter()
 
@@ -184,15 +195,23 @@ def _apply_work_order_schedule(
     current_op: WorkOrderOperation,
     scheduled_start: date,
     forward_schedule: bool = False,
+    calendars: Optional[dict] = None,
+    materials: Optional[dict] = None,
 ) -> Dict[str, Any]:
-    projected_ops = _project_work_order_schedule(
-        operations=operations,
-        current_op=current_op,
-        scheduled_start=scheduled_start,
-        work_center_id=current_op.work_center_id,
-        forward_schedule=forward_schedule,
-    )
+    try:
+        projected_ops = _project_work_order_schedule(
+            operations=operations,
+            current_op=current_op,
+            scheduled_start=scheduled_start,
+            work_center_id=current_op.work_center_id,
+            forward_schedule=forward_schedule,
+            calendars=calendars,
+        )
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from error
     current_projection = projected_ops[0]
+    if materials is not None:
+        validate_material_start(materials, current_projection["scheduled_start"])
     current_op.scheduled_start = current_projection["scheduled_start"]
     current_op.scheduled_end = current_projection["scheduled_end"]
     days_needed = (current_op.scheduled_end - current_op.scheduled_start).days + 1
@@ -204,7 +223,7 @@ def _apply_work_order_schedule(
     scheduled_ops = [
         {
             "operation_id": current_op.id,
-            "scheduled_start": scheduled_start.isoformat(),
+            "scheduled_start": current_op.scheduled_start.isoformat(),
             "scheduled_end": current_op.scheduled_end.isoformat(),
         }
     ]
@@ -248,120 +267,53 @@ def _find_earliest_capacity_date(
 ) -> date:
     start = max(start_date or date.today(), date.today())
     wc = _resolve_work_center(db, work_center_id, company_id)
-    daily_capacity = max(0.1, float(wc.capacity_hours_per_day or 8.0))
-
-    if forward_schedule and operations:
-        projected_work_center_ids = {
-            op.work_center_id for op in operations if op.status != OperationStatus.COMPLETE and op.work_center_id
-        }
-        projected_work_center_ids.add(work_center_id)
-        work_centers = (
-            db.query(WorkCenter)
-            .filter(
-                WorkCenter.id.in_(list(projected_work_center_ids)),
-                WorkCenter.is_active == True,
-            )
-            .all()
-        )
-        capacity_by_work_center = {
-            item.id: max(0.1, float(item.capacity_hours_per_day or 8.0)) for item in work_centers
-        }
-        scheduled_ops = (
-            db.query(WorkOrderOperation)
-            .filter(
-                WorkOrderOperation.work_center_id.in_(projected_work_center_ids),
-                WorkOrderOperation.status != OperationStatus.COMPLETE,
-                WorkOrderOperation.scheduled_start.isnot(None),
-                WorkOrderOperation.work_order_id != operation.work_order_id,
-            )
-            .all()
-        )
-        load_by_work_center: Dict[int, Dict[date, float]] = {}
-        for scheduled_op in scheduled_ops:
-            if not scheduled_op.work_center_id:
-                continue
-            load_by_work_center.setdefault(scheduled_op.work_center_id, {})
-            op_load = _build_daily_load_for_work_center([scheduled_op])
-            for load_date, hours in op_load.items():
-                load_by_work_center[scheduled_op.work_center_id][load_date] = (
-                    load_by_work_center[scheduled_op.work_center_id].get(load_date, 0.0) + hours
-                )
-
-        for offset in range(max(1, horizon_days)):
-            candidate_start = start + timedelta(days=offset)
-            projected_ops = _project_work_order_schedule(
-                operations=operations,
-                current_op=operation,
-                scheduled_start=candidate_start,
-                work_center_id=work_center_id,
-                forward_schedule=True,
-            )
-            can_fit = True
-            candidate_loads = {wc_id: dict(load_by_work_center.get(wc_id, {})) for wc_id in projected_work_center_ids}
-            for projection in projected_ops:
-                projection_work_center_id = projection["work_center_id"]
-                if not projection_work_center_id:
-                    continue
-                projection_capacity = capacity_by_work_center.get(projection_work_center_id, daily_capacity)
-                op_start = projection["scheduled_start"]
-                op_end = projection["scheduled_end"]
-                span_days = (op_end - op_start).days + 1
-                per_day_hours = projection["hours"] / span_days if span_days > 0 else projection["hours"]
-                current = op_start
-                while current <= op_end:
-                    current_load = candidate_loads.setdefault(projection_work_center_id, {}).get(current, 0.0)
-                    if current_load + per_day_hours > projection_capacity:
-                        can_fit = False
-                        break
-                    candidate_loads[projection_work_center_id][current] = current_load + per_day_hours
-                    current += timedelta(days=1)
-                if not can_fit:
-                    break
-            if can_fit:
-                return candidate_start
-
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"No available capacity for {wc.code} within {horizon_days} days. "
-                "Adjust capacity, move work center, or schedule manually."
-            ),
-        )
-
+    calendars = load_working_calendars(db, company_id)
+    rows = operations or [operation]
+    center_ids = {work_center_id}
+    if forward_schedule:
+        center_ids.update(op.work_center_id for op in rows if op.status != OperationStatus.COMPLETE)
     scheduled_ops = (
         db.query(WorkOrderOperation)
         .filter(
-            WorkOrderOperation.work_center_id == work_center_id,
+            WorkOrderOperation.company_id == company_id,
+            WorkOrderOperation.work_center_id.in_(center_ids),
             WorkOrderOperation.status != OperationStatus.COMPLETE,
             WorkOrderOperation.scheduled_start.isnot(None),
-            WorkOrderOperation.id != operation.id,
+            WorkOrderOperation.work_order_id != operation.work_order_id,
         )
         .all()
     )
-    daily_load = _build_daily_load_for_work_center(scheduled_ops)
-
-    total_hours = _operation_total_hours(operation)
-    days_needed = max(1, int(total_hours / daily_capacity) + (1 if total_hours % daily_capacity > 0 else 0))
-    per_day_hours = total_hours / days_needed if days_needed > 0 else total_hours
-
+    loads = {
+        center_id: _build_daily_load_for_work_center(
+            [op for op in scheduled_ops if op.work_center_id == center_id], calendars
+        )
+        for center_id in center_ids
+    }
     for offset in range(max(1, horizon_days)):
-        candidate_start = start + timedelta(days=offset)
-        can_fit = True
-        for day_offset in range(days_needed):
-            candidate_day = candidate_start + timedelta(days=day_offset)
-            day_load = daily_load.get(candidate_day, 0.0)
-            if day_load + per_day_hours > daily_capacity:
-                can_fit = False
-                break
-        if can_fit:
-            return candidate_start
-
+        try:
+            projected = _project_work_order_schedule(
+                rows, operation, start + timedelta(days=offset), work_center_id, forward_schedule, calendars
+            )
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        if projected[0]["scheduled_start"] >= start + timedelta(days=horizon_days) or projected[-1][
+            "scheduled_end"
+        ] >= start + timedelta(days=horizon_days):
+            break
+        candidate = {key: dict(value) for key, value in loads.items()}
+        fits = True
+        for projection in projected:
+            center_id = projection["work_center_id"]
+            for day, hours in _projection_daily_load(projection, calendars).items():
+                total = candidate.setdefault(center_id, {}).get(day, 0) + hours
+                candidate[center_id][day] = total
+                if total > working_hours(calendars, center_id, day) + 0.000001:
+                    fits = False
+        if fits:
+            return projected[0]["scheduled_start"]
     raise HTTPException(
-        status_code=409,
-        detail=(
-            f"No available capacity for {wc.code} within {horizon_days} days. "
-            "Adjust capacity, move work center, or schedule manually."
-        ),
+        409,
+        f"No available capacity for {wc.code} within {horizon_days} days. Adjust the working calendar or review a manual date.",
     )
 
 
@@ -640,6 +592,9 @@ def schedule_work_order(
     endpoints (invariant 2). A genuine no-op self-suppresses.
     """
     work_order = _load_work_order_for_scheduling(db, work_order_id, company_id)
+    materials = load_locked_material_readiness(
+        db, company_id, [work_order], datetime.now(ZoneInfo("America/Chicago")).date()
+    )[work_order.id]
     operations, current_op = _get_current_operation(work_order)
 
     # Snapshot BEFORE any mutation: clear_run_order_on_move rewrites run_order and
@@ -663,6 +618,8 @@ def schedule_work_order(
         current_op=current_op,
         scheduled_start=schedule.scheduled_start,
         forward_schedule=schedule.forward_schedule,
+        calendars=load_working_calendars(db, company_id),
+        materials=materials,
     )
     OperationalEventService(db).emit_best_effort(
         company_id=company_id,
@@ -676,7 +633,7 @@ def schedule_work_order(
         severity="info",
         event_payload={
             "work_order_number": work_order.work_order_number,
-            "scheduled_start": schedule.scheduled_start.isoformat(),
+            "scheduled_start": current_op.scheduled_start.isoformat(),
             "forward_schedule": schedule.forward_schedule,
         },
     )
@@ -719,7 +676,7 @@ def schedule_work_order(
         "message": f"Work order {work_order.work_order_number} scheduled",
         "work_order_id": work_order_id,
         "first_operation_id": current_op.id,
-        "scheduled_start": schedule.scheduled_start.isoformat(),
+        "scheduled_start": current_op.scheduled_start.isoformat()[:10],
         "scheduled_end": current_op.scheduled_end.isoformat() if current_op.scheduled_end else None,
         "work_center_id": current_op.work_center_id,
         "total_operations": len(operations),
@@ -744,6 +701,9 @@ def schedule_work_order_earliest(
     endpoints (invariant 2). A genuine no-op self-suppresses.
     """
     work_order = _load_work_order_for_scheduling(db, work_order_id, company_id)
+    materials = load_locked_material_readiness(
+        db, company_id, [work_order], datetime.now(ZoneInfo("America/Chicago")).date()
+    )[work_order.id]
     operations, current_op = _get_current_operation(work_order)
 
     target_work_center_id = request.work_center_id or current_op.work_center_id
@@ -768,7 +728,10 @@ def schedule_work_order_earliest(
         operation=current_op,
         operations=operations,
         work_center_id=target_work_center_id,
-        start_date=request.start_date,
+        start_date=max(
+            request.start_date or datetime.now(ZoneInfo("America/Chicago")).date(),
+            material_start_date(materials) or date.min,
+        ),
         horizon_days=request.horizon_days,
         forward_schedule=request.forward_schedule,
     )
@@ -779,6 +742,8 @@ def schedule_work_order_earliest(
         current_op=current_op,
         scheduled_start=earliest_start,
         forward_schedule=request.forward_schedule,
+        calendars=load_working_calendars(db, company_id),
+        materials=materials,
     )
     OperationalEventService(db).emit_best_effort(
         company_id=company_id,
@@ -864,6 +829,36 @@ def schedule_operation(
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
 
+    work_order = _load_work_order_for_scheduling(db, operation.work_order_id, company_id)
+    materials = load_locked_material_readiness(
+        db, company_id, [work_order], datetime.now(ZoneInfo("America/Chicago")).date()
+    )[work_order.id]
+    validate_material_start(materials, schedule.scheduled_start)
+
+    calendars = load_working_calendars(db, company_id, [operation.work_center_id])
+    if calendars.get(operation.work_center_id, {}).get("version", 0) > 0:
+        start_day = (
+            schedule.scheduled_start.date()
+            if isinstance(schedule.scheduled_start, datetime)
+            else schedule.scheduled_start
+        )
+        end_day = (
+            schedule.scheduled_end.date() if isinstance(schedule.scheduled_end, datetime) else schedule.scheduled_end
+        )
+        if not start_day or not end_day or end_day < start_day:
+            raise HTTPException(422, "Choose a valid start and end date")
+        available = sum(
+            working_hours(calendars, operation.work_center_id, start_day + timedelta(days=i))
+            for i in range((end_day - start_day).days + 1)
+        )
+        if (
+            working_hours(calendars, operation.work_center_id, start_day) == 0
+            or working_hours(calendars, operation.work_center_id, end_day) == 0
+            or available < _operation_total_hours(operation)
+        ):
+            raise HTTPException(
+                409, "These dates do not fit the work center calendar. Review working days and shift hours."
+            )
     operation.scheduled_start = schedule.scheduled_start
     operation.scheduled_end = schedule.scheduled_end
     db.commit()
@@ -1062,6 +1057,7 @@ def get_capacity_summary(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get capacity utilization by work center"""
+    calendars = load_working_calendars(db, company_id)
     start = datetime.strptime(start_date, "%Y-%m-%d").date()
     end = datetime.strptime(end_date, "%Y-%m-%d").date()
     if end < start:
@@ -1108,11 +1104,11 @@ def get_capacity_summary(
 
     result = []
     for wc in work_centers:
-        load_map = _build_daily_load_for_work_center(operations_by_wc.get(wc.id, []))
+        load_map = _build_daily_load_for_work_center(operations_by_wc.get(wc.id, []), calendars)
         total_hours = sum(hours for load_date, hours in load_map.items() if start <= load_date <= end)
         days = (end - start).days + 1
         daily_capacity = max(0.1, float(wc.capacity_hours_per_day or 8.0))
-        available_hours = days * daily_capacity
+        available_hours = sum(working_hours(calendars, wc.id, start + timedelta(days=offset)) for offset in range(days))
 
         result.append(
             {
@@ -1141,6 +1137,7 @@ def get_capacity_heatmap(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get per-day capacity utilization by work center with overload flags."""
+    calendars = load_working_calendars(db, company_id)
     start = datetime.strptime(start_date, "%Y-%m-%d").date()
     end = datetime.strptime(end_date, "%Y-%m-%d").date()
     if end < start:
@@ -1193,18 +1190,11 @@ def get_capacity_heatmap(
         if op_end < start or op_start > end:
             continue
 
-        total_hours = _operation_total_hours(op)
-        span_days = (op_end - op_start).days + 1
-        per_day_hours = total_hours / span_days if span_days > 0 else total_hours
-
-        overlap_start = max(start, op_start)
-        overlap_end = min(end, op_end)
-        cursor = overlap_start
-        while cursor <= overlap_end:
-            bucket = daily_load_by_wc[op.work_center_id][cursor]
-            bucket["hours"] += per_day_hours
-            bucket["jobs"] += 1.0
-            cursor += timedelta(days=1)
+        for day, hours in _build_daily_load_for_work_center([op], calendars).items():
+            if start <= day <= end and hours > 0:
+                bucket = daily_load_by_wc[op.work_center_id][day]
+                bucket["hours"] += hours
+                bucket["jobs"] += 1.0
 
     overload_cells = 0
     overloaded_work_centers: Set[int] = set()
@@ -1214,10 +1204,11 @@ def get_capacity_heatmap(
         day_rows: List[Dict[str, Any]] = []
         cursor = start
         while cursor <= end:
+            daily_capacity = working_hours(calendars, wc.id, cursor)
             bucket = daily_load_by_wc[wc.id][cursor]
             scheduled_hours = float(bucket["hours"])
             utilization_pct = (scheduled_hours / daily_capacity * 100.0) if daily_capacity > 0 else 0.0
-            overloaded = utilization_pct > 100.0
+            overloaded = scheduled_hours > daily_capacity
             if overloaded:
                 overload_cells += 1
                 overloaded_work_centers.add(wc.id)
@@ -1421,8 +1412,9 @@ def get_capacity_for_date(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get capacity details for a specific work center on a specific date."""
+    calendars = load_working_calendars(db, company_id)
     wc = _resolve_work_center(db, request.work_center_id, company_id)
-    daily_capacity = max(0.1, float(wc.capacity_hours_per_day or 8.0))
+    daily_capacity = working_hours(calendars, wc.id, request.target_date)
 
     scheduled_ops = (
         db.query(WorkOrderOperation)
@@ -1436,7 +1428,7 @@ def get_capacity_for_date(
     if request.work_order_id:
         scheduled_ops = [op for op in scheduled_ops if op.work_order_id != request.work_order_id]
 
-    daily_load = _build_daily_load_for_work_center(scheduled_ops)
+    daily_load = _build_daily_load_for_work_center(scheduled_ops, calendars)
     existing_hours = daily_load.get(request.target_date, 0.0)
 
     projected_hours = 0.0
@@ -1447,13 +1439,17 @@ def get_capacity_for_date(
         if work_order.company_id != company_id:
             raise HTTPException(status_code=404, detail="Work order not found")
         operations, current_op = _get_current_operation(work_order)
-        projected_ops = _project_work_order_schedule(
-            operations=operations,
-            current_op=current_op,
-            scheduled_start=request.target_date,
-            work_center_id=request.work_center_id,
-            forward_schedule=request.forward_schedule,
-        )
+        try:
+            projected_ops = _project_work_order_schedule(
+                operations=operations,
+                current_op=current_op,
+                scheduled_start=request.target_date,
+                work_center_id=request.work_center_id,
+                forward_schedule=request.forward_schedule,
+                calendars=calendars,
+            )
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
         projected_total_hours = sum(float(projection["hours"] or 0) for projection in projected_ops)
         for projection in projected_ops:
             if projection["work_center_id"] != request.work_center_id:
@@ -1461,8 +1457,7 @@ def get_capacity_for_date(
             op_start = projection["scheduled_start"]
             op_end = projection["scheduled_end"]
             if op_start <= request.target_date <= op_end:
-                span_days = (op_end - op_start).days + 1
-                hours_on_date = projection["hours"] / span_days if span_days > 0 else projection["hours"]
+                hours_on_date = _projection_daily_load(projection, calendars).get(request.target_date, 0)
                 projected_hours += hours_on_date
                 op = projection["operation"]
                 projected_jobs_on_date.append(
@@ -1493,7 +1488,7 @@ def get_capacity_for_date(
                     "work_order_id": op.work_order_id,
                     "work_order_number": wo.work_order_number if wo else "?",
                     "operation_name": op.name,
-                    "hours": _operation_total_hours(op),
+                    "hours": _build_daily_load_for_work_center([op], calendars).get(request.target_date, 0),
                     "projected": False,
                 }
             )
@@ -1510,7 +1505,7 @@ def get_capacity_for_date(
         "used_hours": round(used_hours, 2),
         "available_hours": round(available_hours, 2),
         "utilization_pct": round(utilization_pct, 1),
-        "overloaded": utilization_pct > 100.0,
+        "overloaded": used_hours > daily_capacity,
         "jobs_on_date": jobs_on_date,
     }
 
@@ -1525,6 +1520,22 @@ def bulk_schedule_earliest(
     """Schedule multiple work orders at their earliest available capacity in one call."""
     results = []
     errors = []
+    scoped_orders = (
+        db.query(WorkOrder)
+        .filter(
+            WorkOrder.company_id == company_id,
+            WorkOrder.id.in_(request.work_order_ids),
+            WorkOrder.is_deleted.is_(False),
+        )
+        .all()
+    )
+    by_id = {wo.id: wo for wo in scoped_orders}
+    material_jobs = load_locked_material_readiness(
+        db,
+        company_id,
+        [by_id[key] for key in request.work_order_ids if key in by_id],
+        datetime.now(ZoneInfo("America/Chicago")).date(),
+    )
 
     for wo_id in request.work_order_ids:
         try:
@@ -1536,13 +1547,14 @@ def bulk_schedule_earliest(
                 errors.append({"work_order_id": wo_id, "error": "No work center assigned"})
                 continue
 
+            materials = material_jobs[wo_id]
             earliest_start = _find_earliest_capacity_date(
                 db=db,
                 company_id=company_id,
                 operation=current_op,
                 operations=operations,
                 work_center_id=target_wc_id,
-                start_date=None,
+                start_date=material_start_date(materials),
                 horizon_days=request.horizon_days,
                 forward_schedule=request.forward_schedule,
             )
@@ -1553,6 +1565,8 @@ def bulk_schedule_earliest(
                 current_op=current_op,
                 scheduled_start=earliest_start,
                 forward_schedule=request.forward_schedule,
+                calendars=load_working_calendars(db, company_id),
+                materials=materials,
             )
             OperationalEventService(db).emit_best_effort(
                 company_id=company_id,
@@ -1623,3 +1637,74 @@ async def run_scheduling_background(
     )
 
     return {"message": "Scheduling job queued"}
+
+
+@router.get("/work-centers/{work_center_id}/calendar")
+def get_working_calendar(
+    work_center_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    _resolve_work_center(db, work_center_id, company_id)
+    return load_working_calendars(db, company_id, [work_center_id])[work_center_id]
+
+
+@router.put("/work-centers/{work_center_id}/calendar")
+def update_working_calendar(
+    work_center_id: int,
+    payload: WorkingCalendarUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    center = (
+        db.query(WorkCenter)
+        .filter(
+            WorkCenter.company_id == company_id,
+            WorkCenter.id == work_center_id,
+            WorkCenter.is_active == True,
+        )
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+    if center is None:
+        raise HTTPException(404, "Work center not found")
+    before = load_working_calendars(db, company_id, [work_center_id])[work_center_id]
+    if before["version"] != payload.expected_version:
+        raise HTTPException(409, "This working calendar changed. Reload it before saving your edits.")
+    row = (
+        db.query(WorkingCalendar)
+        .filter(
+            WorkingCalendar.company_id == company_id,
+            WorkingCalendar.work_center_id == work_center_id,
+        )
+        .populate_existing()
+        .first()
+    )
+    if row is None:
+        row = WorkingCalendar(company_id=company_id, work_center_id=work_center_id, version=0)
+        db.add(row)
+    row.weekly_hours = payload.weekly_hours
+    row.overrides = sorted(
+        [entry.model_dump(mode="json") for entry in payload.overrides],
+        key=lambda entry: entry["date"],
+    )
+    row.version += 1
+    row.updated_by = current_user.id
+    db.flush()
+    after = load_working_calendars(db, company_id, [work_center_id])[work_center_id]
+    if before["version"] == 0:
+        audit.log_create("working_calendar", row.id, center.code, new_values=after)
+    else:
+        audit.log_update("working_calendar", row.id, center.code, old_values=before, new_values=after)
+    db.commit()
+    invalidate_work_centers_cache(center.id)
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {"event": "working_calendar_updated", "work_center_id": work_center_id},
+        company_id=company_id,
+    )
+    return after

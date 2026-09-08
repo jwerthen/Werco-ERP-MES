@@ -166,9 +166,14 @@ class TestCiKeepsTheArchiveRootsDistinct:
         assert deploy_steps, f"No step deploys {service} any more -- was it renamed?"
 
         for step in deploy_steps:
-            assert step.get("if") == expected_gate, (
+            actual_expected = (
+                f"steps.release_head.outputs.current == 'true' && ({expected_gate})"
+                if service == "werco-worker"
+                else expected_gate
+            )
+            assert step.get("if") == actual_expected, (
                 f"The step that runs `railway up --service {service}` has if={step.get('if')!r}, "
-                f"expected {expected_gate!r}. Without the gate ON THIS STEP, merging deploys "
+                f"expected {actual_expected!r}. Without the gate ON THIS STEP, merging deploys "
                 f"{service} to a service that may not exist, or starts background crons "
                 "nobody asked for. A gate on a neighbouring step does not count."
             )

@@ -47,6 +47,7 @@ interface KioskReportModalProps {
    * letting it through would race the same record from the other tab.
    */
   confirmLockedLabel?: string | null;
+  recoveryNotice?: React.ReactNode;
   busy: boolean;
   online: boolean;
   offlineHintId?: string;
@@ -84,6 +85,7 @@ export default function KioskReportModal({
   online,
   offlineHintId,
   initialTab,
+  recoveryNotice,
   onCancel,
   onConfirmGood,
   onConfirmScrap,
@@ -146,6 +148,7 @@ export default function KioskReportModal({
         <KioskModalClose onClose={onCancel} disabled={busy} />
       </div>
 
+      {recoveryNotice}
       {/* Segmented tabs */}
       <div className="flex border-b border-fd-line" role="tablist" aria-label="Report type">
         <button
