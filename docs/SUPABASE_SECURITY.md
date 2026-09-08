@@ -128,7 +128,7 @@ unapproved and do not create physical inventory or material credits.
 
 ## Governed quote-spacing policies
 
-Migration `103_quote_nesting_spacing_policies` adds a single policy header per
+Migration `103_nesting_spacing_policies` adds a single policy header per
 company, immutable content revisions, and immutable command events for draft
 creation, publication and withdrawal. It creates no policy rows and approves no
 defaults. Every command advances the header by exactly one version; only a new

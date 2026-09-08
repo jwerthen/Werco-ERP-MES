@@ -1,6 +1,6 @@
 """Append-only company quote-spacing revisions, approvals and withdrawals.
 
-Revision ID: 103_quote_nesting_spacing_policies
+Revision ID: 103_nesting_spacing_policies
 Revises: 102_quote_nesting_runs
 No records are seeded and no historical nesting input is rewritten.
 """
@@ -9,7 +9,7 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = '103_quote_nesting_spacing_policies'
+revision = '103_nesting_spacing_policies'
 down_revision = '102_quote_nesting_runs'
 branch_labels = None
 depends_on = None
