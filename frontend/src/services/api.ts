@@ -1,4 +1,5 @@
 import type { BOMExploded } from '../types/engineering';
+import type { NestingCatalogResponse, NestingMaterialRequest, NestingMaterialResolution } from '../types/quoteNesting';
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
 import { normalizeAxiosErrorDetail } from '../utils/apiError';
 import {
@@ -3821,6 +3822,18 @@ class ApiService {
   }
 
   // Quote Calculator
+  async getNestingMaterials(offset = 0, limit = 200, signal?: AbortSignal): Promise<NestingCatalogResponse> {
+    const response = await this.api.get<NestingCatalogResponse>('/quote-nesting/materials', {
+      params: { offset, limit }, signal,
+    });
+    return response.data;
+  }
+
+  async resolveNestingMaterial(data: NestingMaterialRequest, signal?: AbortSignal): Promise<NestingMaterialResolution> {
+    const response = await this.api.post<NestingMaterialResolution>('/quote-nesting/material-resolution', data, { signal });
+    return response.data;
+  }
+
   async getQuoteMaterials(category?: string) {
     const response = await this.api.get('/quote-calc/materials', { params: { category } });
     return response.data;

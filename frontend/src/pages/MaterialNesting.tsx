@@ -31,7 +31,7 @@ export default function MaterialNesting() {
       {target &&
         createPortal(
           <NestingPortalContext.Provider value={target}>
-            <NestingWorkspace key={owner} />
+            <NestingWorkspace key={owner} companyId={currentCompany?.id ?? user?.company_id} estimatorId={user?.id} />
           </NestingPortalContext.Provider>,
           target
         )}

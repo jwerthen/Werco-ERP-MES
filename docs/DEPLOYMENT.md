@@ -129,8 +129,10 @@ Callers authenticate with a normal 15-minute ERP access token; the proxy in fron
 Material Nesting's deployment target is the ERP frontend at
 [`https://wercomfg.app/nest`](https://wercomfg.app/nest). Deploy the updated
 `frontend/` build to the existing Vercel project that owns `wercomfg.app`; keep
-its current domain and project association. The feature needs no separate
-service, iframe, domain, backend deployment, migration, or environment variable.
+its current domain and project association. The material catalog/resolution
+feature also needs the matching existing ERP backend release for
+`/api/v1/quote-nesting/materials` and `/api/v1/quote-nesting/material-resolution`.
+It needs no separate service, iframe, domain, migration, or environment variable.
 
 `frontend/vercel.json` already builds with `npm run build`, publishes `build/`,
 and rewrites SPA paths to `/index.html`, so opening or refreshing `/nest` uses
@@ -138,13 +140,21 @@ the existing application router. Feature assets are bundled from
 `frontend/public/nest-assets/` and `frontend/src/features/nesting/`.
 
 After the normal frontend lint, type-check, tests, and production build pass,
-deploy through that existing Vercel project's release path. Verify `/nest`
+use the existing GitHub Actions release path. Combined backend/frontend changes
+defer from `deploy-frontend-production.yml` to `ci-cd.yml`, which verifies the
+backend release before publishing its dependent frontend and promoting the
+public Vercel website. Do not bypass that API gate with a manual frontend
+release. Verify `wercomfg.app/release.txt` equals the merged release SHA, then `/nest`
 directly and from **Sales & Quoting → Material Nesting** as an allowed user;
 verify signed-out users reach login and a user without `purchasing:view` cannot
-open the workspace. Exercise a DXF import, comparison, and estimate save/reopen.
+open the workspace. Exercise a DXF import, comparison, and estimate save/reopen;
+check active-company catalog selection, stale-source handling, estimator USD
+acknowledgment, and draft review export. Catalog failure must leave geometry
+comparison available without applying unverified catalog prices.
 Confirm another ERP page still renders correctly after leaving the workspace.
 The Railway frontend commands in [DEPLOYMENT_RUNBOOK.md](DEPLOYMENT_RUNBOOK.md)
-target the separate Railway service and do not publish this Vercel domain.
+target the separate Railway service; publishing the Vercel domain also requires
+the existing workflow's coordinated promotion step.
 
 ### Option 1: Docker Compose (Simpler)
 

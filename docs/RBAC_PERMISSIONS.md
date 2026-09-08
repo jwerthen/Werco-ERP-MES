@@ -1285,15 +1285,27 @@ Follow-up owners must be active users in the same company with purchasing access
 
 **Sales & Quoting → Material Nesting** (`/nest`) requires a signed-in ERP user and
 `purchasing:view` on both the sidebar link and the direct route, matching Quote
-Calculator. Admin, Manager, Supervisor, and Viewer have access; Platform Admin
-and the existing superuser override also pass. Operator, Quality, and Shipping
-do not have this permission.
+Calculator. By default, Admin, Manager, Supervisor, and Viewer have access;
+Operator, Quality, and Shipping do not. Active-company role-permission overrides
+can grant or revoke this permission. Platform Admin and the existing superuser
+override also pass; an override from another company is not used.
 
 All permitted users can edit the current browser estimate, compare sheets, and
 download or reopen local estimate files. These are client-side calculations and
 downloads; they create no ERP quote, purchase order, inventory transaction, work
-order, or audit record. There is no new backend permission, endpoint, or bulk
-data export grant. See [MATERIAL_NESTING.md](MATERIAL_NESTING.md).
+order, or audit record. The downloadable review record is draft evidence, not
+a server approval or immutable audit event.
+
+`GET /api/v1/quote-nesting/materials` and
+`POST /api/v1/quote-nesting/material-resolution` independently enforce the same
+effective `purchasing:view` permission. They read only active catalog rows from
+the active company; missing, inactive, and foreign-company IDs all return 404.
+Neither endpoint seeds defaults or writes data. Existing disabled-user,
+kiosk/API-token, and read-only switched-company restrictions remain in force;
+the calculation POST is not exempt from the read-only-context fence. No new
+permission key, backend write grant, inventory reservation, or approval authority
+is introduced. See [MATERIAL_NESTING.md](MATERIAL_NESTING.md) and the
+[API contract](API.md#quote-nesting-material-provenance).
 
 ### Receiving
 

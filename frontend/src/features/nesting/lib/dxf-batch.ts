@@ -1,4 +1,5 @@
 import { importDXFWithReport, type Part } from './nesting';
+import { dxfUnitDecision, geometryHash, sha256, GEOMETRY_VERSION, IMPORTER_VERSION } from './provenance';
 
 export const MAX_DXF_FILES = 100;
 export const MAX_DXF_BYTES = 5_000_000;
@@ -6,6 +7,7 @@ export type DXFFile = {
   name: string;
   size: number;
   text: () => Promise<string>;
+  arrayBuffer?: () => Promise<ArrayBuffer>;
 };
 export type ImportResult = {
   name: string;
@@ -24,12 +26,19 @@ export async function importDXFBatch(
   existing: readonly Part[],
   options: {
     units: 'in' | 'mm';
+    unitsByFile?: ('in' | 'mm')[];
     signal?: AbortSignal;
     onProgress?: (progress: ImportProgress) => void;
     yieldControl?: () => Promise<void>;
   }
 ) {
   if (files.length > MAX_DXF_FILES) throw new Error('Select up to 100 DXF files at a time. No files were imported.');
+  if (!['in', 'mm'].includes(options.units)) throw new Error('Choose inches or millimeters for unitless DXFs.');
+  if (
+    options.unitsByFile &&
+    (options.unitsByFile.length !== files.length || options.unitsByFile.some(unit => !['in', 'mm'].includes(unit)))
+  )
+    throw new Error('Assign source units to every DXF file.');
   const parts: Part[] = [];
   const results: ImportResult[] = [];
   let quantity = existing.reduce((n, p) => n + p.quantity, 0);
@@ -61,13 +70,46 @@ export async function importDXFBatch(
       if (!/\.dxf$/i.test(file.name)) throw new Error('Choose a .dxf file.');
       if (!Number.isFinite(file.size) || file.size < 0 || file.size >= MAX_DXF_BYTES)
         throw new Error('File must be smaller than 5 MB.');
-      const text = await file.text();
+      const bytes = file.arrayBuffer ? await file.arrayBuffer() : undefined;
+      const text = bytes ? new TextDecoder().decode(bytes) : await file.text();
+      if ((bytes?.byteLength ?? new TextEncoder().encode(text).byteLength) >= MAX_DXF_BYTES)
+        throw new Error('File must be smaller than 5 MB.');
       if (options.signal?.aborted) throw new Error('Import cancelled before this file was added.');
-      const imported = importDXFWithReport(text, file.name, options.units);
-      const added = imported.parts.map((part, i) => ({
-        ...part,
-        color: (existing.length + parts.length + i) % 4,
-      }));
+      const assignedUnits = options.unitsByFile?.[results.length] ?? options.units;
+      const unitDecision = dxfUnitDecision(text, assignedUnits);
+      const imported = importDXFWithReport(text, file.name, assignedUnits);
+      const sourceSha256 = await sha256(bytes ?? text);
+      const warnings = [...imported.warnings];
+      if (unitDecision.sourceUnits === 'unitless')
+        warnings.push(
+          `Unitless DXF interpreted as ${unitDecision.resolvedUnits === 'in' ? 'inches' : 'millimeters'} from the import assignment. Verify dimensions against the drawing.`
+        );
+      const added: Part[] = await Promise.all(
+        imported.parts.map(async (part, i) => ({
+          ...part,
+          color: (existing.length + parts.length + i) % 4,
+          provenance: {
+            version: 1 as const,
+            sourceName: file.name,
+            sourceSha256,
+            sourceHashBasis: bytes ? ('original-bytes' as const) : ('utf8-text' as const),
+            geometrySha256: await geometryHash(part),
+            geometryVersion: GEOMETRY_VERSION,
+            ...unitDecision,
+            importerVersion: IMPORTER_VERSION,
+            warnings,
+          },
+        }))
+      );
+      const usedIds = new Set([...existing, ...parts].map(part => part.id));
+      for (const part of added) {
+        const stem = `dxf-${sourceSha256}-${part.provenance!.geometrySha256}`;
+        let occurrence = 1;
+        while (usedIds.has(`${stem}-${occurrence}`)) occurrence++;
+        part.id = `${stem}-${occurrence}`;
+        usedIds.add(part.id);
+      }
+      if (options.signal?.aborted) throw new Error('Import cancelled before this file was added.');
       if (existing.length + parts.length + added.length > 300)
         throw new Error('This file would exceed 300 designs in this estimate. Start a new estimate or remove parts.');
       if (quantity + added.length > 300)
@@ -88,7 +130,7 @@ export async function importDXFBatch(
         designs: added.length,
         partIds: added.map(part => part.id),
         message: `${added.length} design${added.length === 1 ? '' : 's'} added`,
-        warnings: imported.warnings,
+        warnings,
         footprintOnly: imported.footprintOnly,
       });
     } catch (error) {

@@ -1,5 +1,6 @@
 import { packContours, outlinesCollide, movedOuter, rotatePoint } from './contour-packing';
 import { DXF_CURVE_TOLERANCE_MM, readDXFGeometry } from './dxf';
+import { validateProvenance, type PartProvenance } from './provenance';
 
 export type Point = { x: number; y: number };
 export type Loop = { type: 'poly'; points: Point[] } | { type: 'circle'; cx: number; cy: number; r: number };
@@ -13,6 +14,8 @@ export type Part = {
   importMode?: 'drawing-bounds';
   referencePaths?: Point[][];
   geometryToleranceMm?: number;
+  revision?: string;
+  provenance?: PartProvenance;
 };
 export type Stock = {
   width: number;
@@ -245,6 +248,11 @@ export function validatePart(p: Part) {
     'Invalid part identity.'
   );
   requireValid(
+    p.revision === undefined || (typeof p.revision === 'string' && p.revision.length <= 100),
+    'Invalid part revision.'
+  );
+  if (p.provenance !== undefined) validateProvenance(p.provenance);
+  requireValid(
     p.geometryToleranceMm === undefined ||
       (finite(p.geometryToleranceMm) && p.geometryToleranceMm >= 0 && p.geometryToleranceMm <= 0.0254),
     'Invalid geometry approximation tolerance.'
@@ -362,8 +370,22 @@ export function nestParts(parts: Part[], stock: Stock): Nest {
   return result;
 }
 export function validateNest(parts: Part[], s: Stock, n: Nest) {
+  requireValid(n && Array.isArray(n.placements) && Array.isArray(n.unplaced), 'Invalid nest result.');
+  requireValid(Number.isInteger(n.sheets) && n.sheets >= 0 && n.sheets <= s.maxSheets, 'Invalid sheet count.');
   const seen = new Set<string>();
   const partById = new Map(parts.map(p => [p.id, p]));
+  const unplacedIds = new Set<string>();
+  for (const item of n.unplaced) {
+    requireValid(
+      item &&
+        partById.has(item.partId) &&
+        !unplacedIds.has(item.partId) &&
+        Number.isInteger(item.count) &&
+        item.count > 0,
+      'Invalid unplaced part quantity or identity.'
+    );
+    unplacedIds.add(item.partId);
+  }
   const worldOutlines = new Map<Placement, Loop>();
   for (const a of n.placements) {
     const part = partById.get(a.partId);
@@ -418,6 +440,10 @@ export function validateNest(parts: Part[], s: Stock, n: Nest) {
         p.quantity,
       'Part quantity mismatch.'
     );
+  requireValid(
+    new Set(n.placements.map(placement => placement.sheet)).size === n.sheets,
+    'Nest contains empty or missing sheets.'
+  );
 }
 export function transformLoops(p: Part, pl: Placement): Loop[] {
   const b = bounds(p.loops[0]);
