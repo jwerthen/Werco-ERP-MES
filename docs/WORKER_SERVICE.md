@@ -473,6 +473,13 @@ recovers queued/expired leases. A legacy cron allowlist that omits this relay, o
 The release does not change any production cron variable; review existing selection
 as part of the normal release gate instead of silently enabling schedules.
 
+Readiness identifies the original configured `NESTING_RELAY_CRON` object among the
+selected schedules. Sentry's ARQ integration wraps its coroutine in place before
+startup; comparing the callable would falsely disable a running relay. Matching a
+schedule name alone is insufficient. If production intentionally disables all other
+crons, `WORKER_CRON_JOBS=relay_quote_nesting_runs_job` enables only the required
+nesting relay. Coordinate this worker-only setting explicitly; `none` remains unavailable.
+
 For worker-touched production releases, `.github/scripts/verify_worker_release.py`
 combines Railway's active SUCCESS deployment state with fresh events fetched for that
 exact deployment, compares all build identities to the tested image, then rechecks that
