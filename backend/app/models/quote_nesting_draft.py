@@ -87,17 +87,47 @@ def _refuse_revision_mutation(_mapper, _connection, _target):
 
 # Lock-step with migration 101. create_all is a supported bootstrap path, and
 # mapper events alone do not protect bulk SQL or another database connection.
-for _table in (QuoteNestingDraft.__table__, QuoteNestingRevision.__table__):
+for _table, _role_statements in (
+    (
+        QuoteNestingDraft.__table__,
+        (
+            """DO $$ BEGIN
+              IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+                REVOKE ALL ON TABLE quote_nesting_drafts FROM anon;
+                REVOKE ALL ON SEQUENCE quote_nesting_drafts_id_seq FROM anon;
+              END IF;
+            END $$""",
+            """DO $$ BEGIN
+              IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+                REVOKE ALL ON TABLE quote_nesting_drafts FROM authenticated;
+                REVOKE ALL ON SEQUENCE quote_nesting_drafts_id_seq FROM authenticated;
+              END IF;
+            END $$""",
+        ),
+    ),
+    (
+        QuoteNestingRevision.__table__,
+        (
+            """DO $$ BEGIN
+              IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+                REVOKE ALL ON TABLE quote_nesting_revisions FROM anon;
+                REVOKE ALL ON SEQUENCE quote_nesting_revisions_id_seq FROM anon;
+              END IF;
+            END $$""",
+            """DO $$ BEGIN
+              IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+                REVOKE ALL ON TABLE quote_nesting_revisions FROM authenticated;
+                REVOKE ALL ON SEQUENCE quote_nesting_revisions_id_seq FROM authenticated;
+              END IF;
+            END $$""",
+        ),
+    ),
+):
     for _statement in (
         f'ALTER TABLE {_table.name} ENABLE ROW LEVEL SECURITY',
         f'REVOKE ALL ON TABLE {_table.name} FROM PUBLIC',
         f'REVOKE ALL ON SEQUENCE {_table.name}_id_seq FROM PUBLIC',
-        *(f"""DO $$ BEGIN
-              IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN
-                REVOKE ALL ON TABLE {_table.name} FROM {role};
-                REVOKE ALL ON SEQUENCE {_table.name}_id_seq FROM {role};
-              END IF;
-            END $$""" for role in ('anon', 'authenticated')),
+        *_role_statements,
     ):
         event.listen(_table, 'after_create', DDL(_statement).execute_if(dialect='postgresql'))
 
