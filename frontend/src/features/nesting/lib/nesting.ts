@@ -1,3 +1,5 @@
+import { readDXFGeometry } from './dxf';
+
 export type Point = { x: number; y: number };
 export type Loop = { type: 'poly'; points: Point[] } | { type: 'circle'; cx: number; cy: number; r: number };
 export type Part = {
@@ -7,6 +9,7 @@ export type Part = {
   quantity: number;
   rotate: boolean;
   color: number;
+  importMode?: 'drawing-bounds';
 };
 export type Stock = {
   width: number;
@@ -206,6 +209,7 @@ export function validatePart(p: Part) {
     p && typeof p.id === 'string' && typeof p.name === 'string' && p.name.length > 0 && p.name.length < 200,
     'Invalid part identity.'
   );
+  requireValid(p.importMode === undefined || p.importMode === 'drawing-bounds', 'Invalid DXF import mode.');
   requireValid(Number.isInteger(p.quantity) && p.quantity >= 1 && p.quantity <= 300, 'Part quantity must be 1–300.');
   requireValid(
     typeof p.rotate === 'boolean' && Number.isInteger(p.color) && p.color >= 0 && p.color <= 3,
@@ -574,137 +578,78 @@ export function exportDXF(parts: Part[], stock: Stock, nest: Nest, sheet: number
   lines.push(0, 'ENDSEC', 0, 'EOF');
   return lines.join('\n') + '\n';
 }
-export function importDXF(text: string, name: string, unitless: 'mm' | 'in' = 'in'): Part[] {
-  requireValid(text.length < 5_000_000, 'DXF limit: 5 MB.');
-  const raw = text
-    .replace(/^\uFEFF/, '')
-    .replace(/\r/g, '')
-    .trimEnd()
-    .split('\n');
-  requireValid(raw.length % 2 === 0, 'Malformed DXF group pairs.');
-  const pairs: { code: number; value: string }[] = [];
-  for (let i = 0; i < raw.length; i += 2) {
-    requireValid(/^\s*-?\d+\s*$/.test(raw[i]), 'Invalid DXF group code.');
-    pairs.push({ code: Number(raw[i]), value: raw[i + 1].trim() });
-  }
-  requireValid(
-    pairs.some(p => p.code === 0 && p.value === 'EOF'),
-    'Missing DXF end marker.'
-  );
-  let unit = 0;
-  const ui = pairs.findIndex(p => p.code === 9 && p.value === '$INSUNITS');
-  if (ui >= 0) {
-    requireValid(pairs[ui + 1]?.code === 70 && pairs[ui + 1]?.value !== '', 'Invalid DXF unit declaration.');
-    unit = Number(pairs[ui + 1].value);
-  }
-  requireValid([0, 1, 4].includes(unit), 'Only mm and inch DXF units are supported.');
-  const scale = unit === 1 || (unit === 0 && unitless === 'in') ? 25.4 : 1;
-  let inEntities = false;
-  const entities: { type: string; data: typeof pairs }[] = [];
-  for (let i = 0; i < pairs.length; i++) {
-    const p = pairs[i];
-    if (p.code === 0 && p.value === 'SECTION') {
-      inEntities = pairs[i + 1]?.code === 2 && pairs[i + 1]?.value === 'ENTITIES';
-      i++;
-      continue;
-    }
-    if (p.code === 0 && p.value === 'ENDSEC') {
-      inEntities = false;
-      continue;
-    }
-    if (!inEntities) continue;
-    if (p.code === 0) entities.push({ type: p.value, data: [] });
-    else {
-      requireValid(entities.length > 0, 'Malformed entity section.');
-      entities[entities.length - 1].data.push(p);
-    }
-  }
-  requireValid(entities.length > 0 && entities.length <= 300, 'DXF needs 1–300 supported contours.');
-  const loops: Loop[] = entities.map(e => {
-    requireValid(
-      ['LWPOLYLINE', 'CIRCLE'].includes(e.type),
-      `Unsupported ${e.type}. Export closed straight LWPOLYLINEs or CIRCLEs. Join lines and convert curves explicitly in CAD first.`
-    );
-    const numeric = (s: string) => {
-      requireValid(s.trim() !== '' && finite(Number(s)), 'Invalid or blank DXF number.');
-      return Number(s);
+export type DXFImportReport = { parts: Part[]; warnings: string[]; footprintOnly: boolean };
+export function importDXFWithReport(text: string, name: string, unitless: 'mm' | 'in' = 'in'): DXFImportReport {
+  const geometry = readDXFGeometry(text, unitless);
+  const { loops, warnings } = geometry;
+  const baseName = name.replace(/\.dxf$/i, '');
+  const footprint = (): DXFImportReport => {
+    const part: Part = {
+      id: crypto.randomUUID(),
+      name: baseName,
+      loops: normalizeLoops([geometry.footprint]),
+      quantity: 1,
+      rotate: true,
+      color: 0,
+      importMode: 'drawing-bounds',
     };
-    const val = (c: number, d = 0) => {
-      const v = e.data.find(p => p.code === c);
-      return v ? numeric(v.value) : d;
+    validatePart(part);
+    return {
+      parts: [part],
+      footprintOnly: true,
+      warnings: [
+        ...warnings,
+        'Imported one design from the full drawing bounds. Review its size and quantity; footprint area is not actual cut-part area.',
+      ],
     };
-    requireValid(
-      val(67) === 0 && e.data.filter(p => p.code === 410).every(p => p.value.toLowerCase() === 'model'),
-      'Export model-space geometry only. Paper-space entities are not supported.'
-    );
-    requireValid(
-      Math.abs(val(210)) < EPS &&
-        Math.abs(val(220)) < EPS &&
-        Math.abs(val(230, 1) - 1) < EPS &&
-        Math.abs(val(30)) < EPS &&
-        Math.abs(val(38)) < EPS &&
-        Math.abs(val(39)) < EPS,
-      'Only flat XY geometry with +Z extrusion is supported.'
-    );
-    if (e.type === 'CIRCLE') {
-      requireValid(
-        [10, 20, 40].every(c => e.data.some(p => p.code === c)),
-        'Circle is missing required coordinates.'
-      );
-      return {
-        type: 'circle',
-        cx: val(10) * scale,
-        cy: val(20) * scale,
-        r: val(40) * scale,
-      };
-    }
-    requireValid(Number.isInteger(val(90)) && Number.isInteger(val(70)), 'Invalid DXF vertex count or flags.');
-    requireValid((val(70) & 1) === 1, 'Open polyline. Close the contour in CAD first.');
-    requireValid(
-      e.data.filter(p => p.code === 42).every(p => numeric(p.value) === 0),
-      'Curved polyline bulges are not supported; no geometry was changed.'
-    );
-    requireValid(
-      e.data.filter(p => [40, 41, 43].includes(p.code)).every(p => numeric(p.value) === 0),
-      'Wide polylines are not supported.'
-    );
-    const points: Point[] = [];
-    for (const p of e.data) {
-      if (p.code === 10) points.push({ x: numeric(p.value) * scale, y: NaN });
-      if (p.code === 20) {
-        requireValid(points.length > 0, 'Y coordinate without X.');
-        requireValid(Number.isNaN(points[points.length - 1].y), 'Duplicate vertex Y coordinate.');
-        points[points.length - 1].y = numeric(p.value) * scale;
-      }
-    }
-    requireValid(points.length === val(90), 'DXF vertex count mismatch.');
-    if (points.length > 3 && Math.hypot(points[0].x - points.at(-1)!.x, points[0].y - points.at(-1)!.y) < EPS)
-      points.pop();
-    return { type: 'poly', points };
-  });
+  };
+  if (geometry.footprintOnly) return footprint();
   requireValid(vertexCount(loops) <= 20000, 'File geometry limit: 20,000 vertices.');
-  loops.forEach(validateLoop);
-  const parents = loops.map((l, i) => {
-    let parent = -1;
-    for (let j = 0; j < loops.length; j++) {
-      if (i === j) continue;
-      requireValid(!boundariesCross(l, loops[j]), 'Contours touch or intersect. Separate or repair them in CAD.');
-      if (inside(sample(l), loops[j]) && (parent < 0 || loopArea(loops[j]) < loopArea(loops[parent]))) parent = j;
-    }
-    return parent;
-  });
-  const depth = (i: number): number => (parents[i] < 0 ? 0 : 1 + depth(parents[i]));
-  const outer = loops.map((_, i) => i).filter(i => depth(i) % 2 === 0);
-  const result = outer.map((i, k) => ({
-    id: crypto.randomUUID(),
-    name: name.replace(/\.dxf$/i, '') + (outer.length > 1 ? ` · ${k + 1}` : ''),
-    loops: normalizeLoops([loops[i], ...loops.filter((_, j) => parents[j] === i)]),
-    quantity: 1,
-    rotate: true,
-    color: k % 4,
-  }));
-  result.forEach(validatePart);
-  return result;
+  try {
+    loops.forEach(validateLoop);
+    const parents = loops.map((l, i) => {
+      let parent = -1;
+      for (let j = 0; j < loops.length; j++) {
+        if (i === j) continue;
+        requireValid(!boundariesCross(l, loops[j]), 'Contours touch or intersect. Separate or repair them in CAD.');
+        if (inside(sample(l), loops[j]) && (parent < 0 || loopArea(loops[j]) < loopArea(loops[parent]))) parent = j;
+      }
+      return parent;
+    });
+    const depth = (i: number): number => (parents[i] < 0 ? 0 : 1 + depth(parents[i]));
+    const outer = loops.map((_, i) => i).filter(i => depth(i) % 2 === 0);
+    const parts = outer.map((i, k) => ({
+      id: crypto.randomUUID(),
+      name: baseName + (outer.length > 1 ? ` · ${k + 1}` : ''),
+      loops: normalizeLoops([loops[i], ...loops.filter((_, j) => parents[j] === i)]),
+      quantity: 1,
+      rotate: true,
+      color: k % 4,
+    }));
+    parts.forEach(validatePart);
+    return { parts, warnings, footprintOnly: false };
+  } catch (error) {
+    // Geometry/topology ambiguities can still provide conservative purchasing bounds.
+    // Invalid numbers, unsupported entities, and resource/size limits never use this fallback.
+    const topologyErrors = new Set([
+      'Self-intersecting contour.',
+      'Polyline doubles back on itself.',
+      'Duplicate adjacent vertices.',
+      'Contour has no area.',
+      'Contours touch or intersect. Separate or repair them in CAD.',
+      'Hole must lie strictly inside the outer contour.',
+      'Holes may not overlap or contain each other.',
+      'Part must have positive net area.',
+    ]);
+    if (!(error instanceof Error) || !topologyErrors.has(error.message)) throw error;
+    warnings.push(
+      'Overlapping or intersecting paths were found; all supported geometry is included in one rectangular footprint.'
+    );
+    return footprint();
+  }
+}
+export function importDXF(text: string, name: string, unitless: 'mm' | 'in' = 'in'): Part[] {
+  return importDXFWithReport(text, name, unitless).parts;
 }
 export const defaultStock: Stock = {
   width: 3048,

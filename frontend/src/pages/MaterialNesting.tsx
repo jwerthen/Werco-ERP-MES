@@ -5,18 +5,12 @@ import { NestingPortalContext } from '../features/nesting/PortalContext';
 import styles from '../features/nesting/nesting.css?inline';
 import { useAuth } from '../context/AuthContext';
 import { useCompany } from '../context/CompanyContext';
-import { readNestingDraft, readNestingSavedSignature, writeNestingDraft } from '../features/nesting/draft';
-import type { Quote } from '../features/nesting/lib/quoting';
 
 /** A normal authenticated ERP route; only its presentation is isolated. */
 export default function MaterialNesting() {
   const { user } = useAuth();
   const { currentCompany } = useCompany();
   const owner = `${user?.id}:${currentCompany?.id ?? user?.company_id}`;
-  const preserveDraft = useCallback(
-    (quote: Quote, savedSignature: string) => writeNestingDraft(owner, quote, savedSignature),
-    [owner]
-  );
   const [target, setTarget] = useState<HTMLElement | null>(null);
   const attach = useCallback((host: HTMLDivElement | null) => {
     if (!host) return;
@@ -37,12 +31,7 @@ export default function MaterialNesting() {
       {target &&
         createPortal(
           <NestingPortalContext.Provider value={target}>
-            <NestingWorkspace
-              key={owner}
-              initialQuote={readNestingDraft(owner)}
-              initialSavedSignature={readNestingSavedSignature(owner)}
-              onDraftChange={preserveDraft}
-            />
+            <NestingWorkspace key={owner} />
           </NestingPortalContext.Provider>,
           target
         )}

@@ -38,7 +38,7 @@ import { useToast } from '../../components/ui/Toast';
 import { bounds, normalizeLoops, rect, svgPath, transformLoops, validatePart, type Part } from './lib/nesting';
 import { inToMm, mmToIn, formatIn, parseInches, LB_PER_KG } from './lib/units';
 import {
-  demoQuote,
+  createBlankQuote,
   compareSheets,
   validateQuote,
   quoteToFile,
@@ -162,35 +162,28 @@ function NumberField({
     </label>
   );
 }
-export default function NestingWorkspace({
-  initialQuote = demoQuote,
-  initialSavedSignature = JSON.stringify(demoQuote),
-  onDraftChange,
-}: {
-  initialQuote?: Quote;
-  initialSavedSignature?: string;
-  onDraftChange?: (quote: Quote, savedSignature: string) => void;
-}) {
+export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quote }) {
   const fieldId = useId();
-  const [savedSignature, setSavedSignature] = useState(initialSavedSignature);
   const { showToast } = useToast();
   const toast = useMemo(
     () => ({
       success: (message: string, _options?: { duration?: number }) => showToast('success', message),
+      warning: (message: string) => showToast('warning', message),
       error: (message: string, _options?: { duration?: number }) => showToast('error', message),
     }),
     [showToast]
   );
-  const [quote, setQuote] = useState<Quote>(initialQuote),
+  const [quote, setQuote] = useState<Quote>(() => initialQuote ?? createBlankQuote()),
     [tab, setTab] = useState('nest');
+  const [savedSignature, setSavedSignature] = useState(() => JSON.stringify(quote));
   const [snapshot, setSnapshot] = useState<{
     comparison: Comparison;
     signature: string;
   }>(() => ({
-    comparison: compareSheets(demoQuote),
-    signature: JSON.stringify(demoQuote),
+    comparison: compareSheets(quote),
+    signature: JSON.stringify(quote),
   }));
-  const [previewId, setPreviewId] = useState(() => compareSheets(demoQuote).recommendedId),
+  const [previewId, setPreviewId] = useState(() => snapshot.comparison.recommendedId),
     [sheet, setSheet] = useState(0),
     [selected, setSelected] = useState<string | null>(null),
     [zoom, setZoom] = useState(1),
@@ -227,13 +220,11 @@ export default function NestingWorkspace({
   }, []);
   const importRef = useRef<HTMLInputElement>(null),
     loadRef = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    onDraftChange?.(quote, savedSignature);
-  }, [quote, savedSignature, onDraftChange]);
   useUnsavedChanges(JSON.stringify(quote) !== savedSignature);
   const signature = JSON.stringify(quote),
     stale = signature !== snapshot.signature,
     comparison = snapshot.comparison;
+  const hasDrawingBounds = quote.parts.some(part => part.importMode === 'drawing-bounds');
   const active = comparison.results.find(r => r.option.id === previewId) ?? comparison.results[0];
   const nest = active?.nest,
     stock = active?.option,
@@ -328,7 +319,9 @@ export default function NestingWorkspace({
       setImportResults(result.results);
       setSelected(result.parts[0]?.id ?? null);
       const successful = result.results.filter(file => file.status === 'imported').length;
-      if (successful) toast.success(`${successful} files imported · ${result.parts.length} designs added.`);
+      if (successful && result.results.some(file => file.warnings?.length || file.status === 'skipped'))
+        toast.warning(`${successful} files imported. Review the import notes and part dimensions.`);
+      else if (successful) toast.success(`${successful} files imported · ${result.parts.length} designs added.`);
       else toast.error('No files were imported. Review the file results.');
     } catch (error) {
       toast.error((error as Error).message, { duration: 9000 });
@@ -424,7 +417,7 @@ export default function NestingWorkspace({
       ['Required parts', requested],
       ['Placed parts', nest.placements.length],
       ['Purchased area ft2', squareFeet(active.area)],
-      ['Net part area ft2', squareFeet(nest.area)],
+      [hasDrawingBounds ? 'Estimated footprint area ft2' : 'Net part area ft2', squareFeet(nest.area)],
       ['Unused area ft2', squareFeet(active.area - nest.area)],
       ['Utilization %', nest.utilization],
       ['Approx stock weight lb', mass],
@@ -432,7 +425,10 @@ export default function NestingWorkspace({
       ['Estimated material total USD', active.cost === null ? 'Not entered' : active.cost.toFixed(2)],
       [
         'Basis',
-        'Conservative rectangular-envelope estimate; one stock size per option. Freight, tax, labor and consumables excluded.',
+        'Conservative rectangular-envelope estimate; one stock size per option. Freight, tax, labor and consumables excluded.' +
+          (hasDrawingBounds
+            ? ' Whole-drawing footprints include openings and may overstate part area and utilization.'
+            : ''),
       ],
       [],
       ['Compared sheet size', 'Fits all parts', 'Sheets', 'Purchased ft2', 'Utilization %', 'Material cost USD'],
@@ -445,10 +441,17 @@ export default function NestingWorkspace({
         r.complete && r.cost !== null ? r.cost.toFixed(2) : '',
       ]),
       [],
-      ['Part', 'Quantity', 'Width in', 'Height in', 'Rotation allowed'],
+      ['Part', 'Quantity', 'Width in', 'Height in', 'Rotation allowed', 'Geometry basis'],
       ...quote.parts.map(p => {
         const b = bounds(p.loops[0]);
-        return [p.name, p.quantity, mmToIn(b.width), mmToIn(b.height), p.rotate ? '0 / 90 degrees' : '0 degrees'];
+        return [
+          p.name,
+          p.quantity,
+          mmToIn(b.width),
+          mmToIn(b.height),
+          p.rotate ? '0 / 90 degrees' : '0 degrees',
+          p.importMode === 'drawing-bounds' ? 'Whole drawing footprint; verify dimensions' : 'Closed contours',
+        ];
       }),
     ];
     download(
@@ -464,7 +467,10 @@ export default function NestingWorkspace({
       .map(
         pl =>
           `<path d="${svgPath(
-            transformLoops(quote.parts.find(p => p.id === pl.partId)!, pl)
+            transformLoops(
+              quote.parts.find(p => p.id === pl.partId)!,
+              pl
+            )
           )}" fill="#dbeafe" fill-rule="evenodd" stroke="#1d4ed8" stroke-width="1"/>`
       )
       .join('');
@@ -588,9 +594,7 @@ export default function NestingWorkspace({
             <h1 className="sr-only">Sheet material quoting workspace</h1>
             <div className="job-heading">
               <div>
-                <div className="eyebrow">
-                  NESTING FOR QUOTES / {quote.name.includes('demo') ? 'DEMO JOB' : 'CURRENT ESTIMATE'}
-                </div>
+                <div className="eyebrow">NESTING FOR QUOTES / CURRENT ESTIMATE</div>
                 <Input
                   aria-label="Estimate name"
                   className="job-name"
@@ -746,6 +750,7 @@ export default function NestingWorkspace({
                           <small>
                             {formatIn(b.width)} × {formatIn(b.height)} in
                           </small>
+                          {p.importMode === 'drawing-bounds' && <small>Whole drawing footprint · verify size</small>}
                           <div className="part-controls">
                             <Input
                               aria-label={`Quantity for ${p.name}`}
@@ -1125,7 +1130,7 @@ export default function NestingWorkspace({
               {!stale && active?.complete && nest && (
                 <div className="quote-metrics">
                   <div>
-                    <span>Net part area</span>
+                    <span>{hasDrawingBounds ? 'Estimated footprint area' : 'Net part area'}</span>
                     <b>{fmt(squareFeet(nest.area), 2)} ft²</b>
                   </div>
                   <div>
@@ -1148,6 +1153,8 @@ export default function NestingWorkspace({
             <div className="workspace-bottom">
               <p>
                 <Info size={15} /> Conservative rectangular bounds may require more sheets than irregular-shape nesting.
+                {hasDrawingBounds &&
+                  ' Whole-drawing footprints include openings; part area and utilization may be overstated.'}
               </p>
               <div>
                 <button disabled={stale || !visible.length} onClick={exportPreview}>
@@ -1303,9 +1310,10 @@ export default function NestingWorkspace({
                     irregular-shape nest; it is not proof of the smallest possible sheet order.
                   </p>
                   <p>
-                    Utilization is actual part area minus holes, divided by full purchased sheet area. “Unused area”
-                    includes spaces and holes, some of which may be reusable. Approximate weight uses typical material
-                    density.
+                    Utilization is contour area minus holes, divided by full purchased sheet area. Whole-drawing
+                    footprints use their full rectangular area, including openings, and can overstate utilization.
+                    “Unused area” includes spaces and holes, some of which may be reusable. Approximate weight uses
+                    typical material density.
                   </p>
                   <p>
                     Optional prices cover sheet material only. They exclude freight, tax, labor, cutting time and
@@ -1317,19 +1325,24 @@ export default function NestingWorkspace({
                 <h2>Import and save</h2>
                 <p>
                   Upload or drag in up to 100 DXF files per batch, each under 5 MB. A file-by-file report explains any
-                  skipped files; successful files remain in your estimate. Import ASCII DXFs with closed straight
-                  LWPOLYLINEs and CIRCLEs, or add rectangles and circles by size. Separate outer contours become
-                  separate part designs; interior loops remain holes. Inch and millimeter DXFs retain their physical
-                  size. Unitless files default to inches unless you select millimeters before import.
+                  skipped files; successful files remain in your estimate. Connected lines, arcs, circles, and 2D
+                  polylines form part outlines automatically. Separate closed outer contours become separate part
+                  designs; interior loops remain holes. Inch and millimeter DXFs retain their physical size. Unitless
+                  files default to inches unless you select millimeters before import.
                 </p>
                 <p>
-                  Open lines, arcs, bulged polylines, splines, blocks, wide lines and 3D geometry are rejected with an
-                  explanation. Before ordering, check imported part dimensions against your drawing.
+                  Drawings with open or intersecting paths, or supported splines, use one conservative rectangular
+                  footprint for the whole file. These parts are labeled “Whole drawing footprint”; check the overall
+                  size and set quantity for the whole drawing. Spline bounds can be larger than the curve. Text and
+                  leader annotations on the FORMAT layer are omitted with an import note. Unsupported geometry,
+                  including blocks, wide polylines and sloped 3D paths, is reported without adding a partial file.
+                  Before ordering, check imported part dimensions against your drawing.
                 </p>
                 <p>
                   Save the estimate to retain parts, quantities, stock options and prices. Files use inches. Legacy job
-                  files remain supported. Your draft stays available when you visit another ERP page and return. Save a
-                  file before closing or refreshing the app, signing out, or switching companies.
+                  files remain supported. Material Nesting starts with a fresh, empty estimate each time you open the
+                  section. Save a file before leaving, refreshing, signing out, or switching companies. Use Open to
+                  continue a saved estimate.
                 </p>
               </section>
               <section className="section-card">
@@ -1391,15 +1404,20 @@ export default function NestingWorkspace({
                   <div className={'import-result ' + result.status} key={i}>
                     <div>
                       <strong>{result.name}</strong>
-                      <span>{result.status === 'imported' ? 'Imported' : 'Skipped'}</span>
+                      <span>
+                        {result.status === 'imported' ? (result.footprintOnly ? 'Footprint' : 'Imported') : 'Skipped'}
+                      </span>
                     </div>
                     <p>{result.message}</p>
+                    {result.warnings?.map((warning, index) => (
+                      <p key={index}>{warning}</p>
+                    ))}
                   </div>
                 ))}
               </div>
               <p className="import-footnote">
-                New designs start at quantity 1. Files with multiple outer profiles create multiple designs. Skipped
-                files add no parts.
+                New designs start at quantity 1. Closed outer profiles create separate designs. A whole-drawing
+                footprint counts as one design for the entire file. Skipped files add no parts.
               </p>
               <button className="primary" onClick={() => setImportOpen(false)}>
                 Review parts

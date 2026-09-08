@@ -4,7 +4,6 @@ import userEvent from '@testing-library/user-event';
 import MaterialNesting from './MaterialNesting';
 import { bounds } from '../features/nesting/lib/nesting';
 import { compareSheets, quoteFromFile } from '../features/nesting/lib/quoting';
-import { readNestingDraft } from '../features/nesting/draft';
 
 // Vite supplies this CSS as text. Keep the real shadow host, workspace and
 // Base UI portals; only the build-time CSS transform and ERP toast are stubbed.
@@ -104,12 +103,48 @@ async function readBlob(blob: Blob): Promise<string> {
   });
 }
 
+function beforeUnloadIsPrevented() {
+  const event = new Event('beforeunload', { cancelable: true });
+  window.dispatchEvent(event);
+  return event.defaultPrevented;
+}
+
+function expectBlankWorkspace(ui: ReturnType<typeof within>) {
+  expect(ui.getByLabelText('Estimate name')).toHaveValue('New material estimate');
+  expect(ui.getByRole('combobox', { name: 'Material' })).toHaveTextContent('Carbon steel');
+  expect(ui.getByText('0 designs')).toBeInTheDocument();
+  expect(ui.queryByLabelText(/^Quantity for /)).not.toBeInTheDocument();
+  expect(ui.getByRole('heading', { name: 'Add parts to start an estimate' })).toBeInTheDocument();
+  expect(ui.getByRole('heading', { name: 'Your nest preview' })).toBeInTheDocument();
+  expect(ui.queryByText(/parts covered/)).not.toBeInTheDocument();
+  expect(ui.queryByRole('img', { name: /^Layout on / })).not.toBeInTheDocument();
+  expect(ui.getByRole('button', { name: 'Compare sheets' })).toBeDisabled();
+}
+
+async function editEstimate(ui: ReturnType<typeof within>) {
+  fireEvent.change(ui.getByLabelText('Estimate name'), { target: { value: 'Customer bracket run' } });
+  fireEvent.click(ui.getByRole('combobox', { name: 'Material' }));
+  await userEvent.setup().click(await ui.findByRole('option', { name: 'Aluminum' }));
+  fireEvent.click(ui.getByRole('button', { name: 'Add basic shape' }));
+  const dialog = await ui.findByRole('dialog', { name: 'Add a part by size' });
+  fireEvent.change(within(dialog).getByLabelText('Part name'), { target: { value: 'Customer plate' } });
+  fireEvent.change(within(dialog).getByLabelText('Quantity'), { target: { value: '3' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add part' }));
+  await waitFor(() => expect(ui.queryByRole('dialog')).not.toBeInTheDocument());
+}
+
+function expectEditedEstimate(ui: ReturnType<typeof within>) {
+  expect(ui.getByLabelText('Estimate name')).toHaveValue('Customer bracket run');
+  expect(ui.getByRole('combobox', { name: 'Material' })).toHaveTextContent('Aluminum');
+  expect(ui.getByLabelText('Quantity for Customer plate')).toHaveValue(3);
+  expect(ui.getByText('1 designs')).toBeInTheDocument();
+}
+
 describe('Material Nesting inside the ERP shadow host', () => {
   beforeEach(() => {
     mockShowToast.mockClear();
     mockUser = { id: 7, company_id: 10 };
     mockCurrentCompany = { id: 10 };
-    readNestingDraft('clear-between-tests');
   });
 
   afterEach(() => {
@@ -144,10 +179,10 @@ describe('Material Nesting inside the ERP shadow host', () => {
     expect(files.every(({ text }) => text.mock.calls.length === 1)).toBe(true);
     fireEvent.click(within(dialog).getByRole('button', { name: 'Review parts' }));
     await waitFor(() => expect(ui.queryByRole('dialog')).not.toBeInTheDocument());
-    expect(ui.getByText('104 designs')).toBeInTheDocument();
+    expect(ui.getByText('100 designs')).toBeInTheDocument();
     expect(ui.getByRole('button', { name: 'Compare sheets' })).toBeEnabled();
     fireEvent.click(ui.getByRole('button', { name: 'Compare sheets' }));
-    await ui.findByText(/128 \/ 128 parts covered/);
+    await ui.findByText(/100 \/ 100 parts covered/);
 
     const createURL = jest.spyOn(URL, 'createObjectURL');
     jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
@@ -155,10 +190,10 @@ describe('Material Nesting inside the ERP shadow host', () => {
     const blob = createURL.mock.calls[0]?.[0];
     if (!(blob instanceof Blob)) throw new Error('Save did not create an estimate Blob.');
     const saved = quoteFromFile(JSON.parse(await readBlob(blob)));
-    expect(saved.parts).toHaveLength(104);
-    expect(new Set(saved.parts.map(part => part.id)).size).toBe(104);
-    expect(saved.parts.reduce((total, part) => total + part.quantity, 0)).toBe(128);
-    const imported = saved.parts.slice(4);
+    expect(saved.parts).toHaveLength(100);
+    expect(new Set(saved.parts.map(part => part.id)).size).toBe(100);
+    expect(saved.parts.reduce((total, part) => total + part.quantity, 0)).toBe(100);
+    const imported = saved.parts;
     expect(imported.every(part => part.quantity === 1 && part.loops.length === 2)).toBe(true);
     for (const part of imported) {
       expect(bounds(part.loops[0]).width).toBeCloseTo(254);
@@ -166,7 +201,7 @@ describe('Material Nesting inside the ERP shadow host', () => {
     }
     const comparison = compareSheets(saved);
     expect(comparison.recommendedId).toBeTruthy();
-    expect(comparison.results.every(result => result.complete && result.nest?.placements.length === 128)).toBe(true);
+    expect(comparison.results.every(result => result.complete && result.nest?.placements.length === 100)).toBe(true);
     expect(mockShowToast).toHaveBeenCalledWith('success', '100 files imported · 100 designs added.');
   }, 60000);
 
@@ -176,7 +211,7 @@ describe('Material Nesting inside the ERP shadow host', () => {
     fireEvent.change(fileInput(mount, '.dxf'), { target: { files: files.map(({ file }) => file) } });
     expect(mockShowToast).toHaveBeenCalledWith('error', expect.stringContaining('up to 100 DXF files'));
     expect(files.every(({ text }) => text.mock.calls.length === 0)).toBe(true);
-    expect(ui.getByText('4 designs')).toBeInTheDocument();
+    expect(ui.getByText('0 designs')).toBeInTheDocument();
     expect(ui.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
@@ -197,7 +232,7 @@ describe('Material Nesting inside the ERP shadow host', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Add part' }));
     await waitFor(() => expect(ui.queryByRole('dialog')).not.toBeInTheDocument());
     expect(ui.getByLabelText('Quantity for Round spacer')).toHaveValue(3);
-    expect(ui.getByText('5 designs')).toBeInTheDocument();
+    expect(ui.getByText('1 designs')).toBeInTheDocument();
     expect(mockShowToast).toHaveBeenCalledWith('success', 'Part added. Compare sheets to update the estimate.');
     const createURL = jest.spyOn(URL, 'createObjectURL');
     jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
@@ -211,44 +246,71 @@ describe('Material Nesting inside the ERP shadow host', () => {
     });
   });
 
-  it('restores the current owner draft after leaving the route and retains its unsaved warning', () => {
+  it('keeps edits across workspace tabs but starts clean after leaving and reopening the route', async () => {
     const first = mountWorkspace();
-    fireEvent.change(first.ui.getByLabelText('Estimate name'), { target: { value: 'Customer bracket run' } });
-    const beforeLeaving = new Event('beforeunload', { cancelable: true });
-    window.dispatchEvent(beforeLeaving);
-    expect(beforeLeaving.defaultPrevented).toBe(true);
+    expectBlankWorkspace(first.ui);
+    expect(beforeUnloadIsPrevented()).toBe(false);
+    await editEstimate(first.ui);
+    expect(beforeUnloadIsPrevented()).toBe(true);
+
+    fireEvent.click(first.ui.getByRole('tab', { name: 'Stock sizes & prices' }));
+    expect(first.ui.getByRole('tab', { name: 'Stock sizes & prices' })).toHaveAttribute('aria-selected', 'true');
+    fireEvent.click(first.ui.getByRole('tab', { name: 'How estimates work' }));
+    fireEvent.click(first.ui.getByRole('tab', { name: 'Quote workspace' }));
+    expectEditedEstimate(first.ui);
+    fireEvent.click(first.ui.getByRole('button', { name: 'Compare sheets' }));
+    await first.ui.findByText(/3 \/ 3 parts covered/);
     first.unmount();
 
+    // React Router unmounts the page on departure and creates a new one on entry.
     const second = mountWorkspace();
-    expect(second.ui.getByLabelText('Estimate name')).toHaveValue('Customer bracket run');
-    const afterReturning = new Event('beforeunload', { cancelable: true });
-    window.dispatchEvent(afterReturning);
-    expect(afterReturning.defaultPrevented).toBe(true);
+    expectBlankWorkspace(second.ui);
+    expect(beforeUnloadIsPrevented()).toBe(false);
   });
 
-  it('keeps a saved draft clean when returning to the route', () => {
+  it('reopens an explicitly saved estimate after a fresh route entry', async () => {
+    const createURL = jest.spyOn(URL, 'createObjectURL');
     jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
     const first = mountWorkspace();
-    fireEvent.change(first.ui.getByLabelText('Estimate name'), { target: { value: 'Saved bracket run' } });
+    await editEstimate(first.ui);
     fireEvent.click(first.ui.getByRole('button', { name: 'Save' }));
+    const blob = createURL.mock.calls[0]?.[0];
+    if (!(blob instanceof Blob)) throw new Error('Save did not create an estimate Blob.');
+    const savedText = await readBlob(blob);
+    expect(beforeUnloadIsPrevented()).toBe(false);
     first.unmount();
+
     const second = mountWorkspace();
-    expect(second.ui.getByLabelText('Estimate name')).toHaveValue('Saved bracket run');
-    const beforeUnload = new Event('beforeunload', { cancelable: true });
-    window.dispatchEvent(beforeUnload);
-    expect(beforeUnload.defaultPrevented).toBe(false);
+    expectBlankWorkspace(second.ui);
+    const input = fileInput(second.mount, '.json');
+    const openPicker = jest.spyOn(input, 'click');
+    fireEvent.click(second.ui.getByRole('button', { name: 'Open' }));
+    expect(openPicker).toHaveBeenCalledTimes(1);
+    const file = new File([savedText], 'customer-run.estimate.json', { type: 'application/json' });
+    Object.defineProperty(file, 'text', { value: jest.fn().mockResolvedValue(savedText) });
+    fireEvent.change(input, { target: { files: [file] } });
+    await waitFor(() => expect(second.ui.getByLabelText('Estimate name')).toHaveValue('Customer bracket run'));
+    expectEditedEstimate(second.ui);
+    expect(beforeUnloadIsPrevented()).toBe(false);
+    fireEvent.click(second.ui.getByRole('button', { name: 'Compare sheets' }));
+    await second.ui.findByText(/3 \/ 3 parts covered/);
+    expect(mockShowToast).toHaveBeenCalledWith('success', 'Estimate loaded. Compare sheets to calculate requirements.');
   });
 
-  it.each(['company', 'user'])('clears the previous estimate when the active %s changes', identity => {
-    const first = mountWorkspace();
-    fireEvent.change(first.ui.getByLabelText('Estimate name'), { target: { value: 'Private company draft' } });
-    if (identity === 'company') mockCurrentCompany = { id: 20 };
-    else mockUser = { id: 8, company_id: 10 };
-    first.rerender(<MaterialNesting />);
-    expect(first.ui.getByLabelText('Estimate name')).toHaveValue('Bracket assembly — demo');
-    mockCurrentCompany = { id: 10 };
-    mockUser = { id: 7, company_id: 10 };
-    first.rerender(<MaterialNesting />);
-    expect(first.ui.getByLabelText('Estimate name')).toHaveValue('Bracket assembly — demo');
-  });
+  it.each(['company', 'user'])(
+    'starts empty when the active %s changes, including when switching back',
+    async identity => {
+      const first = mountWorkspace();
+      await editEstimate(first.ui);
+      if (identity === 'company') mockCurrentCompany = { id: 20 };
+      else mockUser = { id: 8, company_id: 10 };
+      first.rerender(<MaterialNesting />);
+      expectBlankWorkspace(first.ui);
+      expect(beforeUnloadIsPrevented()).toBe(false);
+      mockCurrentCompany = { id: 10 };
+      mockUser = { id: 7, company_id: 10 };
+      first.rerender(<MaterialNesting />);
+      expectBlankWorkspace(first.ui);
+    }
+  );
 });
