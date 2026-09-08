@@ -1,3 +1,4 @@
+import { analyzeLeftovers, type LeftoverAnalysis } from './leftovers';
 import { allowedRotations, hasOrientationConstraints, orientationExplanation, type GrainAxis } from './orientation';
 import { autoQuotingSpacing } from './spacing';
 import { bounds, validatePart, validateJob, nestParts, type Part, type Stock, type Nest, demoJob } from './nesting';
@@ -37,6 +38,8 @@ export type Quote = {
   options: SheetOption[];
 };
 export type OptionResult = {
+  leftovers?: LeftoverAnalysis;
+  leftoverError?: string;
   option: SheetOption;
   nest: Nest | null;
   error: string | null;
@@ -207,7 +210,16 @@ export function compareSheets(q: Quote): Comparison {
       try {
         const nest = nestParts(q.parts, stockFor(q, option));
         const complete = nest.unplaced.length === 0 && requested > 0;
+        let leftovers: LeftoverAnalysis | undefined;
+        let leftoverError: string | undefined;
+        try {
+          leftovers = analyzeLeftovers(q.parts, stockFor(q, option), nest);
+        } catch (error) {
+          leftoverError = error instanceof Error ? error.message : 'Leftover analysis could not be completed.';
+        }
         return {
+          leftovers,
+          leftoverError,
           option,
           nest,
           complete,

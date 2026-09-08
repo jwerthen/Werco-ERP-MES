@@ -39,7 +39,8 @@ the same permission as Quote Calculator; see [RBAC_PERMISSIONS.md](RBAC_PERMISSI
    `.estimate.json` file. **Save summary** downloads the active group's material
    comparison as CSV; **Save nest preview** downloads its selected sheet as SVG,
    including reference lines. **Export review record** downloads a draft JSON
-   record covering the current inputs and all compared groups.
+   record covering the current inputs and all compared groups, including potential
+   leftover geometry when analysis is available.
 
 The layout places actual outer contours, including concave profiles, using
 multiple part orderings and the permitted rotations after applying grain requirements. It checks contour
@@ -85,6 +86,68 @@ These are estimator-assigned requirements, not grain data inferred from a DXF,
 material name, or ERP catalog record. Confirm the drawing and purchased sheet
 specification. Free-angle rotation, mirroring, and nesting parts inside holes
 remain unavailable.
+
+## Potential leftover regions
+
+After a comparison, **Potential leftovers** overlays the selected sheet with
+amber vector regions. The review panel shows each connected region's actual
+outline and holes, its area, and its overall extents. Select a region to
+highlight it; the thumbnail list pages eight regions at a time. Extents are
+bounding measurements, not a guaranteed usable rectangle. A connected shape
+can be a narrow skeleton that cannot be handled or reused.
+
+Every region remains **review** and contributes **$0 credit**. This predicts
+space left by the proposed placements; it does not prove that material has
+been cut, remains recoverable, has the right traceability, or meets a remnant
+eligibility rule. It creates no inventory, reservation, purchase/quote update,
+remnant identifier, or production instruction. Sheet recommendations and
+material costs receive no leftover credit.
+
+Analysis uses the original validated placements, subtracts guarded full outer
+part profiles from the usable rectangular sheet, and preserves disconnected
+regions and holes through a polygon-tree difference. Internal part cutouts
+stay reserved. It does not replace profiles with bounding boxes. **Area
+breakdown and assumptions** distinguishes:
+
+`gross sheet = edge margins + nominal finished parts + reserved internal cutouts + clearance/numerical protection + potential leftover regions`
+
+Nominal part/cutout areas use the geometry model, including analytic circle
+areas. Numerical loss is assigned to clearance/protection, never described as
+physical kerf. The draft JSON also records the signed reconciliation residual;
+nontrivial negative allowances or residuals make analysis unavailable rather
+than inventing recoverable area.
+
+### Engineering analysis profile
+
+`werco-leftovers-v1` uses the fixed profile below. These are engineering
+approximation settings, not approved shop reuse or cutting policies:
+
+| Setting | Value or behavior |
+|---------|-------------------|
+| Integer grid | 0.0001 mm (approximately 0.000003937 in) |
+| Circle conversion | Circumscribed polygons with radial excess at most 0.0001 in; analytic nominal area is retained |
+| Reserved distance | Half the selected part gap + imported curve tolerance + 0.0004 mm numerical protection; rounded outward to the grid |
+| Offset corners | Square tangent joins, which enclose the round offset; convex corner radius can reach √2 times the reserved distance |
+| Usable boundary | Inset an additional 0.0004 mm and round inward to the grid |
+| Area arithmetic | Origin-relative integer polygon products; model areas retain normal analytical calculations |
+| Reconciliation tolerance | Larger of 0.0000001 mm² or gross sheet area × 0.000000000001; the signed residual remains in draft evidence |
+| Input budget | 60,000 vertices across placed outer profiles; circles at most 8,192 vertices each |
+| Output budget | 30,000 vertices per sheet, 120,000 across the option, and 2,000 connected regions; guarded offset paths also have a 120,000-vertex per-sheet budget |
+| Offset range | Reserved distance at most 40,000 mm; larger requests report analysis unavailable |
+
+Analysis runs in the same comparison worker, outside rendering. A numerical
+or complexity error appears as **Leftover analysis unavailable**; it does not
+erase an otherwise valid nest or sheet recommendation, and no leftover area
+or value is claimed. Input changes hide stale regions until recalculation.
+
+The CSV includes per-sheet leftover areas and zero credits. SVG previews include
+the amber overlay when it is enabled. Draft review JSON includes region geometry
+in inches, area in square inches, the exact profile, review assumptions and
+zero credit. Export validates cached report structure, geometry areas, and its
+relationship to the current sheet/placements without rerunning offset work on
+the UI thread. These checks do not turn the draft into an approved remnant.
+Leftover results are not stored in the editable estimate; **Open** requires a
+fresh comparison. This feature adds no input setting or saved-file version.
 
 ## ERP material and price review
 

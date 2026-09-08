@@ -1,3 +1,4 @@
+import { leftoversToFile } from './leftovers';
 import { allowedRotations, effectiveRotationMode, orientationExplanation } from './orientation';
 import { partArea, validateNest } from './nesting';
 import { projectToFile, validateProject, type QuoteProject } from './quote-project';
@@ -75,6 +76,8 @@ export async function buildRunManifest(
           throw new Error('Stock dimensions or prices differ from the comparison. Recalculate it.');
         const nest = result.nest;
         if (nest) validateNest(quote.parts, stockFor(quote, option), nest);
+        if (result.leftovers && (!nest || result.leftoverError))
+          throw new Error('Leftover report conflicts with its comparison status. Recalculate it.');
         const requested = quote.parts.reduce((count, part) => count + part.quantity, 0);
         const complete = !!nest && nest.placements.length === requested && nest.unplaced.length === 0;
         if (result.complete !== complete)
@@ -103,6 +106,12 @@ export async function buildRunManifest(
           estimatedMaterialCostUSD:
             complete && option.price !== null ? Number((option.price * nest!.sheets).toFixed(2)) : null,
           remnantCreditUSD: 0,
+          leftovers: result.leftovers
+            ? leftoversToFile(result.leftovers, { parts: quote.parts, stock: stockFor(quote, option), nest: nest! })
+            : null,
+          leftoverError:
+            result.leftoverError ??
+            (nest && !result.leftovers ? 'No leftover analysis is available for this comparison.' : null),
           unplaced: nest?.unplaced ?? [],
           placements:
             nest?.placements.map(placement => ({

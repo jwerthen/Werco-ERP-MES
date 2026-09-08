@@ -154,6 +154,13 @@ comparison available without applying unverified catalog prices.
 Verify that a grain-required part is unplaced with unknown sheet grain, then
 can be compared after assigning a compatible axis and rotation policy; reopen
 its saved estimate and confirm the constraints persist.
+Check the potential-leftover overlay and review panel on a sheet with a hole
+and a dividing profile: real region holes/disconnected regions should remain,
+all credits should be zero, and bound extents must not claim a usable rectangle.
+Verify that an unavailable leftover analysis leaves a valid sheet order intact,
+and that editing inputs hides stale regions. Check CSV/SVG/draft JSON exports.
+The leftover increment changes no API, permission, migration, environment
+variable, deployment topology, or editable estimate file version.
 
 The orientation/grain increment changes only frontend behavior and local file
 formats; it adds no API, permission, migration, or environment requirement.

@@ -660,6 +660,113 @@ h2 {
 .orientation-note {
   color: #cbd5e1;
 }
+.leftover-review {
+  margin-top: 22px;
+  padding: 20px;
+  border: 1px solid #475569;
+  background: #111e34;
+  border-radius: 6px;
+}
+.leftover-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.leftover-heading h2 {
+  margin: 6px 0 0;
+  color: #f1f5f9;
+  font-size: 17px;
+}
+.leftover-review p {
+  margin: 14px 0;
+  color: #cbd5e1;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.leftover-review .orientation-warning {
+  color: #fbbf24;
+}
+.leftover-regions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 10px;
+}
+.leftover-pagination {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+  color: #94a3b8;
+  font-size: 12px;
+}
+.leftover-pagination > span {
+  margin-right: auto;
+}
+.leftover-region {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  text-align: left;
+  padding: 12px;
+  min-width: 0;
+  color: #fbbf24;
+  border: 1px solid #475569;
+  border-radius: 4px;
+  background: #0f172a;
+}
+.leftover-region.selected {
+  border-color: #fbbf24;
+  background: #28261f;
+}
+.leftover-region:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 2px;
+}
+.leftover-region svg {
+  width: 70px;
+  height: 65px;
+  flex-shrink: 0;
+}
+.leftover-region > span {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: #e2e8f0;
+  font-size: 13px;
+}
+.leftover-region small {
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.leftover-ledger {
+  margin-top: 16px;
+  color: #cbd5e1;
+  font-size: 13px;
+}
+.leftover-ledger summary {
+  color: #93c5fd;
+  cursor: pointer;
+}
+.leftover-ledger dl {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 16px;
+  max-width: 540px;
+  margin: 16px 0;
+}
+.leftover-ledger dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.canvas-footer {
+  flex-wrap: wrap;
+  gap: 10px 16px;
+}
 .part-row small.orientation-warning,
 .orientation-warning {
   color: #fbbf24;
