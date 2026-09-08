@@ -181,6 +181,17 @@ piece, alter quote totals, or create remnant credit. No new environment variable
 secret, dependency, cron or runtime geometry profile is introduced. Existing saved-run
 worker identity gates remain unchanged; observation records need no new worker job.
 
+Original DXF evidence adds migration `105_nesting_cad_sources` after 104. Apply
+schema/API before the frontend; no source data is seeded and no existing revision
+is rewritten. Four append-only tables track intents, storage attempts, verified
+receipts and per-part bindings. The operations PostgreSQL gate covers both bootstrap
+paths plus actual JWT/file-storage races. Use the existing configured storage
+provider; no secret, environment flag, cron or runtime profile is added. Verify
+explicit saved-revision attachment, lost-reply recovery and authenticated byte-exact
+download with synthetic files. Keep all history on application rollback. Review
+[CAD source storage](CAD_SOURCE_STORAGE.md) before asserting storage durability or
+retention guarantees; an ephemeral local upload directory is not durable storage.
+
 Configured stock exclusions add no migration, permission, environment variable or
 cron setting. The API, frontend and shared worker must understand quote 11/project 12
 and solver `werco-contour-v5` together. The API bounds the saved structural payload;

@@ -51,6 +51,15 @@
 > exact-release/runtime gates. On application rollback retain migration104, piece and
 > observation records and audit history; do not invoke its destructive downgrade.
 
+> **Original DXFs.** Apply additive `105_nesting_cad_sources` after 104 before
+> releasing the saved-revision attachment UI. Verify PostgreSQL bootstrap/migration
+> immutability and tenant guards plus the actual JWT/file-storage race gate. Run an
+> explicit synthetic attachment, lost-response recovery and authenticated byte-exact
+> download. Existing storage configuration is reused; verify provider durability
+> separately. No worker/cron/profile changes or source backfill occur. Keep intent,
+> attempt, receipt and binding history on application rollback; no object purge or
+> destructive schema downgrade is part of ordinary rollback. See `CAD_SOURCE_STORAGE.md`.
+
 > **Stock exclusions.** This increment adds no migration, permission, environment or
 > cron change. Release the quote 11/project 12 API/frontend contract with the compiled
 > `werco-contour-v5` worker through the same backend-first, exact-image/readiness gate.

@@ -3888,6 +3888,35 @@ class ApiService {
     return (await this.api.get('/quote-nesting/spacing-policies', { params: { page, per_page: 20 }, signal })).data;
   }
 
+  async listNestingSources(draftId: number, revision: number, page = 1, signal?: AbortSignal): Promise<import('../types/nestingSource').NestingSourcePage> {
+    return (await this.api.get(`/quote-nesting/drafts/${draftId}/revisions/${revision}/sources`, {
+      params: { page, per_page: 10 }, signal,
+    })).data;
+  }
+
+  async createNestingSourceIntent(draftId: number, revision: number, request: import('../types/nestingSource').NestingSourceRequest, signal?: AbortSignal): Promise<import('../types/nestingSource').NestingSourceIntent> {
+    return (await this.api.post(`/quote-nesting/drafts/${draftId}/revisions/${revision}/sources`, request, { signal })).data;
+  }
+
+  async uploadNestingSource(draftId: number, revision: number, intentId: number, companyId: number, bytes: ArrayBuffer, signal?: AbortSignal): Promise<import('../types/nestingSource').NestingSourceIntent> {
+    return (await this.api.post(`/quote-nesting/drafts/${draftId}/revisions/${revision}/sources/${intentId}/content`, bytes, {
+      params: { expected_company_id: companyId }, signal, timeout: 120_000,
+      headers: { 'Content-Type': 'application/octet-stream' },
+    })).data;
+  }
+
+  async finalizeNestingSource(draftId: number, revision: number, intentId: number, companyId: number, signal?: AbortSignal): Promise<import('../types/nestingSource').NestingSourceIntent> {
+    return (await this.api.post(`/quote-nesting/drafts/${draftId}/revisions/${revision}/sources/${intentId}/finalize`, {
+      expected_company_id: companyId,
+    }, { signal, timeout: 120_000 })).data;
+  }
+
+  async downloadNestingSource(draftId: number, revision: number, intentId: number, signal?: AbortSignal): Promise<Blob> {
+    return (await this.api.get(`/quote-nesting/drafts/${draftId}/revisions/${revision}/sources/${intentId}/download`, {
+      signal, timeout: 120_000, responseType: 'blob',
+    })).data;
+  }
+
   async getNestingSpacingRevision(revision: number, signal?: AbortSignal): Promise<import('../types/nestingPolicy').NestingPolicyRevision & {content: import('../features/nesting/lib/spacing-policy').SpacingPolicyContent}> {
     return (await this.api.get(`/quote-nesting/spacing-policies/revisions/${revision}`, { signal })).data;
   }

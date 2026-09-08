@@ -2344,6 +2344,20 @@ import { ProtectedRoute, AdminRoute } from './components/ProtectedRoute';
 } />
 ```
 
+## Original DXF evidence on saved nesting revisions
+
+`/quote-nesting/drafts/{draft_id}/revisions/{number}/sources` retains unapproved original-byte evidence for material planning and part traceability. The historical namespace does not confer quote approval or inventory authority. These routes reuse effective role permissions, including company overrides:
+
+| Action | Server requirement |
+|---|---|
+| List exact-revision attachment history or download a completed source | Active-company authority and `purchasing:view` |
+| Create an intent, submit original bytes, or finalize tracked bytes | `purchasing:view` **and** `purchasing:create`, writable company context, normal authenticated user/API-token eligibility |
+| Resume an existing intent | All write requirements, plus the exact recorded actor and API-token identity (or the same interactive actor) |
+
+Normal platform/superuser permission bypass remains, but never bypasses read-only context, intended-company checks or another actor/credential's command identity. A read-only colleague can inspect or download completed evidence without becoming its uploader. Revocation/expiry and kiosk path fences remain authoritative; the service rechecks authority before completion after external storage I/O. `can_attach` and per-item `can_resume` describe these capabilities for the UI, not source approval or storage availability.
+
+Intent, storage-attempt and completion mutations each require `AuditService.log_required` in their DB transaction with original credential attribution. Exact completed recovery adds no extra completion audit or object. Staged objects cannot be adopted by another credential, and there is no edit/delete/purge, manufacturing release, quote approval, stock reservation or remnant-credit permission in this feature. See [the source-evidence API contract](API.md#original-dxf-evidence-for-saved-nesting-revisions).
+
 ## Superuser Override
 
 Users with `is_superuser=true` bypass all permission checks. This is reserved for system administrators who need full access regardless of role assignment.

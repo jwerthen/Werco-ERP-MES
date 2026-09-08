@@ -50,6 +50,7 @@ from app.api.endpoints import (
     quote_nesting_drafts,
     quote_nesting_materials,
     quote_nesting_runs,
+    quote_nesting_sources,
     quote_nesting_spacing,
     quotes,
     receiving,
@@ -129,6 +130,7 @@ api_router.include_router(audit.router, prefix="/audit", tags=["Audit"])
 api_router.include_router(quote_calculator.router, prefix="/quote-calc", tags=["Quote Calculator"])
 api_router.include_router(quote_nesting_materials.router, prefix="/quote-nesting", tags=["Quote Nesting"])
 api_router.include_router(quote_nesting_drafts.router, prefix="/quote-nesting/drafts", tags=["Quote Nesting Drafts"])
+api_router.include_router(quote_nesting_sources.router, prefix="/quote-nesting/drafts", tags=["Quote Nesting Drafts"])
 api_router.include_router(quote_nesting_runs.router, prefix="/quote-nesting/runs", tags=["Quote Nesting Runs"])
 api_router.include_router(
     quote_nesting_spacing.router, prefix="/quote-nesting/spacing-policies", tags=["Quote Nesting Spacing Policies"]

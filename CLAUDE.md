@@ -363,6 +363,19 @@ Canonical reported inch strings are distinct from nesting-kernel geometry approv
 Source drift reads are pure and never reconcile inventory. See
 `docs/STOCK_OBSERVATION_ARCHITECTURE.md` and `docs/STOCK_OBSERVATIONS.md`.
 
+### Original DXF evidence
+
+Saved-revision `/sources` routes add explicit original-byte attachments (migration105).
+Bind the exact tenant/revision/input hash and saved part provenance; never rewrite an
+input revision or accept a text-fallback hash as original-byte evidence. Commit each
+fresh generated attempt and required audit before blob I/O, release database sessions
+during I/O, then commit verified receipt, all bindings and required audit atomically.
+An uncertain write is recovered by read-back, never overwritten; downloads verify
+size/hash again. Preserve actor/credential-bound replay, immutable history and scoped
+provider identity. No generic document deletion, inventory mutation or automatic
+retention policy applies. See `docs/CAD_SOURCE_STORAGE.md` and
+`docs/NESTING_ORIGINAL_DXFS.md` for bounds, recovery and storage acceptance limits.
+
 ## Conventions worth matching
 
 - Backend line length is 120 (flake8/black configured to it). Status/priority/role values are `str`-backed `enum.Enum` classes co-located with their model.

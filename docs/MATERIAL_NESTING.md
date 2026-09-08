@@ -6,6 +6,12 @@ make observed pieces available for nesting or assign them credit. See
 [the observation workflow](STOCK_OBSERVATIONS.md). Material Nesting still starts
 with a fresh empty estimate; no observed or predicted stock is automatically loaded.
 
+To retain the original bytes behind a saved nest, use **Team drafts → Original
+DXFs** for that exact revision. Select up to 100 originals and review the matching
+saved profiles before attaching them. See [the attachment workflow](NESTING_ORIGINAL_DXFS.md)
+and [storage and recovery design](CAD_SOURCE_STORAGE.md). This action preserves
+the saved input and current workspace; an attachment does not approve its geometry.
+
 Open **Sales & Quoting → Material Nesting** or `/nest` in the signed-in ERP.
 The tool estimates separate sheet orders for multiple material/thickness groups,
 with optional USD prices for comparing material cost. Access uses `purchasing:view`,
@@ -585,7 +591,9 @@ estimator identity, UTC timestamp (displayed in Central time), a server content
 hash, and source-review notes. The server hash binds its canonical JSON snapshot;
 it does not authenticate original DXF bytes or approve geometry. Original CAD
 bytes, placements, solver output, and leftover regions are not stored in this
-input-draft revision. Use the existing local review export for comparison evidence.
+input-draft revision. **Original DXFs** stores separately verified source attachments;
+**Saved calculations** retains server calculation evidence. Neither action rewrites
+that revision or automatically restores the current workspace.
 
 The server accepts project formats 4/5/6/10/12/15, up to 5 MiB per JSON file,
 with the same 300-part/20,000-vertex/12-stock-option limits and bounded metadata.
@@ -614,7 +622,9 @@ customer/job-level access-control or certification-segregation implementation.
 
 The estimator does not create ERP quotes, purchase orders, work orders,
 production laser nest packages, or inventory movements. Only explicit team
-draft saves add draft/revision records and their required audit events. Its
+draft saves add draft/revision records and their required audit events. Explicit
+source attachments add their own immutable intent, attempt, receipt and part-binding
+history with required audit; they do not create inventory movements. Its
 local files and sheet previews are estimating outputs; it has no machine
 connection, cutting recipes, or postprocessor.
 

@@ -543,8 +543,17 @@ observations** records or withdraws advisory evidence only; no observed piece be
 nesting stock, reserved inventory, certified material or material credit through this
 release.
 
-Rollback uses a compatible API/worker/frontend release, retains migrations 101–104 and
-immutable policy/draft/run/piece-observation history, and does not change cron settings. A failed runtime can
+Original DXF attachment migration105 adds audited source intents, storage attempts,
+verified receipts and exact saved-part bindings. File transfer and verification run
+through the authenticated API and the existing storage adapter; no ARQ job, cron,
+solver profile or worker runtime is added. The normal worker identity gate still
+applies when releasing the whole application. Source receipts do not create or
+approve a nesting calculation. See `CAD_SOURCE_STORAGE.md` for upload recovery and
+the separate storage-retention acceptance boundary.
+
+Rollback uses a compatible API/worker/frontend release, retains migrations 101–105 and
+immutable policy/draft/run/piece-observation history plus source intent/attempt/receipt/
+binding history, and does not change cron settings. A failed runtime can
 still leave history readable, but new calculations remain unavailable. No successful
 calculation, stock reservation, manufacturing approval or automatic material credit is
 implied by a worker startup or a completed deployment.

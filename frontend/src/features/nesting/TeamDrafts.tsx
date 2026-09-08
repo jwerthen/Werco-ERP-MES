@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Cloud, History } from 'lucide-react';
 import api from '../../services/api';
 import type {
@@ -13,6 +13,7 @@ import { projectFromFile, projectToFile, type QuoteProject } from './lib/quote-p
 import { clearCatalogPricing } from './lib/material-binding';
 import { nestingApiMessage } from './useNestingCatalog';
 import SavedRuns from './SavedRuns';
+import CADSourceAttachments from './CADSourceAttachments';
 
 type PendingSave = { request: NestingDraftSave; signature: string };
 
@@ -51,6 +52,11 @@ export default function TeamDrafts({
   const [page, setPage] = useState<NestingDraftPage | null>(null);
   const [history, setHistory] = useState<NestingDraftSummary | null>(null);
   const [runs, setRuns] = useState<NestingDraftSummary | null>(null);
+  const [sources, setSources] = useState<NestingDraftSummary | null>(null);
+  const sourceCloseGuard = useRef<(() => boolean) | null>(null);
+  const registerSourceCloseGuard = useCallback((guard: (() => boolean) | null) => {
+    sourceCloseGuard.current = guard;
+  }, []);
   const [linked, setLinked] = useState<NestingDraftSummary | null>(null);
   const [replace, setReplace] = useState<NestingDraftSummary | null>(null);
   const [loading, setLoading] = useState(false);
@@ -210,6 +216,7 @@ export default function TeamDrafts({
         onClick={() => {
           setOpen(true);
           setRuns(null);
+          setSources(null);
           void list(null);
         }}
         disabled={disabled}
@@ -221,8 +228,10 @@ export default function TeamDrafts({
         onOpenChange={value => {
           if (saving) return;
           if (!value) {
+            if (sourceCloseGuard.current && !sourceCloseGuard.current()) return;
             readController.current?.abort();
             setLoading(false);
+            setSources(null);
           }
           setOpen(value);
         }}
@@ -235,7 +244,13 @@ export default function TeamDrafts({
               empty.
             </DialogDescription>
           </DialogHeader>
-          {runs ? (
+          {sources ? (
+            <CADSourceAttachments
+              target={sources}
+              onBack={() => setSources(null)}
+              registerCloseGuard={registerSourceCloseGuard}
+            />
+          ) : runs ? (
             <SavedRuns
               key={`${runs.draft_id}:${runs.revision_number}`}
               target={runs}
@@ -331,6 +346,14 @@ export default function TeamDrafts({
                       )}
                     </div>
                     <div className="team-draft-actions">
+                      <button
+                        className="secondary"
+                        disabled={unavailable}
+                        onClick={() => setSources(item)}
+                        aria-label={`Original DXFs for ${item.name} revision ${item.revision_number}`}
+                      >
+                        Original DXFs
+                      </button>
                       <button
                         className="secondary"
                         disabled={unavailable}
