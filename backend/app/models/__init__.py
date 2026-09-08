@@ -137,6 +137,7 @@ from .quote_config import (
     QuoteSettings,
     SettingsAuditLog,
 )
+from .quote_nesting_draft import QuoteNestingDraft, QuoteNestingRevision
 from .rfq_quote import PriceSnapshot, QuoteEstimate, QuoteLineSummary, RfqPackage, RfqPackageFile
 from .role_permission import RolePermission
 from .routing import Routing, RoutingOperation
@@ -179,6 +180,8 @@ from .work_order_template import WorkOrderTemplate
 from .working_calendar import WorkingCalendar
 
 __all__ = [
+    "QuoteNestingDraft",
+    "QuoteNestingRevision",
     "ProductionReceipt",
     "RuntimeMetricSample",
     "RuntimeMetricSetting",

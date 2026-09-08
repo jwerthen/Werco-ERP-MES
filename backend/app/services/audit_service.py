@@ -146,6 +146,10 @@ def compute_audit_hash(
     return hashlib.sha256(hash_string.encode('utf-8')).hexdigest()
 
 
+class AuditWriteError(RuntimeError):
+    """A caller requiring atomic audit evidence could not record that evidence."""
+
+
 class AuditService:
     """
     Centralized audit logging service for AS9100D compliance.
@@ -630,6 +634,18 @@ class AuditService:
             logger.error(f"Failed to create audit log: {e}")
             # Don't raise - audit logging should not break the main operation
             return None
+
+    def log_required(self, action: str, resource_type: str, **kwargs: Any) -> AuditLog:
+        """Opt in to atomic audit evidence; the caller must roll back on failure.
+
+        Legacy log/helper callers retain their existing best-effort behavior. This
+        uses the same credential attribution, chain locking and savepoint retries;
+        it neither commits nor rolls back the caller's outer transaction itself.
+        """
+        entry = self.log(action=action, resource_type=resource_type, **kwargs)
+        if entry is None:
+            raise AuditWriteError("The required audit record could not be saved")
+        return entry
 
     def log_create(
         self,

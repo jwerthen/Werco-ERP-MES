@@ -72,6 +72,7 @@ import { buildRunManifest } from './lib/run-manifest';
 import PartOrientationControls, { SheetGrainControl, orientationSummary, sheetGrainLabel } from './OrientationControls';
 import { orientationExplanation } from './lib/orientation';
 import LeftoverReview, { LeftoverOverlay, leftoverPath } from './LeftoverReview';
+import TeamDrafts from './TeamDrafts';
 
 type CachedComparison = { comparison: Comparison; signature: string };
 const legacyFootprintNotice =
@@ -200,12 +201,15 @@ export default function NestingWorkspace({
   initialQuote,
   companyId,
   estimatorId,
+  canSaveDrafts = false,
 }: {
   initialQuote?: Quote;
   companyId?: number;
   estimatorId?: number;
+  canSaveDrafts?: boolean;
 }) {
   const fieldId = useId();
+  const [documentEpoch, setDocumentEpoch] = useState(0);
   const catalog = useNestingCatalog(companyId);
   const [verifiedPricingHashes, setVerifiedPricingHashes] = useState<Set<string>>(() => new Set());
   const { showToast } = useToast();
@@ -606,13 +610,8 @@ export default function NestingWorkspace({
       if (!mountedRef.current) return;
       if (importingRef.current || comparingRef.current)
         throw new Error('Finish the current operation before opening another estimate.');
-      setProject(loaded);
-      setVerifiedPricingHashes(new Set());
-      setSnapshots({});
-      setPreviewId(null);
-      setSheet(0);
-      setSavedSignature(JSON.stringify(loaded));
-      setSelected(null);
+      setDocumentEpoch(value => value + 1);
+      applyOpenedProject(loaded);
       toast.success(
         loaded.groups.some(group => group.quote.materialBinding)
           ? 'Estimate loaded. Refresh and review ERP pricing before using saved catalog costs.'
@@ -623,6 +622,18 @@ export default function NestingWorkspace({
     } finally {
       if (loadRef.current) loadRef.current.value = '';
     }
+  }
+  function applyOpenedProject(loaded: QuoteProject) {
+    if (importingRef.current || comparingRef.current)
+      throw new Error('Finish the current operation before opening another estimate.');
+    setProject(loaded);
+    setVerifiedPricingHashes(new Set());
+    setSnapshots({});
+    setPreviewId(null);
+    setSheet(0);
+    setSavedSignature(JSON.stringify(loaded));
+    setSelected(null);
+    setImportResults([]);
   }
   async function exportReviewRecord() {
     try {
@@ -970,6 +981,7 @@ export default function NestingWorkspace({
                   className="secondary compact"
                   onClick={() => {
                     const next = createBlankProject();
+                    setDocumentEpoch(value => value + 1);
                     setProject(next);
                     setSavedSignature(JSON.stringify(next));
                     setSnapshots({});
@@ -999,6 +1011,20 @@ export default function NestingWorkspace({
                 <button className="secondary compact" onClick={save}>
                   <FileJson size={16} /> Save
                 </button>
+                {companyId && (
+                  <TeamDrafts
+                    key={`${companyId}:${estimatorId}:${documentEpoch}`}
+                    companyId={companyId}
+                    project={project}
+                    canSave={canSaveDrafts}
+                    disabled={busy || importing}
+                    dirty={JSON.stringify(project) !== savedSignature}
+                    onOpen={applyOpenedProject}
+                    onSaved={signature => {
+                      if (signature === JSON.stringify(stateRef.current.project)) setSavedSignature(signature);
+                    }}
+                  />
+                )}
                 <button
                   className="primary"
                   onClick={compare}
@@ -1900,8 +1926,10 @@ export default function NestingWorkspace({
                   Assign material and thickness to selected file rows before import. Each matching group keeps its own
                   stock options, prices and spacing. Save retains all groups and the active selection in inches; older
                   single-material files open as one group. Material Nesting starts with a fresh, empty estimate each
-                  time you open the section. Save a file before leaving, refreshing, signing out, or switching
-                  companies. Use Open to continue a saved estimate.
+                  time you open the section. Use Save for a local file, or Team drafts to save an ERP revision before
+                  leaving, refreshing, signing out, or switching companies. Open a local file with Open, or select a
+                  revision in Team drafts. Each team save retains the previous revision. Drafts store inputs; they do
+                  not approve a quote or reserve material.
                 </p>
               </section>
               <section className="section-card">

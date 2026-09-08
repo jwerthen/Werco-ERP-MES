@@ -47,6 +47,7 @@ from app.api.endpoints import (
     qms_standards,
     quality,
     quote_calculator,
+    quote_nesting_drafts,
     quote_nesting_materials,
     quotes,
     receiving,
@@ -123,6 +124,7 @@ api_router.include_router(traceability.router, prefix="/traceability", tags=["Tr
 api_router.include_router(audit.router, prefix="/audit", tags=["Audit"])
 api_router.include_router(quote_calculator.router, prefix="/quote-calc", tags=["Quote Calculator"])
 api_router.include_router(quote_nesting_materials.router, prefix="/quote-nesting", tags=["Quote Nesting"])
+api_router.include_router(quote_nesting_drafts.router, prefix="/quote-nesting/drafts", tags=["Quote Nesting Drafts"])
 api_router.include_router(dxf_parser.router, prefix="/dxf-parser", tags=["DXF Parser"])
 api_router.include_router(rfq_quotes.router, prefix="/rfq-packages", tags=["AI RFQ Quotes"])
 api_router.include_router(estimate_workbench.router, prefix="/estimate-workbench", tags=["Estimate Workbench"])
