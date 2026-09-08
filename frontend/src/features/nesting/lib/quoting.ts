@@ -1,3 +1,4 @@
+import { allowedRotations, hasOrientationConstraints, orientationExplanation, type GrainAxis } from './orientation';
 import { autoQuotingSpacing } from './spacing';
 import { bounds, validatePart, validateJob, nestParts, type Part, type Stock, type Nest, demoJob } from './nesting';
 import { jobFromFile, jobToFile, mmToIn, inToMm } from './units';
@@ -23,6 +24,7 @@ export function editSheetOption(option: SheetOption, patch: Partial<SheetOption>
 }
 export type Quote = {
   version: 1;
+  grainAxis?: GrainAxis;
   materialBinding?: MaterialBinding;
   spacingMode?: 'auto' | 'manual';
   name: string;
@@ -97,6 +99,7 @@ export const demoQuote: Quote = {
 export function validateQuote(value: unknown): Quote {
   const q = value as Quote;
   check(q && q.version === 1, 'Unsupported estimate version.');
+  check(q.grainAxis === undefined || ['x', 'y'].includes(q.grainAxis), 'Invalid sheet grain axis.');
   check(q.spacingMode === undefined || ['auto', 'manual'].includes(q.spacingMode), 'Invalid spacing mode.');
   check(typeof q.name === 'string' && q.name.length > 0 && q.name.length < 200, 'Enter an estimate name.');
   check(['Carbon steel', 'Stainless steel', 'Aluminum'].includes(q.material), 'Choose a supported material.');
@@ -182,6 +185,7 @@ export function validateQuote(value: unknown): Quote {
 }
 export function stockFor(q: Quote, o: SheetOption): Stock {
   return {
+    ...(q.grainAxis !== undefined ? { grainAxis: q.grainAxis } : {}),
     width: o.width,
     height: o.height,
     margin: q.margin,
@@ -230,14 +234,17 @@ export function compareSheets(q: Quote): Comparison {
       requested,
     };
   const feasible = results.filter(r => r.complete);
-  if (!feasible.length)
+  if (!feasible.length) {
+    const orientationIssues = Array.from(new Set(q.parts.map(part => orientationExplanation(part, q)).filter(Boolean)));
     return {
       results,
       recommendedId: null,
-      reason:
-        'The search did not place every part on an enabled stock size. Review oversize parts, rotation locks, margins, or add a larger sheet.',
+      reason: orientationIssues.length
+        ? orientationIssues.join(' ')
+        : 'The search did not place every part on an enabled stock size. Review oversize parts, rotation rules, sheet grain, margins, or add a larger sheet.',
       requested,
     };
+  }
   if (q.objective === 'cost' && feasible.some(r => r.cost === null))
     return {
       results,
@@ -274,7 +281,10 @@ export function quoteToFile(q: Quote) {
     stock: stockFor(q, o),
   };
   return {
-    version: 3,
+    // Quote 7 is distinct from project 6 and legacy job 8; old readers must
+    // reject a constraint-bearing file instead of silently relaxing its rules.
+    version: hasOrientationConstraints(q.parts, q) ? 7 : 3,
+    ...(q.grainAxis !== undefined ? { grainAxis: q.grainAxis } : {}),
     units: 'in',
     currency: 'USD',
     spacingMode: q.spacingMode ?? 'manual',
@@ -296,14 +306,15 @@ export function quoteToFile(q: Quote) {
 export function quoteFromFile(input: unknown): Quote {
   if (!input || typeof input !== 'object') throw new Error('Invalid estimate file.');
   const d = input as Record<string, unknown>;
-  if (d.version === 3) {
+  if (d.version === 3 || d.version === 7) {
     check(d.units === 'in', 'Estimate file must explicitly declare inches.');
+    check(d.version === 7 || d.grainAxis === undefined, 'Sheet grain requires a version 7 estimate.');
     check(d.currency === undefined || d.currency === 'USD', 'This estimate uses USD sheet prices.');
     check(Array.isArray(d.options) && d.options.length <= 12, 'Invalid stock options.');
     const parts = (
       jobFromFile({
         ...d,
-        version: 2,
+        version: d.version === 7 ? 8 : 2,
         stock: {
           width: 1,
           height: 1,
@@ -318,6 +329,7 @@ export function quoteFromFile(input: unknown): Quote {
     ).parts;
     return validateQuote({
       version: 1,
+      ...(d.grainAxis !== undefined ? { grainAxis: d.grainAxis } : {}),
       name: d.name,
       spacingMode: d.spacingMode ?? 'manual',
       ...(d.materialBinding !== undefined ? { materialBinding: d.materialBinding } : {}),
@@ -338,6 +350,7 @@ export function quoteFromFile(input: unknown): Quote {
   return validateQuote({
     version: 1,
     name: old.name,
+    ...(old.stock.grainAxis !== undefined ? { grainAxis: old.stock.grainAxis } : {}),
     material: old.material,
     thickness: old.thickness,
     parts: old.parts,
@@ -363,9 +376,11 @@ export function oversizeParts(q: Quote, o: SheetOption) {
     h = o.height - 2 * q.margin;
   return q.parts.filter(p => {
     const b = bounds(p.loops[0]);
-    return !(
-      (b.width <= w + 1e-7 && b.height <= h + 1e-7) ||
-      (p.rotate && b.height <= w + 1e-7 && b.width <= h + 1e-7)
+    const guard = 2 * (p.geometryToleranceMm ?? 0);
+    return !allowedRotations(p, q).some(
+      rotation =>
+        (rotation % 180 ? b.height : b.width) + guard <= w + 1e-7 &&
+        (rotation % 180 ? b.width : b.height) + guard <= h + 1e-7
     );
   });
 }

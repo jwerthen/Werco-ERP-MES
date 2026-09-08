@@ -1,3 +1,4 @@
+import { allowedRotations, orientationExplanation, type GrainAxis, type RotationMode } from './orientation';
 import { packContours, outlinesCollide, movedOuter, rotatePoint } from './contour-packing';
 import { DXF_CURVE_TOLERANCE_MM, readDXFGeometry } from './dxf';
 import { validateProvenance, type PartProvenance } from './provenance';
@@ -10,6 +11,8 @@ export type Part = {
   loops: Loop[];
   quantity: number;
   rotate: boolean;
+  rotationMode?: RotationMode;
+  grainAxis?: GrainAxis;
   color: number;
   importMode?: 'drawing-bounds';
   referencePaths?: Point[][];
@@ -18,6 +21,7 @@ export type Part = {
   provenance?: PartProvenance;
 };
 export type Stock = {
+  grainAxis?: GrainAxis;
   width: number;
   height: number;
   margin: number;
@@ -253,6 +257,11 @@ export function validatePart(p: Part) {
   );
   if (p.provenance !== undefined) validateProvenance(p.provenance);
   requireValid(
+    p.rotationMode === undefined || ['fixed', 'half-turn', 'quarter-turn'].includes(p.rotationMode),
+    'Invalid part rotation mode.'
+  );
+  requireValid(p.grainAxis === undefined || ['x', 'y'].includes(p.grainAxis), 'Invalid part grain axis.');
+  requireValid(
     p.geometryToleranceMm === undefined ||
       (finite(p.geometryToleranceMm) && p.geometryToleranceMm >= 0 && p.geometryToleranceMm <= 0.0254),
     'Invalid geometry approximation tolerance.'
@@ -307,7 +316,11 @@ export function validatePart(p: Part) {
   requireValid(partArea(p) > EPS, 'Part must have positive net area.');
 }
 export function validateStock(s: Stock) {
-  requireValid(s && Object.values(s).every(finite), 'Stock settings must be valid numbers.');
+  requireValid(
+    s && [s.width, s.height, s.margin, s.gap, s.maxSheets, s.bedWidth, s.bedHeight].every(finite),
+    'Stock settings must be valid numbers.'
+  );
+  requireValid(s.grainAxis === undefined || ['x', 'y'].includes(s.grainAxis), 'Invalid sheet grain axis.');
   requireValid(
     s.width > 0 && s.height > 0 && s.bedWidth > 0 && s.bedHeight > 0 && s.bedWidth <= 20000 && s.bedHeight <= 20000,
     'Stock and usable travel must be positive and at most 787.4 inches.'
@@ -393,8 +406,8 @@ export function validateNest(parts: Part[], s: Stock, n: Nest) {
     const b = bounds(part.loops[0]);
     requireValid([a.x, a.y, a.width, a.height].every(finite) && a.width > 0 && a.height > 0, 'Invalid placement.');
     requireValid(
-      a.rotation === 0 || ([90, 180, 270].includes(a.rotation) && part.rotate),
-      'Rotation violates grain constraint.'
+      allowedRotations(part, s).includes(a.rotation),
+      orientationExplanation(part, s) ?? 'Placement rotation violates the permitted orientation or grain constraint.'
     );
     requireValid(
       Math.abs(a.width - (a.rotation % 180 ? b.height : b.width)) < EPS &&

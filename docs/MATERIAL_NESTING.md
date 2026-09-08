@@ -42,7 +42,7 @@ the same permission as Quote Calculator; see [RBAC_PERMISSIONS.md](RBAC_PERMISSI
    record covering the current inputs and all compared groups.
 
 The layout places actual outer contours, including concave profiles, using
-multiple part orderings and allowed quarter-turn rotations. It checks contour
+multiple part orderings and the permitted rotations after applying grain requirements. It checks contour
 separation and sheet margins for the resulting placements. It establishes a
 feasible estimate, but does not prove the minimum sheet count. Holes remain
 visible and subtract from part area; other parts are not placed inside them.
@@ -54,6 +54,37 @@ weight uses the selected catalog density when bound to an ERP source (unknown
 when that source has no valid density), or typical density for a family-only
 estimate. Check dimensions, quantities, supplier
 sheet sizes, and your shop's handling capacity before ordering.
+
+## Rotation and grain requirements
+
+Select a part to set **Allowed rotation** and **Part grain**. Rotation choices
+are **Fixed (0°)**, **Half turns (0°, 180°)**, and **Quarter turns
+(0°, 90°, 180°, 270°)**. Set **Sheet grain** for the active material group;
+that direction applies to every stock size compared in that group.
+
+- Part grain X means horizontal in the source drawing; Y means vertical.
+- Sheet grain X runs along sheet length (horizontal in the nest); Y runs along
+  sheet width (vertical in the nest). These are axes, so a 180° turn preserves
+  grain alignment and a 90°/270° turn exchanges X and Y.
+- **No grain requirement** permits the selected rotation policy without a grain
+  restriction. **Unknown / not specified** sheet grain is not permission to
+  rotate a part that requires grain alignment.
+
+The solver intersects the rotation policy with grain alignment before creating
+candidates, including rectangular and circular parts. For example, a part with
+X grain on a Y-grain sheet can use 90° or 270° only when quarter turns are
+permitted. Fixed and half-turn policies cannot satisfy that pairing. Required
+part grain with unknown sheet grain remains unplaced with an explanation;
+unrestricted parts can still be placed, but an incomplete order cannot be
+recommended. Sheet-size changes do not resolve missing or conflicting grain.
+The final placement validator checks the same rules, and the preview and CSV
+show permitted orientations and sheet grain. Editing these settings invalidates
+previous comparisons and draft review exports until the groups are compared again.
+
+These are estimator-assigned requirements, not grain data inferred from a DXF,
+material name, or ERP catalog record. Confirm the drawing and purchased sheet
+specification. Free-angle rotation, mirroring, and nesting parts inside holes
+remain unavailable.
 
 ## ERP material and price review
 
@@ -150,7 +181,14 @@ defaults:
 | Omitted metadata | `VIEWPORT` records and all entities on the `FORMAT` annotation layer, with an import warning for omitted FORMAT entities |
 | Rejected files | Open or ambiguous outer profiles, touching/intersecting contours, reference paths outside or spanning parts, malformed data, unsupported entities, blocks/`INSERT`, wide polylines, sloped/nonplanar geometry, tilted extrusion, or paper-space cut geometry; other text/annotations are not silently discarded |
 | DXF units | Inch and millimeter files retain their physical size; unitless files default to inches unless millimeters is selected before import |
-| Saved estimates | Version 5 projects retain ERP material bindings; family-only projects remain version 4. Both wrap one version 3 inch/USD estimate per group. Older single estimates/jobs open as one group. Legacy `drawing-bounds` parts must be removed and their DXFs re-imported before nesting |
+| Saved estimates | Projects with explicit rotation or grain settings use version 6 and version 7 constrained quotes. Other groups may retain version 3 quotes. Without constraints, ERP-bound projects remain version 5 and family-only projects version 4. Older single estimates/jobs open as one group; constrained legacy jobs use version 8. Legacy `drawing-bounds` parts require DXF re-import before nesting |
+
+Legacy `rotate: false` means fixed and `rotate: true` means quarter turns;
+when `rotationMode` exists, it is authoritative. Axis metadata remains X/Y
+through inch/millimeter conversion. Versions 6/7/8 deliberately differ between
+project/quote/job files so older readers reject the new constraints instead of
+silently relaxing them. Do not edit a file's version to force an older release
+to open it; retain the file and use a compatible release.
 
 Split larger jobs into estimates. Malformed or unsupported files and files
 that exceed a resource or size limit are skipped as a whole with an explanation;
@@ -208,11 +246,16 @@ revision remains a review flag rather than being invented.
 
 **Export review record** requires fresh comparisons for every populated group.
 It records the input project and hash, estimator/company IDs, source/material
-snapshots, quantities and revisions, solver/build/settings, compared stock
+snapshots, quantities and revisions, effective rotation policies, source and
+sheet grain axes, permitted rotations, solver/build/settings, compared stock
 alternatives, validated placements, utilization and entered material costs.
 Changed inputs or inconsistent results require recomparison. The solver is
 deterministic, so the record stores no random seed and explains what replay
-requires. Incomplete heuristic results are not proof that a layout is impossible.
+requires. The manifest identifies orientation policy `werco-orientation-v1`
+and solver `werco-contour-v3`; contour search uses up to two deterministic
+orders, while rectangular-profile search uses three. Geometry fingerprints
+remain about shape; the input-project fingerprint also covers orientation
+requirements. Incomplete heuristic results are not proof that a layout is impossible.
 
 This locally downloaded record is labeled **QUOTE LAYOUT — NOT AN NC PROGRAM**
 and remains `draft_estimator_review`. Its content hash can detect changes but

@@ -1,3 +1,4 @@
+import { hasOrientationConstraints } from './orientation';
 import type { Part } from './nesting';
 import { createBlankQuote, quoteFromFile, quoteToFile, validateQuote, type Quote } from './quoting';
 import { autoQuotingSpacing } from './spacing';
@@ -133,7 +134,13 @@ export function validateProject(value: unknown): QuoteProject {
 export function projectToFile(project: QuoteProject) {
   validateProject(project);
   return {
-    version: project.groups.some(group => group.quote.materialBinding) ? 5 : 4,
+    // Constraint-bearing projects use 6; nested quotes use 7, never a legacy
+    // discriminator that an older reader could accept while ignoring grain.
+    version: project.groups.some(group => hasOrientationConstraints(group.quote.parts, group.quote))
+      ? 6
+      : project.groups.some(group => group.quote.materialBinding)
+        ? 5
+        : 4,
     units: 'in',
     currency: 'USD',
     name: project.name,
@@ -145,7 +152,7 @@ export function projectToFile(project: QuoteProject) {
 export function projectFromFile(input: unknown): QuoteProject {
   check(input && typeof input === 'object', 'Invalid estimate file.');
   const data = input as Record<string, unknown>;
-  if (data.version !== 4 && data.version !== 5) return createBlankProject(quoteFromFile(input));
+  if (data.version !== 4 && data.version !== 5 && data.version !== 6) return createBlankProject(quoteFromFile(input));
   check(data.units === 'in', 'Estimate project must explicitly declare inches.');
   check(data.currency === undefined || data.currency === 'USD', 'This estimate uses USD sheet prices.');
   check(
@@ -156,8 +163,11 @@ export function projectFromFile(input: unknown): QuoteProject {
     check(value && typeof value === 'object', 'Invalid material group.');
     const group = value as { id: unknown; quote: unknown };
     check(
-      group.quote && typeof group.quote === 'object' && (group.quote as { version?: unknown }).version === 3,
-      'Material groups must contain version 3 estimates.'
+      group.quote &&
+        typeof group.quote === 'object' &&
+        ((group.quote as { version?: unknown }).version === 3 ||
+          (data.version === 6 && (group.quote as { version?: unknown }).version === 7)),
+      'Material groups must contain version 3 estimates, or version 7 estimates in a version 6 project.'
     );
     const quote = group.quote as Record<string, unknown>;
     check(quote.units === 'in', 'Material group estimates must explicitly declare inches.');

@@ -1,3 +1,4 @@
+import { allowedRotations, orientationExplanation } from './orientation';
 import { packRectangles } from './rectangular-packing';
 import { convexPieces } from './convex-pieces';
 import * as Clipper from 'clipper-lib';
@@ -471,8 +472,8 @@ export function packContours(parts: Part[], stock: Stock): Nest {
     const seen = new Set<string>();
     shapes.set(
       p.id,
-      (p.rotate ? [0, 90, 180, 270] : [0])
-        .map(r => shape(p, r as Placement['rotation']))
+      allowedRotations(p, stock)
+        .map(r => shape(p, r))
         .filter(s => {
           if (seen.has(s.key)) return false;
           seen.add(s.key);
@@ -550,7 +551,9 @@ export function packContours(parts: Part[], stock: Stock): Nest {
             unplaced.push({
               partId: part.id,
               count: 1,
-              reason: 'No permitted contour placement within sheet margins and spacing',
+              reason:
+                orientationExplanation(part, stock) ??
+                'No permitted contour placement within sheet margins and spacing',
             });
         }
       }
@@ -562,7 +565,7 @@ export function packContours(parts: Part[], stock: Stock): Nest {
         sheets: sheets.length,
         area,
         utilization: sheets.length ? (100 * area) / (stock.width * stock.height * sheets.length) : 0,
-        method: 'True contour nesting · best of two deterministic orders · quarter turns',
+        method: 'True contour nesting · best of two deterministic orders · permitted rotations and grain',
       };
     })
     .filter((pass): pass is Nest => pass !== null);

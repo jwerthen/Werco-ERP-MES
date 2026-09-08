@@ -151,6 +151,18 @@ open the workspace. Exercise a DXF import, comparison, and estimate save/reopen;
 check active-company catalog selection, stale-source handling, estimator USD
 acknowledgment, and draft review export. Catalog failure must leave geometry
 comparison available without applying unverified catalog prices.
+Verify that a grain-required part is unplaced with unknown sheet grain, then
+can be compared after assigning a compatible axis and rotation policy; reopen
+its saved estimate and confirm the constraints persist.
+
+The orientation/grain increment changes only frontend behavior and local file
+formats; it adds no API, permission, migration, or environment requirement.
+On frontend rollback to a release without orientation support, keep newly saved
+version 6 projects, version 7 quotes, and version 8 jobs intact: that release
+will reject them, and a compatible frontend is required to reopen them. Do not
+strip their constraints or change version numbers to force compatibility.
+Unconstrained version 4/5 projects remain compatible.
+
 Confirm another ERP page still renders correctly after leaving the workspace.
 The Railway frontend commands in [DEPLOYMENT_RUNBOOK.md](DEPLOYMENT_RUNBOOK.md)
 target the separate Railway service; publishing the Vercel domain also requires

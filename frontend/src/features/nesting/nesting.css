@@ -629,6 +629,41 @@ h2 {
   gap: 8px;
   margin-top: 9px;
 }
+.orientation-select {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  border: 1px solid #475569;
+  border-radius: 5px;
+  padding: 6px 7px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font: inherit;
+  font-size: 12px;
+}
+.orientation-select:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 2px;
+}
+.orientation-fields {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+.orientation-note,
+.orientation-warning {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.orientation-note {
+  color: #cbd5e1;
+}
+.part-row small.orientation-warning,
+.orientation-warning {
+  color: #fbbf24;
+}
 .part-controls input {
   height: 29px;
   width: 58px;
