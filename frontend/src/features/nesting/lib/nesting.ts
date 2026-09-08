@@ -1,4 +1,5 @@
-import { readDXFGeometry } from './dxf';
+import { packContours, outlinesCollide, movedOuter, rotatePoint } from './contour-packing';
+import { DXF_CURVE_TOLERANCE_MM, readDXFGeometry } from './dxf';
 
 export type Point = { x: number; y: number };
 export type Loop = { type: 'poly'; points: Point[] } | { type: 'circle'; cx: number; cy: number; r: number };
@@ -10,6 +11,8 @@ export type Part = {
   rotate: boolean;
   color: number;
   importMode?: 'drawing-bounds';
+  referencePaths?: Point[][];
+  geometryToleranceMm?: number;
 };
 export type Stock = {
   width: number;
@@ -27,7 +30,7 @@ export type Placement = {
   y: number;
   width: number;
   height: number;
-  rotation: 0 | 90;
+  rotation: 0 | 90 | 180 | 270;
   sheet: number;
 };
 export type Nest = {
@@ -204,10 +207,47 @@ export function normalizeLoops(loops: Loop[]): Loop[] {
       : { ...l, points: l.points.map(p => ({ x: p.x - b.x, y: p.y - b.y })) }
   );
 }
+/** Check every segment interval so a reference line cannot cross outside a concave outline. */
+export function pathWithinLoop(path: Point[], loop: Loop): boolean {
+  const contains = (p: Point) =>
+    inside(p, loop) ||
+    (loop.type === 'circle'
+      ? Math.abs(Math.hypot(p.x - loop.cx, p.y - loop.cy) - loop.r) <= DXF_CURVE_TOLERANCE_MM
+      : edges(loop).some(([a, b]) => distance(p, a, b) <= DXF_CURVE_TOLERANCE_MM));
+  if (!path.every(contains)) return false;
+  if (loop.type === 'circle') return true;
+  for (let i = 1; i < path.length; i++) {
+    const a = path[i - 1],
+      b = path[i],
+      dx = b.x - a.x,
+      dy = b.y - a.y;
+    const crossings = [0, 1];
+    for (const [c, d] of edges(loop)) {
+      const ex = d.x - c.x,
+        ey = d.y - c.y,
+        denominator = dx * ey - dy * ex;
+      if (Math.abs(denominator) <= EPS) continue;
+      const t = ((c.x - a.x) * ey - (c.y - a.y) * ex) / denominator;
+      const u = ((c.x - a.x) * dy - (c.y - a.y) * dx) / denominator;
+      if (t > 0 && t < 1 && u >= 0 && u <= 1) crossings.push(t);
+    }
+    crossings.sort((x, y) => x - y);
+    for (let j = 1; j < crossings.length; j++) {
+      const t = (crossings[j - 1] + crossings[j]) / 2;
+      if (!contains({ x: a.x + t * dx, y: a.y + t * dy })) return false;
+    }
+  }
+  return true;
+}
 export function validatePart(p: Part) {
   requireValid(
     p && typeof p.id === 'string' && typeof p.name === 'string' && p.name.length > 0 && p.name.length < 200,
     'Invalid part identity.'
+  );
+  requireValid(
+    p.geometryToleranceMm === undefined ||
+      (finite(p.geometryToleranceMm) && p.geometryToleranceMm >= 0 && p.geometryToleranceMm <= 0.0254),
+    'Invalid geometry approximation tolerance.'
   );
   requireValid(p.importMode === undefined || p.importMode === 'drawing-bounds', 'Invalid DXF import mode.');
   requireValid(Number.isInteger(p.quantity) && p.quantity >= 1 && p.quantity <= 300, 'Part quantity must be 1–300.');
@@ -234,6 +274,27 @@ export function validatePart(p: Part) {
           !inside(sample(p.loops[j]), p.loops[i]),
         'Holes may not overlap or contain each other.'
       );
+  }
+  if (p.referencePaths !== undefined) {
+    requireValid(
+      Array.isArray(p.referencePaths) && p.referencePaths.length <= 2000,
+      'Maximum 2,000 reference paths per part.'
+    );
+    requireValid(
+      p.referencePaths.reduce((sum, path) => sum + (Array.isArray(path) ? path.length : 20001), vertexCount(p.loops)) <=
+        20000,
+      'Part geometry limit: 20,000 vertices including reference paths.'
+    );
+    for (const path of p.referencePaths) {
+      requireValid(
+        Array.isArray(path) &&
+          path.length >= 2 &&
+          path.length <= 2000 &&
+          path.every(point => point && finite(point.x) && finite(point.y)),
+        'Reference paths need 2–2,000 finite coordinates.'
+      );
+      requireValid(pathWithinLoop(path, p.loops[0]), 'Reference geometry extends outside its closed part outline.');
+    }
   }
   requireValid(partArea(p) > EPS, 'Part must have positive net area.');
 }
@@ -264,207 +325,66 @@ export function validateJob(data: unknown): Job {
   );
   requireValid(typeof j.bedConfirmed === 'boolean', 'Missing machine confirmation status.');
   requireValid(Array.isArray(j.parts) && j.parts.length <= 300, 'Maximum 300 part designs.');
+  j.parts.forEach(validatePart);
   requireValid(
-    j.parts.every(p => Array.isArray(p.loops)) && j.parts.reduce((a, p) => a + vertexCount(p.loops), 0) <= 20000,
+    j.parts.reduce(
+      (a, p) => a + vertexCount(p.loops) + (p.referencePaths?.reduce((n, path) => n + path.length, 0) ?? 0),
+      0
+    ) <= 20000,
     'Job geometry limit: 20,000 vertices.'
   );
-  j.parts.forEach(validatePart);
   requireValid(new Set(j.parts.map(p => p.id)).size === j.parts.length, 'Duplicate part IDs.');
   requireValid(j.parts.reduce((a, p) => a + p.quantity, 0) <= 300, 'Maximum 300 instances per job.');
   validateStock(j.stock);
   return j;
 }
-type Box = { x: number; y: number; width: number; height: number };
-const overlap = (a: Box, b: Box) =>
-  a.x < b.x + b.width - EPS && a.x + a.width > b.x + EPS && a.y < b.y + b.height - EPS && a.y + a.height > b.y + EPS;
-function split(free: Box[], used: Box) {
-  let out: Box[] = [];
-  for (const f of free) {
-    if (!overlap(f, used)) {
-      out.push(f);
-      continue;
-    }
-    if (used.x > f.x + EPS) out.push({ ...f, width: used.x - f.x });
-    if (used.x + used.width < f.x + f.width - EPS)
-      out.push({
-        ...f,
-        x: used.x + used.width,
-        width: f.x + f.width - used.x - used.width,
-      });
-    if (used.y > f.y + EPS) out.push({ ...f, height: used.y - f.y });
-    if (used.y + used.height < f.y + f.height - EPS)
-      out.push({
-        ...f,
-        y: used.y + used.height,
-        height: f.y + f.height - used.y - used.height,
-      });
-  }
-  out = out.filter(f => f.width > EPS && f.height > EPS);
-  return out.filter(
-    (a, i) =>
-      !out.some(
-        (b, j) =>
-          i !== j &&
-          b.x <= a.x + EPS &&
-          b.y <= a.y + EPS &&
-          b.x + b.width >= a.x + a.width - EPS &&
-          b.y + b.height >= a.y + a.height - EPS &&
-          (j < i || b.width * b.height > a.width * a.height + EPS)
-      )
-  );
-}
 export function nestParts(parts: Part[], stock: Stock): Nest {
   validateStock(stock);
-  requireValid(parts.reduce((a, p) => a + vertexCount(p.loops), 0) <= 20000, 'Job geometry limit: 20,000 vertices.');
+  requireValid(
+    parts.reduce(
+      (a, p) => a + vertexCount(p.loops) + (p.referencePaths?.reduce((n, path) => n + path.length, 0) ?? 0),
+      0
+    ) <= 20000,
+    'Job geometry limit: 20,000 vertices.'
+  );
   parts.forEach(validatePart);
+  requireValid(
+    !parts.some(p => p.importMode === 'drawing-bounds'),
+    'This saved estimate contains rectangular DXF footprints. Re-import those DXFs to use their actual contours.'
+  );
   requireValid(new Set(parts.map(p => p.id)).size === parts.length, 'Duplicate part IDs.');
   requireValid(
     parts.length <= 300 && parts.reduce((a, p) => a + p.quantity, 0) <= 300,
     'Limit: 300 designs / 300 instances.'
   );
-  const instances = parts.flatMap(p =>
-    Array.from({ length: p.quantity }, (_, i) => ({
-      p,
-      i,
-      b: bounds(p.loops[0]),
-    }))
-  );
-  const candidates = [0, 1, 2].map(mode => {
-    const free: Box[][] = [];
-    const placements: Placement[] = [];
-    const unplaced: Nest['unplaced'] = [];
-    const sorted = [...instances].sort((a, b) =>
-      mode === 0
-        ? b.b.width * b.b.height - a.b.width * a.b.height
-        : mode === 1
-          ? Math.max(b.b.width, b.b.height) - Math.max(a.b.width, a.b.height)
-          : b.b.height - a.b.height
-    );
-    for (const { p, i, b } of sorted) {
-      let best: {
-        sheet: number;
-        x: number;
-        y: number;
-        width: number;
-        height: number;
-        rotation: 0 | 90;
-        score: number;
-      } | null = null;
-      const search = (si: number) => {
-        for (const f of free[si])
-          for (const rot of (p.rotate ? [0, 90] : [0]) as (0 | 90)[]) {
-            const width = rot === 0 ? b.width : b.height,
-              height = rot === 0 ? b.height : b.width;
-            if (width + stock.gap <= f.width + EPS && height + stock.gap <= f.height + EPS) {
-              const score =
-                si * 1e12 +
-                Math.min(f.width - width - stock.gap, f.height - height - stock.gap) * 1e6 +
-                Math.max(f.width - width - stock.gap, f.height - height - stock.gap);
-              if (!best || score < best.score)
-                best = {
-                  sheet: si,
-                  x: f.x,
-                  y: f.y,
-                  width,
-                  height,
-                  rotation: rot,
-                  score,
-                };
-            }
-          }
-      };
-      free.forEach((_, si) => search(si));
-      if (!best && free.length < stock.maxSheets) {
-        const w = stock.width - 2 * stock.margin,
-          h = stock.height - 2 * stock.margin;
-        const fits =
-          (b.width <= w + EPS && b.height <= h + EPS) || (p.rotate && b.height <= w + EPS && b.width <= h + EPS);
-        if (fits) {
-          free.push([
-            {
-              x: stock.margin,
-              y: stock.margin,
-              width: w + stock.gap,
-              height: h + stock.gap,
-            },
-          ]);
-          search(free.length - 1);
-        }
-      }
-      if (best) {
-        const found = best as {
-          sheet: number;
-          x: number;
-          y: number;
-          width: number;
-          height: number;
-          rotation: 0 | 90;
-          score: number;
-        };
-        const { score, ...placement } = found;
-        void score;
-        placements.push({ ...placement, partId: p.id, instance: i });
-        free[found.sheet] = split(free[found.sheet], {
-          ...found,
-          width: found.width + stock.gap,
-          height: found.height + stock.gap,
-        });
-      } else {
-        const existing = unplaced.find(u => u.partId === p.id);
-        if (existing) existing.count++;
-        else {
-          const w = stock.width - 2 * stock.margin,
-            h = stock.height - 2 * stock.margin;
-          const fits =
-            (b.width <= w + EPS && b.height <= h + EPS) || (p.rotate && b.height <= w + EPS && b.width <= h + EPS);
-          unplaced.push({
-            partId: p.id,
-            count: 1,
-            reason: fits ? 'Sheet limit reached' : 'Exceeds usable sheet at permitted rotations',
-          });
-        }
-      }
-    }
-    const area = placements.reduce((a, pl) => a + partArea(parts.find(p => p.id === pl.partId)!), 0);
-    return {
-      placements,
-      unplaced,
-      sheets: free.length,
-      area,
-      utilization: free.length ? (100 * area) / (stock.width * stock.height * free.length) : 0,
-      method: 'Best of 3 rectangular-envelope passes',
-    };
-  });
-  candidates.sort(
-    (a, b) =>
-      b.placements.length - a.placements.length ||
-      a.sheets - b.sheets ||
-      Math.max(0, ...a.placements.filter(p => p.sheet === a.sheets - 1).map(p => p.y + p.height)) -
-        Math.max(0, ...b.placements.filter(p => p.sheet === b.sheets - 1).map(p => p.y + p.height))
-  );
-  const result = candidates[0];
+  const result = packContours(parts, stock);
   validateNest(parts, stock, result);
   return result;
 }
 export function validateNest(parts: Part[], s: Stock, n: Nest) {
   const seen = new Set<string>();
+  const partById = new Map(parts.map(p => [p.id, p]));
+  const worldOutlines = new Map<Placement, Loop>();
   for (const a of n.placements) {
-    const part = parts.find(p => p.id === a.partId);
+    const part = partById.get(a.partId);
     requireValid(part, 'Unknown part in nest.');
     const b = bounds(part.loops[0]);
     requireValid([a.x, a.y, a.width, a.height].every(finite) && a.width > 0 && a.height > 0, 'Invalid placement.');
-    requireValid(a.rotation === 0 || (a.rotation === 90 && part.rotate), 'Rotation violates grain constraint.');
     requireValid(
-      Math.abs(a.width - (a.rotation ? b.height : b.width)) < EPS &&
-        Math.abs(a.height - (a.rotation ? b.width : b.height)) < EPS,
+      a.rotation === 0 || ([90, 180, 270].includes(a.rotation) && part.rotate),
+      'Rotation violates grain constraint.'
+    );
+    requireValid(
+      Math.abs(a.width - (a.rotation % 180 ? b.height : b.width)) < EPS &&
+        Math.abs(a.height - (a.rotation % 180 ? b.width : b.height)) < EPS,
       'Placement dimensions mismatch.'
     );
     requireValid(Number.isInteger(a.sheet) && a.sheet >= 0 && a.sheet < n.sheets, 'Invalid sheet index.');
     requireValid(
-      a.x >= s.margin - EPS &&
-        a.y >= s.margin - EPS &&
-        a.x + a.width <= s.width - s.margin + EPS &&
-        a.y + a.height <= s.height - s.margin + EPS,
+      a.x >= s.margin + (part.geometryToleranceMm ?? 0) - EPS &&
+        a.y >= s.margin + (part.geometryToleranceMm ?? 0) - EPS &&
+        a.x + a.width <= s.width - s.margin - (part.geometryToleranceMm ?? 0) + EPS &&
+        a.y + a.height <= s.height - s.margin - (part.geometryToleranceMm ?? 0) + EPS,
       'Placement exceeds sheet margins.'
     );
     const key = a.partId + '-' + a.instance;
@@ -473,6 +393,7 @@ export function validateNest(parts: Part[], s: Stock, n: Nest) {
       'Duplicate or invalid part instance.'
     );
     seen.add(key);
+    worldOutlines.set(a, movedOuter(part, a));
   }
   for (let i = 0; i < n.placements.length; i++)
     for (let j = i + 1; j < n.placements.length; j++) {
@@ -480,9 +401,12 @@ export function validateNest(parts: Part[], s: Stock, n: Nest) {
         b = n.placements[j];
       if (a.sheet !== b.sheet) continue;
       requireValid(
-        !overlap(
-          { ...a, width: a.width + s.gap, height: a.height + s.gap },
-          { ...b, width: b.width + s.gap, height: b.height + s.gap }
+        !outlinesCollide(
+          worldOutlines.get(a)!,
+          worldOutlines.get(b)!,
+          s.gap +
+            (partById.get(a.partId)!.geometryToleranceMm ?? 0) +
+            (partById.get(b.partId)!.geometryToleranceMm ?? 0)
         ),
         'Nest violates part spacing.'
       );
@@ -497,8 +421,10 @@ export function validateNest(parts: Part[], s: Stock, n: Nest) {
 }
 export function transformLoops(p: Part, pl: Placement): Loop[] {
   const b = bounds(p.loops[0]);
-  const pt = (x: number, y: number) =>
-    pl.rotation ? { x: pl.x + b.height - y, y: pl.y + x } : { x: pl.x + x, y: pl.y + y };
+  const pt = (x: number, y: number) => {
+    const r = rotatePoint({ x, y }, pl.rotation, b.width, b.height);
+    return { x: pl.x + r.x, y: pl.y + r.y };
+  };
   return p.loops.map(l =>
     l.type === 'circle'
       ? {
@@ -509,6 +435,15 @@ export function transformLoops(p: Part, pl: Placement): Loop[] {
           })(),
         }
       : { type: 'poly', points: l.points.map(q => pt(q.x, q.y)) }
+  );
+}
+export function transformReferencePaths(p: Part, pl: Placement): Point[][] {
+  const b = bounds(p.loops[0]);
+  return (p.referencePaths ?? []).map(path =>
+    path.map(point => {
+      const r = rotatePoint(point, pl.rotation, b.width, b.height);
+      return { x: r.x + pl.x, y: r.y + pl.y };
+    })
   );
 }
 export function svgPath(loops: Loop[]) {
@@ -580,73 +515,60 @@ export function exportDXF(parts: Part[], stock: Stock, nest: Nest, sheet: number
 }
 export type DXFImportReport = { parts: Part[]; warnings: string[]; footprintOnly: boolean };
 export function importDXFWithReport(text: string, name: string, unitless: 'mm' | 'in' = 'in'): DXFImportReport {
-  const geometry = readDXFGeometry(text, unitless);
-  const { loops, warnings } = geometry;
+  const { loops, referencePaths, warnings, geometryToleranceMm } = readDXFGeometry(text, unitless);
   const baseName = name.replace(/\.dxf$/i, '');
-  const footprint = (): DXFImportReport => {
-    const part: Part = {
-      id: crypto.randomUUID(),
-      name: baseName,
-      loops: normalizeLoops([geometry.footprint]),
-      quantity: 1,
-      rotate: true,
-      color: 0,
-      importMode: 'drawing-bounds',
-    };
-    validatePart(part);
+  requireValid(
+    vertexCount(loops) + referencePaths.reduce((sum, path) => sum + path.length, 0) <= 20000,
+    'File geometry limit: 20,000 vertices.'
+  );
+  loops.forEach(validateLoop);
+  const parents = loops.map((l, i) => {
+    let parent = -1;
+    for (let j = 0; j < loops.length; j++) {
+      if (i === j) continue;
+      requireValid(
+        !boundariesCross(l, loops[j]),
+        'Cutting contours touch or intersect. Separate the intended part outlines before importing.'
+      );
+      if (inside(sample(l), loops[j]) && (parent < 0 || loopArea(loops[j]) < loopArea(loops[parent]))) parent = j;
+    }
+    return parent;
+  });
+  const depth = (i: number): number => (parents[i] < 0 ? 0 : 1 + depth(parents[i]));
+  const outer = loops.map((_, i) => i).filter(i => depth(i) % 2 === 0);
+  const referencesByOuter = new Map<number, Point[][]>();
+  for (const path of referencePaths) {
+    const owners = outer.filter(index => pathWithinLoop(path, loops[index]));
+    requireValid(
+      owners.length === 1,
+      'Open geometry extends outside a closed part outline or spans several parts. Close the intended cutting outline or separate the reference lines before importing.'
+    );
+    const list = referencesByOuter.get(owners[0]) ?? [];
+    list.push(path);
+    referencesByOuter.set(owners[0], list);
+  }
+  if (referencePaths.length)
+    warnings.push(
+      `Preserved ${referencePaths.length} unclosed internal path${referencePaths.length === 1 ? '' : 's'} as reference lines. Review whether these are markings or incomplete internal cuts; they do not define part edges or holes.`
+    );
+  const parts: Part[] = outer.map((i, k) => {
+    const origin = bounds(loops[i]),
+      references = referencesByOuter.get(i);
     return {
-      parts: [part],
-      footprintOnly: true,
-      warnings: [
-        ...warnings,
-        'Imported one design from the full drawing bounds. Review its size and quantity; footprint area is not actual cut-part area.',
-      ],
-    };
-  };
-  if (geometry.footprintOnly) return footprint();
-  requireValid(vertexCount(loops) <= 20000, 'File geometry limit: 20,000 vertices.');
-  try {
-    loops.forEach(validateLoop);
-    const parents = loops.map((l, i) => {
-      let parent = -1;
-      for (let j = 0; j < loops.length; j++) {
-        if (i === j) continue;
-        requireValid(!boundariesCross(l, loops[j]), 'Contours touch or intersect. Separate or repair them in CAD.');
-        if (inside(sample(l), loops[j]) && (parent < 0 || loopArea(loops[j]) < loopArea(loops[parent]))) parent = j;
-      }
-      return parent;
-    });
-    const depth = (i: number): number => (parents[i] < 0 ? 0 : 1 + depth(parents[i]));
-    const outer = loops.map((_, i) => i).filter(i => depth(i) % 2 === 0);
-    const parts = outer.map((i, k) => ({
       id: crypto.randomUUID(),
       name: baseName + (outer.length > 1 ? ` · ${k + 1}` : ''),
       loops: normalizeLoops([loops[i], ...loops.filter((_, j) => parents[j] === i)]),
+      ...(references
+        ? { referencePaths: references.map(path => path.map(p => ({ x: p.x - origin.x, y: p.y - origin.y }))) }
+        : {}),
+      ...(geometryToleranceMm ? { geometryToleranceMm } : {}),
       quantity: 1,
       rotate: true,
       color: k % 4,
-    }));
-    parts.forEach(validatePart);
-    return { parts, warnings, footprintOnly: false };
-  } catch (error) {
-    // Geometry/topology ambiguities can still provide conservative purchasing bounds.
-    // Invalid numbers, unsupported entities, and resource/size limits never use this fallback.
-    const topologyErrors = new Set([
-      'Self-intersecting contour.',
-      'Polyline doubles back on itself.',
-      'Duplicate adjacent vertices.',
-      'Contour has no area.',
-      'Contours touch or intersect. Separate or repair them in CAD.',
-      'Hole must lie strictly inside the outer contour.',
-      'Holes may not overlap or contain each other.',
-      'Part must have positive net area.',
-    ]);
-    if (!(error instanceof Error) || !topologyErrors.has(error.message)) throw error;
-    warnings.push(
-      'Overlapping or intersecting paths were found; all supported geometry is included in one rectangular footprint.'
-    );
-    return footprint();
-  }
+    };
+  });
+  parts.forEach(validatePart);
+  return { parts, warnings, footprintOnly: false };
 }
 export function importDXF(text: string, name: string, unitless: 'mm' | 'in' = 'in'): Part[] {
   return importDXFWithReport(text, name, unitless).parts;

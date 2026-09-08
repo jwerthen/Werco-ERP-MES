@@ -11,6 +11,7 @@ export type ImportResult = {
   name: string;
   status: 'imported' | 'skipped';
   designs: number;
+  partIds?: string[];
   message: string;
   warnings?: string[];
   footprintOnly?: boolean;
@@ -34,7 +35,10 @@ export async function importDXFBatch(
   let quantity = existing.reduce((n, p) => n + p.quantity, 0);
   const vertices = (items: readonly Part[]) =>
     items.reduce(
-      (n, p) => n + p.loops.reduce((sum, loop) => sum + (loop.type === 'circle' ? 1 : loop.points.length), 0),
+      (n, p) =>
+        n +
+        p.loops.reduce((sum, loop) => sum + (loop.type === 'circle' ? 1 : loop.points.length), 0) +
+        (p.referencePaths?.reduce((sum, path) => sum + path.length, 0) ?? 0),
       0
     );
   let points = vertices(existing);
@@ -82,6 +86,7 @@ export async function importDXFBatch(
         name: file.name,
         status: 'imported',
         designs: added.length,
+        partIds: added.map(part => part.id),
         message: `${added.length} design${added.length === 1 ? '' : 's'} added`,
         warnings: imported.warnings,
         footprintOnly: imported.footprintOnly,

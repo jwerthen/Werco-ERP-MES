@@ -1,4 +1,4 @@
-import type { Job, Loop } from './nesting';
+import type { Job, Loop, Point } from './nesting';
 import type { Recipe } from './technology';
 export const MM_PER_INCH = 25.4;
 export const PSI_PER_BAR = 14.503773773020923;
@@ -50,10 +50,21 @@ export function jobToFile(job: Job) {
     units: 'in',
     thickness: mmToIn(job.thickness),
     stock,
-    parts: job.parts.map(p => ({
-      ...p,
-      loops: p.loops.map(l => scaleLoop(l, 1 / MM_PER_INCH)),
-    })),
+    parts: job.parts.map(p => {
+      const { geometryToleranceMm, ...part } = p;
+      return {
+        ...part,
+        ...(geometryToleranceMm !== undefined ? { geometryTolerance: mmToIn(geometryToleranceMm) } : {}),
+        loops: p.loops.map(l => scaleLoop(l, 1 / MM_PER_INCH)),
+        ...(p.referencePaths
+          ? {
+              referencePaths: p.referencePaths.map(path =>
+                path.map(point => ({ x: mmToIn(point.x), y: mmToIn(point.y) }))
+              ),
+            }
+          : {}),
+      };
+    }),
   };
 }
 function numeric(n: unknown): number {
@@ -91,7 +102,23 @@ export function jobFromFile(input: unknown): unknown {
         })),
       };
     });
-    return { ...p, loops };
+    if (p.referencePaths !== undefined && (!Array.isArray(p.referencePaths) || p.referencePaths.length > 2000))
+      throw new Error('Invalid reference paths.');
+    let referencePoints = 0;
+    const referencePaths = p.referencePaths?.map((path: Point[]) => {
+      if (!Array.isArray(path) || path.length < 2 || path.length > 2000) throw new Error('Invalid reference path.');
+      referencePoints += path.length;
+      if (referencePoints > 20000) throw new Error('Reference geometry exceeds the 20,000-point limit.');
+      return path.map(point => ({ x: inToMm(numeric(point?.x)), y: inToMm(numeric(point?.y)) }));
+    });
+    const { geometryTolerance, geometryToleranceMm, ...part } = p;
+    if (geometryToleranceMm !== undefined) throw new Error('Inch files must declare geometryTolerance in inches.');
+    return {
+      ...part,
+      loops,
+      ...(referencePaths ? { referencePaths } : {}),
+      ...(geometryTolerance !== undefined ? { geometryToleranceMm: inToMm(numeric(geometryTolerance)) } : {}),
+    };
   });
   const { units, ...other } = d;
   void units;
