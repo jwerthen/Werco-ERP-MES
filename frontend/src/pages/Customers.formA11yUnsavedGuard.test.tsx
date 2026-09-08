@@ -229,6 +229,8 @@ it('keeps a linked customer detail from reopening over its edit form', async () 
     },
   ]);
   mockedApi.getCustomerStats.mockResolvedValue({
+    customer_id: 7,
+    customer_name: 'Linked Account',
     part_count: 0,
     work_order_counts: { total: 0, by_status: {} },
     parts: [],
