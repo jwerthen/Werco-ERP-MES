@@ -41,6 +41,11 @@ def line(identity):
     return json.dumps({"message": json.dumps({"event": "nesting_runtime_ready", "identity": identity})})
 
 
+def structured_line(identity):
+    # Railway promotes the application JSON fields and leaves message empty.
+    return json.dumps({"event": "nesting_runtime_ready", "identity": identity, "message": "", "level": "info"})
+
+
 def status(deployment, active=True):
     return {
         "environments": {
@@ -66,10 +71,11 @@ def status(deployment, active=True):
     }
 
 
-def test_fresh_matching_identity_and_active_success_are_both_required(evidence):
+@pytest.mark.parametrize("encode", [line, structured_line])
+def test_fresh_matching_identity_and_active_success_are_both_required(evidence, encode):
     now, deployment, manifest, identity = evidence
     assert release.active_worker(status(deployment), "werco-worker", "production") == deployment
-    assert release.matching_identity(line(identity), deployment, "a" * 40, manifest, now.timestamp()) == identity
+    assert release.matching_identity(encode(identity), deployment, "a" * 40, manifest, now.timestamp()) == identity
     assert release.active_worker(status(deployment, False), "werco-worker", "production") is None
     assert release.active_worker(status(deployment), "werco-worker", "staging") is None
     assert release.active_worker(status(deployment), "werco-api", "production") is None
@@ -94,17 +100,19 @@ def test_latest_deployment_is_not_proof_of_a_running_worker(evidence, state):
         ("instance_id", "bad"),
     ],
 )
-def test_identity_mismatch_cannot_pass(evidence, field, value):
+@pytest.mark.parametrize("encode", [line, structured_line])
+def test_identity_mismatch_cannot_pass(evidence, field, value, encode):
     now, deployment, manifest, identity = evidence
     identity[field] = value
-    assert release.matching_identity(line(identity), deployment, "a" * 40, manifest, now.timestamp()) is None
+    assert release.matching_identity(encode(identity), deployment, "a" * 40, manifest, now.timestamp()) is None
 
 
 @pytest.mark.parametrize("age", [91, -6, 1000])
-def test_stale_future_and_predeployment_heartbeats_fail(evidence, age):
+@pytest.mark.parametrize("encode", [line, structured_line])
+def test_stale_future_and_predeployment_heartbeats_fail(evidence, age, encode):
     now, deployment, manifest, identity = evidence
     identity["observed_at"] = (now - timedelta(seconds=age)).isoformat()
-    assert release.matching_identity(line(identity), deployment, "a" * 40, manifest, now.timestamp()) is None
+    assert release.matching_identity(encode(identity), deployment, "a" * 40, manifest, now.timestamp()) is None
 
 
 def test_heartbeat_before_active_deployment_start_cannot_pass(evidence):
@@ -122,6 +130,25 @@ def test_ignores_unrelated_or_malformed_logs_and_requires_publication_event(evid
     assert release.matching_identity(line(identity), deployment, "a" * 40, manifest, now.timestamp()) is None
 
 
+def test_structured_event_cannot_replace_bad_identity_with_valid_nested_message(evidence):
+    now, deployment, manifest, identity = evidence
+    forged = {
+        "event": "nesting_runtime_ready",
+        "identity": {**identity, "release": "c" * 40},
+        "message": json.dumps({"event": "nesting_runtime_ready", "identity": identity}),
+    }
+    assert release.matching_identity(json.dumps(forged), deployment, "a" * 40, manifest, now.timestamp()) is None
+
+
+@pytest.mark.parametrize("identity_value", [None, [], {}, {"unexpected": "field"}])
+def test_malformed_structured_identity_does_not_pass(evidence, identity_value):
+    now, deployment, manifest, _ = evidence
+    assert (
+        release.matching_identity(structured_line(identity_value), deployment, "a" * 40, manifest, now.timestamp())
+        is None
+    )
+
+
 def test_different_active_deployment_does_not_validate_latest(evidence):
     _, deployment, _, _ = evidence
     data = status(deployment)
@@ -131,13 +158,22 @@ def test_different_active_deployment_does_not_validate_latest(evidence):
 
 
 @pytest.mark.parametrize("replaced", [False, True])
-def test_verifier_rechecks_platform_state_after_reading_heartbeat(evidence, tmp_path, monkeypatch, capsys, replaced):
+@pytest.mark.parametrize("encode", [line, structured_line])
+def test_verifier_rechecks_platform_state_after_reading_heartbeat(
+    evidence, tmp_path, monkeypatch, capsys, replaced, encode
+):
     _, deployment, manifest, identity = evidence
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest))
     rechecked = {**deployment, "id": "replacement"} if replaced else deployment
-    responses = iter([json.dumps(status(deployment)), line(identity), json.dumps(status(rechecked))])
-    monkeypatch.setattr(release, "command", lambda _args: next(responses))
+    responses = iter([json.dumps(status(deployment)), encode(identity), json.dumps(status(rechecked))])
+    commands = []
+
+    def probe(args):
+        commands.append(args)
+        return next(responses)
+
+    monkeypatch.setattr(release, "command", probe)
     ticks = iter([0, 0, 2, 2])
     monkeypatch.setattr(release.time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(release.time, "sleep", lambda _: None)
@@ -151,6 +187,20 @@ def test_verifier_rechecks_platform_state_after_reading_heartbeat(evidence, tmp_
     else:
         release.verify(args)
         assert "Active worker verified" in capsys.readouterr().out
+    assert commands[1] == [
+        "railway",
+        "logs",
+        deployment["id"],
+        "--service",
+        "werco-worker",
+        "--environment",
+        "production",
+        "--json",
+        "--lines",
+        "200",
+        "--since",
+        "90s",
+    ]
 
 
 def test_image_and_postdeploy_runtime_gates_are_enforced_before_promotion():

@@ -480,6 +480,13 @@ schedule name alone is insufficient. If production intentionally disables all ot
 crons, `WORKER_CRON_JOBS=relay_quote_nesting_runs_job` enables only the required
 nesting relay. Coordinate this worker-only setting explicitly; `none` remains unavailable.
 
+Railway JSON logs can expose the readiness event and identity directly as structured
+fields with an empty `message`, or wrap application JSON in a message string. The
+verifier recognizes the intended event in either representation, then applies the
+same exact identity/freshness checks. It reads bounded recent logs without a text-only
+filter, which would hide structured event attributes. Unrelated or malformed records
+cannot establish readiness.
+
 For worker-touched production releases, `.github/scripts/verify_worker_release.py`
 combines Railway's active SUCCESS deployment state with fresh events fetched for that
 exact deployment, compares all build identities to the tested image, then rechecks that

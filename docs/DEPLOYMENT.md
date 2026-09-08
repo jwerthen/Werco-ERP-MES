@@ -126,6 +126,12 @@ Callers authenticate with a normal 15-minute ERP access token; the proxy in fron
 
 ### Existing Vercel frontend: Material Nesting
 
+Railway `--path-as-root` selects archive-relative names and the service's config root;
+it does not prevent its ignore walker from reading ancestor `.railwayignore` rules.
+The repository rules must retain the frontend's required `public/` assets and the
+stamped `public/release.txt`, even for uploads started inside `frontend/`. Keep normal
+ignore handling enabled and retain the API/frontend/worker archive-root separation.
+
 Material Nesting's deployment target is the ERP frontend at
 [`https://wercomfg.app/nest`](https://wercomfg.app/nest). Deploy the updated
 `frontend/` build to the existing Vercel project that owns `wercomfg.app`; keep
