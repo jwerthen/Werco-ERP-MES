@@ -506,6 +506,27 @@ the image and use its new manifest identity in the unchanged active-deployment/f
 post-Redis heartbeat gate. There is no new migration, cron, environment variable or
 physical-stock reservation implied by this geometry increment.
 
+New compensated-envelope runs use solver `werco-contour-v6`. The normative source
+is `backend/app/data/nesting_profiles/werco-compensated-v1.json`; its reviewed generated
+frontend adapter keeps the frontend-only deployment context intact. CI runs
+`python3 .github/scripts/generate_nesting_profile.py --check`, while standalone
+frontend/Node builds recompute the adapter digest and Python validates the normative
+wrapper. The source identity is `werco-compensated-v1`, SHA-256
+`21e8689fb2ce80c72befbc5866f658cd74fe8ed336d1b5c070e182f3081aa55a`.
+It is separate from the compiled bundle SHA and remains a versioned engineering
+profile, not caller-supplied cutting parameters or policy approval.
+
+The v6 manifest and Node hello include exact `geometry_profile`; source, runtime and
+v3 checkpoint/ledger evidence must agree. The heartbeat DTO is unchanged and exposes
+no geometry payload: public promotion still requires an active deployment plus a
+fresh post-Redis identity matching release, strict solver, tested bundle and Node.
+Do not use a v4/v5 verifier pin with a v6 image or relax equality to accept any solver.
+New populated groups require quote 14 inside project 15; generic Save/Open retains
+older inputs without injection. Existing same-key request recovery remains available;
+an old queued run cannot silently execute a new release/profile. Historical v4/v5
+checkpoints retain their recorded validation and are never recomputed during display.
+No database migration, secret, environment variable or cron change is introduced.
+
 Rollback uses a compatible API/worker/frontend release, retains migrations 101/102/103 and
 immutable policy/draft/run history, and does not change cron settings. A failed runtime can
 still leave history readable, but new calculations remain unavailable. No successful

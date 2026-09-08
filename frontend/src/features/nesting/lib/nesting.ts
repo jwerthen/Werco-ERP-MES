@@ -1,3 +1,5 @@
+import { resolveGeometryProfile, type GeometryProfileRef } from './geometry-profile';
+import { prepareCompensatedGeometry, type CompensatedPose } from './compensated-geometry';
 import {
   validateStockExclusions,
   exclusionVertexCount,
@@ -29,6 +31,7 @@ export type Part = {
   provenance?: PartProvenance;
 };
 export type Stock = {
+  geometryProfile?: GeometryProfileRef;
   exclusions?: StockExclusion[];
   grainAxis?: GrainAxis;
   width: number;
@@ -325,6 +328,7 @@ export function validatePart(p: Part) {
   requireValid(partArea(p) > EPS, 'Part must have positive net area.');
 }
 export function validateStock(s: Stock) {
+  resolveGeometryProfile(s.geometryProfile);
   requireValid(
     s && [s.width, s.height, s.margin, s.gap, s.maxSheets, s.bedWidth, s.bedHeight].every(finite),
     'Stock settings must be valid numbers.'
@@ -396,8 +400,22 @@ export function nestParts(parts: Part[], stock: Stock): Nest {
   validateNest(parts, stock, result);
   return result;
 }
+/** Rectangular usable-stock feasibility across permitted orientations; ignores exclusions and other parts. */
+export function partFitsUsableStock(part: Part, stock: Stock): boolean {
+  const compensated = prepareCompensatedGeometry([part], { ...stock, exclusions: undefined });
+  if (compensated) return compensated.fits(part);
+  const b = bounds(part.loops[0]),
+    margin = stock.margin + (part.geometryToleranceMm ?? 0);
+  return allowedRotations(part, stock).some(
+    rotation =>
+      (rotation % 180 ? b.height : b.width) <= stock.width - 2 * margin + EPS &&
+      (rotation % 180 ? b.width : b.height) <= stock.height - 2 * margin + EPS
+  );
+}
 export function validateNest(parts: Part[], s: Stock, n: Nest) {
-  const exclusions = prepareExclusions(s);
+  const compensated = prepareCompensatedGeometry(parts, s);
+  const exclusions = compensated ? [] : prepareExclusions(s);
+  const poses = new Map<Placement, CompensatedPose>();
   requireValid(n && Array.isArray(n.placements) && Array.isArray(n.unplaced), 'Invalid nest result.');
   requireValid(Number.isInteger(n.sheets) && n.sheets >= 0 && n.sheets <= s.maxSheets, 'Invalid sheet count.');
   const seen = new Set<string>();
@@ -444,7 +462,15 @@ export function validateNest(parts: Part[], s: Stock, n: Nest) {
     );
     seen.add(key);
     const outer = movedOuter(part, a);
-    const collision = exclusionCollision(outer, s.gap, part.geometryToleranceMm ?? 0, exclusions);
+    const pose = compensated?.pose(part, a);
+    if (compensated && pose) {
+      requireValid(compensated.inside(pose), 'Compensated part envelope exceeds the inward-protected usable sheet.');
+      poses.set(a, pose);
+    }
+    const collision =
+      compensated && pose
+        ? compensated.exclusionCollision(pose, outer)
+        : exclusionCollision(outer, s.gap, part.geometryToleranceMm ?? 0, exclusions);
     requireValid(!collision, `Placement enters the guarded stock exclusion: ${collision?.label ?? ''}.`);
     worldOutlines.set(a, outer);
   }
@@ -453,6 +479,8 @@ export function validateNest(parts: Part[], s: Stock, n: Nest) {
       const a = n.placements[i],
         b = n.placements[j];
       if (a.sheet !== b.sheet) continue;
+      if (compensated)
+        requireValid(!compensated.overlap(poses.get(a)!, poses.get(b)!), 'Compensated part envelopes overlap.');
       requireValid(
         !outlinesCollide(
           worldOutlines.get(a)!,

@@ -8,6 +8,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 from sqlalchemy.orm import Session, defer
 
+from app.core.nesting_geometry_profile import is_current_geometry_profile
 from app.core.time_utils import to_utc_iso
 from app.db.locks import acquire_generator_lock
 from app.db.tenant_filter import tenant_query
@@ -16,6 +17,7 @@ from app.models.company import Company
 from app.models.quote_nesting_draft import QuoteNestingRevision
 from app.models.quote_nesting_run import QuoteNestingRun, QuoteNestingRunCheckpoint
 from app.models.user import User, UserRole
+from app.schemas.quote_nesting_drafts import SavedProject
 from app.schemas.quote_nesting_runs import (
     ACTIVE_STATUSES,
     LEASE_SECONDS,
@@ -243,6 +245,16 @@ def _audit(audit: AuditService, run: QuoteNestingRun, action: str, **values: Any
     )
 
 
+def require_current_geometry(project: SavedProject) -> None:
+    """New calculations preflight the entire project before any run/checkpoint."""
+    if any(group.quote.parts and group.quote.geometryProfile is None for group in project.groups):
+        raise HTTPException(
+            422,
+            'Every populated material group must explicitly use current clearance rules. '
+            'Upgrade the estimate and save a new revision before starting a calculation.',
+        )
+
+
 def start_run(
     db: Session, user: User, company_id: int, audit: AuditService, request: StartRunRequest, runtime: dict | None = None
 ) -> dict:
@@ -288,6 +300,7 @@ def start_run(
         raise HTTPException(409, "The requested input hash does not match that exact saved revision")
     # Re-apply bounded structure, never execute geometry or current-catalog substitutions.
     _, project, _ = parse_estimate(canonical_json(revision.estimate_json).encode("utf-8"))
+    require_current_geometry(project)
     verify_project_policies(db, company_id, project)
     if not expected_options(revision.estimate_json):
         raise HTTPException(422, "Save at least one part and enabled stock option before starting a calculation")
@@ -476,12 +489,15 @@ def claim_run(db: Session, company_id: int, run_id: int, *, runtime: dict) -> tu
         return None
     try:
         actor = worker_actor(db, run)
-        revision = input_revision(db, run)
-        raw, _, canonical = parse_estimate(canonical_json(revision.estimate_json).encode("utf-8"))
-        if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != run.input_sha256:
-            raise ValueError("input_mismatch")
+        # Preserve the recorded release contract before applying today's source
+        # requirements. Old queued runs never silently execute the new kernel.
         if run.settings_json != {**RUN_SETTINGS, "runtime": runtime}:
             raise ValueError("runtime_mismatch")
+        revision = input_revision(db, run)
+        raw, project, canonical = parse_estimate(canonical_json(revision.estimate_json).encode("utf-8"))
+        if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != run.input_sha256:
+            raise ValueError("input_mismatch")
+        require_current_geometry(project)
     except (ValueError, HTTPException) as exc:
         code = str(exc) if str(exc) in ERROR_MESSAGES else "input_mismatch"
         finish_run(db, run, code)
@@ -527,7 +543,15 @@ def heartbeat(db: Session, company_id: int, run_id: int, lease: str) -> None:
 
 def accept_hello(db: Session, company_id: int, run_id: int, lease: str, hello: dict) -> None:
     run = live_run(db, company_id, run_id, lease)
-    if run.bundle_sha256 is not None:
+    if (
+        run.bundle_sha256 is not None
+        or not is_current_geometry_profile(hello.get('geometry_profile'))
+        or hello.get('geometry_profile') != run.settings_json.get('geometry_profile')
+        or any(
+            hello.get(field) != run.settings_json['runtime'].get(field)
+            for field in ('solver_version', 'bundle_sha256', 'node_version')
+        )
+    ):
         raise ValueError("invalid_protocol")
     _advance(
         db,

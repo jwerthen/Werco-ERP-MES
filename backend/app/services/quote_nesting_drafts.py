@@ -108,6 +108,14 @@ def _review_sources(db: Session, company_id: int, project: SavedProject, raw: di
         }
     ]
     for group, raw_group in zip(project.groups, raw["groups"]):
+        if group.quote.geometryProfile is not None:
+            issues.append(
+                {
+                    'code': 'geometry_profile_not_shop_approval',
+                    'group_id': group.id,
+                    'message': 'The geometry profile identifies software clearance rules only. It does not approve physical cutting allowances, material, pricing or inventory eligibility.',
+                }
+            )
         if any(stock.exclusions for stock in group.quote.options):
             issues.append(
                 {

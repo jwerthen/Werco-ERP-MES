@@ -7,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.core.nesting_geometry_profile import geometry_profile_identity
 from app.db.database import atomic_transaction
 from app.models.api_token import ApiToken
 from app.models.audit_log import AuditLog
@@ -63,6 +64,17 @@ def estimate():
     }
 
 
+def current_estimate(source=None):
+    """Explicitly upgrade new-run fixtures; retain estimate() as historical input."""
+    import copy
+
+    value = copy.deepcopy(estimate() if source is None else source)
+    value['version'] = 15
+    for group in value['groups']:
+        group['quote'].update(version=14, geometryProfile=geometry_profile_identity())
+    return value
+
+
 def saved(db, user):
     with atomic_transaction(db):
         return save_revision(
@@ -70,7 +82,7 @@ def saved(db, user):
             user,
             1,
             AuditService(db, user),
-            content=json.dumps(estimate()).encode(),
+            content=json.dumps(current_estimate()).encode(),
             request_key=str(uuid4()),
             expected_company_id=1,
         )

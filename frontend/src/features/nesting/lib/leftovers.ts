@@ -1,3 +1,5 @@
+import { GEOMETRY_PROFILE_SPEC, COMPENSATED_GEOMETRY_RULES, resolveGeometryProfile } from './geometry-profile';
+import { prepareCompensatedGeometry } from './compensated-geometry';
 import {
   canonicalPath,
   circleSegments,
@@ -32,6 +34,7 @@ import {
 
 export const LEFTOVER_VERSION = 'werco-leftovers-v1' as const;
 export const LEFTOVER_EXCLUSION_VERSION = 'werco-leftovers-v2' as const;
+export const LEFTOVER_COMPENSATED_VERSION = 'werco-leftovers-v3' as const;
 /** Engineering approximation profile, not approved shop eligibility or a kerf model. */
 export const LEFTOVER_PROFILE = Object.freeze({
   integerGridMm: GUARDED_GEOMETRY_PROFILE.integerGridMm,
@@ -51,6 +54,16 @@ export const LEFTOVER_PROFILE = Object.freeze({
   relativeAreaTolerance: 1e-12,
 });
 export const LEFTOVER_EXCLUSION_PROFILE = Object.freeze({ ...LEFTOVER_PROFILE, exclusions: EXCLUSION_PROFILE });
+const COMPENSATED_LEFTOVER_LIMITS = Object.freeze({
+  ...LEFTOVER_PROFILE,
+  ...COMPENSATED_GEOMETRY_RULES.numerics,
+  maxInputVertices: COMPENSATED_GEOMETRY_RULES.budgets.maxLeftoverInputVertices,
+  maxOutputVertices: COMPENSATED_GEOMETRY_RULES.budgets.maxLeftoverOutputVertices,
+  maxSheetOutputVertices: COMPENSATED_GEOMETRY_RULES.budgets.maxSheetLeftoverOutputVertices,
+  maxRegions: COMPENSATED_GEOMETRY_RULES.budgets.maxLeftoverRegions,
+});
+export const COMPENSATED_RESERVATION_DESCRIPTION =
+  'Compensated outer envelopes reserve half of part gap plus imported curve tolerance and numerical protection; their interiors are disjoint from other parts and stock exclusions and remain entirely inside the inward-protected usable sheet. Square tangent joins; internal cutouts reserved. Not physical kerf or inventory eligibility.';
 const RESERVATION_DESCRIPTION =
   'Half of part gap plus imported curve tolerance and numerical protection around full outer profiles; square tangent joins; inward-protected usable boundary. Not physical kerf.';
 const squareInches = (area: number) => area / (25.4 * 25.4);
@@ -83,11 +96,11 @@ export type SheetLeftoverAnalysis = {
 };
 export type LeftoverAnalysis = {
   inputSignature: string;
-  version: typeof LEFTOVER_VERSION | typeof LEFTOVER_EXCLUSION_VERSION;
+  version: typeof LEFTOVER_VERSION | typeof LEFTOVER_EXCLUSION_VERSION | typeof LEFTOVER_COMPENSATED_VERSION;
   status: 'potential_review_only';
   creditUSD: 0;
   assumptions: {
-    profile: typeof LEFTOVER_PROFILE | typeof LEFTOVER_EXCLUSION_PROFILE;
+    profile: typeof LEFTOVER_PROFILE | typeof LEFTOVER_EXCLUSION_PROFILE | typeof GEOMETRY_PROFILE_SPEC;
     reservation: string;
     internalHolesReserved: true;
     boundsAreUsableRectangles: false;
@@ -112,7 +125,12 @@ function sum(values: number[]): number {
  * This is equality evidence, not a cryptographic approval or an inventory identifier. */
 function inputSignature(parts: Part[], stock: Stock, nest: Nest): string {
   return canonicalJSON({
-    version: stock.exclusions?.length ? 'werco-leftover-inputs-v2' : 'werco-leftover-inputs-v1',
+    version: stock.geometryProfile
+      ? 'werco-leftover-inputs-v3'
+      : stock.exclusions?.length
+        ? 'werco-leftover-inputs-v2'
+        : 'werco-leftover-inputs-v1',
+    ...(stock.geometryProfile ? { geometryProfile: stock.geometryProfile } : {}),
     ...(stock.exclusions?.length ? { exclusions: stock.exclusions } : {}),
     stock: [
       stock.width,
@@ -182,19 +200,18 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
   const placements = [...nest.placements].sort(
     (a, b) => a.sheet - b.sheet || compareText(a.partId, b.partId) || a.instance - b.instance
   );
-  const exclusions = prepareExclusions(stock);
+  const compensated = prepareCompensatedGeometry(parts, stock);
+  const limits = compensated ? COMPENSATED_LEFTOVER_LIMITS : LEFTOVER_PROFILE;
+  const exclusions = compensated?.exclusions ?? prepareExclusions(stock);
   const exclusionPaths = exclusions.flatMap(region => region.paths);
   const withExclusions = exclusions.length > 0;
   let inputVertices = exclusionPaths.reduce((count, path) => count + path.length, 0);
   for (const placement of nest.placements) {
     const outer = byId.get(placement.partId)!.loops[0];
-    inputVertices += outer.type === 'poly' ? outer.points.length : circleSegments(outer.r);
-    check(
-      inputVertices <= LEFTOVER_PROFILE.maxInputVertices,
-      'placed geometry exceeds the 60,000 input-vertex budget.'
-    );
+    inputVertices += outer.type === 'poly' ? outer.points.length : circleSegments(outer.r, compensated?.settings);
+    check(inputVertices <= limits.maxInputVertices, 'placed geometry exceeds the 60,000 input-vertex budget.');
   }
-  const usableBoundary = inwardSheet(stock);
+  const usableBoundary = compensated ? compensated.usable : inwardSheet(stock);
   const excludedArea =
     usableBoundary && withExclusions ? filledArea(intersectPaths([usableBoundary], exclusionPaths)) : 0;
   check(Number.isFinite(excludedArea) && excludedArea >= 0, 'invalid guarded exclusion area.');
@@ -215,15 +232,14 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
     if (usableBoundary) {
       for (const placement of placed) {
         const part = byId.get(placement.partId)!;
-        const envelopes = guardedOuter(
-          movedOuter(part, placement),
-          stock.gap * LEFTOVER_PROFILE.partGapFraction + (part.geometryToleranceMm ?? 0)
-        );
+        const envelopes = compensated
+          ? compensated.translatedPaths(compensated.pose(part, placement))
+          : guardedOuter(
+              movedOuter(part, placement),
+              stock.gap * LEFTOVER_PROFILE.partGapFraction + (part.geometryToleranceMm ?? 0)
+            );
         offsetVertices += envelopes.reduce((count, ring) => count + ring.length, 0);
-        check(
-          offsetVertices <= LEFTOVER_PROFILE.maxOutputVertices,
-          'guarded envelopes exceed the offset-vertex budget.'
-        );
+        check(offsetVertices <= limits.maxOutputVertices, 'guarded envelopes exceed the offset-vertex budget.');
         clipPaths.push(...envelopes);
       }
     }
@@ -257,7 +273,7 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
           holes.sort((a, b) => compareText(pathKey(a), pathKey(b)));
           sheetVertices += outer.length + holes.reduce((count, hole) => count + hole.length, 0);
           check(
-            sheetVertices <= LEFTOVER_PROFILE.maxSheetOutputVertices,
+            sheetVertices <= limits.maxSheetOutputVertices,
             'a sheet exceeds the 30,000 output-vertex display budget.'
           );
           const area = pathArea(outer) - sum(holes.map(pathArea));
@@ -281,8 +297,8 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
     visit(tree);
     outputVertices += sheetVertices;
     regionCount += regions.length;
-    check(outputVertices <= LEFTOVER_PROFILE.maxOutputVertices, 'regions exceed the 120,000 output-vertex budget.');
-    check(regionCount <= LEFTOVER_PROFILE.maxRegions, 'regions exceed the 2,000-region budget.');
+    check(outputVertices <= limits.maxOutputVertices, 'regions exceed the 120,000 output-vertex budget.');
+    check(regionCount <= limits.maxRegions, 'regions exceed the 2,000-region budget.');
     regions.sort(
       (a, b) =>
         b.area - a.area ||
@@ -291,14 +307,11 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
         compareText(JSON.stringify(a.outer), JSON.stringify(b.outer))
     );
     regions.forEach((region, index) => {
-      region.id = `leftover-${withExclusions ? 'v2' : 'v1'}-sheet-${sheet + 1}-region-${index + 1}`;
+      region.id = `leftover-${compensated ? 'v3' : withExclusions ? 'v2' : 'v1'}-sheet-${sheet + 1}-region-${index + 1}`;
     });
     const remainingArea = sum(regions.map(region => region.area));
     const allowance = usableArea - excludedArea - remainingArea - nominalPartArea - reservedCutoutArea;
-    const tolerance = Math.max(
-      LEFTOVER_PROFILE.absoluteAreaToleranceMm2,
-      grossArea * LEFTOVER_PROFILE.relativeAreaTolerance
-    );
+    const tolerance = Math.max(limits.absoluteAreaToleranceMm2, grossArea * limits.relativeAreaTolerance);
     check(allowance >= -tolerance, 'remaining regions overstate usable material; the area ledger is negative.');
     const clearanceAndProtectionArea = Math.max(0, allowance);
     const reconciliationResidualArea =
@@ -317,7 +330,7 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
       grossArea,
       usableArea,
       edgeMarginArea,
-      ...(withExclusions ? { excludedArea } : {}),
+      ...(compensated || withExclusions ? { excludedArea } : {}),
       nominalPartArea,
       reservedCutoutArea,
       clearanceAndProtectionArea,
@@ -328,12 +341,16 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
   }
   return {
     inputSignature: inputSignature(parts, stock, nest),
-    version: withExclusions ? LEFTOVER_EXCLUSION_VERSION : LEFTOVER_VERSION,
+    version: compensated
+      ? LEFTOVER_COMPENSATED_VERSION
+      : withExclusions
+        ? LEFTOVER_EXCLUSION_VERSION
+        : LEFTOVER_VERSION,
     status: 'potential_review_only',
     creditUSD: 0,
     assumptions: {
-      profile: withExclusions ? LEFTOVER_EXCLUSION_PROFILE : LEFTOVER_PROFILE,
-      reservation: RESERVATION_DESCRIPTION,
+      profile: compensated ? GEOMETRY_PROFILE_SPEC : withExclusions ? LEFTOVER_EXCLUSION_PROFILE : LEFTOVER_PROFILE,
+      reservation: compensated ? COMPENSATED_RESERVATION_DESCRIPTION : RESERVATION_DESCRIPTION,
       internalHolesReserved: true,
       boundsAreUsableRectangles: false,
       eligibilityVerified: false,
@@ -344,21 +361,27 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
 
 /** Export a bounded worker result as unapproved review evidence, never as inventory. */
 export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: Part[]; stock: Stock; nest: Nest }) {
+  const compensated = analysis.version === LEFTOVER_COMPENSATED_VERSION;
   const withExclusions = analysis.version === LEFTOVER_EXCLUSION_VERSION;
+  const excludedLedger = compensated || withExclusions;
+  const limits = compensated ? COMPENSATED_LEFTOVER_LIMITS : LEFTOVER_PROFILE;
   check(
-    (analysis.version === LEFTOVER_VERSION || withExclusions) &&
+    (analysis.version === LEFTOVER_VERSION || withExclusions || compensated) &&
       analysis.status === 'potential_review_only' &&
       analysis.creditUSD === 0,
     'invalid review status.'
   );
   check(
     JSON.stringify(analysis.assumptions.profile) ===
-      JSON.stringify(withExclusions ? LEFTOVER_EXCLUSION_PROFILE : LEFTOVER_PROFILE),
+      JSON.stringify(
+        compensated ? GEOMETRY_PROFILE_SPEC : withExclusions ? LEFTOVER_EXCLUSION_PROFILE : LEFTOVER_PROFILE
+      ),
     'unknown numerical profile.'
   );
   check(Array.isArray(analysis.sheets) && analysis.sheets.length <= 300, 'invalid sheet count.');
   check(
-    analysis.assumptions.reservation === RESERVATION_DESCRIPTION &&
+    analysis.assumptions.reservation ===
+      (compensated ? COMPENSATED_RESERVATION_DESCRIPTION : RESERVATION_DESCRIPTION) &&
       analysis.assumptions.internalHolesReserved === true &&
       analysis.assumptions.boundsAreUsableRectangles === false &&
       analysis.assumptions.eligibilityVerified === false,
@@ -379,8 +402,9 @@ export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: P
   );
   if (context) {
     check(
-      withExclusions === Boolean(context.stock.exclusions?.length),
-      'report exclusion version does not match the stock.'
+      compensated === Boolean(resolveGeometryProfile(context.stock.geometryProfile)) &&
+        (compensated || withExclusions === Boolean(context.stock.exclusions?.length)),
+      'report geometry or exclusion version does not match the stock.'
     );
     check(analysis.sheets.length === context.nest.sheets, 'report sheet count does not match the validated nest.');
     check(
@@ -388,7 +412,12 @@ export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: P
       'report input binding does not match the current geometry and placements.'
     );
   }
-  const exportBoundary = context ? inwardSheet(context.stock) : undefined;
+  const exportBoundary = context
+    ? inwardSheet(
+        context.stock,
+        compensated ? { ...COMPENSATED_GEOMETRY_RULES.numerics, ...COMPENSATED_GEOMETRY_RULES.budgets } : undefined
+      )
+    : undefined;
   let vertices = 0,
     regions = 0;
   const regionIds = new Set<string>();
@@ -405,24 +434,21 @@ export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: P
         grossArea: sheet.grossArea,
         usableArea: sheet.usableArea,
         edgeMarginArea: sheet.edgeMarginArea,
-        ...(withExclusions ? { excludedArea: sheet.excludedArea! } : {}),
+        ...(excludedLedger ? { excludedArea: sheet.excludedArea! } : {}),
         nominalPartArea: sheet.nominalPartArea,
         reservedCutoutArea: sheet.reservedCutoutArea,
         clearanceAndProtectionArea: sheet.clearanceAndProtectionArea,
         remainingArea: sheet.remainingArea,
       };
       check(
-        withExclusions ? typeof sheet.excludedArea === 'number' : sheet.excludedArea === undefined,
+        excludedLedger ? typeof sheet.excludedArea === 'number' : sheet.excludedArea === undefined,
         'invalid exclusion ledger version.'
       );
       check(
         Object.values(areas).every(area => Number.isFinite(area) && area >= 0),
         'invalid area ledger.'
       );
-      const tolerance = Math.max(
-        LEFTOVER_PROFILE.absoluteAreaToleranceMm2,
-        sheet.grossArea * LEFTOVER_PROFILE.relativeAreaTolerance
-      );
+      const tolerance = Math.max(limits.absoluteAreaToleranceMm2, sheet.grossArea * limits.relativeAreaTolerance);
       check(Array.isArray(sheet.regions), 'invalid regions.');
       let sheetVertexCount = 0;
       if (context) {
@@ -468,7 +494,7 @@ export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: P
         regions: sheet.regions.map(region => {
           regions++;
           check(
-            regions <= LEFTOVER_PROFILE.maxRegions && region.classification === 'review' && region.creditUSD === 0,
+            regions <= limits.maxRegions && region.classification === 'review' && region.creditUSD === 0,
             'invalid region classification or count.'
           );
           check(
@@ -488,12 +514,9 @@ export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: P
           const ringVertices = rings.reduce((count, ring) => count + ring.length, 0);
           vertices += ringVertices;
           sheetVertexCount += ringVertices;
+          check(sheetVertexCount <= limits.maxSheetOutputVertices, 'sheet geometry exceeds the display budget.');
           check(
-            sheetVertexCount <= LEFTOVER_PROFILE.maxSheetOutputVertices,
-            'sheet geometry exceeds the display budget.'
-          );
-          check(
-            vertices <= LEFTOVER_PROFILE.maxOutputVertices &&
+            vertices <= limits.maxOutputVertices &&
               rings.every(
                 ring =>
                   ring.length >= 3 &&
@@ -541,8 +564,7 @@ export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: P
           check(
             ['x', 'y', 'width', 'height'].every(
               key =>
-                Math.abs(box[key as keyof typeof box] - region.bounds[key as keyof typeof box]) <
-                LEFTOVER_PROFILE.integerGridMm
+                Math.abs(box[key as keyof typeof box] - region.bounds[key as keyof typeof box]) < limits.integerGridMm
             ),
             'region bounds do not match its geometry.'
           );

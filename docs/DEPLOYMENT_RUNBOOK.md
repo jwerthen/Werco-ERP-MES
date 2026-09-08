@@ -48,6 +48,16 @@
 > input versions, exclusion geometry and historical results; never remove constraints
 > to make an older runtime accept them.
 
+> **Compensated envelopes.** Release solver v6, quote 14/project 15 and the exact
+> `werco-compensated-v1` source profile as a compatible API/frontend/worker set.
+> CI checks the generated frontend adapter against normative backend JSON; isolated
+> frontend/Node builds also self-check its digest. The manifest and hello bind
+> `geometry_profile`; heartbeat fields and the active/fresh identity gate are unchanged.
+> There is no migration, environment or cron change. Verify explicit legacy-input
+> upgrade, v3 ledger evidence and frozen v4/v5 historical preview without rerunning it.
+> Retain profile-bearing files/checkpoints on rollback; do not rewrite versions or
+> remove constraints to force compatibility. Local job 16 remains local-only.
+
 ---
 
 ## Table of Contents

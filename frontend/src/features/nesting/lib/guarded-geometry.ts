@@ -15,6 +15,15 @@ export const GUARDED_GEOMETRY_PROFILE = Object.freeze({
   maxIntersectionEdgePairs: 8_000_000,
 });
 export const SCALE = 1 / GUARDED_GEOMETRY_PROFILE.integerGridMm;
+export type GuardedGeometrySettings = {
+  circleRadialExcessMm: number;
+  numericalProtectionMm: number;
+  usableBoundaryInsetMm: number;
+  maxCircleVertices: number;
+  maxEnvelopeVertices: number;
+  maxIntersectionEdgePairs: number;
+  maxOffsetReserveMm?: number;
+};
 const check = (ok: unknown, message: string): void => {
   if (!ok) throw new Error(`Guarded geometry: ${message}`);
 };
@@ -53,20 +62,20 @@ export const sortedPaths = (paths: Clipper.Paths) =>
       return left < right ? -1 : left > right ? 1 : 0;
     });
 
-export function circleSegments(radius: number): number {
-  const angle = Math.acos(1 / (1 + GUARDED_GEOMETRY_PROFILE.circleRadialExcessMm / radius));
+export function circleSegments(radius: number, settings: GuardedGeometrySettings = GUARDED_GEOMETRY_PROFILE): number {
+  const angle = Math.acos(1 / (1 + settings.circleRadialExcessMm / radius));
   const count = Math.max(16, Math.ceil(Math.PI / angle / 4) * 4);
   check(
-    Number.isFinite(count) && count <= GUARDED_GEOMETRY_PROFILE.maxCircleVertices,
+    Number.isFinite(count) && count <= settings.maxCircleVertices,
     'circle tessellation exceeds the numerical budget.'
   );
   return count;
 }
-export function integerOuter(loop: Loop): Clipper.Path {
+export function integerOuter(loop: Loop, settings: GuardedGeometrySettings = GUARDED_GEOMETRY_PROFILE): Clipper.Path {
   let points: Point[];
   if (loop.type === 'poly') points = loop.points;
   else {
-    const count = circleSegments(loop.r),
+    const count = circleSegments(loop.r, settings),
       radius = loop.r / Math.cos(Math.PI / count);
     // Mid-step vertices give tangent sides at the exact axial circle extrema.
     points = Array.from({ length: count }, (_, index) => {
@@ -83,8 +92,11 @@ export function integerOuter(loop: Loop): Clipper.Path {
   return canonicalPath(path, true);
 }
 
-export function inwardSheet(stock: Stock): Clipper.Path | null {
-  const inset = GUARDED_GEOMETRY_PROFILE.usableBoundaryInsetMm;
+export function inwardSheet(
+  stock: Stock,
+  settings: GuardedGeometrySettings = GUARDED_GEOMETRY_PROFILE
+): Clipper.Path | null {
+  const inset = settings.usableBoundaryInsetMm;
   const x0 = Math.ceil((stock.margin + inset) * SCALE),
     y0 = x0;
   const x1 = Math.floor((stock.width - stock.margin - inset) * SCALE);
@@ -100,27 +112,35 @@ export function inwardSheet(stock: Stock): Clipper.Path | null {
 }
 
 /** A circumscribed, outward protected solid outer profile. Internal cutouts stay reserved. */
-export function guardedOuter(loop: Loop, clearance: number): Clipper.Paths {
-  const reserve = clearance + GUARDED_GEOMETRY_PROFILE.numericalProtectionMm;
+export function guardedOuter(
+  loop: Loop,
+  clearance: number,
+  settings: GuardedGeometrySettings = GUARDED_GEOMETRY_PROFILE
+): Clipper.Paths {
+  const reserve = clearance + settings.numericalProtectionMm;
   check(
-    Number.isFinite(clearance) && clearance >= 0 && reserve <= 40000,
+    Number.isFinite(clearance) && clearance >= 0 && reserve <= (settings.maxOffsetReserveMm ?? 40000),
     'reserve distance exceeds the bounded offset range.'
   );
-  const path = integerOuter(loop);
+  const path = integerOuter(loop, settings);
   const offset = new Clipper.ClipperOffset();
   offset.AddPath(path, Clipper.JoinType.jtSquare, Clipper.EndType.etClosedPolygon);
   const envelopes: Clipper.Paths = [];
   offset.Execute(envelopes, Math.ceil(reserve * SCALE));
   check(envelopes.length > 0, 'offset did not preserve an outer contour.');
   check(
-    envelopes.reduce((n, p) => n + p.length, 0) <= GUARDED_GEOMETRY_PROFILE.maxEnvelopeVertices,
+    envelopes.reduce((n, p) => n + p.length, 0) <= settings.maxEnvelopeVertices,
     'guarded envelopes exceed the offset-vertex budget.'
   );
   return envelopes;
 }
 
 /** Preserve all components and hole winding in bounded Boolean operations. */
-export function intersectPaths(a: Clipper.Paths, b: Clipper.Paths): Clipper.Paths {
+export function intersectPaths(
+  a: Clipper.Paths,
+  b: Clipper.Paths,
+  maxVertices: number = GUARDED_GEOMETRY_PROFILE.maxEnvelopeVertices
+): Clipper.Paths {
   if (!a.length || !b.length) return [];
   const clip = new Clipper.Clipper(),
     result: Clipper.Paths = [];
@@ -136,10 +156,7 @@ export function intersectPaths(a: Clipper.Paths, b: Clipper.Paths): Clipper.Path
     ),
     'envelope intersection failed.'
   );
-  check(
-    result.reduce((n, p) => n + p.length, 0) <= GUARDED_GEOMETRY_PROFILE.maxEnvelopeVertices,
-    'intersection exceeds the output-vertex budget.'
-  );
+  check(result.reduce((n, p) => n + p.length, 0) <= maxVertices, 'intersection exceeds the output-vertex budget.');
   return result;
 }
 export function filledArea(paths: Clipper.Paths): number {
@@ -155,7 +172,7 @@ function turn(a: Clipper.IntPoint, b: Clipper.IntPoint, c: Clipper.IntPoint): nu
   const exact = BigInt(b.X - a.X) * BigInt(c.Y - a.Y) - BigInt(b.Y - a.Y) * BigInt(c.X - a.X);
   return exact > BigInt(0) ? 1 : exact < BigInt(0) ? -1 : 0;
 }
-type IntegerBounds = { minX: number; minY: number; maxX: number; maxY: number };
+export type IntegerBounds = { minX: number; minY: number; maxX: number; maxY: number };
 type Edge = IntegerBounds & { a: Clipper.IntPoint; b: Clipper.IntPoint };
 type PreparedRing = {
   path: Clipper.Path;
@@ -229,28 +246,44 @@ function pointInRing(point: Clipper.IntPoint, ring: PreparedRing): number {
   return inside ? 1 : 0;
 }
 /** Boolean area plus original integer edge crossings/containment. Never round away a tiny collision. */
-export function preparedEnvelopesOverlap(a: PreparedGuardedPaths, b: PreparedGuardedPaths): boolean {
-  if (!boundsMeet(a.bounds, b.bounds)) return false;
-  if (filledArea(intersectPaths(a.paths, b.paths)) > 0) return true;
+export function preparedEnvelopesOverlap(
+  a: PreparedGuardedPaths,
+  b: PreparedGuardedPaths,
+  dx = 0,
+  dy = 0,
+  settings: GuardedGeometrySettings = GUARDED_GEOMETRY_PROFILE
+): boolean {
+  check(Number.isSafeInteger(dx) && Number.isSafeInteger(dy), 'envelope translations must be exact grid integers.');
+  const shiftedBounds = (value: IntegerBounds): IntegerBounds => ({
+    minX: value.minX + dx,
+    maxX: value.maxX + dx,
+    minY: value.minY + dy,
+    maxY: value.maxY + dy,
+  });
+  const shiftedPoint = (p: Clipper.IntPoint) => ({ X: p.X + dx, Y: p.Y + dy });
+  if (!boundsMeet(a.bounds, shiftedBounds(b.bounds))) return false;
+  const moved = dx || dy ? b.paths.map(path => path.map(shiftedPoint)) : b.paths;
+  if (filledArea(intersectPaths(a.paths, moved, settings.maxEnvelopeVertices)) > 0) return true;
   let edgePairs = 0;
   for (const aa of a.rings)
     for (const bb of b.rings) {
-      if (!boundsMeet(aa.bounds, bb.bounds)) continue;
-      // Bound interacting ring pairs before edge-level culling, preserving the
-      // declared resource refusal even for pathological overlapping bounds.
+      const bbBounds = shiftedBounds(bb.bounds);
+      if (!boundsMeet(aa.bounds, bbBounds)) continue;
+      // Bound interacting ring pairs before edge-level culling. Immutable
+      // origin indexes are reused across poses; translations never rebuild them.
       edgePairs += aa.edges.length * bb.edges.length;
       check(
-        edgePairs <= GUARDED_GEOMETRY_PROFILE.maxIntersectionEdgePairs,
+        edgePairs <= settings.maxIntersectionEdgePairs,
         'envelope comparison exceeds the bounded edge-pair budget.'
       );
       for (const first of aa.edges) {
-        if (!boundsMeet(first, bb.bounds)) continue;
+        if (!boundsMeet(first, bbBounds)) continue;
         for (const second of bb.edges) {
-          if (!boundsMeet(first, second)) continue;
+          if (!boundsMeet(first, shiftedBounds(second))) continue;
           const p = first.a,
             q = first.b,
-            r = second.a,
-            s = second.b;
+            r = shiftedPoint(second.a),
+            s = shiftedPoint(second.b);
           if (turn(p, q, r) * turn(p, q, s) < 0 && turn(r, s, p) * turn(r, s, q) < 0) return true;
         }
       }
@@ -266,8 +299,8 @@ export function preparedEnvelopesOverlap(a: PreparedGuardedPaths, b: PreparedGua
     return winding !== 0;
   };
   return (
-    a.paths.some(path => path.some(point => strictlyInside(point, b))) ||
-    b.paths.some(path => path.some(point => strictlyInside(point, a)))
+    a.paths.some(path => path.some(point => strictlyInside({ X: point.X - dx, Y: point.Y - dy }, b))) ||
+    b.paths.some(path => path.some(point => strictlyInside(shiftedPoint(point), a)))
   );
 }
 /** Raw callers always prepare fresh snapshots; no mutable-array WeakMap cache. */

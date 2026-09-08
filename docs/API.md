@@ -885,13 +885,13 @@ POST returns **200** for both a new save and an identical idempotent replay.
 The file limit is 5 MiB; a route-specific ASGI cap limits the entire upload to
 5 MiB + 16 KiB before multipart parsing. The global 256 KiB JSON-body cap is
 unchanged. Only the documented, nonduplicated fields are accepted. Current
-project formats 4/5/6/10/12 must explicitly use inches and USD, with bounded metadata,
+project formats 4/5/6/10/12/15 must explicitly use inches and USD, with bounded metadata,
 300 total part instances, 20,000 source geometry vertices, and 12 stock options per group.
 Duplicate JSON keys, non-finite values, unknown fields, original CAD blobs,
 approval flags, and solver/placement output are refused. This is structural
 validation of an input draft, not authoritative geometric acceptance.
 
-Stock exclusions require quote **11** inside project **12**; project 12 may also
+Stock exclusions require quote **11** or **14** inside project **12** or **15**, respectively; project 12 may also
 contain earlier quote 3/7/9 groups. Quote 11 retains orientation and spacing-policy
 fields from quote 7/9. A stock option's optional `exclusions` array contains
 `{id,label,reason,outline,clearance}`: a 1–64 character `[A-Za-z0-9_-]` ID,
@@ -904,6 +904,18 @@ option, including disabled options. IDs are unique per option. Raw outlines must
 lie inside the gross sheet; overlap is permitted, and clearance may extend beyond
 the sheet. The server never crops or renormalizes them. Explicit `null` is invalid;
 an explicitly present empty array still requires the new file versions.
+
+Current geometry rules use quote **14** inside project **15**, with required
+`geometryProfile: {id: "werco-compensated-v1", sha256: <registered digest>}`.
+The exact two-field reference identifies a fixed engineering configuration;
+missing/null/extra fields or an unknown ID/digest reject. Quote 14 retains the
+orientation, policy, catalog and exclusion fields from prior formats. Earlier
+quote versions reject any profile-field presence. Project 15 can preserve mixed
+quote 3/7/9/11/14 groups. Saving and opening an earlier estimate never adds a
+profile, changes its source numbers or rewrites its canonical hash. Explicit
+upgrade is an input edit and requires a new saved revision for a new server run.
+Profile-bearing saves include `geometry_profile_not_shop_approval` review evidence;
+this configuration is not approval of physical allowances, material or pricing.
 
 These are estimator-reported, scenario-wide unavailable areas repeated on each
 hypothetical sheet, with no physical stock identity or machine-control meaning.
@@ -964,7 +976,8 @@ All reads require effective `purchasing:view`; start and cancel additionally req
 | POST | `/quote-nesting/runs/{run_id}/cancel` | Strict JSON `expected_company_id`, `expected_version`; audited cancellation request, returns `RunDetail`. |
 | GET | `/quote-nesting/runs/{run_id}/report` | Exact saved inputs, run detail and available checkpoint payloads with a report digest; always `status: UNAPPROVED`. Read-only evidence, not an approved quote export. |
 
-The caller may explicitly calculate an older saved revision. Its ID/number/hash
+The caller may explicitly calculate an older saved revision carrying the current
+geometry profile on every populated material group. Its ID/number/hash
 must match; the service never substitutes the latest revision. New runs require
 a live worker heartbeat matching the API release, pinned bundle, solver and Node
 runtime. A same-actor/key/request replay returns its original run even if current
@@ -972,6 +985,16 @@ readiness is unavailable; a queued replay retries ID-only dispatch without creat
 a second run or audit event. Changed key meaning, active-company intent or input hash
 is rejected. Only one QUEUED/RUNNING calculation is permitted per company; a
 completed run can be recalculated only by an explicit new request.
+
+Every populated group is checked before creating a new run; empty legacy groups
+may remain untouched. An older populated group without the explicit current
+profile produces **422** with no run, checkpoint, dispatch or run-audit write.
+Same-key recovery precedes current-profile/runtime checks, so retrying an existing
+v4/v5 run does not require rewriting its input. At worker claim, a queued run
+whose frozen settings/runtime differ from the installed release fails with the
+existing audited `runtime_mismatch` outcome before the new profile check. It is
+never upgraded or silently recalculated. Historical report reads remain read-only
+and preserve their recorded settings, solver identity, placements and hashes.
 
 `RunSummary` identifies `id`, company/draft/revision IDs, revision number, input
 hash, actor, status/version/cancellation flag, timestamps, release/solver/bundle/
@@ -996,7 +1019,7 @@ The fixed `standard-v1` technical profile limits the whole project to 120 second
 24 MiB total retained checkpoint content and a 512 MiB Node heap. There is one
 nesting child per worker process; other ARQ functions retain their existing limits.
 Source groups/options are evaluated in their saved order. The shared kernel uses
-code-unit tie-breaking (`werco-contour-v5`), with `seed: null` because it is not
+code-unit tie-breaking (`werco-contour-v6`), with `seed: null` because it is not
 random. Replaying identical saved inputs/build/runtime and completed work is
 deterministic; a wall-time cutoff is not a deterministic work budget.
 
@@ -1005,7 +1028,7 @@ approval. **COMPLETED means all planned stock options were evaluated**, not that
 every part fits. `completed_count` counts feasible stock alternatives for their
 individual material groups, not a combined purchased-sheet order. Each emitted
 nest is checked against original contours, spacing, margins, grain, quantities
-and guarded stock exclusions
+and the compensated part/part, part/exclusion and full-envelope sheet-edge constraints
 before its checkpoint is accepted. Time/work/output limits retain earlier checked
 results and explicitly identify unfinished work. They never establish infeasibility.
 All predicted leftovers remain review-only with zero credit.
@@ -1013,14 +1036,31 @@ All predicted leftovers remain review-only with zero credit.
 Checkpoint framing binds exclusion field presence, array order, IDs, labels,
 reasons, clearance and every source coordinate in both `stock` and `result.option`
 to the immutable imperial input converted to millimeters. No numerical tolerance
-permits a reduced clearance or changed outline. Nonempty exclusions require
-`werco-leftovers-v2` with the pinned `werco-stock-exclusions-v1` guard profile and
-an `excludedArea` ledger in square millimeters. This is the union of guarded
+permits a reduced clearance or changed outline. Current stock dimensions, gap and
+margin also retain exact imperial-to-metric source identity. Solver v6's build
+manifest, child `hello.geometry_profile` and immutable `settings.geometry_profile`
+bind the same registered profile reference; each checkpoint `stock.geometryProfile`
+matches its source quote. A stock option itself does not duplicate that group setting.
+
+Every new calculation uses `werco-leftovers-v3` with the exact normative profile
+payload, fixed reservation explanation and a required `excludedArea` ledger in
+square millimeters, including zero for absent/empty exclusions. This is the union of guarded
 exclusions intersected with the inward usable sheet, excluding margin overlap.
 The gross ledger reconciles edge margin + excluded area + nominal parts + reserved
 internal cutouts + clearance/numerical protection + remaining area + bounded
-roundoff residual. Legacy/empty-exclusion options retain leftover v1 without an
-excluded-area field. Stored historical reports remain unchanged.
+roundoff residual. The software profile reserves half-gap plus imported tolerance
+and numerical protection around each part, with square-tangent corners. The entire
+envelope must stay within the inward-protected usable sheet outside the selected
+margin; it cannot be clipped to make a placement valid. Original nominal minimum
+distance checks remain independent. Historical v4/v5 records retain their v1/v2
+leftover objects and prior rules rather than being reinterpreted as v3.
+
+The profile's normative JSON is packaged under
+`app/data/nesting_profiles/werco-compensated-v1.json`. Its SHA-256 covers recursively
+key-sorted compact ASCII JSON `{id,profile}`, excluding the digest itself and any
+trailing newline. Nonintegral constants are decimal strings. Python checks that
+source on load; generated frontend data and the bundled child are checked against
+the same payload. This hash convention does not change older estimate/report hashes.
 
 Run creation/cancellation and worker lifecycle/checkpoint changes use required
 audit writes in the same database transaction. Background lifecycle evidence

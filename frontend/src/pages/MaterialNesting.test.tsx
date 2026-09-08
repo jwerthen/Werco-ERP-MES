@@ -197,7 +197,13 @@ describe('Material Nesting inside the ERP shadow host', () => {
     expect(ui.getByText('100 designs')).toBeInTheDocument();
     expect(ui.getByRole('button', { name: 'Compare sheets' })).toBeEnabled();
     fireEvent.click(ui.getByRole('button', { name: 'Compare sheets' }));
-    await ui.findByText(/100 \/ 100 parts covered/);
+    // This exercises the real contour solver for three stock alternatives.
+    // Avoid repeatedly formatting the 100-row DOM while that work yields.
+    await waitFor(() => expect(mount.textContent).toContain('100 / 100 parts covered'), {
+      container: mount,
+      timeout: 15000,
+    });
+    expect(ui.getByText(/100 \/ 100 parts covered/)).toBeInTheDocument();
 
     const createURL = jest.spyOn(URL, 'createObjectURL');
     jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);

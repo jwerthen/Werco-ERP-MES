@@ -5,10 +5,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.nesting_geometry_profile import geometry_profile_identity
 from app.schemas.base import UTCModel
 
 PROTOCOL_VERSION = 1
-SOLVER_VERSION = "werco-contour-v5"
+SOLVER_VERSION = "werco-contour-v6"
 MAX_OPTIONS = 36
 MAX_SECONDS = 120
 MAX_MESSAGE_BYTES = 8 * 1024 * 1024
@@ -20,6 +21,7 @@ RUN_SETTINGS = {
     "profile": "standard-v1",
     "protocol": PROTOCOL_VERSION,
     "solver_version": SOLVER_VERSION,
+    "geometry_profile": geometry_profile_identity(),
     "max_seconds": MAX_SECONDS,
     "max_option_evaluations": MAX_OPTIONS,
     "max_input_bytes": MAX_ESTIMATE_BYTES,

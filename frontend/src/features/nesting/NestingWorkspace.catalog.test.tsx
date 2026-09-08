@@ -72,7 +72,7 @@ describe('catalog source lifecycle in the estimate workspace', () => {
     if (!(blob instanceof Blob)) throw new Error('Save did not create a project blob.');
     const text = await blobText(blob);
     const saved = JSON.parse(text);
-    expect(saved.version).toBe(5);
+    expect(saved.version).toBe(15);
     const project = projectFromFile(saved);
     expect(project.groups[0].quote.materialBinding).toMatchObject({
       companyId: 2,

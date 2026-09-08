@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 
+from app.core.nesting_geometry_profile import geometry_profile_identity
 from app.db.database import atomic_transaction
 from app.models.audit_log import AuditLog
 from app.models.company import Company
@@ -17,7 +18,9 @@ from app.models.user import UserRole
 from app.schemas.quote_nesting_runs import SOLVER_VERSION
 from app.services import quote_nesting_runs as service
 from app.services.audit_service import AuditService, AuditWriteError
-from tests.api.test_quote_nesting_drafts_contract import project, upload
+from tests.api.test_quote_nesting_drafts_contract import project as legacy_project
+from tests.api.test_quote_nesting_drafts_contract import upload as upload_draft
+from tests.services.test_quote_nesting_runs_service import current_estimate
 
 pytestmark = [pytest.mark.api, pytest.mark.integration]
 BASE = '/api/v1/quote-nesting/runs'
@@ -28,6 +31,14 @@ RUNTIME = dict(
     bundle_sha256='e' * 64,
     node_version='v22.20.0',
 )
+
+
+def project(*args, **kwargs):
+    return current_estimate(legacy_project(*args, **kwargs))
+
+
+def upload(client, headers, source=None, **kwargs):
+    return upload_draft(client, headers, project() if source is None else source, **kwargs)
 
 
 @pytest.fixture(autouse=True)
@@ -161,7 +172,9 @@ def test_effective_view_and_create_permissions_are_both_required_to_change_runs(
 def test_foreign_run_and_revision_ids_do_not_disclose_inputs_or_allow_cancellation(
     client, admin_headers, admin_user, db_session
 ):
-    other = Company(name='Synthetic other tenant', slug='run-other')
+    # The shared fixture seeds company1 explicitly; PostgreSQL's sequence is
+    # deliberately not advanced by that insert. Keep both synthetic IDs explicit.
+    other = Company(id=2, name='Synthetic other tenant', slug='run-other')
     db_session.add(other)
     db_session.flush()
     draft = QuoteNestingDraft(company_id=other.id, name='Foreign inputs', created_by=admin_user.id)
@@ -231,6 +244,7 @@ def test_runtime_binding_and_checkpoint_are_rolled_back_together_with_failed_aud
     with atomic_transaction(db_session):
         _, lease = service.claim_run(db_session, 1, run_id, runtime=RUNTIME)
     hello = {key: RUNTIME[key] for key in ('solver_version', 'bundle_sha256', 'node_version')}
+    hello['geometry_profile'] = geometry_profile_identity()
     with monkeypatch.context() as patch:
         patch.setattr(AuditService, 'log', lambda *args, **kwargs: None)
         with pytest.raises(AuditWriteError), atomic_transaction(db_session):
@@ -260,6 +274,7 @@ def test_runtime_binding_and_checkpoint_are_rolled_back_together_with_failed_aud
             margin=quote['margin'] * 25.4,
             gap=quote['gap'] * 25.4,
             grainAxis='x',
+            geometryProfile=geometry_profile_identity(),
         ),
         result=dict(
             option={**option, 'width': width, 'height': height},

@@ -32,6 +32,7 @@ describe('saved DXF geometry basis in the quoting workspace', () => {
   it('uses net part area for saved contours after an explicit comparison', async () => {
     render(<NestingWorkspace initialQuote={reopenedQuote()} />);
     expect(screen.queryByText('Legacy footprint · re-import DXF')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Use current clearance rules' }));
     fireEvent.click(screen.getByRole('button', { name: 'Compare sheets' }));
     expect(await screen.findByText('Net part area', {}, { timeout: 5000 })).toBeInTheDocument();
     expect(screen.queryByText('Estimated footprint area')).not.toBeInTheDocument();

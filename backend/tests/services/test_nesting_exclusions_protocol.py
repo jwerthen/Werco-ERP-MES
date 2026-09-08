@@ -6,16 +6,23 @@ import math
 
 import pytest
 
-from app.services.nesting_run_protocol import EXCLUSION_PROFILE, RunProtocolError, expected_options, validate_option
+from app.core.nesting_geometry_profile import geometry_profile_identity, geometry_profile_payload
+from app.services.nesting_run_protocol import (
+    COMPENSATED_RESERVATION,
+    RunProtocolError,
+    expected_options,
+    validate_option,
+)
 from app.services.quote_nesting_drafts import canonical_json
 from tests.api.test_quote_nesting_exclusions_contract import exclusion, exclusion_estimate
+from tests.services.test_quote_nesting_runs_service import current_estimate
 
 pytestmark = pytest.mark.unit
 DIGEST = 'a' * 64
 
 
 def checkpoint(*, regions=True, successful=False):
-    source = exclusion_estimate()
+    source = current_estimate(exclusion_estimate())
     quote = source['groups'][0]['quote']
     quote['parts'][0]['quantity'] = 1
     option = quote['options'][0]
@@ -50,6 +57,7 @@ def checkpoint(*, regions=True, successful=False):
         'margin': quote['margin'] * 25.4,
         'gap': quote['gap'] * 25.4,
         'maxSheets': 1,
+        'geometryProfile': geometry_profile_identity(),
     }
     if 'exclusions' in metric:
         stock['exclusions'] = copy.deepcopy(metric['exclusions'])
@@ -89,8 +97,7 @@ def checkpoint(*, regions=True, successful=False):
             'reconciliationResidualArea': 0,
             'regions': [],
         }
-        if excluded:
-            sheet['excludedArea'] = excluded
+        sheet['excludedArea'] = excluded
         message['result'].update(
             error=None,
             complete=True,
@@ -117,12 +124,12 @@ def checkpoint(*, regions=True, successful=False):
             },
             leftovers={
                 'inputSignature': 'synthetic-layout-binding',
-                'version': 'werco-leftovers-v2' if excluded else 'werco-leftovers-v1',
+                'version': 'werco-leftovers-v3',
                 'status': 'potential_review_only',
                 'creditUSD': 0,
                 'assumptions': {
-                    'profile': {'exclusions': copy.deepcopy(EXCLUSION_PROFILE)} if excluded else {},
-                    'reservation': 'Synthetic',
+                    'profile': geometry_profile_payload(),
+                    'reservation': COMPENSATED_RESERVATION,
                     'internalHolesReserved': True,
                     'boundsAreUsableRectangles': False,
                     'eligibilityVerified': False,
@@ -179,7 +186,7 @@ def test_absent_and_explicit_empty_source_fields_are_not_interchangeable(target)
 
 
 @pytest.mark.parametrize('regions', [True, False, 'empty'])
-def test_nonempty_exclusions_alone_require_the_v2_zero_credit_ledger(regions):
+def test_current_calculations_require_v3_with_or_without_exclusions(regions):
     message, expected = checkpoint(regions=regions, successful=True)
     validate_option(message, DIGEST, expected, 1)
     report = message['result']['leftovers']
@@ -211,18 +218,19 @@ def test_excluded_area_cannot_be_missing_invalid_double_counted_or_credited(alte
         validate_option(message, DIGEST, expected, 1)
 
 
-def test_v1_ledger_cannot_gain_a_silent_exclusion_area_field():
+def test_no_exclusions_require_explicit_zero_excluded_area():
     message, expected = checkpoint(regions=False, successful=True)
-    message['result']['leftovers']['sheets'][0]['excludedArea'] = 0
+    message['result']['leftovers']['sheets'][0]['excludedArea'] = 1
+    message['result']['leftovers']['sheets'][0]['remainingArea'] -= 1
     with pytest.raises(RunProtocolError):
         validate_option(message, DIGEST, expected, 1)
 
 
 @pytest.mark.parametrize(
-    'field,value', [('version', 'unapproved-new-profile'), ('numericalProtectionMm', 0), ('partGapFraction', False)]
+    'field,value', [('integerGridMm', '0.001'), ('numericalProtectionMm', 0), ('partGapFraction', False)]
 )
 def test_changed_exclusion_guard_profile_cannot_enter_checkpoint(field, value):
     message, expected = checkpoint(successful=True)
-    message['result']['leftovers']['assumptions']['profile']['exclusions'][field] = value
+    message['result']['leftovers']['assumptions']['profile']['numerics'][field] = value
     with pytest.raises(RunProtocolError):
         validate_option(message, DIGEST, expected, 1)

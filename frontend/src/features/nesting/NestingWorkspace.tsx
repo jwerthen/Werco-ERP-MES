@@ -60,6 +60,8 @@ import {
   projectFromFile,
   projectToFile,
   validateProject,
+  requireCurrentProjectGeometry,
+  upgradeProjectGeometry,
   type QuoteProject,
 } from './lib/quote-project';
 import { autoQuotingSpacing } from './lib/spacing';
@@ -76,6 +78,7 @@ import TeamDrafts from './TeamDrafts';
 import SpacingPolicyControls from './SpacingPolicyControls';
 import StockExclusions, { StockExclusionOverlay, stockExclusionsSvg } from './StockExclusions';
 import { exclusionsToFile } from './lib/stock-exclusion-files';
+import { geometryProfileLabel, resolveGeometryProfile } from './lib/geometry-profile';
 
 type CachedComparison = { comparison: Comparison; signature: string };
 const legacyFootprintNotice =
@@ -471,6 +474,7 @@ export default function NestingWorkspace({
     try {
       const current = stateRef.current.project;
       validateProject(current);
+      requireCurrentProjectGeometry(current);
       if (current.groups.some(group => group.quote.parts.some(part => part.importMode === 'drawing-bounds')))
         throw new Error(legacyFootprintNotice);
       const groups = current.groups.filter(group => group.quote.parts.length);
@@ -945,6 +949,35 @@ export default function NestingWorkspace({
             Cancel comparison
           </button>
         </div>
+      )}
+      {project.groups.some(
+        group => group.quote.parts.length > 0 && !resolveGeometryProfile(group.quote.geometryProfile)
+      ) && (
+        <section className="geometry-profile-notice" aria-label="Clearance rules update">
+          <strong>This estimate uses earlier clearance rules</strong>
+          <p>
+            Before calculating a new nest, update its rules so each part’s full clearance envelope stays inside the edge
+            margin and clear of other parts. Each part reserves half the gap, plus curve and numerical protection.
+            Corner reserves can require more space and more sheets.
+          </p>
+          <button
+            className="primary"
+            disabled={busy || importing}
+            onClick={() => {
+              setProject(upgradeProjectGeometry(stateRef.current.project));
+              setSnapshots({});
+              toast.success(
+                'Clearance rules updated. Compare again; save a new revision for a saved server calculation.'
+              );
+            }}
+          >
+            Use current clearance rules
+          </button>
+          <p className="helper inset-free">
+            Dimensions, part geometry, selected spacing and prices are retained. Saved runs remain under their recorded
+            rules.
+          </p>
+        </section>
       )}
       <fieldset className="workspace-controls" disabled={importing || busy}>
         <div className="material-groups">
@@ -1596,6 +1629,17 @@ export default function NestingWorkspace({
                     Starting estimate: gap = max(1/8 in, thickness); edge = max(3/8 in, twice thickness). Editable
                     quoting allowances, not machine cutting parameters.
                   </p>
+                  <div className="geometry-profile-details">
+                    <strong>{geometryProfileLabel(quote.geometryProfile)}</strong>
+                    {resolveGeometryProfile(quote.geometryProfile) && (
+                      <p className="helper inset-free">
+                        A part’s nominal edge is at least {formatIn(quote.margin + quote.gap / 2)} in from the sheet
+                        edge before curve and numerical protection. Full clearance envelopes must fit inside the edge
+                        band and stay separate; corners may reserve more space. This is a quote geometry rule, not a
+                        machine setting.
+                      </p>
+                    )}
+                  </div>
                   <SpacingPolicyControls
                     key={`${documentEpoch}:${policyReviewEpoch}:${project.activeGroupId}`}
                     quote={quote}

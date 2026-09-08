@@ -14,8 +14,14 @@ const plate = (): Part => ({
   color: 0,
   loops: [rect(25.4, 12.7)],
 });
-function constrainedQuote(): Quote {
-  return { ...createBlankQuote(), grainAxis: 'x', parts: [{ ...plate(), rotationMode: 'half-turn', grainAxis: 'x' }] };
+function constrainedQuote(legacy = false): Quote {
+  const quote: Quote = {
+    ...createBlankQuote(),
+    grainAxis: 'x',
+    parts: [{ ...plate(), rotationMode: 'half-turn', grainAxis: 'x' }],
+  };
+  if (legacy) delete quote.geometryProfile;
+  return quote;
 }
 const readJSON = (value: unknown): unknown => JSON.parse(JSON.stringify(value));
 
@@ -24,6 +30,7 @@ describe('orientation restrictions in saved estimates and draft evidence', () =>
     'keeps legacy project version and boolean rotation semantics with catalog binding=%s',
     catalog => {
       const quote = catalog ? catalogQuoteFixture().quote : createBlankQuote();
+      delete quote.geometryProfile;
       quote.parts = [plate(), { ...plate(), id: 'locked', rotate: false }];
       const saved = projectToFile(createBlankProject(quote));
       expect(saved.version).toBe(catalog ? 5 : 4);
@@ -37,7 +44,7 @@ describe('orientation restrictions in saved estimates and draft evidence', () =>
   );
 
   it('roundtrips source axes and explicit rotations in project6 and standalone quote7 without scaling direction metadata', async () => {
-    const quote = constrainedQuote();
+    const quote = constrainedQuote(true);
     const savedQuote = quoteToFile(quote);
     expect(savedQuote.version).toBe(7);
     expect(savedQuote.grainAxis).toBe('x');
@@ -54,10 +61,12 @@ describe('orientation restrictions in saved estimates and draft evidence', () =>
   });
 
   it('roundtrips a mixed constrained/unconstrained project without applying grain to the other material group', () => {
-    const project = createBlankProject(constrainedQuote());
+    const project = createBlankProject(constrainedQuote(true));
+    const other = createBlankQuote();
+    delete other.geometryProfile;
     project.groups.push({
       id: 'group-2',
-      quote: { ...createBlankQuote(), material: 'Aluminum', parts: [{ ...plate(), id: 'other' }] },
+      quote: { ...other, material: 'Aluminum', parts: [{ ...plate(), id: 'other' }] },
     });
     const saved = projectToFile(project);
     expect(saved.version).toBe(6);
@@ -102,7 +111,7 @@ describe('orientation restrictions in saved estimates and draft evidence', () =>
   it('retains a sheet-only restriction and rejects corrupt saved part or sheet axes', () => {
     const quote: Quote = { ...createBlankQuote(), grainAxis: 'y', parts: [plate()] };
     const saved = quoteToFile(quote);
-    expect(saved.version).toBe(7);
+    expect(saved.version).toBe(14);
     expect(quoteFromFile(readJSON(saved)).grainAxis).toBe('y');
     expect(() => quoteFromFile({ ...saved, grainAxis: 'unknown' })).toThrow(/grain/i);
     expect(() => quoteFromFile({ ...saved, parts: [{ ...saved.parts[0], rotationMode: 'free' }] })).toThrow(
@@ -125,7 +134,7 @@ describe('orientation restrictions in saved estimates and draft evidence', () =>
   });
 
   it('refuses new constraints disguised as an older quote or job version', () => {
-    const quote = constrainedQuote();
+    const quote = constrainedQuote(true);
     expect(() => quoteFromFile({ ...quoteToFile(quote), version: 3 })).toThrow(/version/i);
     const job: Job = {
       version: 1,
@@ -195,7 +204,7 @@ describe('orientation restrictions in saved estimates and draft evidence', () =>
       expect([90, 270]).toContain(alternative.placements[0].rotationDegrees);
     }
     expect(record.content.solver).toMatchObject({
-      version: 'werco-contour-v5',
+      version: 'werco-contour-v6',
       orientationPolicy: 'werco-orientation-v1',
     });
     expect(record.content.authoritativeApproval).toBe(false);

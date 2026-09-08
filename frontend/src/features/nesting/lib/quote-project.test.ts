@@ -71,8 +71,8 @@ describe('material estimate projects', () => {
     ];
     source.geometryToleranceMm = 0.00254;
     const file = projectToFile(project);
-    expect(file).toMatchObject({ version: 4, units: 'in', activeGroupId: 'aluminum' });
-    expect(file.groups[0].quote.version).toBe(3);
+    expect(file).toMatchObject({ version: 15, units: 'in', activeGroupId: 'aluminum' });
+    expect(file.groups[0].quote.version).toBe(14);
     const restored = projectFromFile(JSON.parse(JSON.stringify(file)));
     expect(restored.name).toBe(project.name);
     expect(restored.activeGroupId).toBe('aluminum');
@@ -86,6 +86,7 @@ describe('material estimate projects', () => {
 
   it('opens a legacy single quote without changing its spacing, prices, or quantity', () => {
     const quote = mixedProject().groups[0].quote;
+    delete quote.geometryProfile;
     quote.parts[0].quantity = 8;
     const project = projectFromFile(quoteToFile(quote));
     expect(project.groups).toHaveLength(1);

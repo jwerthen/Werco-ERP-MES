@@ -2815,3 +2815,9 @@ input[type='number'] {
 .stock-exclusion-overlay path { vector-effect: non-scaling-stroke; }
 .stock-card > .secondary { margin: 12px 0 0; }
 @media (max-width: 560px) { .stock-exclusion-form .two-fields { grid-template-columns: 1fr; } }
+
+/* Explicit, reviewable upgrade from historical quote geometry rules. */
+.quote-app .geometry-profile-notice{margin:14px 0;padding:16px;border:1px solid #d79b36;border-radius:10px;background:#273047;color:#f8fafc;max-width:100%;overflow-wrap:anywhere}
+.quote-app .geometry-profile-notice p{max-width:100ch;margin:8px 0 12px;line-height:1.5}
+.quote-app .geometry-profile-notice .primary{white-space:normal}
+.quote-app .geometry-profile-details{padding:10px;border:1px solid #475569;border-radius:8px;margin:8px 0 12px;font-size:12px;overflow-wrap:anywhere}

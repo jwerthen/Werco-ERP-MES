@@ -107,7 +107,7 @@ describe('rotation and grain controls in the quote workspace', () => {
     if (!(blob instanceof Blob)) throw new Error('Missing saved estimate blob.');
     const savedText = await readBlob(blob);
     const saved = JSON.parse(savedText);
-    expect(saved.version).toBe(6);
+    expect(saved.version).toBe(15);
     expect(projectFromFile(saved).groups[0].quote).toMatchObject({
       grainAxis: 'x',
       parts: [{ rotationMode: 'half-turn', grainAxis: 'x' }],

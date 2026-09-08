@@ -1,0 +1,60 @@
+{
+  "identity": {
+    "id": "werco-compensated-v1",
+    "sha256": "21e8689fb2ce80c72befbc5866f658cd74fe8ed336d1b5c070e182f3081aa55a"
+  },
+  "profile": {
+    "budgets": {
+      "maxCircleVertices": 8192,
+      "maxEnvelopeVertices": 120000,
+      "maxExclusionGuardedVertices": 60000,
+      "maxExclusionRegions": 16,
+      "maxExclusionSourceVertices": 2000,
+      "maxIntersectionEdgePairs": 8000000,
+      "maxLeftoverInputVertices": 60000,
+      "maxLeftoverOutputVertices": 120000,
+      "maxLeftoverRegions": 2000,
+      "maxProjectSourceVertices": 20000,
+      "maxSheetLeftoverOutputVertices": 30000
+    },
+    "internalUnit": "mm",
+    "numerics": {
+      "absoluteAreaToleranceMm2": "0.0000001",
+      "circleRadialExcessMm": "0.00254",
+      "integerGridMm": "0.0001",
+      "maxExclusionClearanceMm": "2540",
+      "maxOffsetReserveMm": "40000",
+      "maximumConvexJoinRadiusFactor": "1.4142135623730951",
+      "nominalDistanceEpsilonMm": "0.0000001",
+      "numericalProtectionMm": "0.0004",
+      "partGapFraction": "0.5",
+      "relativeAreaTolerance": "0.000000000001",
+      "usableBoundaryInsetMm": "0.0004"
+    },
+    "rules": {
+      "boundaryContact": "allowed-if-interiors-disjoint-and-nominal-minimum-passes",
+      "circleApproximation": "circumscribed-with-bounded-radial-excess",
+      "envelopeVertexBudget": "each-offset-or-boolean-output-and-aggregate-prepared-part-orientations-and-exclusions",
+      "exclusionReserve": "entered-clearance-plus-numerical-protection",
+      "internalCutouts": "reserved",
+      "nominalChecksFrame": "original-unrounded-transformed-source",
+      "nominalExclusionMinimum": "half-gap-plus-curve-plus-entered-clearance-plus-two-numerical-protections",
+      "nominalMinimumChecks": "independent",
+      "offsetDistanceRounding": "ceil-integer-grid",
+      "offsetJoin": "square-tangent",
+      "partEnvelopeFrame": "rotated-source-normalized-origin-then-quantized",
+      "partEnvelopeTranslation": "exact-integer-translation-of-prepared-origin-envelope",
+      "partReserve": "half-gap-plus-imported-curve-tolerance-plus-numerical-protection",
+      "partToExclusion": "disjoint-compensated-interiors",
+      "partToPart": "disjoint-compensated-interiors",
+      "partToUsableStock": "entire-envelope-inside-inward-boundary",
+      "placementCoordinateValidation": "equals-nearest-integer-divided-by-grid-scale",
+      "placementTranslations": "integer-grid",
+      "significantGeometryRepair": "requires-explicit-review",
+      "sourceVertexRounding": "nearest-integer-grid",
+      "usableMaximumRounding": "floor-integer-grid",
+      "usableMinimumRounding": "ceil-integer-grid"
+    },
+    "schemaVersion": 1
+  }
+}

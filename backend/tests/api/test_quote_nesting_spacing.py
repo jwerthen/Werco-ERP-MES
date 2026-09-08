@@ -183,13 +183,15 @@ def test_exact_snapshot_save_refuses_tampering_and_legacy_hash_is_unchanged(clie
 
 
 def test_withdrawn_policy_blocks_new_save_and_run_but_queued_replay_is_preserved(client, admin_headers, monkeypatch):
+    from tests.services.test_quote_nesting_runs_service import current_estimate
+
     monkeypatch.setattr(
         "app.api.endpoints.quote_nesting_runs.runtime_status",
         AsyncMock(return_value={"available": True, "identity": RUNTIME}),
     )
     monkeypatch.setattr("app.services.quote_nesting_run_outbox.enqueue_job_best_effort", lambda *args, **kwargs: True)
     publication, _ = published(client, admin_headers)
-    source = policy_estimate(resolved(client, admin_headers).json()["policy"])
+    source = current_estimate(policy_estimate(resolved(client, admin_headers).json()["policy"]))
     saved = save(client, admin_headers, source).json()
     run_body = {
         "draft_id": saved["draft_id"],

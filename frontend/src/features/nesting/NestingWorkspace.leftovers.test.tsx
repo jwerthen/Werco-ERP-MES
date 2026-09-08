@@ -47,7 +47,8 @@ describe('potential leftover review in the estimate workspace', () => {
     expect(panel.getByRole('heading', { name: 'Review potential leftovers · sheet 1' })).toBeInTheDocument();
     expect(panel.getByText('$0 credited')).toBeInTheDocument();
     expect(panel.getByText(/A connected region can still be an unusable skeleton/)).toBeInTheDocument();
-    expect(panel.getByText('Extents do not guarantee a usable rectangle.')).toBeInTheDocument();
+    const regionButtons = panel.getAllByRole('button', { name: /^Highlight leftover region/ });
+    expect(panel.getAllByText('Extents do not guarantee a usable rectangle.')).toHaveLength(regionButtons.length);
     const highlight = panel.getByRole('button', { name: 'Highlight leftover region 1' });
     expect(highlight).toHaveAttribute('aria-pressed', 'false');
     fireEvent.click(highlight);

@@ -169,6 +169,31 @@ preview and area ledger. Only nonempty regions select `werco-leftovers-v2` with
 These are hypothetical sheet-option constraints, not verified physical stock,
 reservations, inventory records or machine zones.
 
+Current compensated-envelope calculations require solver `werco-contour-v6`,
+quote 14/project 15 and the exact `werco-compensated-v1` geometry identity together.
+Local legacy-style job 16 is not a server project wrapper. Fresh estimates carry
+the current profile; Open never adds it to old inputs automatically. Every populated
+group must explicitly use current clearance rules before a new comparison or run.
+Save that input change as a new revision; historical v4/v5 results remain frozen
+under their recorded solver/source/report identities rather than being recalculated.
+
+The normative wrapper is `backend/app/data/nesting_profiles/werco-compensated-v1.json`.
+Its generated frontend adapter is checked by
+`python3 .github/scripts/generate_nesting_profile.py --check`; CI rejects drift.
+Standalone frontend and Node builds self-check the adapter, preserving their existing
+frontend-only build context. Python verifies the normative wrapper on load. The
+canonical profile digest covers its ID and complete payload; changing whitespace is
+not a profile change. The worker manifest and Node hello carry `geometry_profile`,
+which must match the source and checkpoint evidence. Heartbeat DTOs remain unchanged:
+the existing exact release/solver/bundle/Node and fresh post-Redis active-worker gate
+still controls public promotion. No migration, environment variable or cron changes.
+
+Verify explicit legacy-input upgrade and new v3 leftover evidence, including
+`excludedArea` even when zero. The full compensated envelope must fit inside the
+reserved edge band and clear other part/exclusion envelopes; previously fitting
+layouts can require more sheets. This is versioned software geometry, not a shop
+allowance approval, physical-stock verification, reservation or inventory credit.
+
 `frontend/vercel.json` already builds with `npm run build`, publishes `build/`,
 and rewrites SPA paths to `/index.html`, so opening or refreshing `/nest` uses
 the existing application router. Feature assets are bundled from
@@ -235,6 +260,12 @@ An exclusions rollback also retains quote 11/project 12 inputs and local job 13 
 Restore compatible API, frontend and worker images; do not erase exclusion outlines,
 clearances or version discriminators to force an old reader to accept them. Keep
 historical checkpoints unchanged. No database downgrade is required for exclusions.
+
+On a compensated-profile rollback, retain quote 14/project 15 inputs, local job 16
+files and immutable v6 history. An older release can refuse new calculations or new
+file formats; never remove profile identity, downgrade input versions or rewrite old
+checkpoints. Restore compatible API/frontend/worker images. The additive existing
+history schema remains in place; this profile adds no migration to downgrade.
 
 The orientation/grain increment changes only frontend behavior and local file
 formats; it adds no API, permission, migration, or environment requirement.

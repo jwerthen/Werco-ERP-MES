@@ -11,6 +11,8 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from app.schemas.quote_nesting_runs import SOLVER_VERSION
+
 pytestmark = [pytest.mark.unit]
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("worker_release", ROOT / ".github/scripts/verify_worker_release.py")
@@ -24,12 +26,7 @@ def evidence():
     deployment = {"id": "new-deployment", "status": "SUCCESS", "createdAt": (now - timedelta(seconds=60)).isoformat()}
     manifest = {
         "protocol": 1,
-        # Read the kernel's declared version so a stale deployment pin fails this
-        # verifier's full-path tests when a future solver profile ships.
-        "solver_version": re.search(
-            r"export const SOLVER_VERSION = '([^']+)'",
-            (ROOT / "frontend/src/features/nesting/lib/run-manifest.ts").read_text(),
-        ).group(1),
+        "solver_version": SOLVER_VERSION,
         "bundle_sha256": "b" * 64,
         "node_version": "v22.23.2",
     }
@@ -45,6 +42,31 @@ def evidence():
 
 def line(identity):
     return json.dumps({"message": json.dumps({"event": "nesting_runtime_ready", "identity": identity})})
+
+
+def test_server_build_manifest_and_application_share_the_release_identity():
+    build_script = (ROOT / 'frontend/tools/build-nesting-worker.mjs').read_text()
+    declared = re.search(r"solver_version:\s*['\"]([^'\"]+)['\"]", build_script)
+    assert declared is not None and declared.group(1) == SOLVER_VERSION
+    source = (ROOT / 'frontend/src/features/nesting/lib/run-manifest.ts').read_text()
+    shared = re.search(r"export const SOLVER_VERSION\s*=\s*['\"]([^'\"]+)['\"]", source)
+    assert shared is not None and shared.group(1) == SOLVER_VERSION
+    # Existing verify() tests use the application identity, rather than a second
+    # copy of the verifier's literal, and therefore fail if its strict pin drifts.
+
+
+@pytest.mark.parametrize(
+    'solver', ['werco-contour-v4', 'werco-contour-v5', 'werco-contour-v7', 'werco-contour-v6-extra']
+)
+def test_old_future_or_prefix_solver_cannot_pass_the_strict_release_pin(evidence, tmp_path, monkeypatch, solver):
+    _, _, manifest, _ = evidence
+    manifest['solver_version'] = solver
+    path = tmp_path / 'manifest.json'
+    path.write_text(json.dumps(manifest))
+    monkeypatch.setattr(release, 'command', lambda _: pytest.fail('Invalid manifest must fail before platform queries'))
+    args = SimpleNamespace(manifest=path, expect='a' * 40, timeout=1, service='werco-worker', environment='production')
+    with pytest.raises(ValueError, match='Invalid expected release'):
+        release.verify(args)
 
 
 def status(deployment, active=True):
@@ -159,18 +181,6 @@ def test_verifier_rechecks_platform_state_after_reading_heartbeat(evidence, tmp_
         assert "Active worker verified" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("solver", ["werco-contour-v4", "unknown-solver"])
-def test_verifier_rejects_old_or_unknown_manifest_before_platform_reads(evidence, tmp_path, monkeypatch, solver):
-    _, _, manifest, _ = evidence
-    manifest["solver_version"] = solver
-    path = tmp_path / "manifest.json"
-    path.write_text(json.dumps(manifest))
-    monkeypatch.setattr(release, "command", lambda _args: pytest.fail("Invalid manifest must not query Railway"))
-    args = SimpleNamespace(manifest=path, expect="a" * 40, timeout=1, service="werco-worker", environment="production")
-    with pytest.raises(ValueError, match="Invalid expected release or CI runtime manifest"):
-        release.verify(args)
-
-
 def test_image_and_postdeploy_runtime_gates_are_enforced_before_promotion():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci-cd.yml").read_text())
     build = workflow["jobs"]["build"]["steps"]
@@ -197,6 +207,22 @@ def test_compose_worker_preserves_packaged_runtime_and_api_stays_python_only():
         )
         assert "nesting-runtime" not in active and "node:" not in active
     assert "nesting-runtime/" in (ROOT / "backend/.dockerignore").read_text()
+
+
+def test_isolated_frontend_production_build_contains_its_required_profile_verifier():
+    package = json.loads((ROOT / 'frontend/package.json').read_text())
+    assert 'node tools/verify-nesting-profile.mjs' in package['scripts']['build']
+    production = (ROOT / 'frontend/Dockerfile.prod').read_text()
+    copy = 'COPY tools/verify-nesting-profile.mjs ./tools/'
+    assert copy in production and production.index(copy) < production.index('RUN npm run build')
+    assert (ROOT / 'frontend/tools/verify-nesting-profile.mjs').is_file()
+    assert 'COPY src ./src' in production
+    generated = ROOT / 'frontend/src/features/nesting/lib/geometry-profile.generated.json'
+    assert generated.is_file()
+    # Railway uploads frontend/ alone, so the verifier must not require ../backend.
+    checker = (ROOT / 'frontend/tools/verify-nesting-profile.mjs').read_text()
+    assert '../src/features/nesting/lib/geometry-profile.generated.json' in checker
+    assert '../backend' not in checker
 
 
 def test_image_smoke_timeout_removes_only_its_own_container(monkeypatch):

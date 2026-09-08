@@ -1,3 +1,4 @@
+import { CURRENT_GEOMETRY_PROFILE } from '../src/features/nesting/lib/geometry-profile';
 /** Fixed worker entrypoint. The caller supplies data over stdin, never code. */
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -43,6 +44,7 @@ async function main() {
       protocol: 1,
       input_sha256: inputSha256,
       solver_version: SERVER_RUN_PROFILE.solverVersion,
+      geometry_profile: CURRENT_GEOMETRY_PROFILE,
       bundle_sha256: createHash('sha256').update(readFileSync(__filename)).digest('hex'),
       node_version: process.version,
       units: 'mm',

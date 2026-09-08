@@ -1,6 +1,8 @@
 """Exercise the packaged solver as its non-root user, without a network or secrets."""
 
 import argparse
+import copy
+import hashlib
 import json
 import math
 import subprocess
@@ -9,6 +11,19 @@ from uuid import uuid4
 
 NODE_VERSION = "v22.23.2"
 RUNTIME = "/app/nesting-runtime/"
+
+
+def profile_wrapper():
+    source = Path(__file__).resolve().parents[2] / 'backend/app/data/nesting_profiles/werco-compensated-v1.json'
+    wrapper = json.loads(source.read_bytes())
+    canonical = json.dumps(
+        {'id': wrapper['identity']['id'], 'profile': wrapper['profile']},
+        sort_keys=True,
+        separators=(',', ':'),
+        ensure_ascii=True,
+    )
+    assert hashlib.sha256(canonical.encode('ascii')).hexdigest() == wrapper['identity']['sha256']
+    return wrapper
 
 
 def container(image, args, payload=None):
@@ -41,7 +56,7 @@ def container(image, args, payload=None):
 
 def fixture():
     return {
-        "version": 4,
+        "version": 15,
         "units": "in",
         "currency": "USD",
         "name": "Image smoke",
@@ -50,7 +65,8 @@ def fixture():
             {
                 "id": "group",
                 "quote": {
-                    "version": 3,
+                    "version": 14,
+                    'geometryProfile': profile_wrapper()['identity'],
                     "units": "in",
                     "currency": "USD",
                     "name": "Image smoke",
@@ -89,9 +105,7 @@ def fixture():
 
 def exclusion_fixture():
     value = fixture()
-    value['version'] = 12
     quote = value['groups'][0]['quote']
-    quote['version'] = 11
     quote['options'][0]['exclusions'] = [
         {
             'id': 'synthetic-unavailable-strip',
@@ -132,12 +146,9 @@ def verify_exclusion_option(option, source):
     boundary = (2 + region['clearance'] + quote['gap'] / 2) * 25.4 + 0.0008
     assert all(placement['x'] >= boundary - 1e-7 for placement in result['nest']['placements'])
     report = result['leftovers']
-    assert report['version'] == 'werco-leftovers-v2'
+    assert report['version'] == 'werco-leftovers-v3'
     assert report['status'] == 'potential_review_only' and report['creditUSD'] == 0
-    profile = report['assumptions']['profile']['exclusions']
-    assert profile['version'] == 'werco-stock-exclusions-v1'
-    assert profile['numericalProtectionMm'] == 0.0004 and profile['partGapFraction'] == 0.5
-    assert profile['offsetJoin'] == 'square-tangent' and profile['maxIntersectionEdgePairs'] == 8000000
+    assert report['assumptions']['profile'] == profile_wrapper()['profile']
     for sheet in report['sheets']:
         assert 10 * 25.4**2 < sheet['excludedArea'] < 13 * 25.4**2
         accounted = sum(
@@ -156,6 +167,34 @@ def verify_exclusion_option(option, source):
         assert all(region['classification'] == 'review' and region['creditUSD'] == 0 for region in sheet['regions'])
 
 
+def verify_compensated_option(option, source):
+    """Independent rectangle envelope bounds, without calling the shared solver."""
+    quote = source['groups'][0]['quote']
+    stock, result = option['stock'], option['result']
+    assert stock['geometryProfile'] == quote['geometryProfile'] == profile_wrapper()['identity']
+    edge = (quote['margin'] + quote['gap'] / 2) * 25.4 + 0.0008
+    placed = result['nest']['placements']
+    for part in placed:
+        for axis, dimension in (('x', 'width'), ('y', 'height')):
+            assert edge - 1e-7 <= part[axis]
+            assert part[axis] + part[dimension] <= stock[dimension] - edge + 1e-7
+    for index, a in enumerate(placed):
+        for b in placed[index + 1 :]:
+            if a['sheet'] != b['sheet']:
+                continue
+            distance = math.hypot(
+                max(0, b['x'] - a['x'] - a['width'], a['x'] - b['x'] - b['width']),
+                max(0, b['y'] - a['y'] - a['height'], a['y'] - b['y'] - b['height']),
+            )
+            assert distance >= quote['gap'] * 25.4 + 0.0008 - 1e-7
+    report = result['leftovers']
+    assert report['version'] == 'werco-leftovers-v3'
+    assert report['assumptions']['profile'] == profile_wrapper()['profile']
+    assert report['creditUSD'] == 0
+    if not quote['options'][0].get('exclusions'):
+        assert all(sheet['excludedArea'] == 0 for sheet in report['sheets'])
+
+
 def smoke(image):
     inspect = container(
         image,
@@ -164,7 +203,8 @@ def smoke(image):
             (
                 'const fs=require("node:fs"),c=require("node:crypto"),p="' + RUNTIME + '";'
                 'const manifest=JSON.parse(fs.readFileSync(p+"manifest.json"));'
-                'console.log(JSON.stringify({manifest,node_version:process.version,uid:process.getuid(),'
+                'const profile=JSON.parse(fs.readFileSync("/app/app/data/nesting_profiles/werco-compensated-v1.json"));'
+                'console.log(JSON.stringify({manifest,profile,node_version:process.version,uid:process.getuid(),'
                 'actual_sha256:c.createHash("sha256").update(fs.readFileSync(p+"solver.cjs")).digest("hex")}));'
             ),
         ],
@@ -175,7 +215,9 @@ def smoke(image):
     assert identity["uid"] != 0, "The solver must run as the worker's non-root user"
     assert identity["node_version"] == NODE_VERSION
     assert manifest["protocol"] == 1 and manifest["node_major"] == 22
-    assert manifest["solver_version"] == "werco-contour-v5"
+    assert manifest["solver_version"] == "werco-contour-v6"
+    assert identity['profile'] == profile_wrapper()
+    assert manifest['geometry_profile'] == identity['profile']['identity']
     assert manifest["entrypoint"] == "solver.cjs" and manifest["max_option_evaluations"] == 36
     assert manifest["bundle_sha256"] == identity["actual_sha256"]
     payload = {"protocol": 1, "input_sha256": "a" * 64, "estimate": fixture()}
@@ -192,13 +234,13 @@ def smoke(image):
         "solver_version": manifest["solver_version"],
         "bundle_sha256": manifest["bundle_sha256"],
         "node_version": NODE_VERSION,
+        'geometry_profile': manifest['geometry_profile'],
     }
     assert option["type"] == "option" and option["requested"] == 2
     assert option["result"]["complete"] and len(option["result"]["nest"]["placements"]) == 2
     assert summary["type"] == "summary" and summary["stop_reason"] == "completed"
     assert summary["evaluated_count"] == summary["complete_option_count"] == summary["total_options"] == 1
-    assert option['result']['leftovers']['version'] == 'werco-leftovers-v1'
-    assert all('excludedArea' not in sheet for sheet in option['result']['leftovers']['sheets'])
+    verify_compensated_option(option, payload['estimate'])
     excluded_source = exclusion_fixture()
     excluded_payload = {**payload, 'estimate': excluded_source}
     excluded = container(image, [RUNTIME + 'solver.cjs'], json.dumps(excluded_payload))
@@ -206,6 +248,7 @@ def smoke(image):
     excluded_messages = [json.loads(line) for line in excluded.stdout.splitlines()]
     assert [message['type'] for message in excluded_messages] == ['hello', 'option', 'summary']
     verify_exclusion_option(excluded_messages[1], excluded_source)
+    verify_compensated_option(excluded_messages[1], excluded_source)
     assert excluded_messages[2]['complete_option_count'] == 1
     excluded_source['version'] = 10
     excluded_source['groups'][0]['quote']['version'] = 9
@@ -214,6 +257,20 @@ def smoke(image):
     downgrade_messages = [json.loads(line) for line in downgraded.stdout.splitlines()]
     assert [message['type'] for message in downgrade_messages] == ['hello', 'error']
     assert downgrade_messages[-1]['code'] == 'invalid_geometry'
+    # A valid old source remains openable/savable, but cannot be silently upgraded
+    # by the worker. Preflight the entire mixed project before emitting an option.
+    legacy_group = copy.deepcopy(fixture()['groups'][0])
+    legacy_group['id'] = 'old-group'
+    legacy_group['quote'].update(version=3, thickness=0.25)
+    legacy_group['quote'].pop('geometryProfile')
+    legacy_group['quote']['parts'][0]['id'] = 'old-plate'
+    mixed = fixture()
+    mixed['groups'].append(legacy_group)
+    mixed_run = container(image, [RUNTIME + 'solver.cjs'], json.dumps({**payload, 'estimate': mixed}))
+    assert mixed_run.returncode == 2 and not mixed_run.stderr
+    mixed_messages = [json.loads(line) for line in mixed_run.stdout.splitlines()]
+    assert [message['type'] for message in mixed_messages] == ['hello', 'error']
+    assert mixed_messages[-1]['code'] == 'invalid_geometry'
     payload["estimate"]["units"] = "mm"
     invalid = container(image, [RUNTIME + "solver.cjs"], json.dumps(payload))
     assert invalid.returncode == 2 and not invalid.stderr

@@ -261,7 +261,7 @@ paths, minimal child environment and byte/time/heap limits are enforced in
 runtime heartbeats contain build metadata only. Each validated stock option is
 retained as an immutable checkpoint; cancellation/timeouts keep earlier results
 without claiming infeasibility. COMPLETED means planned options evaluated, not
-that every part fits. Solver `werco-contour-v5` uses locale-independent code-unit
+that every part fits. Solver `werco-contour-v6` uses locale-independent code-unit
 tie-breaking. Seed is null; exact saved inputs, runtime/build and completed work
 are the replay boundary, not elapsed wall time.
 
@@ -293,6 +293,33 @@ Quote 11/project 12 discriminators protect exclusion-bearing inputs; legacy job 
 is local-only. Solver v5 and the exact worker/image readiness gate prevent an older
 runtime from silently dropping constraints. No migration, RBAC, environment, cron,
 physical inventory, reservation or manufacturing approval change is included.
+
+### Current compensated-envelope identity and history
+
+Use normative `backend/app/data/nesting_profiles/werco-compensated-v1.json` and its
+checked-in generated frontend adapter, never two manually maintained profiles.
+`python3 .github/scripts/generate_nesting_profile.py --check` verifies their exact
+canonical payload in CI; frontend/Node standalone builds self-check the adapter and
+Python checks the source. Hash recursively sorted compact ASCII `{id, profile}`
+without a terminal newline. The current identity is `werco-compensated-v1` with SHA
+`21e8689fb2ce80c72befbc5866f658cd74fe8ed336d1b5c070e182f3081aa55a`.
+Do not reuse or change historical estimate/report canonicalizers for this hash.
+
+New comparisons/runs use solver v6 and explicit quote 14/project 15 identity; local
+job 16 remains local-only. Fresh groups carry the profile, but opening old inputs
+adds nothing. Every populated group must explicitly upgrade before any new option
+runs; the upgrade preserves source numbers/policy/exclusions and invalidates live
+comparisons, then requires a new saved revision for server execution. The current
+profile reserves full guarded part envelopes against each other, exclusions and
+inward usable stock; independent nominal checks still apply. V3 leftover evidence
+always carries excluded area, including zero. Older v4/v5 runs select only their
+frozen validator from bound run/settings/source/report identities; a report label
+cannot choose weaker rules or cause historical geometry to be recalculated.
+
+Manifest and Node hello carry `geometry_profile`; the Redis heartbeat DTO remains
+unchanged. The API/worker/frontend must share the exact profile and bundle release
+before promotion. No migration, environment, cron, physical inventory, reservation,
+shop-policy approval or quote approval is created by this geometry identity.
 
 ### Quote-spacing policy invariants
 

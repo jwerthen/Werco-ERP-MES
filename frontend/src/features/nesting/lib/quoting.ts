@@ -1,5 +1,11 @@
+import {
+  CURRENT_GEOMETRY_PROFILE,
+  resolveGeometryProfile,
+  requireCurrentGeometryProfile,
+  type GeometryProfileRef,
+} from './geometry-profile';
 import { analyzeLeftovers, type LeftoverAnalysis } from './leftovers';
-import { allowedRotations, hasOrientationConstraints, orientationExplanation, type GrainAxis } from './orientation';
+import { hasOrientationConstraints, orientationExplanation, type GrainAxis } from './orientation';
 import { autoQuotingSpacing } from './spacing';
 import {
   validatePolicySnapshot,
@@ -7,7 +13,16 @@ import {
   type SpacingPolicySnapshot,
   type SpacingOverride,
 } from './spacing-policy';
-import { bounds, validatePart, validateJob, nestParts, type Part, type Stock, type Nest, demoJob } from './nesting';
+import {
+  validatePart,
+  validateJob,
+  nestParts,
+  partFitsUsableStock,
+  type Part,
+  type Stock,
+  type Nest,
+  demoJob,
+} from './nesting';
 import { compareStableText } from './stable-order';
 import { exclusionVertexCount, validateStockExclusions, type StockExclusion } from './stock-exclusions';
 import { exclusionsFromFile, exclusionsToFile } from './stock-exclusion-files';
@@ -37,6 +52,7 @@ export function editSheetOption(option: SheetOption, patch: Partial<SheetOption>
 }
 export type Quote = {
   version: 1;
+  geometryProfile?: GeometryProfileRef;
   grainAxis?: GrainAxis;
   materialBinding?: MaterialBinding;
   spacingMode?: 'auto' | 'manual' | 'policy';
@@ -92,6 +108,7 @@ export const standardOptions: SheetOption[] = [
 export function createBlankQuote(): Quote {
   return {
     version: 1,
+    geometryProfile: { ...CURRENT_GEOMETRY_PROFILE },
     name: 'New material estimate',
     material: 'Carbon steel',
     thickness: inToMm(0.125),
@@ -116,6 +133,7 @@ export const demoQuote: Quote = {
 export function validateQuote(value: unknown): Quote {
   const q = value as Quote;
   check(q && q.version === 1, 'Unsupported estimate version.');
+  resolveGeometryProfile(q.geometryProfile);
   check(q.grainAxis === undefined || ['x', 'y'].includes(q.grainAxis), 'Invalid sheet grain axis.');
   check(q.spacingMode === undefined || ['auto', 'manual', 'policy'].includes(q.spacingMode), 'Invalid spacing mode.');
   check(
@@ -225,6 +243,7 @@ export function validateQuote(value: unknown): Quote {
 }
 export function stockFor(q: Quote, o: SheetOption): Stock {
   return {
+    ...(q.geometryProfile !== undefined ? { geometryProfile: q.geometryProfile } : {}),
     ...(q.grainAxis !== undefined ? { grainAxis: q.grainAxis } : {}),
     ...(o.exclusions !== undefined ? { exclusions: o.exclusions } : {}),
     width: o.width,
@@ -241,6 +260,7 @@ export function stockFor(q: Quote, o: SheetOption): Stock {
 }
 /** Shared browser/server calculation. Call validateQuote before evaluating options. */
 export function calculateSheetOption(q: Quote, option: SheetOption): OptionResult {
+  requireCurrentGeometryProfile(q.geometryProfile);
   const requested = q.parts.reduce((a, p) => a + p.quantity, 0);
   try {
     const nest = nestParts(q.parts, stockFor(q, option));
@@ -276,6 +296,7 @@ export function calculateSheetOption(q: Quote, option: SheetOption): OptionResul
 
 export function compareSheets(q: Quote): Comparison {
   validateQuote(q);
+  requireCurrentGeometryProfile(q.geometryProfile);
   const requested = q.parts.reduce((a, p) => a + p.quantity, 0);
   const results = q.options.filter(o => o.enabled).map(option => calculateSheetOption(q, option));
   if (!requested)
@@ -335,13 +356,17 @@ export function quoteToFile(q: Quote) {
   return {
     // Quote 7 is distinct from project 6 and legacy job 8; old readers must
     // reject a constraint-bearing file instead of silently relaxing its rules.
-    version: q.options.some(option => option.exclusions !== undefined)
-      ? 11
-      : q.spacingPolicy || q.spacingOverride
-        ? 9
-        : hasOrientationConstraints(q.parts, q)
-          ? 7
-          : 3,
+    version:
+      q.geometryProfile !== undefined
+        ? 14
+        : q.options.some(option => option.exclusions !== undefined)
+          ? 11
+          : q.spacingPolicy || q.spacingOverride
+            ? 9
+            : hasOrientationConstraints(q.parts, q)
+              ? 7
+              : 3,
+    ...(q.geometryProfile !== undefined ? { geometryProfile: q.geometryProfile } : {}),
     ...(q.spacingPolicy ? { spacingPolicy: q.spacingPolicy } : {}),
     ...(q.spacingOverride ? { spacingOverride: q.spacingOverride } : {}),
     ...(q.grainAxis !== undefined ? { grainAxis: q.grainAxis } : {}),
@@ -367,27 +392,37 @@ export function quoteToFile(q: Quote) {
 export function quoteFromFile(input: unknown): Quote {
   if (!input || typeof input !== 'object') throw new Error('Invalid estimate file.');
   const d = input as Record<string, unknown>;
+  if (d.version === 14) requireCurrentGeometryProfile(d.geometryProfile);
+  else
+    check(
+      !Object.prototype.hasOwnProperty.call(d, 'geometryProfile'),
+      'Geometry profiles require a version 14 estimate.'
+    );
   check(
     d.version === 9 ||
       d.version === 11 ||
+      d.version === 14 ||
       (d.spacingPolicy === undefined && d.spacingOverride === undefined && d.spacingMode !== 'policy'),
     'Spacing policies require a version 9 or 11 estimate.'
   );
   check(
     d.version === 11 ||
+      d.version === 14 ||
       !Array.isArray(d.options) ||
       d.options.every(option => !option || !Object.prototype.hasOwnProperty.call(option, 'exclusions')),
     'Stock exclusions require a version 11 estimate.'
   );
-  if (d.version === 3 || d.version === 7 || d.version === 9 || d.version === 11) {
+  if (d.version === 3 || d.version === 7 || d.version === 9 || d.version === 11 || d.version === 14) {
     check(d.units === 'in', 'Estimate file must explicitly declare inches.');
     check(d.version !== 3 || d.grainAxis === undefined, 'Sheet grain requires estimate version 7 or 9.');
     check(d.currency === undefined || d.currency === 'USD', 'This estimate uses USD sheet prices.');
     check(Array.isArray(d.options) && d.options.length <= 12, 'Invalid stock options.');
+    const partSource = { ...d };
+    delete partSource.geometryProfile;
     const parts = (
       jobFromFile({
-        ...d,
-        version: d.version === 7 || d.version === 9 || d.version === 11 ? 8 : 2,
+        ...partSource,
+        version: d.version === 7 || d.version === 9 || d.version === 11 || d.version === 14 ? 8 : 2,
         stock: {
           width: 1,
           height: 1,
@@ -402,6 +437,7 @@ export function quoteFromFile(input: unknown): Quote {
     ).parts;
     return validateQuote({
       version: 1,
+      ...(d.version === 14 ? { geometryProfile: d.geometryProfile } : {}),
       ...(d.grainAxis !== undefined ? { grainAxis: d.grainAxis } : {}),
       name: d.name,
       spacingMode: d.spacingMode ?? 'manual',
@@ -428,6 +464,7 @@ export function quoteFromFile(input: unknown): Quote {
   return validateQuote({
     version: 1,
     name: old.name,
+    ...(old.stock.geometryProfile !== undefined ? { geometryProfile: old.stock.geometryProfile } : {}),
     ...(old.stock.grainAxis !== undefined ? { grainAxis: old.stock.grainAxis } : {}),
     material: old.material,
     thickness: old.thickness,
@@ -451,15 +488,12 @@ export function quoteFromFile(input: unknown): Quote {
   });
 }
 export function oversizeParts(q: Quote, o: SheetOption) {
-  const w = o.width - 2 * q.margin,
-    h = o.height - 2 * q.margin;
-  return q.parts.filter(p => {
-    const b = bounds(p.loops[0]);
-    const guard = 2 * (p.geometryToleranceMm ?? 0);
-    return !allowedRotations(p, q).some(
-      rotation =>
-        (rotation % 180 ? b.height : b.width) + guard <= w + 1e-7 &&
-        (rotation % 180 ? b.width : b.height) + guard <= h + 1e-7
-    );
-  });
+  try {
+    const stock = stockFor(q, o);
+    return q.parts.filter(part => !partFitsUsableStock(part, stock));
+  } catch {
+    // A bounded geometry-analysis failure is reported by the option result.
+    // Do not mislabel unassessed parts as oversized or crash the review panel.
+    return [];
+  }
 }

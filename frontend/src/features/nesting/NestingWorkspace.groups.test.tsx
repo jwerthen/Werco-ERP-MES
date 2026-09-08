@@ -171,7 +171,7 @@ describe('material and thickness group workflow', () => {
     if (!(blob instanceof Blob)) throw new Error('Save did not create a project Blob.');
     const savedText = await readBlob(blob);
     const serialized = JSON.parse(savedText);
-    expect(serialized.version).toBe(4);
+    expect(serialized.version).toBe(15);
     expect(serialized.units).toBe('in');
     const project = projectFromFile(serialized);
     expect(project.name).toBe('Mixed purchase');

@@ -27,7 +27,7 @@ WORKDIR /build/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN HUSKY=0 npm ci --no-audit --no-fund
 COPY frontend/tsconfig.json frontend/tsconfig.nesting-worker.json ./
-COPY frontend/tools/build-nesting-worker.mjs frontend/tools/nesting-server-worker.ts ./tools/
+COPY frontend/tools/build-nesting-worker.mjs frontend/tools/nesting-server-worker.ts frontend/tools/verify-nesting-profile.mjs ./tools/
 COPY frontend/src/ ./src/
 RUN npm run build:nesting-worker -- --out-dir=/nesting-runtime
 

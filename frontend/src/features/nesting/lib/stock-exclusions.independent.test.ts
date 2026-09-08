@@ -75,6 +75,7 @@ test('an exclusion-bearing estimate retains an applied policy and deep-clones ex
     margin: inToMm(0.375),
     options: [{ id: 'stock', enabled: true, width: 100, height: 100, price: null, exclusions: [region] }],
   };
+  delete quote.geometryProfile; // Explicit historical v11/v12 fixture, never a new calculation.
   const first = createBlankProject(quote),
     second = createBlankProject(quote);
   const saved = projectToFile(first);

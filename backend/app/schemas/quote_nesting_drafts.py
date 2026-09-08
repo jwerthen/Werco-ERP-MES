@@ -6,6 +6,7 @@ from typing import Annotated, Any, ClassVar, Literal, Optional
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
+from app.core.nesting_geometry_profile import is_current_geometry_profile
 from app.schemas.quote_nesting_spacing import SpacingOverride, SpacingPolicySnapshot, normalize_thickness
 
 MAX_ESTIMATE_BYTES = 5 * 1024 * 1024
@@ -245,8 +246,19 @@ class SavedStock(InputModel):
         return self
 
 
+class SavedGeometryProfile(InputModel):
+    id: Literal['werco-compensated-v1']
+    sha256: Hash
+
+    @model_validator(mode='after')
+    def supported_identity(self):
+        if not is_current_geometry_profile(self.model_dump()):
+            raise ValueError('Unknown geometry profile identity')
+        return self
+
+
 class SavedQuote(InputModel):
-    version: Literal[3, 7, 9, 11]
+    version: Literal[3, 7, 9, 11, 14]
     units: Literal["in"]
     currency: Literal["USD"]
     name: Name
@@ -262,9 +274,12 @@ class SavedQuote(InputModel):
     spacingOverride: Optional[SpacingOverride] = None
     grainAxis: Optional[Axis] = None
     materialBinding: Optional[SavedBinding] = None
+    geometryProfile: Optional[SavedGeometryProfile] = None
 
     @model_validator(mode="after")
     def spacing_governance(self):
+        if (self.version == 14) != ('geometryProfile' in self.model_fields_set):
+            raise ValueError('Geometry profile requires quote version 14 and its exact identity')
         for field in ("spacingPolicy", "spacingOverride"):
             if field in self.model_fields_set and getattr(self, field) is None:
                 raise ValueError("Omit unused spacing governance fields instead of supplying null")
@@ -272,9 +287,9 @@ class SavedQuote(InputModel):
             raise ValueError("Policy spacing mode requires exactly one policy snapshot")
         if self.spacingOverride is not None and (self.spacingPolicy is not None or self.spacingMode != "manual"):
             raise ValueError("Custom spacing requires manual mode and cannot claim policy conformance")
-        if self.version not in (9, 11) and (self.spacingPolicy is not None or self.spacingOverride is not None):
+        if self.version not in (9, 11, 14) and (self.spacingPolicy is not None or self.spacingOverride is not None):
             raise ValueError("Spacing governance requires quote version 9")
-        if self.version != 11 and any("exclusions" in stock.model_fields_set for stock in self.options):
+        if self.version not in (11, 14) and any("exclusions" in stock.model_fields_set for stock in self.options):
             raise ValueError("Stock exclusions require quote version 11")
         snapshot = self.spacingPolicy
         if snapshot is not None and (
@@ -293,7 +308,7 @@ class SavedGroup(InputModel):
 
 
 class SavedProject(InputModel):
-    version: Literal[4, 5, 6, 10, 12]
+    version: Literal[4, 5, 6, 10, 12, 15]
     units: Literal["in"]
     currency: Literal["USD"]
     name: Name
@@ -319,12 +334,14 @@ class SavedProject(InputModel):
             if key in material_keys:
                 raise ValueError("Duplicate material/thickness group")
             material_keys.add(key)
-            if quote.version == 7 and self.version not in (6, 10, 12):
+            if quote.version == 7 and self.version not in (6, 10, 12, 15):
                 raise ValueError("Orientation constraints require project version 6")
-            if quote.version == 9 and self.version not in (10, 12):
+            if quote.version == 9 and self.version not in (10, 12, 15):
                 raise ValueError("Spacing governance requires project version 10")
-            if quote.version == 11 and self.version != 12:
+            if quote.version == 11 and self.version not in (12, 15):
                 raise ValueError("Stock exclusions require project version 12")
+            if quote.version == 14 and self.version != 15:
+                raise ValueError('Geometry profile requires project version 15')
             vertices += sum(
                 len(region.outline.points) if isinstance(region.outline, SavedPolygon) else 1
                 for stock in quote.options
@@ -349,7 +366,7 @@ class SavedProject(InputModel):
                 != quote.material
             ):
                 raise ValueError("Catalog category does not match material family")
-            if quote.version not in (7, 9, 11) and (
+            if quote.version not in (7, 9, 11, 14) and (
                 quote.grainAxis is not None
                 or any(part.rotationMode is not None or part.grainAxis is not None for part in quote.parts)
             ):

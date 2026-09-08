@@ -5,6 +5,13 @@ import { inToMm, jobFromFile, jobToFile } from './units';
 import { type StockExclusion } from './stock-exclusions';
 import { exclusionsToFile } from './stock-exclusion-files';
 
+/** These cases retain the pre-profile file contract; current forms have their own regression suite. */
+function legacyBlankQuote(): Quote {
+  const quote = createBlankQuote();
+  delete quote.geometryProfile;
+  return quote;
+}
+
 const regions = (): StockExclusion[] => [
   {
     id: 'edge',
@@ -38,7 +45,7 @@ const plate = (): Part => ({
 });
 function fixture(): Quote {
   return {
-    ...createBlankQuote(),
+    ...legacyBlankQuote(),
     parts: [plate()],
     options: [{ id: 'sample', width: 254, height: 254, enabled: true, price: 100, exclusions: regions() }],
   };
@@ -82,7 +89,7 @@ describe('stock exclusions in inch estimate files', () => {
   });
 
   it('preserves field absence for legacy files, explicit empty arrays for new files and rejects null', () => {
-    const legacy = createBlankQuote();
+    const legacy = legacyBlankQuote();
     expect(projectToFile(createBlankProject(legacy)).version).toBe(4);
     expect(quoteToFile(legacy).version).toBe(3);
     expect(quoteFromFile(quoteToFile(legacy)).options[0]).not.toHaveProperty('exclusions');
@@ -109,7 +116,7 @@ describe('stock exclusions in inch estimate files', () => {
       changed_at: '2026-09-08T20:00:00Z',
     };
     const project = createBlankProject(quote);
-    project.groups.push({ id: 'other', quote: { ...createBlankQuote(), material: 'Aluminum' } });
+    project.groups.push({ id: 'other', quote: { ...legacyBlankQuote(), material: 'Aluminum' } });
     const file = projectToFile(project);
     expect(file.groups.map(group => group.quote.version)).toEqual([11, 3]);
     const reopened = projectFromFile(readJSON(file));

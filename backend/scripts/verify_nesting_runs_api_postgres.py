@@ -27,6 +27,7 @@ def verify():
 
     from fastapi.testclient import TestClient
 
+    from app.core.nesting_geometry_profile import geometry_profile_identity
     from app.core.security import create_access_token
     from app.db.database import Base, get_db
     from app.main import app
@@ -84,7 +85,7 @@ def verify():
             for idx in (1, 2)
         }
         estimate = {
-            'version': 6,
+            'version': 15,
             'units': 'in',
             'currency': 'USD',
             'name': 'Synthetic API race',
@@ -93,7 +94,8 @@ def verify():
                 {
                     'id': 'group',
                     'quote': {
-                        'version': 7,
+                        'version': 14,
+                        'geometryProfile': geometry_profile_identity(),
                         'units': 'in',
                         'currency': 'USD',
                         'name': 'Synthetic carbon',

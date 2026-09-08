@@ -1,4 +1,5 @@
 import { importDXFBatch, type DXFFile } from './dxf-batch';
+import { CURRENT_GEOMETRY_PROFILE } from './geometry-profile';
 import { bounds, rect } from './nesting';
 import { compareSheets, demoQuote, quoteFromFile, quoteToFile, validateQuote } from './quoting';
 
@@ -129,6 +130,7 @@ describe('DXF batch boundaries in the native ERP feature', () => {
         JSON.stringify(
           quoteToFile({
             ...demoQuote,
+            geometryProfile: CURRENT_GEOMETRY_PROFILE,
             parts: [...demoQuote.parts, ...imported.parts],
           })
         )
@@ -168,7 +170,7 @@ describe('DXF batch boundaries in the native ERP feature', () => {
     expect(imported.results[1].message).toMatch(/300 total parts/);
     expect(second.text).not.toHaveBeenCalled();
     expect(existing[0].quantity).toBe(299);
-    const quote = { ...demoQuote, parts: [...existing, ...imported.parts] };
+    const quote = { ...demoQuote, geometryProfile: CURRENT_GEOMETRY_PROFILE, parts: [...existing, ...imported.parts] };
     const restored = quoteFromFile(JSON.parse(JSON.stringify(quoteToFile(quote))));
     expect(
       compareSheets(restored).results.every(result => result.complete && result.nest?.placements.length === 300)

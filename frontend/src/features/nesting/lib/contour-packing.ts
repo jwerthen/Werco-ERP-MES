@@ -1,3 +1,9 @@
+import {
+  prepareCompensatedGeometry,
+  type CompensatedGeometry,
+  type CompensatedPart,
+  type CompensatedPose,
+} from './compensated-geometry';
 import { guardedOuter, pointPath as guardedPointPath } from './guarded-geometry';
 import { prepareExclusions, exclusionCollision, type PreparedExclusion } from './stock-exclusions';
 import { allowedRotations, orientationExplanation } from './orientation';
@@ -195,6 +201,8 @@ type Shape = {
   path: Clipper.Path;
   tolerance: number;
   pieces?: Clipper.Paths | null;
+  compensated?: CompensatedPart;
+  guardedShapes?: Shape[];
 };
 function shape(part: Part, rotation: Placement['rotation']): Shape {
   const b = bounds(part.loops[0]);
@@ -359,19 +367,47 @@ function obstacle(fixed: Shape, moving: Shape, gap: number): Clipper.Paths {
   sums.sort((a, b) => Math.abs(Clipper.Clipper.Area(b)) - Math.abs(Clipper.Clipper.Area(a)));
   return sums.length ? offset([positive(sums[0])], allowance) : [];
 }
-type Placed = { placement: Placement; shape: Shape; outer: Loop };
+function guardedShape(source: Shape, path: Clipper.Path, key: string): Shape {
+  const points = guardedPointPath(path),
+    r = reduced(points);
+  return {
+    ...source,
+    key,
+    outer: { type: 'poly', points },
+    path: positive(integerPath(r.points)),
+    tolerance: r.tolerance,
+    pieces: undefined,
+    part: { ...source.part, geometryToleranceMm: 0 },
+    compensated: undefined,
+    guardedShapes: undefined,
+  };
+}
+function guardedShapes(source: Shape): Shape[] {
+  if (!source.guardedShapes)
+    source.guardedShapes = source
+      .compensated!.envelope.paths.filter(Clipper.Clipper.Orientation)
+      .map((path, index) => guardedShape(source, path, `${source.key}:${index}`));
+  return source.guardedShapes;
+}
+function compensatedObstacle(fixed: Shape, moving: Shape): Clipper.Paths {
+  return stagedUnion(guardedShapes(fixed).flatMap(a => guardedShapes(moving).map(b => obstacle(a, b, 0))));
+}
+type Placed = { placement: Placement; shape: Shape; outer: Loop; pose?: CompensatedPose };
 function candidates(
   moving: Shape,
   placed: Placed[],
   stock: Stock,
   cache: Map<string, Clipper.Paths>,
-  exclusions: PreparedExclusion[]
+  exclusions: PreparedExclusion[],
+  compensated?: CompensatedGeometry
 ): Point[] {
   const margin = stock.margin + (moving.part.geometryToleranceMm ?? 0);
-  const minX = margin,
-    minY = margin,
-    maxX = stock.width - margin - moving.width,
-    maxY = stock.height - margin - moving.height;
+  const range = compensated?.originRange(moving.compensated!);
+  if (compensated && !range) return [];
+  const minX = range ? range.minX / SCALE : margin,
+    minY = range ? range.minY / SCALE : margin,
+    maxX = range ? range.maxX / SCALE : stock.width - margin - moving.width,
+    maxY = range ? range.maxY / SCALE : stock.height - margin - moving.height;
   if (maxX < minX - EPS || maxY < minY - EPS) return [];
   const corners = [
     { x: minX, y: minY },
@@ -384,20 +420,9 @@ function candidates(
     const key = `exclusions|${moving.key}`;
     let paths = cache.get(key);
     if (!paths) {
-      const envelope = guardedOuter(moving.outer, stock.gap / 2 + (moving.part.geometryToleranceMm ?? 0));
-      const guardedShape = (path: Clipper.Path, key: string): Shape => {
-        const points = guardedPointPath(path),
-          r = reduced(points);
-        return {
-          ...moving,
-          key,
-          outer: { type: 'poly', points },
-          path: positive(integerPath(r.points)),
-          tolerance: r.tolerance,
-          pieces: undefined,
-          part: { ...moving.part, geometryToleranceMm: 0 },
-        };
-      };
+      const envelope =
+        moving.compensated?.envelope.paths ??
+        guardedOuter(moving.outer, stock.gap / 2 + (moving.part.geometryToleranceMm ?? 0));
       // Offset holes may be filled in this candidate approximation only. Final
       // envelope checks and the leftover ledger retain the exact winding.
       const movingPaths = envelope.filter(Clipper.Clipper.Orientation);
@@ -405,7 +430,9 @@ function candidates(
       for (const region of exclusions)
         for (const fixed of region.paths.filter(Clipper.Clipper.Orientation))
           for (const movingPath of movingPaths)
-            groups.push(obstacle(guardedShape(fixed, region.source.id), guardedShape(movingPath, moving.key), 0));
+            groups.push(
+              obstacle(guardedShape(moving, fixed, region.source.id), guardedShape(moving, movingPath, moving.key), 0)
+            );
       paths = stagedUnion(groups);
       cache.set(key, paths);
     }
@@ -415,7 +442,7 @@ function candidates(
     const key = `${item.shape.key}|${moving.key}`;
     let paths = cache.get(key);
     if (!paths) {
-      paths = obstacle(item.shape, moving, stock.gap);
+      paths = compensated ? compensatedObstacle(item.shape, moving) : obstacle(item.shape, moving, stock.gap);
       cache.set(key, paths);
     }
     forbidden.push(
@@ -424,7 +451,7 @@ function candidates(
       )
     );
     // Exact circle tangencies also cover perfectly tight sheet widths.
-    if (moving.outer.type === 'circle' && item.outer.type === 'circle') {
+    if (!compensated && moving.outer.type === 'circle' && item.outer.type === 'circle') {
       const a = item.outer,
         b = moving.outer,
         r = a.r + b.r + stock.gap + (item.shape.part.geometryToleranceMm ?? 0) + (moving.part.geometryToleranceMm ?? 0);
@@ -483,13 +510,22 @@ function candidates(
           }
       }
   const unique = new Map<string, Point>();
-  corners.forEach(p => {
-    if (p.x >= minX - EPS && p.y >= minY - EPS && p.x <= maxX + EPS && p.y <= maxY + EPS)
-      unique.set(`${p.x.toFixed(5)},${p.y.toFixed(5)}`, p);
+  corners.forEach(point => {
+    // NFP intersections can be fractional grid coordinates. Search adjacent
+    // grid origins, then verify the unchanged exact compensated envelopes.
+    const options = compensated
+      ? [Math.floor(point.x * SCALE), Math.ceil(point.x * SCALE)].flatMap(x =>
+          [Math.floor(point.y * SCALE), Math.ceil(point.y * SCALE)].map(y => ({ x: x / SCALE, y: y / SCALE }))
+        )
+      : [point];
+    for (const p of options)
+      if (p.x >= minX - EPS && p.y >= minY - EPS && p.x <= maxX + EPS && p.y <= maxY + EPS)
+        unique.set(`${p.x.toFixed(5)},${p.y.toFixed(5)}`, p);
   });
   return Array.from(unique.values()).sort((a, b) => a.y - b.y || a.x - b.x);
 }
 export function packContours(parts: Part[], stock: Stock): Nest {
+  const compensated = prepareCompensatedGeometry(parts, stock);
   const allRectangles = parts.every(p => {
     const l = p.loops[0],
       b = bounds(l);
@@ -503,11 +539,11 @@ export function packContours(parts: Part[], stock: Stock): Nest {
       )
     );
   });
-  if (allRectangles && !stock.exclusions?.length) {
+  if (allRectangles && !stock.exclusions?.length && !compensated) {
     const tolerance = Math.max(0, ...parts.map(p => p.geometryToleranceMm ?? 0));
     return packRectangles(parts, { ...stock, gap: stock.gap + 2 * tolerance, margin: stock.margin + tolerance });
   }
-  const exclusions = prepareExclusions(stock);
+  const exclusions = compensated?.exclusions ?? prepareExclusions(stock);
   // Scope memoized decisions to this validated run and exact source/pose. The
   // same physical pose recurs across sheets, instances and deterministic passes.
   const exclusionDecisions = new Map<string, boolean>();
@@ -521,6 +557,7 @@ export function packContours(parts: Part[], stock: Stock): Nest {
         .filter(s => {
           if (seen.has(s.key)) return false;
           seen.add(s.key);
+          if (compensated) s.compensated = compensated.get(p, s.rotation);
           return true;
         })
     );
@@ -552,7 +589,7 @@ export function packContours(parts: Part[], stock: Stock): Nest {
         for (let si = 0; si <= sheets.length && si < stock.maxSheets; si++) {
           const placed = sheets[si] ?? [];
           for (const moving of shapes.get(part.id)!) {
-            for (const point of candidates(moving, placed, stock, cache, exclusions)) {
+            for (const point of candidates(moving, placed, stock, cache, exclusions, compensated)) {
               const placement: Placement = {
                 partId: part.id,
                 instance,
@@ -563,29 +600,37 @@ export function packContours(parts: Part[], stock: Stock): Nest {
                 sheet: si,
               };
               const outer = movedOuter(part, placement);
+              const pose = compensated?.pose(part, placement);
+              if (compensated && pose && !compensated.inside(pose)) continue;
               if (exclusions.length) {
                 const key = JSON.stringify([part.id, moving.rotation, point.x, point.y]);
                 let blocked = exclusionDecisions.get(key);
                 if (blocked === undefined) {
-                  blocked = Boolean(exclusionCollision(outer, stock.gap, part.geometryToleranceMm ?? 0, exclusions));
+                  blocked = Boolean(
+                    compensated && pose
+                      ? compensated.exclusionCollision(pose, outer)
+                      : exclusionCollision(outer, stock.gap, part.geometryToleranceMm ?? 0, exclusions)
+                  );
                   if (exclusionDecisions.size < 50000) exclusionDecisions.set(key, blocked);
                 }
                 if (blocked) continue;
               }
               if (
-                placed.some(other =>
-                  outlinesCollide(
-                    outer,
-                    other.outer,
-                    stock.gap + (part.geometryToleranceMm ?? 0) + (other.shape.part.geometryToleranceMm ?? 0)
-                  )
+                placed.some(
+                  other =>
+                    (compensated && pose && other.pose && compensated.overlap(pose, other.pose)) ||
+                    outlinesCollide(
+                      outer,
+                      other.outer,
+                      stock.gap + (part.geometryToleranceMm ?? 0) + (other.shape.part.geometryToleranceMm ?? 0)
+                    )
                 )
               )
                 continue;
               const score = point.y + moving.height,
                 old = best ? best.placement.y + best.placement.height : Infinity;
               if (!best || score < old - EPS || (Math.abs(score - old) < EPS && point.x < best.placement.x))
-                best = { placement, shape: moving, outer };
+                best = { placement, shape: moving, outer, ...(pose ? { pose } : {}) };
               break;
             }
           }

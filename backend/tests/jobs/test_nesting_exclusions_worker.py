@@ -16,7 +16,7 @@ from app.services import quote_nesting_runs as service
 from app.services.audit_service import AuditService
 from app.services.quote_nesting_drafts import save_revision
 from tests.api.test_quote_nesting_exclusions_contract import exclusion_estimate
-from tests.services.test_quote_nesting_runs_service import request_for
+from tests.services.test_quote_nesting_runs_service import current_estimate, request_for
 
 pytestmark = pytest.mark.integration
 
@@ -41,8 +41,8 @@ async def test_real_node_exclusion_validation_precedes_any_accepted_checkpoint(
     monkeypatch.setattr(outbox, 'enqueue_job_best_effort', lambda *_args, **_kwargs: True)
     monkeypatch.setattr(outbox, 'enqueue_job_fire_and_forget_fastfail', no_queue)
     runtime = await jobs.verify_runtime()
-    assert runtime['solver_version'] == 'werco-contour-v5'
-    source = exclusion_estimate()
+    assert runtime['solver_version'] == 'werco-contour-v6'
+    source = current_estimate(exclusion_estimate())
     region = source['groups'][0]['quote']['options'][0]['exclusions'][0]
     region['outline'] = {
         'type': 'poly',
@@ -84,7 +84,7 @@ async def test_real_node_exclusion_validation_precedes_any_accepted_checkpoint(
     assert result['nest']['unplaced'] == [] and len(result['nest']['placements']) == 2
     boundary = (6 + 0.125 + 0.125 / 2) * 25.4 + 0.0008
     assert all(placement['x'] >= boundary - 1e-7 for placement in result['nest']['placements'])
-    assert result['leftovers']['version'] == 'werco-leftovers-v2'
+    assert result['leftovers']['version'] == 'werco-leftovers-v3'
     assert result['leftovers']['creditUSD'] == 0 and result['leftovers']['sheets'][0]['excludedArea'] > 0
     report = service.export_report(db_session, 1, run['id'])
     assert report['status'] == 'UNAPPROVED' and report['estimate'] == source

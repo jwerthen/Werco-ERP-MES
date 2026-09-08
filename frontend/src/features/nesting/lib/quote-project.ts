@@ -1,3 +1,4 @@
+import { CURRENT_GEOMETRY_PROFILE, requireCurrentGeometryProfile, resolveGeometryProfile } from './geometry-profile';
 import { hasOrientationConstraints } from './orientation';
 import type { Part } from './nesting';
 import { createBlankQuote, quoteFromFile, quoteToFile, validateQuote, type Quote } from './quoting';
@@ -41,6 +42,7 @@ export function materialThicknessKey(material: string, thickness: number, materi
 function cloneQuote(quote: Quote): Quote {
   return {
     ...quote,
+    ...(quote.geometryProfile !== undefined ? { geometryProfile: { ...quote.geometryProfile } } : {}),
     ...(quote.materialBinding
       ? { materialBinding: JSON.parse(JSON.stringify(quote.materialBinding)) as MaterialBinding }
       : {}),
@@ -176,15 +178,17 @@ export function projectToFile(project: QuoteProject) {
   return {
     // Constraint-bearing projects use 6; nested quotes use 7, never a legacy
     // discriminator that an older reader could accept while ignoring grain.
-    version: project.groups.some(group => group.quote.options.some(option => option.exclusions !== undefined))
-      ? 12
-      : project.groups.some(group => group.quote.spacingPolicy || group.quote.spacingOverride)
-        ? 10
-        : project.groups.some(group => hasOrientationConstraints(group.quote.parts, group.quote))
-          ? 6
-          : project.groups.some(group => group.quote.materialBinding)
-            ? 5
-            : 4,
+    version: project.groups.some(group => group.quote.geometryProfile !== undefined)
+      ? 15
+      : project.groups.some(group => group.quote.options.some(option => option.exclusions !== undefined))
+        ? 12
+        : project.groups.some(group => group.quote.spacingPolicy || group.quote.spacingOverride)
+          ? 10
+          : project.groups.some(group => hasOrientationConstraints(group.quote.parts, group.quote))
+            ? 6
+            : project.groups.some(group => group.quote.materialBinding)
+              ? 5
+              : 4,
     units: 'in',
     currency: 'USD',
     name: project.name,
@@ -196,8 +200,16 @@ export function projectToFile(project: QuoteProject) {
 export function projectFromFile(input: unknown): QuoteProject {
   check(input && typeof input === 'object', 'Invalid estimate file.');
   const data = input as Record<string, unknown>;
-  if (data.version !== 4 && data.version !== 5 && data.version !== 6 && data.version !== 10 && data.version !== 12)
+  if (
+    data.version !== 4 &&
+    data.version !== 5 &&
+    data.version !== 6 &&
+    data.version !== 10 &&
+    data.version !== 12 &&
+    data.version !== 15
+  )
     return createBlankProject(quoteFromFile(input));
+  check(!Object.prototype.hasOwnProperty.call(data, 'geometryProfile'), 'Geometry profiles belong to material groups.');
   check(data.units === 'in', 'Estimate project must explicitly declare inches.');
   check(data.currency === undefined || data.currency === 'USD', 'This estimate uses USD sheet prices.');
   check(
@@ -211,10 +223,12 @@ export function projectFromFile(input: unknown): QuoteProject {
       group.quote &&
         typeof group.quote === 'object' &&
         ((group.quote as { version?: unknown }).version === 3 ||
-          ((data.version === 6 || data.version === 10 || data.version === 12) &&
+          ((data.version === 6 || data.version === 10 || data.version === 12 || data.version === 15) &&
             (group.quote as { version?: unknown }).version === 7) ||
-          ((data.version === 10 || data.version === 12) && (group.quote as { version?: unknown }).version === 9) ||
-          (data.version === 12 && (group.quote as { version?: unknown }).version === 11)),
+          ((data.version === 10 || data.version === 12 || data.version === 15) &&
+            (group.quote as { version?: unknown }).version === 9) ||
+          ((data.version === 12 || data.version === 15) && (group.quote as { version?: unknown }).version === 11) ||
+          (data.version === 15 && (group.quote as { version?: unknown }).version === 14)),
       'Material groups require version 3, or a newer estimate version supported by their project.'
     );
     const quote = group.quote as Record<string, unknown>;
@@ -309,4 +323,29 @@ export function addImportedParts(project: QuoteProject, rows: ImportedPartAssign
     group.quote.parts.push(...row.partIds.map(id => imported.get(id)!));
   }
   return validateProject({ ...project, activeGroupId: firstTargetId ?? project.activeGroupId, groups });
+}
+
+/** Preflight every populated group before producing any new comparison/checkpoint. */
+export function requireCurrentProjectGeometry(project: QuoteProject): void {
+  validateProject(project);
+  project.groups
+    .filter(group => group.quote.parts.length)
+    .forEach(group => requireCurrentGeometryProfile(group.quote.geometryProfile));
+}
+
+/** Explicit editable upgrade. Source geometry, nominal spacing and all business inputs are retained. */
+export function upgradeProjectGeometry(project: QuoteProject): QuoteProject {
+  validateProject(project);
+  return validateProject({
+    ...project,
+    groups: project.groups.map(group => ({
+      ...group,
+      quote: resolveGeometryProfile(group.quote.geometryProfile)
+        ? group.quote
+        : {
+            ...group.quote,
+            geometryProfile: { ...CURRENT_GEOMETRY_PROFILE },
+          },
+    })),
+  });
 }

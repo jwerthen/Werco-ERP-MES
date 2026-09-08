@@ -65,15 +65,19 @@ sheet sizes, and your shop's handling capacity before ordering.
 1. Save the inputs through **Team drafts**. For that saved revision, choose
    **Saved calculations** and then **Calculate saved revision**. This uses the
    selected revision exactly, including its quantities, geometry, spacing and
-   entered prices. Unsaved workspace changes are not submitted. An older revision
-   can be calculated intentionally without replacing the latest draft.
+   entered prices. Unsaved workspace changes are not submitted. New calculations
+   require the current geometry profile in every populated material group. For
+   older inputs, open the revision, select **Use current clearance rules**, and
+   save a new revision; the earlier input and its saved runs remain unchanged.
 2. **Review run** shows the number of stock options evaluated and how many fit
    their entire material group. **Finished** means the search ended; it does not
    mean all parts fit. Every stock size is an alternative scenario. Do not add
    the sheet counts of different alternatives together.
 3. **View option** opens the actual saved contours and holes, sheet selector,
    inch dimensions, margin/gap, and potential-leftover regions. The view binds
-   the saved input hash, stock and result before rendering. A sheet above the
+   the saved input hash, stock, recorded solver/runtime/profile and result before rendering.
+   Historical v4/v5 runs retain their recorded validation rules; viewing history
+   never repacks parts under the current profile. A sheet above the
    100,000-vertex preview budget remains in the saved report but is not drawn.
 4. **Cancel calculation** retains already completed, checked option results.
    A timeout or work limit also keeps completed results and labels missing work.
@@ -223,15 +227,34 @@ than inventing recoverable area.
 
 ### Engineering analysis profile
 
-`werco-leftovers-v1` uses the fixed profile below when there are no exclusion
-regions. `werco-leftovers-v2` adds the pinned `werco-stock-exclusions-v1` profile
-and an explicit `excludedArea` ledger field for nonempty exclusions. An explicit
-empty array retains v1 analysis. These are engineering
-approximation settings, not approved shop reuse or cutting policies:
+New calculations use `werco-compensated-v1` and solver `werco-contour-v6`.
+The source profile ID and SHA-256 are explicit inputs, recorded in the worker
+manifest/hello, saved run settings and review evidence. They identify engineering
+rules; they do not approve a shop clearance or cutting policy.
+
+Every full part envelope must lie inside the inward-protected usable sheet and
+have no interior overlap with another part or an exclusion envelope. Nominal
+full-gap/curve checks remain independent. Internal holes remain reserved, so
+part-in-part placement is prohibited. Square-tangent corner protection is
+conservative and can reduce yield compared with nominal-distance checks alone.
+
+The edge margin is an edge band outside which the **entire envelope** must fit.
+Before curve/numerical protection, a 3/8 in margin plus 1/8 in gap requires the
+nominal part edge to be at least 7/16 in from the sheet edge. Do not subtract
+half-gap from the margin to preserve an earlier layout. Selected gap/margin and
+approved spacing-policy values are not silently changed by the profile.
+
+The current profile uses `werco-leftovers-v3`, with a required `excludedArea`
+field (zero when there are no zones). It subtracts the same prepared envelopes
+used for final validation. Historical `werco-leftovers-v1` remains readable for
+old inputs with no exclusion regions; v2 remains readable for nonempty legacy
+exclusions. Empty legacy arrays retain v1. All versions remain review-only with
+zero material credit.
 
 | Setting | Value or behavior |
 |---------|-------------------|
 | Integer grid | 0.0001 mm (approximately 0.000003937 in) |
+| Current part-envelope frame | Normalize each allowed rotated source at the origin, quantize once, and translate its prepared envelope by exact integer-grid coordinates; nominal checks retain unrounded source geometry |
 | Circle conversion | Circumscribed polygons with radial excess at most 0.0001 in; analytic nominal area is retained |
 | Reserved distance | Half the selected part gap + imported curve tolerance + 0.0004 mm numerical protection; rounded outward to the grid |
 | Offset corners | Square tangent joins, which enclose the round offset; convex corner radius can reach √2 times the reserved distance |
@@ -245,14 +268,28 @@ approximation settings, not approved shop reuse or cutting policies:
 | Exclusion expansion budget | At most 60,000 guarded vertices across one option's regions |
 | Exact edge-crossing fallback | At most 8,000,000 candidate edge pairs per envelope comparison; exceeding the guard rejects the calculation |
 
-The current exclusion constraint checks part/exclusion envelope intersections.
-Existing part-to-part checks still enforce nominal full-gap plus curve allowance;
-square-tangent reservation corners can overlap each other. Existing edge checks
-apply the nominal profile, curve allowance and selected margin, while reservation
-area is clipped at the inward sheet boundary. The union ledger counts overlapping
-reservations once. A generalized policy requiring every compensated part envelope
-to be disjoint from every other envelope and wholly inside the usable boundary
-is still outstanding; this increment does not claim that full-plan requirement.
+Current source and derived geometry are separate: original CAD outlines are not
+snapped or replaced by their envelope. No rectangle fast path bypasses the guarded
+constraints. Final-placement validation failures cannot certify a candidate.
+Exact bounding boxes and edge indexes accelerate vector checks; no raster result
+is used for final acceptance. Boundary contact is allowed only when interiors
+remain disjoint and the nominal minimum also passes.
+
+Historical v4/v5 validation keeps its nominal full-gap/curve and edge rules;
+v5 also enforces guarded part/exclusion separation. Those old reservations may
+overlap at corners or be clipped at the sheet edge. Their immutable evidence is
+preserved rather than retroactively rejected under v6 rules. A saved report's
+leftover label cannot select a weaker validator: solver, runtime, source profile
+and leftover identity must agree.
+
+The normative profile is
+`backend/app/data/nesting_profiles/werco-compensated-v1.json`. Its checksum covers
+canonical ASCII `{id, profile}`; a generated frontend adapter is checked against
+that source in CI and self-verified in standalone frontend/worker builds. The
+current profile checksum is
+`21e8689fb2ce80c72befbc5866f658cd74fe8ed336d1b5c070e182f3081aa55a`.
+Changing these rules requires a new reviewed engineering profile; it is distinct
+from company spacing-policy approval.
 
 Analysis runs in the same comparison worker, outside rendering. A numerical
 or complexity error appears as **Leftover analysis unavailable**; it does not
@@ -386,8 +423,9 @@ The browser and server use exact decimal arithmetic for this rule. This precisio
 is for consistent policy accounting, not a claim of cutting or CAD accuracy.
 Geometry tolerances remain the separate recorded solver profile.
 
-Policy snapshots or recorded overrides use estimate version 9 inside project
-version 10. Other groups can retain their older supported format. Old readers
+Legacy policy snapshots or recorded overrides use estimate version 9 inside
+project version 10. Current profile-bearing inputs use quote14/project15 while
+retaining the same policy/override data. Other groups can retain their older supported format. Old readers
 must reject these new versions rather than ignore the policy meaning. The saved
 calculation and review records carry the snapshot or override reason; neither
 creates physical inventory, reserves material, credits remnants or approves a quote.
@@ -425,11 +463,11 @@ defaults:
 | Omitted metadata | `VIEWPORT` records and all entities on the `FORMAT` annotation layer, with an import warning for omitted FORMAT entities |
 | Rejected files | Open or ambiguous outer profiles, touching/intersecting contours, reference paths outside or spanning parts, malformed data, unsupported entities, blocks/`INSERT`, wide polylines, sloped/nonplanar geometry, tilted extrusion, or paper-space cut geometry; other text/annotations are not silently discarded |
 | DXF units | Inch and millimeter files retain their physical size; unitless files default to inches unless millimeters is selected before import |
-| Saved estimates | Stock exclusions, including an explicit empty array, use project version 12 and quote version 11. Policy snapshots or recorded overrides without exclusions use project 10 and quote 9. Orientation-only projects use 6 and quote 7. Other groups may retain quote 3. Without constraints, ERP-bound projects remain 5 and family-only projects 4. Older single estimates/jobs open as one group; constrained legacy jobs use 8, and jobs with exclusions use 13. Legacy `drawing-bounds` parts require DXF re-import before nesting |
+| Saved estimates | Current geometry profiles require project15/quote14 or standalone job16. Project15 may retain older quote3/7/9/11 groups, but every populated group must be explicitly upgraded before any new calculation. Legacy exclusions use project12/quote11; legacy policy snapshots use project10/quote9; orientation uses project6/quote7/job8. Without those constraints, ERP-bound projects use5 and family-only projects4. Jobs with exclusions use13. Older inputs are readable without automatic profile insertion. Legacy `drawing-bounds` parts require DXF re-import |
 
 Legacy `rotate: false` means fixed and `rotate: true` means quarter turns;
 when `rotationMode` exists, it is authoritative. Axis metadata remains X/Y
-through inch/millimeter conversion. Versions 6/7/8/9/10/11/12/13 deliberately differ between
+through inch/millimeter conversion. Versions 6/7/8/9/10/11/12/13/14/15/16 deliberately differ between
 project/quote/job files so older readers reject the new constraints instead of
 silently relaxing them. Do not edit a file's version to force an older release
 to open it; retain the file and use a compatible release.
@@ -496,11 +534,11 @@ alternatives, validated placements, utilization and entered material costs.
 Changed inputs or inconsistent results require recomparison. The solver is
 deterministic, so the record stores no random seed and explains what replay
 requires. The manifest identifies orientation policy `werco-orientation-v1`
-and solver `werco-contour-v5`; contour search uses up to two deterministic
-orders, while rectangular-profile search uses three. Geometry fingerprints
+and solver `werco-contour-v6`; contour search uses up to two deterministic
+orders for every part shape. The rectangle fast path is disabled. Geometry fingerprints
 remain about shape; the input-project fingerprint also covers orientation
-requirements and exact stock-exclusion inputs. Exclusion-bearing options use the
-contour search even for rectangular parts. Incomplete heuristic results are not
+requirements, the explicit geometry profile and exact stock-exclusion inputs.
+Incomplete heuristic results are not
 proof that a layout is impossible.
 
 This locally downloaded record is labeled **QUOTE LAYOUT — NOT AN NC PROGRAM**
@@ -543,7 +581,7 @@ it does not authenticate original DXF bytes or approve geometry. Original CAD
 bytes, placements, solver output, and leftover regions are not stored in this
 input-draft revision. Use the existing local review export for comparison evidence.
 
-The server accepts current project formats 4/5/6, up to 5 MiB per JSON file,
+The server accepts project formats 4/5/6/10/12/15, up to 5 MiB per JSON file,
 with the same 300-part/20,000-vertex/12-stock-option limits and bounded metadata.
 It validates structure, unique identities, and active-company catalog references.
 Stale or inactive catalog snapshots can be retained with review notes so work
