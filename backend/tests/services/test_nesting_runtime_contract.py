@@ -77,14 +77,15 @@ async def test_ready_identity_is_returned_only_with_current_release_and_live_red
     }
 
 
-@pytest.mark.parametrize('publish_fails', [False, True])
-async def test_ready_log_is_emitted_only_after_successful_redis_publication(monkeypatch, publish_fails):
+@pytest.mark.parametrize('result,raises', [(True, False), (False, False), (None, False), (1, False), (None, True)])
+async def test_ready_log_is_emitted_only_after_successful_redis_publication(monkeypatch, result, raises):
     log = Mock()
 
     async def store(*args, **kwargs):
         log.assert_not_called()
-        if publish_fails:
+        if raises:
             raise ConnectionError('Synthetic unavailable Redis')
+        return result
 
     async def stop(_delay):
         raise asyncio.CancelledError
@@ -102,7 +103,7 @@ async def test_ready_log_is_emitted_only_after_successful_redis_publication(monk
     pool.set.assert_awaited_once()
     args, kwargs = pool.set.call_args
     assert args[0] == 'synthetic-runtime-key' and kwargs['ex'] == runtime.RUNTIME_TTL
-    if publish_fails:
+    if raises or result is not True:
         log.assert_not_called()
     else:
         log.assert_called_once_with(json.loads(args[1]))
