@@ -145,9 +145,9 @@ services:
   # ARQ Worker (background jobs)
   worker:
     build:
-      context: ./backend
-      dockerfile: Dockerfile.prod
-    image: werco-backend:${VERSION:-latest}
+      context: .
+      dockerfile: backend/Dockerfile.worker
+    image: werco-worker:${VERSION:-latest}
     container_name: werco-worker-prod
     environment:
       DATABASE_URL: ${DATABASE_URL:?Supabase DATABASE_URL required}

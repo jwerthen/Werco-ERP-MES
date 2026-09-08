@@ -899,6 +899,9 @@ def release_git_repo(tmp_path):
         return result.stdout.strip()
 
     git('init', '-q')
+    scope = repo / '.github/scripts/worker_release_scope.py'
+    scope.parent.mkdir(parents=True)
+    scope.write_text((REPO_ROOT / '.github/scripts/worker_release_scope.py').read_text())
     for path in ('frontend/app.ts', 'backend/app.py'):
         file = repo / path
         file.parent.mkdir(exist_ok=True)
@@ -965,6 +968,10 @@ class TestCoordinatedProductionReleaseOrdering:
             ('mixed', False),
             ('delete_backend', False),
             ('rename_backend', False),
+            ('worker_kernel', False),
+            ('worker_build', False),
+            ('worker_lock', False),
+            ('nesting_ui', True),
         ],
     )
     def test_classifies_backend_edits_deletions_and_renames(self, release_git_repo, tmp_path, change, expected):
@@ -977,6 +984,16 @@ class TestCoordinatedProductionReleaseOrdering:
             backend.unlink()
         elif change == 'rename_backend':
             backend.rename(repo / 'frontend/archived.py')
+        elif change in ('worker_kernel', 'worker_build', 'worker_lock', 'nesting_ui'):
+            path = {
+                'worker_kernel': 'frontend/src/features/nesting/lib/contour-packing.ts',
+                'worker_build': 'frontend/tools/build-nesting-worker.mjs',
+                'worker_lock': 'frontend/package-lock.json',
+                'nesting_ui': 'frontend/src/features/nesting/nesting.css',
+            }[change]
+            file = repo / path
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text('synthetic change\n')
         git('add', '-A')
         git('commit', '-qm', 'release changes')
         assert (

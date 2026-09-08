@@ -239,6 +239,7 @@ class TestTheCronInventoryIsStable:
             "archive_aged_audit_logs_job",
             "poll_tracking_job",
             "relay_pending_notifications_job",
+            "relay_quote_nesting_runs_job",
         }
 
 
@@ -685,8 +686,8 @@ class TestTheOwnersMrpCutover:
         selected = select_cron_jobs(OWNER_EXCLUSION_VALUE)
         names = {job.name.removeprefix("cron:") for job in selected}
 
-        assert len(selected) == 12
-        assert len(ALL_CRON_JOBS) == 13
+        assert len(selected) == 13
+        assert len(ALL_CRON_JOBS) == 14
         assert "run_mrp_auto_draft_job" not in names
         assert names == {
             "send_daily_digest_job",
@@ -701,17 +702,19 @@ class TestTheOwnersMrpCutover:
             "archive_aged_audit_logs_job",
             "poll_tracking_job",
             "relay_pending_notifications_job",
+            "relay_quote_nesting_runs_job",
         }
 
-    def test_exclusion_follows_new_cleanup_while_legacy_allowlist_stays_frozen(self):
-        """The newly shipped retention cron is picked up only by the exclusion policy."""
+    def test_exclusion_follows_new_jobs_while_legacy_allowlist_stays_frozen(self):
+        """New retention and queued-run recovery are picked up by the exclusion policy."""
         from app.worker import select_cron_jobs
 
         by_exclusion = select_cron_jobs(OWNER_EXCLUSION_VALUE)
         by_allowlist = select_cron_jobs(OWNER_ALLOWLIST_VALUE)
 
         assert {job.name for job in by_exclusion} - {job.name for job in by_allowlist} == {
-            "cron:cleanup_runtime_metrics_job"
+            "cron:cleanup_runtime_metrics_job",
+            "cron:relay_quote_nesting_runs_job",
         }
         assert {id(job) for job in by_allowlist} < {id(job) for job in by_exclusion}
 
@@ -726,7 +729,7 @@ class TestTheOwnersMrpCutover:
 
         worker = importlib.reload(worker)
         try:
-            assert len(worker.WorkerSettings.cron_jobs) == 12
+            assert len(worker.WorkerSettings.cron_jobs) == 13
             assert MRP_CRON not in [job.name for job in worker.WorkerSettings.cron_jobs]
             assert worker.run_mrp_auto_draft_job in worker.WorkerSettings.functions
         finally:
@@ -749,9 +752,9 @@ class TestTheOwnersMrpCutover:
                 await worker.startup({})
             text = caplog.text
 
-            assert "1 of 13 cron jobs SUPPRESSED" in text
+            assert "1 of 14 cron jobs SUPPRESSED" in text
             assert repr(OWNER_EXCLUSION_VALUE) in text
-            assert "12 job(s) armed" in text
+            assert "13 job(s) armed" in text
             # Once, in the SUPPRESSED warning -- never among the armed "next run" lines.
             assert text.count(MRP_CRON) == 1
             assert "cron:poll_tracking_job -> next run" in text

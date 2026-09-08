@@ -187,6 +187,22 @@ jobs:
           docker build --build-arg REACT_APP_API_URL="$REACT_APP_API_URL" -t werco-erp-frontend:${{ github.sha }} ./frontend
           docker build --build-arg REACT_APP_API_URL="$REACT_APP_API_URL" -t werco-erp-frontend:latest ./frontend
 
+      - name: Build worker image with the shared nesting kernel
+        run: docker build -f backend/Dockerfile.worker -t werco-erp-worker:${{ github.sha }} .
+
+      - name: Verify the worker image without network access
+        run: |
+          python3 .github/scripts/smoke_nesting_worker.py \
+            --image werco-erp-worker:${{ github.sha }} \
+            --manifest-out worker-runtime/manifest.json
+
+      - name: Preserve the tested worker identity
+        uses: actions/upload-artifact@v7
+        with:
+          name: worker-runtime-${{ github.sha }}
+          path: worker-runtime/manifest.json
+          if-no-files-found: error
+
       - name: Test Docker Compose
         # docker-compose.yml uses required-variable interpolation (e.g. ${DATABASE_URL:?...}).
         # These placeholders only satisfy `config`'s static interpolation check; they are not
@@ -487,6 +503,32 @@ jobs:
         if: steps.release_head.outputs.current == 'true'
         run: npm install -g @railway/cli@5.41.2
 
+      - name: Identify releases that change the worker
+        id: worker_scope
+        if: steps.release_head.outputs.current == 'true'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          changed="$(python3 .github/scripts/worker_release_scope.py --before "$BEFORE_SHA" --head "$GITHUB_SHA")"
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
+      - name: Require the existing worker release path for worker changes
+        if: steps.release_head.outputs.current == 'true' && steps.worker_scope.outputs.changed == 'true'
+        env:
+          WORKER_DEPLOY_ENABLED: ${{ vars.DEPLOY_WORKER_PRODUCTION }}
+        run: |
+          if [ "$WORKER_DEPLOY_ENABLED" != "true" ]; then
+            echo "This release changes the worker, but its reviewed production deploy path is disabled."
+            exit 1
+          fi
+
+      - name: Load the exact tested worker identity
+        if: steps.release_head.outputs.current == 'true' && steps.worker_scope.outputs.changed == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: worker-runtime-${{ github.sha }}
+          path: worker-runtime
+
       # Stamp the commit SHA into the artifact BEFORE it is uploaded. app/core/config.py
       # reads backend/RELEASE into APP_RELEASE, which is reported to Sentry (`release`)
       # and by /health/detailed (checks.application.release) -- so "is commit X actually
@@ -640,11 +682,8 @@ jobs:
           set -o pipefail
           railway up --service werco-worker . --path-as-root --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}" 2>&1 | tee "$RUNNER_TEMP/deploy-worker.log"
 
-      # The worker serves no HTTP, so the upload receipt is the only gate available to
-      # CI -- there is nothing to poll for a release SHA. Confirm it from the service's
-      # startup log instead (docs/WORKER_SERVICE.md). Carries the same `if:` as the step
-      # above so it stays skipped, rather than failing on a missing log, while the worker
-      # deploy is still gated off.
+      # An upload receipt confirms acceptance only. Releases that change worker inputs
+      # must also pass the active-deployment and fresh runtime heartbeat gate below.
       - name: Confirm Railway accepted the worker upload
         if: steps.release_head.outputs.current == 'true' && (vars.DEPLOY_WORKER_PRODUCTION == 'true')
         run: |
@@ -660,6 +699,14 @@ jobs:
             exit 1
           fi
           echo "Railway accepted the worker upload and queued a build."
+
+      - name: Verify the active worker has this release and tested runtime
+        if: steps.release_head.outputs.current == 'true' && steps.worker_scope.outputs.changed == 'true'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          python3 .github/scripts/verify_worker_release.py \
+            --expect "$GITHUB_SHA" --manifest worker-runtime/manifest.json
 
       # Backend identity was verified before publishing dependent code. Finish
       # by checking the frontend artifact's SHA (a plain HTTP 200 is insufficient

@@ -195,7 +195,7 @@ describe('orientation restrictions in saved estimates and draft evidence', () =>
       expect([90, 270]).toContain(alternative.placements[0].rotationDegrees);
     }
     expect(record.content.solver).toMatchObject({
-      version: 'werco-contour-v3',
+      version: 'werco-contour-v4',
       orientationPolicy: 'werco-orientation-v1',
     });
     expect(record.content.authoritativeApproval).toBe(false);

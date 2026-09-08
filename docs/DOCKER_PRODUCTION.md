@@ -71,6 +71,15 @@ docker-compose -f docker-compose.prod.yml logs -f
 | Supabase | Managed Postgres database | 5432 or pooler port | external managed service |
 | redis | Cache and job queue | 6379 | - |
 
+Both Compose worker definitions build from the repository root with
+`backend/Dockerfile.worker`. Its separate build stage compiles the shared nesting
+kernel and supplies pinned Node 22.23.2 only to the worker; API images remain
+Python-only. Do not bind the entire backend directory over `/app` in this image,
+because that hides `/app/nesting-runtime`. Rebuild the worker after source changes.
+No environment or cron selection is changed by this packaging. Server calculations
+require a fresh published runtime identity and the selected nesting relay schedule;
+see [WORKER_SERVICE.md](WORKER_SERVICE.md#saved-nesting-calculation-runtime).
+
 ## Security Features
 
 ### Network Isolation

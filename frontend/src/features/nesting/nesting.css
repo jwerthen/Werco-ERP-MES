@@ -2770,3 +2770,16 @@ input[type='number'] {
 }
 .team-draft-error { color: #fca5a5; }
 .team-draft-message { color: #93c5fd; }
+.saved-runs, .saved-run-review, .saved-run-options { display: grid; gap: 12px; }
+.saved-run-review { border-top: 1px solid #475569; padding-top: 18px; }
+.saved-runs p { font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+.saved-runs h3, .saved-runs h4 { font-size: 15px; font-weight: 600; }
+.saved-runs details { font-size: 12px; overflow-wrap: anywhere; }
+.saved-runs details ul { list-style: disc; padding-left: 18px; }
+.saved-runs pre { white-space: pre-wrap; padding: 12px; background: #0f172a; border-radius: 4px; }
+.saved-run-preview { display: grid; gap: 12px; min-width: 0; }
+.saved-run-preview > svg { display: block; width: 100%; max-height: 440px; border: 1px solid #475569; }
+.saved-run-sheet-picker { display: flex; gap: 12px; align-items: center; font-size: 13px; }
+.saved-run-sheet-picker select { color: #f8fafc; background: #172438; border: 1px solid #64748b; padding: 6px 10px; border-radius: 4px; }
+.saved-run-preview .leftover-review { margin: 0; padding: 12px; }
+.saved-run-preview .leftover-regions { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }

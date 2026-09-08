@@ -12,6 +12,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { projectFromFile, projectToFile, type QuoteProject } from './lib/quote-project';
 import { clearCatalogPricing } from './lib/material-binding';
 import { nestingApiMessage } from './useNestingCatalog';
+import SavedRuns from './SavedRuns';
 
 type PendingSave = { request: NestingDraftSave; signature: string };
 
@@ -49,6 +50,7 @@ export default function TeamDrafts({
   const [open, setOpen] = useState(false);
   const [page, setPage] = useState<NestingDraftPage | null>(null);
   const [history, setHistory] = useState<NestingDraftSummary | null>(null);
+  const [runs, setRuns] = useState<NestingDraftSummary | null>(null);
   const [linked, setLinked] = useState<NestingDraftSummary | null>(null);
   const [replace, setReplace] = useState<NestingDraftSummary | null>(null);
   const [loading, setLoading] = useState(false);
@@ -203,6 +205,7 @@ export default function TeamDrafts({
         }
         onClick={() => {
           setOpen(true);
+          setRuns(null);
           void list(null);
         }}
         disabled={disabled}
@@ -228,135 +231,154 @@ export default function TeamDrafts({
               empty.
             </DialogDescription>
           </DialogHeader>
-          <div className="team-draft-current">
-            <strong>{project.name}</strong>
-            <p>
-              {linked
-                ? `Draft #${linked.draft_id} · opened revision ${linked.revision_number}`
-                : 'New, unsaved team draft'}
-            </p>
-            <p className="helper inset-free">Draft only. Recalculate the nest and review pricing after opening.</p>
-            <div className="team-draft-actions">
-              {canSave && (
-                <button className="primary" disabled={unavailable} onClick={() => void save()}>
-                  {saving
-                    ? 'Saving…'
-                    : pending
-                      ? 'Retry previous save'
-                      : linked
-                        ? 'Save next revision'
-                        : 'Save team draft'}
-                </button>
-              )}
-              {canSave && linked && !pending && (
-                <button className="secondary" disabled={unavailable} onClick={() => void save(true)}>
-                  Save as new draft
-                </button>
-              )}
-              {!canSave && <p>You can open drafts. Saving requires purchasing create permission.</p>}
-            </div>
-            {pending && !saving && (
-              <p role="status">
-                The previous save is unconfirmed. Retry checks that same snapshot without creating a duplicate.
-              </p>
-            )}
-          </div>
-          {message && (
-            <p className="team-draft-message" role="status">
-              {message}
-            </p>
-          )}
-          {error && (
-            <p className="team-draft-error" role="alert">
-              {error}
-            </p>
-          )}
-          {replace && (
-            <div className="team-draft-replace">
-              <p>
-                Open “{replace.name}”, revision {replace.revision_number}, and replace your current unsaved inputs?
-              </p>
-              <div className="team-draft-actions">
-                <button className="primary" disabled={unavailable} onClick={() => void load(replace)}>
-                  Replace current estimate
-                </button>
-                <button className="secondary" disabled={unavailable} onClick={() => setReplace(null)}>
-                  Keep current estimate
-                </button>
-              </div>
-            </div>
-          )}
-          <div className="team-draft-list-heading">
-            <h3>{history ? `Revision history · draft #${history.draft_id}` : 'Saved team drafts'}</h3>
-            <button className="secondary compact" disabled={unavailable} onClick={() => void list(null)}>
-              {history ? 'All drafts' : 'Refresh list'}
-            </button>
-          </div>
-          {loading && <p role="status">Loading drafts…</p>}
-          {page && !page.items.length && <p>No saved team drafts yet.</p>}
-          <div className="team-draft-list">
-            {page?.items.map(item => (
-              <article className="team-draft-item" key={`${item.draft_id}:${item.revision_number}`}>
-                <div>
-                  <strong>{item.name}</strong>
-                  <p>
-                    #{item.draft_id} · revision {item.revision_number} · {formatCentralDateTime(item.created_at)}{' '}
-                    Central · user #{item.created_by}
-                  </p>
-                  {item.review_issues.length > 0 && (
-                    <details>
-                      <summary>Review notes ({item.review_issues.length})</summary>
-                      <ul>
-                        {item.review_issues.map((issue, i) => (
-                          <li key={`${issue.code}:${i}`}>{issue.message}</li>
-                        ))}
-                      </ul>
-                    </details>
-                  )}
-                </div>
+          {runs ? (
+            <SavedRuns
+              key={`${runs.draft_id}:${runs.revision_number}`}
+              target={runs}
+              canStart={canSave}
+              onBack={() => setRuns(null)}
+            />
+          ) : (
+            <>
+              <div className="team-draft-current">
+                <strong>{project.name}</strong>
+                <p>
+                  {linked
+                    ? `Draft #${linked.draft_id} · opened revision ${linked.revision_number}`
+                    : 'New, unsaved team draft'}
+                </p>
+                <p className="helper inset-free">Draft only. Recalculate the nest and review pricing after opening.</p>
                 <div className="team-draft-actions">
-                  <button
-                    className="secondary"
-                    disabled={unavailable || !!pending}
-                    onClick={() => choose(item)}
-                    aria-label={`Open ${item.name} revision ${item.revision_number}`}
-                  >
-                    Open revision {item.revision_number}
-                  </button>
-                  {!history && (
-                    <button
-                      className="secondary"
-                      disabled={unavailable}
-                      onClick={() => void list(item)}
-                      aria-label={`History for ${item.name}`}
-                    >
-                      <History size={16} /> History
+                  {canSave && (
+                    <button className="primary" disabled={unavailable} onClick={() => void save()}>
+                      {saving
+                        ? 'Saving…'
+                        : pending
+                          ? 'Retry previous save'
+                          : linked
+                            ? 'Save next revision'
+                            : 'Save team draft'}
                     </button>
                   )}
+                  {canSave && linked && !pending && (
+                    <button className="secondary" disabled={unavailable} onClick={() => void save(true)}>
+                      Save as new draft
+                    </button>
+                  )}
+                  {!canSave && <p>You can open drafts. Saving requires purchasing create permission.</p>}
                 </div>
-              </article>
-            ))}
-          </div>
-          {page && page.total > page.per_page && (
-            <nav className="team-draft-actions" aria-label="Draft pages">
-              <button
-                className="secondary"
-                disabled={unavailable || page.page <= 1}
-                onClick={() => void list(history, page.page - 1)}
-              >
-                Previous drafts
-              </button>
-              <span>
-                Page {page.page} of {Math.ceil(page.total / page.per_page)}
-              </span>
-              <button
-                className="secondary"
-                disabled={unavailable || page.page * page.per_page >= page.total}
-                onClick={() => void list(history, page.page + 1)}
-              >
-                Next drafts
-              </button>
-            </nav>
+                {pending && !saving && (
+                  <p role="status">
+                    The previous save is unconfirmed. Retry checks that same snapshot without creating a duplicate.
+                  </p>
+                )}
+              </div>
+              {message && (
+                <p className="team-draft-message" role="status">
+                  {message}
+                </p>
+              )}
+              {error && (
+                <p className="team-draft-error" role="alert">
+                  {error}
+                </p>
+              )}
+              {replace && (
+                <div className="team-draft-replace">
+                  <p>
+                    Open “{replace.name}”, revision {replace.revision_number}, and replace your current unsaved inputs?
+                  </p>
+                  <div className="team-draft-actions">
+                    <button className="primary" disabled={unavailable} onClick={() => void load(replace)}>
+                      Replace current estimate
+                    </button>
+                    <button className="secondary" disabled={unavailable} onClick={() => setReplace(null)}>
+                      Keep current estimate
+                    </button>
+                  </div>
+                </div>
+              )}
+              <div className="team-draft-list-heading">
+                <h3>{history ? `Revision history · draft #${history.draft_id}` : 'Saved team drafts'}</h3>
+                <button className="secondary compact" disabled={unavailable} onClick={() => void list(null)}>
+                  {history ? 'All drafts' : 'Refresh list'}
+                </button>
+              </div>
+              {loading && <p role="status">Loading drafts…</p>}
+              {page && !page.items.length && <p>No saved team drafts yet.</p>}
+              <div className="team-draft-list">
+                {page?.items.map(item => (
+                  <article className="team-draft-item" key={`${item.draft_id}:${item.revision_number}`}>
+                    <div>
+                      <strong>{item.name}</strong>
+                      <p>
+                        #{item.draft_id} · revision {item.revision_number} · {formatCentralDateTime(item.created_at)}{' '}
+                        Central · user #{item.created_by}
+                      </p>
+                      {item.review_issues.length > 0 && (
+                        <details>
+                          <summary>Review notes ({item.review_issues.length})</summary>
+                          <ul>
+                            {item.review_issues.map((issue, i) => (
+                              <li key={`${issue.code}:${i}`}>{issue.message}</li>
+                            ))}
+                          </ul>
+                        </details>
+                      )}
+                    </div>
+                    <div className="team-draft-actions">
+                      <button
+                        className="secondary"
+                        disabled={unavailable}
+                        onClick={() => setRuns(item)}
+                        aria-label={`Saved calculations for ${item.name} revision ${item.revision_number}`}
+                      >
+                        Saved calculations
+                      </button>
+                      <button
+                        className="secondary"
+                        disabled={unavailable || !!pending}
+                        onClick={() => choose(item)}
+                        aria-label={`Open ${item.name} revision ${item.revision_number}`}
+                      >
+                        Open revision {item.revision_number}
+                      </button>
+                      {!history && (
+                        <button
+                          className="secondary"
+                          disabled={unavailable}
+                          onClick={() => void list(item)}
+                          aria-label={`History for ${item.name}`}
+                        >
+                          <History size={16} /> History
+                        </button>
+                      )}
+                    </div>
+                  </article>
+                ))}
+              </div>
+              {page && page.total > page.per_page && (
+                <nav className="team-draft-actions" aria-label="Draft pages">
+                  <button
+                    className="secondary"
+                    disabled={unavailable || page.page <= 1}
+                    onClick={() => void list(history, page.page - 1)}
+                  >
+                    Previous drafts
+                  </button>
+                  <span>
+                    Page {page.page} of {Math.ceil(page.total / page.per_page)}
+                  </span>
+                  <button
+                    className="secondary"
+                    disabled={unavailable || page.page * page.per_page >= page.total}
+                    onClick={() => void list(history, page.page + 1)}
+                  >
+                    Next drafts
+                  </button>
+                </nav>
+              )}
+            </>
           )}
         </DialogContent>
       </Dialog>

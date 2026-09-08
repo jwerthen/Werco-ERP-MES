@@ -100,6 +100,32 @@ operational or audit table is rewritten. App-layer draft writes use required
 `AuditService` evidence in the same transaction; audit chain pause settings
 retain their existing behavior.
 
+## Saved nesting calculation records
+
+Migration `102_quote_nesting_runs` adds company-scoped run headers and immutable
+option checkpoints. Both tables enable deny-default RLS and revoke table/sequence
+grants from PUBLIC and existing `anon`/`authenticated` roles. Literal guarded role
+statements preserve bootstrap security without interpolated role queries. Model
+DDL mirrors migration guards, including pinned function `search_path`.
+
+The run's composite FK binds company, exact saved revision ID/draft/number and
+input hash; a supporting unique index is added to the existing revision table.
+The active-company partial unique index permits only one QUEUED/RUNNING run.
+Run update guards enforce immutable inputs/settings, write-once lease/runtime
+identity, legal status transitions, version increments and terminal immutability.
+Checkpoints bind the run's company and lease, and reject UPDATE/DELETE/TRUNCATE.
+Direct run deletion/truncation is refused. The service adds required audit
+evidence atomically for user commands and worker lifecycle/checkpoint writes.
+
+The disposable PostgreSQL verifier exercises migrations 101/102, same-company
+active-run races, lease-claim CAS, exact-input/tenant/lease FKs, terminal guards
+and immutable checkpoints. Separate unit and PostgreSQL-dialect compilation
+tests compare model bootstrap guards with the migrations. This is test evidence, not permission
+to modify production records. Ordinary application rollback retains both the
+input history and saved calculations; dropping these tables is destructive and
+requires a separate retention/rollback decision. Runtime results remain
+unapproved and do not create physical inventory or material credits.
+
 ## Dashboard checklist (manual — cannot be done via SQL)
 
 These are Supabase dashboard settings; migrations can't reach them. Where the current state wasn't

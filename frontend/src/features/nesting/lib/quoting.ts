@@ -2,6 +2,7 @@ import { analyzeLeftovers, type LeftoverAnalysis } from './leftovers';
 import { allowedRotations, hasOrientationConstraints, orientationExplanation, type GrainAxis } from './orientation';
 import { autoQuotingSpacing } from './spacing';
 import { bounds, validatePart, validateJob, nestParts, type Part, type Stock, type Nest, demoJob } from './nesting';
+import { compareStableText } from './stable-order';
 import { jobFromFile, jobToFile, mmToIn, inToMm } from './units';
 import {
   catalogFamily,
@@ -201,43 +202,45 @@ export function stockFor(q: Quote, o: SheetOption): Stock {
     bedHeight: o.height,
   };
 }
+/** Shared browser/server calculation. Call validateQuote before evaluating options. */
+export function calculateSheetOption(q: Quote, option: SheetOption): OptionResult {
+  const requested = q.parts.reduce((a, p) => a + p.quantity, 0);
+  try {
+    const nest = nestParts(q.parts, stockFor(q, option));
+    const complete = nest.unplaced.length === 0 && requested > 0;
+    let leftovers: LeftoverAnalysis | undefined;
+    let leftoverError: string | undefined;
+    try {
+      leftovers = analyzeLeftovers(q.parts, stockFor(q, option), nest);
+    } catch (error) {
+      leftoverError = error instanceof Error ? error.message : 'Leftover analysis could not be completed.';
+    }
+    return {
+      leftovers,
+      leftoverError,
+      option,
+      nest,
+      complete,
+      area: nest.sheets * option.width * option.height,
+      cost: option.price === null ? null : option.price * nest.sheets,
+      error: null,
+    };
+  } catch (e) {
+    return {
+      option,
+      nest: null,
+      complete: false,
+      area: 0,
+      cost: null,
+      error: (e as Error).message,
+    };
+  }
+}
+
 export function compareSheets(q: Quote): Comparison {
   validateQuote(q);
   const requested = q.parts.reduce((a, p) => a + p.quantity, 0);
-  const results = q.options
-    .filter(o => o.enabled)
-    .map(option => {
-      try {
-        const nest = nestParts(q.parts, stockFor(q, option));
-        const complete = nest.unplaced.length === 0 && requested > 0;
-        let leftovers: LeftoverAnalysis | undefined;
-        let leftoverError: string | undefined;
-        try {
-          leftovers = analyzeLeftovers(q.parts, stockFor(q, option), nest);
-        } catch (error) {
-          leftoverError = error instanceof Error ? error.message : 'Leftover analysis could not be completed.';
-        }
-        return {
-          leftovers,
-          leftoverError,
-          option,
-          nest,
-          complete,
-          area: nest.sheets * option.width * option.height,
-          cost: option.price === null ? null : option.price * nest.sheets,
-          error: null,
-        };
-      } catch (e) {
-        return {
-          option,
-          nest: null,
-          complete: false,
-          area: 0,
-          cost: null,
-          error: (e as Error).message,
-        };
-      }
-    });
+  const results = q.options.filter(o => o.enabled).map(option => calculateSheetOption(q, option));
   if (!requested)
     return {
       results,
@@ -269,7 +272,7 @@ export function compareSheets(q: Quote): Comparison {
       (q.objective === 'cost' ? a.cost! - b.cost! : a.area - b.area) ||
       a.area - b.area ||
       a.nest!.sheets - b.nest!.sheets ||
-      a.option.id.localeCompare(b.option.id)
+      compareStableText(a.option.id, b.option.id)
   );
   return {
     results,

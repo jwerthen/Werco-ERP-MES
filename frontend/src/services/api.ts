@@ -3860,6 +3860,34 @@ class ApiService {
     })).data;
   }
 
+  async getNestingRuntime(signal?: AbortSignal): Promise<import('../types/nestingRun').NestingRuntime> {
+    return (await this.api.get('/quote-nesting/runs/runtime', { signal })).data;
+  }
+
+  async listNestingRuns(draftId: number, revision: number, page = 1, signal?: AbortSignal): Promise<import('../types/nestingRun').NestingRunPage> {
+    return (await this.api.get('/quote-nesting/runs', { params: { draft_id: draftId, revision_number: revision, page, per_page: 10 }, signal })).data;
+  }
+
+  async getNestingRun(runId: number, signal?: AbortSignal): Promise<import('../types/nestingRun').NestingRunDetail> {
+    return (await this.api.get(`/quote-nesting/runs/${runId}`, { signal })).data;
+  }
+
+  async startNestingRun(request: import('../types/nestingRun').NestingRunRequest, signal?: AbortSignal): Promise<import('../types/nestingRun').NestingRunSummary> {
+    return (await this.api.post('/quote-nesting/runs', request, { signal })).data;
+  }
+
+  async cancelNestingRun(runId: number, companyId: number, expectedVersion: number, signal?: AbortSignal): Promise<import('../types/nestingRun').NestingRunSummary> {
+    return (await this.api.post(`/quote-nesting/runs/${runId}/cancel`, { expected_company_id: companyId, expected_version: expectedVersion }, { signal })).data;
+  }
+
+  async getNestingRunCheckpoint(runId: number, sequence: number, signal?: AbortSignal): Promise<import('../types/nestingRun').NestingRunCheckpoint> {
+    return (await this.api.get(`/quote-nesting/runs/${runId}/checkpoints/${sequence}`, { signal })).data;
+  }
+
+  async getNestingRunReport(runId: number, signal?: AbortSignal): Promise<import('../types/nestingRun').NestingRunReport> {
+    return (await this.api.get(`/quote-nesting/runs/${runId}/report`, { signal, timeout: 120_000 })).data;
+  }
+
   async getQuoteMaterials(category?: string) {
     const response = await this.api.get('/quote-calc/materials', { params: { category } });
     return response.data;

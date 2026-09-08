@@ -20,6 +20,12 @@ node_modules
 .venv311
 **/.venv311
 frontend/dist
+frontend/build
+frontend/coverage
+frontend/playwright-report
+frontend/test-results
+frontend/.browser-harness
+backend/nesting-runtime
 landing/dist
 __pycache__
 **/__pycache__

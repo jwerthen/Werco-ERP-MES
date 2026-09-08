@@ -7,9 +7,10 @@
 > exists, what the code does, what changed. If the two disagree, the runbook is the one being
 > executed and this one is the one to correct.
 
-**Status: PREPARED, NOT DEPLOYED.** Everything in the repo is ready. No Railway service has
-been created, no variable has been set, nothing has been deployed, and both CI deploy steps
-are gated off.
+**Deployment status:** the production `werco-worker` service exists and the gated
+CI/CD worker upload path is active (verified 2026-09-08). The original cutover analysis
+below is historical; it does not establish current cron settings or certify any new
+nesting runtime as deployed. Each nesting release requires the identity gate below.
 
 Read §1 before §5. The most important finding is not "there is no worker" — it is that the
 enqueue side was pointed at the wrong Redis, so **creating a worker without the code fix
@@ -441,6 +442,51 @@ Until these are set, both workflow steps are skipped and merging changes nothing
 ---
 
 ## 6. Verifying it is actually working
+
+### Saved nesting calculation runtime
+
+The worker image builds the same TypeScript contour kernel used by the browser with
+the committed frontend lockfile. The build stage uses official
+[`node:22.23.2-bookworm-slim`](https://hub.docker.com/_/node), pinned to manifest digest
+`sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5`.
+Only its Node executable and the compiled `solver.cjs`/`manifest.json` reach the
+Python worker image; npm, frontend assets and node_modules remain outside it.
+The API Dockerfiles do not gain Node. Repo-root build/upload ignores retain the
+compiler/kernel inputs, while backend-only image contexts exclude generated bundles.
+Both Compose workers build this image; a whole-backend mount must not hide `/app/nesting-runtime`.
+
+CI requires a non-root, network-disabled, read-only image smoke that checks Node's
+exact version, the executable SHA against the manifest and its hello message, a
+complete synthetic contour result, and malformed-unit rejection. Its manifest artifact
+is the expected production identity. Node is limited to 512 MiB heap and one nesting
+child per ARQ process; this does not reserve memory against other background jobs.
+
+The worker publishes `quote-nesting:runtime:v1:<release>` in the existing Redis target
+every 30 seconds with a 90 second TTL. Only after a successful publication does the safe
+`nesting_runtime_ready` JSON event include release, protocol, solver version, bundle SHA,
+Node version, worker instance ID, Railway deployment ID, and UTC observation time.
+No geometry or credentials are logged. The permissioned API runtime endpoint exposes
+availability/identity; missing or stale identity prevents new run creation.
+The selected ARQ schedules must include `relay_quote_nesting_runs_job`, which
+recovers queued/expired leases. A legacy cron allowlist that omits this relay, or
+`WORKER_CRON_JOBS=none`, deliberately prevents the runtime from advertising readiness.
+The release does not change any production cron variable; review existing selection
+as part of the normal release gate instead of silently enabling schedules.
+
+For worker-touched production releases, `.github/scripts/verify_worker_release.py`
+combines Railway's active SUCCESS deployment state with fresh events fetched for that
+exact deployment, compares all build identities to the tested image, then rechecks that
+deployment is still active. A queued build, an inactive latest deployment, a prior
+release's heartbeat, or startup verification without successful Redis publication cannot
+pass. The check uses the existing Railway project token and changes no service settings.
+An unrelated frontend UI/CSS change retains the standalone frontend release path;
+shared kernel/build inputs defer to the combined API/worker pipeline.
+
+Rollback uses a compatible API/worker/frontend release, retains migrations 101/102 and
+immutable draft/run history, and does not change cron settings. A failed runtime can
+still leave history readable, but new calculations remain unavailable. No successful
+calculation, stock reservation, manufacturing approval or automatic material credit is
+implied by a worker startup or a completed deployment.
 
 There is no HTTP endpoint to curl — the worker serves none, by design. Use:
 

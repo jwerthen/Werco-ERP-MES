@@ -41,9 +41,9 @@
 [build]
 builder = "dockerfile"
 dockerfilePath = "backend/Dockerfile.worker"
-# Only backend changes can alter worker behavior; frontend/landing churn should not
-# rebuild it. (Only consulted by Railway's GitHub-integration deploys, not by `railway up`.)
-watchPatterns = ["backend/**"]
+# The shared nesting kernel is a worker input; unrelated UI/landing changes are not.
+# Only consulted by Railway's GitHub integration, not by `railway up`.
+watchPatterns = ["backend/**", "frontend/package.json", "frontend/package-lock.json", "frontend/tsconfig.json", "frontend/tsconfig.nesting-worker.json", "frontend/tools/build-nesting-worker.mjs", "frontend/tools/nesting-server-worker.ts", "frontend/src/features/nesting/lib/**", "railway.toml", ".railwayignore", ".dockerignore"]
 
 [deploy]
 # DELIBERATELY NO healthcheckPath -- see the header. There is no HTTP endpoint to probe.

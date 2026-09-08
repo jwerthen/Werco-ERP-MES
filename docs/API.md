@@ -921,6 +921,96 @@ input snapshot. An identical same-actor retry returns the original result before
 checking today's draft version. It never appends a second revision or audit event.
 See [Material Nesting](MATERIAL_NESTING.md#team-drafts-and-revision-history).
 
+### Quote nesting saved server calculations
+
+These routes calculate **unapproved quote layouts** from an exact immutable team
+draft revision. They do not accept arbitrary geometry/programs at execution time,
+approve a quote, control a laser, reserve material, or write operational costs.
+All reads require effective `purchasing:view`; start and cancel additionally require
+`purchasing:create`, using the draft routes' existing session/company restrictions.
+
+| Method | Endpoint | Contract |
+|--------|----------|----------|
+| GET | `/quote-nesting/runs/runtime` | Fresh, matching worker readiness: `schema_version`, `available`, `reason`, nullable `identity`. No geometry or credentials. |
+| POST | `/quote-nesting/runs` | Strict JSON: positive `draft_id`, `revision_number`, `expected_company_id`, lowercase SHA256 `input_sha256`, UUID `request_key`. Returns `RunDetail` (200); queues IDs after commit. |
+| GET | `/quote-nesting/runs` | Summary page with optional `draft_id`/`revision_number`; `page` 1–100000 and `per_page` 1–100. No geometry. |
+| GET | `/quote-nesting/runs/{run_id}` | Exact run status/settings/warnings and checkpoint metadata. |
+| GET | `/quote-nesting/runs/{run_id}/checkpoints/{sequence}` | One immutable option result and content hash; sequence 1–36. |
+| POST | `/quote-nesting/runs/{run_id}/cancel` | Strict JSON `expected_company_id`, `expected_version`; audited cancellation request, returns `RunDetail`. |
+| GET | `/quote-nesting/runs/{run_id}/report` | Exact saved inputs, run detail and available checkpoint payloads with a report digest; always `status: UNAPPROVED`. Read-only evidence, not an approved quote export. |
+
+The caller may explicitly calculate an older saved revision. Its ID/number/hash
+must match; the service never substitutes the latest revision. New runs require
+a live worker heartbeat matching the API release, pinned bundle, solver and Node
+runtime. A same-actor/key/request replay returns its original run even if current
+readiness is unavailable; a queued replay retries ID-only dispatch without creating
+a second run or audit event. Changed key meaning, active-company intent or input hash
+is rejected. Only one QUEUED/RUNNING calculation is permitted per company; a
+completed run can be recalculated only by an explicit new request.
+
+`RunSummary` identifies `id`, company/draft/revision IDs, revision number, input
+hash, actor, status/version/cancellation flag, timestamps, release/solver/bundle/
+Node identity, evaluated/complete-option counts, checkpoint bytes and bounded
+error code/message. `RunDetail` adds `schema_version: 1`, frozen `settings`, nullable
+`summary`, `warnings` and checkpoint metadata. Metadata contains sequence, group
+and stock-option IDs, content hash/bytes/time, complete flag, sheets, placed and
+unplaced counts. Pages use `items`, `total`, `page`, `per_page`, `schema_version: 1`.
+
+The checkpoint response adds `schema_version: 1` and `result`, the exact version-1
+Node option envelope. Original saved inputs use inches; this internal geometry
+envelope explicitly declares millimeters. The application converts all displayed
+dimensions/areas to imperial. Report `content_sha256` hashes the server's canonical
+JSON excluding the hash field itself. Checkpoint hashes cover the entire option
+envelope. These are stored-result identities, not signatures authenticating original
+CAD bytes, material certification or approved pricing. A report fetched during an
+active run is a snapshot of currently retained work; later reports may contain
+additional checkpoints. Reports do not create immutable quote-export records.
+
+The fixed `standard-v1` technical profile limits the whole project to 120 seconds,
+36 enabled stock options, 5 MiB saved input, an 8 MiB result line including newline,
+24 MiB total retained checkpoint content and a 512 MiB Node heap. There is one
+nesting child per worker process; other ARQ functions retain their existing limits.
+Source groups/options are evaluated in their saved order. The shared kernel uses
+code-unit tie-breaking (`werco-contour-v4`), with `seed: null` because it is not
+random. Replaying identical saved inputs/build/runtime and completed work is
+deterministic; a wall-time cutoff is not a deterministic work budget.
+
+QUEUED → RUNNING → COMPLETED/PARTIAL/CANCELLED/FAILED are separate from quote
+approval. **COMPLETED means all planned stock options were evaluated**, not that
+every part fits. `completed_count` counts feasible stock alternatives for their
+individual material groups, not a combined purchased-sheet order. Each emitted
+nest is checked against original contours, spacing, margins, grain and quantities
+before its checkpoint is accepted. Time/work/output limits retain earlier checked
+results and explicitly identify unfinished work. They never establish infeasibility.
+All predicted leftovers remain review-only with zero credit.
+
+Run creation/cancellation and worker lifecycle/checkpoint changes use required
+audit writes in the same database transaction. Background lifecycle evidence
+retains the submitting API-token credential attribution, including when revocation
+or expiry stops execution; this attribution does not grant execution rights.
+Heartbeats renew a 45-second lease
+every 10 seconds; cancellation/actor eligibility is checked while the child runs.
+The narrow relay requeues committed pending IDs and marks expired leases failed;
+it does not rerun a terminal result. Input/settings references and completed
+checkpoints are immutable; SQL guards enforce tenant/lease/input relationships,
+version increments, legal transitions and terminal immutability. No database
+transaction spans a geometry calculation; only short lifecycle/poll transactions
+run while the child works. Failed required audit evidence
+rolls back the associated change.
+
+Readiness identity contains release, protocol, solver version, bundle SHA, Node
+version, instance ID, observation time and nullable Railway deployment ID. Its
+Redis heartbeat expires after 90 seconds and is refreshed every 30 seconds. The
+worker publishes readiness only when its nesting relay cron is selected; disabling
+that relay leaves new server calculations unavailable.
+`reason` may be `ready`, `missing`, `stale`, `release_mismatch`, `queue_unavailable`
+or `invalid_identity`. No private drawing information is published in this key.
+
+- **403:** permission/session/company restriction; **404:** inaccessible run/input.
+- **409:** active run, stale cancellation version, input/request conflict or concurrent write.
+- **422:** invalid request; existing global JSON-body cap still applies.
+- **503:** matching runtime unavailable for a new request or required audit failure.
+
 ### Global search and customer edits
 
 `GET /search/` accepts `q` (1–100 characters), `types` (comma-separated entity

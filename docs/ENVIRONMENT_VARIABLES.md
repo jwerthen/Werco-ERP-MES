@@ -458,6 +458,19 @@ The API and the worker each log a warning at startup, and `/health/ready` report
 Read by the worker process only (`arq app.worker.WorkerSettings`). See
 `docs/WORKER_SERVICE.md` (reference) and `docs/WORKER_DEPLOYMENT_RUNBOOK.md` (procedure).
 
+Saved nesting calculations add no operator-set variables or secrets. The worker
+uses the API's existing database/Redis configuration and the artifact's `APP_RELEASE`.
+Its Node path `/usr/local/bin/node`, bundle path `/app/nesting-runtime/solver.cjs`,
+Node 22 runtime and 512 MiB heap limit are fixed in reviewed code/image configuration;
+request input cannot override them. Railway supplies `RAILWAY_DEPLOYMENT_ID` for
+the availability heartbeat; do not set it manually. Existing `WORKER_CRON_JOBS`
+and deployment enablement variables are unchanged. Missing fresh runtime identity
+causes new server nesting requests to fail unavailable while saved history stays readable.
+Runtime readiness also requires `relay_quote_nesting_runs_job` among the worker's
+selected schedules. Existing cron allowlists must include that relay to support server
+nesting; `none` intentionally leaves new calculations unavailable. No deployment
+script changes these selections or enables unrelated schedules.
+
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `WORKER_CRON_JOBS` | No | all | Which scheduled jobs the worker registers. Unset or `all` → every cron (12 of them). `none` → no crons; the worker still drains enqueue-driven jobs (notifications, webhooks, labels, completion signals). A comma-separated list of job names arms **exactly** those (allowlist). A `-` prefix **excludes** a job from the full set (denylist): `all,-run_mrp_auto_draft_job`. The two shapes may not be mixed. **An unrecognised name is a hard startup error, not a silent skip — a negated one included.** `none` is the correct value for a first-ever boot — several crons write or email in bulk on their first run. Full syntax below |

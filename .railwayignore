@@ -2,8 +2,8 @@
 #
 # The worker is the one service deployed from the REPO ROOT (see railway.toml for why its
 # config file cannot live in backend/). Without this file every `railway up` from the root
-# would upload the frontend, the landing site, the docs and the load tests -- none of which
-# backend/Dockerfile.worker copies into the image.
+# would upload frontend assets/reports, the landing site, docs and load tests. The worker
+# needs frontend compiler/kernel inputs, but does not copy those unrelated artifacts.
 #
 # This file is never consulted by the API or frontend deploys: those run
 # `cd backend|frontend && railway up . --path-as-root`, so the repo root is not their
@@ -11,7 +11,18 @@
 #
 # `railway up` already honors .gitignore, so node_modules/.venv/build output need no entry.
 
-frontend/
+# The worker compiles the same nesting kernel as the browser. Keep its package
+# lock, source and two build tools in the archive; omit unrelated frontend output.
+frontend/build/
+frontend/dist/
+frontend/public/
+frontend/e2e/
+frontend/coverage/
+frontend/playwright-report/
+frontend/test-results/
+frontend/.browser-harness/
+frontend/tools/browser-harness/
+backend/nesting-runtime/
 landing/
 load-tests/
 docs/

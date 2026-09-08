@@ -1,4 +1,5 @@
 import { allowedRotations, orientationExplanation } from './orientation';
+import { compareStableText } from './stable-order';
 import { packRectangles } from './rectangular-packing';
 import { convexPieces } from './convex-pieces';
 import * as Clipper from 'clipper-lib';
@@ -496,7 +497,7 @@ export function packContours(parts: Part[], stock: Stock): Nest {
             ? bb.width * bb.height - aa.width * aa.height
             : Math.max(bb.width, bb.height) - Math.max(aa.width, aa.height)) ||
           partArea(b.part) - partArea(a.part) ||
-          a.part.id.localeCompare(b.part.id) ||
+          compareStableText(a.part.id, b.part.id) ||
           a.instance - b.instance
         );
       });
