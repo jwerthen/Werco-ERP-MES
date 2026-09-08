@@ -1,13 +1,12 @@
-# Upload trimming for the ARQ worker service ONLY.
+# Repository upload trimming, primarily for the ARQ worker's repo-root archive.
 #
-# The worker is the one service deployed from the REPO ROOT (see railway.toml for why its
-# config file cannot live in backend/). Without this file every `railway up` from the root
-# would upload frontend assets/reports, the landing site, docs and load tests. The worker
-# needs frontend compiler/kernel inputs, but does not copy those unrelated artifacts.
-#
-# This file is never consulted by the API or frontend deploys: those run
-# `cd backend|frontend && railway up . --path-as-root`, so the repo root is not their
-# archive root and this file is not in their upload.
+# Railway 5.41.2 selects paths with ignore::WalkBuilder before applying
+# --path-as-root to archive names. Parent .railwayignore rules therefore also
+# affect API/frontend uploads launched from their own subdirectories. Keep every
+# required build input for those services; path-as-root does not isolate ignore
+# rules. In particular frontend/public (including the stamped release receipt)
+# must remain included. The worker image never copies those public assets.
+# Primary source: https://github.com/railwayapp/cli/blob/v5.41.2/src/controllers/upload.rs
 #
 # `railway up` already honors .gitignore, so node_modules/.venv/build output need no entry.
 
@@ -15,7 +14,6 @@
 # lock, source and two build tools in the archive; omit unrelated frontend output.
 frontend/build/
 frontend/dist/
-frontend/public/
 frontend/e2e/
 frontend/coverage/
 frontend/playwright-report/
