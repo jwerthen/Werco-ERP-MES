@@ -16,7 +16,6 @@ import {
   FolderOpen,
   Check,
   Info,
-  LockKeyhole,
   CircleHelp,
   ZoomIn,
   ZoomOut,
@@ -70,6 +69,9 @@ import MaterialSourcePanel from './MaterialSourcePanel';
 import useNestingCatalog from './useNestingCatalog';
 import { catalogFamily, clearCatalogPricing, materialGroupLabel, type MaterialBinding } from './lib/material-binding';
 import { buildRunManifest } from './lib/run-manifest';
+import PartOrientationControls, { SheetGrainControl, orientationSummary, sheetGrainLabel } from './OrientationControls';
+import { orientationExplanation } from './lib/orientation';
+import LeftoverReview, { LeftoverOverlay, leftoverPath } from './LeftoverReview';
 
 type CachedComparison = { comparison: Comparison; signature: string };
 const legacyFootprintNotice =
@@ -257,6 +259,8 @@ export default function NestingWorkspace({
     [zoom, setZoom] = useState(1),
     [busy, setBusy] = useState(false),
     [labels, setLabels] = useState(true),
+    [showLeftovers, setShowLeftovers] = useState(true),
+    [selectedLeftover, setSelectedLeftover] = useState<string | null>(null),
     [unitless, setUnitless] = useState('in'),
     [showAdd, setShowAdd] = useState(false),
     [help, setHelp] = useState(false);
@@ -307,6 +311,8 @@ export default function NestingWorkspace({
   const nest = active?.nest,
     stock = active?.option,
     visible = stale ? [] : (nest?.placements.filter(p => p.sheet === sheet) ?? []);
+  const leftoverSheet = stale ? undefined : active?.leftovers?.sheets.find(result => result.sheet === sheet);
+  useEffect(() => setSelectedLeftover(null), [signature, active?.option.id, active?.leftovers, sheet]);
   const requested = quote.parts.reduce((a, p) => a + p.quantity, 0),
     enabled = quote.options.filter(o => o.enabled).length;
   const error = useMemo(() => {
@@ -642,6 +648,7 @@ export default function NestingWorkspace({
     };
     const rows = [
       ['MATERIAL REQUIREMENT ESTIMATE'],
+      ['Scope', 'Quote layout — not an NC program'],
       ['Job', quote.name],
       ['Material', materialGroupLabel(quote)],
       ['Material family', quote.material],
@@ -659,6 +666,7 @@ export default function NestingWorkspace({
       ['Thickness in', mmToIn(quote.thickness)],
       ['Selected stock width in', mmToIn(active.option.height)],
       ['Selected stock length in', mmToIn(active.option.width)],
+      ['Sheet grain', sheetGrainLabel(quote.grainAxis)],
       ['Sheets to order', nest.sheets],
       ['Required parts', requested],
       ['Placed parts', nest.placements.length],
@@ -669,6 +677,11 @@ export default function NestingWorkspace({
       ['Approx stock weight lb', mass ?? 'Unavailable: density not recorded'],
       ['Price per sheet USD', active.option.price ?? 'Not entered'],
       ['Estimated material total USD', active.cost === null ? 'Not entered' : active.cost.toFixed(2)],
+      ['Credited remnant value USD', 0],
+      [
+        'Leftover review status',
+        active.leftovers ? 'Predicted geometry; physical review required' : (active.leftoverError ?? 'Not calculated'),
+      ],
       [
         'Basis',
         'Actual-contour estimating layout; one material, thickness and stock size per order option. Holes are not used for part placement. Freight, tax, labor and consumables excluded.',
@@ -684,7 +697,7 @@ export default function NestingWorkspace({
         r.complete && r.cost !== null ? r.cost.toFixed(2) : '',
       ]),
       [],
-      ['Part', 'Quantity', 'Width in', 'Height in', 'Rotation allowed', 'Geometry basis'],
+      ['Part', 'Quantity', 'Width in', 'Height in', 'Rotation allowed', 'Part grain axis', 'Geometry basis'],
       ...quote.parts.map(p => {
         const b = bounds(p.loops[0]);
         return [
@@ -692,10 +705,34 @@ export default function NestingWorkspace({
           p.quantity,
           mmToIn(b.width),
           mmToIn(b.height),
-          p.rotate ? '0 / 90 / 180 / 270 degrees' : '0 degrees',
+          orientationSummary(p, quote),
+          p.grainAxis ?? 'No grain requirement',
           p.importMode === 'drawing-bounds' ? 'Legacy footprint; re-import DXF before nesting' : 'Closed contours',
         ];
       }),
+      [],
+      [
+        'Sheet',
+        'Gross area in2',
+        'Edge margin area in2',
+        'Nominal part area in2',
+        'Reserved cutout area in2',
+        'Clearance and protection area in2',
+        'Potential leftover area in2',
+        'Connected regions',
+        'Credited value USD',
+      ],
+      ...(active.leftovers?.sheets.map(result => [
+        result.sheet + 1,
+        result.grossArea / 25.4 ** 2,
+        result.edgeMarginArea / 25.4 ** 2,
+        result.nominalPartArea / 25.4 ** 2,
+        result.reservedCutoutArea / 25.4 ** 2,
+        result.clearanceAndProtectionArea / 25.4 ** 2,
+        result.remainingArea / 25.4 ** 2,
+        result.regions.length,
+        0,
+      ]) ?? []),
     ];
     download(
       rows.map(row => row.map(csv).join(',')).join('\n'),
@@ -706,6 +743,15 @@ export default function NestingWorkspace({
   }
   function exportPreview() {
     if (stale || !stock || !nest) return;
+    const remaining =
+      showLeftovers && leftoverSheet
+        ? leftoverSheet.regions
+            .map(
+              region =>
+                `<path d="${leftoverPath(region)}" fill="#fef3c7" fill-rule="evenodd" stroke="#d97706" stroke-width="0.5"><title>Potential leftover — review required, no value credited</title></path>`
+            )
+            .join('')
+        : '';
     const paths = visible
       .map(pl => {
         const part = quote.parts.find(p => p.id === pl.partId)!;
@@ -717,7 +763,7 @@ export default function NestingWorkspace({
       })
       .join('');
     download(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${mmToIn(stock.width)}in" height="${mmToIn(stock.height)}in" viewBox="0 0 ${stock.width} ${stock.height}"><rect width="100%" height="100%" fill="white"/><g transform="translate(0 ${stock.height}) scale(1 -1)">${paths}</g></svg>`,
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${mmToIn(stock.width)}in" height="${mmToIn(stock.height)}in" viewBox="0 0 ${stock.width} ${stock.height}"><title>QUOTE LAYOUT — NOT AN NC PROGRAM</title><desc>Sheet grain: ${sheetGrainLabel(quote.grainAxis)}. Permitted part orientations are recorded in the material summary and draft review export. Mirroring is prohibited. Amber regions are predicted leftovers requiring physical review; no value is credited.</desc><rect width="100%" height="100%" fill="white"/><g transform="translate(0 ${stock.height}) scale(1 -1)">${remaining}${paths}</g></svg>`,
       safeName(quote.name) + `-sheet-${sheet + 1}-preview.svg`,
       'image/svg+xml'
     );
@@ -1085,9 +1131,22 @@ export default function NestingWorkspace({
                           <small>
                             {formatIn(b.width)} × {formatIn(b.height)} in
                           </small>
+                          <small className={orientationExplanation(p, quote) ? 'orientation-warning' : ''}>
+                            {orientationSummary(p, quote)}
+                            {p.grainAxis ? ` · grain ${p.grainAxis.toUpperCase()}` : ''}
+                          </small>
                           {p.importMode === 'drawing-bounds' && <small>Legacy footprint · re-import DXF</small>}
                           {selected === p.id && (
                             <div className="part-provenance">
+                              <PartOrientationControls
+                                part={p}
+                                stock={quote}
+                                onChange={patch =>
+                                  update({
+                                    parts: quote.parts.map(part => (part.id === p.id ? { ...part, ...patch } : part)),
+                                  })
+                                }
+                              />
                               <label className="field-label" htmlFor={fieldId + '-revision-' + p.id}>
                                 <span>Part revision (if known)</span>
                                 <Input
@@ -1150,17 +1209,13 @@ export default function NestingWorkspace({
                               }
                             />
                             <button
-                              className={`icon-button ${p.rotate ? 'active' : ''}`}
-                              aria-label={`${p.rotate ? 'Lock' : 'Allow'} rotation for ${p.name}`}
-                              aria-pressed={p.rotate}
-                              title={p.rotate ? '0°, 90°, 180° and 270° rotation allowed' : 'Grain locked'}
-                              onClick={() =>
-                                update({
-                                  parts: quote.parts.map(a => (a.id === p.id ? { ...a, rotate: !a.rotate } : a)),
-                                })
-                              }
+                              className={`icon-button ${selected === p.id ? 'active' : ''}`}
+                              aria-label={`Edit rotation and grain for ${p.name}`}
+                              aria-expanded={selected === p.id}
+                              title="Edit permitted rotations and source grain direction"
+                              onClick={() => setSelected(selected === p.id ? null : p.id)}
                             >
-                              {p.rotate ? <RotateCw size={15} /> : <LockKeyhole size={15} />}
+                              <Settings2 size={15} />
                             </button>
                             <button
                               className="icon-button delete"
@@ -1189,7 +1244,7 @@ export default function NestingWorkspace({
                   <Plus size={16} /> Add basic shape
                 </button>
                 <p className="helper">
-                  Lock rotation for grain or directional finishes. All quantities belong to this material and thickness.
+                  Select a part to set its allowed rotations and grain. Grain requirements need a known sheet grain.
                 </p>
               </aside>
               <section className="canvas-panel">
@@ -1225,13 +1280,17 @@ export default function NestingWorkspace({
                 {stale || !stock || !nest || !visible.length ? (
                   <div className="canvas-empty">
                     <Layers3 size={32} />
-                    <h2>{stale ? 'Ready to compare' : requested ? 'No parts fit this sheet' : 'Your nest preview'}</h2>
+                    <h2>
+                      {stale ? 'Ready to compare' : requested ? 'No placements on this sheet' : 'Your nest preview'}
+                    </h2>
                     <p>
                       {error ||
                         active?.error ||
                         (stale
                           ? 'Update the estimate to see a fresh nest.'
-                          : 'Import parts or try a larger stock size.')}
+                          : requested
+                            ? comparison.reason
+                            : 'Import parts to compare stock sizes.')}
                     </p>
                     <button className="primary" onClick={compare} disabled={busy || !!error || !quote.parts.length}>
                       Compare {enabled} sheet sizes
@@ -1275,6 +1334,19 @@ export default function NestingWorkspace({
                         <text x={stock.width / 2} y={-36} textAnchor="middle" fill="#94a3b8" fontSize="32">
                           {formatIn(stock.width)} in
                         </text>
+                        {quote.grainAxis && (
+                          <text
+                            x={stock.width / 2}
+                            y={stock.height + 60}
+                            textAnchor="middle"
+                            fill="#93c5fd"
+                            fontSize="25"
+                          >
+                            {quote.grainAxis === 'x'
+                              ? '↔ Grain along sheet length (X)'
+                              : '↕ Grain along sheet width (Y)'}
+                          </text>
+                        )}
                         <text
                           transform={`translate(-42 ${stock.height / 2}) rotate(-90)`}
                           textAnchor="middle"
@@ -1284,6 +1356,9 @@ export default function NestingWorkspace({
                           {formatIn(stock.height)} in
                         </text>
                         <g transform={`translate(0 ${stock.height}) scale(1 -1)`}>
+                          {showLeftovers && leftoverSheet && (
+                            <LeftoverOverlay sheet={leftoverSheet} highlightedId={selectedLeftover} />
+                          )}
                           {visible.map((pl, i) => {
                             const p = quote.parts.find(a => a.id === pl.partId)!;
                             return (
@@ -1292,7 +1367,7 @@ export default function NestingWorkspace({
                                 className="placed-part"
                                 onClick={() => setSelected(selected === p.id ? null : p.id)}
                               >
-                                <title>{`${p.name} #${pl.instance + 1} · ${formatIn(pl.width)} × ${formatIn(pl.height)} in`}</title>
+                                <title>{`${p.name} #${pl.instance + 1} · ${formatIn(pl.width)} × ${formatIn(pl.height)} in · ${pl.rotation}° · ${orientationSummary(p, quote)} permitted${p.grainAxis ? ` · grain aligned with sheet ${quote.grainAxis?.toUpperCase()}` : ''}`}</title>
                                 <path
                                   d={svgPath(transformLoops(p, pl))}
                                   fill={colors[p.color].fill}
@@ -1345,6 +1420,16 @@ export default function NestingWorkspace({
                   <span>
                     {selected ? quote.parts.find(p => p.id === selected)?.name : 'One-inch grid · actual part contours'}
                   </span>
+                  <label className="switch-inline" htmlFor={fieldId + '-leftovers'}>
+                    Potential leftovers
+                    <Switch
+                      size="sm"
+                      id={fieldId + '-leftovers'}
+                      checked={showLeftovers}
+                      onCheckedChange={setShowLeftovers}
+                      aria-label="Show potential leftovers"
+                    />
+                  </label>
                   <label className="switch-inline" htmlFor={fieldId + '-labels'}>
                     Labels
                     <Switch
@@ -1388,6 +1473,10 @@ export default function NestingWorkspace({
                     max={100}
                     onChange={v => changeMaterial({ thickness: v })}
                   />
+                  <SheetGrainControl grainAxis={quote.grainAxis} onChange={grainAxis => update({ grainAxis })} />
+                  <p className="helper inset-free">
+                    Applies to every stock size in this material group. Set a part’s grain from its DXF orientation.
+                  </p>
                   <div className="two-fields">
                     <NumberField
                       label="Edge margin"
@@ -1458,7 +1547,7 @@ export default function NestingWorkspace({
                   </p>
                 </div>
                 <div className="note">
-                  <b>Material planning only</b>
+                  <b>Quote layout · not an NC program</b>
                   <p>Compare sheet quantities before quoting. No cutting recipes or machine setup required.</p>
                 </div>
               </aside>
@@ -1537,7 +1626,7 @@ export default function NestingWorkspace({
               )}
               {!stale && active && !active.complete && quote.parts.length > 0 && (
                 <div className="unplaced-panel">
-                  <h2>Parts that need another stock option</h2>
+                  <h2>Parts requiring review</h2>
                   {oversizeParts(quote, active.option).map(p => (
                     <p key={p.id}>
                       <b>
@@ -1545,7 +1634,7 @@ export default function NestingWorkspace({
                       </b>
                       <span>
                         {formatIn(bounds(p.loops[0]).width)} × {formatIn(bounds(p.loops[0]).height)} in ·{' '}
-                        {p.rotate ? '0° / 90° allowed' : 'rotation locked'}
+                        {orientationExplanation(p, quote) ?? `${orientationSummary(p, quote)} allowed`}
                       </span>
                     </p>
                   ))}
@@ -1573,6 +1662,17 @@ export default function NestingWorkspace({
                     </b>
                   </div>
                 </div>
+              )}
+              {!stale && active?.complete && (
+                <LeftoverReview
+                  sheet={leftoverSheet}
+                  error={active.leftoverError}
+                  highlightedId={selectedLeftover}
+                  onHighlight={id => {
+                    setSelectedLeftover(current => (current === id ? null : id));
+                    setShowLeftovers(true);
+                  }}
+                />
               )}
             </section>
             <div className="workspace-bottom">
@@ -1763,9 +1863,15 @@ export default function NestingWorkspace({
                     order.
                   </p>
                   <p>
+                    Each part can use fixed orientation, half turns or quarter turns. Part grain is the horizontal (X)
+                    or vertical (Y) direction in the source drawing. A required grain must align with the selected sheet
+                    grain; unknown or conflicting directions stay unplaced. Parts are never mirrored.
+                  </p>
+                  <p>
                     Utilization is contour area minus holes, divided by full purchased sheet area. Parts are not nested
-                    inside holes. “Unused area” includes spaces and holes, some of which may be reusable. Approximate
-                    weight uses typical material density.
+                    inside holes. “Unused area” includes margins, spaces and holes. Amber leftover regions are a
+                    separate conservative prediction after spacing and curve protection; every region requires review
+                    and receives no cost credit. Approximate weight uses the selected source density when available.
                   </p>
                   <p>
                     Optional prices cover sheet material only. They exclude freight, tax, labor, cutting time and
@@ -1950,7 +2056,7 @@ export default function NestingWorkspace({
           </DialogHeader>
           <ol className="help-list">
             <li>Add part shapes or import DXFs. Assign file materials and thicknesses in inches.</li>
-            <li>Set quantities, grain locks, edge margin and spacing.</li>
+            <li>Set quantities, allowed rotations, part and sheet grain, edge margin and spacing.</li>
             <li>Enable stock sizes you can buy. Add supplier prices if needed.</li>
             <li>Compare sheets and review the recommended size and quantity.</li>
             <li>Save your estimate and material requirement summary.</li>
@@ -1972,7 +2078,8 @@ export default function NestingWorkspace({
           <Crosshair size={14} /> WERCO NEST
         </span>
         <span>
-          Material planning · Imperial units <span className="footer-divider">/</span> Save your estimate to keep work
+          Quote layout · not an NC program · Imperial units <span className="footer-divider">/</span> Save your estimate
+          to keep work
         </span>
       </footer>
     </section>

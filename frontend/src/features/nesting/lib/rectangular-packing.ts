@@ -1,3 +1,4 @@
+import { allowedRotations, orientationExplanation } from './orientation';
 import {
   bounds,
   validatePart,
@@ -81,20 +82,32 @@ export function packRectangles(parts: Part[], stock: Stock): Nest {
           : b.b.height - a.b.height
     );
     for (const { p, i, b } of sorted) {
+      const permitted = allowedRotations(p, stock);
+      // Rectangular outer profiles share a footprint after 180 degrees. Keep the
+      // first actually permitted rotation for each parity, including 90-only grain.
+      const rotations = permitted.filter(
+        (rotation, index) => permitted.findIndex(candidate => candidate % 180 === rotation % 180) === index
+      );
+      const fitsSheet = (width: number, height: number) =>
+        rotations.some(
+          rotation =>
+            (rotation % 180 ? b.height : b.width) <= width + EPS &&
+            (rotation % 180 ? b.width : b.height) <= height + EPS
+        );
       let best: {
         sheet: number;
         x: number;
         y: number;
         width: number;
         height: number;
-        rotation: 0 | 90;
+        rotation: Placement['rotation'];
         score: number;
       } | null = null;
       const search = (si: number) => {
         for (const f of free[si])
-          for (const rot of (p.rotate ? [0, 90] : [0]) as (0 | 90)[]) {
-            const width = rot === 0 ? b.width : b.height,
-              height = rot === 0 ? b.height : b.width;
+          for (const rot of rotations) {
+            const width = rot % 180 ? b.height : b.width,
+              height = rot % 180 ? b.width : b.height;
             if (width + stock.gap <= f.width + EPS && height + stock.gap <= f.height + EPS) {
               const score =
                 si * 1e12 +
@@ -117,8 +130,7 @@ export function packRectangles(parts: Part[], stock: Stock): Nest {
       if (!best && free.length < stock.maxSheets) {
         const w = stock.width - 2 * stock.margin,
           h = stock.height - 2 * stock.margin;
-        const fits =
-          (b.width <= w + EPS && b.height <= h + EPS) || (p.rotate && b.height <= w + EPS && b.width <= h + EPS);
+        const fits = fitsSheet(w, h);
         if (fits) {
           free.push([
             {
@@ -138,7 +150,7 @@ export function packRectangles(parts: Part[], stock: Stock): Nest {
           y: number;
           width: number;
           height: number;
-          rotation: 0 | 90;
+          rotation: Placement['rotation'];
           score: number;
         };
         const { score, ...placement } = found;
@@ -155,12 +167,13 @@ export function packRectangles(parts: Part[], stock: Stock): Nest {
         else {
           const w = stock.width - 2 * stock.margin,
             h = stock.height - 2 * stock.margin;
-          const fits =
-            (b.width <= w + EPS && b.height <= h + EPS) || (p.rotate && b.height <= w + EPS && b.width <= h + EPS);
+          const fits = fitsSheet(w, h);
           unplaced.push({
             partId: p.id,
             count: 1,
-            reason: fits ? 'Sheet limit reached' : 'Exceeds usable sheet at permitted rotations',
+            reason:
+              orientationExplanation(p, stock) ??
+              (fits ? 'Sheet limit reached' : 'Exceeds usable sheet at permitted rotations'),
           });
         }
       }

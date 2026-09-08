@@ -1,3 +1,4 @@
+import { hasOrientationConstraints } from './orientation';
 import type { Job, Loop, Point } from './nesting';
 import type { Recipe } from './technology';
 export const MM_PER_INCH = 25.4;
@@ -46,7 +47,7 @@ export function jobToFile(job: Job) {
   for (const k of dimensions) stock[k] = mmToIn(stock[k]);
   return {
     ...job,
-    version: 2,
+    version: hasOrientationConstraints(job.parts, job.stock) ? 8 : 2,
     units: 'in',
     thickness: mmToIn(job.thickness),
     stock,
@@ -74,12 +75,27 @@ function numeric(n: unknown): number {
 export function jobFromFile(input: unknown): unknown {
   if (!input || typeof input !== 'object') throw new Error('Invalid job file.');
   const d = input as Record<string, unknown>;
-  if (d.version === 1) return d;
-  if (d.version !== 2 || d.units !== 'in')
-    throw new Error('Expected a version 2 job with units "in", or a legacy version 1 job.');
+  if (d.version === 1) {
+    const legacyStock = d.stock as Record<string, unknown> | undefined;
+    if (
+      legacyStock?.grainAxis !== undefined ||
+      (Array.isArray(d.parts) &&
+        d.parts.some(part => part && (part.rotationMode !== undefined || part.grainAxis !== undefined)))
+    )
+      throw new Error('Orientation and grain constraints require a version 8 job or version 7 estimate.');
+    return d;
+  }
+  if ((d.version !== 2 && d.version !== 8) || d.units !== 'in')
+    throw new Error('Expected a version 2 or 8 job with units "in", or a legacy version 1 job.');
   if (!d.stock || typeof d.stock !== 'object' || !Array.isArray(d.parts) || d.parts.length > 300)
     throw new Error('Invalid job stock or parts.');
   const stock = { ...d.stock } as Record<string, unknown>;
+  if (
+    d.version !== 8 &&
+    (stock.grainAxis !== undefined ||
+      d.parts.some(part => part && (part.rotationMode !== undefined || part.grainAxis !== undefined)))
+  )
+    throw new Error('Orientation and grain constraints require a version 8 job or version 7 estimate.');
   for (const k of dimensions) stock[k] = inToMm(numeric(stock[k]));
   const parts = d.parts.map(p => {
     if (!p || typeof p !== 'object' || !Array.isArray(p.loops) || p.loops.length > 100)

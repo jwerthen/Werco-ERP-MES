@@ -39,10 +39,11 @@ the same permission as Quote Calculator; see [RBAC_PERMISSIONS.md](RBAC_PERMISSI
    `.estimate.json` file. **Save summary** downloads the active group's material
    comparison as CSV; **Save nest preview** downloads its selected sheet as SVG,
    including reference lines. **Export review record** downloads a draft JSON
-   record covering the current inputs and all compared groups.
+   record covering the current inputs and all compared groups, including potential
+   leftover geometry when analysis is available.
 
 The layout places actual outer contours, including concave profiles, using
-multiple part orderings and allowed quarter-turn rotations. It checks contour
+multiple part orderings and the permitted rotations after applying grain requirements. It checks contour
 separation and sheet margins for the resulting placements. It establishes a
 feasible estimate, but does not prove the minimum sheet count. Holes remain
 visible and subtract from part area; other parts are not placed inside them.
@@ -54,6 +55,99 @@ weight uses the selected catalog density when bound to an ERP source (unknown
 when that source has no valid density), or typical density for a family-only
 estimate. Check dimensions, quantities, supplier
 sheet sizes, and your shop's handling capacity before ordering.
+
+## Rotation and grain requirements
+
+Select a part to set **Allowed rotation** and **Part grain**. Rotation choices
+are **Fixed (0°)**, **Half turns (0°, 180°)**, and **Quarter turns
+(0°, 90°, 180°, 270°)**. Set **Sheet grain** for the active material group;
+that direction applies to every stock size compared in that group.
+
+- Part grain X means horizontal in the source drawing; Y means vertical.
+- Sheet grain X runs along sheet length (horizontal in the nest); Y runs along
+  sheet width (vertical in the nest). These are axes, so a 180° turn preserves
+  grain alignment and a 90°/270° turn exchanges X and Y.
+- **No grain requirement** permits the selected rotation policy without a grain
+  restriction. **Unknown / not specified** sheet grain is not permission to
+  rotate a part that requires grain alignment.
+
+The solver intersects the rotation policy with grain alignment before creating
+candidates, including rectangular and circular parts. For example, a part with
+X grain on a Y-grain sheet can use 90° or 270° only when quarter turns are
+permitted. Fixed and half-turn policies cannot satisfy that pairing. Required
+part grain with unknown sheet grain remains unplaced with an explanation;
+unrestricted parts can still be placed, but an incomplete order cannot be
+recommended. Sheet-size changes do not resolve missing or conflicting grain.
+The final placement validator checks the same rules, and the preview and CSV
+show permitted orientations and sheet grain. Editing these settings invalidates
+previous comparisons and draft review exports until the groups are compared again.
+
+These are estimator-assigned requirements, not grain data inferred from a DXF,
+material name, or ERP catalog record. Confirm the drawing and purchased sheet
+specification. Free-angle rotation, mirroring, and nesting parts inside holes
+remain unavailable.
+
+## Potential leftover regions
+
+After a comparison, **Potential leftovers** overlays the selected sheet with
+amber vector regions. The review panel shows each connected region's actual
+outline and holes, its area, and its overall extents. Select a region to
+highlight it; the thumbnail list pages eight regions at a time. Extents are
+bounding measurements, not a guaranteed usable rectangle. A connected shape
+can be a narrow skeleton that cannot be handled or reused.
+
+Every region remains **review** and contributes **$0 credit**. This predicts
+space left by the proposed placements; it does not prove that material has
+been cut, remains recoverable, has the right traceability, or meets a remnant
+eligibility rule. It creates no inventory, reservation, purchase/quote update,
+remnant identifier, or production instruction. Sheet recommendations and
+material costs receive no leftover credit.
+
+Analysis uses the original validated placements, subtracts guarded full outer
+part profiles from the usable rectangular sheet, and preserves disconnected
+regions and holes through a polygon-tree difference. Internal part cutouts
+stay reserved. It does not replace profiles with bounding boxes. **Area
+breakdown and assumptions** distinguishes:
+
+`gross sheet = edge margins + nominal finished parts + reserved internal cutouts + clearance/numerical protection + potential leftover regions`
+
+Nominal part/cutout areas use the geometry model, including analytic circle
+areas. Numerical loss is assigned to clearance/protection, never described as
+physical kerf. The draft JSON also records the signed reconciliation residual;
+nontrivial negative allowances or residuals make analysis unavailable rather
+than inventing recoverable area.
+
+### Engineering analysis profile
+
+`werco-leftovers-v1` uses the fixed profile below. These are engineering
+approximation settings, not approved shop reuse or cutting policies:
+
+| Setting | Value or behavior |
+|---------|-------------------|
+| Integer grid | 0.0001 mm (approximately 0.000003937 in) |
+| Circle conversion | Circumscribed polygons with radial excess at most 0.0001 in; analytic nominal area is retained |
+| Reserved distance | Half the selected part gap + imported curve tolerance + 0.0004 mm numerical protection; rounded outward to the grid |
+| Offset corners | Square tangent joins, which enclose the round offset; convex corner radius can reach √2 times the reserved distance |
+| Usable boundary | Inset an additional 0.0004 mm and round inward to the grid |
+| Area arithmetic | Origin-relative integer polygon products; model areas retain normal analytical calculations |
+| Reconciliation tolerance | Larger of 0.0000001 mm² or gross sheet area × 0.000000000001; the signed residual remains in draft evidence |
+| Input budget | 60,000 vertices across placed outer profiles; circles at most 8,192 vertices each |
+| Output budget | 30,000 vertices per sheet, 120,000 across the option, and 2,000 connected regions; guarded offset paths also have a 120,000-vertex per-sheet budget |
+| Offset range | Reserved distance at most 40,000 mm; larger requests report analysis unavailable |
+
+Analysis runs in the same comparison worker, outside rendering. A numerical
+or complexity error appears as **Leftover analysis unavailable**; it does not
+erase an otherwise valid nest or sheet recommendation, and no leftover area
+or value is claimed. Input changes hide stale regions until recalculation.
+
+The CSV includes per-sheet leftover areas and zero credits. SVG previews include
+the amber overlay when it is enabled. Draft review JSON includes region geometry
+in inches, area in square inches, the exact profile, review assumptions and
+zero credit. Export validates cached report structure, geometry areas, and its
+relationship to the current sheet/placements without rerunning offset work on
+the UI thread. These checks do not turn the draft into an approved remnant.
+Leftover results are not stored in the editable estimate; **Open** requires a
+fresh comparison. This feature adds no input setting or saved-file version.
 
 ## ERP material and price review
 
@@ -150,7 +244,14 @@ defaults:
 | Omitted metadata | `VIEWPORT` records and all entities on the `FORMAT` annotation layer, with an import warning for omitted FORMAT entities |
 | Rejected files | Open or ambiguous outer profiles, touching/intersecting contours, reference paths outside or spanning parts, malformed data, unsupported entities, blocks/`INSERT`, wide polylines, sloped/nonplanar geometry, tilted extrusion, or paper-space cut geometry; other text/annotations are not silently discarded |
 | DXF units | Inch and millimeter files retain their physical size; unitless files default to inches unless millimeters is selected before import |
-| Saved estimates | Version 5 projects retain ERP material bindings; family-only projects remain version 4. Both wrap one version 3 inch/USD estimate per group. Older single estimates/jobs open as one group. Legacy `drawing-bounds` parts must be removed and their DXFs re-imported before nesting |
+| Saved estimates | Projects with explicit rotation or grain settings use version 6 and version 7 constrained quotes. Other groups may retain version 3 quotes. Without constraints, ERP-bound projects remain version 5 and family-only projects version 4. Older single estimates/jobs open as one group; constrained legacy jobs use version 8. Legacy `drawing-bounds` parts require DXF re-import before nesting |
+
+Legacy `rotate: false` means fixed and `rotate: true` means quarter turns;
+when `rotationMode` exists, it is authoritative. Axis metadata remains X/Y
+through inch/millimeter conversion. Versions 6/7/8 deliberately differ between
+project/quote/job files so older readers reject the new constraints instead of
+silently relaxing them. Do not edit a file's version to force an older release
+to open it; retain the file and use a compatible release.
 
 Split larger jobs into estimates. Malformed or unsupported files and files
 that exceed a resource or size limit are skipped as a whole with an explanation;
@@ -208,11 +309,16 @@ revision remains a review flag rather than being invented.
 
 **Export review record** requires fresh comparisons for every populated group.
 It records the input project and hash, estimator/company IDs, source/material
-snapshots, quantities and revisions, solver/build/settings, compared stock
+snapshots, quantities and revisions, effective rotation policies, source and
+sheet grain axes, permitted rotations, solver/build/settings, compared stock
 alternatives, validated placements, utilization and entered material costs.
 Changed inputs or inconsistent results require recomparison. The solver is
 deterministic, so the record stores no random seed and explains what replay
-requires. Incomplete heuristic results are not proof that a layout is impossible.
+requires. The manifest identifies orientation policy `werco-orientation-v1`
+and solver `werco-contour-v3`; contour search uses up to two deterministic
+orders, while rectangular-profile search uses three. Geometry fingerprints
+remain about shape; the input-project fingerprint also covers orientation
+requirements. Incomplete heuristic results are not proof that a layout is impossible.
 
 This locally downloaded record is labeled **QUOTE LAYOUT — NOT AN NC PROGRAM**
 and remains `draft_estimator_review`. Its content hash can detect changes but

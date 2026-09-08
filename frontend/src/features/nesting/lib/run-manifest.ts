@@ -1,3 +1,5 @@
+import { leftoversToFile } from './leftovers';
+import { allowedRotations, effectiveRotationMode, orientationExplanation } from './orientation';
 import { partArea, validateNest } from './nesting';
 import { projectToFile, validateProject, type QuoteProject } from './quote-project';
 import { stockFor, type Comparison } from './quoting';
@@ -5,7 +7,7 @@ import { canonicalJSON, geometryHash, sha256 } from './provenance';
 import { mmToIn } from './units';
 
 export type ComparisonSnapshot = { comparison: Comparison; signature: string };
-export const SOLVER_VERSION = 'werco-contour-v2';
+export const SOLVER_VERSION = 'werco-contour-v3';
 
 /** Downloadable draft evidence. This is never an approval, inventory claim or server audit record. */
 export async function buildRunManifest(
@@ -35,6 +37,8 @@ export async function buildRunManifest(
         quote.parts.map(async part => {
           const currentGeometrySha256 = await geometryHash(part);
           const flags: string[] = [];
+          const orientationIssue = orientationExplanation(part, quote);
+          if (orientationIssue) flags.push(orientationIssue);
           if (!part.revision?.trim()) flags.push('Part revision has not been assigned.');
           if (!part.provenance) flags.push('No imported source-file fingerprint is available.');
           else {
@@ -51,7 +55,16 @@ export async function buildRunManifest(
             quantity: part.quantity,
             geometrySha256: currentGeometrySha256,
             source: part.provenance ?? null,
-            allowedRotations: part.rotate ? [0, 90, 180, 270] : [0],
+            rotationMode: effectiveRotationMode(part),
+            rotationModeSource: part.rotationMode === undefined ? 'legacy_rotate_flag' : 'explicit_selection',
+            sourceGrainAxis: part.grainAxis ?? null,
+            sourceGrainDirection:
+              part.grainAxis === 'x'
+                ? 'Horizontal in source drawing'
+                : part.grainAxis === 'y'
+                  ? 'Vertical in source drawing'
+                  : 'No grain requirement assigned',
+            allowedRotations: allowedRotations(part, quote),
             mirrorAllowed: false,
             reviewFlags: Array.from(new Set(flags)),
           };
@@ -63,6 +76,8 @@ export async function buildRunManifest(
           throw new Error('Stock dimensions or prices differ from the comparison. Recalculate it.');
         const nest = result.nest;
         if (nest) validateNest(quote.parts, stockFor(quote, option), nest);
+        if (result.leftovers && (!nest || result.leftoverError))
+          throw new Error('Leftover report conflicts with its comparison status. Recalculate it.');
         const requested = quote.parts.reduce((count, part) => count + part.quantity, 0);
         const complete = !!nest && nest.placements.length === requested && nest.unplaced.length === 0;
         if (result.complete !== complete)
@@ -91,6 +106,12 @@ export async function buildRunManifest(
           estimatedMaterialCostUSD:
             complete && option.price !== null ? Number((option.price * nest!.sheets).toFixed(2)) : null,
           remnantCreditUSD: 0,
+          leftovers: result.leftovers
+            ? leftoversToFile(result.leftovers, { parts: quote.parts, stock: stockFor(quote, option), nest: nest! })
+            : null,
+          leftoverError:
+            result.leftoverError ??
+            (nest && !result.leftovers ? 'No leftover analysis is available for this comparison.' : null),
           unplaced: nest?.unplaced ?? [],
           placements:
             nest?.placements.map(placement => ({
@@ -114,6 +135,9 @@ export async function buildRunManifest(
         throw new Error('The recommended alternative is not a complete valid layout. Recalculate it.');
       return {
         groupId: group.id,
+        sheetGrainAxis: quote.grainAxis ?? null,
+        sheetGrainDirection:
+          quote.grainAxis === 'x' ? 'Along sheet length' : quote.grainAxis === 'y' ? 'Along sheet width' : 'Unknown',
         parts,
         recommendedOptionId: comparison.recommendedId,
         recommendationReason: comparison.reason,
@@ -132,11 +156,14 @@ export async function buildRunManifest(
     solver: {
       version: SOLVER_VERSION,
       build: process.env.REACT_APP_RELEASE || 'development',
-      algorithm: 'Deterministic two-order contour placement; rectangle-only fast path',
+      algorithm: 'Deterministic two-order contour placement; three-order rectangular-profile fast path',
       seed: null,
       seedExplanation:
         'This solver does not use randomness. Replay requires the exact saved inputs, part IDs and solver build.',
-      maximumSearchOrders: 2,
+      maximumSearchOrders: 3,
+      contourSearchOrders: 2,
+      rectangularSearchOrders: 3,
+      orientationPolicy: 'werco-orientation-v1',
       workerDeadlineMs: 120000,
       searchMode: 'bounded_deterministic',
       policyStatus: 'draft_configuration',
