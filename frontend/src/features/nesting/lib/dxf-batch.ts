@@ -1,4 +1,4 @@
-import { importDXF, type Part } from './nesting';
+import { importDXFWithReport, type Part } from './nesting';
 
 export const MAX_DXF_FILES = 100;
 export const MAX_DXF_BYTES = 5_000_000;
@@ -12,6 +12,8 @@ export type ImportResult = {
   status: 'imported' | 'skipped';
   designs: number;
   message: string;
+  warnings?: string[];
+  footprintOnly?: boolean;
 };
 export type ImportProgress = { completed: number; total: number; name: string };
 
@@ -57,7 +59,8 @@ export async function importDXFBatch(
         throw new Error('File must be smaller than 5 MB.');
       const text = await file.text();
       if (options.signal?.aborted) throw new Error('Import cancelled before this file was added.');
-      const added = importDXF(text, file.name, options.units).map((part, i) => ({
+      const imported = importDXFWithReport(text, file.name, options.units);
+      const added = imported.parts.map((part, i) => ({
         ...part,
         color: (existing.length + parts.length + i) % 4,
       }));
@@ -80,6 +83,8 @@ export async function importDXFBatch(
         status: 'imported',
         designs: added.length,
         message: `${added.length} design${added.length === 1 ? '' : 's'} added`,
+        warnings: imported.warnings,
+        footprintOnly: imported.footprintOnly,
       });
     } catch (error) {
       results.push({

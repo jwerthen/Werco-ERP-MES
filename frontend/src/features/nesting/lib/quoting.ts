@@ -60,6 +60,20 @@ export const standardOptions: SheetOption[] = [
   enabled: ['48x96', '60x120', '60x144'].includes(String(id)),
   price: null,
 }));
+/** Every workspace mount gets its own empty estimate and editable stock options. */
+export function createBlankQuote(): Quote {
+  return {
+    version: 1,
+    name: 'New material estimate',
+    material: 'Carbon steel',
+    thickness: inToMm(0.125),
+    parts: [],
+    margin: inToMm(0.375),
+    gap: inToMm(0.1875),
+    objective: 'area',
+    options: standardOptions.map(option => ({ ...option })),
+  };
+}
 export const demoQuote: Quote = {
   version: 1,
   name: 'Bracket assembly — demo',
