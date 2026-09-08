@@ -1343,6 +1343,31 @@ unapproved even when its geometry is checked and its search finishes. No new
 permission key, quote approval, cost writeback, original-CAD authentication or
 inventory reservation authority is introduced.
 
+**Quote-spacing policy governance** adds Admin decisions, separate from quote approval:
+
+| Action | Required authority |
+|--------|--------------------|
+| Read policy history/revisions or resolve a matching band | Effective `purchasing:view` |
+| Create policy draft, publish approval or withdraw approval | Admin (or existing Platform Admin/superuser exemption) **and** effective `purchasing:view` + `purchasing:create` |
+| Apply a resolved band or enter a custom-spacing reason in the browser | Existing nesting access; persistence still uses the draft/run write gates |
+
+A Manager or Supervisor with purchasing create permission cannot administer
+spacing policies. Admin permission overrides still apply. The server independently
+checks every command; API-token, kiosk, disabled-user and read-only switched-company
+fences remain. Each write names the intended company, expected policy version,
+request UUID and reason. Same-request replay is bound to the actor and credential;
+tenant references are scoped and foreign IDs return 404. Reads create no policy
+or approval rows. Publication binds an immutable content hash; withdrawal appends
+history instead of deleting it. Required audit failure rolls back the command.
+
+The initial workflow allows an Admin to approve their own draft. This is a
+quoting-allowance approval only, not two-person quote approval, material/certification
+acceptance or manufacturing authority. Saving or starting new policy-bound work
+revalidates current approval on the server. Already accepted queued calculations
+keep their frozen inputs. Custom-spacing overrides expressly remove the approval
+claim and retain an estimator reason. Company switches abort pending UI operations
+and clear the prior decision target. See [MATERIAL_NESTING.md](MATERIAL_NESTING.md#admin-policy-history-and-decisions).
+
 ### Receiving
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |

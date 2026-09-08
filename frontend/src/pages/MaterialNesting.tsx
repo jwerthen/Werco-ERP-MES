@@ -10,7 +10,7 @@ import { usePermissions } from '../hooks/usePermissions';
 /** A normal authenticated ERP route; only its presentation is isolated. */
 export default function MaterialNesting() {
   const { user } = useAuth();
-  const { canAll } = usePermissions();
+  const { canAll, isAdmin } = usePermissions();
   const { currentCompany } = useCompany();
   const owner = `${user?.id}:${currentCompany?.id ?? user?.company_id}`;
   const [target, setTarget] = useState<HTMLElement | null>(null);
@@ -38,6 +38,7 @@ export default function MaterialNesting() {
               companyId={currentCompany?.id ?? user?.company_id}
               estimatorId={user?.id}
               canSaveDrafts={canAll(['purchasing:view', 'purchasing:create'])}
+              canManagePolicies={isAdmin && canAll(['purchasing:view', 'purchasing:create'])}
             />
           </NestingPortalContext.Provider>,
           target

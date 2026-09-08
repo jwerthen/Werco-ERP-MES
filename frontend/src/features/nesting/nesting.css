@@ -2783,3 +2783,22 @@ input[type='number'] {
 .saved-run-sheet-picker select { color: #f8fafc; background: #172438; border: 1px solid #64748b; padding: 6px 10px; border-radius: 4px; }
 .saved-run-preview .leftover-review { margin: 0; padding: 12px; }
 .saved-run-preview .leftover-regions { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.spacing-policy-controls { display: grid; gap: 10px; padding-top: 14px; border-top: 1px solid #475569; }
+.spacing-policy-controls strong { font-size: 13px; }
+.spacing-policy-controls form, .policy-resolution { display: grid; gap: 10px; padding: 12px; border: 1px solid #475569; border-radius: 6px; }
+.spacing-policy-dialog { width: min(900px, calc(100vw - 24px)); max-width: 900px; max-height: 88vh; overflow-y: auto; }
+.spacing-policy-dialog h3 { margin: 12px 0 6px; font-size: 16px; font-weight: 600; }
+.spacing-policy-dialog p { font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+.spacing-policy-editor, .spacing-policy-editor > fieldset, .policy-decision > fieldset { display: grid; gap: 14px; min-width: 0; }
+.spacing-policy-dialog input, .spacing-policy-dialog select, .spacing-policy-dialog textarea, .spacing-policy-controls textarea {
+  color: #f8fafc; background: #0f172a; border: 1px solid #64748b; padding: 8px 10px; border-radius: 5px; width: 100%; min-width: 0;
+}
+.spacing-policy-dialog input:focus-visible, .spacing-policy-dialog select:focus-visible, .spacing-policy-dialog textarea:focus-visible,
+.spacing-policy-controls textarea:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
+.policy-band, .policy-decision { border: 1px solid #475569; border-radius: 6px; padding: 14px; display: grid; gap: 12px; }
+.policy-band legend, .policy-decision legend { font-size: 14px; font-weight: 600; padding: 0 6px; }
+.policy-band-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.policy-table-scroll { overflow-x: auto; }
+.policy-table-scroll table { width: 100%; font-size: 12px; }
+.policy-table-scroll th, .policy-table-scroll td { padding: 10px; text-align: left; border-bottom: 1px solid #475569; }
+@media (max-width: 560px) { .policy-band-fields { grid-template-columns: 1fr; } }

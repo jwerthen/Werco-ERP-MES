@@ -28,6 +28,7 @@ from app.services.audit_service import AuditService
 from app.services.nesting_run_protocol import expected_options, validate_option
 from app.services.quote_nesting_drafts import canonical_json, parse_estimate, require_access
 from app.services.quote_nesting_run_outbox import mark_run_pending
+from app.services.quote_nesting_spacing import verify_project_policies
 
 ERROR_MESSAGES = {
     "input_limit": "The saved input exceeded the calculation input budget. No geometry was accepted.",
@@ -286,7 +287,8 @@ def start_run(
     if revision.content_sha256 != request.input_sha256 or _digest(revision.estimate_json) != request.input_sha256:
         raise HTTPException(409, "The requested input hash does not match that exact saved revision")
     # Re-apply bounded structure, never execute geometry or current-catalog substitutions.
-    parse_estimate(canonical_json(revision.estimate_json).encode("utf-8"))
+    _, project, _ = parse_estimate(canonical_json(revision.estimate_json).encode("utf-8"))
+    verify_project_policies(db, company_id, project)
     if not expected_options(revision.estimate_json):
         raise HTTPException(422, "Save at least one part and enabled stock option before starting a calculation")
     now = datetime.utcnow()

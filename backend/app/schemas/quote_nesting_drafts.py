@@ -6,6 +6,8 @@ from typing import Annotated, Any, ClassVar, Literal, Optional
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
+from app.schemas.quote_nesting_spacing import SpacingOverride, SpacingPolicySnapshot, normalize_thickness
+
 MAX_ESTIMATE_BYTES = 5 * 1024 * 1024
 MAX_DRAFT_REQUEST_BYTES = MAX_ESTIMATE_BYTES + 16 * 1024
 MAX_INCHES = 20000 / 25.4
@@ -202,7 +204,7 @@ class SavedStock(InputModel):
 
 
 class SavedQuote(InputModel):
-    version: Literal[3, 7]
+    version: Literal[3, 7, 9]
     units: Literal["in"]
     currency: Literal["USD"]
     name: Name
@@ -213,9 +215,32 @@ class SavedQuote(InputModel):
     objective: Literal["area", "cost"]
     options: list[SavedStock] = Field(min_length=1, max_length=12)
     parts: list[SavedPart] = Field(max_length=300)
-    spacingMode: Optional[Literal["auto", "manual"]] = None
+    spacingMode: Optional[Literal["auto", "manual", "policy"]] = None
+    spacingPolicy: Optional[SpacingPolicySnapshot] = None
+    spacingOverride: Optional[SpacingOverride] = None
     grainAxis: Optional[Axis] = None
     materialBinding: Optional[SavedBinding] = None
+
+    @model_validator(mode="after")
+    def spacing_governance(self):
+        for field in ("spacingPolicy", "spacingOverride"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError("Omit unused spacing governance fields instead of supplying null")
+        if (self.spacingPolicy is not None) != (self.spacingMode == "policy"):
+            raise ValueError("Policy spacing mode requires exactly one policy snapshot")
+        if self.spacingOverride is not None and (self.spacingPolicy is not None or self.spacingMode != "manual"):
+            raise ValueError("Custom spacing requires manual mode and cannot claim policy conformance")
+        if self.version != 9 and (self.spacingPolicy is not None or self.spacingOverride is not None):
+            raise ValueError("Spacing governance requires quote version 9")
+        snapshot = self.spacingPolicy
+        if snapshot is not None and (
+            snapshot.band.material != self.material
+            or snapshot.thickness_in != normalize_thickness(str(self.thickness))
+            or float(snapshot.gap_in) != self.gap
+            or float(snapshot.margin_in) != self.margin
+        ):
+            raise ValueError("Policy snapshot must match the exact material, thickness and spacing")
+        return self
 
 
 class SavedGroup(InputModel):
@@ -224,7 +249,7 @@ class SavedGroup(InputModel):
 
 
 class SavedProject(InputModel):
-    version: Literal[4, 5, 6]
+    version: Literal[4, 5, 6, 10]
     units: Literal["in"]
     currency: Literal["USD"]
     name: Name
@@ -250,8 +275,10 @@ class SavedProject(InputModel):
             if key in material_keys:
                 raise ValueError("Duplicate material/thickness group")
             material_keys.add(key)
-            if quote.version == 7 and self.version != 6:
+            if quote.version == 7 and self.version not in (6, 10):
                 raise ValueError("Orientation constraints require project version 6")
+            if quote.version == 9 and self.version != 10:
+                raise ValueError("Spacing governance requires project version 10")
             if len({stock.id for stock in quote.options}) != len(quote.options):
                 raise ValueError("Duplicate stock option IDs")
             if not any(stock.enabled for stock in quote.options):
@@ -269,7 +296,7 @@ class SavedProject(InputModel):
                 != quote.material
             ):
                 raise ValueError("Catalog category does not match material family")
-            if quote.version != 7 and (
+            if quote.version not in (7, 9) and (
                 quote.grainAxis is not None
                 or any(part.rotationMode is not None or part.grainAxis is not None for part in quote.parts)
             ):

@@ -135,6 +135,14 @@ export async function buildRunManifest(
         throw new Error('The recommended alternative is not a complete valid layout. Recalculate it.');
       return {
         groupId: group.id,
+        spacing: {
+          mode: quote.spacingMode ?? 'manual',
+          policySnapshot: quote.spacingPolicy ?? null,
+          estimatorOverride: quote.spacingOverride ?? null,
+          reviewNote: quote.spacingPolicy
+            ? 'Snapshot math validated locally; the server checks current approval when saving or starting a new calculation.'
+            : 'These allowances are not bound to an approved policy.',
+        },
         sheetGrainAxis: quote.grainAxis ?? null,
         sheetGrainDirection:
           quote.grainAxis === 'x' ? 'Along sheet length' : quote.grainAxis === 'y' ? 'Along sheet width' : 'Unknown',

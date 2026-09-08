@@ -3860,6 +3860,30 @@ class ApiService {
     })).data;
   }
 
+  async getNestingSpacingPolicies(page = 1, signal?: AbortSignal): Promise<import('../types/nestingPolicy').NestingPolicyState> {
+    return (await this.api.get('/quote-nesting/spacing-policies', { params: { page, per_page: 20 }, signal })).data;
+  }
+
+  async getNestingSpacingRevision(revision: number, signal?: AbortSignal): Promise<import('../types/nestingPolicy').NestingPolicyRevision & {content: import('../features/nesting/lib/spacing-policy').SpacingPolicyContent}> {
+    return (await this.api.get(`/quote-nesting/spacing-policies/revisions/${revision}`, { signal })).data;
+  }
+
+  async createNestingSpacingRevision(request: import('../types/nestingPolicy').NestingPolicyRevisionRequest, signal?: AbortSignal): Promise<import('../types/nestingPolicy').NestingPolicyReceipt> {
+    return (await this.api.post('/quote-nesting/spacing-policies/revisions', request, { signal })).data;
+  }
+
+  async publishNestingSpacingPolicy(request: import('../types/nestingPolicy').NestingPolicyPublishRequest, signal?: AbortSignal): Promise<import('../types/nestingPolicy').NestingPolicyReceipt> {
+    return (await this.api.post('/quote-nesting/spacing-policies/publications', request, { signal })).data;
+  }
+
+  async withdrawNestingSpacingPolicy(publicationId: number, request: import('../types/nestingPolicy').NestingPolicyCommandBase, signal?: AbortSignal): Promise<import('../types/nestingPolicy').NestingPolicyReceipt> {
+    return (await this.api.post(`/quote-nesting/spacing-policies/publications/${publicationId}/withdraw`, request, { signal })).data;
+  }
+
+  async resolveNestingSpacingPolicy(request: import('../types/nestingPolicy').NestingPolicyResolveRequest, signal?: AbortSignal): Promise<import('../types/nestingPolicy').NestingPolicyResolution> {
+    return (await this.api.post('/quote-nesting/spacing-policies/resolve', request, { signal })).data;
+  }
+
   async getNestingRuntime(signal?: AbortSignal): Promise<import('../types/nestingRun').NestingRuntime> {
     return (await this.api.get('/quote-nesting/runs/runtime', { signal })).data;
   }

@@ -239,7 +239,7 @@ not seed missing records. See the [API contract](API.md#quote-nesting-material-p
 
 ## Quoting spacing allowances
 
-Automatic spacing uses the group's material thickness `t`, in inches:
+**Unreviewed starting allowances** use the group's material thickness `t`, in inches:
 
 - Part-to-part gap: `max(0.125, t)` inches, measured between part contours.
 - Sheet edge margin: `max(0.375, 2 × t)` inches, reserved at each sheet edge.
@@ -265,6 +265,68 @@ review them and re-enter its cleared sheet prices.
 The estimator does not calculate kerf compensation, pierce locations, leads,
 thermal behavior, clamps, or automatic part handling. A production CAM setup
 must account for those conditions separately.
+
+### Apply a reviewed company policy
+
+**Check current spacing policy** reads the active company's currently effective
+approval for this material family and thickness. Review the returned revision,
+band and calculated gap/margin, then explicitly apply it. Checking alone changes
+no estimate. Applying locks material, thickness and spacing so the displayed
+conformance cannot drift. An exact ERP source can still be reviewed within the
+same material/thickness; a family policy does not approve that source's grade,
+certification, price or inventory suitability.
+
+To change an applied policy, choose **Use custom spacing**, enter an estimator
+reason and select **Use custom allowances**. This removes the conformance claim,
+unlocks the fields and retains the reason in the next saved revision. The auto
+toggle stays disabled for a recorded override; applying a current policy replaces
+the override explicitly. Ordinary legacy/manual estimates remain unreviewed.
+Newly imported groups start unreviewed and never inherit an approval silently.
+
+The server independently verifies the exact company, publication, revision,
+content hash, band, thickness and arithmetic when saving inputs or starting a
+new saved calculation. A withdrawn or superseded approval requires applying a
+current policy or recording custom spacing. Existing saved revisions and completed
+reports remain unchanged; a calculation already accepted into the queue retains
+its frozen settings. Opening a historical revision does not certify its policy
+as current. Older saved evidence remains readable.
+
+### Admin policy history and decisions
+
+**Review spacing policies** shows immutable drafts and approval/withdrawal history.
+Permitted readers can inspect it. An Admin with nesting write access can:
+
+1. Create a named draft with material-family/thickness bands. **Copy starting
+   allowances** is an explicit convenience action, not a shop-approved standard.
+   No policy is seeded on deployment or first visit.
+2. Review an exact saved revision, then approve it with a reason. A blank effective
+   date means the server's approval time; a future date starts at midnight Central.
+   Past dates are refused. The current workflow permits an Admin to approve their
+   own draft; this policy decision does not approve any nest or quote.
+3. Withdraw an approval with a reason. History is preserved. The latest effective
+   approval is selected before withdrawal is checked: withdrawing it does not
+   reactivate an older policy. A withdrawn future approval blocks policy use from
+   its scheduled time unless replaced; the prior current policy applies until then.
+
+Draft, approval and withdrawal commands record the actor, effective time, exact
+content, revision/version and required audit evidence. Concurrent edits require
+refreshing; uncertain requests offer an identical retry instead of a second
+command. Switching company clears prior policy targets and pending UI actions.
+
+Policy bands are lower-inclusive/upper-exclusive intervals, in inches, between
+0 and 4 in. Up to 128 nonoverlapping bands may cover the three supported material
+families; gaps are allowed and resolve as unmatched. Decimal values use at most
+nine fractional places. Thickness is normalized half-up to 0.000000001 in;
+`max(minimum, thickness × multiplier)` is rounded upward to that quantum.
+The browser and server use exact decimal arithmetic for this rule. This precision
+is for consistent policy accounting, not a claim of cutting or CAD accuracy.
+Geometry tolerances remain the separate recorded solver profile.
+
+Policy snapshots or recorded overrides use estimate version 9 inside project
+version 10. Other groups can retain their older supported format. Old readers
+must reject these new versions rather than ignore the policy meaning. The saved
+calculation and review records carry the snapshot or override reason; neither
+creates physical inventory, reserves material, credits remnants or approves a quote.
 
 The source documents establish configurable CAM behavior, not these numeric
 defaults:
@@ -299,11 +361,11 @@ defaults:
 | Omitted metadata | `VIEWPORT` records and all entities on the `FORMAT` annotation layer, with an import warning for omitted FORMAT entities |
 | Rejected files | Open or ambiguous outer profiles, touching/intersecting contours, reference paths outside or spanning parts, malformed data, unsupported entities, blocks/`INSERT`, wide polylines, sloped/nonplanar geometry, tilted extrusion, or paper-space cut geometry; other text/annotations are not silently discarded |
 | DXF units | Inch and millimeter files retain their physical size; unitless files default to inches unless millimeters is selected before import |
-| Saved estimates | Projects with explicit rotation or grain settings use version 6 and version 7 constrained quotes. Other groups may retain version 3 quotes. Without constraints, ERP-bound projects remain version 5 and family-only projects version 4. Older single estimates/jobs open as one group; constrained legacy jobs use version 8. Legacy `drawing-bounds` parts require DXF re-import before nesting |
+| Saved estimates | Policy snapshots or recorded overrides use project version 10 and quote version 9. Projects with explicit rotation or grain settings use version 6 and version 7 constrained quotes. Other groups may retain version 3 quotes. Without constraints, ERP-bound projects remain version 5 and family-only projects version 4. Older single estimates/jobs open as one group; constrained legacy jobs use version 8. Legacy `drawing-bounds` parts require DXF re-import before nesting |
 
 Legacy `rotate: false` means fixed and `rotate: true` means quarter turns;
 when `rotationMode` exists, it is authoritative. Axis metadata remains X/Y
-through inch/millimeter conversion. Versions 6/7/8 deliberately differ between
+through inch/millimeter conversion. Versions 6/7/8/9/10 deliberately differ between
 project/quote/job files so older readers reject the new constraints instead of
 silently relaxing them. Do not edit a file's version to force an older release
 to open it; retain the file and use a compatible release.

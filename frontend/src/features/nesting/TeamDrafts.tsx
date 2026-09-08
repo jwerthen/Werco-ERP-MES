@@ -120,9 +120,13 @@ export default function TeamDrafts({
         groups: stored.groups.map(group => ({ ...group, quote: clearCatalogPricing(group.quote) })),
       };
       if (
-        loaded.groups.some(group => group.quote.materialBinding && group.quote.materialBinding.companyId !== companyId)
+        loaded.groups.some(
+          group =>
+            (group.quote.materialBinding && group.quote.materialBinding.companyId !== companyId) ||
+            (group.quote.spacingPolicy && group.quote.spacingPolicy.company_id !== companyId)
+        )
       )
-        throw new Error('This estimate contains material sources from another company.');
+        throw new Error('This estimate contains material or policy sources from another company.');
       onOpen(loaded);
       setLinked(result);
       setReplace(null);

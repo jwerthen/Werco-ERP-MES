@@ -73,6 +73,7 @@ import PartOrientationControls, { SheetGrainControl, orientationSummary, sheetGr
 import { orientationExplanation } from './lib/orientation';
 import LeftoverReview, { LeftoverOverlay, leftoverPath } from './LeftoverReview';
 import TeamDrafts from './TeamDrafts';
+import SpacingPolicyControls from './SpacingPolicyControls';
 
 type CachedComparison = { comparison: Comparison; signature: string };
 const legacyFootprintNotice =
@@ -114,15 +115,18 @@ function Picker({
   items,
   label,
   id,
+  disabled = false,
 }: {
   value: string;
   onChange: (v: string) => void;
   items: string[];
   label: string;
   id?: string;
+  disabled?: boolean;
 }) {
   return (
     <Select
+      disabled={disabled}
       value={value}
       onValueChange={v => {
         if (v !== null) onChange(v);
@@ -149,6 +153,7 @@ function NumberField({
   min = 0,
   max = 20000,
   step = 'any',
+  disabled = false,
 }: {
   label: string;
   value: number;
@@ -157,6 +162,7 @@ function NumberField({
   min?: number;
   max?: number;
   step?: string;
+  disabled?: boolean;
 }) {
   const isLength = unit === 'in';
   const display = () => (Number.isFinite(value) ? String(Number((isLength ? mmToIn(value) : value).toFixed(6))) : '');
@@ -172,6 +178,7 @@ function NumberField({
         {unit && <small>{unit}</small>}
       </span>
       <Input
+        disabled={disabled}
         type={isLength ? 'text' : 'number'}
         inputMode="decimal"
         value={draft}
@@ -202,14 +209,17 @@ export default function NestingWorkspace({
   companyId,
   estimatorId,
   canSaveDrafts = false,
+  canManagePolicies = false,
 }: {
   initialQuote?: Quote;
   companyId?: number;
   estimatorId?: number;
   canSaveDrafts?: boolean;
+  canManagePolicies?: boolean;
 }) {
   const fieldId = useId();
   const [documentEpoch, setDocumentEpoch] = useState(0);
+  const [policyReviewEpoch, setPolicyReviewEpoch] = useState(0);
   const catalog = useNestingCatalog(companyId);
   const [verifiedPricingHashes, setVerifiedPricingHashes] = useState<Set<string>>(() => new Set());
   const { showToast } = useToast();
@@ -348,12 +358,28 @@ export default function NestingWorkspace({
     else
       setQuote(q => {
         const changed = { ...q, ...patch };
+        if (
+          q.spacingOverride &&
+          !Object.prototype.hasOwnProperty.call(patch, 'spacingOverride') &&
+          (patch.gap !== undefined || patch.margin !== undefined)
+        )
+          changed.spacingOverride = { ...q.spacingOverride, changed_at: new Date().toISOString() };
         return patch.options && !Object.prototype.hasOwnProperty.call(patch, 'materialBinding')
           ? clearCatalogPricing(changed)
           : changed;
       });
   };
   const changeMaterial = (patch: Partial<Quote>) => {
+    if (
+      quote.spacingPolicy &&
+      ((patch.material !== undefined && patch.material !== quote.material) ||
+        (patch.thickness !== undefined && patch.thickness !== quote.thickness))
+    ) {
+      toast.warning(
+        'Choose custom spacing with an estimator reason before changing an applied policy’s material or thickness.'
+      );
+      return;
+    }
     const changed = clearCatalogPricing({
       ...quote,
       ...patch,
@@ -627,6 +653,7 @@ export default function NestingWorkspace({
     if (importingRef.current || comparingRef.current)
       throw new Error('Finish the current operation before opening another estimate.');
     setProject(loaded);
+    setPolicyReviewEpoch(value => value + 1);
     setVerifiedPricingHashes(new Set());
     setSnapshots({});
     setPreviewId(null);
@@ -1487,6 +1514,7 @@ export default function NestingWorkspace({
                     <Picker
                       id={fieldId + '-material'}
                       label="Material"
+                      disabled={!!quote.spacingPolicy}
                       value={quote.material}
                       onChange={v => changeMaterial({ material: v })}
                       items={['Carbon steel', 'Stainless steel', 'Aluminum']}
@@ -1494,6 +1522,7 @@ export default function NestingWorkspace({
                   </label>
                   <NumberField
                     label="Thickness"
+                    disabled={!!quote.spacingPolicy}
                     value={quote.thickness}
                     unit="in"
                     max={100}
@@ -1506,12 +1535,14 @@ export default function NestingWorkspace({
                   <div className="two-fields">
                     <NumberField
                       label="Edge margin"
+                      disabled={!!quote.spacingPolicy}
                       value={quote.margin}
                       unit="in"
                       onChange={v => update({ margin: v, spacingMode: 'manual' })}
                     />
                     <NumberField
                       label="Part gap"
+                      disabled={!!quote.spacingPolicy}
                       value={quote.gap}
                       unit="in"
                       onChange={v => update({ gap: v, spacingMode: 'manual' })}
@@ -1523,6 +1554,7 @@ export default function NestingWorkspace({
                       id={fieldId + '-auto-spacing'}
                       aria-labelledby={fieldId + '-auto-spacing-label'}
                       checked={quote.spacingMode === 'auto'}
+                      disabled={!!quote.spacingPolicy || !!quote.spacingOverride}
                       onCheckedChange={auto => {
                         try {
                           update(
@@ -1540,6 +1572,13 @@ export default function NestingWorkspace({
                     Starting estimate: gap = max(1/8 in, thickness); edge = max(3/8 in, twice thickness). Editable
                     quoting allowances, not machine cutting parameters.
                   </p>
+                  <SpacingPolicyControls
+                    key={`${documentEpoch}:${policyReviewEpoch}:${project.activeGroupId}`}
+                    quote={quote}
+                    companyId={companyId}
+                    canManage={canManagePolicies}
+                    onChange={update}
+                  />
                   <label className="field-label" htmlFor={fieldId + '-priority'}>
                     <span>Compare by</span>
                     <Picker

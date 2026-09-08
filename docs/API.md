@@ -885,7 +885,7 @@ POST returns **200** for both a new save and an identical idempotent replay.
 The file limit is 5 MiB; a route-specific ASGI cap limits the entire upload to
 5 MiB + 16 KiB before multipart parsing. The global 256 KiB JSON-body cap is
 unchanged. Only the documented, nonduplicated fields are accepted. Current
-project formats 4/5/6 must explicitly use inches and USD, with bounded metadata,
+project formats 4/5/6/10 must explicitly use inches and USD, with bounded metadata,
 300 total part instances, 20,000 geometry vertices, and 12 stock options per group.
 Duplicate JSON keys, non-finite values, unknown fields, original CAD blobs,
 approval flags, and solver/placement output are refused. This is structural
@@ -903,6 +903,9 @@ pricing, and imported CAD hashes remain unapproved client assertions.
 Catalog bindings must reference this company's existing IDs. Changed/inactive
 sources are preserved with explicit review notes; missing/foreign IDs are
 refused without saving. Open clears catalog-price acknowledgment in the UI.
+Applied spacing-policy claims additionally require current immutable publication
+verification; see the spacing-policy contract below. Legacy inputs have no policy
+conformance claim and keep their original canonical payload/hash.
 Every successful first write adds one immutable revision and its required audit
 event in one transaction; failed audit evidence rolls back all draft changes.
 No quote totals, material allocation, remnant reservation, or operational records
@@ -1010,6 +1013,97 @@ or `invalid_identity`. No private drawing information is published in this key.
 - **409:** active run, stale cancellation version, input/request conflict or concurrent write.
 - **422:** invalid request; existing global JSON-body cap still applies.
 - **503:** matching runtime unavailable for a new request or required audit failure.
+
+### Quote nesting spacing policies
+
+`/quote-nesting/spacing-policies` governs **family-level quoting allowances** for
+Carbon steel, Stainless steel and Aluminum. It does not approve a quote, a laser
+process, a material grade or remnant eligibility. Reads and resolution require
+effective `purchasing:view`. Creating revisions, publishing and withdrawing also
+require Admin authority and effective `purchasing:create`, with the existing
+active-company, API-token, kiosk and read-only-context fences. An Admin may
+explicitly approve their own revision; this is the initial workflow assumption,
+not a claim of independent approval or compliance certification.
+
+| Method | Relative endpoint | Contract |
+|--------|-------------------|----------|
+| GET | (base) | Current header/selection plus separately counted revision and publication history; `page` 1–100000 and `per_page` 1–100 apply to both history lists. |
+| GET | `/revisions/{number}` | Immutable revision content, author/time, canonical content hash and size. |
+| POST | `/revisions` | Append a draft from `content`, `reason`, UUID `request_key`, `expected_company_id`, and `expected_version` (0 only for the initial company policy). |
+| POST | `/publications` | Explicit approval of `revision_number` and `content_sha256`, with the common command fields and `effective_at`: null for server-now, or a future UTC timestamp. |
+| POST | `/publications/{id}/withdraw` | Append a reasoned withdrawal using the common command fields. No history is edited or deleted. |
+| POST | `/resolve` | Read-only `{material, thickness_in}`; returns `{schema_version:1,status:resolved\|unmatched\|unavailable,policy:null\|snapshot,explanation}`. Application to workspace inputs remains explicit. |
+
+There is one company policy header and immutable content revisions. A shared
+append-only command ledger records revision creation, publication and withdrawal.
+The company version advances for every command; the revision number advances only
+when content is appended. Company locks, expected-version checks and database
+constraints protect races. A UUID is unique across all three commands in the
+company and binds the submitting actor/credential and exact command. Same-key
+retries recover that event before checking the current version; they create no
+second decision or audit row. Command receipts return `schema_version`, original
+`policy_version`, `event_id`, revision summary and nullable publication detail.
+Publication detail includes its current scheduled/current/superseded/withdrawn
+status, so its status may change when the original command is retrieved later.
+
+Content is `{schema_version:1,units:"in",name,bands}`. Each band contains `id`,
+`material`, `thickness_min_in`, `thickness_max_in`, `minimum_gap_in`,
+`gap_thickness_multiplier`, `minimum_margin_in`, and `margin_thickness_multiplier`.
+Band IDs are unique ASCII letters/digits/underscore/hyphen, 1–64 characters.
+The interval includes its lower bound and excludes its upper bound. Bands for
+one family cannot overlap; gaps are allowed and return `unmatched`.
+
+Policy values are canonical unsigned decimal strings with at most nine fractional
+digits, no exponent notation and no unnecessary leading/trailing zeros.
+Resolution accepts a thickness string with up to 18 fractional digits. Thickness
+is normalized **half-up to 0.000000001 inch**; a value rounded to zero is refused.
+For each allowance, compute the maximum of its minimum and normalized thickness
+times its multiplier, then round **up** to that same inch quantum. Python uses a
+fresh fixed Decimal context and the shared TypeScript implementation uses integer
+arithmetic. Policy-bearing saved quotes store numeric gap/margin from the exact
+canonical resolved strings; the backend checks those IEEE numeric values exactly,
+instead of accepting a tolerance that could understate the allowance.
+
+Structural limits are 128 bands, thickness bounds between 0 and 4 inches, minima
+and multipliers between 0 and 100, and 64 KiB canonical policy content. Each gap
+and margin formula must have a positive minimum or multiplier. These limits are
+technical bounds, not recommended manufacturing settings. No policy or approval
+is seeded by migration or created by a read. Copying the estimator's existing
+starting allowances into a policy draft requires explicit action.
+
+Publications cannot be retroactive or share an effective instant. Selection first
+finds the latest publication effective at the server's current time, then checks
+withdrawal. A withdrawn publication never reactivates an earlier one. Withdrawing
+a future publication leaves the prior current publication applicable until the
+future effective instant; thereafter that withdrawn publication makes resolution
+unavailable until a later effective publication replaces it. All API timestamps
+are complete UTC date/times ending in `Z`; the UI displays Central time.
+
+Saved quote version **9** and project version **10** carry `spacingPolicy` or
+`spacingOverride`. Omit unused fields; explicit null is invalid. Older discriminants reject these fields. A policy snapshot
+contains schema/company/policy/publication/revision identity, content hash, exact
+matched band, canonical thickness/gap/margin and `resolved_at`; it requires
+`spacingMode:"policy"`. A custom override contains `{schema_version:1,reason,
+changed_at}`, requires manual mode and cannot coexist with a policy claim.
+Absent metadata remains visibly unreviewed. Legacy revisions and their hashes
+are not rewritten.
+
+New draft saves and new server runs verify policy claims against immutable source
+records and the currently effective, unwithdrawn publication under the same company
+policy lock. Material/thickness/spacing changes, forged source fields and stale
+approvals cannot pass as conforming. The estimator must resolve/apply the current
+policy or explicitly choose unapproved custom spacing with a reason. Already
+queued runs retain their exact accepted input snapshot; claim/replay never applies
+a newer policy or withdraws previously accepted work retroactively. Historical
+reports remain unchanged, and same-key run retries recover their original run.
+
+Policy commands use required audit evidence in the same transaction; an audit
+failure rolls back the header, content and command. Failure responses are 403 for
+authority/context restrictions, 404 for inaccessible policy records, 409 for
+version/request/currentness conflicts, 422 for invalid content/snapshot/schedule,
+and 503 when required audit evidence fails. Existing global JSON-body limits remain
+in force. All quote outputs remain unapproved and predicted leftovers retain zero
+credit; no inventory, reservation, quote total or machine-control record changes.
 
 ### Global search and customer edits
 

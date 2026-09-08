@@ -1,6 +1,12 @@
 import { analyzeLeftovers, type LeftoverAnalysis } from './leftovers';
 import { allowedRotations, hasOrientationConstraints, orientationExplanation, type GrainAxis } from './orientation';
 import { autoQuotingSpacing } from './spacing';
+import {
+  validatePolicySnapshot,
+  validateSpacingOverride,
+  type SpacingPolicySnapshot,
+  type SpacingOverride,
+} from './spacing-policy';
 import { bounds, validatePart, validateJob, nestParts, type Part, type Stock, type Nest, demoJob } from './nesting';
 import { compareStableText } from './stable-order';
 import { jobFromFile, jobToFile, mmToIn, inToMm } from './units';
@@ -28,7 +34,9 @@ export type Quote = {
   version: 1;
   grainAxis?: GrainAxis;
   materialBinding?: MaterialBinding;
-  spacingMode?: 'auto' | 'manual';
+  spacingMode?: 'auto' | 'manual' | 'policy';
+  spacingPolicy?: SpacingPolicySnapshot;
+  spacingOverride?: SpacingOverride;
   name: string;
   material: string;
   thickness: number;
@@ -104,7 +112,17 @@ export function validateQuote(value: unknown): Quote {
   const q = value as Quote;
   check(q && q.version === 1, 'Unsupported estimate version.');
   check(q.grainAxis === undefined || ['x', 'y'].includes(q.grainAxis), 'Invalid sheet grain axis.');
-  check(q.spacingMode === undefined || ['auto', 'manual'].includes(q.spacingMode), 'Invalid spacing mode.');
+  check(q.spacingMode === undefined || ['auto', 'manual', 'policy'].includes(q.spacingMode), 'Invalid spacing mode.');
+  check(
+    (q.spacingMode === 'policy') === (q.spacingPolicy !== undefined),
+    'Applied policy requires policy spacing mode.'
+  );
+  check(!(q.spacingPolicy && q.spacingOverride), 'Policy conformance and a custom override cannot both apply.');
+  if (q.spacingPolicy !== undefined) validatePolicySnapshot(q.spacingPolicy, q.material, q.thickness, q.gap, q.margin);
+  if (q.spacingOverride !== undefined) {
+    validateSpacingOverride(q.spacingOverride);
+    check(q.spacingMode === 'manual', 'A custom-spacing reason requires manual mode.');
+  }
   check(typeof q.name === 'string' && q.name.length > 0 && q.name.length < 200, 'Enter an estimate name.');
   check(['Carbon steel', 'Stainless steel', 'Aluminum'].includes(q.material), 'Choose a supported material.');
 
@@ -298,7 +316,9 @@ export function quoteToFile(q: Quote) {
   return {
     // Quote 7 is distinct from project 6 and legacy job 8; old readers must
     // reject a constraint-bearing file instead of silently relaxing its rules.
-    version: hasOrientationConstraints(q.parts, q) ? 7 : 3,
+    version: q.spacingPolicy || q.spacingOverride ? 9 : hasOrientationConstraints(q.parts, q) ? 7 : 3,
+    ...(q.spacingPolicy ? { spacingPolicy: q.spacingPolicy } : {}),
+    ...(q.spacingOverride ? { spacingOverride: q.spacingOverride } : {}),
     ...(q.grainAxis !== undefined ? { grainAxis: q.grainAxis } : {}),
     units: 'in',
     currency: 'USD',
@@ -308,8 +328,8 @@ export function quoteToFile(q: Quote) {
     material: q.material,
     thickness: mmToIn(q.thickness),
     parts: jobToFile(job).parts,
-    margin: mmToIn(q.margin),
-    gap: mmToIn(q.gap),
+    margin: q.spacingPolicy ? Number(q.spacingPolicy.margin_in) : mmToIn(q.margin),
+    gap: q.spacingPolicy ? Number(q.spacingPolicy.gap_in) : mmToIn(q.gap),
     objective: q.objective,
     options: q.options.map(o => ({
       ...o,
@@ -321,15 +341,19 @@ export function quoteToFile(q: Quote) {
 export function quoteFromFile(input: unknown): Quote {
   if (!input || typeof input !== 'object') throw new Error('Invalid estimate file.');
   const d = input as Record<string, unknown>;
-  if (d.version === 3 || d.version === 7) {
+  check(
+    d.version === 9 || (d.spacingPolicy === undefined && d.spacingOverride === undefined && d.spacingMode !== 'policy'),
+    'Spacing policies require a version 9 estimate.'
+  );
+  if (d.version === 3 || d.version === 7 || d.version === 9) {
     check(d.units === 'in', 'Estimate file must explicitly declare inches.');
-    check(d.version === 7 || d.grainAxis === undefined, 'Sheet grain requires a version 7 estimate.');
+    check(d.version !== 3 || d.grainAxis === undefined, 'Sheet grain requires estimate version 7 or 9.');
     check(d.currency === undefined || d.currency === 'USD', 'This estimate uses USD sheet prices.');
     check(Array.isArray(d.options) && d.options.length <= 12, 'Invalid stock options.');
     const parts = (
       jobFromFile({
         ...d,
-        version: d.version === 7 ? 8 : 2,
+        version: d.version === 7 || d.version === 9 ? 8 : 2,
         stock: {
           width: 1,
           height: 1,
@@ -347,6 +371,8 @@ export function quoteFromFile(input: unknown): Quote {
       ...(d.grainAxis !== undefined ? { grainAxis: d.grainAxis } : {}),
       name: d.name,
       spacingMode: d.spacingMode ?? 'manual',
+      ...(d.spacingPolicy !== undefined ? { spacingPolicy: d.spacingPolicy } : {}),
+      ...(d.spacingOverride !== undefined ? { spacingOverride: d.spacingOverride } : {}),
       ...(d.materialBinding !== undefined ? { materialBinding: d.materialBinding } : {}),
       material: d.material,
       thickness: inToMm(dim(d.thickness)),

@@ -30,6 +30,15 @@
 > or an old log check. Roll back compatible application images while retaining additive
 > draft/run tables and immutable history. See [WORKER_SERVICE.md](WORKER_SERVICE.md#saved-nesting-calculation-runtime).
 
+> **Spacing policies.** Apply additive migration 103 after 102 through the normal API
+> boot migration path. It creates no seed/approved policy and introduces no secret,
+> environment or cron setting. The API, frontend and compiled shared worker must all
+> understand project 10/quote 9, so retain the existing exact-release API and fresh worker
+> identity gates before public promotion. Validate policy approval/withdrawal and a new
+> saved custom-spacing revision without changing historical reports. Application rollback
+> retains policy/draft/run history and restores compatible images; do not downgrade 103
+> or rewrite saved format versions as an ordinary rollback.
+
 ---
 
 ## Table of Contents

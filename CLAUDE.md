@@ -273,6 +273,32 @@ unapproved, leftover credits stay zero, and no CAD-source authenticity, physical
 remnant registration, approval, reservation or quote total write is implied.
 See `docs/API.md`, `docs/MATERIAL_NESTING.md` and the worker deployment runbook.
 
+### Quote-spacing policy invariants
+
+`/quote-nesting/spacing-policies` uses a tenant-owned singleton header, immutable
+content revisions and an append-only decision ledger (migration103). No migration,
+GET or startup seeds/approves policy rows. Read/resolve requires effective
+`purchasing:view`; draft/publish/withdraw also requires Admin authority and
+`purchasing:create`, preserving existing token/context fences. Every command
+uses company-version CAS, actor/credential-bound UUID replay, tenant composite
+references and required transactional audit. RLS/revokes and immutable guards
+must remain identical in model bootstrap and migration DDL.
+
+Select the latest effective publication before testing withdrawal; never fall
+back silently to an older approval. New draft saves and run starts take the same
+company policy lock as publication and verify exact snapshot authority/currentness.
+Queued run claims deliberately do not re-resolve policy: accepted immutable
+inputs retain their original settings. Legacy inputs/hashes are not rewritten.
+Policy/override quotes use version9 in project10. An override is manual with an
+explicit reason and cannot coexist with a policy snapshot.
+
+Python fixed-context Decimal and TypeScript BigInt share canonical nine-place
+inch values: half-up thickness normalization, upward formula rounding. Keep the
+exact numeric serialization bridge and real complete UTC timestamp checks. This
+is quoting-policy precision, not configurable geometry tolerance or machine data.
+Policy approval does not approve a nest, grade/certification, remnant or quote.
+See `docs/API.md`, `docs/RBAC_PERMISSIONS.md` and `docs/MATERIAL_NESTING.md`.
+
 ## Conventions worth matching
 
 - Backend line length is 120 (flake8/black configured to it). Status/priority/role values are `str`-backed `enum.Enum` classes co-located with their model.

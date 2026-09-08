@@ -44,6 +44,10 @@ function cloneQuote(quote: Quote): Quote {
     ...(quote.materialBinding
       ? { materialBinding: JSON.parse(JSON.stringify(quote.materialBinding)) as MaterialBinding }
       : {}),
+    ...(quote.spacingPolicy
+      ? { spacingPolicy: { ...quote.spacingPolicy, band: { ...quote.spacingPolicy.band } } }
+      : {}),
+    ...(quote.spacingOverride ? { spacingOverride: { ...quote.spacingOverride } } : {}),
     options: quote.options.map(option => ({ ...option })),
     parts: quote.parts.map(part => ({
       ...part,
@@ -136,11 +140,13 @@ export function projectToFile(project: QuoteProject) {
   return {
     // Constraint-bearing projects use 6; nested quotes use 7, never a legacy
     // discriminator that an older reader could accept while ignoring grain.
-    version: project.groups.some(group => hasOrientationConstraints(group.quote.parts, group.quote))
-      ? 6
-      : project.groups.some(group => group.quote.materialBinding)
-        ? 5
-        : 4,
+    version: project.groups.some(group => group.quote.spacingPolicy || group.quote.spacingOverride)
+      ? 10
+      : project.groups.some(group => hasOrientationConstraints(group.quote.parts, group.quote))
+        ? 6
+        : project.groups.some(group => group.quote.materialBinding)
+          ? 5
+          : 4,
     units: 'in',
     currency: 'USD',
     name: project.name,
@@ -152,7 +158,8 @@ export function projectToFile(project: QuoteProject) {
 export function projectFromFile(input: unknown): QuoteProject {
   check(input && typeof input === 'object', 'Invalid estimate file.');
   const data = input as Record<string, unknown>;
-  if (data.version !== 4 && data.version !== 5 && data.version !== 6) return createBlankProject(quoteFromFile(input));
+  if (data.version !== 4 && data.version !== 5 && data.version !== 6 && data.version !== 10)
+    return createBlankProject(quoteFromFile(input));
   check(data.units === 'in', 'Estimate project must explicitly declare inches.');
   check(data.currency === undefined || data.currency === 'USD', 'This estimate uses USD sheet prices.');
   check(
@@ -166,8 +173,9 @@ export function projectFromFile(input: unknown): QuoteProject {
       group.quote &&
         typeof group.quote === 'object' &&
         ((group.quote as { version?: unknown }).version === 3 ||
-          (data.version === 6 && (group.quote as { version?: unknown }).version === 7)),
-      'Material groups must contain version 3 estimates, or version 7 estimates in a version 6 project.'
+          ((data.version === 6 || data.version === 10) && (group.quote as { version?: unknown }).version === 7) ||
+          (data.version === 10 && (group.quote as { version?: unknown }).version === 9)),
+      'Material groups require version 3, or a newer estimate version supported by their project.'
     );
     const quote = group.quote as Record<string, unknown>;
     check(quote.units === 'in', 'Material group estimates must explicitly declare inches.');

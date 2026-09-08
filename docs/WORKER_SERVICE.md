@@ -482,6 +482,13 @@ pass. The check uses the existing Railway project token and changes no service s
 An unrelated frontend UI/CSS change retains the standalone frontend release path;
 shared kernel/build inputs defer to the combined API/worker pipeline.
 
+Spacing-policy calculations require the shared bundle, API and frontend to support
+project 10/quote 9 together, after additive migration 103 follows 102. A changed policy-aware
+kernel is a worker release input and gets a new tested bundle identity. No policy is
+seeded by migration and no new cron, secret or environment variable is introduced.
+Retain policy/draft/run history on application rollback; do not remove policy snapshots
+or custom-spacing reasons from saved inputs to make an older runtime accept them.
+
 Rollback uses a compatible API/worker/frontend release, retains migrations 101/102 and
 immutable draft/run history, and does not change cron settings. A failed runtime can
 still leave history readable, but new calculations remain unavailable. No successful

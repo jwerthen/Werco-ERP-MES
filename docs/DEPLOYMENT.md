@@ -144,6 +144,17 @@ No new service, domain, secret, operator-set runtime path or cron setting is add
 Do not report server calculation availability until the release's worker identity
 gate passes; a missing/stale runtime leaves new calculation requests unavailable.
 
+Tenant spacing policies additionally require additive migration 103 after 102.
+The migration creates policy storage/guards and does not seed or approve a policy.
+API, frontend and shared-worker bundle must all support project version 10 and nested
+quote version 9 before policy-bearing estimates are published to users. Use the same
+runtime-gated, backend-first combined release; a standalone frontend upload cannot
+establish policy compatibility. No new secret, environment variable or cron is added.
+Verify explicit policy authoring, approval/withdrawal, application to the matching
+material/thickness band, and a new saved revision after custom spacing edits. Previously
+saved reports must remain unchanged. Policy approval records a tenant quoting policy;
+it is not machine-program or manufacturing approval.
+
 `frontend/vercel.json` already builds with `npm run build`, publishes `build/`,
 and rewrites SPA paths to `/index.html`, so opening or refreshing `/nest` uses
 the existing application router. Feature assets are bundled from
@@ -199,6 +210,12 @@ preserve completed history and allow interrupted leases to become failed/worker-
 Do not rewrite a saved checkpoint or mark an interrupted calculation successful.
 Existing history reads remain available without a current solver; creating a new run
 requires a fresh matching runtime. No release grants quote approval or inventory credit.
+
+On a spacing-policy rollback, retain migration 103 and its immutable policy history
+alongside migrations 101/102. Restore a compatible API/frontend/worker release together.
+Keep project 10/quote 9 files and saved revisions intact; older readers must reject them
+rather than drop policy snapshots, custom-spacing reasons or constraints. Do not strip
+fields/change version numbers or seed replacement policies to force compatibility.
 
 The orientation/grain increment changes only frontend behavior and local file
 formats; it adds no API, permission, migration, or environment requirement.
