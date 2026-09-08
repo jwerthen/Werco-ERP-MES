@@ -22,6 +22,7 @@ is ``arq``, making that outcome impossible rather than merely documented.
 
 from pathlib import Path
 
+import pathspec
 import pytest
 import yaml
 
@@ -196,3 +197,20 @@ class TestCiKeepsTheArchiveRootsDistinct:
         stamp = text.index("Stamp release SHA into the backend artifact")
         worker = text.index("railway up --service werco-worker .")
         assert stamp < worker
+
+
+def test_frontend_public_assets_survive_ancestor_railway_ignore_rules():
+    """path-as-root changes tar names; ancestor ignore rules still select entries.
+
+    Railway 5.41.2 uses ignore::WalkBuilder with custom .railwayignore rules
+    before it strips the archive prefix. These gitignore-pattern checks protect
+    Dockerfile.prod's required public COPY and the later stamped release receipt.
+    """
+    dockerfile = _read(REPO_ROOT / "frontend/Dockerfile.prod")
+    assert "COPY public ./public" in dockerfile
+    spec = pathspec.GitIgnoreSpec.from_lines(_read(REPO_ROOT / ".railwayignore").splitlines())
+    public = REPO_ROOT / "frontend/public"
+    assets = [path.relative_to(REPO_ROOT).as_posix() for path in public.rglob("*") if path.is_file()]
+    assert assets, "The production frontend must ship its public assets."
+    for required in assets + ["frontend/public/release.txt"]:
+        assert not spec.match_file(required), f"Railway ancestor rules omit required frontend artifact {required}"

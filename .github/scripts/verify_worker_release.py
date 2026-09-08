@@ -46,8 +46,14 @@ def matching_identity(lines, deployment, release, manifest, now):
     for line in reversed(lines.splitlines()):
         try:
             event = json.loads(line)
-            # Railway's --json wraps the application's log event as a message.
-            if isinstance(event, dict) and isinstance(event.get("message"), str):
+            # Railway can promote JSON fields beside an empty message, or wrap
+            # the entire application event inside message. Preserve promoted
+            # events; never replace their identity with a nested message.
+            if (
+                isinstance(event, dict)
+                and event.get("event") != "nesting_runtime_ready"
+                and isinstance(event.get("message"), str)
+            ):
                 message = event["message"]
                 _, marker, payload = message.partition("{")
                 event = json.loads(marker + payload)
@@ -122,8 +128,8 @@ def verify(args):
                         "--json",
                         "--lines",
                         "200",
-                        "--filter",
-                        "nesting_runtime_ready",
+                        # Railway's text filter misses promoted JSON fields.
+                        # Bound retrieval here; filter exact events locally.
                         "--since",
                         "90s",
                     ]
