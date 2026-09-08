@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.schemas.base import UTCModel
 
 PROTOCOL_VERSION = 1
-SOLVER_VERSION = "werco-contour-v4"
+SOLVER_VERSION = "werco-contour-v5"
 MAX_OPTIONS = 36
 MAX_SECONDS = 120
 MAX_MESSAGE_BYTES = 8 * 1024 * 1024

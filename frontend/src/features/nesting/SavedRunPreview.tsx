@@ -10,6 +10,7 @@ import { formatIn } from './lib/units';
 import { canonicalJSON } from './lib/provenance';
 import { nestingApiMessage } from './useNestingCatalog';
 import LeftoverReview, { LeftoverOverlay } from './LeftoverReview';
+import { StockExclusionOverlay } from './StockExclusions';
 
 export default function SavedRunPreview({ run, sequence }: { run: NestingRunDetail; sequence: number }) {
   const [data, setData] = useState<{ quote: Quote; output: ServerOptionMessage } | null>(null);
@@ -51,8 +52,8 @@ export default function SavedRunPreview({ run, sequence }: { run: NestingRunDeta
         if (
           !quote ||
           !option ||
-        canonicalJSON(option) !== canonicalJSON(output.result.option) ||
-        canonicalJSON(stockFor(quote, option)) !== canonicalJSON(output.stock)
+          canonicalJSON(option) !== canonicalJSON(output.result.option) ||
+          canonicalJSON(stockFor(quote, option)) !== canonicalJSON(output.stock)
         )
           throw new Error('Saved stock geometry differs from its input revision.');
         if (output.result.nest) validateNest(quote.parts, output.stock, output.result.nest);
@@ -129,6 +130,7 @@ export default function SavedRunPreview({ run, sequence }: { run: NestingRunDeta
             strokeWidth={stock.width / 700}
           />
           <g transform={`translate(0 ${stock.height}) scale(1 -1)`}>
+            <StockExclusionOverlay exclusions={stock.exclusions} />
             <rect
               x={stock.margin}
               y={stock.margin}

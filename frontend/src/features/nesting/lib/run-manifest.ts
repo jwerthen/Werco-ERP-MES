@@ -4,10 +4,11 @@ import { partArea, validateNest } from './nesting';
 import { projectToFile, validateProject, type QuoteProject } from './quote-project';
 import { stockFor, type Comparison } from './quoting';
 import { canonicalJSON, geometryHash, sha256 } from './provenance';
+import { exclusionsToFile } from './stock-exclusion-files';
 import { mmToIn } from './units';
 
 export type ComparisonSnapshot = { comparison: Comparison; signature: string };
-export const SOLVER_VERSION = 'werco-contour-v4';
+export const SOLVER_VERSION = 'werco-contour-v5';
 
 /** Downloadable draft evidence. This is never an approval, inventory claim or server audit record. */
 export async function buildRunManifest(
@@ -92,6 +93,13 @@ export async function buildRunManifest(
         const grossAreaIn2 = nest ? mmToIn(option.width) * mmToIn(option.height) * nest.sheets : null;
         return {
           stockOptionId: option.id,
+          ...(option.exclusions !== undefined
+            ? {
+                stockExclusions: exclusionsToFile(option.exclusions),
+                stockExclusionBasis:
+                  'Estimator-entered unavailable regions repeated on every hypothetical sheet of this option; no physical piece or reservation.',
+              }
+            : {}),
           status: complete ? 'complete_valid_layout' : nest ? 'partial_valid_layout' : 'calculation_failed',
           explanation:
             result.error ??

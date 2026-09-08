@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from app.jobs import quote_nesting_runs as job
+from app.schemas.quote_nesting_runs import SOLVER_VERSION
 from app.services import nesting_runtime as runtime
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
@@ -18,7 +19,7 @@ def identity(**changes):
         **dict(
             release='synthetic-release',
             protocol=1,
-            solver_version='werco-contour-v4',
+            solver_version=SOLVER_VERSION,
             bundle_sha256='a' * 64,
             node_version='v22.20.0',
             instance_id='12345678-1234-4234-8234-123456789abc',

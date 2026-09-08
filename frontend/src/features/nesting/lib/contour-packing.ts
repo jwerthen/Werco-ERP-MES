@@ -1,3 +1,5 @@
+import { guardedOuter, pointPath as guardedPointPath } from './guarded-geometry';
+import { prepareExclusions, exclusionCollision, type PreparedExclusion } from './stock-exclusions';
 import { allowedRotations, orientationExplanation } from './orientation';
 import { compareStableText } from './stable-order';
 import { packRectangles } from './rectangular-packing';
@@ -358,7 +360,13 @@ function obstacle(fixed: Shape, moving: Shape, gap: number): Clipper.Paths {
   return sums.length ? offset([positive(sums[0])], allowance) : [];
 }
 type Placed = { placement: Placement; shape: Shape; outer: Loop };
-function candidates(moving: Shape, placed: Placed[], stock: Stock, cache: Map<string, Clipper.Paths>): Point[] {
+function candidates(
+  moving: Shape,
+  placed: Placed[],
+  stock: Stock,
+  cache: Map<string, Clipper.Paths>,
+  exclusions: PreparedExclusion[]
+): Point[] {
   const margin = stock.margin + (moving.part.geometryToleranceMm ?? 0);
   const minX = margin,
     minY = margin,
@@ -372,6 +380,37 @@ function candidates(moving: Shape, placed: Placed[], stock: Stock, cache: Map<st
     { x: maxX, y: maxY },
   ];
   const forbidden: Clipper.Paths = [];
+  if (exclusions.length) {
+    const key = `exclusions|${moving.key}`;
+    let paths = cache.get(key);
+    if (!paths) {
+      const envelope = guardedOuter(moving.outer, stock.gap / 2 + (moving.part.geometryToleranceMm ?? 0));
+      const guardedShape = (path: Clipper.Path, key: string): Shape => {
+        const points = guardedPointPath(path),
+          r = reduced(points);
+        return {
+          ...moving,
+          key,
+          outer: { type: 'poly', points },
+          path: positive(integerPath(r.points)),
+          tolerance: r.tolerance,
+          pieces: undefined,
+          part: { ...moving.part, geometryToleranceMm: 0 },
+        };
+      };
+      // Offset holes may be filled in this candidate approximation only. Final
+      // envelope checks and the leftover ledger retain the exact winding.
+      const movingPaths = envelope.filter(Clipper.Clipper.Orientation);
+      const groups: Clipper.Paths[] = [];
+      for (const region of exclusions)
+        for (const fixed of region.paths.filter(Clipper.Clipper.Orientation))
+          for (const movingPath of movingPaths)
+            groups.push(obstacle(guardedShape(fixed, region.source.id), guardedShape(movingPath, moving.key), 0));
+      paths = stagedUnion(groups);
+      cache.set(key, paths);
+    }
+    forbidden.push(...paths);
+  }
   for (const item of placed) {
     const key = `${item.shape.key}|${moving.key}`;
     let paths = cache.get(key);
@@ -464,10 +503,14 @@ export function packContours(parts: Part[], stock: Stock): Nest {
       )
     );
   });
-  if (allRectangles) {
+  if (allRectangles && !stock.exclusions?.length) {
     const tolerance = Math.max(0, ...parts.map(p => p.geometryToleranceMm ?? 0));
     return packRectangles(parts, { ...stock, gap: stock.gap + 2 * tolerance, margin: stock.margin + tolerance });
   }
+  const exclusions = prepareExclusions(stock);
+  // Scope memoized decisions to this validated run and exact source/pose. The
+  // same physical pose recurs across sheets, instances and deterministic passes.
+  const exclusionDecisions = new Map<string, boolean>();
   const shapes = new Map<string, Shape[]>();
   parts.forEach(p => {
     const seen = new Set<string>();
@@ -509,7 +552,7 @@ export function packContours(parts: Part[], stock: Stock): Nest {
         for (let si = 0; si <= sheets.length && si < stock.maxSheets; si++) {
           const placed = sheets[si] ?? [];
           for (const moving of shapes.get(part.id)!) {
-            for (const point of candidates(moving, placed, stock, cache)) {
+            for (const point of candidates(moving, placed, stock, cache, exclusions)) {
               const placement: Placement = {
                 partId: part.id,
                 instance,
@@ -520,6 +563,15 @@ export function packContours(parts: Part[], stock: Stock): Nest {
                 sheet: si,
               };
               const outer = movedOuter(part, placement);
+              if (exclusions.length) {
+                const key = JSON.stringify([part.id, moving.rotation, point.x, point.y]);
+                let blocked = exclusionDecisions.get(key);
+                if (blocked === undefined) {
+                  blocked = Boolean(exclusionCollision(outer, stock.gap, part.geometryToleranceMm ?? 0, exclusions));
+                  if (exclusionDecisions.size < 50000) exclusionDecisions.set(key, blocked);
+                }
+                if (blocked) continue;
+              }
               if (
                 placed.some(other =>
                   outlinesCollide(
@@ -554,7 +606,9 @@ export function packContours(parts: Part[], stock: Stock): Nest {
               count: 1,
               reason:
                 orientationExplanation(part, stock) ??
-                'No permitted contour placement within sheet margins and spacing',
+                (exclusions.length
+                  ? 'The search found no valid contour placement within stock exclusions, margins and spacing'
+                  : 'No permitted contour placement within sheet margins and spacing'),
             });
         }
       }

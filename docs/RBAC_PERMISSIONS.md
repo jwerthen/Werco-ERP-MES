@@ -1343,6 +1343,16 @@ unapproved even when its geometry is checked and its search finishes. No new
 permission key, quote approval, cost writeback, original-CAD authentication or
 inventory reservation authority is introduced.
 
+**Configured stock exclusions** use the existing estimate, draft and calculation
+permissions above. Editing an exclusion in the browser requires nesting access;
+persisting it or starting a saved calculation still requires effective
+`purchasing:view` and `purchasing:create`. No role, permission key or approval
+boundary changes. Its label, reason, outline and entered clearance describe every
+hypothetical sheet of one stock-size scenario. They do not certify physical stock,
+claim a machine zone, reserve material or grant inventory write authority. The API
+bounds saved input structure; worker geometry validation does not promote the draft
+to an approved nest or quote.
+
 **Quote-spacing policy governance** adds Admin decisions, separate from quote approval:
 
 | Action | Required authority |

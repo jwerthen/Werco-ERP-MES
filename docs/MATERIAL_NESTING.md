@@ -142,6 +142,48 @@ material name, or ERP catalog record. Confirm the drawing and purchased sheet
 specification. Free-angle rotation, mirroring, and nesting parts inside holes
 remain unavailable.
 
+## Excluded stock areas
+
+In **Stock sizes & prices**, open **Excluded areas** on a stock option. Add a
+rectangle or circle using decimal or fractional inches, an area label, a reason
+the material is unavailable, and optional added clearance. Coordinates start at
+the sheet's lower-left corner: X follows length and Y follows width. An existing
+polygon imported through a saved estimate retains its exact outline; this first
+editor supports changes to its label, reason and clearance, not polygon reshaping.
+
+These are **estimator-reported quote inputs**, not physically verified stock or
+machine settings. The regions repeat on **every hypothetical sheet of that size
+option**. They do not identify a particular sheet, confirm damage or certification,
+allocate inventory, reserve material, or configure a clamp or machine control.
+Use a separate option/estimate when that repeat assumption is inappropriate.
+New stock options and newly imported material/thickness groups start without
+exclusions; source coordinates are not copied into a different material group.
+
+Each option permits 16 regions, with up to 2,000 source polygon vertices in total;
+a circle counts as one source vertex. All options, including disabled options,
+share the project's 20,000-vertex budget with parts and reference geometry.
+Region labels and reasons are required. Added clearance is 0–100 inches, an
+engineering input bound rather than a recommended shop allowance. The complete
+entered outline must lie inside the gross sheet. An incompatible sheet-size
+reduction is rejected; the program never crops, translates, or deletes an area
+to make the edit work. Overlapping exclusion regions are permitted and counted
+once through their union.
+
+Red outlines in the editor, layout and SVG are the **entered unavailable areas**.
+The solver also reserves the entered clearance around each exclusion, the part's
+half-gap and curve allowance, and numerical guards. It checks both nominal
+profile distance and intersections of the same conservative vector envelopes
+used by leftover analysis. Rectangle-only packing is disabled when nonempty
+exclusions are present. Candidate simplification is bounded and final validation
+uses the actual guarded shapes. A search that leaves parts unplaced is an
+incomplete result, not proof that no arrangement can exist.
+
+Adding, editing or removing an exclusion invalidates the comparison and its
+review export until recalculation. Save/Open, team input revisions, server
+calculations and review exports retain coordinates, clearance, label and reason.
+Input revisions and their save audit are retained; approval, per-edit reason
+codes for removal and an automatic reapproval workflow remain future work.
+
 ## Potential leftover regions
 
 After a comparison, **Potential leftovers** overlays the selected sheet with
@@ -159,12 +201,19 @@ remnant identifier, or production instruction. Sheet recommendations and
 material costs receive no leftover credit.
 
 Analysis uses the original validated placements, subtracts guarded full outer
-part profiles from the usable rectangular sheet, and preserves disconnected
+part profiles and guarded exclusion regions from the usable rectangular sheet, and preserves disconnected
 regions and holes through a polygon-tree difference. Internal part cutouts
 stay reserved. It does not replace profiles with bounding boxes. **Area
 breakdown and assumptions** distinguishes:
 
-`gross sheet = edge margins + nominal finished parts + reserved internal cutouts + clearance/numerical protection + potential leftover regions`
+`gross sheet = edge margins + excluded stock + nominal finished parts + reserved internal cutouts + clearance/numerical protection + potential leftover regions`
+
+**Usable sheet area** means the rectangle after the entered edge margins, before
+stock exclusions. **Excluded stock within margins** measures the guarded union
+inside the numerically protected usable boundary, so overlapping areas and areas
+inside edge margins are not double-counted. The same reserved polygons are
+subtracted from the potential leftovers. All resulting regions remain review-only
+with zero credit, including disconnected pieces.
 
 Nominal part/cutout areas use the geometry model, including analytic circle
 areas. Numerical loss is assigned to clearance/protection, never described as
@@ -174,7 +223,10 @@ than inventing recoverable area.
 
 ### Engineering analysis profile
 
-`werco-leftovers-v1` uses the fixed profile below. These are engineering
+`werco-leftovers-v1` uses the fixed profile below when there are no exclusion
+regions. `werco-leftovers-v2` adds the pinned `werco-stock-exclusions-v1` profile
+and an explicit `excludedArea` ledger field for nonempty exclusions. An explicit
+empty array retains v1 analysis. These are engineering
 approximation settings, not approved shop reuse or cutting policies:
 
 | Setting | Value or behavior |
@@ -189,6 +241,18 @@ approximation settings, not approved shop reuse or cutting policies:
 | Input budget | 60,000 vertices across placed outer profiles; circles at most 8,192 vertices each |
 | Output budget | 30,000 vertices per sheet, 120,000 across the option, and 2,000 connected regions; guarded offset paths also have a 120,000-vertex per-sheet budget |
 | Offset range | Reserved distance at most 40,000 mm; larger requests report analysis unavailable |
+| Exclusion guards | Same grid, circumscribed circles, square tangent joins and 0.0004 mm numerical protection; entered exclusion clearance is separate from the part envelope |
+| Exclusion expansion budget | At most 60,000 guarded vertices across one option's regions |
+| Exact edge-crossing fallback | At most 8,000,000 candidate edge pairs per envelope comparison; exceeding the guard rejects the calculation |
+
+The current exclusion constraint checks part/exclusion envelope intersections.
+Existing part-to-part checks still enforce nominal full-gap plus curve allowance;
+square-tangent reservation corners can overlap each other. Existing edge checks
+apply the nominal profile, curve allowance and selected margin, while reservation
+area is clipped at the inward sheet boundary. The union ledger counts overlapping
+reservations once. A generalized policy requiring every compensated part envelope
+to be disjoint from every other envelope and wholly inside the usable boundary
+is still outstanding; this increment does not claim that full-plan requirement.
 
 Analysis runs in the same comparison worker, outside rendering. A numerical
 or complexity error appears as **Leftover analysis unavailable**; it does not
@@ -202,7 +266,7 @@ zero credit. Export validates cached report structure, geometry areas, and its
 relationship to the current sheet/placements without rerunning offset work on
 the UI thread. These checks do not turn the draft into an approved remnant.
 Leftover results are not stored in the editable estimate; **Open** requires a
-fresh comparison. This feature adds no input setting or saved-file version.
+fresh comparison. Analysis output is separate from editable stock-exclusion inputs.
 
 ## ERP material and price review
 
@@ -353,7 +417,7 @@ defaults:
 |-------|-------------------|
 | DXF batch | Up to 100 files; each file smaller than 5,000,000 bytes |
 | Estimate | Up to 300 designs and 300 total parts, including quantities, across all groups |
-| Geometry | Up to 2,000 vertices per contour/reference path after curve conversion, 20,000 geometry vertices including reference paths per parsed file and project, and 300 closed contours per file |
+| Geometry | Up to 2,000 vertices per contour/reference path after curve conversion; 20,000 source vertices including reference paths and all options' exclusion regions per project; 20,000 geometry vertices and 300 closed contours per parsed DXF |
 | DXF records | Up to 20,000 entity records per file, including legacy polyline vertex records |
 | Stock options | Up to 12 per group |
 | Contour import | ASCII DXF model-space `LINE`, `ARC`, `CIRCLE`, `LWPOLYLINE`, ordinary legacy 2D `POLYLINE`/`VERTEX`/`SEQEND`, and supported clamped planar `SPLINE`; polylines may include circular bulges |
@@ -361,11 +425,11 @@ defaults:
 | Omitted metadata | `VIEWPORT` records and all entities on the `FORMAT` annotation layer, with an import warning for omitted FORMAT entities |
 | Rejected files | Open or ambiguous outer profiles, touching/intersecting contours, reference paths outside or spanning parts, malformed data, unsupported entities, blocks/`INSERT`, wide polylines, sloped/nonplanar geometry, tilted extrusion, or paper-space cut geometry; other text/annotations are not silently discarded |
 | DXF units | Inch and millimeter files retain their physical size; unitless files default to inches unless millimeters is selected before import |
-| Saved estimates | Policy snapshots or recorded overrides use project version 10 and quote version 9. Projects with explicit rotation or grain settings use version 6 and version 7 constrained quotes. Other groups may retain version 3 quotes. Without constraints, ERP-bound projects remain version 5 and family-only projects version 4. Older single estimates/jobs open as one group; constrained legacy jobs use version 8. Legacy `drawing-bounds` parts require DXF re-import before nesting |
+| Saved estimates | Stock exclusions, including an explicit empty array, use project version 12 and quote version 11. Policy snapshots or recorded overrides without exclusions use project 10 and quote 9. Orientation-only projects use 6 and quote 7. Other groups may retain quote 3. Without constraints, ERP-bound projects remain 5 and family-only projects 4. Older single estimates/jobs open as one group; constrained legacy jobs use 8, and jobs with exclusions use 13. Legacy `drawing-bounds` parts require DXF re-import before nesting |
 
 Legacy `rotate: false` means fixed and `rotate: true` means quarter turns;
 when `rotationMode` exists, it is authoritative. Axis metadata remains X/Y
-through inch/millimeter conversion. Versions 6/7/8/9/10 deliberately differ between
+through inch/millimeter conversion. Versions 6/7/8/9/10/11/12/13 deliberately differ between
 project/quote/job files so older readers reject the new constraints instead of
 silently relaxing them. Do not edit a file's version to force an older release
 to open it; retain the file and use a compatible release.
@@ -432,10 +496,12 @@ alternatives, validated placements, utilization and entered material costs.
 Changed inputs or inconsistent results require recomparison. The solver is
 deterministic, so the record stores no random seed and explains what replay
 requires. The manifest identifies orientation policy `werco-orientation-v1`
-and solver `werco-contour-v4`; contour search uses up to two deterministic
+and solver `werco-contour-v5`; contour search uses up to two deterministic
 orders, while rectangular-profile search uses three. Geometry fingerprints
 remain about shape; the input-project fingerprint also covers orientation
-requirements. Incomplete heuristic results are not proof that a layout is impossible.
+requirements and exact stock-exclusion inputs. Exclusion-bearing options use the
+contour search even for rectangular parts. Incomplete heuristic results are not
+proof that a layout is impossible.
 
 This locally downloaded record is labeled **QUOTE LAYOUT — NOT AN NC PROGRAM**
 and remains `draft_estimator_review`. Its content hash can detect changes but

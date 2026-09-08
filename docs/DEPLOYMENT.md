@@ -155,6 +155,20 @@ material/thickness band, and a new saved revision after custom spacing edits. Pr
 saved reports must remain unchanged. Policy approval records a tenant quoting policy;
 it is not machine-program or manufacturing approval.
 
+Configured stock exclusions add no migration, permission, environment variable or
+cron setting. The API, frontend and shared worker must understand quote 11/project 12
+and solver `werco-contour-v5` together. The API bounds the saved structural payload;
+the shared TypeScript kernel performs topology and guarded-geometry checks before
+any calculation checkpoint is emitted. The legacy single-job version 13 is a local
+file format, not an accepted server project envelope. Keep the existing API-first
+release, tested image manifest, active-worker/fresh post-Redis identity and public
+release receipt gates; an older worker must not silently ignore the new constraints.
+Verify an exclusion-bearing saved revision and calculation, including the distinct
+preview and area ledger. Only nonempty regions select `werco-leftovers-v2` with
+`excludedArea`; omitted or empty exclusion lists keep the v1 leftover contract.
+These are hypothetical sheet-option constraints, not verified physical stock,
+reservations, inventory records or machine zones.
+
 `frontend/vercel.json` already builds with `npm run build`, publishes `build/`,
 and rewrites SPA paths to `/index.html`, so opening or refreshing `/nest` uses
 the existing application router. Feature assets are bundled from
@@ -216,6 +230,11 @@ alongside migrations 101/102. Restore a compatible API/frontend/worker release t
 Keep project 10/quote 9 files and saved revisions intact; older readers must reject them
 rather than drop policy snapshots, custom-spacing reasons or constraints. Do not strip
 fields/change version numbers or seed replacement policies to force compatibility.
+
+An exclusions rollback also retains quote 11/project 12 inputs and local job 13 files.
+Restore compatible API, frontend and worker images; do not erase exclusion outlines,
+clearances or version discriminators to force an old reader to accept them. Keep
+historical checkpoints unchanged. No database downgrade is required for exclusions.
 
 The orientation/grain increment changes only frontend behavior and local file
 formats; it adds no API, permission, migration, or environment requirement.

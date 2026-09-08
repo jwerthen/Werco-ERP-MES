@@ -29,7 +29,7 @@ const bundle = await readFile(outfile);
 // test compares the build manifest to the actual executable's hello message.
 const manifest = {
   protocol: 1,
-  solver_version: 'werco-contour-v4',
+  solver_version: 'werco-contour-v5',
   bundle_sha256: createHash('sha256').update(bundle).digest('hex'),
   node_major: 22,
   max_option_evaluations: 36,

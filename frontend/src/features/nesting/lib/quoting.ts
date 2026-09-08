@@ -9,6 +9,8 @@ import {
 } from './spacing-policy';
 import { bounds, validatePart, validateJob, nestParts, type Part, type Stock, type Nest, demoJob } from './nesting';
 import { compareStableText } from './stable-order';
+import { exclusionVertexCount, validateStockExclusions, type StockExclusion } from './stock-exclusions';
+import { exclusionsFromFile, exclusionsToFile } from './stock-exclusion-files';
 import { jobFromFile, jobToFile, mmToIn, inToMm } from './units';
 import {
   catalogFamily,
@@ -17,6 +19,7 @@ import {
   type MaterialBinding,
 } from './material-binding';
 export type SheetOption = {
+  exclusions?: StockExclusion[];
   id: string;
   width: number;
   height: number;
@@ -24,11 +27,13 @@ export type SheetOption = {
   price: number | null;
 };
 export function editSheetOption(option: SheetOption, patch: Partial<SheetOption>): SheetOption {
-  return {
+  const changed = {
     ...option,
     ...patch,
     ...(patch.width !== undefined || patch.height !== undefined ? { price: null } : {}),
   };
+  if (changed.exclusions !== undefined) validateStockExclusions(changed.exclusions, changed.width, changed.height);
+  return changed;
 }
 export type Quote = {
   version: 1;
@@ -183,6 +188,7 @@ export function validateQuote(value: unknown): Quote {
         o.height <= 20000,
       'Stock dimensions must be positive, up to 787.4 inches.'
     );
+    if (o.exclusions !== undefined) validateStockExclusions(o.exclusions, o.width, o.height);
     check(
       o.price === null || (Number.isFinite(o.price) && o.price >= 0),
       'Enter a valid sheet price or leave it blank.'
@@ -200,6 +206,18 @@ export function validateQuote(value: unknown): Quote {
     );
   });
   check(
+    q.parts.reduce(
+      (sum, part) =>
+        sum +
+        part.loops.reduce((n, loop) => n + (loop.type === 'circle' ? 1 : loop.points.length), 0) +
+        (part.referencePaths?.reduce((n, path) => n + path.length, 0) ?? 0),
+      0
+    ) +
+      q.options.reduce((sum, option) => sum + exclusionVertexCount(option.exclusions ?? []), 0) <=
+      20000,
+    'Maximum 20,000 source vertices across parts and stock exclusions.'
+  );
+  check(
     q.options.some(o => o.enabled),
     'Enable at least one stock size to compare.'
   );
@@ -208,6 +226,7 @@ export function validateQuote(value: unknown): Quote {
 export function stockFor(q: Quote, o: SheetOption): Stock {
   return {
     ...(q.grainAxis !== undefined ? { grainAxis: q.grainAxis } : {}),
+    ...(o.exclusions !== undefined ? { exclusions: o.exclusions } : {}),
     width: o.width,
     height: o.height,
     margin: q.margin,
@@ -316,7 +335,13 @@ export function quoteToFile(q: Quote) {
   return {
     // Quote 7 is distinct from project 6 and legacy job 8; old readers must
     // reject a constraint-bearing file instead of silently relaxing its rules.
-    version: q.spacingPolicy || q.spacingOverride ? 9 : hasOrientationConstraints(q.parts, q) ? 7 : 3,
+    version: q.options.some(option => option.exclusions !== undefined)
+      ? 11
+      : q.spacingPolicy || q.spacingOverride
+        ? 9
+        : hasOrientationConstraints(q.parts, q)
+          ? 7
+          : 3,
     ...(q.spacingPolicy ? { spacingPolicy: q.spacingPolicy } : {}),
     ...(q.spacingOverride ? { spacingOverride: q.spacingOverride } : {}),
     ...(q.grainAxis !== undefined ? { grainAxis: q.grainAxis } : {}),
@@ -335,6 +360,7 @@ export function quoteToFile(q: Quote) {
       ...o,
       width: mmToIn(o.width),
       height: mmToIn(o.height),
+      ...(o.exclusions !== undefined ? { exclusions: exclusionsToFile(o.exclusions) } : {}),
     })),
   };
 }
@@ -342,10 +368,18 @@ export function quoteFromFile(input: unknown): Quote {
   if (!input || typeof input !== 'object') throw new Error('Invalid estimate file.');
   const d = input as Record<string, unknown>;
   check(
-    d.version === 9 || (d.spacingPolicy === undefined && d.spacingOverride === undefined && d.spacingMode !== 'policy'),
-    'Spacing policies require a version 9 estimate.'
+    d.version === 9 ||
+      d.version === 11 ||
+      (d.spacingPolicy === undefined && d.spacingOverride === undefined && d.spacingMode !== 'policy'),
+    'Spacing policies require a version 9 or 11 estimate.'
   );
-  if (d.version === 3 || d.version === 7 || d.version === 9) {
+  check(
+    d.version === 11 ||
+      !Array.isArray(d.options) ||
+      d.options.every(option => !option || !Object.prototype.hasOwnProperty.call(option, 'exclusions')),
+    'Stock exclusions require a version 11 estimate.'
+  );
+  if (d.version === 3 || d.version === 7 || d.version === 9 || d.version === 11) {
     check(d.units === 'in', 'Estimate file must explicitly declare inches.');
     check(d.version !== 3 || d.grainAxis === undefined, 'Sheet grain requires estimate version 7 or 9.');
     check(d.currency === undefined || d.currency === 'USD', 'This estimate uses USD sheet prices.');
@@ -353,7 +387,7 @@ export function quoteFromFile(input: unknown): Quote {
     const parts = (
       jobFromFile({
         ...d,
-        version: d.version === 7 || d.version === 9 ? 8 : 2,
+        version: d.version === 7 || d.version === 9 || d.version === 11 ? 8 : 2,
         stock: {
           width: 1,
           height: 1,
@@ -384,6 +418,9 @@ export function quoteFromFile(input: unknown): Quote {
         ...o,
         width: inToMm(dim(o.width)),
         height: inToMm(dim(o.height)),
+        ...(o.exclusions !== undefined
+          ? { exclusions: exclusionsFromFile(o.exclusions, inToMm(dim(o.width)), inToMm(dim(o.height))) }
+          : {}),
       })),
     });
   }
@@ -403,6 +440,7 @@ export function quoteFromFile(input: unknown): Quote {
         id: 'saved-stock',
         width: old.stock.width,
         height: old.stock.height,
+        ...(old.stock.exclusions !== undefined ? { exclusions: old.stock.exclusions } : {}),
         enabled: true,
         price: null,
       },

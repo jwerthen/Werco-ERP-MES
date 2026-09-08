@@ -13,6 +13,22 @@ from typing import Any
 from app.schemas.quote_nesting_runs import MAX_MESSAGE_BYTES, MAX_OPTIONS, SOLVER_VERSION
 from app.services.quote_nesting_drafts import canonical_json
 
+EXCLUSION_PROFILE = {
+    "version": "werco-stock-exclusions-v1",
+    "integerGridMm": 0.0001,
+    "circleRadialExcessMm": 0.00254,
+    "numericalProtectionMm": 0.0004,
+    "partGapFraction": 0.5,
+    "offsetJoin": "square-tangent",
+    "maximumConvexJoinRadiusFactor": math.sqrt(2),
+    "maxRegions": 16,
+    "maxSourceVertices": 2000,
+    "maxProjectSourceVertices": 20000,
+    "maxClearanceMm": 2540,
+    "maxGuardedVertices": 60000,
+    "maxIntersectionEdgePairs": 8000000,
+}
+
 
 class RunProtocolError(ValueError):
     """A child result cannot be accepted as a validated checkpoint."""
@@ -96,6 +112,39 @@ def _same_number(actual: Any, expected: float) -> None:
     require(number(actual) and math.isclose(actual, expected, rel_tol=1e-12, abs_tol=1e-7))
 
 
+def _same_exclusions(actual: dict, source: dict) -> None:
+    """Bind the emitted source geometry, not its separately guarded envelope."""
+    require(("exclusions" in actual) == ("exclusions" in source))
+    if "exclusions" not in source:
+        return
+    regions = actual["exclusions"]
+    require(isinstance(regions, list) and len(regions) == len(source["exclusions"]))
+
+    def exact_inches(value: Any, inches: float) -> None:
+        # Both interpreters use IEEE binary64 for this one multiplication. A
+        # tolerance here would permit changed boundaries or reduced clearance.
+        require(number(value) and value == inches * 25.4)
+
+    for region, original in zip(regions, source["exclusions"]):
+        exact(region, {"id", "label", "reason", "outline", "clearance"})
+        require(all(region[field] == original[field] for field in ("id", "label", "reason")))
+        exact_inches(region["clearance"], original["clearance"])
+        outline, saved = region["outline"], original["outline"]
+        if saved["type"] == "circle":
+            exact(outline, {"type", "cx", "cy", "r"})
+            require(outline["type"] == "circle")
+            for field in ("cx", "cy", "r"):
+                exact_inches(outline[field], saved[field])
+        else:
+            exact(outline, {"type", "points"})
+            require(outline["type"] == "poly" and isinstance(outline["points"], list))
+            require(len(outline["points"]) == len(saved["points"]))
+            for point, saved_point in zip(outline["points"], saved["points"]):
+                exact(point, {"x", "y"})
+                for axis in ("x", "y"):
+                    exact_inches(point[axis], saved_point[axis])
+
+
 def validate_option(message: dict, digest: str, expected: dict, sequence: int) -> tuple[str, int]:
     exact(
         message,
@@ -120,7 +169,9 @@ def validate_option(message: dict, digest: str, expected: dict, sequence: int) -
     requested = sum(part["quantity"] for part in quote["parts"])
     require(integer(message["requested"], 1) and message["requested"] == requested)
     stock = exact(
-        message["stock"], {"width", "height", "margin", "gap", "maxSheets", "bedWidth", "bedHeight"}, {"grainAxis"}
+        message["stock"],
+        {"width", "height", "margin", "gap", "maxSheets", "bedWidth", "bedHeight"},
+        {"grainAxis", "exclusions"},
     )
     for field in ("width", "height"):
         _same_number(stock[field], option[field] * 25.4)
@@ -129,14 +180,16 @@ def validate_option(message: dict, digest: str, expected: dict, sequence: int) -
         _same_number(stock[field], quote[field] * 25.4)
     require(integer(stock["maxSheets"], 1) and stock["maxSheets"] == requested)
     require(stock.get("grainAxis") == quote.get("grainAxis"))
+    _same_exclusions(stock, option)
     result = exact(
         message["result"], {"option", "nest", "error", "complete", "area", "cost"}, {"leftovers", "leftoverError"}
     )
-    result_option = exact(result["option"], {"id", "width", "height", "enabled", "price"})
+    result_option = exact(result["option"], {"id", "width", "height", "enabled", "price"}, {"exclusions"})
     require(result_option["id"] == option["id"] and result_option["enabled"] is True)
     for field in ("width", "height"):
         _same_number(result_option[field], option[field] * 25.4)
     require(result_option["price"] == option["price"] and type(result["complete"]) is bool)
+    _same_exclusions(result_option, option)
     require(number(result["area"]) and (result["cost"] is None or number(result["cost"])))
     if result["error"] is not None:
         require(isinstance(result["error"], str) and len(result["error"]) <= 1000)
@@ -188,15 +241,17 @@ def validate_option(message: dict, digest: str, expected: dict, sequence: int) -
         if "leftoverError" in result:
             require(isinstance(result["leftoverError"], str) and len(result["leftoverError"]) <= 1000)
         if "leftovers" in result:
-            _validate_leftover_status(result["leftovers"], nest["sheets"])
+            _validate_leftover_status(result["leftovers"], nest["sheets"], stock)
     canonical = canonical_json(message)
     byte_count = len(canonical.encode("utf-8"))
     require(byte_count <= MAX_MESSAGE_BYTES)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest(), byte_count
 
 
-def _validate_leftover_status(value: Any, sheets: int) -> None:
+def _validate_leftover_status(value: Any, sheets: int, stock: dict) -> None:
     exact(value, {"inputSignature", "version", "status", "creditUSD", "assumptions", "sheets"})
+    excluded = bool(stock.get("exclusions"))
+    require(value["version"] == ("werco-leftovers-v2" if excluded else "werco-leftovers-v1"))
     require(value["status"] == "potential_review_only" and type(value["creditUSD"]) is int and value["creditUSD"] == 0)
     assumptions = exact(
         value["assumptions"],
@@ -207,9 +262,42 @@ def _validate_leftover_status(value: Any, sheets: int) -> None:
         and assumptions["boundsAreUsableRectangles"] is False
         and assumptions["eligibilityVerified"] is False
     )
+    profile = assumptions["profile"]
+    require(isinstance(profile, dict))
+    require(("exclusions" in profile) == excluded)
+    if excluded:
+        require(canonical_json(profile["exclusions"]) == canonical_json(EXCLUSION_PROFILE))
     require(isinstance(value["sheets"], list) and len(value["sheets"]) == sheets)
-    for sheet in value["sheets"]:
+    for index, sheet in enumerate(value["sheets"]):
         require(isinstance(sheet, dict) and isinstance(sheet.get("regions"), list))
+        require(integer(sheet.get("sheet")) and sheet["sheet"] == index)
+        area_fields = {
+            "grossArea",
+            "usableArea",
+            "edgeMarginArea",
+            "nominalPartArea",
+            "reservedCutoutArea",
+            "clearanceAndProtectionArea",
+            "remainingArea",
+        }
+        require(all(number(sheet.get(field)) for field in area_fields))
+        require(("excludedArea" in sheet) == excluded)
+        if excluded:
+            require(number(sheet["excludedArea"], 0, sheet["usableArea"]))
+        residual = sheet.get("reconciliationResidualArea")
+        require(number(residual, -math.inf))
+        require(abs(residual) <= max(1e-7, sheet["grossArea"] * 1e-12))
+        _same_number(sheet["grossArea"], stock["width"] * stock["height"])
+        _same_number(
+            sheet["usableArea"], (stock["width"] - 2 * stock["margin"]) * (stock["height"] - 2 * stock["margin"])
+        )
+        _same_number(sheet["edgeMarginArea"] + sheet["usableArea"], sheet["grossArea"])
+        _same_number(
+            sheet["grossArea"],
+            sum(sheet[field] for field in area_fields - {"grossArea", "usableArea"})
+            + sheet.get("excludedArea", 0)
+            + residual,
+        )
         for region in sheet["regions"]:
             require(isinstance(region, dict) and region.get("classification") == "review")
             require(type(region.get("creditUSD")) is int and region["creditUSD"] == 0)

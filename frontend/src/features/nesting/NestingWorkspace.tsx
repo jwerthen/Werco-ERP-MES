@@ -74,6 +74,8 @@ import { orientationExplanation } from './lib/orientation';
 import LeftoverReview, { LeftoverOverlay, leftoverPath } from './LeftoverReview';
 import TeamDrafts from './TeamDrafts';
 import SpacingPolicyControls from './SpacingPolicyControls';
+import StockExclusions, { StockExclusionOverlay, stockExclusionsSvg } from './StockExclusions';
+import { exclusionsToFile } from './lib/stock-exclusion-files';
 
 type CachedComparison = { comparison: Comparison; signature: string };
 const legacyFootprintNotice =
@@ -435,16 +437,23 @@ export default function NestingWorkspace({
       toast.error((e as Error).message);
     }
   };
-  const changeOption = (id: string, patch: Partial<SheetOption>) =>
-    setQuote(q => ({
-      ...q,
-      ...(patch.width !== undefined || patch.height !== undefined ? clearCatalogPricing(q) : q),
-      options: q.options
-        .map(o => (o.id === id ? editSheetOption(o, patch) : o))
-        .map(o =>
-          q.materialBinding && (patch.width !== undefined || patch.height !== undefined) ? { ...o, price: null } : o
-        ),
-    }));
+  const changeOption = (id: string, patch: Partial<SheetOption>) => {
+    try {
+      const q = quote;
+      const next = {
+        ...q,
+        ...(patch.width !== undefined || patch.height !== undefined ? clearCatalogPricing(q) : q),
+        options: q.options
+          .map(o => (o.id === id ? editSheetOption(o, patch) : o))
+          .map(o =>
+            q.materialBinding && (patch.width !== undefined || patch.height !== undefined) ? { ...o, price: null } : o
+          ),
+      };
+      setQuote(next);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : 'Cannot change this stock option.');
+    }
+  };
   const stateRef = useRef({ project, quote, comparison, stale, snapshots });
   stateRef.current = { project, quote, comparison, stale, snapshots };
   useEffect(() => {
@@ -705,6 +714,7 @@ export default function NestingWorkspace({
       ['Selected stock width in', mmToIn(active.option.height)],
       ['Selected stock length in', mmToIn(active.option.width)],
       ['Sheet grain', sheetGrainLabel(quote.grainAxis)],
+      ['Excluded areas repeated per sheet', active.option.exclusions?.length ?? 0],
       ['Sheets to order', nest.sheets],
       ['Required parts', requested],
       ['Placed parts', nest.placements.length],
@@ -753,6 +763,7 @@ export default function NestingWorkspace({
         'Sheet',
         'Gross area in2',
         'Edge margin area in2',
+        'Excluded stock area in2',
         'Nominal part area in2',
         'Reserved cutout area in2',
         'Clearance and protection area in2',
@@ -764,6 +775,7 @@ export default function NestingWorkspace({
         result.sheet + 1,
         result.grossArea / 25.4 ** 2,
         result.edgeMarginArea / 25.4 ** 2,
+        (result.excludedArea ?? 0) / 25.4 ** 2,
         result.nominalPartArea / 25.4 ** 2,
         result.reservedCutoutArea / 25.4 ** 2,
         result.clearanceAndProtectionArea / 25.4 ** 2,
@@ -771,6 +783,17 @@ export default function NestingWorkspace({
         result.regions.length,
         0,
       ]) ?? []),
+      [],
+      ['Excluded area ID', 'Label', 'Reason', 'Added clearance in', 'Actual outline JSON in'],
+      ...(active.option.exclusions
+        ? exclusionsToFile(active.option.exclusions).map(region => [
+            region.id,
+            region.label,
+            region.reason,
+            region.clearance,
+            JSON.stringify(region.outline),
+          ])
+        : []),
     ];
     download(
       rows.map(row => row.map(csv).join(',')).join('\n'),
@@ -801,7 +824,7 @@ export default function NestingWorkspace({
       })
       .join('');
     download(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${mmToIn(stock.width)}in" height="${mmToIn(stock.height)}in" viewBox="0 0 ${stock.width} ${stock.height}"><title>QUOTE LAYOUT — NOT AN NC PROGRAM</title><desc>Sheet grain: ${sheetGrainLabel(quote.grainAxis)}. Permitted part orientations are recorded in the material summary and draft review export. Mirroring is prohibited. Amber regions are predicted leftovers requiring physical review; no value is credited.</desc><rect width="100%" height="100%" fill="white"/><g transform="translate(0 ${stock.height}) scale(1 -1)">${remaining}${paths}</g></svg>`,
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${mmToIn(stock.width)}in" height="${mmToIn(stock.height)}in" viewBox="0 0 ${stock.width} ${stock.height}"><title>QUOTE LAYOUT — NOT AN NC PROGRAM</title><desc>Sheet grain: ${sheetGrainLabel(quote.grainAxis)}. Permitted part orientations are recorded in the material summary and draft review export. Mirroring is prohibited. Red shapes are entered unavailable stock; added clearance and guarded part envelopes also apply. Amber regions are predicted leftovers requiring physical review; no value is credited.</desc><rect width="100%" height="100%" fill="white"/><g transform="translate(0 ${stock.height}) scale(1 -1)">${remaining}${stockExclusionsSvg(stock.exclusions)}${paths}</g></svg>`,
       safeName(quote.name) + `-sheet-${sheet + 1}-preview.svg`,
       'image/svg+xml'
     );
@@ -1409,6 +1432,7 @@ export default function NestingWorkspace({
                           {formatIn(stock.height)} in
                         </text>
                         <g transform={`translate(0 ${stock.height}) scale(1 -1)`}>
+                          <StockExclusionOverlay exclusions={stock.exclusions} />
                           {showLeftovers && leftoverSheet && (
                             <LeftoverOverlay sheet={leftoverSheet} highlightedId={selectedLeftover} />
                           )}
@@ -1669,7 +1693,7 @@ export default function NestingWorkspace({
                             ) : (
                               <span className="incomplete-result">
                                 {r.error ||
-                                  `${r.nest?.unplaced.reduce((a, u) => a + u.count, 0) ?? requested} parts do not fit`}
+                                  `${r.nest?.unplaced.reduce((a, u) => a + u.count, 0) ?? requested} parts remain unplaced`}
                               </span>
                             )}
                           </TableCell>
@@ -1862,6 +1886,26 @@ export default function NestingWorkspace({
                         }
                       />
                     </label>
+                    <StockExclusions
+                      key={`${documentEpoch}:${policyReviewEpoch}:${project.activeGroupId}:${o.id}`}
+                      option={o}
+                      onChange={regions => {
+                        const nextQuote = {
+                          ...quote,
+                          options: quote.options.map(option =>
+                            option.id === o.id ? editSheetOption(option, { exclusions: regions }) : option
+                          ),
+                        };
+                        const next = {
+                          ...project,
+                          groups: project.groups.map(group =>
+                            group.id === project.activeGroupId ? { ...group, quote: nextQuote } : group
+                          ),
+                        };
+                        validateProject(next);
+                        setProject(next);
+                      }}
+                    />
                     <div className="stock-card-footer">
                       <span>{fmt(squareFeet(o.width * o.height), 2)} ft² per sheet</span>
                       <button

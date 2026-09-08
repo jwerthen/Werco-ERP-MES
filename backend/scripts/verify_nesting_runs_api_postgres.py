@@ -34,6 +34,7 @@ def verify():
     from app.models.company import Company
     from app.models.quote_nesting_run import QuoteNestingRun
     from app.models.user import User, UserRole
+    from app.schemas.quote_nesting_runs import SOLVER_VERSION
 
     schema = 'nest_api_check_' + uuid4().hex
     owner = sa.create_engine(url)
@@ -121,7 +122,7 @@ def verify():
         runtime = dict(
             release='synthetic-release',
             protocol=1,
-            solver_version='werco-contour-v4',
+            solver_version=SOLVER_VERSION,
             bundle_sha256='a' * 64,
             node_version='v22.20.0',
         )

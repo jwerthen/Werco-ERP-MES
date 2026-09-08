@@ -489,8 +489,18 @@ seeded by migration and no new cron, secret or environment variable is introduce
 Retain policy/draft/run history on application rollback; do not remove policy snapshots
 or custom-spacing reasons from saved inputs to make an older runtime accept them.
 
-Rollback uses a compatible API/worker/frontend release, retains migrations 101/102 and
-immutable draft/run history, and does not change cron settings. A failed runtime can
+Stock exclusions require solver `werco-contour-v5` and quote 11/project 12 support
+across API, frontend and compiled worker. The local job 13 wrapper is not a server
+project format. API validation bounds IDs, finite dimensions, gross-sheet containment
+and complexity; the shared TypeScript kernel validates source topology and guarded
+exclusion/part geometry before emitting a checkpoint. Nonempty regions select the
+v2 leftover profile and `excludedArea`; absent/empty lists retain v1. Rebuild and test
+the image and use its new manifest identity in the unchanged active-deployment/fresh
+post-Redis heartbeat gate. There is no new migration, cron, environment variable or
+physical-stock reservation implied by this geometry increment.
+
+Rollback uses a compatible API/worker/frontend release, retains migrations 101/102/103 and
+immutable policy/draft/run history, and does not change cron settings. A failed runtime can
 still leave history readable, but new calculations remain unavailable. No successful
 calculation, stock reservation, manufacturing approval or automatic material credit is
 implied by a worker startup or a completed deployment.

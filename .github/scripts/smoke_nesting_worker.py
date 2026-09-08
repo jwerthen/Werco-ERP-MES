@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import subprocess
 from pathlib import Path
 from uuid import uuid4
@@ -86,6 +87,75 @@ def fixture():
     }
 
 
+def exclusion_fixture():
+    value = fixture()
+    value['version'] = 12
+    quote = value['groups'][0]['quote']
+    quote['version'] = 11
+    quote['options'][0]['exclusions'] = [
+        {
+            'id': 'synthetic-unavailable-strip',
+            'label': 'Synthetic stock defect',
+            'reason': 'Image smoke uses no physical stock or machine coordinates',
+            'clearance': 0.125,
+            'outline': {
+                'type': 'poly',
+                'points': [
+                    {'x': 0, 'y': 0},
+                    {'x': 2, 'y': 0},
+                    {'x': 2, 'y': 6},
+                    {'x': 0, 'y': 6},
+                ],
+            },
+        }
+    ]
+    return value
+
+
+def verify_exclusion_option(option, source):
+    quote = source['groups'][0]['quote']
+    region = quote['options'][0]['exclusions'][0]
+    metric = {
+        **region,
+        'clearance': region['clearance'] * 25.4,
+        'outline': {
+            'type': 'poly',
+            'points': [{key: point[key] * 25.4 for key in ('x', 'y')} for point in region['outline']['points']],
+        },
+    }
+    assert option['stock']['exclusions'] == option['result']['option']['exclusions'] == [metric]
+    result = option['result']
+    assert result['complete'] and len(result['nest']['placements']) == 2
+    assert result['nest']['unplaced'] == []
+    # Independent axis-aligned distance oracle: every plate must lie right of
+    # the strip plus entered clearance, half-gap and the two numerical guards.
+    boundary = (2 + region['clearance'] + quote['gap'] / 2) * 25.4 + 0.0008
+    assert all(placement['x'] >= boundary - 1e-7 for placement in result['nest']['placements'])
+    report = result['leftovers']
+    assert report['version'] == 'werco-leftovers-v2'
+    assert report['status'] == 'potential_review_only' and report['creditUSD'] == 0
+    profile = report['assumptions']['profile']['exclusions']
+    assert profile['version'] == 'werco-stock-exclusions-v1'
+    assert profile['numericalProtectionMm'] == 0.0004 and profile['partGapFraction'] == 0.5
+    assert profile['offsetJoin'] == 'square-tangent' and profile['maxIntersectionEdgePairs'] == 8000000
+    for sheet in report['sheets']:
+        assert 10 * 25.4**2 < sheet['excludedArea'] < 13 * 25.4**2
+        accounted = sum(
+            sheet[key]
+            for key in (
+                'edgeMarginArea',
+                'excludedArea',
+                'nominalPartArea',
+                'reservedCutoutArea',
+                'clearanceAndProtectionArea',
+                'remainingArea',
+                'reconciliationResidualArea',
+            )
+        )
+        assert math.isclose(accounted, sheet['grossArea'], abs_tol=1e-7, rel_tol=1e-12)
+        assert all(region['classification'] == 'review' and region['creditUSD'] == 0 for region in sheet['regions'])
+
+
 def smoke(image):
     inspect = container(
         image,
@@ -105,7 +175,7 @@ def smoke(image):
     assert identity["uid"] != 0, "The solver must run as the worker's non-root user"
     assert identity["node_version"] == NODE_VERSION
     assert manifest["protocol"] == 1 and manifest["node_major"] == 22
-    assert manifest["solver_version"] == "werco-contour-v4"
+    assert manifest["solver_version"] == "werco-contour-v5"
     assert manifest["entrypoint"] == "solver.cjs" and manifest["max_option_evaluations"] == 36
     assert manifest["bundle_sha256"] == identity["actual_sha256"]
     payload = {"protocol": 1, "input_sha256": "a" * 64, "estimate": fixture()}
@@ -127,6 +197,23 @@ def smoke(image):
     assert option["result"]["complete"] and len(option["result"]["nest"]["placements"]) == 2
     assert summary["type"] == "summary" and summary["stop_reason"] == "completed"
     assert summary["evaluated_count"] == summary["complete_option_count"] == summary["total_options"] == 1
+    assert option['result']['leftovers']['version'] == 'werco-leftovers-v1'
+    assert all('excludedArea' not in sheet for sheet in option['result']['leftovers']['sheets'])
+    excluded_source = exclusion_fixture()
+    excluded_payload = {**payload, 'estimate': excluded_source}
+    excluded = container(image, [RUNTIME + 'solver.cjs'], json.dumps(excluded_payload))
+    assert excluded.returncode == 0 and not excluded.stderr, 'Packaged solver failed the stock exclusion case'
+    excluded_messages = [json.loads(line) for line in excluded.stdout.splitlines()]
+    assert [message['type'] for message in excluded_messages] == ['hello', 'option', 'summary']
+    verify_exclusion_option(excluded_messages[1], excluded_source)
+    assert excluded_messages[2]['complete_option_count'] == 1
+    excluded_source['version'] = 10
+    excluded_source['groups'][0]['quote']['version'] = 9
+    downgraded = container(image, [RUNTIME + 'solver.cjs'], json.dumps(excluded_payload))
+    assert downgraded.returncode == 2 and not downgraded.stderr
+    downgrade_messages = [json.loads(line) for line in downgraded.stdout.splitlines()]
+    assert [message['type'] for message in downgrade_messages] == ['hello', 'error']
+    assert downgrade_messages[-1]['code'] == 'invalid_geometry'
     payload["estimate"]["units"] = "mm"
     invalid = container(image, [RUNTIME + "solver.cjs"], json.dumps(payload))
     assert invalid.returncode == 2 and not invalid.stderr

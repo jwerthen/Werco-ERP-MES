@@ -1,3 +1,19 @@
+import {
+  canonicalPath,
+  circleSegments,
+  compareText,
+  guardedOuter,
+  inwardSheet,
+  pathArea,
+  pathKey,
+  pointPath,
+  sortedPaths,
+  SCALE,
+  intersectPaths,
+  filledArea,
+  GUARDED_GEOMETRY_PROFILE,
+} from './guarded-geometry';
+import { EXCLUSION_PROFILE, exclusionVertexCount, prepareExclusions } from './stock-exclusions';
 import { canonicalJSON } from './provenance';
 import * as Clipper from 'clipper-lib';
 import { movedOuter } from './contour-packing';
@@ -8,7 +24,6 @@ import {
   validateNest,
   validatePart,
   validateStock,
-  type Loop,
   type Nest,
   type Part,
   type Point,
@@ -16,27 +31,28 @@ import {
 } from './nesting';
 
 export const LEFTOVER_VERSION = 'werco-leftovers-v1' as const;
+export const LEFTOVER_EXCLUSION_VERSION = 'werco-leftovers-v2' as const;
 /** Engineering approximation profile, not approved shop eligibility or a kerf model. */
 export const LEFTOVER_PROFILE = Object.freeze({
-  integerGridMm: 0.0001,
-  circleRadialExcessMm: 0.0001 * 25.4,
-  numericalProtectionMm: 0.0004,
-  usableBoundaryInsetMm: 0.0004,
-  partGapFraction: 0.5,
+  integerGridMm: GUARDED_GEOMETRY_PROFILE.integerGridMm,
+  circleRadialExcessMm: GUARDED_GEOMETRY_PROFILE.circleRadialExcessMm,
+  numericalProtectionMm: GUARDED_GEOMETRY_PROFILE.numericalProtectionMm,
+  usableBoundaryInsetMm: GUARDED_GEOMETRY_PROFILE.usableBoundaryInsetMm,
+  partGapFraction: GUARDED_GEOMETRY_PROFILE.partGapFraction,
   importedCurveToleranceIncluded: true,
-  offsetJoin: 'square-tangent' as const,
-  maximumConvexJoinRadiusFactor: Math.SQRT2,
+  offsetJoin: GUARDED_GEOMETRY_PROFILE.offsetJoin,
+  maximumConvexJoinRadiusFactor: GUARDED_GEOMETRY_PROFILE.maximumConvexJoinRadiusFactor,
   maxInputVertices: 60_000,
   maxOutputVertices: 120_000,
   maxSheetOutputVertices: 30_000,
   maxRegions: 2_000,
-  maxCircleVertices: 8_192,
+  maxCircleVertices: GUARDED_GEOMETRY_PROFILE.maxCircleVertices,
   absoluteAreaToleranceMm2: 1e-7,
   relativeAreaTolerance: 1e-12,
 });
+export const LEFTOVER_EXCLUSION_PROFILE = Object.freeze({ ...LEFTOVER_PROFILE, exclusions: EXCLUSION_PROFILE });
 const RESERVATION_DESCRIPTION =
   'Half of part gap plus imported curve tolerance and numerical protection around full outer profiles; square tangent joins; inward-protected usable boundary. Not physical kerf.';
-const SCALE = 1 / LEFTOVER_PROFILE.integerGridMm;
 const squareInches = (area: number) => area / (25.4 * 25.4);
 const check = (ok: unknown, message: string): void => {
   if (!ok) throw new Error(`Leftover analysis: ${message}`);
@@ -57,6 +73,7 @@ export type SheetLeftoverAnalysis = {
   grossArea: number;
   usableArea: number;
   edgeMarginArea: number;
+  excludedArea?: number;
   nominalPartArea: number;
   reservedCutoutArea: number;
   clearanceAndProtectionArea: number;
@@ -66,11 +83,11 @@ export type SheetLeftoverAnalysis = {
 };
 export type LeftoverAnalysis = {
   inputSignature: string;
-  version: typeof LEFTOVER_VERSION;
+  version: typeof LEFTOVER_VERSION | typeof LEFTOVER_EXCLUSION_VERSION;
   status: 'potential_review_only';
   creditUSD: 0;
   assumptions: {
-    profile: typeof LEFTOVER_PROFILE;
+    profile: typeof LEFTOVER_PROFILE | typeof LEFTOVER_EXCLUSION_PROFILE;
     reservation: string;
     internalHolesReserved: true;
     boundsAreUsableRectangles: false;
@@ -91,91 +108,12 @@ function sum(values: number[]): number {
   return result;
 }
 
-/** Integer-grid ring areas use exact integer products, even near the sheet-size limit. */
-function pathArea(path: Clipper.Path): number {
-  if (path.length < 3) return 0;
-  const origin = path[0];
-  let twice = BigInt(0);
-  for (let index = 0; index < path.length; index++) {
-    const a = path[index],
-      b = path[(index + 1) % path.length];
-    twice += BigInt(a.X - origin.X) * BigInt(b.Y - origin.Y) - BigInt(b.X - origin.X) * BigInt(a.Y - origin.Y);
-  }
-  return Number(twice < BigInt(0) ? -twice : twice) / (2 * SCALE * SCALE);
-}
-
-function canonicalPath(path: Clipper.Path, positive?: boolean): Clipper.Path {
-  const points = path.map(point => ({ X: point.X, Y: point.Y }));
-  if (positive !== undefined && Clipper.Clipper.Orientation(points) !== positive) points.reverse();
-  let start = 0;
-  for (let index = 1; index < points.length; index++)
-    if (points[index].X < points[start].X || (points[index].X === points[start].X && points[index].Y < points[start].Y))
-      start = index;
-  return [...points.slice(start), ...points.slice(0, start)];
-}
-const pathKey = (path: Clipper.Path) => path.map(point => `${point.X},${point.Y}`).join(';');
-const compareText = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
-const pointPath = (path: Clipper.Path) => path.map(point => ({ x: point.X / SCALE, y: point.Y / SCALE }));
-const sortedPaths = (paths: Clipper.Paths) =>
-  paths
-    .map(path => canonicalPath(path))
-    .sort((a, b) => {
-      const left = pathKey(a),
-        right = pathKey(b);
-      return left < right ? -1 : left > right ? 1 : 0;
-    });
-
-function circleSegments(radius: number): number {
-  const angle = Math.acos(1 / (1 + LEFTOVER_PROFILE.circleRadialExcessMm / radius));
-  const count = Math.max(16, Math.ceil(Math.PI / angle / 4) * 4);
-  check(
-    Number.isFinite(count) && count <= LEFTOVER_PROFILE.maxCircleVertices,
-    'circle tessellation exceeds the numerical budget.'
-  );
-  return count;
-}
-function integerOuter(loop: Loop): Clipper.Path {
-  let points: Point[];
-  if (loop.type === 'poly') points = loop.points;
-  else {
-    const count = circleSegments(loop.r),
-      radius = loop.r / Math.cos(Math.PI / count);
-    // Mid-step vertices give tangent sides at the exact axial circle extrema.
-    points = Array.from({ length: count }, (_, index) => {
-      const angle = ((2 * index + 1) * Math.PI) / count;
-      return { x: loop.cx + radius * Math.cos(angle), y: loop.cy + radius * Math.sin(angle) };
-    });
-  }
-  const path = points.map(point => ({ X: Math.round(point.x * SCALE), Y: Math.round(point.y * SCALE) }));
-  check(
-    path.every(point => Number.isSafeInteger(point.X) && Number.isSafeInteger(point.Y)),
-    'coordinates exceed integer precision.'
-  );
-  check(pathArea(path) > 0, 'an outer contour collapses at the analysis grid precision.');
-  return canonicalPath(path, true);
-}
-
-function inwardSheet(stock: Stock): Clipper.Path | null {
-  const inset = LEFTOVER_PROFILE.usableBoundaryInsetMm;
-  const x0 = Math.ceil((stock.margin + inset) * SCALE),
-    y0 = x0;
-  const x1 = Math.floor((stock.width - stock.margin - inset) * SCALE);
-  const y1 = Math.floor((stock.height - stock.margin - inset) * SCALE);
-  return x1 > x0 && y1 > y0
-    ? [
-        { X: x0, Y: y0 },
-        { X: x1, Y: y0 },
-        { X: x1, Y: y1 },
-        { X: x0, Y: y1 },
-      ]
-    : null;
-}
-
 /** Canonical worker inputs bind a cached report to its exact geometry and placements.
  * This is equality evidence, not a cryptographic approval or an inventory identifier. */
 function inputSignature(parts: Part[], stock: Stock, nest: Nest): string {
   return canonicalJSON({
-    version: 'werco-leftover-inputs-v1',
+    version: stock.exclusions?.length ? 'werco-leftover-inputs-v2' : 'werco-leftover-inputs-v1',
+    ...(stock.exclusions?.length ? { exclusions: stock.exclusions } : {}),
     stock: [
       stock.width,
       stock.height,
@@ -234,7 +172,9 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
         part.loops.reduce((vertices, loop) => vertices + (loop.type === 'circle' ? 1 : loop.points.length), 0) +
         (part.referencePaths?.reduce((vertices, path) => vertices + path.length, 0) ?? 0),
       0
-    ) <= 20000,
+    ) +
+      exclusionVertexCount(stock.exclusions ?? []) <=
+      20000,
     'source geometry exceeds the 20,000-vertex limit.'
   );
   validateNest(parts, stock, nest);
@@ -242,7 +182,10 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
   const placements = [...nest.placements].sort(
     (a, b) => a.sheet - b.sheet || compareText(a.partId, b.partId) || a.instance - b.instance
   );
-  let inputVertices = 0;
+  const exclusions = prepareExclusions(stock);
+  const exclusionPaths = exclusions.flatMap(region => region.paths);
+  const withExclusions = exclusions.length > 0;
+  let inputVertices = exclusionPaths.reduce((count, path) => count + path.length, 0);
   for (const placement of nest.placements) {
     const outer = byId.get(placement.partId)!.loops[0];
     inputVertices += outer.type === 'poly' ? outer.points.length : circleSegments(outer.r);
@@ -252,6 +195,9 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
     );
   }
   const usableBoundary = inwardSheet(stock);
+  const excludedArea =
+    usableBoundary && withExclusions ? filledArea(intersectPaths([usableBoundary], exclusionPaths)) : 0;
+  check(Number.isFinite(excludedArea) && excludedArea >= 0, 'invalid guarded exclusion area.');
   const grossArea = stock.width * stock.height;
   const usableArea = (stock.width - 2 * stock.margin) * (stock.height - 2 * stock.margin);
   const edgeMarginArea = grossArea - usableArea;
@@ -264,24 +210,15 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
     const reservedCutoutArea = sum(
       placed.map(placement => sum(byId.get(placement.partId)!.loops.slice(1).map(loopArea)))
     );
-    const clipPaths: Clipper.Paths = [];
-    let offsetVertices = 0;
+    const clipPaths: Clipper.Paths = [...exclusionPaths];
+    let offsetVertices = exclusionPaths.reduce((count, path) => count + path.length, 0);
     if (usableBoundary) {
       for (const placement of placed) {
         const part = byId.get(placement.partId)!;
-        const path = integerOuter(movedOuter(part, placement));
-        const reserve =
-          stock.gap * LEFTOVER_PROFILE.partGapFraction +
-          (part.geometryToleranceMm ?? 0) +
-          LEFTOVER_PROFILE.numericalProtectionMm;
-        check(Number.isFinite(reserve) && reserve <= 40_000, 'reserve distance exceeds the bounded offset range.');
-        // Square joins place a tangent outside the circular offset. The extra
-        // four grid cells cover input/output rounding and Boolean intersections.
-        const offset = new Clipper.ClipperOffset();
-        offset.AddPath(path, Clipper.JoinType.jtSquare, Clipper.EndType.etClosedPolygon);
-        const envelopes: Clipper.Paths = [];
-        offset.Execute(envelopes, Math.ceil(reserve * SCALE));
-        check(envelopes.length > 0, 'offset did not preserve a placed outer contour.');
+        const envelopes = guardedOuter(
+          movedOuter(part, placement),
+          stock.gap * LEFTOVER_PROFILE.partGapFraction + (part.geometryToleranceMm ?? 0)
+        );
         offsetVertices += envelopes.reduce((count, ring) => count + ring.length, 0);
         check(
           offsetVertices <= LEFTOVER_PROFILE.maxOutputVertices,
@@ -354,10 +291,10 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
         compareText(JSON.stringify(a.outer), JSON.stringify(b.outer))
     );
     regions.forEach((region, index) => {
-      region.id = `leftover-v1-sheet-${sheet + 1}-region-${index + 1}`;
+      region.id = `leftover-${withExclusions ? 'v2' : 'v1'}-sheet-${sheet + 1}-region-${index + 1}`;
     });
     const remainingArea = sum(regions.map(region => region.area));
-    const allowance = usableArea - remainingArea - nominalPartArea - reservedCutoutArea;
+    const allowance = usableArea - excludedArea - remainingArea - nominalPartArea - reservedCutoutArea;
     const tolerance = Math.max(
       LEFTOVER_PROFILE.absoluteAreaToleranceMm2,
       grossArea * LEFTOVER_PROFILE.relativeAreaTolerance
@@ -365,13 +302,22 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
     check(allowance >= -tolerance, 'remaining regions overstate usable material; the area ledger is negative.');
     const clearanceAndProtectionArea = Math.max(0, allowance);
     const reconciliationResidualArea =
-      grossArea - sum([edgeMarginArea, nominalPartArea, reservedCutoutArea, clearanceAndProtectionArea, remainingArea]);
+      grossArea -
+      sum([
+        edgeMarginArea,
+        excludedArea,
+        nominalPartArea,
+        reservedCutoutArea,
+        clearanceAndProtectionArea,
+        remainingArea,
+      ]);
     check(Math.abs(reconciliationResidualArea) <= tolerance, 'the area ledger does not reconcile.');
     sheets.push({
       sheet,
       grossArea,
       usableArea,
       edgeMarginArea,
+      ...(withExclusions ? { excludedArea } : {}),
       nominalPartArea,
       reservedCutoutArea,
       clearanceAndProtectionArea,
@@ -382,11 +328,11 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
   }
   return {
     inputSignature: inputSignature(parts, stock, nest),
-    version: LEFTOVER_VERSION,
+    version: withExclusions ? LEFTOVER_EXCLUSION_VERSION : LEFTOVER_VERSION,
     status: 'potential_review_only',
     creditUSD: 0,
     assumptions: {
-      profile: LEFTOVER_PROFILE,
+      profile: withExclusions ? LEFTOVER_EXCLUSION_PROFILE : LEFTOVER_PROFILE,
       reservation: RESERVATION_DESCRIPTION,
       internalHolesReserved: true,
       boundsAreUsableRectangles: false,
@@ -398,12 +344,16 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
 
 /** Export a bounded worker result as unapproved review evidence, never as inventory. */
 export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: Part[]; stock: Stock; nest: Nest }) {
+  const withExclusions = analysis.version === LEFTOVER_EXCLUSION_VERSION;
   check(
-    analysis.version === LEFTOVER_VERSION && analysis.status === 'potential_review_only' && analysis.creditUSD === 0,
+    (analysis.version === LEFTOVER_VERSION || withExclusions) &&
+      analysis.status === 'potential_review_only' &&
+      analysis.creditUSD === 0,
     'invalid review status.'
   );
   check(
-    JSON.stringify(analysis.assumptions.profile) === JSON.stringify(LEFTOVER_PROFILE),
+    JSON.stringify(analysis.assumptions.profile) ===
+      JSON.stringify(withExclusions ? LEFTOVER_EXCLUSION_PROFILE : LEFTOVER_PROFILE),
     'unknown numerical profile.'
   );
   check(Array.isArray(analysis.sheets) && analysis.sheets.length <= 300, 'invalid sheet count.');
@@ -428,6 +378,10 @@ export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: P
     'missing or oversized worker input binding.'
   );
   if (context) {
+    check(
+      withExclusions === Boolean(context.stock.exclusions?.length),
+      'report exclusion version does not match the stock.'
+    );
     check(analysis.sheets.length === context.nest.sheets, 'report sheet count does not match the validated nest.');
     check(
       analysis.inputSignature === inputSignature(context.parts, context.stock, context.nest),
@@ -451,11 +405,16 @@ export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: P
         grossArea: sheet.grossArea,
         usableArea: sheet.usableArea,
         edgeMarginArea: sheet.edgeMarginArea,
+        ...(withExclusions ? { excludedArea: sheet.excludedArea! } : {}),
         nominalPartArea: sheet.nominalPartArea,
         reservedCutoutArea: sheet.reservedCutoutArea,
         clearanceAndProtectionArea: sheet.clearanceAndProtectionArea,
         remainingArea: sheet.remainingArea,
       };
+      check(
+        withExclusions ? typeof sheet.excludedArea === 'number' : sheet.excludedArea === undefined,
+        'invalid exclusion ledger version.'
+      );
       check(
         Object.values(areas).every(area => Number.isFinite(area) && area >= 0),
         'invalid area ledger.'
@@ -492,6 +451,7 @@ export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: P
           sheet.grossArea -
             sum([
               sheet.edgeMarginArea,
+              sheet.excludedArea ?? 0,
               sheet.nominalPartArea,
               sheet.reservedCutoutArea,
               sheet.clearanceAndProtectionArea,

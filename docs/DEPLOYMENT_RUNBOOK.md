@@ -39,6 +39,15 @@
 > retains policy/draft/run history and restores compatible images; do not downgrade 103
 > or rewrite saved format versions as an ordinary rollback.
 
+> **Stock exclusions.** This increment adds no migration, permission, environment or
+> cron change. Release the quote 11/project 12 API/frontend contract with the compiled
+> `werco-contour-v5` worker through the same backend-first, exact-image/readiness gate.
+> Legacy job 13 is local-only. Verify a saved exclusion-bearing scenario and its v2
+> leftover ledger; absent/empty regions retain v1. These scenario constraints do not
+> establish physical inventory or reserve stock. On rollback retain the original
+> input versions, exclusion geometry and historical results; never remove constraints
+> to make an older runtime accept them.
+
 ---
 
 ## Table of Contents

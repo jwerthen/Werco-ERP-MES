@@ -14,6 +14,7 @@ from app.models.quote_nesting_draft import QuoteNestingDraft, QuoteNestingRevisi
 from app.models.quote_nesting_run import QuoteNestingRun, QuoteNestingRunCheckpoint
 from app.models.role_permission import RolePermission
 from app.models.user import UserRole
+from app.schemas.quote_nesting_runs import SOLVER_VERSION
 from app.services import quote_nesting_runs as service
 from app.services.audit_service import AuditService, AuditWriteError
 from tests.api.test_quote_nesting_drafts_contract import project, upload
@@ -23,7 +24,7 @@ BASE = '/api/v1/quote-nesting/runs'
 RUNTIME = dict(
     release='synthetic-release',
     protocol=1,
-    solver_version='werco-contour-v4',
+    solver_version=SOLVER_VERSION,
     bundle_sha256='e' * 64,
     node_version='v22.20.0',
 )

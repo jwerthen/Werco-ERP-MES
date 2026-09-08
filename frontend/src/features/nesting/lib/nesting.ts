@@ -1,3 +1,11 @@
+import {
+  validateStockExclusions,
+  exclusionVertexCount,
+  prepareExclusions,
+  exclusionCollision,
+  type StockExclusion,
+} from './stock-exclusions';
+export type { StockExclusion } from './stock-exclusions';
 import { allowedRotations, orientationExplanation, type GrainAxis, type RotationMode } from './orientation';
 import { packContours, outlinesCollide, movedOuter, rotatePoint } from './contour-packing';
 import { DXF_CURVE_TOLERANCE_MM, readDXFGeometry } from './dxf';
@@ -21,6 +29,7 @@ export type Part = {
   provenance?: PartProvenance;
 };
 export type Stock = {
+  exclusions?: StockExclusion[];
   grainAxis?: GrainAxis;
   width: number;
   height: number;
@@ -333,6 +342,7 @@ export function validateStock(s: Stock) {
     s.gap >= 0 && s.margin >= 0 && s.width > 2 * s.margin && s.height > 2 * s.margin,
     'Margin or spacing is invalid for this sheet.'
   );
+  if (s.exclusions !== undefined) validateStockExclusions(s.exclusions, s.width, s.height);
   requireValid(Number.isInteger(s.maxSheets) && s.maxSheets >= 1 && s.maxSheets <= 300, 'Sheet limit must be 1–300.');
 }
 export function validateJob(data: unknown): Job {
@@ -347,16 +357,18 @@ export function validateJob(data: unknown): Job {
   requireValid(typeof j.bedConfirmed === 'boolean', 'Missing machine confirmation status.');
   requireValid(Array.isArray(j.parts) && j.parts.length <= 300, 'Maximum 300 part designs.');
   j.parts.forEach(validatePart);
+  validateStock(j.stock);
   requireValid(
     j.parts.reduce(
       (a, p) => a + vertexCount(p.loops) + (p.referencePaths?.reduce((n, path) => n + path.length, 0) ?? 0),
       0
-    ) <= 20000,
+    ) +
+      exclusionVertexCount(j.stock?.exclusions ?? []) <=
+      20000,
     'Job geometry limit: 20,000 vertices.'
   );
   requireValid(new Set(j.parts.map(p => p.id)).size === j.parts.length, 'Duplicate part IDs.');
   requireValid(j.parts.reduce((a, p) => a + p.quantity, 0) <= 300, 'Maximum 300 instances per job.');
-  validateStock(j.stock);
   return j;
 }
 export function nestParts(parts: Part[], stock: Stock): Nest {
@@ -365,7 +377,9 @@ export function nestParts(parts: Part[], stock: Stock): Nest {
     parts.reduce(
       (a, p) => a + vertexCount(p.loops) + (p.referencePaths?.reduce((n, path) => n + path.length, 0) ?? 0),
       0
-    ) <= 20000,
+    ) +
+      exclusionVertexCount(stock.exclusions ?? []) <=
+      20000,
     'Job geometry limit: 20,000 vertices.'
   );
   parts.forEach(validatePart);
@@ -383,6 +397,7 @@ export function nestParts(parts: Part[], stock: Stock): Nest {
   return result;
 }
 export function validateNest(parts: Part[], s: Stock, n: Nest) {
+  const exclusions = prepareExclusions(s);
   requireValid(n && Array.isArray(n.placements) && Array.isArray(n.unplaced), 'Invalid nest result.');
   requireValid(Number.isInteger(n.sheets) && n.sheets >= 0 && n.sheets <= s.maxSheets, 'Invalid sheet count.');
   const seen = new Set<string>();
@@ -428,7 +443,10 @@ export function validateNest(parts: Part[], s: Stock, n: Nest) {
       'Duplicate or invalid part instance.'
     );
     seen.add(key);
-    worldOutlines.set(a, movedOuter(part, a));
+    const outer = movedOuter(part, a);
+    const collision = exclusionCollision(outer, s.gap, part.geometryToleranceMm ?? 0, exclusions);
+    requireValid(!collision, `Placement enters the guarded stock exclusion: ${collision?.label ?? ''}.`);
+    worldOutlines.set(a, outer);
   }
   for (let i = 0; i < n.placements.length; i++)
     for (let j = i + 1; j < n.placements.length; j++) {

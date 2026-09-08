@@ -885,11 +885,33 @@ POST returns **200** for both a new save and an identical idempotent replay.
 The file limit is 5 MiB; a route-specific ASGI cap limits the entire upload to
 5 MiB + 16 KiB before multipart parsing. The global 256 KiB JSON-body cap is
 unchanged. Only the documented, nonduplicated fields are accepted. Current
-project formats 4/5/6/10 must explicitly use inches and USD, with bounded metadata,
-300 total part instances, 20,000 geometry vertices, and 12 stock options per group.
+project formats 4/5/6/10/12 must explicitly use inches and USD, with bounded metadata,
+300 total part instances, 20,000 source geometry vertices, and 12 stock options per group.
 Duplicate JSON keys, non-finite values, unknown fields, original CAD blobs,
 approval flags, and solver/placement output are refused. This is structural
 validation of an input draft, not authoritative geometric acceptance.
+
+Stock exclusions require quote **11** inside project **12**; project 12 may also
+contain earlier quote 3/7/9 groups. Quote 11 retains orientation and spacing-policy
+fields from quote 7/9. A stock option's optional `exclusions` array contains
+`{id,label,reason,outline,clearance}`: a 1–64 character `[A-Za-z0-9_-]` ID,
+trimmed nonblank label (up to 120 characters), trimmed reason (up to 1,000), one
+closed polygon or analytical circle using the existing saved loop representation,
+and additional clearance 0–100 inches. All coordinates and clearance are inches.
+Each option allows 16 regions and 2,000 source vertices; a circle counts as one.
+The 20,000 project cap includes parts, reference paths and exclusions on every
+option, including disabled options. IDs are unique per option. Raw outlines must
+lie inside the gross sheet; overlap is permitted, and clearance may extend beyond
+the sheet. The server never crops or renormalizes them. Explicit `null` is invalid;
+an explicitly present empty array still requires the new file versions.
+
+These are estimator-reported, scenario-wide unavailable areas repeated on each
+hypothetical sheet, with no physical stock identity or machine-control meaning.
+Saving retains the exact source JSON and adds `unverified_stock_exclusions` review
+evidence per affected group. Python checks bounded primitives, metadata and raw
+sheet bounds; the shared calculation kernel checks polygon topology, numerical
+representability and guarded placement constraints before a checkpoint can be
+accepted. An unapproved draft save is not proof that its geometry can be calculated.
 
 Revision summaries contain `draft_id`, `company_id`, `revision_number`,
 `draft_version`, `name`, `status: DRAFT`, `content_sha256`, `payload_schema_version`,
@@ -974,7 +996,7 @@ The fixed `standard-v1` technical profile limits the whole project to 120 second
 24 MiB total retained checkpoint content and a 512 MiB Node heap. There is one
 nesting child per worker process; other ARQ functions retain their existing limits.
 Source groups/options are evaluated in their saved order. The shared kernel uses
-code-unit tie-breaking (`werco-contour-v4`), with `seed: null` because it is not
+code-unit tie-breaking (`werco-contour-v5`), with `seed: null` because it is not
 random. Replaying identical saved inputs/build/runtime and completed work is
 deterministic; a wall-time cutoff is not a deterministic work budget.
 
@@ -982,10 +1004,23 @@ QUEUED → RUNNING → COMPLETED/PARTIAL/CANCELLED/FAILED are separate from quot
 approval. **COMPLETED means all planned stock options were evaluated**, not that
 every part fits. `completed_count` counts feasible stock alternatives for their
 individual material groups, not a combined purchased-sheet order. Each emitted
-nest is checked against original contours, spacing, margins, grain and quantities
+nest is checked against original contours, spacing, margins, grain, quantities
+and guarded stock exclusions
 before its checkpoint is accepted. Time/work/output limits retain earlier checked
 results and explicitly identify unfinished work. They never establish infeasibility.
 All predicted leftovers remain review-only with zero credit.
+
+Checkpoint framing binds exclusion field presence, array order, IDs, labels,
+reasons, clearance and every source coordinate in both `stock` and `result.option`
+to the immutable imperial input converted to millimeters. No numerical tolerance
+permits a reduced clearance or changed outline. Nonempty exclusions require
+`werco-leftovers-v2` with the pinned `werco-stock-exclusions-v1` guard profile and
+an `excludedArea` ledger in square millimeters. This is the union of guarded
+exclusions intersected with the inward usable sheet, excluding margin overlap.
+The gross ledger reconciles edge margin + excluded area + nominal parts + reserved
+internal cutouts + clearance/numerical protection + remaining area + bounded
+roundoff residual. Legacy/empty-exclusion options retain leftover v1 without an
+excluded-area field. Stored historical reports remain unchanged.
 
 Run creation/cancellation and worker lifecycle/checkpoint changes use required
 audit writes in the same database transaction. Background lifecycle evidence
@@ -1079,7 +1114,8 @@ future effective instant; thereafter that withdrawn publication makes resolution
 unavailable until a later effective publication replaces it. All API timestamps
 are complete UTC date/times ending in `Z`; the UI displays Central time.
 
-Saved quote version **9** and project version **10** carry `spacingPolicy` or
+Saved quote version **9** and project version **10** (also exclusion-bearing
+quote 11/project 12) carry `spacingPolicy` or
 `spacingOverride`. Omit unused fields; explicit null is invalid. Older discriminants reject these fields. A policy snapshot
 contains schema/company/policy/publication/revision identity, content hash, exact
 matched band, canonical thickness/gap/margin and `resolved_at`; it requires

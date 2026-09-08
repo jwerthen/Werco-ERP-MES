@@ -261,7 +261,7 @@ paths, minimal child environment and byte/time/heap limits are enforced in
 runtime heartbeats contain build metadata only. Each validated stock option is
 retained as an immutable checkpoint; cancellation/timeouts keep earlier results
 without claiming infeasibility. COMPLETED means planned options evaluated, not
-that every part fits. Solver `werco-contour-v4` uses locale-independent code-unit
+that every part fits. Solver `werco-contour-v5` uses locale-independent code-unit
 tie-breaking. Seed is null; exact saved inputs, runtime/build and completed work
 are the replay boundary, not elapsed wall time.
 
@@ -272,6 +272,27 @@ the UI shows imperial measurements and actual checked contours. All runs remain
 unapproved, leftover credits stay zero, and no CAD-source authenticity, physical
 remnant registration, approval, reservation or quote total write is implied.
 See `docs/API.md`, `docs/MATERIAL_NESTING.md` and the worker deployment runbook.
+
+### Configured quote stock exclusions
+
+Stock-size options can retain labeled, reasoned unavailable regions and explicit
+clearance in sheet-local coordinates. They repeat on every hypothetical sheet of
+that option; they are not physical piece IDs, reservations or machine zones. Preserve
+exact outlines and reject out-of-sheet edits instead of silently cropping/removing
+regions. Bounds are 16 regions/2,000 source vertices per option and 20,000 combined
+part/reference/exclusion source vertices per project. A zero entered clearance does
+not remove the separate numerical/curve guard.
+
+The API applies bounded structural validation; authoritative topology and guarded
+geometry validation runs in the shared TypeScript Node kernel before a checkpoint.
+Disable the rectangle fast path when nonempty exclusions exist. Final constraints
+and leftover subtraction use the same guarded envelopes, and overlapping exclusions
+are unioned once within usable stock. Only nonempty exclusions select
+`werco-leftovers-v2` and the `excludedArea` ledger; absent/empty lists preserve v1.
+Quote 11/project 12 discriminators protect exclusion-bearing inputs; legacy job 13
+is local-only. Solver v5 and the exact worker/image readiness gate prevent an older
+runtime from silently dropping constraints. No migration, RBAC, environment, cron,
+physical inventory, reservation or manufacturing approval change is included.
 
 ### Quote-spacing policy invariants
 

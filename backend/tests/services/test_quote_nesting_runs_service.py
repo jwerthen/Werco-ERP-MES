@@ -11,7 +11,7 @@ from app.db.database import atomic_transaction
 from app.models.api_token import ApiToken
 from app.models.audit_log import AuditLog
 from app.models.quote_nesting_run import QuoteNestingRun
-from app.schemas.quote_nesting_runs import StartRunRequest
+from app.schemas.quote_nesting_runs import SOLVER_VERSION, StartRunRequest
 from app.services import quote_nesting_run_outbox as outbox
 from app.services import quote_nesting_runs as service
 from app.services.audit_service import AuditService, AuditWriteError
@@ -20,7 +20,7 @@ from app.services.quote_nesting_drafts import save_revision
 RUNTIME = {
     "release": "development",
     "protocol": 1,
-    "solver_version": "werco-contour-v4",
+    "solver_version": SOLVER_VERSION,
     "bundle_sha256": "a" * 64,
     "node_version": "v22.22.3",
 }

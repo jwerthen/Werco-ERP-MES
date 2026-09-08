@@ -108,6 +108,14 @@ def _review_sources(db: Session, company_id: int, project: SavedProject, raw: di
         }
     ]
     for group, raw_group in zip(project.groups, raw["groups"]):
+        if any(stock.exclusions for stock in group.quote.options):
+            issues.append(
+                {
+                    "code": "unverified_stock_exclusions",
+                    "group_id": group.id,
+                    "message": "Stock exclusions are estimator-reported unavailable areas, not physically verified stock. Topology and guarded clearance are checked only during calculation.",
+                }
+            )
         binding = group.quote.materialBinding
         if binding is None:
             continue

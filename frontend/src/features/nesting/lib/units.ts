@@ -1,6 +1,7 @@
 import { hasOrientationConstraints } from './orientation';
 import type { Job, Loop, Point } from './nesting';
 import type { Recipe } from './technology';
+import { exclusionsFromFile, exclusionsToFile } from './stock-exclusion-files';
 export const MM_PER_INCH = 25.4;
 export const PSI_PER_BAR = 14.503773773020923;
 export const LB_PER_KG = 2.2046226218487757;
@@ -45,9 +46,10 @@ const dimensions = ['width', 'height', 'margin', 'gap', 'bedWidth', 'bedHeight']
 export function jobToFile(job: Job) {
   const stock = { ...job.stock };
   for (const k of dimensions) stock[k] = mmToIn(stock[k]);
+  if (job.stock.exclusions !== undefined) stock.exclusions = exclusionsToFile(job.stock.exclusions);
   return {
     ...job,
-    version: hasOrientationConstraints(job.parts, job.stock) ? 8 : 2,
+    version: job.stock.exclusions !== undefined ? 13 : hasOrientationConstraints(job.parts, job.stock) ? 8 : 2,
     units: 'in',
     thickness: mmToIn(job.thickness),
     stock,
@@ -75,6 +77,9 @@ function numeric(n: unknown): number {
 export function jobFromFile(input: unknown): unknown {
   if (!input || typeof input !== 'object') throw new Error('Invalid job file.');
   const d = input as Record<string, unknown>;
+  const declaredStock = d.stock as Record<string, unknown> | undefined;
+  if (d.version !== 13 && declaredStock && Object.prototype.hasOwnProperty.call(declaredStock, 'exclusions'))
+    throw new Error('Stock exclusions require a version 13 job or version 11 estimate.');
   if (d.version === 1) {
     const legacyStock = d.stock as Record<string, unknown> | undefined;
     if (
@@ -85,18 +90,21 @@ export function jobFromFile(input: unknown): unknown {
       throw new Error('Orientation and grain constraints require a version 8 job or version 7 estimate.');
     return d;
   }
-  if ((d.version !== 2 && d.version !== 8) || d.units !== 'in')
-    throw new Error('Expected a version 2 or 8 job with units "in", or a legacy version 1 job.');
+  if ((d.version !== 2 && d.version !== 8 && d.version !== 13) || d.units !== 'in')
+    throw new Error('Expected a version 2, 8 or 13 job with units "in", or a legacy version 1 job.');
   if (!d.stock || typeof d.stock !== 'object' || !Array.isArray(d.parts) || d.parts.length > 300)
     throw new Error('Invalid job stock or parts.');
   const stock = { ...d.stock } as Record<string, unknown>;
   if (
     d.version !== 8 &&
+    d.version !== 13 &&
     (stock.grainAxis !== undefined ||
       d.parts.some(part => part && (part.rotationMode !== undefined || part.grainAxis !== undefined)))
   )
     throw new Error('Orientation and grain constraints require a version 8 job or version 7 estimate.');
   for (const k of dimensions) stock[k] = inToMm(numeric(stock[k]));
+  if (Object.prototype.hasOwnProperty.call(stock, 'exclusions'))
+    stock.exclusions = exclusionsFromFile(stock.exclusions, numeric(stock.width), numeric(stock.height));
   const parts = d.parts.map(p => {
     if (!p || typeof p !== 'object' || !Array.isArray(p.loops) || p.loops.length > 100)
       throw new Error('Invalid part contours.');

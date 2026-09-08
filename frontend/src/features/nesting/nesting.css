@@ -2802,3 +2802,16 @@ input[type='number'] {
 .policy-table-scroll table { width: 100%; font-size: 12px; }
 .policy-table-scroll th, .policy-table-scroll td { padding: 10px; text-align: left; border-bottom: 1px solid #475569; }
 @media (max-width: 560px) { .policy-band-fields { grid-template-columns: 1fr; } }
+.stock-exclusion-dialog { width: min(760px, calc(100vw - 24px)); max-width: 760px; max-height: 88vh; overflow-y: auto; }
+.stock-exclusion-dialog p { font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+.stock-exclusion-form { display: grid; gap: 14px; padding: 14px; border: 1px solid #475569; border-radius: 6px; }
+.stock-exclusion-form input, .stock-exclusion-form textarea, .stock-exclusion-form select {
+  color: #f8fafc; background: #0f172a; border: 1px solid #64748b; padding: 8px 10px; border-radius: 5px; width: 100%; min-width: 0;
+}
+.stock-exclusion-form input:focus-visible, .stock-exclusion-form textarea:focus-visible, .stock-exclusion-form select:focus-visible {
+  outline: 2px solid #60a5fa; outline-offset: 2px;
+}
+.stock-exclusion-preview { display: block; width: 100%; height: 210px; border: 1px solid #475569; background: #0f172a; }
+.stock-exclusion-overlay path { vector-effect: non-scaling-stroke; }
+.stock-card > .secondary { margin: 12px 0 0; }
+@media (max-width: 560px) { .stock-exclusion-form .two-fields { grid-template-columns: 1fr; } }
