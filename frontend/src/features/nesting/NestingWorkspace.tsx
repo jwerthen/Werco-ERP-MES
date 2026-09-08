@@ -66,6 +66,10 @@ import {
 import { autoQuotingSpacing } from './lib/spacing';
 import { compareSheetsInWorker } from './lib/nesting-worker-client';
 import DXFAssignments, { type DXFFileAssignment } from './DXFAssignments';
+import MaterialSourcePanel from './MaterialSourcePanel';
+import useNestingCatalog from './useNestingCatalog';
+import { catalogFamily, clearCatalogPricing, materialGroupLabel, type MaterialBinding } from './lib/material-binding';
+import { buildRunManifest } from './lib/run-manifest';
 
 type CachedComparison = { comparison: Comparison; signature: string };
 const legacyFootprintNotice =
@@ -190,8 +194,18 @@ function NumberField({
     </label>
   );
 }
-export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quote }) {
+export default function NestingWorkspace({
+  initialQuote,
+  companyId,
+  estimatorId,
+}: {
+  initialQuote?: Quote;
+  companyId?: number;
+  estimatorId?: number;
+}) {
   const fieldId = useId();
+  const catalog = useNestingCatalog(companyId);
+  const [verifiedPricingHashes, setVerifiedPricingHashes] = useState<Set<string>>(() => new Set());
   const { showToast } = useToast();
   const toast = useMemo(
     () => ({
@@ -213,6 +227,25 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
           : group
       ),
     }));
+  useEffect(() => {
+    if (!catalog.items.length && !catalog.complete) return;
+    setProject(current => {
+      let changed = false;
+      const groups = current.groups.map(group => {
+        const binding = group.quote.materialBinding;
+        const source = binding && catalog.items.find(item => item.id === binding.catalog.id);
+        if (
+          binding?.acknowledgement &&
+          ((source && source.catalog_hash !== binding.catalog.catalog_hash) || (catalog.complete && !source))
+        ) {
+          changed = true;
+          return { ...group, quote: clearCatalogPricing(group.quote) };
+        }
+        return group;
+      });
+      return changed ? { ...current, groups } : current;
+    });
+  }, [catalog.items, catalog.complete]);
   const [savedSignature, setSavedSignature] = useState(() => JSON.stringify(project));
   const [snapshots, setSnapshots] = useState<Record<string, CachedComparison>>({});
   const [compareProgress, setCompareProgress] = useState({ completed: 0, total: 0, name: '' });
@@ -262,6 +295,11 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
   const signature = JSON.stringify(quote),
     stale = !!quote.parts.length && signature !== snapshot?.signature,
     comparison = quote.parts.length ? (snapshot?.comparison ?? emptyComparison) : emptyComparison;
+  const reviewReady =
+    project.groups.some(group => group.quote.parts.length > 0) &&
+    project.groups.every(
+      group => !group.quote.parts.length || snapshots[group.id]?.signature === JSON.stringify(group.quote)
+    );
   const active =
     comparison.results.find(r => r.option.id === previewId) ??
     comparison.results.find(r => r.option.id === comparison.recommendedId) ??
@@ -282,7 +320,14 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
     }
   }, [project]);
   const density = quote.material === 'Carbon steel' ? 7850 : quote.material === 'Stainless steel' ? 7930 : 2700;
-  const mass = active ? (active.area * quote.thickness * density * LB_PER_KG) / 1e9 : 0;
+  const catalogDensity = quote.materialBinding?.catalog.density_lb_per_cubic_inch;
+  const mass = active
+    ? quote.materialBinding
+      ? catalogDensity && Number(catalogDensity) > 0
+        ? ((active.area * quote.thickness) / 25.4 ** 3) * Number(catalogDensity)
+        : null
+      : (active.area * quote.thickness * density * LB_PER_KG) / 1e9
+    : 0;
   const update = (patch: Partial<Quote>) => {
     if (patch.name !== undefined)
       setProject(current => ({
@@ -290,20 +335,36 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
         name: patch.name!,
         groups: current.groups.map(group => ({ ...group, quote: { ...group.quote, name: patch.name! } })),
       }));
-    else setQuote(q => ({ ...q, ...patch }));
+    else
+      setQuote(q => {
+        const changed = { ...q, ...patch };
+        return patch.options && !Object.prototype.hasOwnProperty.call(patch, 'materialBinding')
+          ? clearCatalogPricing(changed)
+          : changed;
+      });
   };
   const changeMaterial = (patch: Partial<Quote>) => {
-    const changed = { ...quote, ...patch, options: quote.options.map(option => ({ ...option, price: null })) };
+    const changed = clearCatalogPricing({
+      ...quote,
+      ...patch,
+      options: quote.options.map(option => ({ ...option, price: null })),
+    });
+    if (
+      patch.material !== undefined &&
+      patch.material !== quote.material &&
+      !Object.prototype.hasOwnProperty.call(patch, 'materialBinding')
+    )
+      delete changed.materialBinding;
     if (changed.spacingMode === 'auto' && Number.isFinite(changed.thickness) && changed.thickness > 0)
       Object.assign(changed, autoQuotingSpacing(changed.thickness));
     if (!Number.isFinite(changed.thickness) || changed.thickness <= 0 || changed.thickness > 100)
       return setQuote(changed);
     try {
-      const key = materialThicknessKey(changed.material, changed.thickness);
+      const key = materialThicknessKey(changed.material, changed.thickness, changed.materialBinding);
       const target = project.groups.find(
         group =>
           group.id !== project.activeGroupId &&
-          materialThicknessKey(group.quote.material, group.quote.thickness) === key
+          materialThicknessKey(group.quote.material, group.quote.thickness, group.quote.materialBinding) === key
       );
       const next = target
         ? {
@@ -315,11 +376,11 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                 group.id === target.id
                   ? {
                       ...group,
-                      quote: {
+                      quote: clearCatalogPricing({
                         ...group.quote,
                         parts: [...group.quote.parts, ...changed.parts],
                         options: group.quote.options.map(option => ({ ...option, price: null })),
-                      },
+                      }),
                     }
                   : group
               ),
@@ -341,7 +402,12 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
   const changeOption = (id: string, patch: Partial<SheetOption>) =>
     setQuote(q => ({
       ...q,
-      options: q.options.map(o => (o.id === id ? editSheetOption(o, patch) : o)),
+      ...(patch.width !== undefined || patch.height !== undefined ? clearCatalogPricing(q) : q),
+      options: q.options
+        .map(o => (o.id === id ? editSheetOption(o, patch) : o))
+        .map(o =>
+          q.materialBinding && (patch.width !== undefined || patch.height !== undefined) ? { ...o, price: null } : o
+        ),
     }));
   const stateRef = useRef({ project, quote, comparison, stale, snapshots });
   stateRef.current = { project, quote, comparison, stale, snapshots };
@@ -369,7 +435,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
         setCompareProgress({
           completed: index,
           total: groups.length,
-          name: `${group.quote.material} · ${formatIn(group.quote.thickness)} in`,
+          name: `${materialGroupLabel(group.quote)} · ${formatIn(group.quote.thickness)} in`,
         });
         const next = await compareSheetsInWorker(group.quote, { signal: controller.signal });
         if (!mountedRef.current || controller.signal.aborted) return null;
@@ -386,7 +452,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
         setCompareProgress({
           completed: index + 1,
           total: groups.length,
-          name: `${group.quote.material} · ${formatIn(group.quote.thickness)} in`,
+          name: `${materialGroupLabel(group.quote)} · ${formatIn(group.quote.thickness)} in`,
         });
       }
       setPreviewId(null);
@@ -439,6 +505,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
     try {
       const result = await importDXFBatch(selectedFiles, existing, {
         units: unitless as 'in' | 'mm',
+        unitsByFile: assignments.map(row => row.units ?? (unitless as 'in' | 'mm')),
         signal: controller.signal,
         onProgress: progress => {
           if (mountedRef.current) setImportProgress(progress);
@@ -525,21 +592,45 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
     if (!file) return;
     try {
       if (file.size > 5_000_000) throw new Error('Estimate limit: 5 MB.');
-      const loaded = projectFromFile(JSON.parse(await file.text()));
+      const stored = projectFromFile(JSON.parse(await file.text()));
+      const loaded = {
+        ...stored,
+        groups: stored.groups.map(group => ({ ...group, quote: clearCatalogPricing(group.quote) })),
+      };
       if (!mountedRef.current) return;
       if (importingRef.current || comparingRef.current)
         throw new Error('Finish the current operation before opening another estimate.');
       setProject(loaded);
+      setVerifiedPricingHashes(new Set());
       setSnapshots({});
       setPreviewId(null);
       setSheet(0);
       setSavedSignature(JSON.stringify(loaded));
       setSelected(null);
-      toast.success('Estimate loaded. Compare sheets to calculate requirements.');
+      toast.success(
+        loaded.groups.some(group => group.quote.materialBinding)
+          ? 'Estimate loaded. Refresh and review ERP pricing before using saved catalog costs.'
+          : 'Estimate loaded. Compare sheets to calculate requirements.'
+      );
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
       if (loadRef.current) loadRef.current.value = '';
+    }
+  }
+  async function exportReviewRecord() {
+    try {
+      const signature = JSON.stringify(project);
+      const record = await buildRunManifest(project, snapshots, {
+        companyId: companyId ?? null,
+        estimatorId: estimatorId ?? null,
+      });
+      if (!mountedRef.current || signature !== JSON.stringify(stateRef.current.project))
+        throw new Error('The estimate changed during export. Compare the current inputs and export again.');
+      download(JSON.stringify(record, null, 2), safeName(project.name) + '-draft-review.json', 'application/json');
+      toast.success('Draft review record downloaded. This is not a server-approved audit or material reservation.');
+    } catch (e) {
+      toast.error((e as Error).message);
     }
   }
   function exportSummary() {
@@ -552,7 +643,17 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
     const rows = [
       ['MATERIAL REQUIREMENT ESTIMATE'],
       ['Job', quote.name],
-      ['Material', quote.material],
+      ['Material', materialGroupLabel(quote)],
+      ['Material family', quote.material],
+      ['ERP catalog ID', quote.materialBinding?.catalog.id ?? 'Not selected'],
+      ['Price source', quote.materialBinding?.priceBasis ?? 'Manual estimate'],
+      ['Source snapshot', quote.materialBinding?.resolution?.content_hash ?? 'None'],
+      [
+        'Pricing review',
+        quote.materialBinding
+          ? 'Estimator-assumed USD; catalog metadata remains unresolved; not approved'
+          : 'Manually entered USD estimate',
+      ],
       ['Selection', active.option.id === comparison.recommendedId ? 'Recommended option' : 'Previewed option'],
       ['Comparison basis', comparison.reason],
       ['Thickness in', mmToIn(quote.thickness)],
@@ -565,7 +666,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
       ['Net part area ft2', squareFeet(nest.area)],
       ['Unused area ft2', squareFeet(active.area - nest.area)],
       ['Utilization %', nest.utilization],
-      ['Approx stock weight lb', mass],
+      ['Approx stock weight lb', mass ?? 'Unavailable: density not recorded'],
       ['Price per sheet USD', active.option.price ?? 'Not entered'],
       ['Estimated material total USD', active.cost === null ? 'Not entered' : active.cost.toFixed(2)],
       [
@@ -750,7 +851,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
             >
               {project.groups.map(group => (
                 <option key={group.id} value={group.id}>
-                  {group.quote.material} · {formatIn(group.quote.thickness)} in ·{' '}
+                  {materialGroupLabel(group.quote)} · {formatIn(group.quote.thickness)} in ·{' '}
                   {group.quote.parts.reduce((count, part) => count + part.quantity, 0)} parts
                 </option>
               ))}
@@ -772,7 +873,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                   onClick={() => setProject(previous => ({ ...previous, activeGroupId: group.id }))}
                 >
                   <strong>
-                    {group.quote.material} · {formatIn(group.quote.thickness)} in
+                    {materialGroupLabel(group.quote)} · {formatIn(group.quote.thickness)} in
                   </strong>
                   <span>
                     {count} parts ·{' '}
@@ -812,7 +913,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                   onChange={e => update({ name: e.target.value })}
                 />
                 <p className="job-subtitle">
-                  {quote.material}
+                  {materialGroupLabel(quote)}
                   <span>·</span>
                   {formatIn(quote.thickness)} in<span>·</span>
                   {requested} parts
@@ -826,6 +927,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                     setProject(next);
                     setSavedSignature(JSON.stringify(next));
                     setSnapshots({});
+                    setVerifiedPricingHashes(new Set());
                     setImportResults([]);
                     setPreviewId(null);
                     setSelected(null);
@@ -835,6 +937,18 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                 </button>
                 <button className="secondary compact" onClick={() => loadRef.current?.click()}>
                   <FolderOpen size={16} /> Open
+                </button>
+                <button
+                  className="secondary compact"
+                  onClick={() => void exportReviewRecord()}
+                  disabled={!reviewReady || busy || importing || !!error}
+                  title={
+                    reviewReady
+                      ? 'Download draft evidence; not a server-approved audit'
+                      : 'Compare every material group before exporting'
+                  }
+                >
+                  Export review record
                 </button>
                 <button className="secondary compact" onClick={save}>
                   <FileJson size={16} /> Save
@@ -972,6 +1086,46 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                             {formatIn(b.width)} × {formatIn(b.height)} in
                           </small>
                           {p.importMode === 'drawing-bounds' && <small>Legacy footprint · re-import DXF</small>}
+                          {selected === p.id && (
+                            <div className="part-provenance">
+                              <label className="field-label" htmlFor={fieldId + '-revision-' + p.id}>
+                                <span>Part revision (if known)</span>
+                                <Input
+                                  id={fieldId + '-revision-' + p.id}
+                                  maxLength={80}
+                                  value={p.revision ?? ''}
+                                  onChange={event =>
+                                    update({
+                                      parts: quote.parts.map(part =>
+                                        part.id === p.id ? { ...part, revision: event.target.value || undefined } : part
+                                      ),
+                                    })
+                                  }
+                                />
+                              </label>
+                              {p.provenance ? (
+                                <details>
+                                  <summary>Geometry provenance</summary>
+                                  <p>{p.provenance.sourceName}</p>
+                                  <p>
+                                    Source units: {p.provenance.sourceUnits}; resolved: {p.provenance.resolvedUnits} (
+                                    {p.provenance.unitDecision}).
+                                  </p>
+                                  <p className="hash-value">Source SHA-256: {p.provenance.sourceSha256}</p>
+                                  <p className="hash-value">Geometry SHA-256: {p.provenance.geometrySha256}</p>
+                                  <p>
+                                    {p.provenance.importerVersion} · {p.provenance.geometryVersion} ·{' '}
+                                    {p.provenance.sourceHashBasis}
+                                  </p>
+                                  {p.provenance.warnings.map((warning, index) => (
+                                    <p key={index}>{warning}</p>
+                                  ))}
+                                </details>
+                              ) : (
+                                <small>No imported source-file provenance.</small>
+                              )}
+                            </div>
+                          )}
                           {!!p.referencePaths?.length && (
                             <small>{p.referencePaths.length} internal reference paths · review intent</small>
                           )}
@@ -1210,6 +1364,13 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                   </h2>
                 </div>
                 <div className="settings-body">
+                  <button className="stock-manager" onClick={() => setTab('stock')}>
+                    <span>
+                      ERP material source
+                      <small>{quote.materialBinding?.catalog.name ?? 'Select an exact catalog record'}</small>
+                    </span>
+                    <ChevronRight size={16} />
+                  </button>
                   <label className="field-label" htmlFor={fieldId + '-material'}>
                     <span>Material</span>
                     <Picker
@@ -1403,7 +1564,7 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                   </div>
                   <div>
                     <span>Approx. stock weight</span>
-                    <b>{fmt(mass)} lb</b>
+                    <b>{mass === null ? 'Unavailable' : `${fmt(mass)} lb`}</b>
                   </div>
                   <div>
                     <span>Part coverage</span>
@@ -1435,14 +1596,41 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                 <div className="eyebrow">SHEETS YOU CAN BUY</div>
                 <h1>Compare your actual stock options.</h1>
                 <p>
-                  Enable available sizes and optionally enter supplier prices for {quote.material.toLowerCase()},{' '}
+                  Enable available sizes and select a pricing source for {materialGroupLabel(quote)},{' '}
                   {formatIn(quote.thickness)} inch thick. Sizes are editable; availability is supplied by you.
                 </p>
               </div>
+              <MaterialSourcePanel
+                quote={quote}
+                companyId={companyId}
+                catalog={catalog}
+                verifiedHashes={verifiedPricingHashes}
+                onBindingChange={(binding?: MaterialBinding) =>
+                  changeMaterial({
+                    materialBinding: binding,
+                    ...(binding ? { material: catalogFamily(binding.catalog.category)! } : {}),
+                  })
+                }
+                onResolved={binding => {
+                  setVerifiedPricingHashes(
+                    current => new Set([...Array.from(current), binding.resolution!.content_hash])
+                  );
+                  changeMaterial({ materialBinding: binding });
+                }}
+                onApply={(binding, prices) =>
+                  update({
+                    materialBinding: binding,
+                    options: quote.options.map(option => ({ ...option, price: prices.get(option.id) ?? null })),
+                  })
+                }
+              />
               <div className="stock-intro">
                 <div>
                   <b>Prices per sheet · USD</b>
-                  <p>Blank means unknown. Prices clear when material or thickness changes.</p>
+                  <p>
+                    Blank means unknown. ERP prices require source resolution and review; clear the source to enter
+                    supplier prices manually.
+                  </p>
                 </div>
                 <button
                   className="primary"
@@ -1499,7 +1687,8 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
                         min={0}
                         step=".01"
                         id={fieldId + '-price-' + o.id}
-                        placeholder="Not entered"
+                        placeholder={quote.materialBinding ? 'Resolve ERP source' : 'Not entered'}
+                        disabled={!!quote.materialBinding}
                         value={o.price === null ? '' : o.price}
                         onChange={e =>
                           changeOption(o.id, {
@@ -1630,7 +1819,14 @@ export default function NestingWorkspace({ initialQuote }: { initialQuote?: Quot
       {pendingFiles && (
         <DXFAssignments
           files={pendingFiles}
-          initial={{ material: quote.material, thickness: quote.thickness }}
+          initial={{
+            material: quote.material,
+            thickness: quote.thickness,
+            materialBinding: quote.materialBinding,
+            units: unitless as 'in' | 'mm',
+          }}
+          companyId={companyId}
+          catalog={catalog}
           onClose={() => setPendingFiles(null)}
           onConfirm={assignments => void confirmImport(pendingFiles, assignments)}
         />

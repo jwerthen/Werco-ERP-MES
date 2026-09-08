@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import MaterialNesting from './MaterialNesting';
 import { bounds } from '../features/nesting/lib/nesting';
@@ -7,8 +7,15 @@ import { compareSheets } from '../features/nesting/lib/quoting';
 import { projectFromFile } from '../features/nesting/lib/quote-project';
 
 // Vite supplies this CSS as text. Keep the real shadow host, workspace and
-// Base UI portals; only the build-time CSS transform and ERP toast are stubbed.
+// Base UI portals. Stub the build-time CSS transform and ERP toast; the
+// catalog is explicitly empty so these geometry/route tests remain offline.
 jest.mock('../features/nesting/nesting.css?inline', () => '', { virtual: true });
+jest.mock('../services/api', () => ({
+  __esModule: true,
+  default: {
+    getNestingMaterials: jest.fn().mockResolvedValue({ schema_version: 1, items: [], total: 0, offset: 0, limit: 200 }),
+  },
+}));
 const mockShowToast = jest.fn();
 let mockUser = { id: 7, company_id: 10 };
 let mockCurrentCompany = { id: 10 };
@@ -80,8 +87,11 @@ function dxfFile(name: string) {
   return { file, text };
 }
 
-function mountWorkspace() {
-  const rendered = render(<MaterialNesting />);
+async function mountWorkspace() {
+  let rendered!: ReturnType<typeof render>;
+  await act(async () => {
+    rendered = render(<MaterialNesting />);
+  });
   const shadow = screen.getByTestId('material-nesting-host').shadowRoot;
   if (!shadow) throw new Error('Material Nesting did not attach its shadow root.');
   const mount = shadow.querySelector<HTMLElement>('[data-nesting-mount]');
@@ -153,7 +163,7 @@ describe('Material Nesting inside the ERP shadow host', () => {
   });
 
   it('imports 100 actual files, reports every file inside the shadow root, and saves all quantities and geometry', async () => {
-    const { shadow, mount, ui } = mountWorkspace();
+    const { shadow, mount, ui } = await mountWorkspace();
     const files = Array.from({ length: 100 }, (_, index) => dxfFile(`Plate-${index + 1}.dxf`));
     const input = fileInput(mount, '.dxf');
     expect(input.multiple).toBe(true);
@@ -213,7 +223,7 @@ describe('Material Nesting inside the ERP shadow host', () => {
   }, 60000);
 
   it('rejects a 101-file selection before reading or changing the estimate', async () => {
-    const { mount, ui } = mountWorkspace();
+    const { mount, ui } = await mountWorkspace();
     const files = Array.from({ length: 101 }, (_, index) => dxfFile(`Plate-${index}.dxf`));
     fireEvent.change(fileInput(mount, '.dxf'), { target: { files: files.map(({ file }) => file) } });
     expect(mockShowToast).toHaveBeenCalledWith('error', expect.stringContaining('up to 100 DXF files'));
@@ -224,7 +234,7 @@ describe('Material Nesting inside the ERP shadow host', () => {
 
   it('keeps a select popup inside its dialog and adds a fractional-inch circle with the chosen quantity', async () => {
     const user = userEvent.setup();
-    const { shadow, ui } = mountWorkspace();
+    const { shadow, ui } = await mountWorkspace();
     fireEvent.click(ui.getByRole('button', { name: 'Add basic shape' }));
     const dialog = await ui.findByRole('dialog', { name: 'Add a part by size' });
     expect(dialog.getRootNode()).toBe(shadow);
@@ -256,7 +266,7 @@ describe('Material Nesting inside the ERP shadow host', () => {
   });
 
   it('keeps edits across workspace tabs but starts clean after leaving and reopening the route', async () => {
-    const first = mountWorkspace();
+    const first = await mountWorkspace();
     expectBlankWorkspace(first.ui);
     expect(beforeUnloadIsPrevented()).toBe(false);
     await editEstimate(first.ui);
@@ -272,7 +282,7 @@ describe('Material Nesting inside the ERP shadow host', () => {
     first.unmount();
 
     // React Router unmounts the page on departure and creates a new one on entry.
-    const second = mountWorkspace();
+    const second = await mountWorkspace();
     expectBlankWorkspace(second.ui);
     expect(beforeUnloadIsPrevented()).toBe(false);
   });
@@ -280,7 +290,7 @@ describe('Material Nesting inside the ERP shadow host', () => {
   it('reopens an explicitly saved estimate after a fresh route entry', async () => {
     const createURL = jest.spyOn(URL, 'createObjectURL');
     jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
-    const first = mountWorkspace();
+    const first = await mountWorkspace();
     await editEstimate(first.ui);
     fireEvent.click(first.ui.getByRole('button', { name: 'Save' }));
     const blob = createURL.mock.calls[0]?.[0];
@@ -289,7 +299,7 @@ describe('Material Nesting inside the ERP shadow host', () => {
     expect(beforeUnloadIsPrevented()).toBe(false);
     first.unmount();
 
-    const second = mountWorkspace();
+    const second = await mountWorkspace();
     expectBlankWorkspace(second.ui);
     const input = fileInput(second.mount, '.json');
     const openPicker = jest.spyOn(input, 'click');
@@ -309,16 +319,16 @@ describe('Material Nesting inside the ERP shadow host', () => {
   it.each(['company', 'user'])(
     'starts empty when the active %s changes, including when switching back',
     async identity => {
-      const first = mountWorkspace();
+      const first = await mountWorkspace();
       await editEstimate(first.ui);
       if (identity === 'company') mockCurrentCompany = { id: 20 };
       else mockUser = { id: 8, company_id: 10 };
-      first.rerender(<MaterialNesting />);
+      await act(async () => first.rerender(<MaterialNesting />));
       expectBlankWorkspace(first.ui);
       expect(beforeUnloadIsPrevented()).toBe(false);
       mockCurrentCompany = { id: 10 };
       mockUser = { id: 7, company_id: 10 };
-      first.rerender(<MaterialNesting />);
+      await act(async () => first.rerender(<MaterialNesting />));
       expectBlankWorkspace(first.ui);
     }
   );

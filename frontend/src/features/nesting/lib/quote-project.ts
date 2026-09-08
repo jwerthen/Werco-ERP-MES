@@ -2,10 +2,16 @@ import type { Part } from './nesting';
 import { createBlankQuote, quoteFromFile, quoteToFile, validateQuote, type Quote } from './quoting';
 import { autoQuotingSpacing } from './spacing';
 import { inToMm } from './units';
+import { materialGroupKey, validateMaterialBinding, type MaterialBinding } from './material-binding';
 
 export type QuoteGroup = { id: string; quote: Quote };
 export type QuoteProject = { name: string; activeGroupId: string; groups: QuoteGroup[] };
-export type ImportedPartAssignment = { material: string; thickness: number; partIds: string[] };
+export type ImportedPartAssignment = {
+  material: string;
+  thickness: number;
+  materialBinding?: MaterialBinding;
+  partIds: string[];
+};
 
 const THICKNESS_KEY_STEP_MM = 1e-6;
 const MAX_PARTS = 300;
@@ -17,18 +23,26 @@ function check(ok: unknown, message: string): asserts ok {
 }
 
 /** Group identical stock specifications after rounding thickness to 0.000001 mm. */
-export function materialThicknessKey(material: string, thickness: number): string {
+export function materialThicknessKey(material: string, thickness: number, materialBinding?: MaterialBinding): string {
   check(materials.includes(material), 'Choose a supported material.');
   check(
     Number.isFinite(thickness) && thickness > 0 && thickness <= 100,
     'Enter a positive thickness, up to 3.937 inches.'
   );
-  return JSON.stringify([material, Math.round(thickness / THICKNESS_KEY_STEP_MM)]);
+  if (materialBinding !== undefined) validateMaterialBinding(materialBinding);
+  return materialGroupKey({
+    material,
+    thickness: Math.round(thickness / THICKNESS_KEY_STEP_MM) * THICKNESS_KEY_STEP_MM,
+    materialBinding,
+  });
 }
 
 function cloneQuote(quote: Quote): Quote {
   return {
     ...quote,
+    ...(quote.materialBinding
+      ? { materialBinding: JSON.parse(JSON.stringify(quote.materialBinding)) as MaterialBinding }
+      : {}),
     options: quote.options.map(option => ({ ...option })),
     parts: quote.parts.map(part => ({
       ...part,
@@ -74,7 +88,7 @@ function checkProjectStructure(value: unknown): QuoteProject {
     groupIds.add(group.id);
     const quote = group.quote;
     check(quote && typeof quote === 'object' && Array.isArray(quote.parts), 'Invalid material group estimate.');
-    const key = materialThicknessKey(quote.material, quote.thickness);
+    const key = materialThicknessKey(quote.material, quote.thickness, quote.materialBinding);
     check(!materialKeys.has(key), 'Duplicate material and thickness groups. Combine their parts into one group.');
     materialKeys.add(key);
     designs += quote.parts.length;
@@ -119,7 +133,7 @@ export function validateProject(value: unknown): QuoteProject {
 export function projectToFile(project: QuoteProject) {
   validateProject(project);
   return {
-    version: 4,
+    version: project.groups.some(group => group.quote.materialBinding) ? 5 : 4,
     units: 'in',
     currency: 'USD',
     name: project.name,
@@ -131,7 +145,7 @@ export function projectToFile(project: QuoteProject) {
 export function projectFromFile(input: unknown): QuoteProject {
   check(input && typeof input === 'object', 'Invalid estimate file.');
   const data = input as Record<string, unknown>;
-  if (data.version !== 4) return createBlankProject(quoteFromFile(input));
+  if (data.version !== 4 && data.version !== 5) return createBlankProject(quoteFromFile(input));
   check(data.units === 'in', 'Estimate project must explicitly declare inches.');
   check(data.currency === undefined || data.currency === 'USD', 'This estimate uses USD sheet prices.');
   check(
@@ -183,7 +197,7 @@ export function addImportedParts(project: QuoteProject, rows: ImportedPartAssign
   const assigned = new Set<string>();
   for (const row of rows) {
     check(row && Array.isArray(row.partIds) && row.partIds.length > 0, 'Assign at least one part to each row.');
-    materialThicknessKey(row.material, row.thickness);
+    materialThicknessKey(row.material, row.thickness, row.materialBinding);
     for (const id of row.partIds) {
       check(imported.has(id), 'A material assignment refers to an unknown imported part.');
       check(!assigned.has(id), 'Each imported part must have exactly one material assignment.');
@@ -195,13 +209,16 @@ export function addImportedParts(project: QuoteProject, rows: ImportedPartAssign
   const source = project.groups.find(group => group.id === project.activeGroupId)!.quote;
   const groups = project.groups.map(group => ({ ...group, quote: { ...group.quote, parts: [...group.quote.parts] } }));
   const byMaterial = new Map(
-    groups.map(group => [materialThicknessKey(group.quote.material, group.quote.thickness), group])
+    groups.map(group => [
+      materialThicknessKey(group.quote.material, group.quote.thickness, group.quote.materialBinding),
+      group,
+    ])
   );
   const groupIds = new Set(groups.map(group => group.id));
   let nextId = 1;
   let firstTargetId: string | undefined;
   for (const row of rows) {
-    const key = materialThicknessKey(row.material, row.thickness);
+    const key = materialThicknessKey(row.material, row.thickness, row.materialBinding);
     let group = byMaterial.get(key);
     if (!group) {
       while (groupIds.has(`group-${nextId}`)) nextId += 1;
@@ -214,6 +231,7 @@ export function addImportedParts(project: QuoteProject, rows: ImportedPartAssign
           name: project.name,
           material: row.material,
           thickness: row.thickness,
+          ...(row.materialBinding ? { materialBinding: { ...row.materialBinding, acknowledgement: undefined } } : {}),
           ...autoQuotingSpacing(row.thickness),
           spacingMode: 'auto',
           objective: source.objective,

@@ -12,14 +12,16 @@ the same permission as Quote Calculator; see [RBAC_PERMISSIONS.md](RBAC_PERMISSI
    and the active group's material, thickness, part spacing, and edge margin.
    Dimension fields accept decimal inches and fractions such as `1/4` or `1 1/2`.
 2. Upload or drop DXFs, or add rectangles and circles by size. Before files are
-   parsed, select filename rows and apply their material and thickness. All files
+   parsed, select filename rows and apply their material, thickness, optional
+   exact ERP catalog record, and units to use for unitless drawings. All files
    are imported with the assignments shown, including unchecked rows. Files with
-   the same material and thickness join the same group; different thicknesses
+   the same material identity and thickness join the same group; different thicknesses
    never share a sheet. Duplicate filenames remain separate rows. Confirm each
    imported part's dimensions and quantity, and set rotation/grain constraints.
    Read the import report: valid files stay when other files are skipped.
 3. In **Stock sizes & prices**, enable the sheet sizes available to your shop
-   for the active group and enter optional prices per sheet. Changing a sheet's
+   for the active group and enter optional prices per sheet, or resolve them
+   from **ERP material & pricing** as described below. Changing a sheet's
    dimensions clears its price. Changing a group's material/thickness clears
    its prices; matching groups combine their parts. New groups copy active stock
    sizes and enabled flags with independent options and blank prices.
@@ -36,7 +38,8 @@ the same permission as Quote Calculator; see [RBAC_PERMISSIONS.md](RBAC_PERMISSI
 5. **Save** downloads every group and the active selection in one editable
    `.estimate.json` file. **Save summary** downloads the active group's material
    comparison as CSV; **Save nest preview** downloads its selected sheet as SVG,
-   including reference lines.
+   including reference lines. **Export review record** downloads a draft JSON
+   record covering the current inputs and all compared groups.
 
 The layout places actual outer contours, including concave profiles, using
 multiple part orderings and allowed quarter-turn rotations. It checks contour
@@ -47,8 +50,43 @@ Each group's comparison uses one stock size for its entire order and does not
 combine stock sizes. Utilization uses contour area less holes divided by total
 purchased sheet area. The preview and exports are estimating layouts, not
 production toolpaths. Material prices exclude freight, tax, labor, cutting time, and consumables;
-weight uses typical material density. Check dimensions, quantities, supplier
+weight uses the selected catalog density when bound to an ERP source (unknown
+when that source has no valid density), or typical density for a family-only
+estimate. Check dimensions, quantities, supplier
 sheet sizes, and your shop's handling capacity before ordering.
+
+## ERP material and price review
+
+**ERP material & pricing** reads the active company's existing quote-material
+catalog. Select the exact **Catalog material** and **Price basis**, then
+**Resolve sheet prices**. The tool does not infer a catalog record from the
+family name, select a nearby thickness price, or use a different price basis
+when the chosen price is missing. Per-square-foot pricing requires selecting
+an exact catalog price key; the key does not verify the entered thickness.
+The displayed catalog update time is not a price effective date.
+
+Per-pound pricing uses sheet area × thickness × catalog density × price;
+per-cubic-inch uses area × thickness × price; per-square-foot uses area × price
+÷ 144. Dimensions are inches. Calculations use decimal arithmetic, with each
+sheet cost rounded half-up to two places. Missing or invalid density prevents
+per-pound conversion. A missing, zero, or invalid price stays unresolved.
+
+The existing catalog lacks authoritative currency, structured grade/coating,
+certification, inventory mapping, price effective/expiry dates, approved
+revision, and verified thickness. Those gaps remain visible even when costs
+can be calculated. Before **Apply reviewed USD prices**, acknowledge that you
+are treating the values as USD and have reviewed the unresolved metadata for
+this estimate. This is an estimator assumption; it does not approve material
+compatibility, certification, inventory availability, or the source currency.
+The server always reports `confirmed: false` and `currency: null`.
+
+Changing source, thickness, or sheet dimensions clears applied catalog prices
+and the acknowledgment. A changed source hash requires refreshing and resolving
+again. **Open** also clears saved catalog prices and acknowledgment; refresh
+the catalog and review them again in the current company. Family-only estimates
+and geometry comparison remain available if catalog access fails. Clear the
+catalog source to enter manual prices. All catalog access is read-only and does
+not seed missing records. See the [API contract](API.md#quote-nesting-material-provenance).
 
 ## Quoting spacing allowances
 
@@ -112,7 +150,7 @@ defaults:
 | Omitted metadata | `VIEWPORT` records and all entities on the `FORMAT` annotation layer, with an import warning for omitted FORMAT entities |
 | Rejected files | Open or ambiguous outer profiles, touching/intersecting contours, reference paths outside or spanning parts, malformed data, unsupported entities, blocks/`INSERT`, wide polylines, sloped/nonplanar geometry, tilted extrusion, or paper-space cut geometry; other text/annotations are not silently discarded |
 | DXF units | Inch and millimeter files retain their physical size; unitless files default to inches unless millimeters is selected before import |
-| Saved estimates | Version 4 projects wrap one version 3 inch/USD estimate per group; older single estimates/jobs open as one group. Legacy `drawing-bounds` parts can be opened but must be removed and their DXFs re-imported before nesting |
+| Saved estimates | Version 5 projects retain ERP material bindings; family-only projects remain version 4. Both wrap one version 3 inch/USD estimate per group. Older single estimates/jobs open as one group. Legacy `drawing-bounds` parts must be removed and their DXFs re-imported before nesting |
 
 Split larger jobs into estimates. Malformed or unsupported files and files
 that exceed a resource or size limit are skipped as a whole with an explanation;
@@ -151,11 +189,36 @@ Rational spans are converted to their actual curved profiles within the stated
 tolerance; their control-hull rectangles are not used as parts. Unsupported,
 discontinuous, malformed, or excessively detailed spline data is rejected.
 
-Material groups use exact material labels and thickness rounded to
-0.000001 mm for their grouping key; displayed dimensions and saved files remain
+Family-only groups use exact material labels; ERP-bound groups also include
+company and catalog record IDs, so distinct catalog materials cannot combine
+solely because their family names match. Thickness is rounded to 0.000001 mm
+for the grouping key; displayed dimensions and saved files remain
 in inches. Duplicate group/part IDs, duplicate stock specifications, incomplete
 upload assignments, and project-wide resource overruns are rejected without
 partially applying the assignment.
+
+### Source provenance and draft review records
+
+DXF imports retain the filename, a SHA-256 source fingerprint, declared or
+assigned units, the normalized geometry fingerprint, and import warnings.
+Fingerprints use original file bytes when available, or explicitly identify
+the UTF-8 text basis. Unitless drawings retain the estimator's inch/millimeter
+assignment for review. Add **Part revision (if known)** to each part; an empty
+revision remains a review flag rather than being invented.
+
+**Export review record** requires fresh comparisons for every populated group.
+It records the input project and hash, estimator/company IDs, source/material
+snapshots, quantities and revisions, solver/build/settings, compared stock
+alternatives, validated placements, utilization and entered material costs.
+Changed inputs or inconsistent results require recomparison. The solver is
+deterministic, so the record stores no random seed and explains what replay
+requires. Incomplete heuristic results are not proof that a layout is impossible.
+
+This locally downloaded record is labeled **QUOTE LAYOUT — NOT AN NC PROGRAM**
+and remains `draft_estimator_review`. Its content hash can detect changes but
+does not make it signed, immutable, or server-approved. Source CAD bytes are
+not embedded or uploaded. There is no remnant credit, inventory reservation,
+quote cost writeback, machine configuration approval, or production program.
 
 ## Storage and ERP integration
 
@@ -179,6 +242,7 @@ connection, cutting recipes, or postprocessor.
 
 The workspace is a native ERP route with feature-local styles isolated in a
 ShadowRoot and notifications supplied by the existing ERP toast provider.
-It uses the existing Vercel frontend deployment and SPA rewrite. No new API,
-database migration, environment variable, or hosting project is required; see
+It uses the existing Vercel frontend deployment and SPA rewrite, plus two
+read-only ERP catalog/resolution endpoints. No database migration, environment
+variable, separate service, or hosting project is required; see
 [DEPLOYMENT.md](DEPLOYMENT.md#existing-vercel-frontend-material-nesting).

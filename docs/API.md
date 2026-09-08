@@ -793,6 +793,77 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 
 ## Core Endpoints
 
+### Quote nesting material provenance
+
+These endpoints support `/nest` with read-only selection of existing active
+`QuoteMaterial` catalog rows. Both require the active company's effective
+`purchasing:view` permission, including its role overrides and the existing
+Platform Admin/superuser exemptions. Existing authentication, kiosk/API-token,
+and read-only switched-company restrictions still apply; the POST has no
+read-only-context exemption. See [Material Nesting permissions](RBAC_PERMISSIONS.md#material-nesting).
+Paths below are relative to `/api/v1`.
+
+| Method | Endpoint | Contract |
+|--------|----------|----------|
+| GET | `/quote-nesting/materials` | Active-company catalog; `offset` ≥ 0 (default 0), `limit` 1–500 (default 200). Returns `schema_version: 1`, `items`, `total`, `offset`, `limit`. An empty catalog stays empty; this read never seeds defaults. |
+| POST | `/quote-nesting/material-resolution` | Resolve one explicitly selected catalog record and price basis against estimator-supplied stock dimensions. Does not save, approve, reserve, or mutate any record. |
+
+Example resolution request:
+
+```json
+{
+  "catalog_material_id": 42,
+  "thickness_in": "0.125",
+  "stock_options": [{"id": "48x96", "width_in": "48", "length_in": "96"}],
+  "price_basis": "per_lb"
+}
+```
+
+Use an ID returned by the current company's catalog. Optionally supply
+`expected_catalog_hash` with that row's 64-character lowercase SHA-256 digest;
+a changed snapshot returns **409**, requiring reload. The frontend supplies it.
+Inactive, foreign-company, and missing IDs return the same **404** response.
+Invalid request shapes return **422**: IDs must be positive JSON integers;
+dimensions must be positive decimal **strings**, with at most 12 digits before
+and 12 after the decimal point. Fractions, scientific notation, JSON numbers,
+non-finite values, and unknown fields are rejected. Stock options require 1–20
+unique nonblank IDs (≤100 characters each).
+
+| Explicit `price_basis` | Source field | Sheet-cost formula |
+|------------------------|--------------|--------------------|
+| `per_lb` | `stock_price_per_pound` | width × length × thickness × catalog density × price |
+| `per_cubic_inch` | `stock_price_per_cubic_inch` | width × length × thickness × price |
+| `per_square_foot` | `sheet_pricing[price_key]` | width × length × price ÷ 144 |
+
+All input dimensions are inches and density is lb/in³. `per_square_foot`
+requires the exact catalog `price_key` (1–100 characters); other bases forbid
+it. No nearest-thickness, name, first-price, alternate-basis, or typical-density
+fallback is applied. A sheet-price key's relationship to the entered thickness
+remains unverified even when the selected price is calculable. Invalid or
+nonpositive source prices are unavailable, not zero-cost stock. Without valid
+density, weight is null and per-pound pricing is unresolved; the other two
+bases may still calculate with the density warning retained.
+
+Catalog items return identity/name/category, nullable `source_updated_at`,
+`catalog_hash`, nullable decimal-string density, `price_options` with exact
+source fields/keys and nullable decimal-string unit prices, and `missing_metadata`.
+Resolution responses add `company_id`, the selected catalog snapshot and basis,
+canonical `thickness_in`, `stocks`, `issues`, and `content_hash`. Each stock
+returns decimal strings for dimensions, square-inch/square-foot area and
+cubic-inch volume, plus nullable `weight_lb` and `sheet_cost`. Money uses
+decimal arithmetic and half-up rounding to two places; the displayed
+square-foot area is rounded to 12 places without affecting cost arithmetic.
+
+Every result has `confirmed: false` and `currency: null`. `status` is
+`review_required` when numerically `calculable`, otherwise `unresolved`.
+The legacy catalog does not establish currency, structured grade/coating,
+certification, inventory mapping, price effectivity/expiry, approved revision,
+or authoritative thickness. These gaps always appear as issues; its update
+timestamp is not a price effective date. Canonical hashes include company and
+source identity, normalize equivalent decimal representations, and sort stock
+rows by ID. They detect changed inputs; they are not signed approvals or
+persisted audit events. CAD geometry is not submitted to these endpoints.
+
 ### Global search and customer edits
 
 `GET /search/` accepts `q` (1–100 characters), `types` (comma-separated entity

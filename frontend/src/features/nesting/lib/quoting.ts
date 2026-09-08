@@ -1,6 +1,12 @@
 import { autoQuotingSpacing } from './spacing';
 import { bounds, validatePart, validateJob, nestParts, type Part, type Stock, type Nest, demoJob } from './nesting';
 import { jobFromFile, jobToFile, mmToIn, inToMm } from './units';
+import {
+  catalogFamily,
+  hasAcknowledgedCatalogPricing,
+  validateMaterialBinding,
+  type MaterialBinding,
+} from './material-binding';
 export type SheetOption = {
   id: string;
   width: number;
@@ -17,6 +23,7 @@ export function editSheetOption(option: SheetOption, patch: Partial<SheetOption>
 }
 export type Quote = {
   version: 1;
+  materialBinding?: MaterialBinding;
   spacingMode?: 'auto' | 'manual';
   name: string;
   material: string;
@@ -93,6 +100,7 @@ export function validateQuote(value: unknown): Quote {
   check(q.spacingMode === undefined || ['auto', 'manual'].includes(q.spacingMode), 'Invalid spacing mode.');
   check(typeof q.name === 'string' && q.name.length > 0 && q.name.length < 200, 'Enter an estimate name.');
   check(['Carbon steel', 'Stainless steel', 'Aluminum'].includes(q.material), 'Choose a supported material.');
+
   check(
     Number.isFinite(q.thickness) && q.thickness > 0 && q.thickness <= 100,
     'Enter a positive thickness, up to 3.937 inches.'
@@ -117,6 +125,27 @@ export function validateQuote(value: unknown): Quote {
   );
   check(['area', 'cost'].includes(q.objective), 'Invalid comparison priority.');
   check(Array.isArray(q.options) && q.options.length > 0 && q.options.length <= 12, 'Choose 1–12 stock sizes.');
+  if (q.materialBinding !== undefined) {
+    validateMaterialBinding(q.materialBinding);
+    check(
+      catalogFamily(q.materialBinding.catalog.category) === q.material,
+      'ERP catalog material does not match this material family.'
+    );
+    if (q.options.some(option => option.price !== null)) {
+      check(
+        hasAcknowledgedCatalogPricing(q),
+        'Resolve the ERP source and acknowledge USD/review before using its sheet prices.'
+      );
+      check(
+        q.options.every(
+          option =>
+            option.price ===
+            Number(q.materialBinding!.resolution!.stocks.find(stock => stock.id === option.id)!.sheet_cost)
+        ),
+        'Sheet prices do not match the acknowledged ERP source.'
+      );
+    }
+  }
   check(new Set(q.options.map(o => o.id)).size === q.options.length, 'Duplicate stock option IDs.');
   q.options.forEach(o => {
     check(typeof o.id === 'string' && o.id.length > 0 && typeof o.enabled === 'boolean', 'Invalid stock option.');
@@ -206,7 +235,7 @@ export function compareSheets(q: Quote): Comparison {
       results,
       recommendedId: null,
       reason:
-        'No enabled stock size fits all parts. Review oversize parts, rotation locks, margins, or add a larger sheet.',
+        'The search did not place every part on an enabled stock size. Review oversize parts, rotation locks, margins, or add a larger sheet.',
       requested,
     };
   if (q.objective === 'cost' && feasible.some(r => r.cost === null))
@@ -249,6 +278,7 @@ export function quoteToFile(q: Quote) {
     units: 'in',
     currency: 'USD',
     spacingMode: q.spacingMode ?? 'manual',
+    ...(q.materialBinding ? { materialBinding: q.materialBinding } : {}),
     name: q.name,
     material: q.material,
     thickness: mmToIn(q.thickness),
@@ -290,6 +320,7 @@ export function quoteFromFile(input: unknown): Quote {
       version: 1,
       name: d.name,
       spacingMode: d.spacingMode ?? 'manual',
+      ...(d.materialBinding !== undefined ? { materialBinding: d.materialBinding } : {}),
       material: d.material,
       thickness: inToMm(dim(d.thickness)),
       parts,

@@ -1,6 +1,10 @@
 // jest-dom adds custom jest matchers for asserting on DOM nodes.
 import '@testing-library/jest-dom';
 import { TextDecoder, TextEncoder } from 'util';
+import { webcrypto } from 'crypto';
+
+// Use real SHA-256 for CAD provenance tests; jsdom only supplies random-value APIs.
+if (!global.crypto.subtle) Object.defineProperty(global.crypto, 'subtle', { value: webcrypto.subtle });
 
 if (!global.TextEncoder) {
   global.TextEncoder = TextEncoder as any;
@@ -49,10 +53,7 @@ global.IntersectionObserver = class IntersectionObserver {
 const originalConsoleError = console.error;
 beforeAll(() => {
   console.error = (...args: any[]) => {
-    if (
-      typeof args[0] === 'string' &&
-      args[0].includes('Warning: ReactDOM.render')
-    ) {
+    if (typeof args[0] === 'string' && args[0].includes('Warning: ReactDOM.render')) {
       return;
     }
     originalConsoleError.call(console, ...args);
