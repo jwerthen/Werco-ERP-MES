@@ -136,6 +136,14 @@ It needs no separate service, iframe, domain, or environment variable. Team
 draft persistence additionally requires backend migration `101_quote_nesting_drafts`
 and its `/api/v1/quote-nesting/drafts` routes before the frontend is promoted.
 
+Saved server calculations additionally require migration `102_quote_nesting_runs`
+and the existing ARQ worker with the compiled shared nesting kernel. The API image
+remains Python-only and coordinates saved revisions, leases and checkpoints; only
+`backend/Dockerfile.worker` includes Node and `/app/nesting-runtime/{solver.cjs,manifest.json}`.
+No new service, domain, secret, operator-set runtime path or cron setting is added.
+Do not report server calculation availability until the release's worker identity
+gate passes; a missing/stale runtime leaves new calculation requests unavailable.
+
 `frontend/vercel.json` already builds with `npm run build`, publishes `build/`,
 and rewrites SPA paths to `/index.html`, so opening or refreshing `/nest` uses
 the existing application router. Feature assets are bundled from
@@ -145,7 +153,12 @@ After the normal frontend lint, type-check, tests, and production build pass,
 use the existing GitHub Actions release path. Combined backend/frontend changes
 defer from `deploy-frontend-production.yml` to `ci-cd.yml`, which verifies the
 backend release before publishing its dependent frontend and promoting the
-public Vercel website. Do not bypass that API gate with a manual frontend
+public Vercel website. Shared nesting-kernel/build changes also defer to that path.
+Worker-touched releases must pass the required worker image smoke and then verify
+an active Railway SUCCESS deployment with a fresh, post-Redis-publication heartbeat
+matching its deployment ID, merged SHA, tested bundle SHA and pinned Node version.
+The verifier rechecks active state; an upload receipt or old startup log cannot pass.
+Do not bypass those API/worker gates with a manual frontend
 release. Verify `wercomfg.app/release.txt` equals the merged release SHA, then `/nest`
 directly and from **Sales & Quoting → Material Nesting** as an allowed user;
 verify signed-out users reach login and a user without `purchasing:view` cannot
@@ -178,6 +191,14 @@ Application rollback can leave the additive draft tables in place. Do not downgr
 migration101 as an ordinary rollback: its downgrade drops the new draft history.
 Retain/export required records before any separately authorized destructive schema
 rollback. An older frontend retains its local-file workflow but has no Team drafts UI.
+
+Migration102 adds calculation/checkpoint history. Keep migrations101 and102 on an
+application rollback; their destructive downgrades are separate, explicitly authorized
+record-retention decisions. Restore API, worker and frontend as one compatible release;
+preserve completed history and allow interrupted leases to become failed/worker-lost.
+Do not rewrite a saved checkpoint or mark an interrupted calculation successful.
+Existing history reads remain available without a current solver; creating a new run
+requires a fresh matching runtime. No release grants quote approval or inventory credit.
 
 The orientation/grain increment changes only frontend behavior and local file
 formats; it adds no API, permission, migration, or environment requirement.

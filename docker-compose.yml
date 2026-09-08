@@ -105,8 +105,8 @@ services:
   # ARQ Worker (background jobs)
   worker:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile.worker
     container_name: werco-worker
     environment:
       DATABASE_URL: ${DATABASE_URL:?Supabase DATABASE_URL required}
@@ -156,8 +156,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    volumes:
-      - ./backend:/app
+    # Rebuild for source changes: a backend bind over /app would hide the bundled
+    # Node runtime and make local behavior differ from the production worker.
     command: arq app.worker.WorkerSettings
 
 volumes:

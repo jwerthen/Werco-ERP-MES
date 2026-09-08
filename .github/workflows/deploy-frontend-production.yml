@@ -49,7 +49,7 @@ jobs:
                git cat-file -e "${HEAD_SHA}^{commit}"; then
             # Compare the entire push, including deletions/renames. A missing base,
             # unknown commit or failed diff safely leaves the full pipeline in charge.
-            if git diff --quiet --no-renames "$BEFORE_SHA" "$HEAD_SHA" -- backend/; then
+            if [ "$(python3 .github/scripts/worker_release_scope.py --before "$BEFORE_SHA" --head "$HEAD_SHA")" = "false" ]; then
               standalone=true
             fi
           fi
@@ -57,7 +57,7 @@ jobs:
           if [ "$standalone" = "true" ]; then
             echo "Frontend-only or explicit manual release may use this workflow."
           else
-            echo "Combined or unclassified release: the full CI/CD pipeline will deploy backend first."
+            echo "Backend/shared-worker or unclassified release: the full pipeline verifies API and worker before promotion."
           fi
 
   deploy-frontend:

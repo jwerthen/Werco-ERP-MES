@@ -62,6 +62,15 @@ class QuoteNestingRevision(Base, TenantMixin):
         CheckConstraint('length(request_key) = 36', name='ck_quote_nest_revision_request_key'),
         CheckConstraint('length(trim(name)) BETWEEN 1 AND 200', name='ck_quote_nest_revision_name'),
         Index('ix_quote_nest_revision_company_draft', 'company_id', 'draft_id', 'revision_number'),
+        Index(
+            'uq_quote_nest_revision_exact_input',
+            'company_id',
+            'id',
+            'draft_id',
+            'revision_number',
+            'content_sha256',
+            unique=True,
+        ),
     )
     id = Column(Integer, primary_key=True)
     draft_id = Column(Integer, nullable=False)

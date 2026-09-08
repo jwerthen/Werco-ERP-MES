@@ -1,0 +1,201 @@
+"""The deploy gate must reject old, inactive and merely-started solver runtimes."""
+
+import importlib.util
+import json
+import subprocess
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import yaml
+
+pytestmark = [pytest.mark.unit]
+ROOT = Path(__file__).resolve().parents[2]
+SPEC = importlib.util.spec_from_file_location("worker_release", ROOT / ".github/scripts/verify_worker_release.py")
+release = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(release)
+
+
+@pytest.fixture
+def evidence():
+    now = datetime.now(timezone.utc)
+    deployment = {"id": "new-deployment", "status": "SUCCESS", "createdAt": (now - timedelta(seconds=60)).isoformat()}
+    manifest = {
+        "protocol": 1,
+        "solver_version": "werco-contour-v4",
+        "bundle_sha256": "b" * 64,
+        "node_version": "v22.23.2",
+    }
+    identity = {
+        **manifest,
+        "release": "a" * 40,
+        "instance_id": "12345678-1234-1234-1234-123456789abc",
+        "deployment_id": deployment["id"],
+        "observed_at": (now - timedelta(seconds=2)).isoformat(),
+    }
+    return now, deployment, manifest, identity
+
+
+def line(identity):
+    return json.dumps({"message": json.dumps({"event": "nesting_runtime_ready", "identity": identity})})
+
+
+def status(deployment, active=True):
+    return {
+        "environments": {
+            "edges": [
+                {
+                    "node": {
+                        "name": "production",
+                        "serviceInstances": {
+                            "edges": [
+                                {
+                                    "node": {
+                                        "serviceName": "werco-worker",
+                                        "latestDeployment": deployment,
+                                        "activeDeployments": [deployment] if active else [],
+                                    }
+                                }
+                            ]
+                        },
+                    }
+                }
+            ]
+        }
+    }
+
+
+def test_fresh_matching_identity_and_active_success_are_both_required(evidence):
+    now, deployment, manifest, identity = evidence
+    assert release.active_worker(status(deployment), "werco-worker", "production") == deployment
+    assert release.matching_identity(line(identity), deployment, "a" * 40, manifest, now.timestamp()) == identity
+    assert release.active_worker(status(deployment, False), "werco-worker", "production") is None
+    assert release.active_worker(status(deployment), "werco-worker", "staging") is None
+    assert release.active_worker(status(deployment), "werco-api", "production") is None
+
+
+@pytest.mark.parametrize("state", ["BUILDING", "DEPLOYING", "FAILED", "CRASHED", "REMOVED"])
+def test_latest_deployment_is_not_proof_of_a_running_worker(evidence, state):
+    _, deployment, _, _ = evidence
+    deployment["status"] = state
+    assert release.active_worker(status(deployment), "werco-worker", "production") is None
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("release", "c" * 40),
+        ("deployment_id", "old-deployment"),
+        ("bundle_sha256", "c" * 64),
+        ("node_version", "v22.23.1"),
+        ("solver_version", "old-solver"),
+        ("protocol", True),
+        ("instance_id", "bad"),
+    ],
+)
+def test_identity_mismatch_cannot_pass(evidence, field, value):
+    now, deployment, manifest, identity = evidence
+    identity[field] = value
+    assert release.matching_identity(line(identity), deployment, "a" * 40, manifest, now.timestamp()) is None
+
+
+@pytest.mark.parametrize("age", [91, -6, 1000])
+def test_stale_future_and_predeployment_heartbeats_fail(evidence, age):
+    now, deployment, manifest, identity = evidence
+    identity["observed_at"] = (now - timedelta(seconds=age)).isoformat()
+    assert release.matching_identity(line(identity), deployment, "a" * 40, manifest, now.timestamp()) is None
+
+
+def test_heartbeat_before_active_deployment_start_cannot_pass(evidence):
+    now, deployment, manifest, identity = evidence
+    identity["observed_at"] = (now - timedelta(seconds=65)).isoformat()
+    assert release.matching_identity(line(identity), deployment, "a" * 40, manifest, now.timestamp()) is None
+
+
+def test_ignores_unrelated_or_malformed_logs_and_requires_publication_event(evidence):
+    now, deployment, manifest, identity = evidence
+    noise = '\n'.join(['plain text', '{bad json', json.dumps({"event": "startup", "identity": identity})])
+    assert release.matching_identity(noise, deployment, "a" * 40, manifest, now.timestamp()) is None
+    assert release.matching_identity(noise + '\n' + line(identity), deployment, "a" * 40, manifest, now.timestamp())
+    identity.pop("observed_at")
+    assert release.matching_identity(line(identity), deployment, "a" * 40, manifest, now.timestamp()) is None
+
+
+def test_different_active_deployment_does_not_validate_latest(evidence):
+    _, deployment, _, _ = evidence
+    data = status(deployment)
+    instance = data["environments"]["edges"][0]["node"]["serviceInstances"]["edges"][0]["node"]
+    instance["activeDeployments"] = [{**deployment, "id": "older"}]
+    assert release.active_worker(data, "werco-worker", "production") is None
+
+
+@pytest.mark.parametrize("replaced", [False, True])
+def test_verifier_rechecks_platform_state_after_reading_heartbeat(evidence, tmp_path, monkeypatch, capsys, replaced):
+    _, deployment, manifest, identity = evidence
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    rechecked = {**deployment, "id": "replacement"} if replaced else deployment
+    responses = iter([json.dumps(status(deployment)), line(identity), json.dumps(status(rechecked))])
+    monkeypatch.setattr(release, "command", lambda _args: next(responses))
+    ticks = iter([0, 0, 2, 2])
+    monkeypatch.setattr(release.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(release.time, "sleep", lambda _: None)
+    args = SimpleNamespace(
+        manifest=manifest_path, expect="a" * 40, timeout=1, service="werco-worker", environment="production"
+    )
+    if replaced:
+        with pytest.raises(SystemExit, match="no active deployment"):
+            release.verify(args)
+        assert "Active worker verified" not in capsys.readouterr().out
+    else:
+        release.verify(args)
+        assert "Active worker verified" in capsys.readouterr().out
+
+
+def test_image_and_postdeploy_runtime_gates_are_enforced_before_promotion():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci-cd.yml").read_text())
+    build = workflow["jobs"]["build"]["steps"]
+    smoke = next(step for step in build if "smoke_nesting_worker.py" in step.get("run", ""))
+    assert not smoke.get("continue-on-error")
+    assert not smoke.get("if")
+    steps = workflow["jobs"]["deploy-production"]["steps"]
+    verify = next(i for i, step in enumerate(steps) if "verify_worker_release.py" in step.get("run", ""))
+    upload = next(i for i, step in enumerate(steps) if "railway up --service werco-worker " in step.get("run", ""))
+    promote = next(i for i, step in enumerate(steps) if "promote_vercel.py" in step.get("run", ""))
+    assert upload < verify < promote
+    assert not steps[verify].get("continue-on-error")
+    assert "steps.worker_scope.outputs.changed == 'true'" in steps[verify]["if"]
+
+
+def test_compose_worker_preserves_packaged_runtime_and_api_stays_python_only():
+    for filename in ("docker-compose.yml", "docker-compose.prod.yml"):
+        worker = yaml.safe_load((ROOT / filename).read_text())["services"]["worker"]
+        assert worker["build"] == {"context": ".", "dockerfile": "backend/Dockerfile.worker"}
+        assert all(not volume.endswith(":/app") for volume in worker.get("volumes", []))
+    for filename in ("Dockerfile", "Dockerfile.prod"):
+        active = '\n'.join(
+            line for line in (ROOT / "backend" / filename).read_text().splitlines() if not line.startswith('#')
+        )
+        assert "nesting-runtime" not in active and "node:" not in active
+    assert "nesting-runtime/" in (ROOT / "backend/.dockerignore").read_text()
+
+
+def test_image_smoke_timeout_removes_only_its_own_container(monkeypatch):
+    spec = importlib.util.spec_from_file_location("worker_smoke", ROOT / ".github/scripts/smoke_nesting_worker.py")
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+    commands = []
+
+    def run(args, **_kwargs):
+        commands.append(args)
+        if len(commands) == 1:
+            raise subprocess.TimeoutExpired(args, 30)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(smoke.subprocess, "run", run)
+    with pytest.raises(subprocess.TimeoutExpired):
+        smoke.container("synthetic-image", ["solver.cjs"])
+    name = next(arg.split("=", 1)[1] for arg in commands[0] if arg.startswith("--name="))
+    assert name.startswith("werco-nesting-smoke-")
+    assert commands[1] == ["docker", "rm", "--force", name]

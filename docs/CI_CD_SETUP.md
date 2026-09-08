@@ -50,6 +50,17 @@ stages are separately branch-gated to pushes, so a PR run does the full CI and n
 | Deploy Staging | Railway deployment | Security (develop branch) |
 | Deploy Production | Railway deployment, then post-deploy health verification | Security (main branch) |
 
+The build stage also requires `backend/Dockerfile.worker` and a non-root,
+network-disabled solver smoke. Its manifest artifact binds the compiled shared
+TypeScript kernel and pinned Node 22.23.2 runtime. On production releases touching
+the backend, shared nesting library, compiler/lockfile or worker infrastructure,
+the existing enabled worker deploy path is required before mutation. After the API
+release/migration gate, worker upload must be followed by verification of an active
+SUCCESS deployment and a fresh matching post-Redis heartbeat before Vercel promotion.
+`.github/scripts/worker_release_scope.py` also makes shared-kernel changes defer from
+the standalone frontend workflow. Unrelated UI/CSS releases keep that fast path.
+Neither the receipt string nor logs without live platform state prove availability.
+
 > **Production auto-deploys from `main`.** A push to `main` (only reachable through a
 > merged PR — see Branch Protection below) runs full CI and then deploys to production
 > with **no manual approval gate**. The `production` GitHub environment no longer carries

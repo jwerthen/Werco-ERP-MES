@@ -43,7 +43,8 @@ the same permission as Quote Calculator; see [RBAC_PERMISSIONS.md](RBAC_PERMISSI
    record covering the current inputs and all compared groups, including potential
    leftover geometry when analysis is available. **Team drafts** saves inputs
    to the ERP as a new draft or a new immutable revision; it does not save a
-   validated comparison or change material inventory.
+   validated comparison or change material inventory. Use a saved revision's
+   **Saved calculations** action when you want the server to retain a calculation.
 
 The layout places actual outer contours, including concave profiles, using
 multiple part orderings and the permitted rotations after applying grain requirements. It checks contour
@@ -58,6 +59,57 @@ weight uses the selected catalog density when bound to an ERP source (unknown
 when that source has no valid density), or typical density for a family-only
 estimate. Check dimensions, quantities, supplier
 sheet sizes, and your shop's handling capacity before ordering.
+
+## Saved calculations for team review
+
+1. Save the inputs through **Team drafts**. For that saved revision, choose
+   **Saved calculations** and then **Calculate saved revision**. This uses the
+   selected revision exactly, including its quantities, geometry, spacing and
+   entered prices. Unsaved workspace changes are not submitted. An older revision
+   can be calculated intentionally without replacing the latest draft.
+2. **Review run** shows the number of stock options evaluated and how many fit
+   their entire material group. **Finished** means the search ended; it does not
+   mean all parts fit. Every stock size is an alternative scenario. Do not add
+   the sheet counts of different alternatives together.
+3. **View option** opens the actual saved contours and holes, sheet selector,
+   inch dimensions, margin/gap, and potential-leftover regions. The view binds
+   the saved input hash, stock and result before rendering. A sheet above the
+   100,000-vertex preview budget remains in the saved report but is not drawn.
+4. **Cancel calculation** retains already completed, checked option results.
+   A timeout or work limit also keeps completed results and labels missing work.
+   Leaving this panel stops browser polling, not the server's submitted job.
+   Use the cancel action to stop that job explicitly. Entering the nesting section
+   later still begins with empty workspace inputs.
+5. **Download saved report** exports an unapproved JSON evidence snapshot:
+   exact imperial input revision, server identity, settings, warnings and retained
+   results. Its internal geometry payload explicitly uses millimeters; all
+   on-screen dimensions and areas use inches/feet. This report is not an approved
+   quote export, CAD-source signature, inventory record or machine program.
+
+The server uses the same geometry kernel as the browser and checks each emitted
+layout before retaining it. It permits one active calculation per company and
+one nesting child per worker process. The initial technical profile allows 120
+seconds for the entire project, 36 enabled stock options in saved order and a
+512 MiB Node heap. Saved input remains limited to 5 MiB, 300 total part instances
+and 20,000 source vertices. Output budgets are 8 MiB per option message and 24 MiB
+of retained option content. These are computational limits, not shop-approved
+manufacturing parameters or a proof of the optimal material order.
+
+If the matching calculation service is starting or unavailable, refresh its
+status. Local **Compare sheets** remains usable. An unconfirmed start shows
+**Retry calculation request**, which recovers the same request instead of
+creating another run. A stopped/expired run is never silently retried with a new
+solver; explicitly create a new calculation. Permission loss or a changed
+worker build can stop work while retaining earlier checked checkpoints.
+
+Saved calculations remain **unapproved**. Source CAD bytes are not retained by
+this workflow; material identity, original source hashes, drawing semantics,
+shop rules and prices still need review. Potential remnants receive $0 credit.
+There is no physical-material allocation, reservation, approval or quote-cost
+writeback. The panel shows release, solver/bundle/runtime, input hash and limits
+under **Calculation identity, limits and review notes**. Fixed code-unit ordering
+replaces locale-dependent tie-breaking in solver v4; the recorded seed is null
+because this search is not random.
 
 ## Rotation and grain requirements
 
@@ -318,7 +370,7 @@ alternatives, validated placements, utilization and entered material costs.
 Changed inputs or inconsistent results require recomparison. The solver is
 deterministic, so the record stores no random seed and explains what replay
 requires. The manifest identifies orientation policy `werco-orientation-v1`
-and solver `werco-contour-v3`; contour search uses up to two deterministic
+and solver `werco-contour-v4`; contour search uses up to two deterministic
 orders, while rectangular-profile search uses three. Geometry fingerprints
 remain about shape; the input-project fingerprint also covers orientation
 requirements. Incomplete heuristic results are not proof that a layout is impossible.

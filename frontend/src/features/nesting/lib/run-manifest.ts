@@ -7,7 +7,7 @@ import { canonicalJSON, geometryHash, sha256 } from './provenance';
 import { mmToIn } from './units';
 
 export type ComparisonSnapshot = { comparison: Comparison; signature: string };
-export const SOLVER_VERSION = 'werco-contour-v3';
+export const SOLVER_VERSION = 'werco-contour-v4';
 
 /** Downloadable draft evidence. This is never an approval, inventory claim or server audit record. */
 export async function buildRunManifest(

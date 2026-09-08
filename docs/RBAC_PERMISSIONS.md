@@ -1324,6 +1324,25 @@ revisions and required audit events, never operational quote or inventory writes
 Company scope is enforced on every draft query/reference. Customer/job-specific
 segregation and approvals are future capabilities, not implied by draft access.
 
+**Saved server calculations** use the same effective permissions:
+
+| Action | Required effective permissions |
+|--------|--------------------------------|
+| Read runtime readiness, run history, status, exact checkpoint or draft report | `purchasing:view` |
+| Start a calculation from an exact saved revision or cancel a run | `purchasing:view` **and** `purchasing:create` |
+
+The worker rechecks the submitting actor's active user/company membership,
+effective permissions and API-token validity before claiming work and while it
+runs. Queue payloads contain only company/run IDs; no user credential or drawing
+is put in Redis. Worker build readiness is shared infrastructure metadata, not
+another tenant's data. All result/report queries remain company-scoped. Start
+and cancel explicitly bind the intended company. Reads create no business/audit
+events; normal API-token usage telemetry still applies. New run, cancellation,
+lease and checkpoint writes require transactional audit evidence. A run remains
+unapproved even when its geometry is checked and its search finishes. No new
+permission key, quote approval, cost writeback, original-CAD authentication or
+inventory reservation authority is introduced.
+
 ### Receiving
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |

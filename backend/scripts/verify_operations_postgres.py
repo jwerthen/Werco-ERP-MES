@@ -1,4 +1,4 @@
-"""Exercise migrations 095–101 and runtime p75 on CI's disposable PostgreSQL.
+"""Exercise migrations 095–102 and runtime p75 on CI's disposable PostgreSQL.
 
 This uses an isolated schema, rolls everything back, and refuses remote/production DBs.
 Run before the E2E seed so schema migration failures stop the browser suite early.
@@ -6,6 +6,8 @@ Run before the E2E seed so schema migration failures stop the browser suite earl
 
 import importlib.util
 import os
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -17,6 +19,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from app.models.runtime_metric import RuntimeMetricSample
 from app.services.runtime_metric_service import summarize_runtime_metrics
+from scripts.verify_nesting_runs_postgres import assert_nesting_run_races
 
 DATA_API_ROLES = ("anon", "authenticated")
 TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
@@ -58,7 +61,7 @@ def assert_nesting_revision_guards(connection):
     for statement in (
         "UPDATE quote_nesting_revisions SET name='Changed' WHERE id=1",
         'DELETE FROM quote_nesting_revisions WHERE id=1',
-        'TRUNCATE quote_nesting_revisions',
+        'TRUNCATE quote_nesting_revisions, quote_nesting_runs, quote_nesting_run_checkpoints',
     ):
         refused(sa.text(statement), {}, '23514')
     connection.execute(sa.text('INSERT INTO companies (id) VALUES (2)'))
@@ -114,6 +117,7 @@ def verify():
         "099_recoverable_import_batches",
         "100_receiving_supplier_followup",
         "101_quote_nesting_drafts",
+        "102_quote_nesting_runs",
     ):
         path = Path(__file__).resolve().parents[1] / "alembic/versions" / (filename + ".py")
         spec = importlib.util.spec_from_file_location(filename, path)
@@ -145,7 +149,7 @@ def verify():
                     )
                 )
             # Existing references only; these migrations must not depend on seed data.
-            for table in ("companies", "users", "work_centers", "work_order_operations", "time_entries"):
+            for table in ("companies", "users", "api_tokens", "work_centers", "work_order_operations", "time_entries"):
                 connection.execute(sa.text(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)"))
             connection.execute(sa.text("""CREATE TABLE work_orders (
               id INTEGER PRIMARY KEY, company_id INTEGER, is_deleted BOOLEAN,
@@ -163,6 +167,7 @@ def verify():
                 new_tables = set(inspector.get_table_names(schema=schema)) - {
                     "companies",
                     "users",
+                    "api_tokens",
                     "work_centers",
                     "work_order_operations",
                     "time_entries",
@@ -241,12 +246,24 @@ def verify():
                 assert not sa.inspect(connection).get_sequence_names(schema=schema)
                 assert not sa.inspect(connection).get_indexes("work_orders", schema=schema)
             print(
-                "PostgreSQL migrations 095–100 passed upgrade/downgrade twice, "
+                "PostgreSQL migrations 095–102 passed upgrade/downgrade twice, "
                 "RLS and Data API table/sequence privilege checks, and p75 cohorts 1/4/5/8."
             )
         finally:
             transaction.rollback()
-            engine.dispose()
+    try:
+        assert_nesting_run_races(engine)
+        # A separate process prevents FastAPI/auth/queue test doubles or startup
+        # state from leaking into other checks. This child repeats the local/test
+        # database guard and owns a disposable schema, never the E2E seed tables.
+        subprocess.run(
+            [sys.executable, '-m', 'scripts.verify_nesting_runs_api_postgres'],
+            check=True,
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+    finally:
+        engine.dispose()
 
 
 if __name__ == "__main__":

@@ -6,8 +6,8 @@
 
 > **Scope.** This runbook covers the two long-standing services, `werco-api` and
 > `werco-frontend`. It does **not** cover the ARQ background worker (`werco-worker`), which
-> no workflow in this repo has ever deployed. Its one-time cutover — pre-flight checks, the blast radius of
-> twelve crons that have never fired, the staged rollout, and rollback — is
+> now uses the gated worker steps in the main CI/CD pipeline. Its original cutover —
+> pre-flight checks, per-cron effects, staged rollout, and rollback — is
 > [`WORKER_DEPLOYMENT_RUNBOOK.md`](WORKER_DEPLOYMENT_RUNBOOK.md). Two differences matter if
 > you ever deploy the worker by hand: it is deployed from the **repo root**, not `backend/`,
 > and it has **no healthcheck** (it serves no HTTP).
@@ -19,6 +19,16 @@
 > they do not establish that a build is serving on `wercomfg.app`. Use
 > [DEPLOYMENT.md → Existing Vercel frontend](DEPLOYMENT.md#existing-vercel-frontend-material-nesting)
 > for the native nesting feature's deployment scope and checks.
+
+> **Saved nesting calculations.** The normal combined release must migrate the API
+> through 102 before uploading the worker. CI builds the separate worker image, tests
+> its fixed Node executable without network access, and preserves the bundle manifest.
+> Before Vercel promotion, worker-touched releases require an active Railway SUCCESS
+> deployment and a heartbeat no older than 90 seconds from that exact deployment, published
+> after a successful Redis write, matching the release/manifest/Node identity. The gate
+> rechecks active state. Failure blocks promotion; do not replace it with a manual upload
+> or an old log check. Roll back compatible application images while retaining additive
+> draft/run tables and immutable history. See [WORKER_SERVICE.md](WORKER_SERVICE.md#saved-nesting-calculation-runtime).
 
 ---
 

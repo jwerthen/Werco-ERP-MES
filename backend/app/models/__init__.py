@@ -138,6 +138,7 @@ from .quote_config import (
     SettingsAuditLog,
 )
 from .quote_nesting_draft import QuoteNestingDraft, QuoteNestingRevision
+from .quote_nesting_run import QuoteNestingRun, QuoteNestingRunCheckpoint
 from .rfq_quote import PriceSnapshot, QuoteEstimate, QuoteLineSummary, RfqPackage, RfqPackageFile
 from .role_permission import RolePermission
 from .routing import Routing, RoutingOperation
@@ -182,6 +183,8 @@ from .working_calendar import WorkingCalendar
 __all__ = [
     "QuoteNestingDraft",
     "QuoteNestingRevision",
+    "QuoteNestingRun",
+    "QuoteNestingRunCheckpoint",
     "ProductionReceipt",
     "RuntimeMetricSample",
     "RuntimeMetricSetting",
