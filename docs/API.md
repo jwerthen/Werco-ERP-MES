@@ -864,6 +864,63 @@ source identity, normalize equivalent decimal representations, and sort stock
 rows by ID. They detect changed inputs; they are not signed approvals or
 persisted audit events. CAD geometry is not submitted to these endpoints.
 
+### Quote nesting draft revisions
+
+Explicit Save/Open of **unapproved client inputs**, separate from operational
+quotes, laser nests, and inventory. All paths are relative to `/api/v1` and
+require the active company's effective `purchasing:view`; POST also requires
+`purchasing:create`. Existing role overrides, platform/superuser behavior, and
+read-only company/kiosk/API-token fences still apply. Read handlers make no
+business or audit writes; API-token authentication may retain its normal usage telemetry.
+
+| Method | Endpoint | Contract |
+|--------|----------|----------|
+| GET | `/quote-nesting/drafts` | Latest revision summaries, newest first with stable ID tie-break. `page` 1–100000 (default 1), `per_page` 1–100 (default 20). |
+| GET | `/quote-nesting/drafts/{id}/revisions` | Paginated immutable revision summaries with the same paging fields. |
+| GET | `/quote-nesting/drafts/{id}/revisions/{number}` | Exact revision plus its imperial `estimate` input object. Its `draft_version` is that revision's version, not today's latest. |
+| POST | `/quote-nesting/drafts` | Multipart JSON file `estimate`, UUID `request_key`, positive integer `expected_company_id`; create a new draft. |
+| POST | `/quote-nesting/drafts/{id}/revisions` | The same fields plus positive `expected_version`; append only when that version is current. |
+
+POST returns **200** for both a new save and an identical idempotent replay.
+The file limit is 5 MiB; a route-specific ASGI cap limits the entire upload to
+5 MiB + 16 KiB before multipart parsing. The global 256 KiB JSON-body cap is
+unchanged. Only the documented, nonduplicated fields are accepted. Current
+project formats 4/5/6 must explicitly use inches and USD, with bounded metadata,
+300 total part instances, 20,000 geometry vertices, and 12 stock options per group.
+Duplicate JSON keys, non-finite values, unknown fields, original CAD blobs,
+approval flags, and solver/placement output are refused. This is structural
+validation of an input draft, not authoritative geometric acceptance.
+
+Revision summaries contain `draft_id`, `company_id`, `revision_number`,
+`draft_version`, `name`, `status: DRAFT`, `content_sha256`, `payload_schema_version`,
+`payload_bytes`, `created_by`, `created_at`, and `review_issues` (code/message,
+optional group ID). Pages add `schema_version: 1`, `items`, `total`, `page`,
+`per_page`; exact-revision/save responses add `schema_version: 1` and `estimate`.
+The content hash covers server canonical JSON (sorted keys, compact separators,
+UTF-8, no non-finite numbers), not authenticated original DXF bytes. Geometry,
+pricing, and imported CAD hashes remain unapproved client assertions.
+
+Catalog bindings must reference this company's existing IDs. Changed/inactive
+sources are preserved with explicit review notes; missing/foreign IDs are
+refused without saving. Open clears catalog-price acknowledgment in the UI.
+Every successful first write adds one immutable revision and its required audit
+event in one transaction; failed audit evidence rolls back all draft changes.
+No quote totals, material allocation, remnant reservation, or operational records
+are modified. PostgreSQL rejects revision UPDATE/DELETE/TRUNCATE. There is no
+revision mutation/deletion or approval endpoint.
+
+- **403**: effective permission or existing session/company restriction.
+- **404**: inaccessible or missing draft/revision.
+- **409**: stale version, changed intended company, reused request key with a
+  different actor/payload/target, or a concurrent unique-key conflict.
+- **413**: file or whole-upload limit; **415**: wrong media type; **422**: invalid input.
+- **503**: required audit evidence failed; the transaction was rolled back.
+
+Retries must reuse the same UUID, intended company, target/version and exact
+input snapshot. An identical same-actor retry returns the original result before
+checking today's draft version. It never appends a second revision or audit event.
+See [Material Nesting](MATERIAL_NESTING.md#team-drafts-and-revision-history).
+
 ### Global search and customer edits
 
 `GET /search/` accepts `q` (1–100 characters), `types` (comma-separated entity

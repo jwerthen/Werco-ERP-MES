@@ -132,7 +132,9 @@ Material Nesting's deployment target is the ERP frontend at
 its current domain and project association. The material catalog/resolution
 feature also needs the matching existing ERP backend release for
 `/api/v1/quote-nesting/materials` and `/api/v1/quote-nesting/material-resolution`.
-It needs no separate service, iframe, domain, migration, or environment variable.
+It needs no separate service, iframe, domain, or environment variable. Team
+draft persistence additionally requires backend migration `101_quote_nesting_drafts`
+and its `/api/v1/quote-nesting/drafts` routes before the frontend is promoted.
 
 `frontend/vercel.json` already builds with `npm run build`, publishes `build/`,
 and rewrites SPA paths to `/index.html`, so opening or refreshing `/nest` uses
@@ -161,6 +163,21 @@ Verify that an unavailable leftover analysis leaves a valid sheet order intact,
 and that editing inputs hides stale regions. Check CSV/SVG/draft JSON exports.
 The leftover increment changes no API, permission, migration, environment
 variable, deployment topology, or editable estimate file version.
+
+For team drafts, the normal backend boot migration creates `quote_nesting_drafts`
+and `quote_nesting_revisions`, their tenant/version/request constraints, deny-by-default
+RLS, and immutable revision guards. The models mirror bootstrap constraints and
+trigger DDL. The existing PostgreSQL verification script exercises this migration
+in a disposable schema; API concurrency checks run in the existing E2E pipeline.
+Verify explicit save, revision history, stale-version conflict, same-request retry,
+Viewer read-only behavior, and a fresh empty workspace after route reentry/company
+switch. Reopening must clear comparisons and applied catalog prices. No original
+CAD files, quote totals, or inventory records are written by these routes.
+
+Application rollback can leave the additive draft tables in place. Do not downgrade
+migration101 as an ordinary rollback: its downgrade drops the new draft history.
+Retain/export required records before any separately authorized destructive schema
+rollback. An older frontend retains its local-file workflow but has no Team drafts UI.
 
 The orientation/grain increment changes only frontend behavior and local file
 formats; it adds no API, permission, migration, or environment requirement.

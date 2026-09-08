@@ -1,4 +1,4 @@
-"""Exercise migrations 095–100 and runtime p75 on CI's disposable PostgreSQL.
+"""Exercise migrations 095–101 and runtime p75 on CI's disposable PostgreSQL.
 
 This uses an isolated schema, rolls everything back, and refuses remote/production DBs.
 Run before the E2E seed so schema migration failures stop the browser suite early.
@@ -21,6 +21,52 @@ from app.services.runtime_metric_service import summarize_runtime_metrics
 DATA_API_ROLES = ("anon", "authenticated")
 TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
 SEQUENCE_PRIVILEGES = ("USAGE", "SELECT", "UPDATE")
+
+
+def assert_nesting_revision_guards(connection):
+    """Use real SQL against the new tables; ORM events cannot make these pass."""
+    connection.execute(sa.text("""INSERT INTO quote_nesting_drafts
+      (id, company_id, name, created_by, created_at, updated_at)
+      VALUES (1, 1, 'Synthetic draft', 1, now(), now())"""))
+    insert_revision = sa.text("""INSERT INTO quote_nesting_revisions
+      (id, company_id, draft_id, revision_number, draft_version, name, estimate_json,
+       content_sha256, payload_schema_version, payload_bytes, created_by, created_at,
+       request_key, request_hash, review_issues_json)
+      VALUES (:id, :company_id, 1, :revision, :revision, 'Synthetic revision', '{}',
+       :content_hash, 6, 2, 1, now(), :request_key, :request_hash, '[]')""")
+    first = {
+        'id': 1,
+        'company_id': 1,
+        'revision': 1,
+        'content_hash': 'a' * 64,
+        'request_hash': 'b' * 64,
+        'request_key': str(uuid4()),
+    }
+    connection.execute(insert_revision, first)
+
+    def refused(statement, parameters, expected_code):
+        savepoint = connection.begin_nested()
+        try:
+            connection.execute(statement, parameters)
+        except sa.exc.DBAPIError as error:
+            savepoint.rollback()
+            assert error.orig.pgcode == expected_code, str(error.orig)
+        else:
+            savepoint.rollback()
+            raise AssertionError('PostgreSQL accepted a prohibited nesting revision write')
+
+    for statement in (
+        "UPDATE quote_nesting_revisions SET name='Changed' WHERE id=1",
+        'DELETE FROM quote_nesting_revisions WHERE id=1',
+        'TRUNCATE quote_nesting_revisions',
+    ):
+        refused(sa.text(statement), {}, '23514')
+    connection.execute(sa.text('INSERT INTO companies (id) VALUES (2)'))
+    refused(insert_revision, {**first, 'id': 2, 'company_id': 2, 'revision': 2, 'request_key': str(uuid4())}, '23503')
+    refused(insert_revision, {**first, 'id': 2, 'revision': 2}, '23505')
+    refused(insert_revision, {**first, 'id': 2, 'request_key': str(uuid4())}, '23505')
+    refused(sa.text("UPDATE quote_nesting_drafts SET status='APPROVED' WHERE id=1"), {}, '23514')
+    assert connection.execute(sa.text('SELECT name FROM quote_nesting_revisions')).scalar_one() == 'Synthetic revision'
 
 
 def assert_private_objects(connection, schema, tables):
@@ -67,6 +113,7 @@ def verify():
         "098_runtime_metrics",
         "099_recoverable_import_batches",
         "100_receiving_supplier_followup",
+        "101_quote_nesting_drafts",
     ):
         path = Path(__file__).resolve().parents[1] / "alembic/versions" / (filename + ".py")
         spec = importlib.util.spec_from_file_location(filename, path)
@@ -127,6 +174,7 @@ def verify():
                 assert_private_objects(connection, schema, new_tables)
                 connection.execute(sa.text("INSERT INTO companies (id) VALUES (1)"))
                 connection.execute(sa.text("INSERT INTO users (id) VALUES (1)"))
+                assert_nesting_revision_guards(connection)
                 connection.execute(sa.text("INSERT INTO documents (id) VALUES (1)"))
                 connection.execute(
                     sa.text("INSERT INTO purchase_orders (id, company_id, status) VALUES (1, 1, 'sent')")

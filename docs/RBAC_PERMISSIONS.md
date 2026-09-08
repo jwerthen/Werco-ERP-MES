@@ -1303,9 +1303,26 @@ the active company; missing, inactive, and foreign-company IDs all return 404.
 Neither endpoint seeds defaults or writes data. Existing disabled-user,
 kiosk/API-token, and read-only switched-company restrictions remain in force;
 the calculation POST is not exempt from the read-only-context fence. No new
-permission key, backend write grant, inventory reservation, or approval authority
-is introduced. See [MATERIAL_NESTING.md](MATERIAL_NESTING.md) and the
+permission key, inventory reservation, or approval authority
+is introduced by catalog resolution. See [MATERIAL_NESTING.md](MATERIAL_NESTING.md) and the
 [API contract](API.md#quote-nesting-material-provenance).
+
+**Team draft persistence** adds a separate explicit write boundary:
+
+| Action | Required effective permissions |
+|--------|--------------------------------|
+| List drafts/history or open a revision | `purchasing:view` |
+| Save new draft or append a revision | `purchasing:view` **and** `purchasing:create` |
+
+Defaults allow Admin, Manager and Supervisor to save; Viewer can open drafts.
+Tenant overrides are honored and malformed overrides fail closed. Existing
+Platform Admin/superuser exemptions remain, but read-only switched-company
+contexts cannot write. The frontend hides Save when create permission is absent;
+the server checks independently. These permissions grant neither geometry/quote
+approval nor physical-material reservation. New saves add immutable input
+revisions and required audit events, never operational quote or inventory writes.
+Company scope is enforced on every draft query/reference. Customer/job-specific
+segregation and approvals are future capabilities, not implied by draft access.
 
 ### Receiving
 

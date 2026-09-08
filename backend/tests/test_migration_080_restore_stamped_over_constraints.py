@@ -669,7 +669,7 @@ def test_the_cyclic_fk_renders_as_a_post_create_alter_on_postgres():
     raises and nothing warns — SQLAlchemy silently picks its own edges and defers ALL
     FOURTEEN foreign keys on both tables to post-CREATE ALTERs, so the bootstrap DDL stops
     resembling the migrated schema and every one of them lands unnamed. With ``use_alter``
-    pinned to this column exactly ONE post-CREATE ALTER is emitted, carrying 003's name and
+    pinned to this column exactly ONE post-CREATE FK ALTER is emitted, carrying 003's name and
     ``ON DELETE SET NULL``, so a bootstrapped DB and a migrated DB end up identical. The
     count is the assertion that catches the silent version.
     """
@@ -680,8 +680,14 @@ def test_the_cyclic_fk_renders_as_a_post_create_alter_on_postgres():
     )
     metadata.create_all(engine, checkfirst=False)
 
-    alters = [statement.strip() for statement in statements if "ALTER TABLE" in statement]
-    assert len(alters) == 1, f"expected exactly one post-CREATE ALTER (the cyclic FK), got {alters}"
+    # Security bootstrap hooks may also emit ALTER TABLE ... ENABLE ROW LEVEL SECURITY.
+    # Count named AND unnamed FK ALTERs so the use_alter regression still fails.
+    alters = [
+        statement.strip()
+        for statement in statements
+        if statement.lstrip().startswith("ALTER TABLE") and "FOREIGN KEY" in statement
+    ]
+    assert len(alters) == 1, f"expected exactly one post-CREATE FK ALTER (the cyclic FK), got {alters}"
     alter = alters[0]
     assert "ADD CONSTRAINT fk_work_orders_current_operation" in alter
     assert "FOREIGN KEY(current_operation_id) REFERENCES work_order_operations (id)" in alter

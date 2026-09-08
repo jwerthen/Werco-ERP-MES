@@ -8,7 +8,8 @@ the same permission as Quote Calculator; see [RBAC_PERMISSIONS.md](RBAC_PERMISSI
 ## Prepare and compare an estimate
 
 1. Each entry to Material Nesting starts with an empty estimate. Begin entering
-   parts, or use **Open** to restore a saved estimate file. Set the project name
+   parts, use **Open** for a local estimate file, or explicitly choose a revision
+   from **Team drafts**. Set the project name
    and the active group's material, thickness, part spacing, and edge margin.
    Dimension fields accept decimal inches and fractions such as `1/4` or `1 1/2`.
 2. Upload or drop DXFs, or add rectangles and circles by size. Before files are
@@ -40,7 +41,9 @@ the same permission as Quote Calculator; see [RBAC_PERMISSIONS.md](RBAC_PERMISSI
    comparison as CSV; **Save nest preview** downloads its selected sheet as SVG,
    including reference lines. **Export review record** downloads a draft JSON
    record covering the current inputs and all compared groups, including potential
-   leftover geometry when analysis is available.
+   leftover geometry when analysis is available. **Team drafts** saves inputs
+   to the ERP as a new draft or a new immutable revision; it does not save a
+   validated comparison or change material inventory.
 
 The layout places actual outer contours, including concave profiles, using
 multiple part orderings and the permitted rotations after applying grain requirements. It checks contour
@@ -333,22 +336,68 @@ section, without demo parts or an automatically restored draft. Edits remain
 while you work within the page, including switching material groups and its
 workspace, stock, and help tabs. Leaving for another ERP page clears the current estimate; returning
 starts empty. Changing the user or active company also starts a fresh estimate.
-There is no localStorage, sessionStorage, or server-side save.
+No workspace is automatically restored from localStorage, sessionStorage, or the server.
 
 **Save before leaving the section**, refreshing, closing the tab, signing out,
 or switching companies. While the workspace has unsaved edits, it requests the
 browser's refresh/close warning; ordinary ERP navigation does not prompt.
-Use **Open** to restore an estimate from a saved file, then compare sheets to
-calculate fresh results.
+Use **Open** to restore an estimate from a saved file, or **Team drafts** to
+select a saved ERP revision. Both clear applied ERP catalog prices and prior
+comparisons. Refresh the catalog, review pricing, and compare sheets again.
+
+### Team drafts and revision history
+
+**Team drafts** only loads its list when selected. **Save team draft** creates
+a company-scoped DRAFT; **Save next revision** appends to the opened draft.
+Earlier revisions remain readable through **History**. Saving a historical
+revision while a newer one exists returns a conflict: open the latest revision
+or explicitly use **Save as new draft**. No collaborator's work is overwritten.
+**New** and opening a local file detach the current team-draft selection.
+Opening a team revision asks before replacing unsaved inputs.
+
+Each revision retains imperial estimate inputs, source metadata/hashes,
+material/thickness groups, quantities, stock settings, orientation restrictions,
+estimator identity, UTC timestamp (displayed in Central time), a server content
+hash, and source-review notes. The server hash binds its canonical JSON snapshot;
+it does not authenticate original DXF bytes or approve geometry. Original CAD
+bytes, placements, solver output, and leftover regions are not stored in this
+input-draft revision. Use the existing local review export for comparison evidence.
+
+The server accepts current project formats 4/5/6, up to 5 MiB per JSON file,
+with the same 300-part/20,000-vertex/12-stock-option limits and bounded metadata.
+It validates structure, unique identities, and active-company catalog references.
+Stale or inactive catalog snapshots can be retained with review notes so work
+can be saved, but all source values remain client assertions. Missing or foreign
+catalog IDs are refused. Significant geometry is not repaired or approved by Save;
+Open also runs the browser's geometry validation before replacing the workspace.
+
+Listing/opening requires effective `purchasing:view`; saving also requires
+`purchasing:create`, including tenant role overrides. Draft writes preserve the
+existing read-only company, kiosk, and API-token restrictions. The request binds
+the intended company, preventing a refreshed session from saving into another
+company. A revision and its required `AuditService` event commit together; audit
+failure rolls back the save. The event records identifiers, hashes, and review
+codes rather than geometry. Hash-chain runtime settings keep their existing meaning.
+Identical same-actor request-key retries return the original revision. If a save's
+network outcome is uncertain, **Retry previous save** checks that exact snapshot;
+it does not save newly edited inputs until the prior outcome is resolved.
+
+PostgreSQL UPDATE, DELETE, and TRUNCATE guards protect revision history, with
+application mapper guards and SQLite UPDATE/DELETE guards for local tests.
+There is no revision-edit, delete, approval, archive, or inventory command.
+Drafts are currently shared with permitted users in their company; this is not a
+customer/job-level access-control or certification-segregation implementation.
 
 The estimator does not create ERP quotes, purchase orders, work orders,
-production laser nest packages, inventory movements, or audit records. Its
+production laser nest packages, or inventory movements. Only explicit team
+draft saves add draft/revision records and their required audit events. Its
 local files and sheet previews are estimating outputs; it has no machine
 connection, cutting recipes, or postprocessor.
 
 The workspace is a native ERP route with feature-local styles isolated in a
 ShadowRoot and notifications supplied by the existing ERP toast provider.
 It uses the existing Vercel frontend deployment and SPA rewrite, plus two
-read-only ERP catalog/resolution endpoints. No database migration, environment
-variable, separate service, or hosting project is required; see
+read-only ERP catalog/resolution endpoints plus authenticated draft endpoints.
+Team drafts require migration `101_quote_nesting_drafts` on the existing backend.
+No environment variable, separate service, or hosting project is added; see
 [DEPLOYMENT.md](DEPLOYMENT.md#existing-vercel-frontend-material-nesting).

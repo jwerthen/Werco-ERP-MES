@@ -88,6 +88,18 @@ future objects, but the advisor lints **RLS state itself** — a new table witho
 `rls_disabled_in_public` ERROR back. Guard it the same way `059` does: Postgres-only (skip on
 SQLite). This is also recorded in CLAUDE.md → "Migrations — handle with care".
 
+## Nesting draft revision storage
+
+Migration `101_quote_nesting_drafts` adds company-scoped headers and immutable
+input revisions. Both tables enable RLS with no policies, revoke table/sequence
+grants from PUBLIC and present `anon`/`authenticated` roles, and keep tenant
+filtering in the authenticated API. PostgreSQL guards refuse revision UPDATE,
+DELETE and TRUNCATE; the trigger function pins `search_path`. Model create-all
+DDL mirrors these guards so bootstrap cannot silently omit them. No existing
+operational or audit table is rewritten. App-layer draft writes use required
+`AuditService` evidence in the same transaction; audit chain pause settings
+retain their existing behavior.
+
 ## Dashboard checklist (manual — cannot be done via SQL)
 
 These are Supabase dashboard settings; migrations can't reach them. Where the current state wasn't

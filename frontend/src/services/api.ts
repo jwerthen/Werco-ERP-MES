@@ -3834,6 +3834,32 @@ class ApiService {
     return response.data;
   }
 
+  async listNestingDrafts(page = 1, signal?: AbortSignal): Promise<import('../types/nestingDraft').NestingDraftPage> {
+    return (await this.api.get('/quote-nesting/drafts', { params: { page, per_page: 10 }, signal })).data;
+  }
+
+  async listNestingDraftRevisions(draftId: number, page = 1, signal?: AbortSignal): Promise<import('../types/nestingDraft').NestingDraftPage> {
+    return (await this.api.get(`/quote-nesting/drafts/${draftId}/revisions`, { params: { page, per_page: 10 }, signal })).data;
+  }
+
+  async getNestingDraftRevision(draftId: number, revision: number, signal?: AbortSignal): Promise<import('../types/nestingDraft').NestingDraftRevision> {
+    return (await this.api.get(`/quote-nesting/drafts/${draftId}/revisions/${revision}`, { signal })).data;
+  }
+
+  async saveNestingDraft(request: import('../types/nestingDraft').NestingDraftSave, signal?: AbortSignal): Promise<import('../types/nestingDraft').NestingDraftRevision> {
+    const body = new FormData();
+    body.append('estimate', new Blob([request.estimateJson], { type: 'application/json' }), 'estimate.json');
+    body.append('request_key', request.requestKey);
+    // A refreshed credential may have a different active company. The server
+    // checks this explicit intent before any write, including idempotent retries.
+    body.append('expected_company_id', String(request.companyId));
+    if (request.target) body.append('expected_version', String(request.target.expectedVersion));
+    const path = request.target ? `/quote-nesting/drafts/${request.target.draftId}/revisions` : '/quote-nesting/drafts';
+    return (await this.api.post(path, body, {
+      signal, timeout: 120_000, headers: { 'Content-Type': 'multipart/form-data' },
+    })).data;
+  }
+
   async getQuoteMaterials(category?: string) {
     const response = await this.api.get('/quote-calc/materials', { params: { category } });
     return response.data;
