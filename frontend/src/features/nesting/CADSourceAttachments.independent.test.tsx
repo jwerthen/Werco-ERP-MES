@@ -12,11 +12,14 @@ import type { NestingSourceIntent } from '../../types/nestingSource';
 
 let mockCompanyId = 2;
 let mockUserId = 7;
+let mockPaceCalls = 0;
 // Real pacing has a separate fake-clock test. This suite checks data/ordering
 // across 100 requests with the actual hashing and receipt validators active.
 jest.mock('./cadSourceTransport', () => ({
   ...jest.requireActual('./cadSourceTransport'),
-  createSourcePacer: () => async () => undefined,
+  createSourcePacer: () => async () => {
+    mockPaceCalls += 1;
+  },
 }));
 jest.mock('../../context/AuthContext', () => ({ useAuth: () => ({ user: { id: mockUserId } }) }));
 jest.mock('../../context/CompanyContext', () => ({ useCompany: () => ({ currentCompany: { id: mockCompanyId } }) }));
@@ -69,6 +72,7 @@ beforeEach(async () => {
   jest.resetAllMocks();
   mockCompanyId = 2;
   mockUserId = 7;
+  mockPaceCalls = 0;
   fixture = await sourceFixture();
   get.mockResolvedValue(fixture.revision);
   list.mockResolvedValue(sourcePage());
@@ -150,12 +154,20 @@ test('100 distinct originals produce 100 byte-exact sequential attachments with 
   expect(screen.getAllByRole('checkbox')).toHaveLength(100);
   expect(create).not.toHaveBeenCalled();
   const attach = screen.getByRole('button', { name: 'Attach selected originals' });
+  const refresh = screen.getByRole('button', { name: 'Refresh attachments' });
+  expect(refresh).toBeEnabled();
   fireEvent.click(attach);
   fireEvent.click(attach);
-  await screen.findByText('Batch finished. Review each file’s receipt or recovery message.', {}, { timeout: 15000 });
+  expect(refresh).toBeDisabled();
+  // The 200 write calls and real receipt hashes have a separate functional
+  // budget from file matching. Poll one attribute, not the full 100-row DOM
+  // on every progress mutation. This does not change production pacing.
+  await waitFor(() => expect(refresh).toBeEnabled(), { timeout: 60000 });
+  expect(screen.getByText('Batch finished. Review each file’s receipt or recovery message.')).toBeInTheDocument();
   expect(screen.getAllByText(retained)).toHaveLength(100);
   expect(create).toHaveBeenCalledTimes(100);
   expect(upload).toHaveBeenCalledTimes(100);
+  expect(mockPaceCalls).toBe(200);
   expect(maxActive).toBe(1);
   expect(order).toEqual(files.flatMap((_, index) => [`intent:${index}`, `bytes:${index}`]));
   expect(new Set(create.mock.calls.map(call => call[2].request_key)).size).toBe(100);
@@ -168,7 +180,7 @@ test('100 distinct originals produce 100 byte-exact sequential attachments with 
     expect(files[index].arrayBuffer).toHaveBeenCalledTimes(2);
   });
   expect(finalize).not.toHaveBeenCalled();
-}, 30000);
+}, 120000);
 
 test('a rejected foreign-actor intent is never used as a recovery handle', async () => {
   create.mockImplementationOnce(async (_draft, _number, request) => ({
