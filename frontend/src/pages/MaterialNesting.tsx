@@ -40,6 +40,7 @@ export default function MaterialNesting() {
               canSaveDrafts={canAll(['purchasing:view', 'purchasing:create'])}
               canManagePolicies={isAdmin && canAll(['purchasing:view', 'purchasing:create'])}
               canPlanRemnants={canAll(['inventory:view'])}
+              canExportBuyerPdf={canAll(['purchasing:view'])}
             />
           </NestingPortalContext.Provider>,
           target

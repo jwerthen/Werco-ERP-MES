@@ -1323,6 +1323,16 @@ downloads; they create no ERP quote, purchase order, inventory transaction, work
 order, or audit record. The downloadable review record is draft evidence, not
 a server approval or immutable audit event.
 
+**Export buyer PDF** formats one complete, current alternative per populated group.
+`POST /api/v1/quote-nesting/buyer-pdf` independently requires effective
+`purchasing:view`; any conditional group or recorded-piece sheet additionally
+requires `inventory:view`. Both multipart/report company IDs must match the active
+company. Company/preparer identity comes from the authenticated server context.
+The endpoint writes no order, inventory, quote, revision or audit record and adds
+no permission key. Existing kiosk, disabled-user and read-only switched-company
+POST restrictions remain in force. The PDF does not establish material availability,
+reservation, certification or manufacturing approval.
+
 `GET /api/v1/quote-nesting/materials` and
 `POST /api/v1/quote-nesting/material-resolution` independently enforce the same
 effective `purchasing:view` permission. They read only active catalog rows from

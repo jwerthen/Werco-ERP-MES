@@ -25,6 +25,7 @@ from app.middleware.logging_middleware import (
     CorrelationIdMiddleware,
     RequestLoggingMiddleware,
 )
+from app.middleware.nesting_buyer_pdf_body_limit import NestingBuyerPdfBodyLimitMiddleware
 from app.middleware.nesting_draft_body_limit import NestingDraftBodyLimitMiddleware
 from app.middleware.nesting_source_body_limit import NestingSourceBodyLimitMiddleware
 
@@ -644,6 +645,7 @@ For API support, contact the system administrator.
 app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(CorrelationIdMiddleware)
 app.add_middleware(NestingDraftBodyLimitMiddleware)
+app.add_middleware(NestingBuyerPdfBodyLimitMiddleware)
 app.add_middleware(NestingSourceBodyLimitMiddleware)
 
 # GZip compression middleware

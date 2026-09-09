@@ -33,6 +33,7 @@ from app.api.endpoints import (
     maintenance,
     materials,
     mrp,
+    nesting_buyer_pdf,
     notifications,
     oee,
     operational_events,
@@ -81,6 +82,7 @@ from app.api.endpoints import (
 )
 
 api_router = APIRouter()
+api_router.include_router(nesting_buyer_pdf.router, prefix="/quote-nesting", tags=["Quote Nesting"])
 api_router.include_router(document_deliveries.router, prefix="/document-deliveries", tags=["Document Deliveries"])
 api_router.include_router(operations_inbox.router, prefix="/operations-inbox", tags=["Operations Inbox"])
 api_router.include_router(user_workspaces.router, prefix="/user-workspaces", tags=["User Workspaces"])

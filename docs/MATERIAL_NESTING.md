@@ -85,6 +85,33 @@ when that source has no valid density), or typical density for a family-only
 estimate. Check dimensions, quantities, supplier
 sheet sizes, and your shop's handling capacity before ordering.
 
+## Buyer PDF for the selected material plan
+
+After comparing current inputs, choose **Export buyer PDF**. Select one complete
+alternative for every populated material/thickness group; alternative counts are
+separate and must not be added together. Enter a **Job / project reference** and
+optional **Buyer notes**, then choose **Download buyer PDF**. These report-only
+fields do not change the nest. Missing, stale or incomplete group results keep
+export unavailable. **Cancel export**, changing inputs/context, or starting a new
+comparison discards a pending download.
+
+The PDF contains the selected full-sheet purchase quantities, material/thickness,
+part quantities and revisions, plus each actual vector nest layout in inches. The
+drawings fit the page and are not 1:1. For an explicitly selected recorded-piece
+alternative, existing-piece use is separate from purchased stock and a full-sheet
+fallback replaces the selected buy list if that piece cannot be used. Confirm its
+physical availability and eligibility before reducing the purchase quantity.
+
+Confirm material grade/specification before ordering: a family label alone does
+not establish grade. No prices, quote totals, purchase order, material credit or NC
+program is produced. PDF generation is a read-only server formatting operation,
+not geometry certification, inventory reservation or manufacturing approval.
+The report is limited to 300 instances, 300 sheets, 200,000 vector vertices,
+8 MiB of input and 20 MiB of PDF output; split larger jobs. Unsupported font
+characters appear as visible code-point markers rather than disappearing.
+See [API details](API.md#buyer-material-plan-pdf) and
+[permissions](RBAC_PERMISSIONS.md#material-nesting).
+
 ## Saved calculations for team review
 
 1. Save the inputs through **Team drafts**. For that saved revision, choose

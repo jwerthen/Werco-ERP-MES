@@ -3862,6 +3862,35 @@ class ApiService {
     return response.data;
   }
 
+  async generateNestingBuyerPdf(report: import('../features/nesting/lib/buyer-pdf-types').BuyerPdfReport, signal?: AbortSignal): Promise<Blob> {
+    const body = new FormData();
+    body.append('report', new Blob([JSON.stringify(report)], { type: 'application/json' }), 'buyer-report.json');
+    // The company is frozen with the report, including after token refresh.
+    body.append('expected_company_id', String(report.expectedCompanyId));
+    try {
+      return (await this.api.post('/quote-nesting/buyer-pdf', body, {
+        signal, timeout: 120_000, responseType: 'blob',
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })).data;
+    } catch (cause) {
+      const data = (cause as { response?: { data?: unknown } })?.response?.data;
+      if (data instanceof Blob) {
+        let detail: unknown;
+        if (data.size <= 64 * 1024) {
+          try {
+            detail = (JSON.parse(await data.text()) as { detail?: unknown }).detail;
+          } catch {
+            // A non-JSON error response must never be downloaded as a PDF.
+          }
+        }
+        throw new Error(typeof detail === 'string' ? detail : 'The buyer PDF could not be generated. Please try again.');
+      }
+      const detail = (data as { detail?: unknown })?.detail;
+      if (typeof detail === 'string') throw new Error(detail);
+      throw cause;
+    }
+  }
+
   async listNestingDrafts(page = 1, signal?: AbortSignal): Promise<import('../types/nestingDraft').NestingDraftPage> {
     return (await this.api.get('/quote-nesting/drafts', { params: { page, per_page: 10 }, signal })).data;
   }
