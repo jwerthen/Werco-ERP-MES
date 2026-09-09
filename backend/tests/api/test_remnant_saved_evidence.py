@@ -1,12 +1,9 @@
 """Current authorization and source-currentness fences across saved evidence paths."""
 
-import json
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
-from sqlalchemy import JSON, cast, func, literal, select
 
 from app.db.database import atomic_transaction
 from app.models.audit_log import AuditLog
@@ -15,7 +12,7 @@ from app.models.quote_nesting_run import QuoteNestingRunCheckpoint
 from app.models.role_permission import RolePermission
 from app.models.user import UserRole
 from app.services import quote_nesting_runs as runs
-from app.services.audit_service import AuditService
+from scripts.verify_remnant_planning_postgres import assert_json_presence, assert_source_header_lock
 from tests.api.test_quote_nesting_drafts_contract import upload
 from tests.services import test_nesting_remnant_protocol as fixtures
 from tests.services.test_quote_nesting_runs_service import RUNTIME, request_for
@@ -141,9 +138,7 @@ def test_source_drift_blocks_new_save_but_does_not_block_historical_read_or_uuid
 def test_postgres_presence_distinguishes_absent_explicit_null_and_object(db_session):
     if db_session.get_bind().dialect.name != 'postgresql':
         pytest.skip('PostgreSQL JSON expression is exercised by the isolated live-PG gate')
-    for value, expected in [({}, None), ({'remnantPlan': None}, 'null'), ({'remnantPlan': {}}, 'object')]:
-        expression = func.json_typeof(cast(literal(json.dumps(value)), JSON)['remnantPlan'])
-        assert db_session.scalar(select(expression)) == expected
+    assert_json_presence(db_session)
 
 
 def test_postgres_save_source_header_lock_blocks_withdrawal_until_snapshot_commit(
@@ -151,40 +146,4 @@ def test_postgres_save_source_header_lock_blocks_withdrawal_until_snapshot_commi
 ):
     if db_session.get_bind().dialect.name != 'postgresql':
         pytest.skip('FOR SHARE/UPDATE conflict requires the isolated PostgreSQL gate')
-    from sqlalchemy import text
-    from sqlalchemy.exc import OperationalError
-    from sqlalchemy.orm import Session
-
-    from app.models.user import User
-    from app.schemas.quote_nesting_drafts import SavedProject
-    from app.schemas.stock_piece import WithdrawObservation
-    from app.services.remnant_planning import verify_project_selection
-    from app.services.stock_piece import save_observation
-
-    body = WithdrawObservation(
-        expected_company_id=1,
-        expected_version=1,
-        request_key=str(uuid4()),
-        state='WITHDRAWN',
-        reason='Explicit test withdrawal',
-        observed_at='2026-09-08T13:00:00Z',
-        observer_name='Synthetic inspector',
-    )
-    piece_id = observed[1]['piece_id']
-    with atomic_transaction(db_session):
-        verify_project_selection(db_session, admin_user, 1, SavedProject.model_validate(project), project)
-        with Session(db_session.get_bind()) as concurrent:
-            with pytest.raises(OperationalError) as caught, atomic_transaction(concurrent):
-                concurrent.execute(text("SET LOCAL lock_timeout = '150ms'"))
-                actor = concurrent.get(User, admin_user.id)
-                actor._active_company_id = 1
-                save_observation(concurrent, actor, 1, AuditService(concurrent, actor), body, piece_id=piece_id)
-            assert caught.value.orig.pgcode == '55P03'
-    with Session(db_session.get_bind()) as concurrent, atomic_transaction(concurrent):
-        actor = concurrent.get(User, admin_user.id)
-        actor._active_company_id = 1
-        saved = save_observation(concurrent, actor, 1, AuditService(concurrent, actor), body, piece_id=piece_id)
-        assert saved['state'] == 'WITHDRAWN' and saved['observation_number'] == 2
-    with pytest.raises(HTTPException) as caught, atomic_transaction(db_session):
-        verify_project_selection(db_session, admin_user, 1, SavedProject.model_validate(project), project)
-    assert caught.value.status_code == 409
+    assert_source_header_lock(project, observed[1]['piece_id'], db_session, admin_user)

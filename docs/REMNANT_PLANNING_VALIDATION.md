@@ -47,6 +47,19 @@ These timings are a local comparison, not a production latency promise.
   Named compliance review found no material issue. No migration, new environment
   variable or extra cron schedule was introduced.
 
+## Mandatory PostgreSQL coverage
+
+The existing operations/E2E gate now runs
+`python -m scripts.verify_remnant_planning_postgres` as a checked subprocess with
+an outer 60-second timeout. It reuses exactly the two PostgreSQL-only assertions
+from `tests/api/test_remnant_saved_evidence.py`: omitted/null/object JSON field
+presence, and the save/start observation-header lock that blocks withdrawal until
+snapshot commit, then rejects that withdrawn selection. Both passed on disposable
+PostgreSQL15. Its generated schema is removed on normal completion and assertion
+failures; a forcibly terminated child relies on disposable test-database teardown.
+It touches no E2E seed tables. This does not make all 37 historical local cases
+above mandatory CI coverage. No production behavior, dependencies or CI YAML change.
+
 ## Actual browser and production packages
 
 The real MaterialNesting route and shadow-root presentation were exercised in a

@@ -287,6 +287,12 @@ def verify():
             timeout=60,
             stdin=subprocess.DEVNULL,
         )
+        subprocess.run(
+            [sys.executable, '-m', 'scripts.verify_remnant_planning_postgres'],
+            check=True,
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
     finally:
         engine.dispose()
 
