@@ -1,11 +1,13 @@
 """Atomic receipts, retry identity, real certificate bytes, and supplier follow-up."""
 
-from datetime import date, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from app.models.audit_log import AuditLog
+from app.models.company import Company
 from app.models.inventory import InventoryItem, InventoryTransaction
 from app.models.purchasing import POReceipt, POStatus, PurchaseOrderLine, ReceivingDeliveryBatch
 from app.models.role_permission import RolePermission
@@ -130,21 +132,32 @@ def test_foreign_lines_and_revoked_permissions_cannot_post(client, db_session):
     assert db_session.query(POReceipt).count() == 0
 
 
-def test_confirmation_preserves_requested_dates_rejects_stale_and_appears_in_inbox(client, db_session):
+@pytest.mark.parametrize('company_timezone', ['America/Chicago', 'UTC'])
+@pytest.mark.parametrize('due_offset,expected_severity', [(-1, 'high'), (0, 'medium')])
+def test_confirmation_preserves_requested_dates_rejects_stale_and_appears_in_inbox(
+    client, db_session, monkeypatch, company_timezone, due_offset, expected_severity
+):
     user, first, second, _ = setup_delivery(db_session)
+    company = db_session.get(Company, user.company_id)
+    company.timezone = company_timezone
+    # At this instant UTC is September 9 while Chicago is still September 8.
+    # Fixture deadlines and inbox severity must share the company's calendar.
+    inbox_now = datetime(2026, 9, 9, 0, 30, tzinfo=timezone.utc)
+    monkeypatch.setattr('app.services.operations_inbox_service.datetime', Mock(now=Mock(return_value=inbox_now)))
+    today = inbox_now.astimezone(ZoneInfo(company.timezone)).date()
     po = first.purchase_order
-    po.required_date = date.today() + timedelta(days=1)
-    po.expected_date = date.today() + timedelta(days=2)
+    po.required_date = today + timedelta(days=1)
+    po.expected_date = today + timedelta(days=2)
     db_session.commit()
     headers = headers_for(user)
     old = client.get(f'/api/v1/purchasing/purchase-orders/{po.id}', headers=headers).json()
     body = {
         'expected_updated_at': old['updated_at'],
         'acknowledged': True,
-        'supplier_confirmed_date': (date.today() + timedelta(days=3)).isoformat(),
+        'supplier_confirmed_date': (today + timedelta(days=3)).isoformat(),
         'supplier_confirmation_note': 'Supplier confirms revised arrival after material delay.',
         'follow_up_owner_id': user.id,
-        'follow_up_due_date': (date.today() - timedelta(days=1)).isoformat(),
+        'follow_up_due_date': (today + timedelta(days=due_offset)).isoformat(),
     }
     url = f'/api/v1/purchasing/purchase-orders/{po.id}/supplier-confirmation'
     response = client.put(url, headers=headers, json=body)
@@ -158,7 +171,7 @@ def test_confirmation_preserves_requested_dates_rejects_stale_and_appears_in_inb
         for item in client.get('/api/v1/operations-inbox/', headers=headers).json()['items']
         if item['source_kind'] == 'supplier_follow_up' and item['source_id'] == po.id
     )
-    assert follow['owner_id'] == user.id and follow['severity'] == 'high'
+    assert follow['owner_id'] == user.id and follow['severity'] == expected_severity
     body.update(expected_updated_at=result['updated_at'], acknowledged=False, supplier_confirmed_date=None)
     revoked = client.put(url, headers=headers, json=body)
     assert revoked.status_code == 200, revoked.text
