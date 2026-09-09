@@ -1,7 +1,8 @@
 # Actual-shape recorded-piece leftover ledger
 
-This is the Wave A geometry foundation for conditional material planning. It does
-not yet connect a selected piece to saved projects or server calculation stages.
+This describes the actual-domain area ledger used by conditional material planning,
+including saved projects and staged server calculations. See
+[the recorded-piece workflow](RECORDED_PIECE_PLANNING.md) for selection and review.
 A reported piece remains availability and eligibility unverified. Analysis and
 export create no inventory, reservation, consumption, physical child piece or
 monetary credit.

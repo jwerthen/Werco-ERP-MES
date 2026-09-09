@@ -206,7 +206,7 @@ preview and area ledger. Only nonempty regions select `werco-leftovers-v2` with
 These are hypothetical sheet-option constraints, not verified physical stock,
 reservations, inventory records or machine zones.
 
-Current compensated-envelope calculations require solver `werco-contour-v6`,
+The compensated-envelope increment introduced solver `werco-contour-v6`,
 quote 14/project 15 and the exact `werco-compensated-v1` geometry identity together.
 Local legacy-style job 16 is not a server project wrapper. Fresh estimates carry
 the current profile; Open never adds it to old inputs automatically. Every populated
@@ -218,10 +218,9 @@ The normative wrapper is `backend/app/data/nesting_profiles/werco-compensated-v1
 Recorded-piece foundations add the separate
 `backend/app/data/nesting_profiles/werco-remnant-domain-v1.json`; the generator and
 isolated frontend verifier now validate both wrappers and their dependency linkage.
-The base profile is immutable. This foundation adds no environment variable,
-dependency, migration, cron or automatic inventory action; full staged comparison
-integration is not enabled by this foundation alone. See
-[REMNANT_PLANNING.md](REMNANT_PLANNING.md).
+The base profile is immutable. Recorded-piece comparison uses the separate domain
+identity and the solver-v7 staged contract below; adding a profile alone does not
+establish physical stock eligibility. See [REMNANT_PLANNING.md](REMNANT_PLANNING.md).
 Its generated frontend adapter is checked by
 `python3 .github/scripts/generate_nesting_profile.py --check`; CI rejects drift.
 Standalone frontend and Node builds self-check the adapter, preserving their existing
@@ -237,6 +236,34 @@ Verify explicit legacy-input upgrade and new v3 leftover evidence, including
 reserved edge band and clear other part/exclusion envelopes; previously fitting
 layouts can require more sheets. This is versioned software geometry, not a shop
 allowance approval, physical-stock verification, reservation or inventory credit.
+
+Recorded-piece comparison requires matching API/frontend/worker support for solver
+`werco-contour-v7`. Ordinary full-sheet projects retain protocol1 and quote14/project15;
+only project18 containing an explicit `remnantPlan` selects protocol2. The compiled
+manifest keeps base `protocol:1` and adds exact `supported_protocols:[1,2]` plus
+`remnant_domain_profile`. The domain identity is `werco-remnant-domain-v1`, SHA256
+`114171806c36fee380801a72b2beb346a41fa1af83884097f9604f417cdd445b`, linked to the unchanged
+compensated profile. Startup verifies both profiles, supported protocols and executable
+hash before advertising readiness. The existing eight-field Redis heartbeat still
+uses base protocol1; its exact v7 bundle identity binds those validated capabilities.
+
+Use the existing backend-first combined workflow, including the final non-root,
+network-disabled worker image smoke for ordinary protocol1 and staged protocol2.
+Keep the release verifier's strict v7 pin, authoritative structured Railway events,
+bounded log retrieval, freshness and active-deployment recheck. Only after the API,
+worker and public frontend report the tested merge may this release be called live.
+No migration after 105, new environment variable, secret, dependency, cron or service
+is added. Existing relay selection must remain eligible; do not enable other schedules.
+
+Acceptance should compare a full-sheet baseline with one explicitly assigned recorded
+piece plus residual full sheets, including zero-fit and all-fit cases. All stages share
+the existing 36-evaluation, 120-second and memory/output budgets; interrupted work keeps
+verified checkpoints without claiming a completed conditional alternative. Completed
+means the planned search ran, not that every instance fits. Preserve source snapshots
+and original instance identities. The piece's reported outline/holes and predicted
+remaining regions are planning evidence with zero credit: no availability, reservation,
+consumption, certification or automatic leftover registration follows from a release.
+See [RECORDED_PIECE_PLANNING.md](RECORDED_PIECE_PLANNING.md).
 
 `frontend/vercel.json` already builds with `npm run build`, publishes `build/`,
 and rewrites SPA paths to `/index.html`, so opening or refreshing `/nest` uses
@@ -318,6 +345,15 @@ files and immutable v6 history. An older release can refuse new calculations or 
 file formats; never remove profile identity, downgrade input versions or rewrite old
 checkpoints. Restore compatible API/frontend/worker images. The additive existing
 history schema remains in place; this profile adds no migration to downgrade.
+
+On a recorded-piece application rollback, retain project18 snapshots and protocol2
+stage/checkpoint dependencies under their recorded v7/profile identities. Older images
+may refuse those inputs; never strip the selection, renumber its stages or recalculate
+historical reports through a different solver. Keep migrations101–105 and restore a
+compatible API/frontend/worker set. Compatibility includes the effective `inventory:view`
+gates on remnant-bearing draft, run and CAD evidence: a pre-remnant API may lack those
+gates and is not a safe reader merely because the tables remain. No new schema
+downgrade or inventory reversal is part of this calculation-only rollback.
 
 The orientation/grain increment changes only frontend behavior and local file
 formats; it adds no API, permission, migration, or environment requirement.

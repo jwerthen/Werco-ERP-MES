@@ -1,3 +1,4 @@
+import type { RemnantStageMessage } from '../features/nesting/lib/remnant-planning';
 import type { ServerOptionMessage } from '../features/nesting/lib/server-run';
 export type NestingRuntime = {
   schema_version: 1;
@@ -47,6 +48,9 @@ export type NestingRunCheckpointSummary = {
   content_sha256: string;
   payload_bytes: number;
   created_at: string;
+  stage_kind?: 'baseline' | 'recorded_piece' | 'residual';
+  source_option_id?: string | null;
+  depends_on?: string | null;
   complete: boolean;
   sheets: number | null;
   placed: number;
@@ -73,7 +77,10 @@ export type NestingRunRequest = {
   expected_company_id: number;
   request_key: string;
 };
-export type NestingRunCheckpoint = NestingRunCheckpointSummary & { result: ServerOptionMessage };
+export type NestingRunCheckpoint = NestingRunCheckpointSummary & {
+  schema_version?: 1;
+  result: ServerOptionMessage | RemnantStageMessage;
+};
 export type NestingRunReport = {
   schema_version: 1;
   status: 'UNAPPROVED';

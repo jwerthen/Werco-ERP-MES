@@ -28,6 +28,7 @@ from app.schemas.quote_nesting_sources import (
 from app.services import quote_nesting_source_storage as storage
 from app.services.audit_service import AuditService
 from app.services.quote_nesting_drafts import canonical_json, require_access
+from app.services.remnant_planning import require_saved_evidence_access
 
 
 def digest(value) -> str:
@@ -49,6 +50,7 @@ def _actor(ctx: SourceContext, *, write: bool) -> User:
     if getattr(user, '_active_company_id', None) != ctx.company_id:
         raise HTTPException(409, 'Active company changed; reopen the saved revision')
     require_access(ctx.db, user, ctx.company_id, write=write)
+    require_saved_evidence_access(ctx.db, user, ctx.company_id, _revision(ctx).estimate_json)
     return user
 
 

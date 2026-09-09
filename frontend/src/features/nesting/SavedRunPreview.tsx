@@ -1,6 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import api from '../../services/api';
 import type { NestingRunDetail } from '../../types/nestingRun';
+import PlanningLayout from './PlanningLayout';
+import { validateSavedPlanningStage, type ValidatedPlanningStage } from './lib/saved-remnant-layout';
 import { projectFromFile } from './lib/quote-project';
 import type { Quote } from './lib/quoting';
 import { svgPath, transformLoops } from './lib/nesting';
@@ -13,12 +15,16 @@ import { StockExclusionOverlay } from './StockExclusions';
 
 export default function SavedRunPreview({ run, sequence }: { run: NestingRunDetail; sequence: number }) {
   const [data, setData] = useState<{ quote: Quote; output: ServerOptionMessage; profileLabel: string } | null>(null);
+  const [staged, setStaged] = useState<ValidatedPlanningStage | null>(null);
   const [error, setError] = useState('');
   const [sheet, setSheet] = useState(0);
   const [highlighted, setHighlighted] = useState<string | null>(null);
   // Bind the fetch to immutable identity, not each heartbeat's mutable status.
   const { id, company_id: companyId, draft_id: draftId, revision_number: revision, input_sha256: inputSha } = run;
+  const runRef = useRef(run);
+  runRef.current = run;
   const expectedHash = run.checkpoints.find(item => item.sequence === sequence)?.content_sha256;
+  const checkpointRules = JSON.stringify(run.checkpoints);
   const recordedRules = JSON.stringify({
     solver_version: run.solver_version,
     bundle_sha256: run.bundle_sha256,
@@ -29,6 +35,7 @@ export default function SavedRunPreview({ run, sequence }: { run: NestingRunDeta
   useEffect(() => {
     const controller = new AbortController();
     setData(null);
+    setStaged(null);
     setError('');
     setSheet(0);
     setHighlighted(null);
@@ -36,7 +43,7 @@ export default function SavedRunPreview({ run, sequence }: { run: NestingRunDeta
       api.getNestingRunCheckpoint(id, sequence, controller.signal),
       api.getNestingDraftRevision(draftId, revision, controller.signal),
     ])
-      .then(([checkpoint, source]) => {
+      .then(async ([checkpoint, source]) => {
         if (controller.signal.aborted) return;
         const output = checkpoint.result;
         if (
@@ -45,13 +52,34 @@ export default function SavedRunPreview({ run, sequence }: { run: NestingRunDeta
           source.revision_number !== revision ||
           source.content_sha256 !== inputSha ||
           checkpoint.content_sha256 !== expectedHash ||
-          output.type !== 'option' ||
-          output.protocol !== 1 ||
           output.input_sha256 !== inputSha ||
           output.sequence !== sequence ||
           output.units !== 'mm'
         )
           throw new Error('Saved geometry identity does not match this run.');
+        if (output.type === 'stage') {
+          const boundRun = {
+            ...runRef.current,
+            checkpoints: JSON.parse(checkpointRules),
+            ...JSON.parse(recordedRules),
+          } as NestingRunDetail;
+          const predecessorMetadata =
+            output.stage_kind === 'residual'
+              ? boundRun.checkpoints.find(
+                  item => item.option_id === output.depends_on && item.stage_kind === 'recorded_piece'
+                )
+              : undefined;
+          if (output.stage_kind === 'residual' && !predecessorMetadata)
+            throw new Error('Saved recorded-piece predecessor is missing.');
+          const predecessor = predecessorMetadata
+            ? await api.getNestingRunCheckpoint(id, predecessorMetadata.sequence, controller.signal)
+            : undefined;
+          if (controller.signal.aborted) return;
+          const checked = await validateSavedPlanningStage(boundRun, source.estimate, checkpoint, predecessor);
+          if (!controller.signal.aborted) setStaged(checked);
+          return;
+        }
+        if (output.type !== 'option' || output.protocol !== 1) throw new Error('Unknown saved geometry protocol.');
         const project = projectFromFile(source.estimate);
         const quote = project.groups.find(group => group.id === output.group_id)?.quote;
         if (!quote) throw new Error('Saved material group is missing.');
@@ -62,13 +90,42 @@ export default function SavedRunPreview({ run, sequence }: { run: NestingRunDeta
         if (!controller.signal.aborted) setError(nestingApiMessage(cause));
       });
     return () => controller.abort();
-  }, [id, companyId, draftId, revision, inputSha, sequence, expectedHash, recordedRules]);
+  }, [id, companyId, draftId, revision, inputSha, sequence, expectedHash, recordedRules, checkpointRules]);
   if (error)
     return (
       <p className="team-draft-error" role="alert">
         {error}
       </p>
     );
+  if (staged) {
+    const { output, quote, instanceMap } = staged;
+    if (output.stage_kind === 'residual' && output.requested === 0)
+      return (
+        <p>
+          Every original group instance is on the recorded piece. This conditional alternative requires zero full
+          sheets.
+        </p>
+      );
+    if (!output.stock || !output.result?.nest)
+      return <p>{output.result?.error || 'No placed geometry in this stage.'}</p>;
+    return (
+      <PlanningLayout
+        parts={quote.parts}
+        stock={output.stock}
+        nest={output.result.nest}
+        leftovers={output.result.leftovers}
+        leftoverError={output.result.leftoverError}
+        instanceMap={instanceMap}
+        label={
+          output.stage_kind === 'recorded_piece'
+            ? 'Saved recorded-piece layout'
+            : output.stage_kind === 'residual'
+              ? 'Saved remaining full-sheet layout'
+              : 'Saved full-sheet baseline'
+        }
+      />
+    );
+  }
   if (!data) return <p role="status">Loading saved part geometry…</p>;
   const { quote, output, profileLabel } = data;
   const { result, stock } = output;

@@ -30,8 +30,14 @@ const bundle = await readFile(outfile);
 // test compares the build manifest to the actual executable's hello message.
 const manifest = {
   protocol: 1,
-  solver_version: 'werco-contour-v6',
-  geometry_profile: JSON.parse(await readFile(path.join(frontendRoot, 'src/features/nesting/lib/geometry-profile.generated.json'), 'utf8')).identity,
+  solver_version: 'werco-contour-v7',
+  supported_protocols: [1, 2],
+  remnant_domain_profile: JSON.parse(
+    await readFile(path.join(frontendRoot, 'src/features/nesting/lib/remnant-domain-profile.generated.json'), 'utf8')
+  ).identity,
+  geometry_profile: JSON.parse(
+    await readFile(path.join(frontendRoot, 'src/features/nesting/lib/geometry-profile.generated.json'), 'utf8')
+  ).identity,
   bundle_sha256: createHash('sha256').update(bundle).digest('hex'),
   node_major: 22,
   max_option_evaluations: 36,

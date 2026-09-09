@@ -1,0 +1,213 @@
+{
+  "version": 18,
+  "remnantPlan": {
+    "version": 1,
+    "groupId": "g1",
+    "snapshot": {
+      "version": 1,
+      "companyId": 2,
+      "pieceId": 41,
+      "label": "Café L-piece",
+      "observationNumber": 2,
+      "state": "RECORDED",
+      "observedAt": "2026-09-08T12:00:00Z",
+      "observerName": "Synthetic observer",
+      "reason": "Measured remaining outline",
+      "createdAt": "2026-09-08T12:05:00Z",
+      "createdBy": 7,
+      "submittedApiTokenId": null,
+      "payloadSchemaVersion": 1,
+      "payloadSha256": "71e33008e1826ef5dd56f5b3de33c4618f12e537e475bdfd0b31d162dba0abcb",
+      "payloadBytes": 506,
+      "evidence": {
+        "version": 1,
+        "unit": "in",
+        "measurement_method": "Synthetic coordinate measurement",
+        "source_units": "unknown",
+        "geometry": {
+          "kind": "polygon",
+          "outer": [
+            {
+              "x": "-0.000000001",
+              "y": "0"
+            },
+            {
+              "x": "12",
+              "y": "0"
+            },
+            {
+              "x": "12",
+              "y": "3"
+            },
+            {
+              "x": "6",
+              "y": "3"
+            },
+            {
+              "x": "6",
+              "y": "8"
+            },
+            {
+              "x": "-0.000000001",
+              "y": "8"
+            }
+          ],
+          "holes": [
+            [
+              {
+                "x": "1",
+                "y": "1"
+              },
+              {
+                "x": "2",
+                "y": "1"
+              },
+              {
+                "x": "2",
+                "y": "2"
+              },
+              {
+                "x": "1",
+                "y": "2"
+              }
+            ]
+          ]
+        },
+        "unavailable_zones": [],
+        "thickness": "0.125",
+        "grade": "A36",
+        "grain_axis": null,
+        "location_note": null,
+        "ownership_note": null,
+        "certification_note": null
+      },
+      "sourceInventoryItemId": 23,
+      "sourcePartId": 31,
+      "sourceSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sourceEvidence": {
+        "version": 1,
+        "item": {
+          "id": 23,
+          "company_id": 2,
+          "part_id": 31,
+          "location": "Rack 1",
+          "warehouse": null,
+          "lot_number": "LOT-1",
+          "serial_number": null,
+          "received_date": null,
+          "supplier_id": null,
+          "po_number": null,
+          "cert_number": null,
+          "heat_lot": null,
+          "expiration_date": null,
+          "status": "available",
+          "is_active": true,
+          "updated_at": null
+        },
+        "part": {
+          "id": 31,
+          "company_id": 2,
+          "part_number": "SYNTHETIC-STOCK",
+          "revision": null,
+          "name": "Synthetic source",
+          "part_type": "raw_material",
+          "unit_of_measure": "SHEET",
+          "is_active": true,
+          "is_deleted": false,
+          "updated_at": null
+        },
+        "movement_watermark": {
+          "coverage": "direct_item_and_unattributed_same_part",
+          "count": 0,
+          "max_id": null,
+          "max_created_at": null
+        }
+      }
+    },
+    "snapshotSha256": "038a56e697dce977ae55f26b9a4fcef329f55562d5071c9050168d047b4f73a3",
+    "assignment": {
+      "version": 1,
+      "basis": "planner_declared_unverified",
+      "family": "Carbon steel",
+      "requiredGrade": "A36",
+      "thicknessIn": "0.125",
+      "reason": "Browser verification of actual measured L-shaped source",
+      "targetGroupSha256": "1fc1616e81d22dfab84980f25e16b481ff7fce4fd123ac56366a12f3ad5a0106"
+    },
+    "geometryProfile": {
+      "id": "werco-remnant-domain-v1",
+      "sha256": "114171806c36fee380801a72b2beb346a41fa1af83884097f9604f417cdd445b"
+    },
+    "zoneClearanceIn": "0.125",
+    "capacity": 1,
+    "planningOnly": true,
+    "eligibilityVerified": false,
+    "availabilityVerified": false
+  },
+  "units": "in",
+  "currency": "USD",
+  "name": "Synthetic L-piece material plan",
+  "activeGroupId": "g1",
+  "groups": [
+    {
+      "id": "g1",
+      "quote": {
+        "version": 14,
+        "geometryProfile": {
+          "id": "werco-compensated-v1",
+          "sha256": "21e8689fb2ce80c72befbc5866f658cd74fe8ed336d1b5c070e182f3081aa55a"
+        },
+        "units": "in",
+        "currency": "USD",
+        "spacingMode": "auto",
+        "name": "New material estimate",
+        "material": "Carbon steel",
+        "thickness": 0.125,
+        "parts": [
+          {
+            "id": "plate",
+            "name": "Synthetic plate",
+            "quantity": 10,
+            "rotate": true,
+            "color": 0,
+            "loops": [
+              {
+                "type": "poly",
+                "points": [
+                  {
+                    "x": 0,
+                    "y": 0
+                  },
+                  {
+                    "x": 1.9999999999999996,
+                    "y": 0
+                  },
+                  {
+                    "x": 1.9999999999999996,
+                    "y": 1.9999999999999996
+                  },
+                  {
+                    "x": 0,
+                    "y": 1.9999999999999996
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "margin": 0.125,
+        "gap": 0.125,
+        "objective": "area",
+        "options": [
+          {
+            "id": "sheet",
+            "width": 8,
+            "height": 8,
+            "enabled": true,
+            "price": null
+          }
+        ]
+      }
+    }
+  ]
+}

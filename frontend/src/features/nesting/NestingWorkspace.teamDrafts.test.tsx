@@ -126,8 +126,8 @@ test('double Save is single-flight and a late successful save cannot mark newer 
   const button = screen.getByRole('button', { name: 'Save team draft' });
   fireEvent.click(button);
   fireEvent.click(button);
-  expect(save).toHaveBeenCalledTimes(1);
   expect(button).toBeDisabled();
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
   fireEvent.change(screen.getByLabelText('Estimate name'), { target: { value: 'Newer unsaved inputs' } });
   await act(async () => finish({ ...receipt(), estimate: JSON.parse(save.mock.calls[0][0].estimateJson) }));
   expect(screen.getByLabelText('Estimate name')).toHaveValue('Newer unsaved inputs');

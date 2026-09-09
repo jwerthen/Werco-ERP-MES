@@ -107,7 +107,7 @@ def verify(args):
         or not re.fullmatch(r"[0-9a-f]{64}", manifest.get("bundle_sha256", ""))
         or manifest.get("node_version") != "v22.23.2"
         or manifest.get("protocol") != 1
-        or manifest.get("solver_version") != "werco-contour-v6"
+        or manifest.get("solver_version") != "werco-contour-v7"
     ):
         raise ValueError("Invalid expected release or CI runtime manifest")
     deadline = time.monotonic() + args.timeout

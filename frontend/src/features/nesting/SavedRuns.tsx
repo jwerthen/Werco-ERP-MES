@@ -10,6 +10,7 @@ import type {
 } from '../../types/nestingRun';
 import { formatCentralDateTime } from '../../utils/centralTime';
 import { nestingApiMessage } from './useNestingCatalog';
+import { validateRemnantReport } from './lib/remnant-review';
 import SavedRunPreview from './SavedRunPreview';
 
 const active = (run: NestingRunSummary) => run.status === 'QUEUED' || run.status === 'RUNNING';
@@ -111,7 +112,11 @@ export default function SavedRuns({
         if (result.schema_version !== 1 || !Array.isArray(result.checkpoints))
           throw new Error('Invalid saved calculation.');
         setRun(result);
-        setPage(previous => previous ? { ...previous, items: previous.items.map(item => item.id === result.id ? result : item) } : previous);
+        setPage(previous =>
+          previous
+            ? { ...previous, items: previous.items.map(item => (item.id === result.id ? result : item)) }
+            : previous
+        );
         if (active(result)) timer = setTimeout(() => void poll(), 3000);
       } catch (cause) {
         if (!controller.signal.aborted) setError(nestingApiMessage(cause));
@@ -196,6 +201,8 @@ export default function SavedRuns({
         !/^[a-f0-9]{64}$/.test(report.content_sha256)
       )
         throw new Error('The saved report does not match this calculation.');
+      await validateRemnantReport(report);
+      if (!live.current || controller.signal.aborted) return;
       const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }));
       const anchor = document.createElement('a');
       anchor.href = url;
@@ -324,15 +331,28 @@ export default function SavedRuns({
               <article className="team-draft-item" key={checkpoint.sequence}>
                 <div>
                   <strong>
-                    {checkpoint.group_id} · {checkpoint.option_id}
+                    {checkpoint.group_id} ·{' '}
+                    {checkpoint.stage_kind === 'recorded_piece'
+                      ? 'Recorded piece'
+                      : checkpoint.stage_kind === 'residual'
+                        ? `Remaining sheets · ${checkpoint.source_option_id}`
+                        : checkpoint.stage_kind === 'baseline'
+                          ? `Full-sheet baseline · ${checkpoint.source_option_id}`
+                          : checkpoint.option_id}
                   </strong>
                   <p>
-                    {checkpoint.sheets ?? '—'} sheets · {checkpoint.placed} placed · {checkpoint.unplaced} unplaced ·{' '}
-                    {checkpoint.complete ? 'Full group fits' : 'Review incomplete layout'}
+                    {checkpoint.sheets ?? '—'}{' '}
+                    {checkpoint.stage_kind === 'recorded_piece' ? 'reported piece' : 'full sheets'} ·{' '}
+                    {checkpoint.placed} placed · {checkpoint.unplaced} unplaced ·{' '}
+                    {checkpoint.complete
+                      ? checkpoint.stage_kind === 'residual'
+                        ? 'Conditional remainder fits'
+                        : 'Full group fits'
+                      : 'Review incomplete layout'}
                   </p>
                 </div>
                 <button className="secondary" onClick={() => setPreview(checkpoint.sequence)}>
-                  View option {checkpoint.sequence}
+                  View {checkpoint.stage_kind ? 'stage' : 'option'} {checkpoint.sequence}
                 </button>
               </article>
             ))}

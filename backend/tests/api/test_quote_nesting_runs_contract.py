@@ -244,6 +244,7 @@ def test_runtime_binding_and_checkpoint_are_rolled_back_together_with_failed_aud
     with atomic_transaction(db_session):
         _, lease = service.claim_run(db_session, 1, run_id, runtime=RUNTIME)
     hello = {key: RUNTIME[key] for key in ('solver_version', 'bundle_sha256', 'node_version')}
+    hello['protocol'] = 1
     hello['geometry_profile'] = geometry_profile_identity()
     with monkeypatch.context() as patch:
         patch.setattr(AuditService, 'log', lambda *args, **kwargs: None)

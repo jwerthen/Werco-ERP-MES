@@ -1,11 +1,21 @@
 """Read-only physical-piece planning evidence; no material or inventory approval."""
 
+import hashlib
 import json
-from decimal import Decimal
+import math
+from decimal import Context, Decimal, localcontext
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.nesting_geometry_profile import is_current_geometry_profile
+from app.core.remnant_domain_profile import is_current_remnant_profile
+from app.core.remnant_evidence import (
+    canonical_evidence,
+    evidence_sha256,
+    target_group_sha256,
+)
+from app.schemas.quote_nesting_spacing import normalize_thickness
 from app.schemas.stock_piece import ID, Hash, ObservationEvidence, decimal_value
 
 MAX_SELECTION_BYTES = 256 * 1024
@@ -201,3 +211,62 @@ class RemnantSelection(StrictModel):
         ):
             raise ValueError('Remnant selection exceeds 256 KiB')
         return self
+
+
+def validate_group_binding(selection: RemnantSelection, quote: dict) -> None:
+    """Exact immutable group identity; no inventory, geometry approval or inference."""
+    evidence, assignment = selection.snapshot.evidence, selection.assignment
+    thickness = quote.get("thickness")
+    with localcontext(Context(prec=50)):
+        known = evidence.thickness is not None and Decimal(evidence.thickness) * Decimal("25.4") <= Decimal(100)
+    if (
+        not known
+        or evidence.grade is None
+        or evidence.geometry.kind == "unknown"
+        or type(thickness) not in (int, float)
+        or not math.isfinite(thickness)
+        or not isinstance(quote.get("parts"), list)
+        or not quote["parts"]
+        or quote.get("material") != assignment.family
+        or evidence.grade != assignment.requiredGrade
+        or normalize_thickness(str(thickness)) != evidence.thickness
+        or assignment.thicknessIn != evidence.thickness
+        or target_group_sha256(selection.groupId, assignment.requiredGrade, quote) != assignment.targetGroupSha256
+    ):
+        raise ValueError("The exact material group, known thickness or required grade no longer matches the piece")
+
+
+def validate_saved_selection(raw: dict, quote: dict) -> RemnantSelection:
+    """Validate original JSON before any units/defaults/serialization can change its hash."""
+    selection = RemnantSelection.model_validate(raw)
+    if canonical_evidence(raw) != canonical_evidence(selection.model_dump(mode='json')):
+        raise ValueError("Saved remnant evidence must be canonical; selection cannot repair it")
+    snapshot = selection.snapshot.model_dump(mode='json')
+    encoded = json.dumps(snapshot["evidence"], sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode(
+        "utf-8"
+    )
+    if (
+        hashlib.sha256(encoded).hexdigest() != selection.snapshot.payloadSha256
+        or len(encoded) != selection.snapshot.payloadBytes
+        or evidence_sha256(snapshot) != selection.snapshotSha256
+    ):
+        raise ValueError("Saved remnant evidence fingerprint does not match its immutable snapshot")
+    if not is_current_remnant_profile(selection.geometryProfile.model_dump()):
+        raise ValueError("Unsupported remnant domain profile")
+    if quote.get('version') != 14 or not is_current_geometry_profile(quote.get("geometryProfile")):
+        raise ValueError("The selected material group must use the current geometry profile")
+    validate_group_binding(selection, quote)
+    return selection
+
+
+def recorded_vertices(selection: RemnantSelection) -> int:
+    evidence = selection.snapshot.evidence
+    shape = evidence.geometry
+    count = (
+        (len(shape.outer) + sum(len(hole) for hole in shape.holes))
+        if shape.kind == "polygon"
+        else 4 if shape.kind == "rectangle" else 1
+    )
+    return count + sum(
+        len(zone.outline.pts) if zone.outline.kind == "polygon" else 1 for zone in evidence.unavailable_zones
+    )

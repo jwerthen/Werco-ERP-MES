@@ -11,6 +11,7 @@ import re
 from typing import Any
 
 from app.core.nesting_geometry_profile import geometry_profile_payload, is_current_geometry_profile
+from app.core.remnant_domain_profile import is_current_remnant_profile
 from app.schemas.quote_nesting_runs import MAX_MESSAGE_BYTES, MAX_OPTIONS, SOLVER_VERSION
 from app.services.quote_nesting_drafts import canonical_json
 
@@ -107,7 +108,7 @@ def _base(message: dict, kind: str, digest: str) -> None:
     require(message.get("input_sha256") == digest)
 
 
-def validate_hello(message: dict, digest: str, manifest: dict) -> None:
+def validate_hello(message: dict, digest: str, manifest: dict, *, protocol: int = 1) -> None:
     exact(
         message,
         {
@@ -119,9 +120,14 @@ def validate_hello(message: dict, digest: str, manifest: dict) -> None:
             "node_version",
             "units",
             "geometry_profile",
-        },
+        }
+        | ({"remnant_domain_profile"} if protocol == 2 else set()),
     )
-    _base(message, "hello", digest)
+    require(type(message.get("protocol")) is int and message["protocol"] == protocol)
+    require(message.get("type") == "hello" and message.get("input_sha256") == digest)
+    if protocol == 2:
+        require(is_current_remnant_profile(message["remnant_domain_profile"]))
+        require(message["remnant_domain_profile"] == manifest.get("remnant_domain_profile"))
     require(message["solver_version"] == SOLVER_VERSION == manifest["solver_version"])
     require(is_current_geometry_profile(message['geometry_profile']))
     require(message['geometry_profile'] == manifest.get('geometry_profile'))
@@ -223,40 +229,7 @@ def validate_option(message: dict, digest: str, expected: dict, sequence: int) -
         )
         require("leftovers" not in result and "leftoverError" not in result)
     else:
-        nest = exact(result["nest"], {"placements", "unplaced", "sheets", "area", "utilization", "method"})
-        require(integer(nest["sheets"]) and number(nest["area"]) and number(nest["utilization"], 0, 100.00000001))
-        require(isinstance(nest["method"], str) and len(nest["method"]) <= 300)
-        require(isinstance(nest["placements"], list) and len(nest["placements"]) <= requested)
-        require(isinstance(nest["unplaced"], list) and len(nest["unplaced"]) <= len(quote["parts"]))
-        quantities = {part["id"]: part["quantity"] for part in quote["parts"]}
-        placed = {key: set() for key in quantities}
-        used_sheets = set()
-        for placement in nest["placements"]:
-            exact(placement, {"partId", "instance", "x", "y", "width", "height", "rotation", "sheet"})
-            part_id = placement["partId"]
-            require(part_id in quantities and integer(placement["instance"], 0, quantities[part_id] - 1))
-            require(placement["instance"] not in placed[part_id])
-            placed[part_id].add(placement["instance"])
-            require(integer(placement["sheet"], 0, nest["sheets"] - 1))
-            used_sheets.add(placement["sheet"])
-            require(type(placement["rotation"]) is int and placement["rotation"] in (0, 90, 180, 270))
-            for axis, dimension in (("x", "width"), ("y", "height")):
-                require(number(placement[axis], -1e-7, stock[dimension] + 1e-7))
-                require(number(placement[dimension], 0, stock[dimension] + 1e-7))
-                require(placement[axis] + placement[dimension] <= stock[dimension] + 1e-6)
-        remaining = {}
-        for unplaced in nest["unplaced"]:
-            exact(unplaced, {"partId", "count", "reason"})
-            require(unplaced["partId"] in quantities and unplaced["partId"] not in remaining)
-            require(
-                integer(unplaced["count"], 1)
-                and isinstance(unplaced["reason"], str)
-                and len(unplaced["reason"]) <= 1000
-            )
-            remaining[unplaced["partId"]] = unplaced["count"]
-        require(all(len(placed[key]) + remaining.get(key, 0) == qty for key, qty in quantities.items()))
-        require(used_sheets == set(range(nest["sheets"])))
-        require(result["complete"] == (not remaining))
+        nest = validate_nest_structure(result, quote, stock)
         _same_number(result["area"], stock["width"] * stock["height"] * nest["sheets"])
         # Saved catalog acknowledgments may make cost unavailable; never infer a price.
         if result["cost"] is not None:
@@ -345,3 +318,47 @@ def validate_summary(message: dict, digest: str, keys: list[dict], total: int, c
     require(integer(message["total_options"], 0, 3600) and message["total_options"] == total)
     require(message["stop_reason"] == ("work_limit" if total > MAX_OPTIONS else "completed"))
     require(len(keys) == min(total, MAX_OPTIONS))
+
+
+def validate_nest_structure(result: dict, quote: dict, stock: dict) -> dict:
+    """Bounded identity/count checks shared by ordinary and recorded-piece stages."""
+    requested = sum(part["quantity"] for part in quote["parts"])
+    nest = exact(
+        result["nest"],
+        {"placements", "unplaced", "sheets", "area", "utilization", "method"},
+    )
+    require(integer(nest["sheets"]) and number(nest["area"]) and number(nest["utilization"], 0, 100.00000001))
+    require(isinstance(nest["method"], str) and len(nest["method"]) <= 300)
+    require(isinstance(nest["placements"], list) and len(nest["placements"]) <= requested)
+    require(isinstance(nest["unplaced"], list) and len(nest["unplaced"]) <= len(quote["parts"]))
+    quantities = {part["id"]: part["quantity"] for part in quote["parts"]}
+    placed = {key: set() for key in quantities}
+    used_sheets = set()
+    for placement in nest["placements"]:
+        exact(
+            placement,
+            {"partId", "instance", "x", "y", "width", "height", "rotation", "sheet"},
+        )
+        part_id = placement["partId"]
+        require(part_id in quantities and integer(placement["instance"], 0, quantities[part_id] - 1))
+        require(placement["instance"] not in placed[part_id])
+        placed[part_id].add(placement["instance"])
+        require(integer(placement["sheet"], 0, nest["sheets"] - 1))
+        used_sheets.add(placement["sheet"])
+        require(type(placement["rotation"]) is int and placement["rotation"] in (0, 90, 180, 270))
+        for axis, dimension in (("x", "width"), ("y", "height")):
+            require(number(placement[axis], -1e-7, stock[dimension] + 1e-7))
+            require(number(placement[dimension], 0, stock[dimension] + 1e-7))
+            require(placement[axis] + placement[dimension] <= stock[dimension] + 1e-6)
+    remaining = {}
+    for unplaced in nest["unplaced"]:
+        exact(unplaced, {"partId", "count", "reason"})
+        require(unplaced["partId"] in quantities and unplaced["partId"] not in remaining)
+        require(
+            integer(unplaced["count"], 1) and isinstance(unplaced["reason"], str) and len(unplaced["reason"]) <= 1000
+        )
+        remaining[unplaced["partId"]] = unplaced["count"]
+    require(all(len(placed[key]) + remaining.get(key, 0) == qty for key, qty in quantities.items()))
+    require(used_sheets == set(range(nest["sheets"])))
+    require(result["complete"] == (not remaining))
+    return nest

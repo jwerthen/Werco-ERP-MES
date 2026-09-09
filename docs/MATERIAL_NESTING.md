@@ -1,9 +1,11 @@
 # Material Nesting
 
 The separate **Warehouse → Inventory → Piece observations** register can retain
-reported sheet/remnant measurements and immutable source history. It does not
-make observed pieces available for nesting or assign them credit. See
-[the observation workflow](STOCK_OBSERVATIONS.md). Material Nesting still starts
+reported sheet/remnant measurements and immutable source history. A current
+recorded piece can be explicitly selected for a conditional nesting comparison;
+selection does not verify availability, reserve inventory or assign credit. See
+[the observation workflow](STOCK_OBSERVATIONS.md) and
+[recorded-piece planning](RECORDED_PIECE_PLANNING.md). Material Nesting still starts
 with a fresh empty estimate; no observed or predicted stock is automatically loaded.
 
 To retain the original bytes behind a saved nest, use **Team drafts → Original
@@ -58,6 +60,17 @@ the same permission as Quote Calculator; see [RBAC_PERMISSIONS.md](RBAC_PERMISSI
    validated comparison or change material inventory. Use a saved revision's
    **Saved calculations** action when you want the server to retain a calculation.
 
+The steps above describe ordinary full-sheet comparison. An optional recorded-piece
+selection adds one actual measured shape, including its physical holes, to one
+material group. All full-sheet baselines remain visible. Each conditional alternative
+uses that piece at most once, then full sheets for the exact remaining originals.
+The selected project shares one 120-second calculation deadline and at most 36
+stages across its baseline, piece and remaining-sheet alternatives. Completed stages
+remain available if later work stops. Source/group changes require explicit refresh
+and reaffirmation; file Open never silently reconfirms a piece. See
+[the conditional workflow](RECORDED_PIECE_PLANNING.md) for saved history, partial
+review exports and source-review requirements.
+
 The layout places actual outer contours, including concave profiles, using
 multiple part orderings and the permitted rotations after applying grain requirements. It checks contour
 separation and sheet margins for the resulting placements. It establishes a
@@ -88,7 +101,7 @@ sheet sizes, and your shop's handling capacity before ordering.
 3. **View option** opens the actual saved contours and holes, sheet selector,
    inch dimensions, margin/gap, and potential-leftover regions. The view binds
    the saved input hash, stock, recorded solver/runtime/profile and result before rendering.
-   Historical v4/v5 runs retain their recorded validation rules; viewing history
+   Historical v4/v5/v6 runs retain their recorded validation rules; viewing history
    never repacks parts under the current profile. A sheet above the
    100,000-vertex preview budget remains in the saved report but is not drawn.
 4. **Cancel calculation** retains already completed, checked option results.
@@ -224,7 +237,7 @@ breakdown and assumptions** distinguishes:
 
 `gross sheet = edge margins + excluded stock + nominal finished parts + reserved internal cutouts + clearance/numerical protection + potential leftover regions`
 
-**Usable sheet area** means the rectangle after the entered edge margins, before
+For ordinary full sheets, **Usable sheet area** means the rectangle after the entered edge margins, before
 stock exclusions. **Excluded stock within margins** measures the guarded union
 inside the numerically protected usable boundary, so overlapping areas and areas
 inside edge margins are not double-counted. The same reserved polygons are
@@ -239,7 +252,10 @@ than inventing recoverable area.
 
 ### Engineering analysis profile
 
-New calculations use `werco-compensated-v1` and solver `werco-contour-v6`.
+New calculations use `werco-compensated-v1` and solver `werco-contour-v7`.
+Recorded-piece calculations also require `werco-remnant-domain-v1`; their actual
+boundary/hole containment and area ledger are documented in
+[the remnant domain ledger](REMNANT_LEFTOVER_LEDGER.md).
 The source profile ID and SHA-256 are explicit inputs, recorded in the worker
 manifest/hello, saved run settings and review evidence. They identify engineering
 rules; they do not approve a shop clearance or cutting policy.
@@ -256,12 +272,15 @@ nominal part edge to be at least 7/16 in from the sheet edge. Do not subtract
 half-gap from the margin to preserve an earlier layout. Selected gap/margin and
 approved spacing-policy values are not silently changed by the profile.
 
-The current profile uses `werco-leftovers-v3`, with a required `excludedArea`
+Ordinary full-sheet calculations use `werco-leftovers-v3`, with a required `excludedArea`
 field (zero when there are no zones). It subtracts the same prepared envelopes
 used for final validation. Historical `werco-leftovers-v1` remains readable for
 old inputs with no exclusion regions; v2 remains readable for nonempty legacy
 exclusions. Empty legacy arrays retain v1. All versions remain review-only with
-zero material credit.
+zero material credit. Recorded-piece outcomes use `werco-leftovers-v4`, retaining
+the actual physical holes, protected area and usable domain. They also remain
+review-only with zero credit; connected leftover geometry is not proof of a
+physically usable or available remnant.
 
 | Setting | Value or behavior |
 |---------|-------------------|
@@ -475,7 +494,7 @@ defaults:
 | Omitted metadata | `VIEWPORT` records and all entities on the `FORMAT` annotation layer, with an import warning for omitted FORMAT entities |
 | Rejected files | Open or ambiguous outer profiles, touching/intersecting contours, reference paths outside or spanning parts, malformed data, unsupported entities, blocks/`INSERT`, wide polylines, sloped/nonplanar geometry, tilted extrusion, or paper-space cut geometry; other text/annotations are not silently discarded |
 | DXF units | Inch and millimeter files retain their physical size; unitless files default to inches unless millimeters is selected before import |
-| Saved estimates | Current geometry profiles require project15/quote14 or standalone job16. Project15 may retain older quote3/7/9/11 groups, but every populated group must be explicitly upgraded before any new calculation. Legacy exclusions use project12/quote11; legacy policy snapshots use project10/quote9; orientation uses project6/quote7/job8. Without those constraints, ERP-bound projects use5 and family-only projects4. Jobs with exclusions use13. Older inputs are readable without automatic profile insertion. Legacy `drawing-bounds` parts require DXF re-import |
+| Saved estimates | Current geometry profiles require project15/quote14 or standalone job16. A recorded-piece selection uses project18; the ordinary writer remains project15. Project18 may omit the selection, but explicit null and selection fields in older formats are refused. Standalone job files cannot represent a recorded-piece domain. Project15 may retain older quote3/7/9/11 groups, but every populated group must be explicitly upgraded before any new calculation. Legacy exclusions use project12/quote11; legacy policy snapshots use project10/quote9; orientation uses project6/quote7/job8. Without those constraints, ERP-bound projects use5 and family-only projects4. Jobs with exclusions use13. Older inputs are readable without automatic profile insertion. Legacy `drawing-bounds` parts require DXF re-import |
 
 Legacy `rotate: false` means fixed and `rotate: true` means quarter turns;
 when `rotationMode` exists, it is authoritative. Axis metadata remains X/Y
@@ -538,7 +557,10 @@ the UTF-8 text basis. Unitless drawings retain the estimator's inch/millimeter
 assignment for review. Add **Part revision (if known)** to each part; an empty
 revision remains a review flag rather than being invented.
 
-**Export review record** requires fresh comparisons for every populated group.
+For ordinary full-sheet projects, **Export review record** requires fresh comparisons
+for every populated group. Conditional recorded-piece projects can export a current,
+validated partial stage prefix, explicitly labelled with its evaluated stage count;
+see [recorded-piece exports](RECORDED_PIECE_PLANNING.md).
 It records the input project and hash, estimator/company IDs, source/material
 snapshots, quantities and revisions, effective rotation policies, source and
 sheet grain axes, permitted rotations, solver/build/settings, compared stock
@@ -546,7 +568,7 @@ alternatives, validated placements, utilization and entered material costs.
 Changed inputs or inconsistent results require recomparison. The solver is
 deterministic, so the record stores no random seed and explains what replay
 requires. The manifest identifies orientation policy `werco-orientation-v1`
-and solver `werco-contour-v6`; contour search uses up to two deterministic
+and solver `werco-contour-v7`; contour search uses up to two deterministic
 orders for every part shape. The rectangle fast path is disabled. Geometry fingerprints
 remain about shape; the input-project fingerprint also covers orientation
 requirements, the explicit geometry profile and exact stock-exclusion inputs.
@@ -595,13 +617,18 @@ input-draft revision. **Original DXFs** stores separately verified source attach
 **Saved calculations** retains server calculation evidence. Neither action rewrites
 that revision or automatically restores the current workspace.
 
-The server accepts project formats 4/5/6/10/12/15, up to 5 MiB per JSON file,
+The server accepts project formats 4/5/6/10/12/15/18, up to 5 MiB per JSON file,
 with the same 300-part/20,000-vertex/12-stock-option limits and bounded metadata.
 It validates structure, unique identities, and active-company catalog references.
 Stale or inactive catalog snapshots can be retained with review notes so work
 can be saved, but all source values remain client assertions. Missing or foreign
 catalog IDs are refused. Significant geometry is not repaired or approved by Save;
 Open also runs the browser's geometry validation before replacing the workspace.
+Inputs containing recorded-piece evidence also require effective `inventory:view`
+for reads and writes. New saves and calculation requests recheck the current source;
+historical reports retain their original source evidence without asserting current
+availability. Selected projects use staged server protocol2; ordinary projects keep
+protocol1 with the same v7 runtime. See [recorded-piece planning](RECORDED_PIECE_PLANNING.md).
 
 Listing/opening requires effective `purchasing:view`; saving also requires
 `purchasing:create`, including tenant role overrides. Draft writes preserve the

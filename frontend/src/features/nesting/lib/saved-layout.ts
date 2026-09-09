@@ -4,7 +4,7 @@ import { leftoversToFile } from './leftovers';
 import { validateNest } from './nesting';
 import { canonicalJSON } from './provenance';
 import type { QuoteProject } from './quote-project';
-import { stockFor } from './quoting';
+import { stockFor, type Quote } from './quoting';
 import type { ServerOptionMessage } from './server-run';
 
 const object = (value: unknown): Record<string, unknown> | undefined =>
@@ -19,10 +19,17 @@ export type SavedGeometryRun = Pick<
   'solver_version' | 'bundle_sha256' | 'node_version' | 'release_identity' | 'settings'
 >;
 export function validateSavedLayout(run: SavedGeometryRun, project: QuoteProject, output: ServerOptionMessage): string {
+  check(project.remnantPlan === undefined, 'staged recorded-piece inputs need their bound stage reader.');
   const settings = run.settings;
+  check(
+    !Object.prototype.hasOwnProperty.call(settings, 'remnant_domain_profile'),
+    'an ordinary result cannot carry staged domain rules.'
+  );
   const runtime = object(settings.runtime);
   check(
-    ['werco-contour-v4', 'werco-contour-v5', 'werco-contour-v6'].includes(run.solver_version ?? '') &&
+    ['werco-contour-v4', 'werco-contour-v5', 'werco-contour-v6', 'werco-contour-v7'].includes(
+      run.solver_version ?? ''
+    ) &&
       settings.solver_version === run.solver_version &&
       settings.protocol === 1 &&
       settings.units === 'mm' &&
@@ -40,17 +47,11 @@ export function validateSavedLayout(run: SavedGeometryRun, project: QuoteProject
     'solver and recorded runtime identity do not agree.'
   );
   const quote = project.groups.find(group => group.id === output.group_id)?.quote;
-  const option = quote?.options.find(item => item.id === output.option_id && item.enabled);
-  check(quote && option, 'the selected material group or stock option is missing.');
-  if (!quote || !option) throw new Error('Saved geometry input is missing.');
-  check(
-    canonicalJSON(option) === canonicalJSON(output.result.option) &&
-      canonicalJSON(stockFor(quote, option)) === canonicalJSON(output.stock),
-    'stock geometry differs from the input revision.'
-  );
+  check(quote, 'the selected material group is missing.');
+  if (!quote) throw new Error('Saved geometry input is missing.');
   let expectedLeftovers: string;
   let label: string;
-  if (run.solver_version === 'werco-contour-v6') {
+  if (run.solver_version === 'werco-contour-v6' || run.solver_version === 'werco-contour-v7') {
     project.groups
       .filter(group => group.quote.parts.length)
       .forEach(group => requireCurrentGeometryProfile(group.quote.geometryProfile));
@@ -79,6 +80,19 @@ export function validateSavedLayout(run: SavedGeometryRun, project: QuoteProject
         ? 'Historical nominal clearance rules (v4)'
         : 'Historical nominal clearance rules with exclusions (v5)';
   }
+  validateSheetGeometry(quote, output, expectedLeftovers);
+  return label;
+}
+
+/** Source and original-geometry validation shared by already-authorized current stages. */
+export function validateSheetGeometry(quote: Quote, output: ServerOptionMessage, expectedLeftovers: string): void {
+  const option = quote.options.find(item => item.id === output.option_id && item.enabled);
+  check(
+    option &&
+      canonicalJSON(option) === canonicalJSON(output.result.option) &&
+      canonicalJSON(stockFor(quote, option)) === canonicalJSON(output.stock),
+    'stock geometry differs from the input revision.'
+  );
   const { result } = output;
   if (result.nest) validateNest(quote.parts, output.stock, result.nest);
   const requested = quote.parts.reduce((count, part) => count + part.quantity, 0);
@@ -95,5 +109,4 @@ export function validateSavedLayout(run: SavedGeometryRun, project: QuoteProject
     );
     leftoversToFile(result.leftovers, { parts: quote.parts, stock: output.stock, nest: result.nest });
   }
-  return label;
 }

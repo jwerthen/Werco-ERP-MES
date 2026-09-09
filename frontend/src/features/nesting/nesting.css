@@ -2834,3 +2834,26 @@ input[type='number'] {
 .cad-source-target input { flex: 0 0 auto; width: 16px; height: 16px; margin-top: 3px; accent-color: #4d86e9; }
 .cad-source-target small { display: block; color: var(--muted-foreground); font-size: 11px; overflow-wrap: anywhere; }
 .cad-source-hash { display: block; white-space: normal; overflow-wrap: anywhere; font-size: 11px; line-height: 1.6; padding-top: 6px; }
+
+/* Recorded-piece planning is a workspace section, separate from dialog-scoped evidence cards. */
+.quote-app .remnant-planning-panel {
+  margin: 18px 24px;
+  padding: 18px;
+  border: 1px solid #40516a;
+  border-radius: 6px;
+  background: #111e32;
+  color: #f1f5f9;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+}
+.quote-app .remnant-planning-panel > h3 { font-size: 17px; font-weight: 600; }
+.quote-app .remnant-planning-panel > p { max-width: 110ch; font-size: 13px; color: #cbd5e1; }
+.quote-app .remnant-planning-panel .saved-run-options { grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); align-items: start; }
+.quote-app .remnant-planning-panel .team-draft-item { background: #0c1729; font-size: 13px; }
+.quote-app .remnant-planning-panel .team-draft-item p { margin-top: 6px; }
+.quote-app .remnant-planning-panel button { white-space: normal; }
+.quote-app .remnant-planning-panel .saved-run-preview { padding-top: 14px; border-top: 1px solid #334155; }
+@container nesting (max-width: 600px) {
+  .quote-app .remnant-planning-panel { margin: 14px 12px; padding: 14px; }
+  .quote-app .remnant-planning-panel .team-draft-actions > button { width: 100%; }
+}

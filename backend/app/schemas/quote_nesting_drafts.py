@@ -8,6 +8,11 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validat
 
 from app.core.nesting_geometry_profile import is_current_geometry_profile
 from app.schemas.quote_nesting_spacing import SpacingOverride, SpacingPolicySnapshot, normalize_thickness
+from app.schemas.remnant_planning import (
+    RemnantSelection,
+    recorded_vertices,
+    validate_saved_selection,
+)
 
 MAX_ESTIMATE_BYTES = 5 * 1024 * 1024
 MAX_DRAFT_REQUEST_BYTES = MAX_ESTIMATE_BYTES + 16 * 1024
@@ -308,17 +313,35 @@ class SavedGroup(InputModel):
 
 
 class SavedProject(InputModel):
-    version: Literal[4, 5, 6, 10, 12, 15]
+    version: Literal[4, 5, 6, 10, 12, 15, 18]
     units: Literal["in"]
     currency: Literal["USD"]
     name: Name
     activeGroupId: Identifier
     groups: list[SavedGroup] = Field(min_length=1, max_length=300)
+    remnantPlan: Optional[RemnantSelection] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def original_remnant_binding(cls, value):
+        if isinstance(value, dict) and "remnantPlan" in value:
+            if value.get("version") != 18 or not isinstance(value["remnantPlan"], dict):
+                raise ValueError("Remnant planning requires project18 with an explicit nonnull selection")
+            plan = value["remnantPlan"]
+            groups = value.get("groups")
+            if not isinstance(groups, list):
+                raise ValueError("Remnant planning requires a material group")
+            targets = [group for group in groups if isinstance(group, dict) and group.get("id") == plan.get("groupId")]
+            if len(targets) != 1 or not isinstance(targets[0].get("quote"), dict):
+                raise ValueError("Recorded piece must be assigned to exactly one material group")
+            validate_saved_selection(plan, targets[0]["quote"])
+        return value
 
     @model_validator(mode="after")
     def bounded_structure(self):
         ids, part_ids, material_keys = set(), set(), set()
-        quantity = vertices = designs = 0
+        quantity = designs = 0
+        vertices = recorded_vertices(self.remnantPlan) if self.remnantPlan else 0
         for group in self.groups:
             if group.id in ids:
                 raise ValueError("Duplicate material group ID")
@@ -334,13 +357,13 @@ class SavedProject(InputModel):
             if key in material_keys:
                 raise ValueError("Duplicate material/thickness group")
             material_keys.add(key)
-            if quote.version == 7 and self.version not in (6, 10, 12, 15):
+            if quote.version == 7 and self.version not in (6, 10, 12, 15, 18):
                 raise ValueError("Orientation constraints require project version 6")
-            if quote.version == 9 and self.version not in (10, 12, 15):
+            if quote.version == 9 and self.version not in (10, 12, 15, 18):
                 raise ValueError("Spacing governance requires project version 10")
-            if quote.version == 11 and self.version not in (12, 15):
+            if quote.version == 11 and self.version not in (12, 15, 18):
                 raise ValueError("Stock exclusions require project version 12")
-            if quote.version == 14 and self.version != 15:
+            if quote.version == 14 and self.version not in (15, 18):
                 raise ValueError('Geometry profile requires project version 15')
             vertices += sum(
                 len(region.outline.points) if isinstance(region.outline, SavedPolygon) else 1
@@ -383,6 +406,15 @@ class SavedProject(InputModel):
                     raise ValueError("Estimate exceeds 300 parts or 20,000 geometry vertices")
         if self.activeGroupId not in ids:
             raise ValueError("Active material group does not exist")
+        if self.remnantPlan:
+            baseline = sum(
+                sum(option.enabled for option in group.quote.options) for group in self.groups if group.quote.parts
+            )
+            target = next(group for group in self.groups if group.id == self.remnantPlan.groupId)
+            if not baseline or not any(option.enabled for option in target.quote.options):
+                raise ValueError("The recorded-piece group requires an enabled full-sheet baseline option")
+            if baseline + 1 + sum(option.enabled for option in target.quote.options) > 36:
+                raise ValueError("Baseline, recorded-piece and residual stages exceed the shared 36-stage limit")
         return self
 
 

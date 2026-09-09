@@ -13,6 +13,7 @@ import { projectFromFile, projectToFile, type QuoteProject } from './lib/quote-p
 import { clearCatalogPricing } from './lib/material-binding';
 import { nestingApiMessage } from './useNestingCatalog';
 import SavedRuns from './SavedRuns';
+import { validateRemnantFile } from './lib/remnant-evidence';
 import CADSourceAttachments from './CADSourceAttachments';
 
 type PendingSave = { request: NestingDraftSave; signature: string };
@@ -119,6 +120,10 @@ export default function TeamDrafts({
         throw new Error('The server returned a different draft revision.');
       if (signature !== JSON.stringify(projectRef.current))
         throw new Error('Your estimate changed while the draft loaded. Open it again to replace the current estimate.');
+      await validateRemnantFile(result.estimate, companyId);
+      if (!mounted.current || controller.signal.aborted) return;
+      if (signature !== JSON.stringify(projectRef.current))
+        throw new Error('Your nest changed while evidence was checked. Open it again.');
       const stored = projectFromFile(result.estimate);
       // Saved inputs are not a current catalog review or a validated nest result.
       const loaded = {
@@ -152,6 +157,8 @@ export default function TeamDrafts({
     setError('');
     setMessage('');
     let operation: PendingSave;
+    savingRef.current = true;
+    setSaving(true);
     try {
       operation = pending ?? {
         request: {
@@ -162,10 +169,16 @@ export default function TeamDrafts({
         },
         signature: JSON.stringify(projectRef.current),
       };
+      if (!pending) await validateRemnantFile(JSON.parse(operation.request.estimateJson), companyId);
+      if (!mounted.current) return;
       if (new Blob([operation.request.estimateJson]).size > 5 * 1024 * 1024)
         throw new Error('Team draft limit: 5 MiB. Save a smaller estimate.');
     } catch (cause) {
-      setError(nestingApiMessage(cause));
+      savingRef.current = false;
+      if (mounted.current) {
+        setSaving(false);
+        setError(nestingApiMessage(cause));
+      }
       return;
     }
     readController.current?.abort();

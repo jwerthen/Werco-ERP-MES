@@ -1004,8 +1004,9 @@ error code/message. `RunDetail` adds `schema_version: 1`, frozen `settings`, nul
 and stock-option IDs, content hash/bytes/time, complete flag, sheets, placed and
 unplaced counts. Pages use `items`, `total`, `page`, `per_page`, `schema_version: 1`.
 
-The checkpoint response adds `schema_version: 1` and `result`, the exact version-1
-Node option envelope. Original saved inputs use inches; this internal geometry
+The checkpoint response adds `schema_version: 1` and `result`, the exact protocol-1
+Node option envelope for ordinary inputs, or protocol-2 stage envelope for a source-bound
+recorded-piece project. Historical payloads retain their original protocol and solver. Original saved inputs use inches; this internal geometry
 envelope explicitly declares millimeters. The application converts all displayed
 dimensions/areas to imperial. Report `content_sha256` hashes the server's canonical
 JSON excluding the hash field itself. Checkpoint hashes cover the entire option
@@ -1019,7 +1020,7 @@ The fixed `standard-v1` technical profile limits the whole project to 120 second
 24 MiB total retained checkpoint content and a 512 MiB Node heap. There is one
 nesting child per worker process; other ARQ functions retain their existing limits.
 Source groups/options are evaluated in their saved order. The shared kernel uses
-code-unit tie-breaking (`werco-contour-v6`), with `seed: null` because it is not
+code-unit tie-breaking (`werco-contour-v7`), with `seed: null` because it is not
 random. Replaying identical saved inputs/build/runtime and completed work is
 deterministic; a wall-time cutoff is not a deterministic work budget.
 
@@ -9841,6 +9842,74 @@ specification return 409. Existing permission/token/read-only restrictions retur
 the existing global JSON receive cap returns 413. No fallback mapping from catalog,
 Part name, grade aliases, gauge, UOM or inventory quantity is inferred.
 
-Wave A adds this source resolver and independently tested selection/currentness
-helpers only. Saved-draft and server-run remnant formats are integrated separately;
-this endpoint alone does not make a conditional calculation or persist a selection.
+The resolver itself makes no calculation or write. An explicit source-bound selection
+can be saved in project18 and calculated through the existing authenticated saved-run routes.
+
+### Source-bound recorded-piece projects and worker stages
+
+Project18 adds optional `remnantPlan`; explicit null is rejected and older project
+versions reject the field. A project18 without the field uses ordinary protocol1;
+normal writers emit project15 when no piece is selected. One project may select one
+recorded physical piece, assigned to exactly one populated quote14 group. The selection
+contains the exact observation snapshot and typed snapshot SHA, current remnant-domain
+profile identity, canonical-inch zone clearance, and an explicit family/grade/thickness
+assignment with reason and a typed hash over `{groupId, requiredGrade, quote}`. That hash
+uses the original saved imperial quote before defaults or unit conversion. Grade is
+trimmed case-sensitive text and thickness must be known and equal; no catalog-to-inventory
+mapping is inferred. `capacity: 1`, `planningOnly: true`, `eligibilityVerified: false`,
+and `availabilityVerified: false` are mandatory.
+
+New saves and new starts require the same-company latest RECORDED observation, its exact
+payload/source hashes, an unchanged active/available Item+Part source, and known compatible
+reported shape/specification. The check holds the observation header FOR SHARE until the
+save/start transaction commits, after existing draft/run and policy locks. It does not lock
+inventory, reserve a piece or promise that another planner will not select it. Later source
+movement is possible. Exact same-key retries first check current authorization, then return
+the original record without applying current-source checks again. Queued claims similarly
+retain their frozen source and only recheck actor/token permissions, input integrity and
+exact runtime/profile identity. Historical reads never rewrite or silently refresh evidence.
+
+Remnant-bearing evidence additionally requires effective `inventory:view` on draft lists,
+history/detail/save and retries; run lists/detail/checkpoints/reports/start/cancel and retries;
+all original-CAD source routes, including completion and download recovery; and worker
+claim/live checkpoint checks. A purchasing grant alone does not expose recorded stock.
+Omitted remnant fields preserve ordinary nesting access. No new role or inventory mutation
+authority is introduced.
+
+The v7 manifest declares base `protocol: 1`, exact `supported_protocols: [1,2]` and the
+packaged `remnant_domain_profile`. The readiness heartbeat remains its existing eight-field
+protocol1 identity. For a remnant-bearing project, frozen run settings select protocol2
+and add the remnant profile; their runtime identity remains protocol1. Protocol2 hello
+also binds the exact remnant profile, base geometry profile, bundle and Node version.
+
+Protocol2 stages are ordered: every full-sheet baseline, one recorded-piece evaluation,
+then every enabled full-sheet option for that group's remaining instances. The total
+`B + 1 + K` must be at most 36 before save/start and shares the existing 120-second, heap,
+frame and retained-checkpoint budgets. No timeout or missing work proves infeasibility.
+Each stage has an input-derived `stage-01`…`stage-36` identity, sequence, kind, group,
+original `option_id` (null for the piece), dependency (piece stage for residuals), requested
+count, exact source stock, result and instance map. Source stock is independently rebuilt
+from canonical nanoinches; bounding extents are never treated as available material.
+
+The recorded-piece result has only `nest`, `error`, `complete`, `area` and optional leftover
+status—no price, cost or financial option. It uses zero or one physical piece. If geometry
+cannot be prepared, an explicit error with null stock/nest preserves all requested instances.
+Residual maps enumerate each remaining original instance exactly once in original part order;
+compact residual quantities cannot erase, duplicate or substitute originals. All-fit cases
+still emit planned residual stages with zero requested instances, an empty map and null
+stock/result. Those are complete alternatives requiring zero full sheets.
+
+Public checkpoint `option_id` holds the stage identity. Protocol2 metadata additionally has
+`stage_kind`, `source_option_id` and `depends_on`; these three keys remain absent from legacy
+metadata. The canonical checkpoint hash covers the exact decoded JSON frame, not its NDJSON
+whitespace. `completed_count` counts complete baseline/residual alternatives, including empty
+residuals, and excludes the recorded-piece stage. COMPLETED means evaluations finished.
+
+Recorded-piece leftover evidence is v4, always unapproved and zero-credit. Per-sheet
+`grossArea` is analytical reported material minus physical holes; `protectedArea` is actual
+inward-protected material before zones; `usableArea` is final vector material after zones.
+`edgeMarginArea = grossArea - protectedArea` and `excludedArea = protectedArea - usableArea`.
+The complete ledger also includes nominal parts, reserved part cutouts, clearance/protection,
+remaining regions and bounded reconciliation residual. Exact profile/area definitions and
+source identity accompany the report. These are conditional planning results, not physical
+availability, reservation, consumption, valuation or automatic child-remnant records.

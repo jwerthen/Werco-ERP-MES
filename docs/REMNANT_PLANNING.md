@@ -1,9 +1,10 @@
 # Recorded-piece nesting foundations
 
-This increment supplies validated source selection and actual-domain geometry.
-It does not yet expose a complete piece-versus-full-sheet comparison in the
-workspace. Saved project/run integration follows separately. Existing full-sheet
-nesting behavior and historical geometry profiles are unchanged.
+This document describes validated source selection and actual-domain geometry.
+The workspace now integrates these foundations with conditional piece-versus-full-sheet
+comparisons, saved projects and staged server calculations. See
+[the recorded-piece workflow](RECORDED_PIECE_PLANNING.md). Existing ordinary
+full-sheet geometry rules and historical profiles are preserved.
 
 The read-only planning snapshot endpoint and permissions are documented in
 [API.md](API.md) and [RBAC_PERMISSIONS.md](RBAC_PERMISSIONS.md). A recorded
@@ -54,5 +55,5 @@ physical holes, unavailable strips, split/empty erosion, grain, quantities,
 determinism, sub-grid violations and budget refusal. A1,000-vertex/30-instance
 benchmark produced identical complete Nest JSON before and after bounded caching
 and edge-distance culling; this does not guarantee that every300-instance job will
-finish within the shared120-second worker limit. The staged integration must retain
+finish within the shared120-second worker limit. The staged integration retains
 completed full-sheet baselines if later recorded-piece work fails or times out.

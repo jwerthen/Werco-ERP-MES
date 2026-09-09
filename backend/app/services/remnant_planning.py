@@ -1,23 +1,27 @@
-"""Pure source resolution and future save/start fences for conditional planning."""
+"""Pure source resolution and immutable save/start fences for conditional planning."""
 
-import math
 from datetime import datetime, timezone
 from decimal import Context, Decimal, localcontext
 from typing import Any
 
 from fastapi import HTTPException
 from pydantic import ValidationError
-from sqlalchemy import and_
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from app.core.remnant_domain_profile import is_current_remnant_profile
-from app.core.remnant_evidence import evidence_sha256, target_group_sha256
+from app.core.remnant_evidence import evidence_sha256
 from app.core.time_utils import to_utc_iso
 from app.db.tenant_filter import tenant_query
+from app.models.quote_nesting_draft import QuoteNestingRevision
 from app.models.stock_piece import StockPiece, StockPieceObservation
 from app.models.user import User
-from app.schemas.quote_nesting_spacing import normalize_thickness
-from app.schemas.remnant_planning import PlanningSnapshotRequest, RemnantSelection, RemnantSnapshot
+from app.schemas.remnant_planning import (
+    PlanningSnapshotRequest,
+    RemnantSelection,
+    RemnantSnapshot,
+    validate_group_binding,
+)
 from app.schemas.stock_piece import ObservationEvidence, UnknownShape
 from app.services import stock_piece
 
@@ -63,6 +67,58 @@ REVIEW_ISSUES = [
 def require_inventory_access(db: Session, user: User, company_id: int) -> None:
     """Additional evidence-read gate, called alongside existing nesting permissions."""
     stock_piece.require_access(db, user, company_id)
+
+
+def has_remnant_plan(value: Any) -> bool:
+    return isinstance(value, dict) and "remnantPlan" in value
+
+
+def require_saved_evidence_access(db: Session, user: User | None, company_id: int, raw: dict) -> None:
+    """Authorization precedes replay; it does not revalidate historical currentness."""
+    if has_remnant_plan(raw):
+        if user is None:
+            raise HTTPException(
+                403,
+                "Recorded-piece evidence requires authenticated inventory:view access",
+            )
+        require_inventory_access(db, user, company_id)
+
+
+def require_revision_evidence_access(db: Session, user: User | None, company_id: int, revision_ids: list[int]) -> None:
+    """One bounded metadata query, never N+1 or a page of 5 MiB input transfers."""
+    if not revision_ids:
+        return
+    value = QuoteNestingRevision.estimate_json
+    presence = (
+        func.json_type(value, "$.remnantPlan").isnot(None)
+        if db.get_bind().dialect.name == "sqlite"
+        else func.json_typeof(value["remnantPlan"]).isnot(None)
+    )
+    found = (
+        tenant_query(db, QuoteNestingRevision, company_id)
+        .with_entities(QuoteNestingRevision.id)
+        .filter(QuoteNestingRevision.id.in_(revision_ids), presence)
+        .first()
+    )
+    if found is not None:
+        require_saved_evidence_access(db, user, company_id, {"remnantPlan": True})
+
+
+def verify_project_selection(db: Session, user: User, company_id: int, project: Any, raw: dict) -> list[dict]:
+    """Called after draft/run/policy locks, before the caller's immutable write/audit."""
+    selection = project.remnantPlan
+    if selection is None:
+        return []
+    target = next(group["quote"] for group in raw["groups"] if group['id'] == selection.groupId)
+    current = verify_current_selection(db, user, company_id, selection, target, lock_header=True)
+    return [
+        {
+            "code": "recorded_piece_planning_only",
+            "group_id": selection.groupId,
+            "message": "Recorded-piece source checked as of save/start; no reservation, material eligibility or physical availability is verified.",
+            'checked_at': current['checked_at'],
+        }
+    ]
 
 
 def lock_observation_header(db: Session, company_id: int, piece_id: int) -> StockPiece:
@@ -219,23 +275,8 @@ def resolve_snapshot(
 
 def verify_assignment(selection: RemnantSelection, raw_quote: dict[str, Any]) -> None:
     """Bind the whole exact imperial group before conversion or catalog application."""
-    evidence = _known_evidence(selection.snapshot.evidence.model_dump(mode='json'))
-    assignment = selection.assignment
-    thickness = raw_quote.get('thickness')
     try:
-        if (
-            type(thickness) not in (int, float)
-            or not math.isfinite(thickness)
-            or not isinstance(raw_quote.get('parts'), list)
-            or not raw_quote['parts']
-            or raw_quote.get('material') != assignment.family
-            or evidence.grade != assignment.requiredGrade
-            or normalize_thickness(str(thickness)) != evidence.thickness
-            or assignment.thicknessIn != evidence.thickness
-            or target_group_sha256(selection.groupId, assignment.requiredGrade, raw_quote)
-            != assignment.targetGroupSha256
-        ):
-            raise ValueError('The exact group/specification no longer matches')
+        validate_group_binding(selection, raw_quote)
     except (ValueError, TypeError, OverflowError) as exc:
         raise HTTPException(
             409, 'Material group, thickness or exact required grade changed; refresh and reassign the piece'
@@ -251,7 +292,7 @@ def verify_current_selection(
     *,
     lock_header: bool = True,
 ) -> dict:
-    """Future save/start helper; caller owns transaction and existing nesting auth."""
+    """Source-currentness check; caller owns transaction and existing nesting auth."""
     require_inventory_access(db, user, company_id)
     if selection.snapshot.companyId != company_id:
         raise HTTPException(404, 'Recorded piece was not found in this company')

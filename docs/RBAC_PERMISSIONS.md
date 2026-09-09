@@ -2385,6 +2385,17 @@ resolver requires effective `inventory:view` and normal tenant/token/kiosk acces
 It does not require Admin/Manager/Supervisor inventory mutation authority and makes
 no observation, audit or inventory change. Existing read-only-company contexts still
 refuse the POST under the central method fence; no read-only exemption is added.
-No purchasing permission grants inventory access. Wave A prepares an additional
-inventory-read helper for later remnant-bearing saved-input/run integration; legacy
-nesting payload permissions are unchanged in this source-only foundation.
+No purchasing permission grants inventory access. Project18 records carrying an actual
+`remnantPlan` field additionally require effective `inventory:view` wherever their evidence
+leaves the API: draft list/history/detail/save and exact retries; saved-run list/detail,
+checkpoint/report/start/cancel and retries; and all attached CAD intent/content/finalize/
+download operations. The gate uses field presence, not version alone. Worker claim and
+live checkpoint acceptance recheck the submitting actor/token's inventory permission.
+Ordinary inputs without that field retain their existing nesting permissions.
+
+Authorization precedes idempotent recovery. Current observation/source checks apply only to
+new saves and starts, under a short observation-header shared lock after the existing policy
+locks. Historical reads and queued calculations preserve their frozen unapproved evidence;
+a source correction or withdrawal does not rewrite a saved record. No stock-mutator role,
+reservation/consumption grant or new approval authority is introduced. A source selection
+remains planner-declared and physically unverified, even after a successful calculation.

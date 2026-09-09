@@ -46,6 +46,7 @@ export function* calculateSavedProject(
 ): Generator<ServerOptionMessage | ServerSummaryMessage> {
   if (!/^[a-f0-9]{64}$/.test(inputSha256)) throw new Error('Invalid input fingerprint.');
   const project = projectFromFile(estimate);
+  if (project.remnantPlan) throw new Error('Recorded-piece selections require the staged protocol2 calculation.');
   requireCurrentProjectGeometry(project);
   const groups = project.groups.filter(group => group.quote.parts.length > 0);
   if (!groups.length) throw new Error('A saved server calculation requires at least one part.');

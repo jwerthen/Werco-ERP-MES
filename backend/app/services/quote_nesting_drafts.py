@@ -22,6 +22,11 @@ from app.schemas.quote_nesting_drafts import MAX_ESTIMATE_BYTES, SavedProject
 from app.services.audit_service import AuditService
 from app.services.quote_nesting_materials import catalog_material
 from app.services.quote_nesting_spacing import verify_project_policies
+from app.services.remnant_planning import (
+    require_revision_evidence_access,
+    require_saved_evidence_access,
+    verify_project_selection,
+)
 
 
 def require_access(db: Session, user: User, company_id: int, *, write: bool = False) -> None:
@@ -175,7 +180,15 @@ def revision_response(revision: QuoteNestingRevision, *, include_estimate: bool 
     return result
 
 
-def list_drafts(db: Session, company_id: int, *, page: int, per_page: int, draft_id: int | None = None) -> dict:
+def list_drafts(
+    db: Session,
+    company_id: int,
+    *,
+    page: int,
+    per_page: int,
+    draft_id: int | None = None,
+    user: User | None = None,
+) -> dict:
     query = tenant_query(db, QuoteNestingRevision, company_id).options(defer(QuoteNestingRevision.estimate_json))
     if draft_id is None:
         query = query.join(QuoteNestingDraft, QuoteNestingDraft.id == QuoteNestingRevision.draft_id).filter(
@@ -192,6 +205,7 @@ def list_drafts(db: Session, company_id: int, *, page: int, per_page: int, draft
         .limit(per_page)
         .all()
     )
+    require_revision_evidence_access(db, user, company_id, [row.id for row in rows])
     return {
         "schema_version": 1,
         "items": [revision_response(row) for row in rows],
@@ -209,7 +223,14 @@ def _draft(db: Session, company_id: int, draft_id: int, *, locked: bool = False)
     return draft
 
 
-def get_revision(db: Session, company_id: int, draft_id: int, number: int) -> dict:
+def get_revision(
+    db: Session,
+    company_id: int,
+    draft_id: int,
+    number: int,
+    *,
+    user: User | None = None,
+) -> dict:
     revision = (
         tenant_query(db, QuoteNestingRevision, company_id)
         .filter(QuoteNestingRevision.draft_id == draft_id, QuoteNestingRevision.revision_number == number)
@@ -217,6 +238,7 @@ def get_revision(db: Session, company_id: int, draft_id: int, number: int) -> di
     )
     if revision is None:
         raise HTTPException(404, "Nesting draft revision not found")
+    require_saved_evidence_access(db, user, company_id, revision.estimate_json)
     return revision_response(revision, include_estimate=True)
 
 
@@ -245,6 +267,7 @@ def save_revision(
     ):
         raise HTTPException(422, "Appending a revision requires a positive expected_version")
     raw, parsed, canonical = parse_estimate(content)
+    require_saved_evidence_access(db, user, company_id, raw)
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     request_hash = hashlib.sha256(
         canonical_json(
@@ -269,6 +292,7 @@ def save_revision(
         raise HTTPException(409, "This draft has a newer revision. Open its latest revision or save a separate draft.")
     issues = _review_sources(db, company_id, parsed, raw)
     issues.extend(verify_project_policies(db, company_id, parsed))
+    issues.extend(verify_project_selection(db, user, company_id, parsed, raw))
     now = datetime.utcnow()
     if draft is None:
         draft = QuoteNestingDraft(

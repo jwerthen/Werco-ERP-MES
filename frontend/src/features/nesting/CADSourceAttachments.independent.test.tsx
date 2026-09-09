@@ -80,9 +80,11 @@ afterEach(() => jest.restoreAllMocks());
 function mount() {
   return render(<CADSourceAttachments target={fixture.revision} onBack={onBack} registerCloseGuard={guard} />);
 }
-async function select(files = [fixture.file]) {
+async function select(files = [fixture.file], timeout = 1000) {
   fireEvent.change(await screen.findByLabelText(label), { target: { files } });
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Attach selected originals' })).toBeEnabled());
+  // Avoid walking the growing 100-row DOM on every asynchronous hash update.
+  const attach = await screen.findByRole('button', { name: 'Attach selected originals' }, { timeout });
+  await waitFor(() => expect(attach).toBeEnabled(), { timeout });
 }
 
 test('100 distinct originals produce 100 byte-exact sequential attachments with unique frozen commands', async () => {
@@ -135,8 +137,16 @@ test('100 distinct originals produce 100 byte-exact sequential attachments with 
     return completed(pending.get(id)!);
   });
   files.forEach(file => jest.mocked(file.arrayBuffer).mockClear());
+  // A final original can finish reading after Testing Library's default 1s
+  // wait. Keep its exact bytes and real hash/receipt validation in this case.
+  jest.mocked(files[99].arrayBuffer).mockImplementationOnce(async () => {
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    return expectedBytes[99];
+  });
   mount();
-  await select(files);
+  // This checks completion of 100 real sequential hashes under coverage;
+  // it is not a one-second filesystem or hashing performance requirement.
+  await select(files, 15000);
   expect(screen.getAllByRole('checkbox')).toHaveLength(100);
   expect(create).not.toHaveBeenCalled();
   const attach = screen.getByRole('button', { name: 'Attach selected originals' });

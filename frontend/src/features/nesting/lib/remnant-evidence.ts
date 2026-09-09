@@ -337,6 +337,30 @@ export function defaultZoneClearance(quote: unknown): string {
   return normalizedZoneClearance(`${units / BigInt(1_000_000_000)}${fractional ? `.${fractional}` : ''}`);
 }
 
+/** Synchronous file structure check; cryptographic binding is a separate explicit async boundary. */
+export function parseRemnantPlanStructure(value: unknown): RemnantPlan {
+  const plan = planSchema.parse(value);
+  unchangedJSON(value, plan);
+  requireRemnantDomainProfile(plan.geometryProfile);
+  check(
+    plan.zoneClearanceIn === normalizedZoneClearance(plan.zoneClearanceIn),
+    'Zone clearance must be canonical inches.'
+  );
+  check(new TextEncoder().encode(JSON.stringify(plan)).length <= 262144, 'The planning selection exceeds 256 KiB.');
+  return plan;
+}
+
+/** Verify against the untouched imperial file before any editable mm conversion. No live-source claim. */
+export async function validateRemnantFile(value: unknown, companyId: number): Promise<void> {
+  const file = value as { version?: unknown; remnantPlan?: unknown; groups?: { id: string; quote: unknown }[] };
+  if (!file || !Object.prototype.hasOwnProperty.call(file, 'remnantPlan')) return;
+  check(file.version === 18 && Array.isArray(file.groups), 'Recorded-piece evidence requires project version 18.');
+  const plan = parseRemnantPlanStructure(file.remnantPlan);
+  const group = file.groups.find(item => item.id === plan.groupId);
+  check(group, 'The selected recorded-piece material group is missing.');
+  await validateRemnantPlan(plan, { companyId, groupId: group.id, quote: group.quote });
+}
+
 /** Local mathematical/source binding only; new server save/start must re-resolve currentness. */
 export async function validateRemnantPlan(
   value: unknown,

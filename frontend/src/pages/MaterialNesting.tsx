@@ -39,6 +39,7 @@ export default function MaterialNesting() {
               estimatorId={user?.id}
               canSaveDrafts={canAll(['purchasing:view', 'purchasing:create'])}
               canManagePolicies={isAdmin && canAll(['purchasing:view', 'purchasing:create'])}
+              canPlanRemnants={canAll(['inventory:view'])}
             />
           </NestingPortalContext.Provider>,
           target
