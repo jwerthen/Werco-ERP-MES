@@ -19,9 +19,7 @@ SPEC.loader.exec_module(GENERATOR)
 
 
 def encoded(wrapper):
-    return (
-        json.dumps(wrapper, sort_keys=True, indent=2, ensure_ascii=True) + "\n"
-    ).encode("ascii")
+    return (json.dumps(wrapper, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode("ascii")
 
 
 def rehash(wrapper):
@@ -65,10 +63,7 @@ def frontend_check(root):
 
 
 def generated_files(root):
-    return [
-        root / "frontend/src/features/nesting/lib" / name
-        for _, name in GENERATOR.PROFILES
-    ]
+    return [root / "frontend/src/features/nesting/lib" / name for _, name in GENERATOR.PROFILES]
 
 
 def test_both_generated_profiles_check_without_changes_and_frontend_build_needs_no_backend(
@@ -78,10 +73,7 @@ def test_both_generated_profiles_check_without_changes_and_frontend_build_needs_
     wrappers = GENERATOR.generate(tree)
     GENERATOR.generate(tree, write=True)
     assert before == [path.read_bytes() for path in generated_files(tree)]
-    assert (
-        wrappers[0]["identity"]["sha256"]
-        == "21e8689fb2ce80c72befbc5866f658cd74fe8ed336d1b5c070e182f3081aa55a"
-    )
+    assert wrappers[0]["identity"]["sha256"] == "21e8689fb2ce80c72befbc5866f658cd74fe8ed336d1b5c070e182f3081aa55a"
     assert wrappers[1]["profile"]["compensatedProfile"] == wrappers[0]["identity"]
     shutil.rmtree(tree / "backend")
     result = frontend_check(tree)
@@ -100,11 +92,7 @@ def test_either_generated_copy_must_be_present_and_exact(tree, profile, change):
         wrapper["profile"]["numerics"]["integerGridMm"] = "0.01"
         target.write_bytes(encoded(wrapper))
     else:
-        target.write_bytes(
-            target.read_bytes().replace(
-                b'"identity":', b'"identity": {}, "identity":', 1
-            )
-        )
+        target.write_bytes(target.read_bytes().replace(b'"identity":', b'"identity": {}, "identity":', 1))
     with pytest.raises(ValueError, match="stale"):
         GENERATOR.generate(tree)
     result = frontend_check(tree)
@@ -127,9 +115,7 @@ def test_either_generated_copy_must_be_present_and_exact(tree, profile, change):
         "large",
     ],
 )
-def test_invalid_normative_profile_is_refused_before_either_generated_file_is_written(
-    tree, change
-):
+def test_invalid_normative_profile_is_refused_before_either_generated_file_is_written(tree, change):
     source = tree / "backend/app/data/nesting_profiles/werco-remnant-domain-v1.json"
     wrapper = json.loads(source.read_bytes())
     if change == "wrong-base":
