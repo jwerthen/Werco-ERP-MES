@@ -793,6 +793,49 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 
 ## Core Endpoints
 
+### Buyer material plan PDF
+
+`POST /api/v1/quote-nesting/buyer-pdf` formats explicitly selected local planning
+layouts into a PDF attachment. Company/preparer identity comes from the authenticated
+active context. It does not retrieve or certify a saved nest, recalculate geometry,
+submit an order, or write business/audit/inventory records. The supplied input SHA-256
+identifies client planning input, not server approval or original DXF bytes.
+
+Authentication and effective `purchasing:view` are checked before multipart parsing.
+Any conditional group or recorded-piece sheet additionally requires effective
+`inventory:view`. Company role overrides and existing platform exemptions apply.
+Disabled users, kiosk credentials and read-only switched-company POST restrictions
+retain their existing fences; this POST has no read-only-context exemption.
+
+Send exactly two multipart fields, without duplicates:
+
+| Field | Contract |
+|-------|----------|
+| `report` | UTF-8 JSON file, at most 8 MiB. Strict version1, `units: "in"`, `solverVersion: "werco-contour-v7"`, `expectedCompanyId`, project reference/notes, input SHA-256 and selected material groups. Unknown/duplicate JSON keys and nonfinite values are refused. |
+| `expected_company_id` | Positive 32-bit integer; both this field and the report's company ID must match the authenticated active company. A stale/mismatched company returns 409. |
+
+Groups contain material/description/thickness, part requirements, sequential sheets,
+actual outlines/holes, unavailable zones and placed contours. Every requested original
+instance must appear exactly once. A conditional plan includes its replacement
+full-sheet purchase fallback; one recorded piece can be used in one group. Limits
+are 300 original instances, 300 sheets, 200,000 aggregate vertices, 8 MiB JSON and
+20 MiB output. Positive dimensions/radii/thickness are bounded to 1e-9–100,000
+inches. A raw request cap of 8 MiB plus 64 KiB multipart overhead checks
+declared and streamed bytes before file spooling. Parsing/formatting runs off the
+event loop. Structural extent checks are not a second topology or approval engine.
+
+Success returns `application/pdf`, an attachment filename, `Cache-Control:
+private, no-store`, and `X-Content-Type-Options: nosniff`. The PDF separates selected
+purchase counts from conditional existing-piece use and its fallback. Part quantities,
+revisions and fitted vector layouts use inches; prices, quote totals, NC output and
+material credit are absent. Text is escaped; unsupported font characters remain
+visible as code-point markers. Rendering accepts no external images, SVG, URLs or
+filesystem paths. Errors include 401/403 for access, 409 for company drift, 413 for
+size, 415 for media type, and 400/422 for malformed multipart/report data.
+
+No migration, environment variable, runtime profile or permission key is added.
+See [the user workflow](MATERIAL_NESTING.md#buyer-pdf-for-the-selected-material-plan).
+
 ### Quote nesting material provenance
 
 These endpoints support `/nest` with read-only selection of existing active

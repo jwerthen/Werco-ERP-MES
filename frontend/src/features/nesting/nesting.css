@@ -3,6 +3,44 @@
 @import 'tw-animate-css';
 @import './variants.css';
 
+.app-dialog.buyer-pdf-dialog {
+  width: min(680px, calc(100vw - 32px));
+  max-width: 680px !important;
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  color: #e2e8f0;
+}
+.buyer-pdf-dialog form,
+.buyer-pdf-fields,
+.buyer-pdf-groups {
+  display: grid;
+  gap: 16px;
+}
+.buyer-pdf-fields { min-width: 0; border: 0; padding: 0; }
+.buyer-pdf-fields label { display: grid; gap: 7px; min-width: 0; color: #e2e8f0; font-size: 14px; }
+.buyer-pdf-fields input,
+.buyer-pdf-fields select,
+.buyer-pdf-fields textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #475569;
+  border-radius: 6px;
+  background: #0f172a;
+  color: #f1f5f9;
+  padding: 10px;
+  font: inherit;
+}
+.buyer-pdf-fields textarea { resize: vertical; }
+.buyer-pdf-fields :focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
+.buyer-pdf-fields:disabled { opacity: .7; }
+.buyer-pdf-note { color: #94a3b8; font-size: 12px; }
+.buyer-pdf-warning { padding: 12px; border: 1px solid #a87928; background: #2d2519; color: #fde6b7; font-size: 13px; line-height: 1.5; }
+.buyer-pdf-error,
+.buyer-pdf-fields [role='alert'] { color: #fca5a5; overflow-wrap: anywhere; }
+.buyer-pdf-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+.buyer-pdf-actions button { white-space: normal; }
+@media (max-width: 480px) { .buyer-pdf-actions button { width: 100%; } }
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {

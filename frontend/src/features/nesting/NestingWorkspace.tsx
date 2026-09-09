@@ -88,6 +88,8 @@ import SpacingPolicyControls from './SpacingPolicyControls';
 import StockExclusions, { StockExclusionOverlay, stockExclusionsSvg } from './StockExclusions';
 import { exclusionsToFile } from './lib/stock-exclusion-files';
 import { geometryProfileLabel, resolveGeometryProfile } from './lib/geometry-profile';
+import BuyerPdfExport from './BuyerPdfExport';
+import type { BuyerPdfInputs } from './lib/buyer-pdf-types';
 
 type CachedComparison = { comparison: Comparison; signature: string };
 const legacyFootprintNotice =
@@ -225,6 +227,7 @@ export default function NestingWorkspace({
   canSaveDrafts = false,
   canManagePolicies = false,
   canPlanRemnants = false,
+  canExportBuyerPdf = true,
 }: {
   initialQuote?: Quote;
   companyId?: number;
@@ -232,6 +235,7 @@ export default function NestingWorkspace({
   canSaveDrafts?: boolean;
   canManagePolicies?: boolean;
   canPlanRemnants?: boolean;
+  canExportBuyerPdf?: boolean;
 }) {
   const fieldId = useId();
   const [documentEpoch, setDocumentEpoch] = useState(0);
@@ -383,6 +387,16 @@ export default function NestingWorkspace({
       return (e as Error).message;
     }
   }, [project]);
+  const buyerPdfInputs = useMemo<BuyerPdfInputs>(() => {
+    const currentStages = planningRun?.signature === JSON.stringify(project) ? planningRun : null;
+    return {
+      project,
+      comparisons: snapshots,
+      remnantInput: currentStages?.raw ?? null,
+      stages: currentStages?.stages ?? [],
+      companyId: companyId ?? 0,
+    };
+  }, [project, snapshots, planningRun, companyId]);
   const density = quote.material === 'Carbon steel' ? 7850 : quote.material === 'Stainless steel' ? 7930 : 2700;
   const catalogDensity = quote.materialBinding?.catalog.density_lb_per_cubic_inch;
   const mass = active
@@ -1271,6 +1285,12 @@ export default function NestingWorkspace({
                 >
                   Export review record
                 </button>
+                <BuyerPdfExport
+                  inputs={buyerPdfInputs}
+                  estimatorId={estimatorId}
+                  canPlanRemnants={canPlanRemnants}
+                  disabled={busy || importing || !!error || catalog.loading || !canExportBuyerPdf}
+                />
                 <button className="secondary compact" onClick={save}>
                   <FileJson size={16} /> Save
                 </button>
