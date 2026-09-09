@@ -1,0 +1,51 @@
+{
+  "identity": {
+    "id": "werco-remnant-domain-v1",
+    "sha256": "114171806c36fee380801a72b2beb346a41fa1af83884097f9604f417cdd445b"
+  },
+  "profile": {
+    "budgets": {
+      "maxBooleanVertices": 120000,
+      "maxCandidateCacheEntries": 1200,
+      "maxCandidateCachedVertices": 240000,
+      "maxCandidateUnionInputVertices": 120000,
+      "maxCandidateWork": 64000000,
+      "maxContainmentCacheEntries": 50000,
+      "maxDomainVertices": 12000,
+      "maxHoles": 16,
+      "maxPredicateWork": 8000000,
+      "maxSourceVertices": 2000,
+      "maxZones": 16
+    },
+    "compensatedProfile": {
+      "id": "werco-compensated-v1",
+      "sha256": "21e8689fb2ce80c72befbc5866f658cd74fe8ed336d1b5c070e182f3081aa55a"
+    },
+    "internalUnit": "mm",
+    "numerics": {
+      "absoluteAreaToleranceMm2": "0.0000001",
+      "boundaryProtectionMm": "0.0004",
+      "circleRadialErrorMm": "0.00254",
+      "integerGridMm": "0.0001",
+      "relativeAreaTolerance": "0.000000000001"
+    },
+    "rules": {
+      "availableCircle": "inscribed-then-inward-protected",
+      "boundaryContact": "allowed-if-nominal-minimum-and-entire-envelope-pass",
+      "candidateSearch": "bounded-convex-support-or-boundary-segment-sweep",
+      "capacity": "one-per-scenario",
+      "eligibility": "not-established",
+      "erosionComponents": "retain-all",
+      "grossArea": "actual-outer-minus-physical-holes",
+      "guardedContainment": "boolean-difference-plus-exact-integer-boundaries-and-split-midpoints",
+      "leftovers": "potential-review-only-zero-credit",
+      "nominalBoundaryMinimum": "edge-margin-plus-part-gap-times-compensated-part-gap-fraction-plus-imported-tolerance-plus-twice-compensated-numerical-protection",
+      "nominalBoundaryMinimumBasis": "independent-original-curve-check-includes-additional-numerical-protection-beyond-manufacturing-margin-and-web",
+      "outerAndPhysicalHoleMargin": "group-edge-margin-plus-boundary-protection",
+      "sourceNormalization": "exact-nanoinch-translation-before-mm-conversion",
+      "sourceTopology": "reject-significant-repair",
+      "unavailableZoneClearance": "explicit-additional-clearance"
+    },
+    "schemaVersion": 1
+  }
+}

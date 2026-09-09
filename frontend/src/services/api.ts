@@ -2692,6 +2692,10 @@ class ApiService {
     return (await this.api.get(`/inventory/stock-pieces/${pieceId}/observations/${observation}`, { signal })).data;
   }
 
+  async resolveRemnantPlanningSnapshot(pieceId: number, observation: number, request: import('../types/remnantPlanning').RemnantSnapshotRequest, signal?: AbortSignal): Promise<import('../types/remnantPlanning').RemnantResolution> {
+    return (await this.api.post(`/inventory/stock-pieces/${pieceId}/observations/${observation}/planning-snapshot`, request, { signal })).data;
+  }
+
   async createStockPiece(request: import('../types/stockPiece').CreateStockPiece, signal?: AbortSignal): Promise<import('../types/stockPiece').StockPieceDetail> {
     return (await this.api.post('/inventory/stock-pieces', request, { signal })).data;
   }

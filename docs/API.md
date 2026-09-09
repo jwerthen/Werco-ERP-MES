@@ -9801,3 +9801,46 @@ Only the original actor and exact API-token identity (or the same interactive ac
 The intent, each fresh attempt and its audit commit **before** the corresponding object write. Each attempt freezes a generated company-scoped key and nonsecret provider identity; a retry never reuses an uncertain attempt for another write. Storage I/O occurs outside DB transactions/connections. Partial, late and unsuccessful objects remain accounted for by immutable attempts. A unique receipt and complete binding set commit with required audit in a separate transaction. Failed completion/audit may be retried through finalize without another upload. Completed command recovery returns historical receipt metadata without requiring the provider to be online. Download separately fails closed if bytes are missing, changed, oversized or unavailable.
 
 Success and exact replay return 200. Unknown/cross-company revisions or intents return 404; changed company, mismatched bytes/targets/UUID, occupied bindings and attempt exhaustion return 409; ownership/permission failures return 403; malformed/duplicate fields return 422; size limits return 413; incorrect content type returns 415. Storage uncertainty, incomplete finalize and required audit failure return 503 with recovery guidance. A 503 does not authorize an automatic fresh upload: check completion, then let the user explicitly resend the original file if needed. No storage error may silently rewrite a receipt or the saved input JSON.
+
+
+## Recorded-piece planning snapshot
+
+`POST /inventory/stock-pieces/{piece_id}/observations/{number}/planning-snapshot`
+is a read-only resolver for conditional material planning. It performs no nesting,
+physical eligibility approval, observation/audit mutation, inventory reconciliation,
+reservation or financial calculation. IDs are positive signed-32-bit integers.
+
+Request: `{expected_company_id,expected_payload_sha256,expected_source_sha256}`.
+Require effective `inventory:view`, the normal active-company/authentication/token
+fences, and an exact scoped observation. No inventory mutator role is needed. The
+existing general read-only-company restriction on POST requests still applies.
+Duplicate JSON keys, null/malformed identities and extra fields are rejected.
+
+The response is `{company_id,snapshot,snapshot_sha256,latest_observation_number,
+source_status,current_source_sha256,checked_at,review_issues,advisory}`. A successful
+response requires the latest RECORDED observation, a still-present and unchanged
+source, active Item/Part, source status `available`, known geometry kind, known
+positive thickness within the planning range and known reported grade. This does
+not establish physical availability or material suitability. Geometrically invalid
+evidence is never repaired here; bounded structural evidence is retained, and the
+calculation kernel must separately validate topology before accepting placements.
+
+`snapshot` preserves exact observation identity, observer/reason/timestamps, canonical
+inch measurement evidence and its existing payload hash/count, source IDs/hash, and
+a nonfinancial historical Item/Part/movement-watermark subset. It excludes aggregate
+quantities and costs. `snapshot_sha256` is not the observation payload hash or original
+source hash; it uses the dedicated `werco-remnant-evidence-v1` typed ASCII/IEEE754
+encoding. The immutable snapshot excludes dynamic source status/check timestamps.
+Source comparison and latestness share one source SQL statement; future movement
+can still occur immediately afterward. Historical observations remain unchanged.
+
+Success returns 200. Foreign/unknown identities return 404; changed company, stale or
+withdrawn evidence, mismatched hashes, missing/held/inactive sources or unknown required
+specification return 409. Existing permission/token/read-only restrictions return
+403 (revoked credentials may return 401); malformed bounded input returns 422 and
+the existing global JSON receive cap returns 413. No fallback mapping from catalog,
+Part name, grade aliases, gauge, UOM or inventory quantity is inferred.
+
+Wave A adds this source resolver and independently tested selection/currentness
+helpers only. Saved-draft and server-run remnant formats are integrated separately;
+this endpoint alone does not make a conditional calculation or persist a selection.

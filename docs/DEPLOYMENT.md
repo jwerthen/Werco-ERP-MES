@@ -215,6 +215,13 @@ Save that input change as a new revision; historical v4/v5 results remain frozen
 under their recorded solver/source/report identities rather than being recalculated.
 
 The normative wrapper is `backend/app/data/nesting_profiles/werco-compensated-v1.json`.
+Recorded-piece foundations add the separate
+`backend/app/data/nesting_profiles/werco-remnant-domain-v1.json`; the generator and
+isolated frontend verifier now validate both wrappers and their dependency linkage.
+The base profile is immutable. This foundation adds no environment variable,
+dependency, migration, cron or automatic inventory action; full staged comparison
+integration is not enabled by this foundation alone. See
+[REMNANT_PLANNING.md](REMNANT_PLANNING.md).
 Its generated frontend adapter is checked by
 `python3 .github/scripts/generate_nesting_profile.py --check`; CI rejects drift.
 Standalone frontend and Node builds self-check the adapter, preserving their existing

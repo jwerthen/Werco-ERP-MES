@@ -2376,3 +2376,15 @@ Users with `is_superuser=true` bypass all permission checks. This is reserved fo
 - Frontend checks are for UX only - they can be bypassed
 - Backend checks are the authoritative security layer
 - Always verify permissions server-side before performing actions
+
+
+### Recorded-piece planning snapshot
+
+The pure `POST /inventory/stock-pieces/{piece_id}/observations/{number}/planning-snapshot`
+resolver requires effective `inventory:view` and normal tenant/token/kiosk access.
+It does not require Admin/Manager/Supervisor inventory mutation authority and makes
+no observation, audit or inventory change. Existing read-only-company contexts still
+refuse the POST under the central method fence; no read-only exemption is added.
+No purchasing permission grants inventory access. Wave A prepares an additional
+inventory-read helper for later remnant-bearing saved-input/run integration; legacy
+nesting payload permissions are unchanged in this source-only foundation.

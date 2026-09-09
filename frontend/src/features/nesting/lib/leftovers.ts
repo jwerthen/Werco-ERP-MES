@@ -1,4 +1,12 @@
-import { GEOMETRY_PROFILE_SPEC, COMPENSATED_GEOMETRY_RULES, resolveGeometryProfile } from './geometry-profile';
+import {
+  CURRENT_GEOMETRY_PROFILE,
+  GEOMETRY_PROFILE_SPEC,
+  COMPENSATED_GEOMETRY_RULES,
+  resolveGeometryProfile,
+} from './geometry-profile';
+import { REMNANT_DOMAIN_PROFILE, REMNANT_DOMAIN_SPEC } from './remnant-domain-profile';
+import { prepareStockDomain, type DomainStock } from './remnant-domain';
+import { domainContains, prepareDomainBoundary } from './domain-containment';
 import { prepareCompensatedGeometry } from './compensated-geometry';
 import {
   canonicalPath,
@@ -35,6 +43,27 @@ import {
 export const LEFTOVER_VERSION = 'werco-leftovers-v1' as const;
 export const LEFTOVER_EXCLUSION_VERSION = 'werco-leftovers-v2' as const;
 export const LEFTOVER_COMPENSATED_VERSION = 'werco-leftovers-v3' as const;
+export const LEFTOVER_DOMAIN_VERSION = 'werco-leftovers-v4' as const;
+export const LEFTOVER_DOMAIN_PROFILE = Object.freeze({
+  compensatedProfile: CURRENT_GEOMETRY_PROFILE,
+  remnantDomainProfile: REMNANT_DOMAIN_PROFILE,
+  remnantDomain: REMNANT_DOMAIN_SPEC,
+});
+export const DOMAIN_AREA_DEFINITIONS = Object.freeze({
+  grossArea: 'Analytical reported outer area minus physical holes; bounding extents are not material.',
+  protectedArea:
+    'Actual vector material after inward physical-edge margin and numerical protection, before unavailable zones.',
+  usableArea: 'Actual protected material after the union of guarded unavailable zones.',
+  edgeMarginArea:
+    'Gross minus protected area, including physical-edge margin and conservative numerical/curve protection.',
+  excludedArea: 'Protected minus usable area; overlapping guarded unavailable zones are counted once.',
+  clearanceAndProtectionArea:
+    'Usable minus remaining, nominal parts and reserved internal cutouts; part envelopes and numerical protection, not physical kerf.',
+  remainingArea:
+    'Connected vector regions after compensated part-envelope subtraction; potential review only, no availability or credit.',
+});
+export const DOMAIN_RESERVATION_DESCRIPTION =
+  'Compensated outer part envelopes are subtracted once from the actual inward-protected material after guarded unavailable zones; physical holes are absent from gross material, while part internal cutouts remain reserved. Boundary contact and original nominal clearances follow the recorded-piece domain profile. Potential review only; no physical eligibility, availability, reservation or credit.';
 /** Engineering approximation profile, not approved shop eligibility or a kerf model. */
 export const LEFTOVER_PROFILE = Object.freeze({
   integerGridMm: GUARDED_GEOMETRY_PROFILE.integerGridMm,
@@ -85,6 +114,7 @@ export type SheetLeftoverAnalysis = {
   sheet: number;
   grossArea: number;
   usableArea: number;
+  protectedArea?: number;
   edgeMarginArea: number;
   excludedArea?: number;
   nominalPartArea: number;
@@ -96,11 +126,20 @@ export type SheetLeftoverAnalysis = {
 };
 export type LeftoverAnalysis = {
   inputSignature: string;
-  version: typeof LEFTOVER_VERSION | typeof LEFTOVER_EXCLUSION_VERSION | typeof LEFTOVER_COMPENSATED_VERSION;
+  version:
+    | typeof LEFTOVER_VERSION
+    | typeof LEFTOVER_EXCLUSION_VERSION
+    | typeof LEFTOVER_COMPENSATED_VERSION
+    | typeof LEFTOVER_DOMAIN_VERSION;
   status: 'potential_review_only';
   creditUSD: 0;
   assumptions: {
-    profile: typeof LEFTOVER_PROFILE | typeof LEFTOVER_EXCLUSION_PROFILE | typeof GEOMETRY_PROFILE_SPEC;
+    profile:
+      | typeof LEFTOVER_PROFILE
+      | typeof LEFTOVER_EXCLUSION_PROFILE
+      | typeof GEOMETRY_PROFILE_SPEC
+      | typeof LEFTOVER_DOMAIN_PROFILE;
+    areaDefinitions?: typeof DOMAIN_AREA_DEFINITIONS;
     reservation: string;
     internalHolesReserved: true;
     boundsAreUsableRectangles: false;
@@ -125,12 +164,15 @@ function sum(values: number[]): number {
  * This is equality evidence, not a cryptographic approval or an inventory identifier. */
 function inputSignature(parts: Part[], stock: Stock, nest: Nest): string {
   return canonicalJSON({
-    version: stock.geometryProfile
-      ? 'werco-leftover-inputs-v3'
-      : stock.exclusions?.length
-        ? 'werco-leftover-inputs-v2'
-        : 'werco-leftover-inputs-v1',
+    version: stock.domain
+      ? 'werco-leftover-inputs-v4'
+      : stock.geometryProfile
+        ? 'werco-leftover-inputs-v3'
+        : stock.exclusions?.length
+          ? 'werco-leftover-inputs-v2'
+          : 'werco-leftover-inputs-v1',
     ...(stock.geometryProfile ? { geometryProfile: stock.geometryProfile } : {}),
+    ...(stock.domain ? { domain: stock.domain } : {}),
     ...(stock.exclusions?.length ? { exclusions: stock.exclusions } : {}),
     stock: [
       stock.width,
@@ -191,7 +233,13 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
         (part.referencePaths?.reduce((vertices, path) => vertices + path.length, 0) ?? 0),
       0
     ) +
-      exclusionVertexCount(stock.exclusions ?? []) <=
+      exclusionVertexCount(stock.exclusions ?? []) +
+      (stock.domain
+        ? [stock.domain.outer, ...stock.domain.holes].reduce(
+            (count, loop) => count + (loop.type === 'circle' ? 1 : loop.points.length),
+            0
+          )
+        : 0) <=
       20000,
     'source geometry exceeds the 20,000-vertex limit.'
   );
@@ -201,23 +249,28 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
     (a, b) => a.sheet - b.sheet || compareText(a.partId, b.partId) || a.instance - b.instance
   );
   const compensated = prepareCompensatedGeometry(parts, stock);
+  const domain = compensated?.domain;
   const limits = compensated ? COMPENSATED_LEFTOVER_LIMITS : LEFTOVER_PROFILE;
   const exclusions = compensated?.exclusions ?? prepareExclusions(stock);
   const exclusionPaths = exclusions.flatMap(region => region.paths);
   const withExclusions = exclusions.length > 0;
-  let inputVertices = exclusionPaths.reduce((count, path) => count + path.length, 0);
+  let inputVertices = (domain?.usable ?? exclusionPaths).reduce((count, path) => count + path.length, 0);
   for (const placement of nest.placements) {
     const outer = byId.get(placement.partId)!.loops[0];
     inputVertices += outer.type === 'poly' ? outer.points.length : circleSegments(outer.r, compensated?.settings);
     check(inputVertices <= limits.maxInputVertices, 'placed geometry exceeds the 60,000 input-vertex budget.');
   }
   const usableBoundary = compensated ? compensated.usable : inwardSheet(stock);
-  const excludedArea =
-    usableBoundary && withExclusions ? filledArea(intersectPaths([usableBoundary], exclusionPaths)) : 0;
+  const usablePaths = domain?.usable ?? (usableBoundary ? [usableBoundary] : []);
+  const excludedArea = domain
+    ? domain.unavailableArea
+    : usableBoundary && withExclusions
+      ? filledArea(intersectPaths([usableBoundary], exclusionPaths))
+      : 0;
   check(Number.isFinite(excludedArea) && excludedArea >= 0, 'invalid guarded exclusion area.');
-  const grossArea = stock.width * stock.height;
-  const usableArea = (stock.width - 2 * stock.margin) * (stock.height - 2 * stock.margin);
-  const edgeMarginArea = grossArea - usableArea;
+  const grossArea = domain?.grossArea ?? stock.width * stock.height;
+  const usableArea = domain?.usableArea ?? (stock.width - 2 * stock.margin) * (stock.height - 2 * stock.margin);
+  const edgeMarginArea = domain?.edgeAndProtectionArea ?? grossArea - usableArea;
   let outputVertices = 0,
     regionCount = 0;
   const sheets: SheetLeftoverAnalysis[] = [];
@@ -227,9 +280,9 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
     const reservedCutoutArea = sum(
       placed.map(placement => sum(byId.get(placement.partId)!.loops.slice(1).map(loopArea)))
     );
-    const clipPaths: Clipper.Paths = [...exclusionPaths];
-    let offsetVertices = exclusionPaths.reduce((count, path) => count + path.length, 0);
-    if (usableBoundary) {
+    const clipPaths: Clipper.Paths = domain ? [] : [...exclusionPaths];
+    let offsetVertices = clipPaths.reduce((count, path) => count + path.length, 0);
+    if (usablePaths.length) {
       for (const placement of placed) {
         const part = byId.get(placement.partId)!;
         const envelopes = compensated
@@ -244,10 +297,15 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
       }
     }
     const tree = new Clipper.PolyTree();
-    if (usableBoundary) {
+    if (usablePaths.length) {
       const clip = new Clipper.Clipper();
       clip.StrictlySimple = true;
-      check(clip.AddPath(usableBoundary, Clipper.PolyType.ptSubject, true), 'usable sheet polygon is invalid.');
+      check(
+        domain
+          ? clip.AddPaths(usablePaths, Clipper.PolyType.ptSubject, true)
+          : clip.AddPath(usableBoundary!, Clipper.PolyType.ptSubject, true),
+        'usable sheet polygon is invalid.'
+      );
       if (clipPaths.length)
         check(clip.AddPaths(sortedPaths(clipPaths), Clipper.PolyType.ptClip, true), 'guarded envelopes are invalid.');
       check(
@@ -307,10 +365,10 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
         compareText(JSON.stringify(a.outer), JSON.stringify(b.outer))
     );
     regions.forEach((region, index) => {
-      region.id = `leftover-${compensated ? 'v3' : withExclusions ? 'v2' : 'v1'}-sheet-${sheet + 1}-region-${index + 1}`;
+      region.id = `leftover-${domain ? 'v4' : compensated ? 'v3' : withExclusions ? 'v2' : 'v1'}-sheet-${sheet + 1}-region-${index + 1}`;
     });
     const remainingArea = sum(regions.map(region => region.area));
-    const allowance = usableArea - excludedArea - remainingArea - nominalPartArea - reservedCutoutArea;
+    const allowance = usableArea - (domain ? 0 : excludedArea) - remainingArea - nominalPartArea - reservedCutoutArea;
     const tolerance = Math.max(limits.absoluteAreaToleranceMm2, grossArea * limits.relativeAreaTolerance);
     check(allowance >= -tolerance, 'remaining regions overstate usable material; the area ledger is negative.');
     const clearanceAndProtectionArea = Math.max(0, allowance);
@@ -329,6 +387,7 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
       sheet,
       grossArea,
       usableArea,
+      ...(domain ? { protectedArea: domain.protectedArea } : {}),
       edgeMarginArea,
       ...(compensated || withExclusions ? { excludedArea } : {}),
       nominalPartArea,
@@ -341,16 +400,29 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
   }
   return {
     inputSignature: inputSignature(parts, stock, nest),
-    version: compensated
-      ? LEFTOVER_COMPENSATED_VERSION
-      : withExclusions
-        ? LEFTOVER_EXCLUSION_VERSION
-        : LEFTOVER_VERSION,
+    version: domain
+      ? LEFTOVER_DOMAIN_VERSION
+      : compensated
+        ? LEFTOVER_COMPENSATED_VERSION
+        : withExclusions
+          ? LEFTOVER_EXCLUSION_VERSION
+          : LEFTOVER_VERSION,
     status: 'potential_review_only',
     creditUSD: 0,
     assumptions: {
-      profile: compensated ? GEOMETRY_PROFILE_SPEC : withExclusions ? LEFTOVER_EXCLUSION_PROFILE : LEFTOVER_PROFILE,
-      reservation: compensated ? COMPENSATED_RESERVATION_DESCRIPTION : RESERVATION_DESCRIPTION,
+      profile: domain
+        ? LEFTOVER_DOMAIN_PROFILE
+        : compensated
+          ? GEOMETRY_PROFILE_SPEC
+          : withExclusions
+            ? LEFTOVER_EXCLUSION_PROFILE
+            : LEFTOVER_PROFILE,
+      ...(domain ? { areaDefinitions: DOMAIN_AREA_DEFINITIONS } : {}),
+      reservation: domain
+        ? DOMAIN_RESERVATION_DESCRIPTION
+        : compensated
+          ? COMPENSATED_RESERVATION_DESCRIPTION
+          : RESERVATION_DESCRIPTION,
       internalHolesReserved: true,
       boundsAreUsableRectangles: false,
       eligibilityVerified: false,
@@ -361,7 +433,9 @@ export function analyzeLeftovers(parts: Part[], stock: Stock, nest: Nest): Lefto
 
 /** Export a bounded worker result as unapproved review evidence, never as inventory. */
 export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: Part[]; stock: Stock; nest: Nest }) {
-  const compensated = analysis.version === LEFTOVER_COMPENSATED_VERSION;
+  const domain = analysis.version === LEFTOVER_DOMAIN_VERSION;
+  const compensated = analysis.version === LEFTOVER_COMPENSATED_VERSION || domain;
+  check(!domain || context, 'actual-domain evidence requires its original layout context.');
   const withExclusions = analysis.version === LEFTOVER_EXCLUSION_VERSION;
   const excludedLedger = compensated || withExclusions;
   const limits = compensated ? COMPENSATED_LEFTOVER_LIMITS : LEFTOVER_PROFILE;
@@ -374,14 +448,27 @@ export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: P
   check(
     JSON.stringify(analysis.assumptions.profile) ===
       JSON.stringify(
-        compensated ? GEOMETRY_PROFILE_SPEC : withExclusions ? LEFTOVER_EXCLUSION_PROFILE : LEFTOVER_PROFILE
+        domain
+          ? LEFTOVER_DOMAIN_PROFILE
+          : compensated
+            ? GEOMETRY_PROFILE_SPEC
+            : withExclusions
+              ? LEFTOVER_EXCLUSION_PROFILE
+              : LEFTOVER_PROFILE
       ),
     'unknown numerical profile.'
   );
   check(Array.isArray(analysis.sheets) && analysis.sheets.length <= 300, 'invalid sheet count.');
   check(
     analysis.assumptions.reservation ===
-      (compensated ? COMPENSATED_RESERVATION_DESCRIPTION : RESERVATION_DESCRIPTION) &&
+      (domain
+        ? DOMAIN_RESERVATION_DESCRIPTION
+        : compensated
+          ? COMPENSATED_RESERVATION_DESCRIPTION
+          : RESERVATION_DESCRIPTION) &&
+      (domain
+        ? JSON.stringify(analysis.assumptions.areaDefinitions) === JSON.stringify(DOMAIN_AREA_DEFINITIONS)
+        : analysis.assumptions.areaDefinitions === undefined) &&
       analysis.assumptions.internalHolesReserved === true &&
       analysis.assumptions.boundsAreUsableRectangles === false &&
       analysis.assumptions.eligibilityVerified === false,
@@ -402,7 +489,8 @@ export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: P
   );
   if (context) {
     check(
-      compensated === Boolean(resolveGeometryProfile(context.stock.geometryProfile)) &&
+      domain === Boolean(context.stock.domain) &&
+        compensated === Boolean(resolveGeometryProfile(context.stock.geometryProfile)) &&
         (compensated || withExclusions === Boolean(context.stock.exclusions?.length)),
       'report geometry or exclusion version does not match the stock.'
     );
@@ -412,12 +500,24 @@ export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: P
       'report input binding does not match the current geometry and placements.'
     );
   }
-  const exportBoundary = context
-    ? inwardSheet(
-        context.stock,
-        compensated ? { ...COMPENSATED_GEOMETRY_RULES.numerics, ...COMPENSATED_GEOMETRY_RULES.budgets } : undefined
-      )
-    : undefined;
+  if (domain && context) {
+    // v4 evidence is small, single-piece and immutable: regenerate the actual
+    // remainder, not merely its area or bounding extents. This bounded extra work
+    // also refuses a rewritten in-domain region covering a placed part.
+    const regenerated = analyzeLeftovers(context.parts, context.stock, context.nest);
+    check(
+      canonicalJSON(analysis) === canonicalJSON(regenerated),
+      'actual-domain report differs from the regenerated remainder.'
+    );
+  }
+  const exportDomain = domain && context ? prepareStockDomain(context.stock as DomainStock) : undefined;
+  const exportBoundary =
+    context && !domain
+      ? inwardSheet(
+          context.stock,
+          compensated ? { ...COMPENSATED_GEOMETRY_RULES.numerics, ...COMPENSATED_GEOMETRY_RULES.budgets } : undefined
+        )
+      : undefined;
   let vertices = 0,
     regions = 0;
   const regionIds = new Set<string>();
@@ -433,6 +533,7 @@ export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: P
       const areas = {
         grossArea: sheet.grossArea,
         usableArea: sheet.usableArea,
+        ...(domain ? { protectedArea: sheet.protectedArea! } : {}),
         edgeMarginArea: sheet.edgeMarginArea,
         ...(excludedLedger ? { excludedArea: sheet.excludedArea! } : {}),
         nominalPartArea: sheet.nominalPartArea,
@@ -440,6 +541,10 @@ export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: P
         clearanceAndProtectionArea: sheet.clearanceAndProtectionArea,
         remainingArea: sheet.remainingArea,
       };
+      check(
+        domain ? typeof sheet.protectedArea === 'number' : sheet.protectedArea === undefined,
+        'invalid protected-area ledger version.'
+      );
       check(
         excludedLedger ? typeof sheet.excludedArea === 'number' : sheet.excludedArea === undefined,
         'invalid exclusion ledger version.'
@@ -458,16 +563,24 @@ export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: P
         const nominal = sum(placed.map(placement => partArea(byId.get(placement.partId)!)));
         const cutouts = sum(placed.map(placement => sum(byId.get(placement.partId)!.loops.slice(1).map(loopArea))));
         check(
-          Math.abs(sheet.grossArea - stock.width * stock.height) <= tolerance &&
-            Math.abs(sheet.usableArea - (stock.width - 2 * stock.margin) * (stock.height - 2 * stock.margin)) <=
-              tolerance &&
+          Math.abs(sheet.grossArea - (exportDomain?.grossArea ?? stock.width * stock.height)) <= tolerance &&
+            Math.abs(
+              sheet.usableArea -
+                (exportDomain?.usableArea ?? (stock.width - 2 * stock.margin) * (stock.height - 2 * stock.margin))
+            ) <= tolerance &&
+            (!exportDomain ||
+              (Math.abs(sheet.protectedArea! - exportDomain.protectedArea) <= tolerance &&
+                Math.abs(sheet.excludedArea! - exportDomain.unavailableArea) <= tolerance &&
+                Math.abs(sheet.edgeMarginArea - exportDomain.edgeAndProtectionArea) <= tolerance)) &&
             Math.abs(sheet.nominalPartArea - nominal) <= tolerance &&
             Math.abs(sheet.reservedCutoutArea - cutouts) <= tolerance,
           'report areas do not match the validated placements and sheet.'
         );
       }
       check(
-        Math.abs(sheet.edgeMarginArea + sheet.usableArea - sheet.grossArea) <= tolerance,
+        Math.abs(sheet.edgeMarginArea + (domain ? sheet.protectedArea! : sheet.usableArea) - sheet.grossArea) <=
+          tolerance &&
+          (!domain || Math.abs(sheet.usableArea + sheet.excludedArea! - sheet.protectedArea!) <= tolerance),
         'usable and margin areas do not match the sheet.'
       );
       const remaining = sum(sheet.regions.map(region => region.area));
@@ -541,7 +654,23 @@ export function leftoversToFile(analysis: LeftoverAnalysis, context?: { parts: P
               return { X, Y };
             })
           );
-          if (context)
+          if (exportDomain) {
+            check(
+              integerRings.every((ring, index) =>
+                index === 0 ? Clipper.Clipper.Area(ring) > 0 : Clipper.Clipper.Area(ring) < 0
+              ),
+              'invalid actual-domain region winding.'
+            );
+            const simplified = Clipper.Clipper.SimplifyPolygons(integerRings, Clipper.PolyFillType.pftNonZero);
+            check(
+              canonicalJSON(sortedPaths(simplified)) === canonicalJSON(sortedPaths(integerRings)),
+              'invalid actual-domain region topology.'
+            );
+            check(
+              domainContains(prepareDomainBoundary(integerRings), exportDomain.prepared),
+              'region extends outside the actual usable material.'
+            );
+          } else if (context)
             check(
               exportBoundary &&
                 integerRings.every(ring =>
