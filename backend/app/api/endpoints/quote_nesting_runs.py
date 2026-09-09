@@ -70,7 +70,13 @@ def list_quote_nesting_runs(
 ):
     """Read company calculation summaries without geometry, audit or other writes."""
     return service.list_runs(
-        db, company_id, page=page, per_page=per_page, draft_id=draft_id, revision_number=revision_number
+        db,
+        company_id,
+        page=page,
+        per_page=per_page,
+        draft_id=draft_id,
+        revision_number=revision_number,
+        user=user,
     )
 
 
@@ -90,7 +96,7 @@ def get_quote_nesting_run(
     company_id: int = Depends(get_current_company_id),
 ):
     """Read status and checkpoint metadata for one exact saved calculation."""
-    return service.run_detail(db, service.get_run(db, company_id, run_id))
+    return service.run_detail(db, service.get_run(db, company_id, run_id), user=user, authorize=True)
 
 
 @router.get("/{run_id}/checkpoints/{sequence}", response_model=RunCheckpointResponse)
@@ -102,7 +108,7 @@ def get_quote_nesting_run_checkpoint(
     company_id: int = Depends(get_current_company_id),
 ):
     """Read one immutable internal-mm result with its server content hash."""
-    return service.get_checkpoint(db, company_id, run_id, sequence)
+    return service.get_checkpoint(db, company_id, run_id, sequence, user=user)
 
 
 @router.post("/{run_id}/cancel", response_model=RunDetail)
@@ -134,4 +140,4 @@ def export_quote_nesting_run_report(
     company_id: int = Depends(get_current_company_id),
 ):
     """Export exact saved inputs and available checked results as unapproved draft evidence."""
-    return service.export_report(db, company_id, run_id)
+    return service.export_report(db, company_id, run_id, user=user)

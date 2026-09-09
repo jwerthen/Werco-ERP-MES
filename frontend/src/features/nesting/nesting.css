@@ -2821,3 +2821,39 @@ input[type='number'] {
 .quote-app .geometry-profile-notice p{max-width:100ch;margin:8px 0 12px;line-height:1.5}
 .quote-app .geometry-profile-notice .primary{white-space:normal}
 .quote-app .geometry-profile-details{padding:10px;border:1px solid #475569;border-radius:8px;margin:8px 0 12px;font-size:12px;overflow-wrap:anywhere}
+.cad-source-panel { display: grid; gap: 14px; color: var(--foreground); min-width: 0; }
+.cad-source-panel p, .cad-source-panel h3, .cad-source-panel h4 { margin: 0; }
+.cad-source-disclosure { border-left: 3px solid #e6af49; padding: 10px 12px; background: #e6af4910; line-height: 1.6; }
+.cad-source-file { display: grid; gap: 8px; font-weight: 600; }
+.cad-source-file input { max-width: 100%; font-size: 14px; }
+.cad-source-files, .cad-source-history { display: grid; gap: 12px; }
+.cad-source-file-row { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--input); border-radius: 6px; background: var(--card); min-width: 0; overflow-wrap: anywhere; }
+.cad-source-file-row fieldset { margin: 0; padding: 10px; border: 1px solid var(--input); min-width: 0; max-height: 240px; overflow-y: auto; }
+.cad-source-file-row legend { padding: 0 5px; font-size: 13px; }
+.cad-source-target { display: flex; align-items: flex-start; gap: 8px; padding: 7px 0; }
+.cad-source-target input { flex: 0 0 auto; width: 16px; height: 16px; margin-top: 3px; accent-color: #4d86e9; }
+.cad-source-target small { display: block; color: var(--muted-foreground); font-size: 11px; overflow-wrap: anywhere; }
+.cad-source-hash { display: block; white-space: normal; overflow-wrap: anywhere; font-size: 11px; line-height: 1.6; padding-top: 6px; }
+
+/* Recorded-piece planning is a workspace section, separate from dialog-scoped evidence cards. */
+.quote-app .remnant-planning-panel {
+  margin: 18px 24px;
+  padding: 18px;
+  border: 1px solid #40516a;
+  border-radius: 6px;
+  background: #111e32;
+  color: #f1f5f9;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+}
+.quote-app .remnant-planning-panel > h3 { font-size: 17px; font-weight: 600; }
+.quote-app .remnant-planning-panel > p { max-width: 110ch; font-size: 13px; color: #cbd5e1; }
+.quote-app .remnant-planning-panel .saved-run-options { grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); align-items: start; }
+.quote-app .remnant-planning-panel .team-draft-item { background: #0c1729; font-size: 13px; }
+.quote-app .remnant-planning-panel .team-draft-item p { margin-top: 6px; }
+.quote-app .remnant-planning-panel button { white-space: normal; }
+.quote-app .remnant-planning-panel .saved-run-preview { padding-top: 14px; border-top: 1px solid #334155; }
+@container nesting (max-width: 600px) {
+  .quote-app .remnant-planning-panel { margin: 14px 12px; padding: 14px; }
+  .quote-app .remnant-planning-panel .team-draft-actions > button { width: 100%; }
+}

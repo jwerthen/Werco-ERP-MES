@@ -45,6 +45,8 @@ export function scaleLoop(loop: Loop, factor: number): Loop {
 }
 const dimensions = ['width', 'height', 'margin', 'gap', 'bedWidth', 'bedHeight'] as const;
 export function jobToFile(job: Job) {
+  if (Object.prototype.hasOwnProperty.call(job.stock, 'domain'))
+    throw new Error('Recorded-piece domains require a source-bound project; standalone job export is unsupported.');
   resolveGeometryProfile(job.stock.geometryProfile);
   const stock = { ...job.stock };
   for (const k of dimensions) stock[k] = mmToIn(stock[k]);
@@ -87,6 +89,8 @@ export function jobFromFile(input: unknown): unknown {
   if (!input || typeof input !== 'object') throw new Error('Invalid job file.');
   const d = input as Record<string, unknown>;
   const declaredStock = d.stock as Record<string, unknown> | undefined;
+  if (declaredStock && Object.prototype.hasOwnProperty.call(declaredStock, 'domain'))
+    throw new Error('Recorded-piece domains require a source-bound project; standalone job import is unsupported.');
   if (Object.prototype.hasOwnProperty.call(d, 'geometryProfile'))
     throw new Error('Job geometry profile belongs to stock.');
   if (d.version === 16) requireCurrentGeometryProfile(declaredStock?.geometryProfile);

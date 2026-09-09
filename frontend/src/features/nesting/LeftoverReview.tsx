@@ -125,9 +125,24 @@ export default function LeftoverReview({
             <dl>
               {(
                 [
-                  ['Gross sheet', sheet.grossArea],
-                  ['Outside edge margins', sheet.edgeMarginArea],
-                  ['Excluded stock within margins', sheet.excludedArea ?? 0],
+                  [
+                    sheet.protectedArea !== undefined
+                      ? 'Actual reported material (physical holes removed)'
+                      : 'Gross sheet',
+                    sheet.grossArea,
+                  ],
+                  [
+                    sheet.protectedArea !== undefined
+                      ? 'Physical-edge margin and numerical protection'
+                      : 'Outside edge margins',
+                    sheet.edgeMarginArea,
+                  ],
+                  [
+                    sheet.protectedArea !== undefined
+                      ? 'Unavailable-zone union within protected material'
+                      : 'Excluded stock within margins',
+                    sheet.excludedArea ?? 0,
+                  ],
                   ['Nominal finished parts', sheet.nominalPartArea],
                   ['Reserved internal cutouts', sheet.reservedCutoutArea],
                   ['Clearance and numerical protection', sheet.clearanceAndProtectionArea],
@@ -142,8 +157,8 @@ export default function LeftoverReview({
             </dl>
             <p>
               Internal cutouts stay reserved. Remaining regions exclude half the selected part gap around each part plus
-              conservative curve and numerical protection. This is a quoting allowance, not an exact kerf or
-              recoverable-scrap calculation.
+              conservative curve and numerical protection. This is a conservative planning allowance, not an exact kerf
+              or recoverable-scrap calculation.
             </p>
             <p>
               These are predicted shapes. No remnant is added to inventory or credited against the sheet cost. Reuse

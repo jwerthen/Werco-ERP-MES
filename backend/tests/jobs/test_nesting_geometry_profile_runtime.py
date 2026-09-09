@@ -6,6 +6,7 @@ import json
 import pytest
 
 from app.core.nesting_geometry_profile import geometry_profile_identity
+from app.core.remnant_domain_profile import remnant_profile_identity
 from app.jobs import quote_nesting_runs as jobs
 from app.schemas.quote_nesting_runs import SOLVER_VERSION
 
@@ -13,7 +14,19 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('change', ['missing', 'null', 'wrong-hash', 'extra', 'old-solver'])
+@pytest.mark.parametrize(
+    'change',
+    [
+        'missing',
+        'null',
+        'wrong-hash',
+        'extra',
+        'old-solver',
+        'missing-capabilities',
+        'wrong-remnant',
+        'boolean-capability',
+    ],
+)
 async def test_invalid_packaged_profile_fails_before_any_executable_launch(tmp_path, monkeypatch, change):
     node = tmp_path / 'node'
     bundle = tmp_path / 'solver.cjs'
@@ -28,6 +41,8 @@ async def test_invalid_packaged_profile_fails_before_any_executable_launch(tmp_p
         'max_option_evaluations': 36,
         'entrypoint': 'solver.cjs',
         'geometry_profile': geometry_profile_identity(),
+        'supported_protocols': [1, 2],
+        'remnant_domain_profile': remnant_profile_identity(),
     }
     if change == 'missing':
         manifest.pop('geometry_profile')
@@ -37,6 +52,12 @@ async def test_invalid_packaged_profile_fails_before_any_executable_launch(tmp_p
         manifest['geometry_profile']['sha256'] = 'a' * 64
     elif change == 'extra':
         manifest['geometry_profile']['approved'] = True
+    elif change == 'missing-capabilities':
+        manifest.pop('supported_protocols')
+    elif change == 'wrong-remnant':
+        manifest['remnant_domain_profile']['sha256'] = '0' * 64
+    elif change == 'boolean-capability':
+        manifest['supported_protocols'] = [True, 2]
     else:
         manifest['solver_version'] = 'werco-contour-v5'
     manifest_path.write_text(json.dumps(manifest))

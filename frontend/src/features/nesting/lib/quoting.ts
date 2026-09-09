@@ -16,6 +16,7 @@ import {
 import {
   validatePart,
   validateJob,
+  validateNest,
   nestParts,
   partFitsUsableStock,
   type Part,
@@ -33,6 +34,7 @@ import {
   validateMaterialBinding,
   type MaterialBinding,
 } from './material-binding';
+import { canonicalJSON } from './provenance';
 export type SheetOption = {
   exclusions?: StockExclusion[];
   id: string;
@@ -297,8 +299,48 @@ export function calculateSheetOption(q: Quote, option: SheetOption): OptionResul
 export function compareSheets(q: Quote): Comparison {
   validateQuote(q);
   requireCurrentGeometryProfile(q.geometryProfile);
-  const requested = q.parts.reduce((a, p) => a + p.quantity, 0);
   const results = q.options.filter(o => o.enabled).map(option => calculateSheetOption(q, option));
+  return rankCompletedResults(q, results);
+}
+
+/** Rank already calculated options without rerunning geometry. Partial progress
+ * may contain a subset; only validated completed options may be recommended. */
+export function comparisonFromResults(q: Quote, results: OptionResult[]): Comparison {
+  validateQuote(q);
+  const count = q.parts.reduce((a, p) => a + p.quantity, 0);
+  const ids = new Set<string>();
+  for (const result of results) {
+    const option = q.options.find(option => option.enabled && option.id === result.option.id);
+    check(!ids.has(result.option.id) && option, 'Comparison results contain a duplicate or disabled stock option.');
+    check(
+      canonicalJSON(option) === canonicalJSON(result.option),
+      'Comparison stock options differ from current inputs.'
+    );
+    if (result.nest) validateNest(q.parts, stockFor(q, option!), result.nest);
+    check(
+      result.complete ===
+        Boolean(result.nest && count > 0 && result.nest.placements.length === count && !result.nest.unplaced.length),
+      'Comparison completion does not match required quantities.'
+    );
+    if (result.nest) {
+      check(
+        result.error === null &&
+          result.area === result.nest.sheets * option!.width * option!.height &&
+          result.cost === (option!.price === null ? null : option!.price * result.nest.sheets),
+        'Comparison material area or entered cost differs from its stock count.'
+      );
+    } else
+      check(
+        typeof result.error === 'string' && result.area === 0 && result.cost === null,
+        'Comparison failure result is inconsistent.'
+      );
+    ids.add(result.option.id);
+  }
+  return rankCompletedResults(q, results);
+}
+
+function rankCompletedResults(q: Quote, results: OptionResult[]): Comparison {
+  const requested = q.parts.reduce((a, p) => a + p.quantity, 0);
   if (!requested)
     return {
       results,

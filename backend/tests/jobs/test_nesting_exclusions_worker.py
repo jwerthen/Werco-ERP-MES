@@ -11,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from app.db.database import atomic_transaction
 from app.jobs import quote_nesting_runs as jobs
 from app.models.quote_nesting_run import QuoteNestingRunCheckpoint
+from app.schemas.quote_nesting_runs import SOLVER_VERSION
 from app.services import quote_nesting_run_outbox as outbox
 from app.services import quote_nesting_runs as service
 from app.services.audit_service import AuditService
@@ -41,7 +42,7 @@ async def test_real_node_exclusion_validation_precedes_any_accepted_checkpoint(
     monkeypatch.setattr(outbox, 'enqueue_job_best_effort', lambda *_args, **_kwargs: True)
     monkeypatch.setattr(outbox, 'enqueue_job_fire_and_forget_fastfail', no_queue)
     runtime = await jobs.verify_runtime()
-    assert runtime['solver_version'] == 'werco-contour-v6'
+    assert runtime['solver_version'] == SOLVER_VERSION
     source = current_estimate(exclusion_estimate())
     region = source['groups'][0]['quote']['options'][0]['exclusions'][0]
     region['outline'] = {

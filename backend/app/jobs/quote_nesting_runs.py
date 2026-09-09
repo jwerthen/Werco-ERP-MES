@@ -14,6 +14,10 @@ from fastapi import HTTPException
 
 from app.core.nesting_geometry_profile import geometry_profile_identity, is_current_geometry_profile
 from app.core.queue import enqueue_job, get_redis_pool
+from app.core.remnant_domain_profile import (
+    is_current_remnant_profile,
+    remnant_profile_identity,
+)
 from app.core.time_utils import to_utc_iso
 from app.db.database import atomic_transaction
 from app.db.session import SessionLocal
@@ -28,10 +32,14 @@ from app.schemas.quote_nesting_runs import (
 )
 from app.services import quote_nesting_runs as service
 from app.services.audit_service import AuditWriteError
+from app.services.nesting_remnant_protocol import (
+    completed_option,
+    planned_evaluations,
+    validate_stage_summary,
+)
 from app.services.nesting_run_protocol import (
     RunProtocolError,
     exact,
-    expected_options,
     parse_message,
     require,
     validate_hello,
@@ -74,9 +82,15 @@ async def verify_runtime() -> dict:
                 "max_option_evaluations",
                 "entrypoint",
                 "geometry_profile",
+                "supported_protocols",
+                "remnant_domain_profile",
             },
         )
         require(is_current_geometry_profile(manifest['geometry_profile']))
+        require(is_current_remnant_profile(manifest["remnant_domain_profile"]))
+        require(
+            manifest["supported_protocols"] == [1, 2] and all(type(n) is int for n in manifest["supported_protocols"])
+        )
         require(manifest["protocol"] == 1 and type(manifest["protocol"]) is int)
         require(manifest["solver_version"] == SOLVER_VERSION and manifest["node_major"] == 22)
         require(manifest["max_option_evaluations"] == MAX_OPTIONS and manifest["entrypoint"] == "solver.cjs")
@@ -213,11 +227,13 @@ async def run_quote_nesting_task(*, company_id: int, run_id: int) -> dict:
             payload, lease = claimed
             raw = canonical_json(payload).encode("utf-8") + b"\n"
             require(len(raw) <= MAX_ESTIMATE_BYTES + 1024)
-            planned = expected_options(payload["estimate"])
+            planned = planned_evaluations(payload["estimate"])
+            protocol = payload["protocol"]
             manifest = {
                 "solver_version": runtime["solver_version"],
                 "bundle_sha256": runtime["bundle_sha256"],
                 "geometry_profile": geometry_profile_identity(),
+                "remnant_domain_profile": remnant_profile_identity(),
             }
             loop = asyncio.get_running_loop()
             deadline = loop.time() + MAX_SECONDS
@@ -267,23 +283,35 @@ async def run_quote_nesting_task(*, company_id: int, run_id: int) -> dict:
                     break
                 message = parse_message(line)
                 if not hello_seen:
-                    validate_hello(message, payload["input_sha256"], manifest)
+                    validate_hello(message, payload["input_sha256"], manifest, protocol=protocol)
                     require(message["node_version"] == runtime["node_version"])
                     _transaction(service.accept_hello, company_id, run_id, lease, message)
                     hello_seen = True
                 elif summary is not None:
                     raise RunProtocolError("Unexpected output after summary")
-                elif message.get("type") == "option":
+                elif message.get("type") == ("stage" if protocol == 2 else "option"):
                     require(len(keys) < min(len(planned), MAX_OPTIONS))
                     _transaction(service.append_checkpoint, company_id, run_id, lease, message)
-                    keys.append({"group_id": message["group_id"], "option_id": message["option_id"]})
-                    complete += int(message["result"]["complete"])
+                    keys.append(
+                        {
+                            "group_id": message["group_id"],
+                            ("stage_id" if protocol == 2 else "option_id"): message[
+                                "stage_id" if protocol == 2 else "option_id"
+                            ],
+                        }
+                    )
+                    complete += int(completed_option(message))
                 elif message.get("type") == "summary":
-                    validate_summary(message, payload["input_sha256"], keys, len(planned), complete)
+                    validator = validate_stage_summary if protocol == 2 else validate_summary
+                    validator(message, payload["input_sha256"], keys, len(planned), complete)
                     summary = message
                 elif message.get("type") == "error":
                     exact(message, {"type", "protocol", "input_sha256", "code"})
-                    require(message["protocol"] == 1 and message["input_sha256"] == payload["input_sha256"])
+                    require(
+                        type(message["protocol"]) is int
+                        and message["protocol"] == protocol
+                        and message["input_sha256"] == payload["input_sha256"]
+                    )
                     require(message["code"] in ("invalid_geometry", "runtime_error", "output_limit", "input_limit"))
                     raise ValueError(message["code"])
                 else:

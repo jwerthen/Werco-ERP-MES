@@ -12,6 +12,7 @@ import { allowedRotations, orientationExplanation, type GrainAxis, type Rotation
 import { packContours, outlinesCollide, movedOuter, rotatePoint } from './contour-packing';
 import { DXF_CURVE_TOLERANCE_MM, readDXFGeometry } from './dxf';
 import { validateProvenance, type PartProvenance } from './provenance';
+import { validateStockDomain, type StockDomain, type DomainStock } from './remnant-domain';
 
 export type Point = { x: number; y: number };
 export type Loop = { type: 'poly'; points: Point[] } | { type: 'circle'; cx: number; cy: number; r: number };
@@ -31,6 +32,7 @@ export type Part = {
   provenance?: PartProvenance;
 };
 export type Stock = {
+  domain?: StockDomain;
   geometryProfile?: GeometryProfileRef;
   exclusions?: StockExclusion[];
   grainAxis?: GrainAxis;
@@ -343,15 +345,22 @@ export function validateStock(s: Stock) {
     'Sheet exceeds the configured machine envelope.'
   );
   requireValid(
-    s.gap >= 0 && s.margin >= 0 && s.width > 2 * s.margin && s.height > 2 * s.margin,
+    s.gap >= 0 &&
+      s.margin >= 0 &&
+      (s.domain ? s.margin <= 20000 && s.gap <= 20000 : s.width > 2 * s.margin && s.height > 2 * s.margin),
     'Margin or spacing is invalid for this sheet.'
   );
-  if (s.exclusions !== undefined) validateStockExclusions(s.exclusions, s.width, s.height);
+  if (s.domain) validateStockDomain(s as DomainStock);
+  else if (s.exclusions !== undefined) validateStockExclusions(s.exclusions, s.width, s.height);
   requireValid(Number.isInteger(s.maxSheets) && s.maxSheets >= 1 && s.maxSheets <= 300, 'Sheet limit must be 1–300.');
 }
 export function validateJob(data: unknown): Job {
   const j = data as Job;
   requireValid(j && j.version === 1, 'Unsupported job file version.');
+  requireValid(
+    !j.stock || !Object.prototype.hasOwnProperty.call(j.stock, 'domain'),
+    'Recorded-piece domains require a source-bound project; standalone job files do not support them.'
+  );
   requireValid(typeof j.name === 'string' && j.name.length > 0 && j.name.length < 200, 'Invalid job name.');
   requireValid(['Carbon steel', 'Stainless steel', 'Aluminum'].includes(j.material), 'Unsupported material.');
   requireValid(
@@ -367,7 +376,8 @@ export function validateJob(data: unknown): Job {
       (a, p) => a + vertexCount(p.loops) + (p.referencePaths?.reduce((n, path) => n + path.length, 0) ?? 0),
       0
     ) +
-      exclusionVertexCount(j.stock?.exclusions ?? []) <=
+      exclusionVertexCount(j.stock?.exclusions ?? []) +
+      (j.stock?.domain ? vertexCount([j.stock.domain.outer, ...j.stock.domain.holes]) : 0) <=
       20000,
     'Job geometry limit: 20,000 vertices.'
   );
@@ -382,7 +392,8 @@ export function nestParts(parts: Part[], stock: Stock): Nest {
       (a, p) => a + vertexCount(p.loops) + (p.referencePaths?.reduce((n, path) => n + path.length, 0) ?? 0),
       0
     ) +
-      exclusionVertexCount(stock.exclusions ?? []) <=
+      exclusionVertexCount(stock.exclusions ?? []) +
+      (stock.domain ? vertexCount([stock.domain.outer, ...stock.domain.holes]) : 0) <=
       20000,
     'Job geometry limit: 20,000 vertices.'
   );
@@ -402,6 +413,7 @@ export function nestParts(parts: Part[], stock: Stock): Nest {
 }
 /** Rectangular usable-stock feasibility across permitted orientations; ignores exclusions and other parts. */
 export function partFitsUsableStock(part: Part, stock: Stock): boolean {
+  if (stock.domain) return packContours([{ ...part, quantity: 1 }], stock).placements.length === 1;
   const compensated = prepareCompensatedGeometry([part], { ...stock, exclusions: undefined });
   if (compensated) return compensated.fits(part);
   const b = bounds(part.loops[0]),

@@ -9,7 +9,7 @@ import { exclusionsToFile } from './stock-exclusion-files';
 import { mmToIn } from './units';
 
 export type ComparisonSnapshot = { comparison: Comparison; signature: string };
-export const SOLVER_VERSION = 'werco-contour-v6';
+export const SOLVER_VERSION = 'werco-contour-v7';
 
 /** Downloadable draft evidence. This is never an approval, inventory claim or server audit record. */
 export async function buildRunManifest(
@@ -18,6 +18,8 @@ export async function buildRunManifest(
   identity: { companyId: number | null; estimatorId: number | null }
 ) {
   validateProject(project);
+  if (project.remnantPlan)
+    throw new Error('Export the staged recorded-piece review to include its source and residual layouts.');
   requireCurrentProjectGeometry(project);
   const groups = project.groups.filter(group => group.quote.parts.length > 0);
   if (!groups.length) throw new Error('Add parts and compare sheets before exporting a review record.');

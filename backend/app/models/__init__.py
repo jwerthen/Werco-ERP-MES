@@ -139,6 +139,12 @@ from .quote_config import (
 )
 from .quote_nesting_draft import QuoteNestingDraft, QuoteNestingRevision
 from .quote_nesting_run import QuoteNestingRun, QuoteNestingRunCheckpoint
+from .quote_nesting_source import (
+    QuoteNestingSourceAttempt,
+    QuoteNestingSourceBinding,
+    QuoteNestingSourceIntent,
+    QuoteNestingSourceReceipt,
+)
 from .quote_nesting_spacing_policy import (
     QuoteNestingSpacingEvent,
     QuoteNestingSpacingPolicy,
@@ -193,6 +199,10 @@ __all__ = [
     "QuoteNestingRevision",
     "QuoteNestingRun",
     "QuoteNestingRunCheckpoint",
+    "QuoteNestingSourceIntent",
+    "QuoteNestingSourceAttempt",
+    "QuoteNestingSourceReceipt",
+    "QuoteNestingSourceBinding",
     "QuoteNestingSpacingPolicy",
     "QuoteNestingSpacingRevision",
     "QuoteNestingSpacingEvent",

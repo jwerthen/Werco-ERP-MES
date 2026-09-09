@@ -5,25 +5,61 @@ the shop opens. **Read §1 and §3 before you touch anything.** Every command be
 copy-pasteable. Every step has a stop condition. Where a fact can only come from the live
 Railway project, this document says so and tells you how to get it — it never guesses.
 
-> **Where this document sits.** `docs/WORKER_SERVICE.md` is the *reference* (why the worker
-> exists, what the code does, what changed). **This** is the *procedure*. They are
-> deliberately separate; if they ever disagree, this file is the one you are executing and
-> `WORKER_SERVICE.md` is the one to correct. `docs/DEPLOYMENT_RUNBOOK.md` covers the routine
-> `werco-api` / `werco-frontend` deploy and mentions no worker at all; this is a one-time
-> cutover of a subsystem that has no deploy history in this repo, with steps that cannot be
-> undone, so it is not folded in there. `docs/NOTIFICATIONS.md` documents the notification pipeline's design, not
-> its deployment.
+> **Scope and history.** The initial-cutover sections below preserve the original
+> Redis/backlog investigation and staged cron procedure. They are not a statement
+> that the current production worker is absent. `WORKER_SERVICE.md` describes its
+> current implementation; `DEPLOYMENT.md` and `DEPLOYMENT_RUNBOOK.md` describe normal
+> releases. A nesting update uses the existing worker and gated pipeline; it does
+> not repeat service provisioning or enable unrelated schedules.
 
-**Nothing in this repo has been deployed.** No Railway service was created, no variable was
-set, no Railway command was run against the project. Both CI worker-deploy steps are gated
-off by default. Merging the branch changes nothing in production until you do §5.
+## Current saved-nesting release procedure
+
+1. Require all exact-head CI/CD, PR Check and relevant PostgreSQL/API E2E gates before
+   normal merge. Build the repo-root worker image and run its non-root, network-disabled,
+   read-only smoke; retain the manifest artifact from that exact tested tree.
+2. For recorded-piece planning, require solver `werco-contour-v7`, manifest base
+   `protocol:1`, exact `supported_protocols:[1,2]` and both validated geometry profiles.
+   Ordinary full-sheet requests stay protocol1; only project18 with `remnantPlan`
+   selects protocol2. The remnant domain identity is `werco-remnant-domain-v1`, SHA256
+   `114171806c36fee380801a72b2beb346a41fa1af83884097f9604f417cdd445b`, linked to unchanged
+   compensated identity `21e8689fb2ce80c72befbc5866f658cd74fe8ed336d1b5c070e182f3081aa55a`.
+   Exercise both protocols in the packaged smoke. No new migration after 105,
+   environment variable, secret, service or cron setting is required.
+3. Preserve the existing cron selection. Saved runs require the selected original
+   `relay_quote_nesting_runs_job` CronJob; `none` or a selection omitting it intentionally
+   advertises no nesting readiness. The startup check survives Sentry's in-place
+   callable wrapping by checking the selected CronJob identity. Do not enable MRP or
+   other schedules to repair a nesting release.
+4. Let the normal combined workflow deploy and verify the exact API release first,
+   then upload the frontend and worker. The worker checks both profiles and its bundle
+   before startup. It publishes the unchanged eight-field, base-protocol1 runtime
+   identity every 30 seconds only after Redis SET succeeds (TTL 90 seconds).
+5. Require `.github/scripts/verify_worker_release.py` against the exact tested manifest:
+   strict v7, release/bundle/Node/deployment equality, fresh post-Redis event and current
+   active SUCCESS deployment, followed by an active-deployment recheck. Accept the
+   supported structured Railway log envelope without a text-only filter. A startup
+   message or accepted upload alone is insufficient. On failure, preserve logs and
+   diagnose the concrete cause; do not relax checks or manually promote the frontend.
+6. Complete the normal Vercel promotion and public `/release.txt` exact-merge check.
+   With an authorized account, verify ordinary full-sheet and explicit recorded-piece
+   comparisons separately, zero-fit/all-fit cases, residual original-instance mapping
+   and retained partial work on cancellation. A complete run means planned work was
+   evaluated; it need not fit every part. No physical availability, reservation,
+   consumption, leftover registration or credit is established by this check.
+
+Rollback restores a compatible API/worker/frontend set and retains additive schema
+101–105 plus immutable inputs, protocol2 stages and report/source identities. Older
+images may refuse project18; never strip fields or recalculate history to force
+compatibility. The API must retain effective `inventory:view` gates on remnant-bearing
+draft/run/CAD evidence; keeping tables does not make a pre-remnant reader safe. Existing
+current-release readiness remains required for new runs.
 
 ---
 
 ## 0. The 60-second version
 
-1. Nothing in this repo has ever deployed a worker (whether one exists in your Railway
-   project is a live check — §4.2). **Separately**, the queue was pointed at the wrong Redis,
+1. At the original cutover, this repo had not deployed a worker (whether one existed
+   was a live check — §4.2). **Separately**, the queue was pointed at the wrong Redis,
    so most likely *nothing was ever enqueued either* — there is probably no backlog at all.
    §2 tells you which of the two situations you are in. **Do not skip it.**
 2. Deploy the API fix first, alone. Verify `job_queue_redis` on `/health/ready` (§5.1).
@@ -90,7 +126,7 @@ whose body has expired logs `job <id> expired` and discards it. So anything queu
 therefore be much larger than the number of jobs that will actually run; §2.3 shows how to
 tell them apart.
 
-### What was fixed in the code (not yet deployed)
+### What the original cutover fixed
 
 - `REDIS_URL` is now the source of truth for **both** the enqueue side and the worker, with
   the host/port/db trio as fallback and `REDIS_PASSWORD` filling a gap neither supplied.
@@ -803,15 +839,16 @@ variables → Actions → **Variables**:
 
 Until these are set, both workflow steps are skipped and merging changes nothing. The
 production step runs **after** the RELEASE stamp, so the worker's Sentry events carry the same
-release tag as the API's. There is no health-verification step for the worker because it
-serves no HTTP — verify it from its startup log (§5.5).
+release tag as the API's. The worker serves no HTTP. For worker-touched nesting releases,
+the current workflow also requires the strict active-deployment/fresh runtime gate described above; the
+startup log alone does not establish nesting readiness.
 
 ---
 
 ## 8. What this runbook does not cover, and what you must decide
 
-1. **Every live fact about your Railway project.** I had no authorization to query it and ran
-   no Railway command against it. §2 and §4 are the checks; the answers are yours to obtain.
+1. **Live Railway facts cannot be inferred from this original cutover record.**
+   Recheck the current project using §2 and §4 before changing its configuration.
    In particular: whether a Redis service exists, what variables `werco-api` actually has,
    whether a worker service already exists, and what `werco-api`'s real start command is.
 2. **What Railway does to a failing healthcheck on your plan.** §4.3. Confirm from Railway's

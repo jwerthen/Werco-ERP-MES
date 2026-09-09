@@ -26,6 +26,7 @@ from app.middleware.logging_middleware import (
     RequestLoggingMiddleware,
 )
 from app.middleware.nesting_draft_body_limit import NestingDraftBodyLimitMiddleware
+from app.middleware.nesting_source_body_limit import NestingSourceBodyLimitMiddleware
 
 # Import for side effects: attaches the transactional-outbox SQLAlchemy Session listeners
 # so operational events committed on the request path tee into the notification pipeline.
@@ -643,6 +644,7 @@ For API support, contact the system administrator.
 app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(CorrelationIdMiddleware)
 app.add_middleware(NestingDraftBodyLimitMiddleware)
+app.add_middleware(NestingSourceBodyLimitMiddleware)
 
 # GZip compression middleware
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=6)

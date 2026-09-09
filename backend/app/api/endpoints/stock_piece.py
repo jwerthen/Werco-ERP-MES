@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_audit_service, get_current_company_id, require_role
 from app.db.database import atomic_transaction, get_db
 from app.models.user import User, UserRole
+from app.schemas.remnant_planning import PlanningSnapshotRequest, PlanningSnapshotResponse
 from app.schemas.stock_piece import (
     CreatePiece,
     ObservationDetail,
@@ -19,6 +20,7 @@ from app.schemas.stock_piece import (
     SourcePage,
     WithdrawObservation,
 )
+from app.services import remnant_planning
 from app.services import stock_piece as service
 from app.services.audit_service import AuditService, AuditWriteError
 
@@ -140,6 +142,23 @@ async def create_stock_piece(
     """Record a labeled physical-piece observation and required audit atomically; never receive inventory."""
     await check_body(request)
     return await run_in_threadpool(save, db, user, company_id, audit, body)
+
+
+@router.post(
+    '/stock-pieces/{piece_id}/observations/{number}/planning-snapshot', response_model=PlanningSnapshotResponse
+)
+async def resolve_stock_piece_planning_snapshot(
+    request: Request,
+    body: PlanningSnapshotRequest,
+    piece_id: int = Path(..., ge=1, le=2147483647),
+    number: int = Path(..., ge=1, le=2147483647),
+    db: Session = Depends(get_db),
+    user: User = Depends(read_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Read exact current recorded-piece evidence for unapproved planning; no geometry, audit or inventory writes."""
+    await check_body(request)
+    return await run_in_threadpool(remnant_planning.resolve_snapshot, db, user, company_id, piece_id, number, body)
 
 
 @router.post('/stock-pieces/{piece_id}/observations', response_model=ObservationDetail)

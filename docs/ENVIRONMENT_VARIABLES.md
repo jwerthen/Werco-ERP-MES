@@ -493,6 +493,14 @@ permissions apply. Recording or withdrawing an observation does not mark a piece
 available, reserve it, feed a nest or award quote credit. Do not introduce service
 variables to claim physical verification or bypass the explicit observation workflow.
 
+Original DXF attachments add migration `105_nesting_cad_sources` and reuse existing
+`STORAGE_BACKEND` / S3 or local upload settings. They add no environment flag, secret,
+cron, dependency or solver override. Each attempt pins its nonsecret provider identity;
+changing provider/root does not silently redirect historical objects. Local files on
+an ephemeral host remain ephemeral. Verify durability, access and restore separately;
+do not encode retention periods or source approval in deployment variables. See
+[CAD source storage](CAD_SOURCE_STORAGE.md) for recovery and rollback behavior.
+
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `WORKER_CRON_JOBS` | No | all | Which scheduled jobs the worker registers. Unset or `all` → every cron (12 of them). `none` → no crons; the worker still drains enqueue-driven jobs (notifications, webhooks, labels, completion signals). A comma-separated list of job names arms **exactly** those (allowlist). A `-` prefix **excludes** a job from the full set (denylist): `all,-run_mrp_auto_draft_job`. The two shapes may not be mixed. **An unrecognised name is a hard startup error, not a silent skip — a negated one included.** `none` is the correct value for a first-ever boot — several crons write or email in bulk on their first run. Full syntax below |

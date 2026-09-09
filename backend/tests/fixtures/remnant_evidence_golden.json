@@ -1,0 +1,111 @@
+[
+  {
+    "name": "null",
+    "value": null,
+    "canonical": "werco-remnant-evidence-v1\nn",
+    "sha256": "356c5c6169d3d8bd61c44fec25f72faff9bd82738e24dc9ac6c4bffcf4f088e1"
+  },
+  {
+    "name": "boolean",
+    "value": true,
+    "canonical": "werco-remnant-evidence-v1\nb1",
+    "sha256": "760e2ad59837d25a2a1b5889fcc576a834dc229c537e09d6bcff42b66d278482"
+  },
+  {
+    "name": "one_integer",
+    "value": 1,
+    "canonical": "werco-remnant-evidence-v1\nd3ff0000000000000",
+    "sha256": "1547325e3ea304aa20719b17da338841884f2ef77cc1985200bf110fd4d39dae"
+  },
+  {
+    "name": "one_float",
+    "value": 1.0,
+    "canonical": "werco-remnant-evidence-v1\nd3ff0000000000000",
+    "sha256": "1547325e3ea304aa20719b17da338841884f2ef77cc1985200bf110fd4d39dae"
+  },
+  {
+    "name": "negative_zero",
+    "value": -0.0,
+    "canonical": "werco-remnant-evidence-v1\nd0000000000000000",
+    "sha256": "fefea765497bbb895af9fa67159ed02c9595acba55ebc34d06965ced944c12c2"
+  },
+  {
+    "name": "tiny_number",
+    "value": 1e-09,
+    "canonical": "werco-remnant-evidence-v1\nd3e112e0be826d695",
+    "sha256": "6c240f9c9c631c2f110b0e4a4d22a2878e7327b2371ed6957890c54302e00e81"
+  },
+  {
+    "name": "subnormal",
+    "value": 5e-324,
+    "canonical": "werco-remnant-evidence-v1\nd0000000000000001",
+    "sha256": "3124aed0c28a68dbbcd846cac2a41368a8cd3a7273150f68339665494ac4afc0"
+  },
+  {
+    "name": "safe_integer",
+    "value": 9007199254740991,
+    "canonical": "werco-remnant-evidence-v1\nd433fffffffffffff",
+    "sha256": "8482aa8668c5fda412db62185b0d2e920bc0b1d656633f29261fcad5b681d0d8"
+  },
+  {
+    "name": "unicode_keys",
+    "value": {
+      "\u00e9": "caf\u00e9\u007f\ud83d\ude00",
+      "z": null,
+      "\u4e2d": [
+        "0.000000001",
+        "-0.000000001",
+        false
+      ]
+    },
+    "canonical": "werco-remnant-evidence-v1\no{\"\\u00e9\":s\"caf\\u00e9\\u007f\\ud83d\\ude00\",\"\\u4e2d\":a[s\"0.000000001\",s\"-0.000000001\",b0],\"z\":n}",
+    "sha256": "455031b87be9a0f3ba8beacab88f4e462d3e086c74b43e9d17f470f065517ed5"
+  },
+  {
+    "name": "typed_values",
+    "value": [
+      null,
+      false,
+      true,
+      0,
+      "0",
+      1,
+      "1",
+      [],
+      {}
+    ],
+    "canonical": "werco-remnant-evidence-v1\na[n,b0,b1,d0000000000000000,s\"0\",d3ff0000000000000,s\"1\",a[],o{}]",
+    "sha256": "26ff5d5aa6a3a203f8fe61baafdb52d1026d0d6d03d215a913696678b039cce3"
+  },
+  {
+    "name": "escaped_keys",
+    "value": {
+      "\n": 1,
+      "a": 2,
+      "\u00e9": 3,
+      "\ud83d\ude00": 4
+    },
+    "canonical": "werco-remnant-evidence-v1\no{\"\\n\":d3ff0000000000000,\"\\u00e9\":d4008000000000000,\"\\ud83d\\ude00\":d4010000000000000,\"a\":d4000000000000000}",
+    "sha256": "2470f1e52b427bc5c7ff52f06fec2234e24450ed0c3b123e466458fa5c415aae"
+  },
+  {
+    "name": "target_group",
+    "value": {
+      "groupId": "M\u00e9tal-\ud83d\ude00",
+      "requiredGrade": "A36",
+      "quote": {
+        "thickness": 0.125,
+        "material": "Carbon steel",
+        "parts": [
+          {
+            "id": "part-1",
+            "quantity": 2
+          }
+        ],
+        "spacingMode": "manual"
+      }
+    },
+    "canonical": "werco-remnant-evidence-v1\no{\"groupId\":s\"M\\u00e9tal-\\ud83d\\ude00\",\"quote\":o{\"material\":s\"Carbon steel\",\"parts\":a[o{\"id\":s\"part-1\",\"quantity\":d4000000000000000}],\"spacingMode\":s\"manual\",\"thickness\":d3fc0000000000000},\"requiredGrade\":s\"A36\"}",
+    "sha256": "f4c60693c88aa7da5ade6bc9ca6057d628184ee704ef7dafc7ff19935c634406"
+  }
+]

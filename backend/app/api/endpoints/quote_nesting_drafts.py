@@ -112,7 +112,7 @@ def list_quote_nesting_drafts(
     company_id: int = Depends(get_current_company_id),
 ):
     """Read latest draft summaries in stable order; no geometry, audit, or business writes."""
-    return service.list_drafts(db, company_id, page=page, per_page=per_page)
+    return service.list_drafts(db, company_id, page=page, per_page=per_page, user=user)
 
 
 @router.get("/{draft_id}/revisions", response_model=DraftHistoryResponse)
@@ -125,7 +125,7 @@ def list_quote_nesting_draft_revisions(
     company_id: int = Depends(get_current_company_id),
 ):
     """Read immutable revision summaries; opening history never changes the current draft."""
-    return service.list_drafts(db, company_id, draft_id=draft_id, page=page, per_page=per_page)
+    return service.list_drafts(db, company_id, draft_id=draft_id, page=page, per_page=per_page, user=user)
 
 
 @router.get("/{draft_id}/revisions/{number}", response_model=DraftRevisionResponse)
@@ -137,7 +137,7 @@ def get_quote_nesting_draft_revision(
     company_id: int = Depends(get_current_company_id),
 ):
     """Open exact saved client inputs, retaining that revision's version for conflict checks."""
-    return service.get_revision(db, company_id, draft_id, number)
+    return service.get_revision(db, company_id, draft_id, number, user=user)
 
 
 @router.post("", response_model=DraftRevisionResponse, openapi_extra=upload_schema(False))
@@ -153,7 +153,11 @@ async def create_quote_nesting_draft(
     return await run_in_threadpool(save, db, user, company_id, audit, values)
 
 
-@router.post("/{draft_id}/revisions", response_model=DraftRevisionResponse, openapi_extra=upload_schema(True))
+@router.post(
+    "/{draft_id}/revisions",
+    response_model=DraftRevisionResponse,
+    openapi_extra=upload_schema(True),
+)
 async def append_quote_nesting_draft_revision(
     draft_id: int,
     request: Request,

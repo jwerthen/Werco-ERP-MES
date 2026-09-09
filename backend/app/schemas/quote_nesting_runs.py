@@ -3,13 +3,13 @@
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from app.core.nesting_geometry_profile import geometry_profile_identity
 from app.schemas.base import UTCModel
 
 PROTOCOL_VERSION = 1
-SOLVER_VERSION = "werco-contour-v6"
+SOLVER_VERSION = "werco-contour-v7"
 MAX_OPTIONS = 36
 MAX_SECONDS = 120
 MAX_MESSAGE_BYTES = 8 * 1024 * 1024
@@ -97,6 +97,18 @@ class RunCheckpointMetadata(UTCModel):
     sheets: int
     placed: int
     unplaced: int
+
+    stage_kind: Literal["baseline", "recorded_piece", "residual"] | None = None
+    source_option_id: str | None = None
+    depends_on: str | None = None
+
+    @model_serializer(mode="wrap")
+    def conditional_stage_metadata(self, handler):
+        value = handler(self)
+        if self.stage_kind is None:
+            for field in ("stage_kind", "source_option_id", "depends_on"):
+                value.pop(field, None)
+        return value
 
 
 class RunCheckpointResponse(RunCheckpointMetadata):

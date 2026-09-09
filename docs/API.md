@@ -1004,8 +1004,9 @@ error code/message. `RunDetail` adds `schema_version: 1`, frozen `settings`, nul
 and stock-option IDs, content hash/bytes/time, complete flag, sheets, placed and
 unplaced counts. Pages use `items`, `total`, `page`, `per_page`, `schema_version: 1`.
 
-The checkpoint response adds `schema_version: 1` and `result`, the exact version-1
-Node option envelope. Original saved inputs use inches; this internal geometry
+The checkpoint response adds `schema_version: 1` and `result`, the exact protocol-1
+Node option envelope for ordinary inputs, or protocol-2 stage envelope for a source-bound
+recorded-piece project. Historical payloads retain their original protocol and solver. Original saved inputs use inches; this internal geometry
 envelope explicitly declares millimeters. The application converts all displayed
 dimensions/areas to imperial. Report `content_sha256` hashes the server's canonical
 JSON excluding the hash field itself. Checkpoint hashes cover the entire option
@@ -1019,7 +1020,7 @@ The fixed `standard-v1` technical profile limits the whole project to 120 second
 24 MiB total retained checkpoint content and a 512 MiB Node heap. There is one
 nesting child per worker process; other ARQ functions retain their existing limits.
 Source groups/options are evaluated in their saved order. The shared kernel uses
-code-unit tie-breaking (`werco-contour-v6`), with `seed: null` because it is not
+code-unit tie-breaking (`werco-contour-v7`), with `seed: null` because it is not
 random. Replaying identical saved inputs/build/runtime and completed work is
 deterministic; a wall-time cutoff is not a deterministic work budget.
 
@@ -9771,3 +9772,144 @@ Geometry validation here is deliberately structural and bounded. The shared serv
 Each source item includes its exact tenant-scoped Item/Part relationship, historical lot/heat/cert/UOM/status/location/cost metadata and a movement watermark. One SQL statement captures Item, Part and watermark together. Coverage is explicitly `direct_item_and_unattributed_same_part`: directly attributed item transactions plus same-Part transactions whose inventory item ID is null. Thus consume/receive turnover is visible even when on-hand returns to the same number; unattributed movements may conservatively flag another lot. Legacy finite floating values are reported as decimal text, nonfinite values as unknown, and no currency or piece valuation is inferred. Source IDs are immutable historical evidence locators without operational foreign keys; new recorded observations validate their current tenant relationship in both API and database guards.
 
 Read-time `source_status` is `unchanged`, `changed` or `missing`, accompanied by `current_source_sha256`. It is a staleness warning, never a lock or availability result. GETs do not reconcile or mutate stock/history. New recorded commands must present the current source fingerprint or receive 409. Same-key recovery runs before source-currentness and version checks, returning the original immutable observation (with a fresh read-time drift warning). Conflicting UUID payload/actor/credential, stale versions and duplicate labels receive 409; cross-company/unknown source relationships receive 404; malformed inputs receive 422; size limits receive 413. Required audit failure returns 503 and rolls back header, observation and audit as one transaction. Database RLS/revokes and immutable UPDATE/DELETE/TRUNCATE guards are supplied by migration 104 and matching model bootstrap DDL; they do not certify physical material.
+
+## Original DXF evidence for saved nesting revisions
+
+These endpoints retain original bytes against an **exact immutable saved input revision**. The existing `quote-nesting` namespace is reused; this feature adds part/source traceability, not quotation totals, pricing, quote approval, reservations or inventory availability. A receipt means `server_hash_verified_unapproved`: the server read back the recorded byte count and SHA-256 at `verified_at`. It does not prove that the importer derived the geometry correctly, that a customer approved the revision, or that the storage provider will retain bytes indefinitely.
+
+All paths below are relative to `/api/v1/quote-nesting/drafts/{draft_id}/revisions/{number}/sources`. IDs and revision numbers are positive 32-bit integers. Read access requires effective `purchasing:view`; mutations also require `purchasing:create`, current active-company authority and a writable context. Normal token expiry/revocation and kiosk fences apply. No new role or permission is introduced.
+
+| Method/path suffix | Contract |
+|---|---|
+| `GET /` | List intents and any completed receipts for this exact revision. `page` defaults to 1 (maximum 100,000), `per_page` defaults to and cannot exceed 10. No storage access, reconciliation or writes. |
+| `POST /` | JSON intent: `{expected_company_id,request_key,expected_input_sha256,source_sha256,byte_count,source_name,mime_type,targets:[{group_id,part_id}]}`. Creates the immutable intent and required audit atomically; exact actor/credential/command replay returns the prior result. |
+| `POST /{intent_id}/content?expected_company_id=...` | One raw `application/octet-stream` original DXF. The server verifies bytes against the intent, tries recovery from previous tracked attempts, then may allocate one audited fresh storage attempt. Successful read-back completes the receipt and all selected bindings atomically with required audit. |
+| `POST /{intent_id}/finalize` | JSON `{expected_company_id}`. Recover an already readable matching attempt without uploading or repairing anything. Return an existing receipt unchanged when the operation already completed. |
+| `GET /{intent_id}/download` | Require a completed receipt and read/verify the entire bounded object before responding with an authenticated attachment. Headers include `Cache-Control: private, no-store` and `X-Content-Type-Options: nosniff`. No public URL or inline CAD execution. |
+
+Intent UUIDs are canonical lowercase UUID strings. All hashes are lowercase 64-character SHA-256 values. `source_name` is a trimmed DXF basename without path separators or control characters, at most 1,024 characters; MIME is bounded descriptive input, not a file-type approval. The byte count must be greater than zero and **strictly less than 5,000,000**, matching the browser importer. Uploaded BOMs, encodings and line endings are retained unchanged; there is no text normalization, ZIP extraction, remote fetch or AI egress.
+
+Select at most 1,000 unique exact `(group_id,part_id)` targets. Every selected part must already have matching `original-bytes` source provenance in the named saved revision. Matching filenames alone are insufficient. `utf8-text`, absent provenance or another source hash returns 409; reimporting and saving a new revision are separate explicit actions. The binding stores the saved provenance plus `reportedRevision` only when the saved part contains a revision field; this text is not an approved ERP/customer revision. One original may bind multiple profiles, but a completed saved-part binding cannot be replaced by a different intent.
+
+Raw content is capped before handler execution, including chunked/no-Content-Length uploads. Intent/finalize JSON is capped at 256 KiB by the new route-specific middleware and remains subject to the existing global JSON limit if it is configured lower. Canonical selected-target evidence is capped at 512 KiB before intent creation. Select fewer profiles when that limit is exceeded. Lists contain at most ten full target-evidence summaries per page. Storage writes are capped at **eight tracked attempts per intent**; recovery can still inspect those attempts after the cap. No automatic body retries, deletion, purge, rename or overwrite path exists. The browser sends an explicitly selected batch sequentially and retains the same intent for recovery.
+
+CAD storage uses an independent S3 client with a 3-second connect timeout, an 8-second socket read timeout and one SDK attempt per operation. The shared document-storage client is unchanged. Each content, finalize or download service operation has a shared 60-second monotonic budget, checked between recorded attempts, before and after streamed chunks, and before new attempt allocation/write. Expiry returns 503 without starting another storage operation; already committed attempts and bytes remain recoverable. This is a cooperative limit, not a hard request deadline: an in-flight SDK call/read, DNS, local filesystem, database work and body reception are not forcibly interrupted. No background cancellation thread or automatic provider retry is introduced. CAD-owned clients and streaming bodies are closed on success and failure.
+
+The page response is `{company_id,draft_id,revision_number,input_sha256,can_attach,items,total,page,per_page}`. Each item contains exact revision/source identities, request UUID, name/MIME/count, target evidence and its digest, actor/credential/time, `attempt_count`, `can_resume`, and nullable `receipt`. State `PENDING` means no completion receipt exists. `ATTACHED` means verification was recorded at the receipt timestamp; listing does not check current object availability. The receipt includes its ID, source hash/count, verifier/credential/time and the fixed unapproved claim. Neither object paths, provider details nor attempt IDs are returned to browsers.
+
+Only the original actor and exact API-token identity (or the same interactive actor) can resume the intent. An authorized colleague may read/download completed evidence but cannot take over an uncertain command. Required authority is rechecked after storage I/O before committing completion. A switched company, revoked token, disabled user or revoked write permission cannot complete a staged upload. Previously committed staging/audit history remains.
+
+The intent, each fresh attempt and its audit commit **before** the corresponding object write. Each attempt freezes a generated company-scoped key and nonsecret provider identity; a retry never reuses an uncertain attempt for another write. Storage I/O occurs outside DB transactions/connections. Partial, late and unsuccessful objects remain accounted for by immutable attempts. A unique receipt and complete binding set commit with required audit in a separate transaction. Failed completion/audit may be retried through finalize without another upload. Completed command recovery returns historical receipt metadata without requiring the provider to be online. Download separately fails closed if bytes are missing, changed, oversized or unavailable.
+
+Success and exact replay return 200. Unknown/cross-company revisions or intents return 404; changed company, mismatched bytes/targets/UUID, occupied bindings and attempt exhaustion return 409; ownership/permission failures return 403; malformed/duplicate fields return 422; size limits return 413; incorrect content type returns 415. Storage uncertainty, incomplete finalize and required audit failure return 503 with recovery guidance. A 503 does not authorize an automatic fresh upload: check completion, then let the user explicitly resend the original file if needed. No storage error may silently rewrite a receipt or the saved input JSON.
+
+
+## Recorded-piece planning snapshot
+
+`POST /inventory/stock-pieces/{piece_id}/observations/{number}/planning-snapshot`
+is a read-only resolver for conditional material planning. It performs no nesting,
+physical eligibility approval, observation/audit mutation, inventory reconciliation,
+reservation or financial calculation. IDs are positive signed-32-bit integers.
+
+Request: `{expected_company_id,expected_payload_sha256,expected_source_sha256}`.
+Require effective `inventory:view`, the normal active-company/authentication/token
+fences, and an exact scoped observation. No inventory mutator role is needed. The
+existing general read-only-company restriction on POST requests still applies.
+Duplicate JSON keys, null/malformed identities and extra fields are rejected.
+
+The response is `{company_id,snapshot,snapshot_sha256,latest_observation_number,
+source_status,current_source_sha256,checked_at,review_issues,advisory}`. A successful
+response requires the latest RECORDED observation, a still-present and unchanged
+source, active Item/Part, source status `available`, known geometry kind, known
+positive thickness within the planning range and known reported grade. This does
+not establish physical availability or material suitability. Geometrically invalid
+evidence is never repaired here; bounded structural evidence is retained, and the
+calculation kernel must separately validate topology before accepting placements.
+
+`snapshot` preserves exact observation identity, observer/reason/timestamps, canonical
+inch measurement evidence and its existing payload hash/count, source IDs/hash, and
+a nonfinancial historical Item/Part/movement-watermark subset. It excludes aggregate
+quantities and costs. `snapshot_sha256` is not the observation payload hash or original
+source hash; it uses the dedicated `werco-remnant-evidence-v1` typed ASCII/IEEE754
+encoding. The immutable snapshot excludes dynamic source status/check timestamps.
+Source comparison and latestness share one source SQL statement; future movement
+can still occur immediately afterward. Historical observations remain unchanged.
+
+Success returns 200. Foreign/unknown identities return 404; changed company, stale or
+withdrawn evidence, mismatched hashes, missing/held/inactive sources or unknown required
+specification return 409. Existing permission/token/read-only restrictions return
+403 (revoked credentials may return 401); malformed bounded input returns 422 and
+the existing global JSON receive cap returns 413. No fallback mapping from catalog,
+Part name, grade aliases, gauge, UOM or inventory quantity is inferred.
+
+The resolver itself makes no calculation or write. An explicit source-bound selection
+can be saved in project18 and calculated through the existing authenticated saved-run routes.
+
+### Source-bound recorded-piece projects and worker stages
+
+Project18 adds optional `remnantPlan`; explicit null is rejected and older project
+versions reject the field. A project18 without the field uses ordinary protocol1;
+normal writers emit project15 when no piece is selected. One project may select one
+recorded physical piece, assigned to exactly one populated quote14 group. The selection
+contains the exact observation snapshot and typed snapshot SHA, current remnant-domain
+profile identity, canonical-inch zone clearance, and an explicit family/grade/thickness
+assignment with reason and a typed hash over `{groupId, requiredGrade, quote}`. That hash
+uses the original saved imperial quote before defaults or unit conversion. Grade is
+trimmed case-sensitive text and thickness must be known and equal; no catalog-to-inventory
+mapping is inferred. `capacity: 1`, `planningOnly: true`, `eligibilityVerified: false`,
+and `availabilityVerified: false` are mandatory.
+
+New saves and new starts require the same-company latest RECORDED observation, its exact
+payload/source hashes, an unchanged active/available Item+Part source, and known compatible
+reported shape/specification. The check holds the observation header FOR SHARE until the
+save/start transaction commits, after existing draft/run and policy locks. It does not lock
+inventory, reserve a piece or promise that another planner will not select it. Later source
+movement is possible. Exact same-key retries first check current authorization, then return
+the original record without applying current-source checks again. Queued claims similarly
+retain their frozen source and only recheck actor/token permissions, input integrity and
+exact runtime/profile identity. Historical reads never rewrite or silently refresh evidence.
+
+Remnant-bearing evidence additionally requires effective `inventory:view` on draft lists,
+history/detail/save and retries; run lists/detail/checkpoints/reports/start/cancel and retries;
+all original-CAD source routes, including completion and download recovery; and worker
+claim/live checkpoint checks. A purchasing grant alone does not expose recorded stock.
+Omitted remnant fields preserve ordinary nesting access. No new role or inventory mutation
+authority is introduced.
+
+The v7 manifest declares base `protocol: 1`, exact `supported_protocols: [1,2]` and the
+packaged `remnant_domain_profile`. The readiness heartbeat remains its existing eight-field
+protocol1 identity. For a remnant-bearing project, frozen run settings select protocol2
+and add the remnant profile; their runtime identity remains protocol1. Protocol2 hello
+also binds the exact remnant profile, base geometry profile, bundle and Node version.
+
+Protocol2 stages are ordered: every full-sheet baseline, one recorded-piece evaluation,
+then every enabled full-sheet option for that group's remaining instances. The total
+`B + 1 + K` must be at most 36 before save/start and shares the existing 120-second, heap,
+frame and retained-checkpoint budgets. No timeout or missing work proves infeasibility.
+Each stage has an input-derived `stage-01`…`stage-36` identity, sequence, kind, group,
+original `option_id` (null for the piece), dependency (piece stage for residuals), requested
+count, exact source stock, result and instance map. Source stock is independently rebuilt
+from canonical nanoinches; bounding extents are never treated as available material.
+
+The recorded-piece result has only `nest`, `error`, `complete`, `area` and optional leftover
+status—no price, cost or financial option. It uses zero or one physical piece. If geometry
+cannot be prepared, an explicit error with null stock/nest preserves all requested instances.
+Residual maps enumerate each remaining original instance exactly once in original part order;
+compact residual quantities cannot erase, duplicate or substitute originals. All-fit cases
+still emit planned residual stages with zero requested instances, an empty map and null
+stock/result. Those are complete alternatives requiring zero full sheets.
+
+Public checkpoint `option_id` holds the stage identity. Protocol2 metadata additionally has
+`stage_kind`, `source_option_id` and `depends_on`; these three keys remain absent from legacy
+metadata. The canonical checkpoint hash covers the exact decoded JSON frame, not its NDJSON
+whitespace. `completed_count` counts complete baseline/residual alternatives, including empty
+residuals, and excludes the recorded-piece stage. COMPLETED means evaluations finished.
+
+Recorded-piece leftover evidence is v4, always unapproved and zero-credit. Per-sheet
+`grossArea` is analytical reported material minus physical holes; `protectedArea` is actual
+inward-protected material before zones; `usableArea` is final vector material after zones.
+`edgeMarginArea = grossArea - protectedArea` and `excludedArea = protectedArea - usableArea`.
+The complete ledger also includes nominal parts, reserved part cutouts, clearance/protection,
+remaining regions and bounded reconciliation residual. Exact profile/area definitions and
+source identity accompany the report. These are conditional planning results, not physical
+availability, reservation, consumption, valuation or automatic child-remnant records.

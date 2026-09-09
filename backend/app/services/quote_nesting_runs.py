@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session, defer
 
 from app.core.nesting_geometry_profile import is_current_geometry_profile
+from app.core.remnant_domain_profile import remnant_profile_identity
 from app.core.time_utils import to_utc_iso
 from app.db.locks import acquire_generator_lock
 from app.db.tenant_filter import tenant_query
@@ -27,10 +28,21 @@ from app.schemas.quote_nesting_runs import (
     StartRunRequest,
 )
 from app.services.audit_service import AuditService
-from app.services.nesting_run_protocol import expected_options, validate_option
+from app.services.nesting_remnant_protocol import (
+    completed_option,
+    planned_evaluations,
+    selected_protocol,
+    validate_stage,
+)
+from app.services.nesting_run_protocol import validate_option
 from app.services.quote_nesting_drafts import canonical_json, parse_estimate, require_access
 from app.services.quote_nesting_run_outbox import mark_run_pending
 from app.services.quote_nesting_spacing import verify_project_policies
+from app.services.remnant_planning import (
+    require_revision_evidence_access,
+    require_saved_evidence_access,
+    verify_project_selection,
+)
 
 ERROR_MESSAGES = {
     "input_limit": "The saved input exceeded the calculation input budget. No geometry was accepted.",
@@ -116,7 +128,7 @@ def _checkpoints(db: Session, run: QuoteNestingRun) -> list[QuoteNestingRunCheck
 
 def _checkpoint(row: QuoteNestingRunCheckpoint, *, payload: bool = False) -> dict:
     result = row.result_json["result"]
-    nest = result["nest"]
+    nest = result["nest"] if result else None
     metadata = {
         "sequence": row.sequence,
         "group_id": row.group_id,
@@ -124,17 +136,32 @@ def _checkpoint(row: QuoteNestingRunCheckpoint, *, payload: bool = False) -> dic
         "content_sha256": row.content_sha256,
         "payload_bytes": row.payload_bytes,
         "created_at": to_utc_iso(row.created_at),
-        "complete": result["complete"],
+        "complete": result["complete"] if result else row.result_json["requested"] == 0,
         "sheets": nest["sheets"] if nest else 0,
         "placed": len(nest["placements"]) if nest else 0,
-        "unplaced": sum(part["count"] for part in nest["unplaced"]) if nest else row.result_json["requested"],
+        "unplaced": (sum(part["count"] for part in nest["unplaced"]) if nest else row.result_json["requested"]),
     }
+    if row.result_json.get("protocol") == 2:
+        metadata.update(
+            stage_kind=row.result_json["stage_kind"],
+            source_option_id=row.result_json["option_id"],
+            depends_on=row.result_json["depends_on"],
+        )
     if payload:
         metadata.update(schema_version=1, result=row.result_json)
     return metadata
 
 
-def run_detail(db: Session, run: QuoteNestingRun, checkpoints: list[QuoteNestingRunCheckpoint] | None = None) -> dict:
+def run_detail(
+    db: Session,
+    run: QuoteNestingRun,
+    checkpoints: list[QuoteNestingRunCheckpoint] | None = None,
+    *,
+    user: User | None = None,
+    authorize: bool = False,
+) -> dict:
+    if authorize:
+        require_revision_evidence_access(db, user, run.company_id, [run.revision_id])
     return {
         **_summary(run),
         "schema_version": 1,
@@ -153,6 +180,7 @@ def list_runs(
     per_page: int,
     draft_id: int | None = None,
     revision_number: int | None = None,
+    user: User | None = None,
 ) -> dict:
     query = tenant_query(db, QuoteNestingRun, company_id).options(
         defer(QuoteNestingRun.settings_json), defer(QuoteNestingRun.summary_json)
@@ -168,6 +196,7 @@ def list_runs(
         .limit(per_page)
         .all()
     )
+    require_revision_evidence_access(db, user, company_id, [row.revision_id for row in rows])
     return {
         "schema_version": 1,
         "items": [_summary(row) for row in rows],
@@ -177,8 +206,16 @@ def list_runs(
     }
 
 
-def get_checkpoint(db: Session, company_id: int, run_id: int, sequence: int) -> dict:
-    get_run(db, company_id, run_id)
+def get_checkpoint(
+    db: Session,
+    company_id: int,
+    run_id: int,
+    sequence: int,
+    *,
+    user: User | None = None,
+) -> dict:
+    run = get_run(db, company_id, run_id)
+    require_revision_evidence_access(db, user, company_id, [run.revision_id])
     row = (
         tenant_query(db, QuoteNestingRunCheckpoint, company_id)
         .filter(QuoteNestingRunCheckpoint.run_id == run_id, QuoteNestingRunCheckpoint.sequence == sequence)
@@ -205,9 +242,10 @@ def input_revision(db: Session, run: QuoteNestingRun) -> QuoteNestingRevision:
     return revision
 
 
-def export_report(db: Session, company_id: int, run_id: int) -> dict:
+def export_report(db: Session, company_id: int, run_id: int, *, user: User | None = None) -> dict:
     run = get_run(db, company_id, run_id)
     revision = input_revision(db, run)
+    require_saved_evidence_access(db, user, company_id, revision.estimate_json)
     checkpoints = _checkpoints(db, run)
     # An active run may gain a checkpoint between reads. Snapshot the header and
     # exact currently observed prefix; never claim that later work was included.
@@ -255,8 +293,20 @@ def require_current_geometry(project: SavedProject) -> None:
         )
 
 
+def run_settings(estimate: dict, runtime: dict) -> dict:
+    settings = {**RUN_SETTINGS, "runtime": runtime}
+    if selected_protocol(estimate) == 2:
+        settings.update(protocol=2, remnant_domain_profile=remnant_profile_identity())
+    return settings
+
+
 def start_run(
-    db: Session, user: User, company_id: int, audit: AuditService, request: StartRunRequest, runtime: dict | None = None
+    db: Session,
+    user: User,
+    company_id: int,
+    audit: AuditService,
+    request: StartRunRequest,
+    runtime: dict | None = None,
 ) -> dict:
     require_access(db, user, company_id, write=True)
     if request.expected_company_id != company_id:
@@ -279,6 +329,7 @@ def start_run(
     if prior is not None:
         if prior.created_by != user.id or prior.request_hash != request_hash:
             raise HTTPException(409, "This request key already identifies a different calculation")
+        require_revision_evidence_access(db, user, company_id, [prior.revision_id])
         if prior.status == "QUEUED":
             mark_run_pending(db, company_id, prior.id)
         return run_detail(db, prior)
@@ -298,11 +349,13 @@ def start_run(
         raise HTTPException(404, "Saved nesting revision not found")
     if revision.content_sha256 != request.input_sha256 or _digest(revision.estimate_json) != request.input_sha256:
         raise HTTPException(409, "The requested input hash does not match that exact saved revision")
+    require_saved_evidence_access(db, user, company_id, revision.estimate_json)
     # Re-apply bounded structure, never execute geometry or current-catalog substitutions.
     _, project, _ = parse_estimate(canonical_json(revision.estimate_json).encode("utf-8"))
     require_current_geometry(project)
     verify_project_policies(db, company_id, project)
-    if not expected_options(revision.estimate_json):
+    verify_project_selection(db, user, company_id, project, revision.estimate_json)
+    if not planned_evaluations(revision.estimate_json):
         raise HTTPException(422, "Save at least one part and enabled stock option before starting a calculation")
     now = datetime.utcnow()
     run = QuoteNestingRun(
@@ -318,7 +371,7 @@ def start_run(
         status="QUEUED",
         version=1,
         cancel_requested=False,
-        settings_json={**RUN_SETTINGS, "runtime": runtime},
+        settings_json=run_settings(revision.estimate_json, runtime),
         release_identity=runtime["release"],
         completed_count=0,
         evaluated_count=0,
@@ -379,6 +432,7 @@ def cancel_run(
     if company_id != expected_company_id:
         raise HTTPException(409, "Active company changed. Refresh saved calculations.")
     run = get_run(db, company_id, run_id, locked=True)
+    require_revision_evidence_access(db, user, company_id, [run.revision_id])
     if run.status in TERMINAL_STATUSES:
         return run_detail(db, run)
     if run.version != expected_version:
@@ -422,6 +476,7 @@ def worker_actor(db: Session, run: QuoteNestingRun) -> User:
         user._api_token_jti_prefix = token.jti_prefix
     try:
         require_access(db, user, run.company_id, write=True)
+        require_revision_evidence_access(db, user, run.company_id, [run.revision_id])
     except HTTPException as exc:
         raise ValueError("actor_ineligible") from exc
     return user
@@ -491,9 +546,9 @@ def claim_run(db: Session, company_id: int, run_id: int, *, runtime: dict) -> tu
         actor = worker_actor(db, run)
         # Preserve the recorded release contract before applying today's source
         # requirements. Old queued runs never silently execute the new kernel.
-        if run.settings_json != {**RUN_SETTINGS, "runtime": runtime}:
-            raise ValueError("runtime_mismatch")
         revision = input_revision(db, run)
+        if run.settings_json != run_settings(revision.estimate_json, runtime):
+            raise ValueError("runtime_mismatch")
         raw, project, canonical = parse_estimate(canonical_json(revision.estimate_json).encode("utf-8"))
         if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != run.input_sha256:
             raise ValueError("input_mismatch")
@@ -516,7 +571,11 @@ def claim_run(db: Session, company_id: int, run_id: int, *, runtime: dict) -> tu
             "lease_expires_at": now + timedelta(seconds=LEASE_SECONDS),
         },
     )
-    return {"protocol": 1, "input_sha256": run.input_sha256, "estimate": raw}, lease
+    return {
+        "protocol": selected_protocol(raw),
+        "input_sha256": run.input_sha256,
+        "estimate": raw,
+    }, lease
 
 
 def live_run(db: Session, company_id: int, run_id: int, lease: str) -> QuoteNestingRun:
@@ -545,11 +604,15 @@ def accept_hello(db: Session, company_id: int, run_id: int, lease: str, hello: d
     run = live_run(db, company_id, run_id, lease)
     if (
         run.bundle_sha256 is not None
+        or type(hello.get("protocol")) is not int
+        or hello.get("protocol") != run.settings_json["protocol"]
+        or (run.settings_json["protocol"] == 2 and hello.get("remnant_domain_profile") != remnant_profile_identity())
+        or (run.settings_json["protocol"] == 1 and "remnant_domain_profile" in hello)
         or not is_current_geometry_profile(hello.get('geometry_profile'))
         or hello.get('geometry_profile') != run.settings_json.get('geometry_profile')
         or any(
-            hello.get(field) != run.settings_json['runtime'].get(field)
-            for field in ('solver_version', 'bundle_sha256', 'node_version')
+            hello.get(field) != run.settings_json["runtime"].get(field)
+            for field in ("solver_version", "bundle_sha256", "node_version")
         )
     ):
         raise ValueError("invalid_protocol")
@@ -568,12 +631,28 @@ def append_checkpoint(db: Session, company_id: int, run_id: int, lease: str, mes
     if run.bundle_sha256 is None:
         raise ValueError("invalid_protocol")
     revision = input_revision(db, run)
-    planned = expected_options(revision.estimate_json)
+    planned = planned_evaluations(revision.estimate_json)
     if run.evaluated_count >= min(len(planned), 36):
         raise ValueError("invalid_protocol")
-    digest, byte_count = validate_option(
-        message, run.input_sha256, planned[run.evaluated_count], run.evaluated_count + 1
-    )
+    protocol = selected_protocol(revision.estimate_json)
+    if protocol == 2:
+        previous = _checkpoints(db, run)
+        if any(_digest(row.result_json) != row.content_sha256 for row in previous):
+            raise ValueError("invalid_protocol")
+        digest, byte_count = validate_stage(
+            message,
+            run.input_sha256,
+            revision.estimate_json,
+            run.evaluated_count + 1,
+            [row.result_json for row in previous],
+        )
+    else:
+        digest, byte_count = validate_option(
+            message,
+            run.input_sha256,
+            planned[run.evaluated_count],
+            run.evaluated_count + 1,
+        )
     if run.checkpoint_bytes + byte_count > MAX_CHECKPOINT_BYTES:
         raise ValueError("output_limit")
     checkpoint = QuoteNestingRunCheckpoint(
@@ -582,7 +661,7 @@ def append_checkpoint(db: Session, company_id: int, run_id: int, lease: str, mes
         lease_token=lease,
         sequence=message["sequence"],
         group_id=message["group_id"],
-        stock_option_id=message["option_id"],
+        stock_option_id=message["stage_id"] if protocol == 2 else message["option_id"],
         result_json=message,
         content_sha256=digest,
         payload_bytes=byte_count,
@@ -597,7 +676,7 @@ def append_checkpoint(db: Session, company_id: int, run_id: int, lease: str, mes
         "NESTING_RUN_CHECKPOINT",
         {
             "evaluated_count": run.evaluated_count + 1,
-            "completed_count": run.completed_count + int(message["result"]["complete"]),
+            "completed_count": run.completed_count + int(completed_option(message)),
             "checkpoint_bytes": run.checkpoint_bytes + byte_count,
         },
         lease_token=lease,

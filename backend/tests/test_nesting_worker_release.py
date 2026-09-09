@@ -56,7 +56,7 @@ def test_server_build_manifest_and_application_share_the_release_identity():
 
 
 @pytest.mark.parametrize(
-    'solver', ['werco-contour-v4', 'werco-contour-v5', 'werco-contour-v7', 'werco-contour-v6-extra']
+    'solver', ['werco-contour-v4', 'werco-contour-v5', 'werco-contour-v6', 'werco-contour-v8', 'werco-contour-v7-extra']
 )
 def test_old_future_or_prefix_solver_cannot_pass_the_strict_release_pin(evidence, tmp_path, monkeypatch, solver):
     _, _, manifest, _ = evidence

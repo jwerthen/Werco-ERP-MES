@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { calculateSavedProject, SERVER_RUN_PROFILE } from '../src/features/nesting/lib/server-run';
+import { calculateRemnantProject } from '../src/features/nesting/lib/remnant-planning';
+import { REMNANT_DOMAIN_PROFILE } from '../src/features/nesting/lib/remnant-domain-profile';
 
 async function writeMessage(value: object) {
   const line = JSON.stringify(value, (_key, item: unknown) => {
@@ -16,6 +18,7 @@ async function writeMessage(value: object) {
 
 async function main() {
   let inputSha256 = '';
+  let protocol = 1;
   try {
     if (Number(process.versions.node.split('.')[0]) !== SERVER_RUN_PROFILE.nodeMajor) throw new Error('runtime_error');
     let size = 0;
@@ -33,30 +36,41 @@ async function main() {
     const data = input as Record<string, unknown>;
     if (
       Object.keys(data).sort().join(',') !== 'estimate,input_sha256,protocol' ||
-      data.protocol !== 1 ||
+      (data.protocol !== 1 && data.protocol !== 2) ||
       typeof data.input_sha256 !== 'string' ||
       !/^[a-f0-9]{64}$/.test(data.input_sha256)
     )
       throw new Error('invalid_geometry');
     inputSha256 = data.input_sha256;
+    protocol = data.protocol;
+    const hasRemnant =
+      data.estimate &&
+      typeof data.estimate === 'object' &&
+      Object.prototype.hasOwnProperty.call(data.estimate, 'remnantPlan');
+    if ((protocol === 2) !== Boolean(hasRemnant)) throw new Error('invalid_geometry');
     await writeMessage({
       type: 'hello',
-      protocol: 1,
+      protocol,
       input_sha256: inputSha256,
       solver_version: SERVER_RUN_PROFILE.solverVersion,
       geometry_profile: CURRENT_GEOMETRY_PROFILE,
+      ...(protocol === 2 ? { remnant_domain_profile: REMNANT_DOMAIN_PROFILE } : {}),
       bundle_sha256: createHash('sha256').update(readFileSync(__filename)).digest('hex'),
       node_version: process.version,
       units: 'mm',
     });
-    for (const message of calculateSavedProject(data.estimate, inputSha256)) await writeMessage(message);
+    const messages =
+      protocol === 2
+        ? calculateRemnantProject(data.estimate, inputSha256)
+        : calculateSavedProject(data.estimate, inputSha256);
+    for await (const message of messages) await writeMessage(message);
   } catch (error) {
     // Do not send private drawing content or an internal stack to stderr/logs.
     const code =
       error instanceof Error && ['output_limit', 'input_limit', 'runtime_error'].includes(error.message)
         ? error.message
         : 'invalid_geometry';
-    await writeMessage({ type: 'error', protocol: 1, input_sha256: inputSha256, code });
+    await writeMessage({ type: 'error', protocol, input_sha256: inputSha256, code });
     process.exitCode = 2;
   }
 }

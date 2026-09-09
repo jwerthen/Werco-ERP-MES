@@ -1,3 +1,5 @@
+import type { RemnantPlan } from '../../../types/remnantPlanning';
+import { parseRemnantPlanStructure } from './remnant-evidence';
 import { CURRENT_GEOMETRY_PROFILE, requireCurrentGeometryProfile, resolveGeometryProfile } from './geometry-profile';
 import { hasOrientationConstraints } from './orientation';
 import type { Part } from './nesting';
@@ -7,7 +9,7 @@ import { inToMm } from './units';
 import { materialGroupKey, validateMaterialBinding, type MaterialBinding } from './material-binding';
 
 export type QuoteGroup = { id: string; quote: Quote };
-export type QuoteProject = { name: string; activeGroupId: string; groups: QuoteGroup[] };
+export type QuoteProject = { name: string; activeGroupId: string; groups: QuoteGroup[]; remnantPlan?: RemnantPlan };
 export type ImportedPartAssignment = {
   material: string;
   thickness: number;
@@ -164,6 +166,37 @@ function checkProjectStructure(value: unknown): QuoteProject {
     typeof project.activeGroupId === 'string' && groupIds.has(project.activeGroupId),
     'Choose an existing active material group.'
   );
+  if (Object.prototype.hasOwnProperty.call(project, 'remnantPlan')) {
+    const plan = parseRemnantPlanStructure(project.remnantPlan);
+    check(groupIds.has(plan.groupId), 'The recorded-piece assignment refers to a missing group.');
+    const geometry = plan.snapshot.evidence.geometry;
+    vertices +=
+      geometry.kind === 'polygon'
+        ? geometry.outer.length + geometry.holes.reduce((n, ring) => n + ring.length, 0)
+        : geometry.kind === 'rectangle'
+          ? 4
+          : geometry.kind === 'circle'
+            ? 1
+            : 0;
+    vertices += plan.snapshot.evidence.unavailable_zones.reduce(
+      (n, zone) => n + (zone.outline.kind === 'circle' ? 1 : zone.outline.pts.length),
+      0
+    );
+    check(
+      vertices <= MAX_VERTICES,
+      'Maximum 20,000 source vertices across parts, stock exclusions and recorded material.'
+    );
+    const baseline = project.groups
+      .filter(group => group.quote.parts.length)
+      .reduce((n, group) => n + group.quote.options.filter(option => option.enabled).length, 0);
+    const residual = project.groups
+      .find(group => group.id === plan.groupId)!
+      .quote.options.filter(option => option.enabled).length;
+    check(
+      baseline + 1 + residual <= 36,
+      'Recorded-piece planning supports at most 36 baseline, piece and residual stages. Disable extra stock options or split this nest.'
+    );
+  }
   return project;
 }
 
@@ -178,17 +211,20 @@ export function projectToFile(project: QuoteProject) {
   return {
     // Constraint-bearing projects use 6; nested quotes use 7, never a legacy
     // discriminator that an older reader could accept while ignoring grain.
-    version: project.groups.some(group => group.quote.geometryProfile !== undefined)
-      ? 15
-      : project.groups.some(group => group.quote.options.some(option => option.exclusions !== undefined))
-        ? 12
-        : project.groups.some(group => group.quote.spacingPolicy || group.quote.spacingOverride)
-          ? 10
-          : project.groups.some(group => hasOrientationConstraints(group.quote.parts, group.quote))
-            ? 6
-            : project.groups.some(group => group.quote.materialBinding)
-              ? 5
-              : 4,
+    version: project.remnantPlan
+      ? 18
+      : project.groups.some(group => group.quote.geometryProfile !== undefined)
+        ? 15
+        : project.groups.some(group => group.quote.options.some(option => option.exclusions !== undefined))
+          ? 12
+          : project.groups.some(group => group.quote.spacingPolicy || group.quote.spacingOverride)
+            ? 10
+            : project.groups.some(group => hasOrientationConstraints(group.quote.parts, group.quote))
+              ? 6
+              : project.groups.some(group => group.quote.materialBinding)
+                ? 5
+                : 4,
+    ...(project.remnantPlan ? { remnantPlan: parseRemnantPlanStructure(project.remnantPlan) } : {}),
     units: 'in',
     currency: 'USD',
     name: project.name,
@@ -200,13 +236,18 @@ export function projectToFile(project: QuoteProject) {
 export function projectFromFile(input: unknown): QuoteProject {
   check(input && typeof input === 'object', 'Invalid estimate file.');
   const data = input as Record<string, unknown>;
+  check(
+    data.version === 18 || !Object.prototype.hasOwnProperty.call(data, 'remnantPlan'),
+    'Recorded-piece evidence requires project version 18.'
+  );
   if (
     data.version !== 4 &&
     data.version !== 5 &&
     data.version !== 6 &&
     data.version !== 10 &&
     data.version !== 12 &&
-    data.version !== 15
+    data.version !== 15 &&
+    data.version !== 18
   )
     return createBlankProject(quoteFromFile(input));
   check(!Object.prototype.hasOwnProperty.call(data, 'geometryProfile'), 'Geometry profiles belong to material groups.');
@@ -223,12 +264,17 @@ export function projectFromFile(input: unknown): QuoteProject {
       group.quote &&
         typeof group.quote === 'object' &&
         ((group.quote as { version?: unknown }).version === 3 ||
-          ((data.version === 6 || data.version === 10 || data.version === 12 || data.version === 15) &&
+          ((data.version === 6 ||
+            data.version === 10 ||
+            data.version === 12 ||
+            data.version === 15 ||
+            data.version === 18) &&
             (group.quote as { version?: unknown }).version === 7) ||
-          ((data.version === 10 || data.version === 12 || data.version === 15) &&
+          ((data.version === 10 || data.version === 12 || data.version === 15 || data.version === 18) &&
             (group.quote as { version?: unknown }).version === 9) ||
-          ((data.version === 12 || data.version === 15) && (group.quote as { version?: unknown }).version === 11) ||
-          (data.version === 15 && (group.quote as { version?: unknown }).version === 14)),
+          ((data.version === 12 || data.version === 15 || data.version === 18) &&
+            (group.quote as { version?: unknown }).version === 11) ||
+          ((data.version === 15 || data.version === 18) && (group.quote as { version?: unknown }).version === 14)),
       'Material groups require version 3, or a newer estimate version supported by their project.'
     );
     const quote = group.quote as Record<string, unknown>;
@@ -240,6 +286,7 @@ export function projectFromFile(input: unknown): QuoteProject {
   checkProjectStructure({
     name: data.name,
     activeGroupId: data.activeGroupId,
+    ...(Object.prototype.hasOwnProperty.call(data, 'remnantPlan') ? { remnantPlan: data.remnantPlan } : {}),
     groups: savedGroups.map(group => ({
       ...group,
       quote: {
@@ -249,7 +296,14 @@ export function projectFromFile(input: unknown): QuoteProject {
     })),
   });
   const groups = savedGroups.map(group => ({ id: group.id, quote: quoteFromFile(group.quote) }));
-  return validateProject({ name: data.name, activeGroupId: data.activeGroupId, groups });
+  return validateProject({
+    name: data.name,
+    activeGroupId: data.activeGroupId,
+    groups,
+    ...(Object.prototype.hasOwnProperty.call(data, 'remnantPlan')
+      ? { remnantPlan: parseRemnantPlanStructure(data.remnantPlan) }
+      : {}),
+  });
 }
 
 /** Add an entire assigned import atomically; invalid assignments leave the project unchanged. */

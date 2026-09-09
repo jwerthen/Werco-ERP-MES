@@ -404,6 +404,8 @@ function candidates(
   const margin = stock.margin + (moving.part.geometryToleranceMm ?? 0);
   const range = compensated?.originRange(moving.compensated!);
   if (compensated && !range) return [];
+  const domainOrigins = range ? compensated?.domainCandidates?.generate(moving.compensated!, range) : undefined;
+  if (domainOrigins && !domainOrigins.boundary.length && !domainOrigins.contacts.length) return [];
   const minX = range ? range.minX / SCALE : margin,
     minY = range ? range.minY / SCALE : margin,
     maxX = range ? range.maxX / SCALE : stock.width - margin - moving.width,
@@ -414,9 +416,10 @@ function candidates(
     { x: maxX, y: minY },
     { x: minX, y: maxY },
     { x: maxX, y: maxY },
+    ...(domainOrigins?.contacts.map(p => ({ x: p.X / SCALE, y: p.Y / SCALE })) ?? []),
   ];
-  const forbidden: Clipper.Paths = [];
-  if (exclusions.length) {
+  const forbidden: Clipper.Paths = [...(domainOrigins?.forbidden ?? [])];
+  if (exclusions.length && !domainOrigins) {
     const key = `exclusions|${moving.key}`;
     let paths = cache.get(key);
     if (!paths) {
@@ -475,13 +478,15 @@ function candidates(
   if (forbidden.length && maxX > minX && maxY > minY) {
     const c = new Clipper.Clipper(),
       free: Clipper.Paths = [];
-    c.AddPath(
-      integerPath([
-        { x: minX, y: minY },
-        { x: maxX, y: minY },
-        { x: maxX, y: maxY },
-        { x: minX, y: maxY },
-      ]),
+    c.AddPaths(
+      domainOrigins?.boundary ?? [
+        integerPath([
+          { x: minX, y: minY },
+          { x: maxX, y: minY },
+          { x: maxX, y: maxY },
+          { x: minX, y: maxY },
+        ]),
+      ],
       Clipper.PolyType.ptSubject,
       true
     );
@@ -651,9 +656,11 @@ export function packContours(parts: Part[], stock: Stock): Nest {
               count: 1,
               reason:
                 orientationExplanation(part, stock) ??
-                (exclusions.length
-                  ? 'The search found no valid contour placement within stock exclusions, margins and spacing'
-                  : 'No permitted contour placement within sheet margins and spacing'),
+                (stock.domain
+                  ? 'The bounded search found no valid placement within the actual recorded material, edge margins, unavailable zones and spacing; this is not proof that no fit exists.'
+                  : exclusions.length
+                    ? 'The search found no valid contour placement within stock exclusions, margins and spacing'
+                    : 'No permitted contour placement within sheet margins and spacing'),
             });
         }
       }
@@ -664,7 +671,9 @@ export function packContours(parts: Part[], stock: Stock): Nest {
         unplaced,
         sheets: sheets.length,
         area,
-        utilization: sheets.length ? (100 * area) / (stock.width * stock.height * sheets.length) : 0,
+        utilization: sheets.length
+          ? (100 * area) / ((compensated?.domain?.grossArea ?? stock.width * stock.height) * sheets.length)
+          : 0,
         method: 'True contour nesting · best of two deterministic orders · permitted rotations and grain',
       };
     })

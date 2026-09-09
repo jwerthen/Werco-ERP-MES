@@ -1,4 +1,10 @@
 'use client';
+import type { RemnantPlan } from '../../types/remnantPlanning';
+import { sha256, canonicalJSON } from './lib/provenance';
+import { validateRemnantFile } from './lib/remnant-evidence';
+import { buildStagePlan, type RemnantStageMessage } from './lib/remnant-planning';
+import RemnantAssignmentControls from './RemnantAssignmentControls';
+import RemnantPlanningResults from './RemnantPlanningResults';
 import React, { useState, useRef, useEffect, useMemo, useId } from 'react';
 import { useUnsavedChanges } from '../../hooks/useUnsavedChanges';
 import {
@@ -46,6 +52,8 @@ import {
 } from './lib/nesting';
 import { inToMm, mmToIn, formatIn, parseInches, LB_PER_KG } from './lib/units';
 import {
+  comparisonFromResults,
+  quoteToFile,
   oversizeParts,
   editSheetOption,
   type Quote,
@@ -65,11 +73,12 @@ import {
   type QuoteProject,
 } from './lib/quote-project';
 import { autoQuotingSpacing } from './lib/spacing';
-import { compareSheetsInWorker } from './lib/nesting-worker-client';
+import { compareSheetsInWorker, compareProjectStagesInWorker } from './lib/nesting-worker-client';
 import DXFAssignments, { type DXFFileAssignment } from './DXFAssignments';
 import MaterialSourcePanel from './MaterialSourcePanel';
 import useNestingCatalog from './useNestingCatalog';
 import { catalogFamily, clearCatalogPricing, materialGroupLabel, type MaterialBinding } from './lib/material-binding';
+import { buildRemnantReview } from './lib/remnant-review';
 import { buildRunManifest } from './lib/run-manifest';
 import PartOrientationControls, { SheetGrainControl, orientationSummary, sheetGrainLabel } from './OrientationControls';
 import { orientationExplanation } from './lib/orientation';
@@ -215,12 +224,14 @@ export default function NestingWorkspace({
   estimatorId,
   canSaveDrafts = false,
   canManagePolicies = false,
+  canPlanRemnants = false,
 }: {
   initialQuote?: Quote;
   companyId?: number;
   estimatorId?: number;
   canSaveDrafts?: boolean;
   canManagePolicies?: boolean;
+  canPlanRemnants?: boolean;
 }) {
   const fieldId = useId();
   const [documentEpoch, setDocumentEpoch] = useState(0);
@@ -268,6 +279,29 @@ export default function NestingWorkspace({
     });
   }, [catalog.items, catalog.complete]);
   const [savedSignature, setSavedSignature] = useState(() => JSON.stringify(project));
+  const [remnantReady, setRemnantReady] = useState<{ plan: string; quote: string } | null>(null);
+  const [planningRun, setPlanningRun] = useState<{
+    signature: string;
+    raw: ReturnType<typeof projectToFile>;
+    stages: RemnantStageMessage[];
+    total: number;
+    finished: boolean;
+    status: string;
+  } | null>(null);
+  const assignedQuote = project.groups.find(group => group.id === project.remnantPlan?.groupId)?.quote;
+  const remnantIsReady =
+    !!project.remnantPlan &&
+    !!assignedQuote &&
+    canPlanRemnants &&
+    project.remnantPlan.snapshot.companyId === companyId &&
+    remnantReady?.plan === JSON.stringify(project.remnantPlan) &&
+    remnantReady.quote === JSON.stringify(quoteToFile(assignedQuote));
+  function selectRemnant(plan: RemnantPlan) {
+    const group = stateRef.current.project.groups.find(item => item.id === plan.groupId);
+    if (!group || plan.snapshot.companyId !== companyId) return;
+    setProject(current => ({ ...current, remnantPlan: plan }));
+    setRemnantReady({ plan: JSON.stringify(plan), quote: JSON.stringify(quoteToFile(group.quote)) });
+  }
   const [snapshots, setSnapshots] = useState<Record<string, CachedComparison>>({});
   const [compareProgress, setCompareProgress] = useState({ completed: 0, total: 0, name: '' });
   const compareController = useRef<AbortController | null>(null);
@@ -318,11 +352,16 @@ export default function NestingWorkspace({
   const signature = JSON.stringify(quote),
     stale = !!quote.parts.length && signature !== snapshot?.signature,
     comparison = quote.parts.length ? (snapshot?.comparison ?? emptyComparison) : emptyComparison;
-  const reviewReady =
-    project.groups.some(group => group.quote.parts.length > 0) &&
-    project.groups.every(
-      group => !group.quote.parts.length || snapshots[group.id]?.signature === JSON.stringify(group.quote)
-    );
+  const reviewReady = project.remnantPlan
+    ? planningRun?.signature === JSON.stringify(project) && planningRun.stages.length > 0
+    : project.groups.some(group => group.quote.parts.length > 0) &&
+      project.groups.every(
+        group =>
+          !group.quote.parts.length ||
+          (snapshots[group.id]?.signature === JSON.stringify(group.quote) &&
+            snapshots[group.id]?.comparison.results.length ===
+              group.quote.options.filter(option => option.enabled).length)
+      );
   const active =
     comparison.results.find(r => r.option.id === previewId) ??
     comparison.results.find(r => r.option.id === comparison.recommendedId) ??
@@ -457,8 +496,8 @@ export default function NestingWorkspace({
       toast.error(cause instanceof Error ? cause.message : 'Cannot change this stock option.');
     }
   };
-  const stateRef = useRef({ project, quote, comparison, stale, snapshots });
-  stateRef.current = { project, quote, comparison, stale, snapshots };
+  const stateRef = useRef({ project, quote, comparison, stale, snapshots, remnantIsReady, canPlanRemnants });
+  stateRef.current = { project, quote, comparison, stale, snapshots, remnantIsReady, canPlanRemnants };
   useEffect(() => {
     setPreviewId(null);
     setSheet(0);
@@ -477,6 +516,116 @@ export default function NestingWorkspace({
       requireCurrentProjectGeometry(current);
       if (current.groups.some(group => group.quote.parts.some(part => part.importMode === 'drawing-bounds')))
         throw new Error(legacyFootprintNotice);
+      if (current.remnantPlan && stateRef.current.remnantIsReady) {
+        const raw = JSON.parse(JSON.stringify(projectToFile(current))) as ReturnType<typeof projectToFile>;
+        const frozen = JSON.stringify(current);
+        await validateRemnantFile(raw, companyId!);
+        const inputSha = await sha256(canonicalJSON(raw));
+        if (!mountedRef.current || controller.signal.aborted || JSON.stringify(stateRef.current.project) !== frozen)
+          return null;
+        const stages: RemnantStageMessage[] = [];
+        const plan = buildStagePlan(raw);
+        const calculationProject = projectFromFile(raw);
+        setPlanningRun({
+          signature: frozen,
+          raw,
+          stages: [],
+          total: plan.length,
+          finished: false,
+          status: 'Calculating baseline and conditional stages…',
+        });
+        setCompareProgress({ completed: 0, total: plan.length, name: 'Full-sheet baseline' });
+        try {
+          await compareProjectStagesInWorker(raw, inputSha, {
+            signal: controller.signal,
+            onStage: stage => {
+              if (
+                !mountedRef.current ||
+                controller.signal.aborted ||
+                JSON.stringify(stateRef.current.project) !== frozen
+              ) {
+                controller.abort();
+                return;
+              }
+              stages.push(stage);
+              setPlanningRun({
+                signature: frozen,
+                raw,
+                stages: [...stages],
+                total: plan.length,
+                finished: false,
+                status: `${stages.length} of ${plan.length} stages evaluated. Earlier complete results are retained.`,
+              });
+              setCompareProgress({
+                completed: stages.length,
+                total: plan.length,
+                name:
+                  stage.stage_kind === 'recorded_piece'
+                    ? 'Recorded piece'
+                    : stage.stage_kind === 'residual'
+                      ? 'Remaining full sheets'
+                      : 'Full-sheet baseline',
+              });
+              if (stage.stage_kind === 'baseline') {
+                const group = current.groups.find(item => item.id === stage.group_id)!;
+                const calculationQuote = calculationProject.groups.find(item => item.id === stage.group_id)!.quote;
+                const baseline = stages.filter(
+                  (item): item is Extract<RemnantStageMessage, { stage_kind: 'baseline' }> =>
+                    item.stage_kind === 'baseline' && item.group_id === group.id
+                );
+                if (baseline.length) {
+                  const comparison = comparisonFromResults(
+                    calculationQuote,
+                    baseline.map(item => item.result)
+                  );
+                  setSnapshots(previous => ({
+                    ...previous,
+                    [group.id]: { comparison, signature: JSON.stringify(group.quote) },
+                  }));
+                }
+              }
+            },
+          });
+          if (mountedRef.current && !controller.signal.aborted && JSON.stringify(stateRef.current.project) === frozen)
+            setPlanningRun(previous =>
+              previous
+                ? {
+                    ...previous,
+                    finished: true,
+                    status: 'Planned search finished. Check complete quantities separately for each alternative.',
+                  }
+                : null
+            );
+        } catch (cause) {
+          if (mountedRef.current)
+            setPlanningRun(previous =>
+              previous?.signature === frozen
+                ? {
+                    ...previous,
+                    status: controller.signal.aborted
+                      ? 'Cancelled. Completed stages are retained.'
+                      : (cause as Error).message,
+                  }
+                : previous
+            );
+          throw cause;
+        }
+        return current.groups
+          .filter(group => group.quote.parts.length)
+          .map(group => ({
+            id: group.id,
+            material: group.quote.material,
+            thickness: group.quote.thickness,
+            comparison: comparisonFromResults(
+              calculationProject.groups.find(item => item.id === group.id)!.quote,
+              stages.flatMap(stage =>
+                stage.stage_kind === 'baseline' && stage.group_id === group.id ? [stage.result] : []
+              )
+            ),
+          }));
+      }
+      if (current.remnantPlan)
+        toast.warning('Recorded-piece assignment requires refresh. Comparing the full-sheet baseline only.');
       const groups = current.groups.filter(group => group.quote.parts.length);
       const results: { id: string; material: string; thickness: number; comparison: Comparison }[] = [];
       for (let index = 0; index < groups.length; index++) {
@@ -624,13 +773,14 @@ export default function NestingWorkspace({
       toast.error((e as Error).message);
     }
   }
-  function save() {
+  async function save() {
     try {
-      download(
-        JSON.stringify(projectToFile(project), null, 2),
-        safeName(project.name) + '.estimate.json',
-        'application/json'
-      );
+      if (project.remnantPlan && !canPlanRemnants)
+        throw new Error('Inventory view permission is required to export recorded-piece evidence.');
+      const raw = JSON.parse(JSON.stringify(projectToFile(project)));
+      if (raw.remnantPlan) await validateRemnantFile(raw, companyId ?? 0);
+      if (!mountedRef.current) return;
+      download(JSON.stringify(raw, null, 2), safeName(project.name) + '.estimate.json', 'application/json');
       setSavedSignature(JSON.stringify(project));
       toast.success('All material groups saved in inches.');
     } catch (e) {
@@ -639,9 +789,17 @@ export default function NestingWorkspace({
   }
   async function load(file?: File) {
     if (!file) return;
+    const openingFrom = JSON.stringify(stateRef.current.project);
     try {
       if (file.size > 5_000_000) throw new Error('Estimate limit: 5 MB.');
-      const stored = projectFromFile(JSON.parse(await file.text()));
+      const raw = JSON.parse(await file.text());
+      if (raw?.remnantPlan && !canPlanRemnants)
+        throw new Error('Inventory view permission is required to open recorded-piece evidence.');
+      await validateRemnantFile(raw, companyId ?? 0);
+      if (!mountedRef.current) return;
+      if (JSON.stringify(stateRef.current.project) !== openingFrom)
+        throw new Error('The workspace changed while opening the file. Open it again when ready.');
+      const stored = projectFromFile(raw);
       const loaded = {
         ...stored,
         groups: stored.groups.map(group => ({ ...group, quote: clearCatalogPricing(group.quote) })),
@@ -666,6 +824,8 @@ export default function NestingWorkspace({
     if (importingRef.current || comparingRef.current)
       throw new Error('Finish the current operation before opening another estimate.');
     setProject(loaded);
+    setRemnantReady(null);
+    setPlanningRun(null);
     setPolicyReviewEpoch(value => value + 1);
     setVerifiedPricingHashes(new Set());
     setSnapshots({});
@@ -677,11 +837,26 @@ export default function NestingWorkspace({
   }
   async function exportReviewRecord() {
     try {
+      if (project.remnantPlan && !canPlanRemnants)
+        throw new Error('Inventory view permission is required to export recorded-piece evidence.');
       const signature = JSON.stringify(project);
-      const record = await buildRunManifest(project, snapshots, {
-        companyId: companyId ?? null,
-        estimatorId: estimatorId ?? null,
-      });
+      if (project.remnantPlan && (!planningRun || planningRun.signature !== signature))
+        throw new Error('Compare the current recorded-piece assignment before export.');
+      const record =
+        project.remnantPlan && planningRun
+          ? await buildRemnantReview(
+              planningRun.raw,
+              planningRun.stages,
+              {
+                companyId: companyId!,
+                estimatorId: estimatorId ?? null,
+              },
+              { searchFinished: planningRun.finished }
+            )
+          : await buildRunManifest(project, snapshots, {
+              companyId: companyId ?? null,
+              estimatorId: estimatorId ?? null,
+            });
       if (!mountedRef.current || signature !== JSON.stringify(stateRef.current.project))
         throw new Error('The estimate changed during export. Compare the current inputs and export again.');
       download(JSON.stringify(record, null, 2), safeName(project.name) + '-draft-review.json', 'application/json');
@@ -860,6 +1035,8 @@ export default function NestingWorkspace({
         execute: (p: unknown) => {
           check(p);
           const s = stateRef.current;
+          if (s.project.remnantPlan && !s.canPlanRemnants)
+            throw new Error('Inventory view permission is required for recorded-piece evidence.');
           return {
             estimate: projectToFile(s.project),
             stale: s.stale,
@@ -942,8 +1119,9 @@ export default function NestingWorkspace({
       {busy && (
         <div className="compare-progress" role="status">
           <span>
-            Comparing group {Math.min(compareProgress.completed + 1, compareProgress.total)} of {compareProgress.total}{' '}
-            · {compareProgress.name}
+            Comparing {project.remnantPlan && remnantIsReady ? 'stage' : 'group'}{' '}
+            {Math.min(compareProgress.completed + 1, compareProgress.total)} of {compareProgress.total} ·{' '}
+            {compareProgress.name}
           </span>
           <button className="secondary compact" onClick={() => compareController.current?.abort()}>
             Cancel comparison
@@ -1066,6 +1244,8 @@ export default function NestingWorkspace({
                     const next = createBlankProject();
                     setDocumentEpoch(value => value + 1);
                     setProject(next);
+                    setRemnantReady(null);
+                    setPlanningRun(null);
                     setSavedSignature(JSON.stringify(next));
                     setSnapshots({});
                     setVerifiedPricingHashes(new Set());
@@ -1082,7 +1262,7 @@ export default function NestingWorkspace({
                 <button
                   className="secondary compact"
                   onClick={() => void exportReviewRecord()}
-                  disabled={!reviewReady || busy || importing || !!error}
+                  disabled={!reviewReady || busy || importing || !!error || (!!project.remnantPlan && !canPlanRemnants)}
                   title={
                     reviewReady
                       ? 'Download draft evidence; not a server-approved audit'
@@ -1118,6 +1298,32 @@ export default function NestingWorkspace({
                 </button>
               </div>
             </div>
+            <RemnantAssignmentControls
+              project={project}
+              companyId={companyId}
+              canPlan={canPlanRemnants}
+              disabled={busy || importing}
+              ready={remnantIsReady}
+              onSelect={selectRemnant}
+              onClear={() => {
+                setProject(current => {
+                  const rest = { ...current };
+                  delete rest.remnantPlan;
+                  return rest;
+                });
+                setRemnantReady(null);
+                setPlanningRun(null);
+              }}
+            />
+            {planningRun && (
+              <RemnantPlanningResults
+                project={project}
+                rawEstimate={planningRun.raw}
+                stages={planningRun.stages}
+                stale={planningRun.signature !== JSON.stringify(project)}
+                status={planningRun.status}
+              />
+            )}
             <div className={`order-banner ${stale ? 'needs-update' : ''}`} aria-live="polite">
               {stale ? (
                 <>

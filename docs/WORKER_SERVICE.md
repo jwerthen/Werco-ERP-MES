@@ -513,7 +513,7 @@ the image and use its new manifest identity in the unchanged active-deployment/f
 post-Redis heartbeat gate. There is no new migration, cron, environment variable or
 physical-stock reservation implied by this geometry increment.
 
-New compensated-envelope runs use solver `werco-contour-v6`. The normative source
+The compensated-envelope increment introduced solver `werco-contour-v6`. The normative source
 is `backend/app/data/nesting_profiles/werco-compensated-v1.json`; its reviewed generated
 frontend adapter keeps the frontend-only deployment context intact. CI runs
 `python3 .github/scripts/generate_nesting_profile.py --check`, while standalone
@@ -543,9 +543,48 @@ observations** records or withdraws advisory evidence only; no observed piece be
 nesting stock, reserved inventory, certified material or material credit through this
 release.
 
-Rollback uses a compatible API/worker/frontend release, retains migrations 101–104 and
-immutable policy/draft/run/piece-observation history, and does not change cron settings. A failed runtime can
-still leave history readable, but new calculations remain unavailable. No successful
+Original DXF attachment migration105 adds audited source intents, storage attempts,
+verified receipts and exact saved-part bindings. File transfer and verification run
+through the authenticated API and the existing storage adapter; no ARQ job, cron,
+solver profile or worker runtime is added. The normal worker identity gate still
+applies when releasing the whole application. Source receipts do not create or
+approve a nesting calculation. See `CAD_SOURCE_STORAGE.md` for upload recovery and
+the separate storage-retention acceptance boundary.
+
+Recorded-piece planning now requires strict solver `werco-contour-v7`. Ordinary
+full-sheet inputs still select protocol1; project18 with an explicit `remnantPlan`
+selects protocol2 while nested group quotes remain14. The manifest retains base
+`protocol:1` and declares exact ordered `supported_protocols:[1,2]`, both geometry
+identities and the compiled bundle SHA. Startup validates these against the source
+profiles before readiness. The remnant identity is `werco-remnant-domain-v1`, SHA256
+`114171806c36fee380801a72b2beb346a41fa1af83884097f9604f417cdd445b`; it binds the unchanged
+compensated profile. Protocol2 hello adds that domain identity. The heartbeat still
+has the same eight fields and base protocol1, so do not change the availability DTO
+or accept protocol2 there to accommodate a staged request.
+
+Package both capabilities in the one existing worker image. Required offline image
+smoke must exercise ordinary protocol1 and a protocol2 baseline/recorded-piece/residual
+plan, with exact manifest/bundle/profile identity and rejected protocol mismatches.
+The normal release gate keeps the strict v7 solver pin and all release, deployment,
+Node, bundle, freshness and active-SUCCESS checks. Preserve top-level structured
+Railway events even when the outer message is empty; do not restore a text-only filter.
+Fresh readiness is still published only after Redis SET succeeds and the original
+selected relay CronJob is present, including after Sentry wraps its coroutine.
+
+All stages share the existing 120-second, 512-MiB child heap, 36-work, 8-MiB message
+and 24-MiB retained-checkpoint limits. A recorded-piece checkpoint alone completes
+no baseline or conditional alternative; timeout/cancel keeps only previously verified
+work. Existing frozen v4/v5/v6 reports are not recomputed. This adds no migration,
+environment variable, secret, cron, separate service or inventory write. See
+`RECORDED_PIECE_PLANNING.md` for source access/currentness and comparison semantics.
+
+Rollback uses a compatible API/worker/frontend release, retains migrations 101–105 and
+immutable policy/draft/run/piece-observation history plus source intent/attempt/receipt/
+binding history, plus project18/protocol2 source and stage evidence, and does not
+change cron settings. Retained history must be served by a compatible API that enforces
+`inventory:view` on remnant-bearing draft/run/CAD evidence; a pre-remnant reader may
+lack that gate even when the schema is retained. A failed runtime can still leave
+authorized history readable, but new calculations remain unavailable. No successful
 calculation, stock reservation, manufacturing approval or automatic material credit is
 implied by a worker startup or a completed deployment.
 

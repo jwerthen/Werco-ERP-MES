@@ -1,3 +1,4 @@
+import { SOLVER_VERSION } from './run-manifest';
 import { rect, validateJob, type Job, type Part } from './nesting';
 import { compareSheets, createBlankQuote, quoteFromFile, quoteToFile, type Quote } from './quoting';
 import { createBlankProject, projectFromFile, projectToFile } from './quote-project';
@@ -204,7 +205,7 @@ describe('orientation restrictions in saved estimates and draft evidence', () =>
       expect([90, 270]).toContain(alternative.placements[0].rotationDegrees);
     }
     expect(record.content.solver).toMatchObject({
-      version: 'werco-contour-v6',
+      version: SOLVER_VERSION,
       orientationPolicy: 'werco-orientation-v1',
     });
     expect(record.content.authoritativeApproval).toBe(false);
