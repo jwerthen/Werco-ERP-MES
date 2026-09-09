@@ -21,6 +21,7 @@ from app.models.user import User, UserRole
 from app.schemas.quote_nesting_drafts import MAX_ESTIMATE_BYTES, SavedProject
 from app.services.audit_service import AuditService
 from app.services.quote_nesting_materials import catalog_material
+from app.services.quote_nesting_spacing import verify_project_policies
 
 
 def require_access(db: Session, user: User, company_id: int, *, write: bool = False) -> None:
@@ -107,6 +108,22 @@ def _review_sources(db: Session, company_id: int, project: SavedProject, raw: di
         }
     ]
     for group, raw_group in zip(project.groups, raw["groups"]):
+        if group.quote.geometryProfile is not None:
+            issues.append(
+                {
+                    'code': 'geometry_profile_not_shop_approval',
+                    'group_id': group.id,
+                    'message': 'The geometry profile identifies software clearance rules only. It does not approve physical cutting allowances, material, pricing or inventory eligibility.',
+                }
+            )
+        if any(stock.exclusions for stock in group.quote.options):
+            issues.append(
+                {
+                    "code": "unverified_stock_exclusions",
+                    "group_id": group.id,
+                    "message": "Stock exclusions are estimator-reported unavailable areas, not physically verified stock. Topology and guarded clearance are checked only during calculation.",
+                }
+            )
         binding = group.quote.materialBinding
         if binding is None:
             continue
@@ -251,6 +268,7 @@ def save_revision(
     if draft is not None and draft.version != expected_version:
         raise HTTPException(409, "This draft has a newer revision. Open its latest revision or save a separate draft.")
     issues = _review_sources(db, company_id, parsed, raw)
+    issues.extend(verify_project_policies(db, company_id, parsed))
     now = datetime.utcnow()
     if draft is None:
         draft = QuoteNestingDraft(

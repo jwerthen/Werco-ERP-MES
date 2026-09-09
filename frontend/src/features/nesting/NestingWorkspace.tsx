@@ -60,6 +60,8 @@ import {
   projectFromFile,
   projectToFile,
   validateProject,
+  requireCurrentProjectGeometry,
+  upgradeProjectGeometry,
   type QuoteProject,
 } from './lib/quote-project';
 import { autoQuotingSpacing } from './lib/spacing';
@@ -73,6 +75,10 @@ import PartOrientationControls, { SheetGrainControl, orientationSummary, sheetGr
 import { orientationExplanation } from './lib/orientation';
 import LeftoverReview, { LeftoverOverlay, leftoverPath } from './LeftoverReview';
 import TeamDrafts from './TeamDrafts';
+import SpacingPolicyControls from './SpacingPolicyControls';
+import StockExclusions, { StockExclusionOverlay, stockExclusionsSvg } from './StockExclusions';
+import { exclusionsToFile } from './lib/stock-exclusion-files';
+import { geometryProfileLabel, resolveGeometryProfile } from './lib/geometry-profile';
 
 type CachedComparison = { comparison: Comparison; signature: string };
 const legacyFootprintNotice =
@@ -114,15 +120,18 @@ function Picker({
   items,
   label,
   id,
+  disabled = false,
 }: {
   value: string;
   onChange: (v: string) => void;
   items: string[];
   label: string;
   id?: string;
+  disabled?: boolean;
 }) {
   return (
     <Select
+      disabled={disabled}
       value={value}
       onValueChange={v => {
         if (v !== null) onChange(v);
@@ -149,6 +158,7 @@ function NumberField({
   min = 0,
   max = 20000,
   step = 'any',
+  disabled = false,
 }: {
   label: string;
   value: number;
@@ -157,6 +167,7 @@ function NumberField({
   min?: number;
   max?: number;
   step?: string;
+  disabled?: boolean;
 }) {
   const isLength = unit === 'in';
   const display = () => (Number.isFinite(value) ? String(Number((isLength ? mmToIn(value) : value).toFixed(6))) : '');
@@ -172,6 +183,7 @@ function NumberField({
         {unit && <small>{unit}</small>}
       </span>
       <Input
+        disabled={disabled}
         type={isLength ? 'text' : 'number'}
         inputMode="decimal"
         value={draft}
@@ -202,14 +214,17 @@ export default function NestingWorkspace({
   companyId,
   estimatorId,
   canSaveDrafts = false,
+  canManagePolicies = false,
 }: {
   initialQuote?: Quote;
   companyId?: number;
   estimatorId?: number;
   canSaveDrafts?: boolean;
+  canManagePolicies?: boolean;
 }) {
   const fieldId = useId();
   const [documentEpoch, setDocumentEpoch] = useState(0);
+  const [policyReviewEpoch, setPolicyReviewEpoch] = useState(0);
   const catalog = useNestingCatalog(companyId);
   const [verifiedPricingHashes, setVerifiedPricingHashes] = useState<Set<string>>(() => new Set());
   const { showToast } = useToast();
@@ -348,12 +363,28 @@ export default function NestingWorkspace({
     else
       setQuote(q => {
         const changed = { ...q, ...patch };
+        if (
+          q.spacingOverride &&
+          !Object.prototype.hasOwnProperty.call(patch, 'spacingOverride') &&
+          (patch.gap !== undefined || patch.margin !== undefined)
+        )
+          changed.spacingOverride = { ...q.spacingOverride, changed_at: new Date().toISOString() };
         return patch.options && !Object.prototype.hasOwnProperty.call(patch, 'materialBinding')
           ? clearCatalogPricing(changed)
           : changed;
       });
   };
   const changeMaterial = (patch: Partial<Quote>) => {
+    if (
+      quote.spacingPolicy &&
+      ((patch.material !== undefined && patch.material !== quote.material) ||
+        (patch.thickness !== undefined && patch.thickness !== quote.thickness))
+    ) {
+      toast.warning(
+        'Choose custom spacing with an estimator reason before changing an applied policy’s material or thickness.'
+      );
+      return;
+    }
     const changed = clearCatalogPricing({
       ...quote,
       ...patch,
@@ -409,16 +440,23 @@ export default function NestingWorkspace({
       toast.error((e as Error).message);
     }
   };
-  const changeOption = (id: string, patch: Partial<SheetOption>) =>
-    setQuote(q => ({
-      ...q,
-      ...(patch.width !== undefined || patch.height !== undefined ? clearCatalogPricing(q) : q),
-      options: q.options
-        .map(o => (o.id === id ? editSheetOption(o, patch) : o))
-        .map(o =>
-          q.materialBinding && (patch.width !== undefined || patch.height !== undefined) ? { ...o, price: null } : o
-        ),
-    }));
+  const changeOption = (id: string, patch: Partial<SheetOption>) => {
+    try {
+      const q = quote;
+      const next = {
+        ...q,
+        ...(patch.width !== undefined || patch.height !== undefined ? clearCatalogPricing(q) : q),
+        options: q.options
+          .map(o => (o.id === id ? editSheetOption(o, patch) : o))
+          .map(o =>
+            q.materialBinding && (patch.width !== undefined || patch.height !== undefined) ? { ...o, price: null } : o
+          ),
+      };
+      setQuote(next);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : 'Cannot change this stock option.');
+    }
+  };
   const stateRef = useRef({ project, quote, comparison, stale, snapshots });
   stateRef.current = { project, quote, comparison, stale, snapshots };
   useEffect(() => {
@@ -436,6 +474,7 @@ export default function NestingWorkspace({
     try {
       const current = stateRef.current.project;
       validateProject(current);
+      requireCurrentProjectGeometry(current);
       if (current.groups.some(group => group.quote.parts.some(part => part.importMode === 'drawing-bounds')))
         throw new Error(legacyFootprintNotice);
       const groups = current.groups.filter(group => group.quote.parts.length);
@@ -627,6 +666,7 @@ export default function NestingWorkspace({
     if (importingRef.current || comparingRef.current)
       throw new Error('Finish the current operation before opening another estimate.');
     setProject(loaded);
+    setPolicyReviewEpoch(value => value + 1);
     setVerifiedPricingHashes(new Set());
     setSnapshots({});
     setPreviewId(null);
@@ -678,6 +718,7 @@ export default function NestingWorkspace({
       ['Selected stock width in', mmToIn(active.option.height)],
       ['Selected stock length in', mmToIn(active.option.width)],
       ['Sheet grain', sheetGrainLabel(quote.grainAxis)],
+      ['Excluded areas repeated per sheet', active.option.exclusions?.length ?? 0],
       ['Sheets to order', nest.sheets],
       ['Required parts', requested],
       ['Placed parts', nest.placements.length],
@@ -726,6 +767,7 @@ export default function NestingWorkspace({
         'Sheet',
         'Gross area in2',
         'Edge margin area in2',
+        'Excluded stock area in2',
         'Nominal part area in2',
         'Reserved cutout area in2',
         'Clearance and protection area in2',
@@ -737,6 +779,7 @@ export default function NestingWorkspace({
         result.sheet + 1,
         result.grossArea / 25.4 ** 2,
         result.edgeMarginArea / 25.4 ** 2,
+        (result.excludedArea ?? 0) / 25.4 ** 2,
         result.nominalPartArea / 25.4 ** 2,
         result.reservedCutoutArea / 25.4 ** 2,
         result.clearanceAndProtectionArea / 25.4 ** 2,
@@ -744,6 +787,17 @@ export default function NestingWorkspace({
         result.regions.length,
         0,
       ]) ?? []),
+      [],
+      ['Excluded area ID', 'Label', 'Reason', 'Added clearance in', 'Actual outline JSON in'],
+      ...(active.option.exclusions
+        ? exclusionsToFile(active.option.exclusions).map(region => [
+            region.id,
+            region.label,
+            region.reason,
+            region.clearance,
+            JSON.stringify(region.outline),
+          ])
+        : []),
     ];
     download(
       rows.map(row => row.map(csv).join(',')).join('\n'),
@@ -774,7 +828,7 @@ export default function NestingWorkspace({
       })
       .join('');
     download(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${mmToIn(stock.width)}in" height="${mmToIn(stock.height)}in" viewBox="0 0 ${stock.width} ${stock.height}"><title>QUOTE LAYOUT — NOT AN NC PROGRAM</title><desc>Sheet grain: ${sheetGrainLabel(quote.grainAxis)}. Permitted part orientations are recorded in the material summary and draft review export. Mirroring is prohibited. Amber regions are predicted leftovers requiring physical review; no value is credited.</desc><rect width="100%" height="100%" fill="white"/><g transform="translate(0 ${stock.height}) scale(1 -1)">${remaining}${paths}</g></svg>`,
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${mmToIn(stock.width)}in" height="${mmToIn(stock.height)}in" viewBox="0 0 ${stock.width} ${stock.height}"><title>QUOTE LAYOUT — NOT AN NC PROGRAM</title><desc>Sheet grain: ${sheetGrainLabel(quote.grainAxis)}. Permitted part orientations are recorded in the material summary and draft review export. Mirroring is prohibited. Red shapes are entered unavailable stock; added clearance and guarded part envelopes also apply. Amber regions are predicted leftovers requiring physical review; no value is credited.</desc><rect width="100%" height="100%" fill="white"/><g transform="translate(0 ${stock.height}) scale(1 -1)">${remaining}${stockExclusionsSvg(stock.exclusions)}${paths}</g></svg>`,
       safeName(quote.name) + `-sheet-${sheet + 1}-preview.svg`,
       'image/svg+xml'
     );
@@ -895,6 +949,35 @@ export default function NestingWorkspace({
             Cancel comparison
           </button>
         </div>
+      )}
+      {project.groups.some(
+        group => group.quote.parts.length > 0 && !resolveGeometryProfile(group.quote.geometryProfile)
+      ) && (
+        <section className="geometry-profile-notice" aria-label="Clearance rules update">
+          <strong>This estimate uses earlier clearance rules</strong>
+          <p>
+            Before calculating a new nest, update its rules so each part’s full clearance envelope stays inside the edge
+            margin and clear of other parts. Each part reserves half the gap, plus curve and numerical protection.
+            Corner reserves can require more space and more sheets.
+          </p>
+          <button
+            className="primary"
+            disabled={busy || importing}
+            onClick={() => {
+              setProject(upgradeProjectGeometry(stateRef.current.project));
+              setSnapshots({});
+              toast.success(
+                'Clearance rules updated. Compare again; save a new revision for a saved server calculation.'
+              );
+            }}
+          >
+            Use current clearance rules
+          </button>
+          <p className="helper inset-free">
+            Dimensions, part geometry, selected spacing and prices are retained. Saved runs remain under their recorded
+            rules.
+          </p>
+        </section>
       )}
       <fieldset className="workspace-controls" disabled={importing || busy}>
         <div className="material-groups">
@@ -1382,6 +1465,7 @@ export default function NestingWorkspace({
                           {formatIn(stock.height)} in
                         </text>
                         <g transform={`translate(0 ${stock.height}) scale(1 -1)`}>
+                          <StockExclusionOverlay exclusions={stock.exclusions} />
                           {showLeftovers && leftoverSheet && (
                             <LeftoverOverlay sheet={leftoverSheet} highlightedId={selectedLeftover} />
                           )}
@@ -1487,6 +1571,7 @@ export default function NestingWorkspace({
                     <Picker
                       id={fieldId + '-material'}
                       label="Material"
+                      disabled={!!quote.spacingPolicy}
                       value={quote.material}
                       onChange={v => changeMaterial({ material: v })}
                       items={['Carbon steel', 'Stainless steel', 'Aluminum']}
@@ -1494,6 +1579,7 @@ export default function NestingWorkspace({
                   </label>
                   <NumberField
                     label="Thickness"
+                    disabled={!!quote.spacingPolicy}
                     value={quote.thickness}
                     unit="in"
                     max={100}
@@ -1506,12 +1592,14 @@ export default function NestingWorkspace({
                   <div className="two-fields">
                     <NumberField
                       label="Edge margin"
+                      disabled={!!quote.spacingPolicy}
                       value={quote.margin}
                       unit="in"
                       onChange={v => update({ margin: v, spacingMode: 'manual' })}
                     />
                     <NumberField
                       label="Part gap"
+                      disabled={!!quote.spacingPolicy}
                       value={quote.gap}
                       unit="in"
                       onChange={v => update({ gap: v, spacingMode: 'manual' })}
@@ -1523,6 +1611,7 @@ export default function NestingWorkspace({
                       id={fieldId + '-auto-spacing'}
                       aria-labelledby={fieldId + '-auto-spacing-label'}
                       checked={quote.spacingMode === 'auto'}
+                      disabled={!!quote.spacingPolicy || !!quote.spacingOverride}
                       onCheckedChange={auto => {
                         try {
                           update(
@@ -1540,6 +1629,24 @@ export default function NestingWorkspace({
                     Starting estimate: gap = max(1/8 in, thickness); edge = max(3/8 in, twice thickness). Editable
                     quoting allowances, not machine cutting parameters.
                   </p>
+                  <div className="geometry-profile-details">
+                    <strong>{geometryProfileLabel(quote.geometryProfile)}</strong>
+                    {resolveGeometryProfile(quote.geometryProfile) && (
+                      <p className="helper inset-free">
+                        A part’s nominal edge is at least {formatIn(quote.margin + quote.gap / 2)} in from the sheet
+                        edge before curve and numerical protection. Full clearance envelopes must fit inside the edge
+                        band and stay separate; corners may reserve more space. This is a quote geometry rule, not a
+                        machine setting.
+                      </p>
+                    )}
+                  </div>
+                  <SpacingPolicyControls
+                    key={`${documentEpoch}:${policyReviewEpoch}:${project.activeGroupId}`}
+                    quote={quote}
+                    companyId={companyId}
+                    canManage={canManagePolicies}
+                    onChange={update}
+                  />
                   <label className="field-label" htmlFor={fieldId + '-priority'}>
                     <span>Compare by</span>
                     <Picker
@@ -1630,7 +1737,7 @@ export default function NestingWorkspace({
                             ) : (
                               <span className="incomplete-result">
                                 {r.error ||
-                                  `${r.nest?.unplaced.reduce((a, u) => a + u.count, 0) ?? requested} parts do not fit`}
+                                  `${r.nest?.unplaced.reduce((a, u) => a + u.count, 0) ?? requested} parts remain unplaced`}
                               </span>
                             )}
                           </TableCell>
@@ -1823,6 +1930,26 @@ export default function NestingWorkspace({
                         }
                       />
                     </label>
+                    <StockExclusions
+                      key={`${documentEpoch}:${policyReviewEpoch}:${project.activeGroupId}:${o.id}`}
+                      option={o}
+                      onChange={regions => {
+                        const nextQuote = {
+                          ...quote,
+                          options: quote.options.map(option =>
+                            option.id === o.id ? editSheetOption(option, { exclusions: regions }) : option
+                          ),
+                        };
+                        const next = {
+                          ...project,
+                          groups: project.groups.map(group =>
+                            group.id === project.activeGroupId ? { ...group, quote: nextQuote } : group
+                          ),
+                        };
+                        validateProject(next);
+                        setProject(next);
+                      }}
+                    />
                     <div className="stock-card-footer">
                       <span>{fmt(squareFeet(o.width * o.height), 2)} ft² per sheet</span>
                       <button

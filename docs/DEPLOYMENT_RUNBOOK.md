@@ -30,6 +30,46 @@
 > or an old log check. Roll back compatible application images while retaining additive
 > draft/run tables and immutable history. See [WORKER_SERVICE.md](WORKER_SERVICE.md#saved-nesting-calculation-runtime).
 
+> **Spacing policies.** Apply additive migration 103 after 102 through the normal API
+> boot migration path. It creates no seed/approved policy and introduces no secret,
+> environment or cron setting. The API, frontend and compiled shared worker must all
+> understand project 10/quote 9, so retain the existing exact-release API and fresh worker
+> identity gates before public promotion. Validate policy approval/withdrawal and a new
+> saved custom-spacing revision without changing historical reports. Application rollback
+> retains policy/draft/run history and restores compatible images; do not downgrade 103
+> or rewrite saved format versions as an ordinary rollback.
+
+> **Piece observations.** Apply additive `104_stock_piece_observations` after
+> `103_nesting_spacing_policies` in the API before frontend promotion. The PostgreSQL
+> operations gate must verify both Alembic and model-bootstrap guards, RLS and table/
+> sequence privilege revocation, plus real API tenant, idempotency and version races.
+> Verify **Warehouse → Inventory → Piece observations**: explicit record, revision
+> history and withdrawal with existing inventory permissions. This is an advisory
+> register; it changes no inventory balance, availability, reservation, nesting input,
+> certification eligibility or quote credit. There are no seeds, new secrets,
+> dependencies, environment settings, crons or solver/profile changes. Keep the existing
+> exact-release/runtime gates. On application rollback retain migration104, piece and
+> observation records and audit history; do not invoke its destructive downgrade.
+
+> **Stock exclusions.** This increment adds no migration, permission, environment or
+> cron change. Release the quote 11/project 12 API/frontend contract with the compiled
+> `werco-contour-v5` worker through the same backend-first, exact-image/readiness gate.
+> Legacy job 13 is local-only. Verify a saved exclusion-bearing scenario and its v2
+> leftover ledger; absent/empty regions retain v1. These scenario constraints do not
+> establish physical inventory or reserve stock. On rollback retain the original
+> input versions, exclusion geometry and historical results; never remove constraints
+> to make an older runtime accept them.
+
+> **Compensated envelopes.** Release solver v6, quote 14/project 15 and the exact
+> `werco-compensated-v1` source profile as a compatible API/frontend/worker set.
+> CI checks the generated frontend adapter against normative backend JSON; isolated
+> frontend/Node builds also self-check its digest. The manifest and hello bind
+> `geometry_profile`; heartbeat fields and the active/fresh identity gate are unchanged.
+> There is no migration, environment or cron change. Verify explicit legacy-input
+> upgrade, v3 ledger evidence and frozen v4/v5 historical preview without rerunning it.
+> Retain profile-bearing files/checkpoints on rollback; do not rewrite versions or
+> remove constraints to force compatibility. Local job 16 remains local-only.
+
 ---
 
 ## Table of Contents

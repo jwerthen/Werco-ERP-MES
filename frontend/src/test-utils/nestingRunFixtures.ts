@@ -1,3 +1,5 @@
+import { CURRENT_GEOMETRY_PROFILE } from '../features/nesting/lib/geometry-profile';
+import { SOLVER_VERSION } from '../features/nesting/lib/run-manifest';
 import type { NestingDraftRevision } from '../types/nestingDraft';
 import type { NestingRunDetail, NestingRunPage, NestingRuntime } from '../types/nestingRun';
 import { rect } from '../features/nesting/lib/nesting';
@@ -64,7 +66,7 @@ export function savedRunFixture() {
     started_at: source.created_at,
     finished_at: source.created_at,
     release_identity: 'synthetic-release',
-    solver_version: 'werco-contour-v4',
+    solver_version: SOLVER_VERSION,
     bundle_sha256: 'b'.repeat(64),
     node_version: 'v22.20.0',
     evaluated_count: 1,
@@ -72,7 +74,21 @@ export function savedRunFixture() {
     checkpoint_bytes: 2000,
     error_code: null,
     error_message: null,
-    settings: { approved: false, remnant_credit_usd: 0 },
+    settings: {
+      approved: false,
+      remnant_credit_usd: 0,
+      protocol: 1,
+      units: 'mm',
+      solver_version: SOLVER_VERSION,
+      geometry_profile: CURRENT_GEOMETRY_PROFILE,
+      runtime: {
+        release: 'synthetic-release',
+        protocol: 1,
+        solver_version: SOLVER_VERSION,
+        bundle_sha256: 'b'.repeat(64),
+        node_version: 'v22.20.0',
+      },
+    },
     summary: null,
     warnings: [{ code: 'unapproved', message: 'Server-calculated draft evidence only.' }],
     checkpoints: [
@@ -105,7 +121,7 @@ export const readyRuntime: NestingRuntime = {
   identity: {
     release: 'synthetic-release',
     protocol: 1,
-    solver_version: 'werco-contour-v4',
+    solver_version: SOLVER_VERSION,
     bundle_sha256: 'b'.repeat(64),
     node_version: 'v22.20.0',
     instance_id: '12345678-1234-4234-8234-123456789abc',

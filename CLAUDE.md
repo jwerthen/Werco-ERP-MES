@@ -261,7 +261,7 @@ paths, minimal child environment and byte/time/heap limits are enforced in
 runtime heartbeats contain build metadata only. Each validated stock option is
 retained as an immutable checkpoint; cancellation/timeouts keep earlier results
 without claiming infeasibility. COMPLETED means planned options evaluated, not
-that every part fits. Solver `werco-contour-v4` uses locale-independent code-unit
+that every part fits. Solver `werco-contour-v6` uses locale-independent code-unit
 tie-breaking. Seed is null; exact saved inputs, runtime/build and completed work
 are the replay boundary, not elapsed wall time.
 
@@ -272,6 +272,96 @@ the UI shows imperial measurements and actual checked contours. All runs remain
 unapproved, leftover credits stay zero, and no CAD-source authenticity, physical
 remnant registration, approval, reservation or quote total write is implied.
 See `docs/API.md`, `docs/MATERIAL_NESTING.md` and the worker deployment runbook.
+
+### Configured quote stock exclusions
+
+Stock-size options can retain labeled, reasoned unavailable regions and explicit
+clearance in sheet-local coordinates. They repeat on every hypothetical sheet of
+that option; they are not physical piece IDs, reservations or machine zones. Preserve
+exact outlines and reject out-of-sheet edits instead of silently cropping/removing
+regions. Bounds are 16 regions/2,000 source vertices per option and 20,000 combined
+part/reference/exclusion source vertices per project. A zero entered clearance does
+not remove the separate numerical/curve guard.
+
+The API applies bounded structural validation; authoritative topology and guarded
+geometry validation runs in the shared TypeScript Node kernel before a checkpoint.
+Disable the rectangle fast path when nonempty exclusions exist. Final constraints
+and leftover subtraction use the same guarded envelopes, and overlapping exclusions
+are unioned once within usable stock. Only nonempty exclusions select
+`werco-leftovers-v2` and the `excludedArea` ledger; absent/empty lists preserve v1.
+Quote 11/project 12 discriminators protect exclusion-bearing inputs; legacy job 13
+is local-only. Solver v5 and the exact worker/image readiness gate prevent an older
+runtime from silently dropping constraints. No migration, RBAC, environment, cron,
+physical inventory, reservation or manufacturing approval change is included.
+
+### Current compensated-envelope identity and history
+
+Use normative `backend/app/data/nesting_profiles/werco-compensated-v1.json` and its
+checked-in generated frontend adapter, never two manually maintained profiles.
+`python3 .github/scripts/generate_nesting_profile.py --check` verifies their exact
+canonical payload in CI; frontend/Node standalone builds self-check the adapter and
+Python checks the source. Hash recursively sorted compact ASCII `{id, profile}`
+without a terminal newline. The current identity is `werco-compensated-v1` with SHA
+`21e8689fb2ce80c72befbc5866f658cd74fe8ed336d1b5c070e182f3081aa55a`.
+Do not reuse or change historical estimate/report canonicalizers for this hash.
+
+New comparisons/runs use solver v6 and explicit quote 14/project 15 identity; local
+job 16 remains local-only. Fresh groups carry the profile, but opening old inputs
+adds nothing. Every populated group must explicitly upgrade before any new option
+runs; the upgrade preserves source numbers/policy/exclusions and invalidates live
+comparisons, then requires a new saved revision for server execution. The current
+profile reserves full guarded part envelopes against each other, exclusions and
+inward usable stock; independent nominal checks still apply. V3 leftover evidence
+always carries excluded area, including zero. Older v4/v5 runs select only their
+frozen validator from bound run/settings/source/report identities; a report label
+cannot choose weaker rules or cause historical geometry to be recalculated.
+
+Manifest and Node hello carry `geometry_profile`; the Redis heartbeat DTO remains
+unchanged. The API/worker/frontend must share the exact profile and bundle release
+before promotion. No migration, environment, cron, physical inventory, reservation,
+shop-policy approval or quote approval is created by this geometry identity.
+
+### Quote-spacing policy invariants
+
+`/quote-nesting/spacing-policies` uses a tenant-owned singleton header, immutable
+content revisions and an append-only decision ledger (migration103). No migration,
+GET or startup seeds/approves policy rows. Read/resolve requires effective
+`purchasing:view`; draft/publish/withdraw also requires Admin authority and
+`purchasing:create`, preserving existing token/context fences. Every command
+uses company-version CAS, actor/credential-bound UUID replay, tenant composite
+references and required transactional audit. RLS/revokes and immutable guards
+must remain identical in model bootstrap and migration DDL.
+
+Select the latest effective publication before testing withdrawal; never fall
+back silently to an older approval. New draft saves and run starts take the same
+company policy lock as publication and verify exact snapshot authority/currentness.
+Queued run claims deliberately do not re-resolve policy: accepted immutable
+inputs retain their original settings. Legacy inputs/hashes are not rewritten.
+Policy/override quotes use version9 in project10. An override is manual with an
+explicit reason and cannot coexist with a policy snapshot.
+
+Python fixed-context Decimal and TypeScript BigInt share canonical nine-place
+inch values: half-up thickness normalization, upward formula rounding. Keep the
+exact numeric serialization bridge and real complete UTC timestamp checks. This
+is quoting-policy precision, not configurable geometry tolerance or machine data.
+Policy approval does not approve a nest, grade/certification, remnant or quote.
+See `docs/API.md`, `docs/RBAC_PERMISSIONS.md` and `docs/MATERIAL_NESTING.md`.
+
+### Advisory physical-piece observations
+
+`/inventory/stock-piece-sources` and `/inventory/stock-pieces` record reported
+measurements only. Migration104 and model bootstrap protect company-unique labels,
+immutable observations, source snapshots and monotonic counters. The service owns
+required-audit transactions, command version CAS and actor/credential-bound UUID
+recovery. Require effective `inventory:view`
+and the existing inventory mutator roles for writes; preserve token, kiosk and
+read-only company fences. New RECORDED evidence verifies the exact tenant item/Part
+relationship. Source IDs deliberately have no operational FK: withdrawal preserves
+earlier evidence even after live source removal. Do not turn these observations
+into availability, reservations, nesting stock, physical lineage or quote credit.
+Canonical reported inch strings are distinct from nesting-kernel geometry approval.
+Source drift reads are pure and never reconcile inventory. See
+`docs/STOCK_OBSERVATION_ARCHITECTURE.md` and `docs/STOCK_OBSERVATIONS.md`.
 
 ## Conventions worth matching
 

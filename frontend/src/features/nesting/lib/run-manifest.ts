@@ -1,13 +1,15 @@
+import { CURRENT_GEOMETRY_PROFILE } from './geometry-profile';
 import { leftoversToFile } from './leftovers';
 import { allowedRotations, effectiveRotationMode, orientationExplanation } from './orientation';
 import { partArea, validateNest } from './nesting';
-import { projectToFile, validateProject, type QuoteProject } from './quote-project';
+import { projectToFile, validateProject, requireCurrentProjectGeometry, type QuoteProject } from './quote-project';
 import { stockFor, type Comparison } from './quoting';
 import { canonicalJSON, geometryHash, sha256 } from './provenance';
+import { exclusionsToFile } from './stock-exclusion-files';
 import { mmToIn } from './units';
 
 export type ComparisonSnapshot = { comparison: Comparison; signature: string };
-export const SOLVER_VERSION = 'werco-contour-v4';
+export const SOLVER_VERSION = 'werco-contour-v6';
 
 /** Downloadable draft evidence. This is never an approval, inventory claim or server audit record. */
 export async function buildRunManifest(
@@ -16,6 +18,7 @@ export async function buildRunManifest(
   identity: { companyId: number | null; estimatorId: number | null }
 ) {
   validateProject(project);
+  requireCurrentProjectGeometry(project);
   const groups = project.groups.filter(group => group.quote.parts.length > 0);
   if (!groups.length) throw new Error('Add parts and compare sheets before exporting a review record.');
   const inputProject = projectToFile(project);
@@ -92,6 +95,14 @@ export async function buildRunManifest(
         const grossAreaIn2 = nest ? mmToIn(option.width) * mmToIn(option.height) * nest.sheets : null;
         return {
           stockOptionId: option.id,
+          geometryProfile: CURRENT_GEOMETRY_PROFILE,
+          ...(option.exclusions !== undefined
+            ? {
+                stockExclusions: exclusionsToFile(option.exclusions),
+                stockExclusionBasis:
+                  'Estimator-entered unavailable regions repeated on every hypothetical sheet of this option; no physical piece or reservation.',
+              }
+            : {}),
           status: complete ? 'complete_valid_layout' : nest ? 'partial_valid_layout' : 'calculation_failed',
           explanation:
             result.error ??
@@ -135,6 +146,14 @@ export async function buildRunManifest(
         throw new Error('The recommended alternative is not a complete valid layout. Recalculate it.');
       return {
         groupId: group.id,
+        spacing: {
+          mode: quote.spacingMode ?? 'manual',
+          policySnapshot: quote.spacingPolicy ?? null,
+          estimatorOverride: quote.spacingOverride ?? null,
+          reviewNote: quote.spacingPolicy
+            ? 'Snapshot math validated locally; the server checks current approval when saving or starting a new calculation.'
+            : 'These allowances are not bound to an approved policy.',
+        },
         sheetGrainAxis: quote.grainAxis ?? null,
         sheetGrainDirection:
           quote.grainAxis === 'x' ? 'Along sheet length' : quote.grainAxis === 'y' ? 'Along sheet width' : 'Unknown',
@@ -154,15 +173,16 @@ export async function buildRunManifest(
     inputSha256,
     inputProject,
     solver: {
+      geometryProfile: CURRENT_GEOMETRY_PROFILE,
       version: SOLVER_VERSION,
       build: process.env.REACT_APP_RELEASE || 'development',
-      algorithm: 'Deterministic two-order contour placement; three-order rectangular-profile fast path',
+      algorithm: 'Deterministic contour placement with compensated clearance envelopes',
       seed: null,
       seedExplanation:
         'This solver does not use randomness. Replay requires the exact saved inputs, part IDs and solver build.',
-      maximumSearchOrders: 3,
+      maximumSearchOrders: 2,
       contourSearchOrders: 2,
-      rectangularSearchOrders: 3,
+      rectangularFastPath: false,
       orientationPolicy: 'werco-orientation-v1',
       workerDeadlineMs: 120000,
       searchMode: 'bounded_deterministic',

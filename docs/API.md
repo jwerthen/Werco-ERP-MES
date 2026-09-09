@@ -885,11 +885,45 @@ POST returns **200** for both a new save and an identical idempotent replay.
 The file limit is 5 MiB; a route-specific ASGI cap limits the entire upload to
 5 MiB + 16 KiB before multipart parsing. The global 256 KiB JSON-body cap is
 unchanged. Only the documented, nonduplicated fields are accepted. Current
-project formats 4/5/6 must explicitly use inches and USD, with bounded metadata,
-300 total part instances, 20,000 geometry vertices, and 12 stock options per group.
+project formats 4/5/6/10/12/15 must explicitly use inches and USD, with bounded metadata,
+300 total part instances, 20,000 source geometry vertices, and 12 stock options per group.
 Duplicate JSON keys, non-finite values, unknown fields, original CAD blobs,
 approval flags, and solver/placement output are refused. This is structural
 validation of an input draft, not authoritative geometric acceptance.
+
+Stock exclusions require quote **11** or **14** inside project **12** or **15**, respectively; project 12 may also
+contain earlier quote 3/7/9 groups. Quote 11 retains orientation and spacing-policy
+fields from quote 7/9. A stock option's optional `exclusions` array contains
+`{id,label,reason,outline,clearance}`: a 1–64 character `[A-Za-z0-9_-]` ID,
+trimmed nonblank label (up to 120 characters), trimmed reason (up to 1,000), one
+closed polygon or analytical circle using the existing saved loop representation,
+and additional clearance 0–100 inches. All coordinates and clearance are inches.
+Each option allows 16 regions and 2,000 source vertices; a circle counts as one.
+The 20,000 project cap includes parts, reference paths and exclusions on every
+option, including disabled options. IDs are unique per option. Raw outlines must
+lie inside the gross sheet; overlap is permitted, and clearance may extend beyond
+the sheet. The server never crops or renormalizes them. Explicit `null` is invalid;
+an explicitly present empty array still requires the new file versions.
+
+Current geometry rules use quote **14** inside project **15**, with required
+`geometryProfile: {id: "werco-compensated-v1", sha256: <registered digest>}`.
+The exact two-field reference identifies a fixed engineering configuration;
+missing/null/extra fields or an unknown ID/digest reject. Quote 14 retains the
+orientation, policy, catalog and exclusion fields from prior formats. Earlier
+quote versions reject any profile-field presence. Project 15 can preserve mixed
+quote 3/7/9/11/14 groups. Saving and opening an earlier estimate never adds a
+profile, changes its source numbers or rewrites its canonical hash. Explicit
+upgrade is an input edit and requires a new saved revision for a new server run.
+Profile-bearing saves include `geometry_profile_not_shop_approval` review evidence;
+this configuration is not approval of physical allowances, material or pricing.
+
+These are estimator-reported, scenario-wide unavailable areas repeated on each
+hypothetical sheet, with no physical stock identity or machine-control meaning.
+Saving retains the exact source JSON and adds `unverified_stock_exclusions` review
+evidence per affected group. Python checks bounded primitives, metadata and raw
+sheet bounds; the shared calculation kernel checks polygon topology, numerical
+representability and guarded placement constraints before a checkpoint can be
+accepted. An unapproved draft save is not proof that its geometry can be calculated.
 
 Revision summaries contain `draft_id`, `company_id`, `revision_number`,
 `draft_version`, `name`, `status: DRAFT`, `content_sha256`, `payload_schema_version`,
@@ -903,6 +937,9 @@ pricing, and imported CAD hashes remain unapproved client assertions.
 Catalog bindings must reference this company's existing IDs. Changed/inactive
 sources are preserved with explicit review notes; missing/foreign IDs are
 refused without saving. Open clears catalog-price acknowledgment in the UI.
+Applied spacing-policy claims additionally require current immutable publication
+verification; see the spacing-policy contract below. Legacy inputs have no policy
+conformance claim and keep their original canonical payload/hash.
 Every successful first write adds one immutable revision and its required audit
 event in one transaction; failed audit evidence rolls back all draft changes.
 No quote totals, material allocation, remnant reservation, or operational records
@@ -939,7 +976,8 @@ All reads require effective `purchasing:view`; start and cancel additionally req
 | POST | `/quote-nesting/runs/{run_id}/cancel` | Strict JSON `expected_company_id`, `expected_version`; audited cancellation request, returns `RunDetail`. |
 | GET | `/quote-nesting/runs/{run_id}/report` | Exact saved inputs, run detail and available checkpoint payloads with a report digest; always `status: UNAPPROVED`. Read-only evidence, not an approved quote export. |
 
-The caller may explicitly calculate an older saved revision. Its ID/number/hash
+The caller may explicitly calculate an older saved revision carrying the current
+geometry profile on every populated material group. Its ID/number/hash
 must match; the service never substitutes the latest revision. New runs require
 a live worker heartbeat matching the API release, pinned bundle, solver and Node
 runtime. A same-actor/key/request replay returns its original run even if current
@@ -947,6 +985,16 @@ readiness is unavailable; a queued replay retries ID-only dispatch without creat
 a second run or audit event. Changed key meaning, active-company intent or input hash
 is rejected. Only one QUEUED/RUNNING calculation is permitted per company; a
 completed run can be recalculated only by an explicit new request.
+
+Every populated group is checked before creating a new run; empty legacy groups
+may remain untouched. An older populated group without the explicit current
+profile produces **422** with no run, checkpoint, dispatch or run-audit write.
+Same-key recovery precedes current-profile/runtime checks, so retrying an existing
+v4/v5 run does not require rewriting its input. At worker claim, a queued run
+whose frozen settings/runtime differ from the installed release fails with the
+existing audited `runtime_mismatch` outcome before the new profile check. It is
+never upgraded or silently recalculated. Historical report reads remain read-only
+and preserve their recorded settings, solver identity, placements and hashes.
 
 `RunSummary` identifies `id`, company/draft/revision IDs, revision number, input
 hash, actor, status/version/cancellation flag, timestamps, release/solver/bundle/
@@ -971,7 +1019,7 @@ The fixed `standard-v1` technical profile limits the whole project to 120 second
 24 MiB total retained checkpoint content and a 512 MiB Node heap. There is one
 nesting child per worker process; other ARQ functions retain their existing limits.
 Source groups/options are evaluated in their saved order. The shared kernel uses
-code-unit tie-breaking (`werco-contour-v4`), with `seed: null` because it is not
+code-unit tie-breaking (`werco-contour-v6`), with `seed: null` because it is not
 random. Replaying identical saved inputs/build/runtime and completed work is
 deterministic; a wall-time cutoff is not a deterministic work budget.
 
@@ -979,10 +1027,40 @@ QUEUED → RUNNING → COMPLETED/PARTIAL/CANCELLED/FAILED are separate from quot
 approval. **COMPLETED means all planned stock options were evaluated**, not that
 every part fits. `completed_count` counts feasible stock alternatives for their
 individual material groups, not a combined purchased-sheet order. Each emitted
-nest is checked against original contours, spacing, margins, grain and quantities
+nest is checked against original contours, spacing, margins, grain, quantities
+and the compensated part/part, part/exclusion and full-envelope sheet-edge constraints
 before its checkpoint is accepted. Time/work/output limits retain earlier checked
 results and explicitly identify unfinished work. They never establish infeasibility.
 All predicted leftovers remain review-only with zero credit.
+
+Checkpoint framing binds exclusion field presence, array order, IDs, labels,
+reasons, clearance and every source coordinate in both `stock` and `result.option`
+to the immutable imperial input converted to millimeters. No numerical tolerance
+permits a reduced clearance or changed outline. Current stock dimensions, gap and
+margin also retain exact imperial-to-metric source identity. Solver v6's build
+manifest, child `hello.geometry_profile` and immutable `settings.geometry_profile`
+bind the same registered profile reference; each checkpoint `stock.geometryProfile`
+matches its source quote. A stock option itself does not duplicate that group setting.
+
+Every new calculation uses `werco-leftovers-v3` with the exact normative profile
+payload, fixed reservation explanation and a required `excludedArea` ledger in
+square millimeters, including zero for absent/empty exclusions. This is the union of guarded
+exclusions intersected with the inward usable sheet, excluding margin overlap.
+The gross ledger reconciles edge margin + excluded area + nominal parts + reserved
+internal cutouts + clearance/numerical protection + remaining area + bounded
+roundoff residual. The software profile reserves half-gap plus imported tolerance
+and numerical protection around each part, with square-tangent corners. The entire
+envelope must stay within the inward-protected usable sheet outside the selected
+margin; it cannot be clipped to make a placement valid. Original nominal minimum
+distance checks remain independent. Historical v4/v5 records retain their v1/v2
+leftover objects and prior rules rather than being reinterpreted as v3.
+
+The profile's normative JSON is packaged under
+`app/data/nesting_profiles/werco-compensated-v1.json`. Its SHA-256 covers recursively
+key-sorted compact ASCII JSON `{id,profile}`, excluding the digest itself and any
+trailing newline. Nonintegral constants are decimal strings. Python checks that
+source on load; generated frontend data and the bundled child are checked against
+the same payload. This hash convention does not change older estimate/report hashes.
 
 Run creation/cancellation and worker lifecycle/checkpoint changes use required
 audit writes in the same database transaction. Background lifecycle evidence
@@ -1010,6 +1088,98 @@ or `invalid_identity`. No private drawing information is published in this key.
 - **409:** active run, stale cancellation version, input/request conflict or concurrent write.
 - **422:** invalid request; existing global JSON-body cap still applies.
 - **503:** matching runtime unavailable for a new request or required audit failure.
+
+### Quote nesting spacing policies
+
+`/quote-nesting/spacing-policies` governs **family-level quoting allowances** for
+Carbon steel, Stainless steel and Aluminum. It does not approve a quote, a laser
+process, a material grade or remnant eligibility. Reads and resolution require
+effective `purchasing:view`. Creating revisions, publishing and withdrawing also
+require Admin authority and effective `purchasing:create`, with the existing
+active-company, API-token, kiosk and read-only-context fences. An Admin may
+explicitly approve their own revision; this is the initial workflow assumption,
+not a claim of independent approval or compliance certification.
+
+| Method | Relative endpoint | Contract |
+|--------|-------------------|----------|
+| GET | (base) | Current header/selection plus separately counted revision and publication history; `page` 1–100000 and `per_page` 1–100 apply to both history lists. |
+| GET | `/revisions/{number}` | Immutable revision content, author/time, canonical content hash and size. |
+| POST | `/revisions` | Append a draft from `content`, `reason`, UUID `request_key`, `expected_company_id`, and `expected_version` (0 only for the initial company policy). |
+| POST | `/publications` | Explicit approval of `revision_number` and `content_sha256`, with the common command fields and `effective_at`: null for server-now, or a future UTC timestamp. |
+| POST | `/publications/{id}/withdraw` | Append a reasoned withdrawal using the common command fields. No history is edited or deleted. |
+| POST | `/resolve` | Read-only `{material, thickness_in}`; returns `{schema_version:1,status:resolved\|unmatched\|unavailable,policy:null\|snapshot,explanation}`. Application to workspace inputs remains explicit. |
+
+There is one company policy header and immutable content revisions. A shared
+append-only command ledger records revision creation, publication and withdrawal.
+The company version advances for every command; the revision number advances only
+when content is appended. Company locks, expected-version checks and database
+constraints protect races. A UUID is unique across all three commands in the
+company and binds the submitting actor/credential and exact command. Same-key
+retries recover that event before checking the current version; they create no
+second decision or audit row. Command receipts return `schema_version`, original
+`policy_version`, `event_id`, revision summary and nullable publication detail.
+Publication detail includes its current scheduled/current/superseded/withdrawn
+status, so its status may change when the original command is retrieved later.
+
+Content is `{schema_version:1,units:"in",name,bands}`. Each band contains `id`,
+`material`, `thickness_min_in`, `thickness_max_in`, `minimum_gap_in`,
+`gap_thickness_multiplier`, `minimum_margin_in`, and `margin_thickness_multiplier`.
+Band IDs are unique ASCII letters/digits/underscore/hyphen, 1–64 characters.
+The interval includes its lower bound and excludes its upper bound. Bands for
+one family cannot overlap; gaps are allowed and return `unmatched`.
+
+Policy values are canonical unsigned decimal strings with at most nine fractional
+digits, no exponent notation and no unnecessary leading/trailing zeros.
+Resolution accepts a thickness string with up to 18 fractional digits. Thickness
+is normalized **half-up to 0.000000001 inch**; a value rounded to zero is refused.
+For each allowance, compute the maximum of its minimum and normalized thickness
+times its multiplier, then round **up** to that same inch quantum. Python uses a
+fresh fixed Decimal context and the shared TypeScript implementation uses integer
+arithmetic. Policy-bearing saved quotes store numeric gap/margin from the exact
+canonical resolved strings; the backend checks those IEEE numeric values exactly,
+instead of accepting a tolerance that could understate the allowance.
+
+Structural limits are 128 bands, thickness bounds between 0 and 4 inches, minima
+and multipliers between 0 and 100, and 64 KiB canonical policy content. Each gap
+and margin formula must have a positive minimum or multiplier. These limits are
+technical bounds, not recommended manufacturing settings. No policy or approval
+is seeded by migration or created by a read. Copying the estimator's existing
+starting allowances into a policy draft requires explicit action.
+
+Publications cannot be retroactive or share an effective instant. Selection first
+finds the latest publication effective at the server's current time, then checks
+withdrawal. A withdrawn publication never reactivates an earlier one. Withdrawing
+a future publication leaves the prior current publication applicable until the
+future effective instant; thereafter that withdrawn publication makes resolution
+unavailable until a later effective publication replaces it. All API timestamps
+are complete UTC date/times ending in `Z`; the UI displays Central time.
+
+Saved quote version **9** and project version **10** (also exclusion-bearing
+quote 11/project 12) carry `spacingPolicy` or
+`spacingOverride`. Omit unused fields; explicit null is invalid. Older discriminants reject these fields. A policy snapshot
+contains schema/company/policy/publication/revision identity, content hash, exact
+matched band, canonical thickness/gap/margin and `resolved_at`; it requires
+`spacingMode:"policy"`. A custom override contains `{schema_version:1,reason,
+changed_at}`, requires manual mode and cannot coexist with a policy claim.
+Absent metadata remains visibly unreviewed. Legacy revisions and their hashes
+are not rewritten.
+
+New draft saves and new server runs verify policy claims against immutable source
+records and the currently effective, unwithdrawn publication under the same company
+policy lock. Material/thickness/spacing changes, forged source fields and stale
+approvals cannot pass as conforming. The estimator must resolve/apply the current
+policy or explicitly choose unapproved custom spacing with a reason. Already
+queued runs retain their exact accepted input snapshot; claim/replay never applies
+a newer policy or withdraws previously accepted work retroactively. Historical
+reports remain unchanged, and same-key run retries recover their original run.
+
+Policy commands use required audit evidence in the same transaction; an audit
+failure rolls back the header, content and command. Failure responses are 403 for
+authority/context restrictions, 404 for inaccessible policy records, 409 for
+version/request/currentness conflicts, 422 for invalid content/snapshot/schedule,
+and 503 when required audit evidence fails. Existing global JSON-body limits remain
+in force. All quote outputs remain unapproved and predicted leftovers retain zero
+credit; no inventory, reservation, quote total or machine-control record changes.
 
 ### Global search and customer edits
 
@@ -9574,3 +9744,30 @@ development or staging deployment to browse the API interactively; this file is
 the reference for production. See `docs/PRODUCTION_CHECKLIST.md`.
 
 For more details on specific endpoints, use the interactive documentation above.
+
+## Advisory physical-piece observations
+
+These authenticated `/api/v1/inventory` endpoints record explicitly reported physical measurements. Each source and observation record carries **“Recorded observation — availability and eligibility unverified.”** They create no inventory quantity, transaction, reservation, operational quote, remnant credit or solver supply. Existing stock writers and negative-on-hand behavior are unchanged. There is no production seeding, automatic remnant generation or adoption of existing inventory.
+
+| Method and path | Contract |
+|---|---|
+| `GET /inventory/stock-piece-sources` | Pure source read. `page` (default 1), `per_page` (default 20, maximum 100), optional `q` (Part number/name or lot, maximum 100 characters), and optional exact `inventory_item_id`. Returns `{company_id,can_record,items,total,page,per_page}`. |
+| `GET /inventory/stock-pieces` | Latest observation summaries, including withdrawn records, in stable newest-first order. Same bounded pagination and capability envelope. |
+| `GET /inventory/stock-pieces/{piece_id}/observations` | Immutable history summaries with the same envelope; foreign/unknown identities return 404. |
+| `GET /inventory/stock-pieces/{piece_id}/observations/{number}` | Exact historical measurement and source snapshots, their hashes, observation version, actor/credential attribution and a current source-drift comparison. |
+| `POST /inventory/stock-pieces` | Create a company-unique, case-sensitive, durable label and first `RECORDED` observation plus required audit atomically. |
+| `POST /inventory/stock-pieces/{piece_id}/observations` | Append `RECORDED` corrected evidence or `WITHDRAWN` history using `expected_version`. Both new commands and identical UUID recovery return 200. |
+
+Reads require effective `inventory:view`. Recording additionally requires the existing Admin, Manager or Supervisor stock-mutator role; granting purchasing permissions does not grant this capability. Active-company, API-token revocation/expiry, kiosk and read-only-context fences apply through the existing authentication dependencies. Page `can_record` is computed from those effective permissions and context. API-token commands retain token attribution and UUID replay requires the same actor **and credential**, not merely the same human user.
+
+Every command contains `expected_company_id`, a canonical UUID `request_key`, required trimmed `reason` (1–1,000 characters), `observer_name` (1–120 characters), and `observed_at` as a complete UTC date/time ending in `Z`. Creation also contains `state:"RECORDED"`, `label` (1–120 trimmed characters), `source_inventory_item_id`, `source_part_id`, `expected_source_sha256`, and `evidence`. Correction uses the same recorded fields with `expected_version` instead of `label`. Withdrawal contains only the common command fields, `state:"WITHDRAWN"`, and `expected_version`; it preserves the preceding recorded measurement/source payload byte-for-byte and remains possible after the operational source disappears. Only a current recorded observation can be withdrawn. Recording a subsequent explicit correction is permitted; withdrawal never writes off stock. Header labels are not renamed, and history has no edit/delete operation.
+
+`evidence` is a strict version 1 object with `unit:"in"`, `measurement_method`, `source_units` (`in`, `mm` or `unknown`), `geometry`, `unavailable_zones`, `thickness`, `grade`, `grain_axis`, `location_note`, `ownership_note`, and `certification_note`. Nullable specification/note fields must be explicitly null when unknown. All supplied measurements are canonical inch decimal **strings** with at most nine fractional digits, no exponent, no trailing fractional zeros and no negative zero; numeric JSON measurements are refused. `source_units` describes the measurement source only; it does not change the inch meaning of the saved coordinates. Dimensions are positive and at most 100,000 inches; point coordinates are bounded to ±100,000 inches.
+
+Supported reported shapes are `{kind:"unknown"}`, `{kind:"rectangle",width,height}`, `{kind:"circle",cx,cy,r}`, or `{kind:"polygon",outer:[{x,y},...],holes:[[{x,y},...],...]}`. The measured polygon is retained; its bounding rectangle is never substituted. Each unavailable zone has `{id,label,reason,outline}` where `outline` is a circle or `{kind:"polygon",pts:[{x,y},...]}`. Zone IDs are unique and use 1–64 ASCII letters/digits/underscore/hyphen. Budgets are 16 zones, 16 interior rings, 2,000 total source vertices across shape/holes/zones (circle counts 1, rectangle 4), and 128 KiB canonical measurement payload. The existing 256 KiB global JSON receive limit applies before route handling. Unknown geometry cannot carry positioned unavailable zones. Duplicate JSON keys, unknown fields, explicit null required geometry, malformed/nonfinite values and over-budget input fail without saving.
+
+Geometry validation here is deliberately structural and bounded. The shared server calculation kernel has **not** checked topology, hole containment or usable regions for these observations. Neither reported geometry nor a matching source hash verifies actual presence, material specification, grain, damage, ownership or certification. Free-text evidence does not establish an approved material mapping. Structured PO/document revision and solver-origin lineage links are deferred; no implicit relationships are created.
+
+Each source item includes its exact tenant-scoped Item/Part relationship, historical lot/heat/cert/UOM/status/location/cost metadata and a movement watermark. One SQL statement captures Item, Part and watermark together. Coverage is explicitly `direct_item_and_unattributed_same_part`: directly attributed item transactions plus same-Part transactions whose inventory item ID is null. Thus consume/receive turnover is visible even when on-hand returns to the same number; unattributed movements may conservatively flag another lot. Legacy finite floating values are reported as decimal text, nonfinite values as unknown, and no currency or piece valuation is inferred. Source IDs are immutable historical evidence locators without operational foreign keys; new recorded observations validate their current tenant relationship in both API and database guards.
+
+Read-time `source_status` is `unchanged`, `changed` or `missing`, accompanied by `current_source_sha256`. It is a staleness warning, never a lock or availability result. GETs do not reconcile or mutate stock/history. New recorded commands must present the current source fingerprint or receive 409. Same-key recovery runs before source-currentness and version checks, returning the original immutable observation (with a fresh read-time drift warning). Conflicting UUID payload/actor/credential, stale versions and duplicate labels receive 409; cross-company/unknown source relationships receive 404; malformed inputs receive 422; size limits receive 413. Required audit failure returns 503 and rolls back header, observation and audit as one transaction. Database RLS/revokes and immutable UPDATE/DELETE/TRUNCATE guards are supplied by migration 104 and matching model bootstrap DDL; they do not certify physical material.

@@ -11,7 +11,7 @@
 # `railway up` already honors .gitignore, so node_modules/.venv/build output need no entry.
 
 # The worker compiles the same nesting kernel as the browser. Keep its package
-# lock, source and two build tools in the archive; omit unrelated frontend output.
+# lock, source and profile-verified build tools in the archive; omit unrelated output.
 frontend/build/
 frontend/dist/
 frontend/e2e/

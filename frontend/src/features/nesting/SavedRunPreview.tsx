@@ -2,23 +2,30 @@ import React, { useEffect, useState } from 'react';
 import api from '../../services/api';
 import type { NestingRunDetail } from '../../types/nestingRun';
 import { projectFromFile } from './lib/quote-project';
-import { stockFor, type Quote } from './lib/quoting';
-import { svgPath, transformLoops, validateNest } from './lib/nesting';
+import type { Quote } from './lib/quoting';
+import { svgPath, transformLoops } from './lib/nesting';
 import type { ServerOptionMessage } from './lib/server-run';
-import { leftoversToFile } from './lib/leftovers';
+import { validateSavedLayout, type SavedGeometryRun } from './lib/saved-layout';
 import { formatIn } from './lib/units';
-import { canonicalJSON } from './lib/provenance';
 import { nestingApiMessage } from './useNestingCatalog';
 import LeftoverReview, { LeftoverOverlay } from './LeftoverReview';
+import { StockExclusionOverlay } from './StockExclusions';
 
 export default function SavedRunPreview({ run, sequence }: { run: NestingRunDetail; sequence: number }) {
-  const [data, setData] = useState<{ quote: Quote; output: ServerOptionMessage } | null>(null);
+  const [data, setData] = useState<{ quote: Quote; output: ServerOptionMessage; profileLabel: string } | null>(null);
   const [error, setError] = useState('');
   const [sheet, setSheet] = useState(0);
   const [highlighted, setHighlighted] = useState<string | null>(null);
   // Bind the fetch to immutable identity, not each heartbeat's mutable status.
   const { id, company_id: companyId, draft_id: draftId, revision_number: revision, input_sha256: inputSha } = run;
   const expectedHash = run.checkpoints.find(item => item.sequence === sequence)?.content_sha256;
+  const recordedRules = JSON.stringify({
+    solver_version: run.solver_version,
+    bundle_sha256: run.bundle_sha256,
+    node_version: run.node_version,
+    release_identity: run.release_identity,
+    settings: run.settings,
+  });
   useEffect(() => {
     const controller = new AbortController();
     setData(null);
@@ -47,28 +54,15 @@ export default function SavedRunPreview({ run, sequence }: { run: NestingRunDeta
           throw new Error('Saved geometry identity does not match this run.');
         const project = projectFromFile(source.estimate);
         const quote = project.groups.find(group => group.id === output.group_id)?.quote;
-        const option = quote?.options.find(item => item.id === output.option_id && item.enabled);
-        if (
-          !quote ||
-          !option ||
-        canonicalJSON(option) !== canonicalJSON(output.result.option) ||
-        canonicalJSON(stockFor(quote, option)) !== canonicalJSON(output.stock)
-        )
-          throw new Error('Saved stock geometry differs from its input revision.');
-        if (output.result.nest) validateNest(quote.parts, output.stock, output.result.nest);
-        if (output.result.leftovers && output.result.nest)
-          leftoversToFile(output.result.leftovers, {
-            parts: quote.parts,
-            stock: output.stock,
-            nest: output.result.nest,
-          });
-        setData({ quote, output });
+        if (!quote) throw new Error('Saved material group is missing.');
+        const profileLabel = validateSavedLayout(JSON.parse(recordedRules) as SavedGeometryRun, project, output);
+        setData({ quote, output, profileLabel });
       })
       .catch(cause => {
         if (!controller.signal.aborted) setError(nestingApiMessage(cause));
       });
     return () => controller.abort();
-  }, [id, companyId, draftId, revision, inputSha, sequence, expectedHash]);
+  }, [id, companyId, draftId, revision, inputSha, sequence, expectedHash, recordedRules]);
   if (error)
     return (
       <p className="team-draft-error" role="alert">
@@ -76,7 +70,7 @@ export default function SavedRunPreview({ run, sequence }: { run: NestingRunDeta
       </p>
     );
   if (!data) return <p role="status">Loading saved part geometry…</p>;
-  const { quote, output } = data;
+  const { quote, output, profileLabel } = data;
   const { result, stock } = output;
   const nest = result.nest;
   if (!nest || !nest.sheets)
@@ -95,6 +89,9 @@ export default function SavedRunPreview({ run, sequence }: { run: NestingRunDeta
       <h4>
         {quote.material} · {formatIn(quote.thickness)} in · {formatIn(stock.height)} × {formatIn(stock.width)} in sheet
       </h4>
+      <p className="helper inset-free">
+        Saved under {profileLabel}. This preview retains the calculation’s recorded rules.
+      </p>
       <label className="saved-run-sheet-picker">
         Sheet
         <select
@@ -129,6 +126,7 @@ export default function SavedRunPreview({ run, sequence }: { run: NestingRunDeta
             strokeWidth={stock.width / 700}
           />
           <g transform={`translate(0 ${stock.height}) scale(1 -1)`}>
+            <StockExclusionOverlay exclusions={stock.exclusions} />
             <rect
               x={stock.margin}
               y={stock.margin}

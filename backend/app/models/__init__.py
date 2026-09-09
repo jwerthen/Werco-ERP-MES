@@ -139,6 +139,11 @@ from .quote_config import (
 )
 from .quote_nesting_draft import QuoteNestingDraft, QuoteNestingRevision
 from .quote_nesting_run import QuoteNestingRun, QuoteNestingRunCheckpoint
+from .quote_nesting_spacing_policy import (
+    QuoteNestingSpacingEvent,
+    QuoteNestingSpacingPolicy,
+    QuoteNestingSpacingRevision,
+)
 from .rfq_quote import PriceSnapshot, QuoteEstimate, QuoteLineSummary, RfqPackage, RfqPackageFile
 from .role_permission import RolePermission
 from .routing import Routing, RoutingOperation
@@ -160,6 +165,7 @@ from .shipping import (
 )
 from .signin_station import SigninStation
 from .spc import ChartType, SPCCharacteristic, SPCControlLimit, SPCMeasurement, SPCProcessCapability
+from .stock_piece import StockPiece, StockPieceObservation
 from .supplier_part import SupplierPartMapping
 from .supplier_scorecard import ApprovedSupplierList, ScorecardPeriod, SupplierAudit, SupplierScorecard
 from .time_entry import TimeEntry
@@ -181,10 +187,15 @@ from .work_order_template import WorkOrderTemplate
 from .working_calendar import WorkingCalendar
 
 __all__ = [
+    "StockPiece",
+    "StockPieceObservation",
     "QuoteNestingDraft",
     "QuoteNestingRevision",
     "QuoteNestingRun",
     "QuoteNestingRunCheckpoint",
+    "QuoteNestingSpacingPolicy",
+    "QuoteNestingSpacingRevision",
+    "QuoteNestingSpacingEvent",
     "ProductionReceipt",
     "RuntimeMetricSample",
     "RuntimeMetricSetting",

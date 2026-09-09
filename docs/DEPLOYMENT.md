@@ -150,6 +150,76 @@ No new service, domain, secret, operator-set runtime path or cron setting is add
 Do not report server calculation availability until the release's worker identity
 gate passes; a missing/stale runtime leaves new calculation requests unavailable.
 
+Tenant spacing policies additionally require additive migration 103 after 102.
+The migration creates policy storage/guards and does not seed or approve a policy.
+API, frontend and shared-worker bundle must all support project version 10 and nested
+quote version 9 before policy-bearing estimates are published to users. Use the same
+runtime-gated, backend-first combined release; a standalone frontend upload cannot
+establish policy compatibility. No new secret, environment variable or cron is added.
+Verify explicit policy authoring, approval/withdrawal, application to the matching
+material/thickness band, and a new saved revision after custom spacing edits. Previously
+saved reports must remain unchanged. Policy approval records a tenant quoting policy;
+it is not machine-program or manufacturing approval.
+
+The physical-piece observation register additionally requires additive migration
+`104_stock_piece_observations` after `103_nesting_spacing_policies`, applied through
+the normal API boot migration before public frontend promotion. It creates
+`stock_pieces` and `stock_piece_observations`; it does not seed pieces or change
+operational inventory balances. PostgreSQL model-bootstrap hooks mirror the Alembic
+tenant/source integrity guards, immutable observation/identity controls, RLS and
+PUBLIC/anon/authenticated table/sequence privilege revocations. The operations E2E
+verifier exercises both DDL paths and disposable-schema API races; a SQLite pass
+alone does not establish these PostgreSQL controls.
+
+After the normal release and exact public receipt checks, verify **Warehouse →
+Inventory → Piece observations** with an authorized account: explicit source
+selection, record/history, same-request recovery, stale-version conflict and
+withdrawal. Withdrawal appends evidence and can preserve history after an operational
+source is removed. Records remain reported observations, not available stock or
+material certification. This increment does not feed a nest, reserve or consume a
+piece, alter quote totals, or create remnant credit. No new environment variable,
+secret, dependency, cron or runtime geometry profile is introduced. Existing saved-run
+worker identity gates remain unchanged; observation records need no new worker job.
+
+Configured stock exclusions add no migration, permission, environment variable or
+cron setting. The API, frontend and shared worker must understand quote 11/project 12
+and solver `werco-contour-v5` together. The API bounds the saved structural payload;
+the shared TypeScript kernel performs topology and guarded-geometry checks before
+any calculation checkpoint is emitted. The legacy single-job version 13 is a local
+file format, not an accepted server project envelope. Keep the existing API-first
+release, tested image manifest, active-worker/fresh post-Redis identity and public
+release receipt gates; an older worker must not silently ignore the new constraints.
+Verify an exclusion-bearing saved revision and calculation, including the distinct
+preview and area ledger. Only nonempty regions select `werco-leftovers-v2` with
+`excludedArea`; omitted or empty exclusion lists keep the v1 leftover contract.
+These are hypothetical sheet-option constraints, not verified physical stock,
+reservations, inventory records or machine zones.
+
+Current compensated-envelope calculations require solver `werco-contour-v6`,
+quote 14/project 15 and the exact `werco-compensated-v1` geometry identity together.
+Local legacy-style job 16 is not a server project wrapper. Fresh estimates carry
+the current profile; Open never adds it to old inputs automatically. Every populated
+group must explicitly use current clearance rules before a new comparison or run.
+Save that input change as a new revision; historical v4/v5 results remain frozen
+under their recorded solver/source/report identities rather than being recalculated.
+
+The normative wrapper is `backend/app/data/nesting_profiles/werco-compensated-v1.json`.
+Its generated frontend adapter is checked by
+`python3 .github/scripts/generate_nesting_profile.py --check`; CI rejects drift.
+Standalone frontend and Node builds self-check the adapter, preserving their existing
+frontend-only build context. Python verifies the normative wrapper on load. The
+canonical profile digest covers its ID and complete payload; changing whitespace is
+not a profile change. The worker manifest and Node hello carry `geometry_profile`,
+which must match the source and checkpoint evidence. Heartbeat DTOs remain unchanged:
+the existing exact release/solver/bundle/Node and fresh post-Redis active-worker gate
+still controls public promotion. No migration, environment variable or cron changes.
+
+Verify explicit legacy-input upgrade and new v3 leftover evidence, including
+`excludedArea` even when zero. The full compensated envelope must fit inside the
+reserved edge band and clear other part/exclusion envelopes; previously fitting
+layouts can require more sheets. This is versioned software geometry, not a shop
+allowance approval, physical-stock verification, reservation or inventory credit.
+
 `frontend/vercel.json` already builds with `npm run build`, publishes `build/`,
 and rewrites SPA paths to `/index.html`, so opening or refreshing `/nest` uses
 the existing application router. Feature assets are bundled from
@@ -205,6 +275,31 @@ preserve completed history and allow interrupted leases to become failed/worker-
 Do not rewrite a saved checkpoint or mark an interrupted calculation successful.
 Existing history reads remain available without a current solver; creating a new run
 requires a fresh matching runtime. No release grants quote approval or inventory credit.
+
+On a spacing-policy rollback, retain migration 103 and its immutable policy history
+alongside migrations 101/102. Restore a compatible API/frontend/worker release together.
+Keep project 10/quote 9 files and saved revisions intact; older readers must reject them
+rather than drop policy snapshots, custom-spacing reasons or constraints. Do not strip
+fields/change version numbers or seed replacement policies to force compatibility.
+
+On an observation-register application rollback, retain migration 104 and all piece
+identities, observations, withdrawals and transactional audit history alongside the
+existing nesting history schema. Restore compatible application images; an older UI
+may omit the register. Do not run the destructive migration104 downgrade or remove
+its integrity/RLS guards as an ordinary application rollback. Any separately requested
+schema removal requires a record-retention decision; withdrawal is the append-only
+application action, not a history deletion.
+
+An exclusions rollback also retains quote 11/project 12 inputs and local job 13 files.
+Restore compatible API, frontend and worker images; do not erase exclusion outlines,
+clearances or version discriminators to force an old reader to accept them. Keep
+historical checkpoints unchanged. No database downgrade is required for exclusions.
+
+On a compensated-profile rollback, retain quote 14/project 15 inputs, local job 16
+files and immutable v6 history. An older release can refuse new calculations or new
+file formats; never remove profile identity, downgrade input versions or rewrite old
+checkpoints. Restore compatible API/frontend/worker images. The additive existing
+history schema remains in place; this profile adds no migration to downgrade.
 
 The orientation/grain increment changes only frontend behavior and local file
 formats; it adds no API, permission, migration, or environment requirement.

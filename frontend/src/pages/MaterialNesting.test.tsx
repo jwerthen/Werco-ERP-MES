@@ -197,7 +197,15 @@ describe('Material Nesting inside the ERP shadow host', () => {
     expect(ui.getByText('100 designs')).toBeInTheDocument();
     expect(ui.getByRole('button', { name: 'Compare sheets' })).toBeEnabled();
     fireEvent.click(ui.getByRole('button', { name: 'Compare sheets' }));
-    await ui.findByText(/100 \/ 100 parts covered/);
+    // This exercises the real contour solver for three stock alternatives.
+    // Avoid repeatedly formatting the 100-row DOM while that work yields.
+    // Compensated-envelope checks run under coverage on shared CI CPUs; this
+    // integration wait is not a solver performance or production deadline.
+    await waitFor(() => expect(mount.textContent).toContain('100 / 100 parts covered'), {
+      container: mount,
+      timeout: 60000,
+    });
+    expect(ui.getByText(/100 \/ 100 parts covered/)).toBeInTheDocument();
 
     const createURL = jest.spyOn(URL, 'createObjectURL');
     jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
@@ -220,7 +228,7 @@ describe('Material Nesting inside the ERP shadow host', () => {
     expect(comparison.recommendedId).toBeTruthy();
     expect(comparison.results.every(result => result.complete && result.nest?.placements.length === 100)).toBe(true);
     expect(mockShowToast).toHaveBeenCalledWith('success', '100 files imported · 100 designs added.');
-  }, 60000);
+  }, 120000);
 
   it('rejects a 101-file selection before reading or changing the estimate', async () => {
     const { mount, ui } = await mountWorkspace();

@@ -28,6 +28,7 @@ import {
 import { getBreadcrumbParent, getRouteTitle } from '../utils/routeMeta';
 import StockMovementsPanel from '../components/inventory/StockMovementsPanel';
 import CycleCountsPanel from '../components/inventory/CycleCountsPanel';
+import StockPieceObservationsPanel from '../components/inventory/StockPieceObservationsPanel';
 import CombineInventoryDialog from '../components/inventory/CombineInventoryDialog';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
@@ -65,7 +66,7 @@ interface InventorySummary {
  * (`StockMovementsPanel`); it replaces a long-dead `transactions` member that was
  * declared here but never given a tab or a panel.
  */
-type TabType = 'summary' | 'details' | 'receive' | 'movements' | 'counts';
+type TabType = 'summary' | 'details' | 'receive' | 'movements' | 'counts' | 'observations';
 type InventoryGroup = 'all' | 'parts' | 'materials';
 
 const MATERIAL_TYPES = new Set(['raw_material', 'purchased', 'hardware', 'consumable']);
@@ -98,7 +99,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   const canCombine = hasPermission(user?.role, 'inventory:combine') || !!user?.is_superuser;
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedInventoryTab = searchParams.get('inventory_tab');
-  const activeTab: TabType = ['summary', 'details', 'movements', 'counts'].includes(requestedInventoryTab || '')
+  const activeTab: TabType = ['summary', 'details', 'movements', 'counts', 'observations'].includes(requestedInventoryTab || '')
     ? (requestedInventoryTab as TabType)
     : searchParams.has('cycle_count')
       ? 'counts'
@@ -658,6 +659,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       level={embedded ? 2 : 1}
       description="Engineering parts, materials, and supplies in one place"
       actions={
+        activeTab !== 'observations' &&
         !loading &&
         !loadError && (
           <>
@@ -712,7 +714,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
     { key: 'part', dir: 'asc' }
   );
 
-  if (loading || loadError) {
+  if ((loading || loadError) && activeTab !== 'observations') {
     return (
       <div className="space-y-4">
         {pageContext}
@@ -733,7 +735,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       {pageContext}
 
       {/* Summary Stats */}
-      <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+      {activeTab !== 'observations' && <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-4 gap-2">
         <MiniStat
           icon={CubeIcon}
           iconBg="bg-fd-blue/15"
@@ -763,13 +765,13 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
           value={lowStockCount}
           valueColor={lowStockCount > 0 ? 'text-fd-amber' : undefined}
         />
-      </MiniStatStrip>
+      </MiniStatStrip>}
 
       {/* Quick Filters — snapshot tabs only. These are CLIENT-side filters over
           the on-hand lists; the Stock Movements tab is a server-paged ledger with
           its own filters, and the "Showing N of M items" counter here would be
           counting a different set than the one on screen. */}
-      {activeTab !== 'movements' && activeTab !== 'counts' && (
+      {activeTab !== 'movements' && activeTab !== 'counts' && activeTab !== 'observations' && (
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-col gap-3 w-full sm:max-w-xl">
             <div className="relative">
@@ -877,6 +879,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
             { id: 'details', label: 'Detail by Location' },
             { id: 'movements', label: 'Stock Movements' },
             { id: 'counts', label: 'Cycle Counts' },
+            { id: 'observations', label: 'Piece observations' },
           ].map(tab => (
             <button
               key={tab.id}
@@ -903,6 +906,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
       {activeTab === 'details' && <TableWorkspaceControls workspace={detailWorkspace} />}
       {/* Tab Content */}
       <div>
+        {activeTab === 'observations' && <StockPieceObservationsPanel />}
         {activeTab === 'summary' && (
           <DataTable
             columns={summaryWorkspace.displayColumns(summaryColumns)}

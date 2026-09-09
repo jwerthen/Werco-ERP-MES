@@ -471,6 +471,28 @@ selected schedules. Existing cron allowlists must include that relay to support 
 nesting; `none` intentionally leaves new calculations unavailable. No deployment
 script changes these selections or enables unrelated schedules.
 
+Tenant spacing policies are versioned database records, not environment variables.
+Migration103 follows 102 and seeds no policy or approval. This feature adds no secret,
+runtime-path override or schedule. API/frontend/shared-worker releases must support
+project 10/quote 9 together; the existing release/runtime gates remain mandatory. Do not
+encode material allowances or policy approval in service variables to bypass the
+explicit, audited policy workflow.
+
+Stock exclusions are versioned quote inputs, not service variables or physical
+inventory configuration. They add no environment variable, secret, cron selection
+or migration. API/frontend/shared-worker support for quote 11/project 12 and solver
+`werco-contour-v5` must advance together through the existing runtime identity gate.
+Do not encode exclusion geometry or clearances in deployment variables. Legacy job
+13 is a local file format; stored server revisions retain their original project format.
+
+Physical-piece observations are database evidence, not deployment variables. Additive
+migration `104_stock_piece_observations` follows `103_nesting_spacing_policies` and
+creates no seed records. The register adds no secret, environment variable, cron,
+dependency or runtime/profile override; existing database configuration and inventory
+permissions apply. Recording or withdrawing an observation does not mark a piece
+available, reserve it, feed a nest or award quote credit. Do not introduce service
+variables to claim physical verification or bypass the explicit observation workflow.
+
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `WORKER_CRON_JOBS` | No | all | Which scheduled jobs the worker registers. Unset or `all` → every cron (12 of them). `none` → no crons; the worker still drains enqueue-driven jobs (notifications, webhooks, labels, completion signals). A comma-separated list of job names arms **exactly** those (allowlist). A `-` prefix **excludes** a job from the full set (denylist): `all,-run_mrp_auto_draft_job`. The two shapes may not be mixed. **An unrecognised name is a hard startup error, not a silent skip — a negated one included.** `none` is the correct value for a first-ever boot — several crons write or email in bulk on their first run. Full syntax below |

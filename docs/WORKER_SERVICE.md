@@ -496,8 +496,55 @@ pass. The check uses the existing Railway project token and changes no service s
 An unrelated frontend UI/CSS change retains the standalone frontend release path;
 shared kernel/build inputs defer to the combined API/worker pipeline.
 
-Rollback uses a compatible API/worker/frontend release, retains migrations 101/102 and
-immutable draft/run history, and does not change cron settings. A failed runtime can
+Spacing-policy calculations require the shared bundle, API and frontend to support
+project 10/quote 9 together, after additive migration 103 follows 102. A changed policy-aware
+kernel is a worker release input and gets a new tested bundle identity. No policy is
+seeded by migration and no new cron, secret or environment variable is introduced.
+Retain policy/draft/run history on application rollback; do not remove policy snapshots
+or custom-spacing reasons from saved inputs to make an older runtime accept them.
+
+Stock exclusions require solver `werco-contour-v5` and quote 11/project 12 support
+across API, frontend and compiled worker. The local job 13 wrapper is not a server
+project format. API validation bounds IDs, finite dimensions, gross-sheet containment
+and complexity; the shared TypeScript kernel validates source topology and guarded
+exclusion/part geometry before emitting a checkpoint. Nonempty regions select the
+v2 leftover profile and `excludedArea`; absent/empty lists retain v1. Rebuild and test
+the image and use its new manifest identity in the unchanged active-deployment/fresh
+post-Redis heartbeat gate. There is no new migration, cron, environment variable or
+physical-stock reservation implied by this geometry increment.
+
+New compensated-envelope runs use solver `werco-contour-v6`. The normative source
+is `backend/app/data/nesting_profiles/werco-compensated-v1.json`; its reviewed generated
+frontend adapter keeps the frontend-only deployment context intact. CI runs
+`python3 .github/scripts/generate_nesting_profile.py --check`, while standalone
+frontend/Node builds recompute the adapter digest and Python validates the normative
+wrapper. The source identity is `werco-compensated-v1`, SHA-256
+`21e8689fb2ce80c72befbc5866f658cd74fe8ed336d1b5c070e182f3081aa55a`.
+It is separate from the compiled bundle SHA and remains a versioned engineering
+profile, not caller-supplied cutting parameters or policy approval.
+
+The v6 manifest and Node hello include exact `geometry_profile`; source, runtime and
+v3 checkpoint/ledger evidence must agree. The heartbeat DTO is unchanged and exposes
+no geometry payload: public promotion still requires an active deployment plus a
+fresh post-Redis identity matching release, strict solver, tested bundle and Node.
+Do not use a v4/v5 verifier pin with a v6 image or relax equality to accept any solver.
+New populated groups require quote 14 inside project 15; generic Save/Open retains
+older inputs without injection. Existing same-key request recovery remains available;
+an old queued run cannot silently execute a new release/profile. Historical v4/v5
+checkpoints retain their recorded validation and are never recomputed during display.
+No database migration, secret, environment variable or cron change is introduced.
+
+The physical-piece observation register adds migration104 after103 through API boot;
+model-bootstrap DDL mirrors its PostgreSQL source/tenant, immutable-history and RLS/
+privilege guards. It adds no ARQ job, cron, environment variable, dependency or solver/
+profile revision. Existing saved nesting calculations continue to require the same
+active-release and fresh post-Redis runtime proof. **Warehouse → Inventory → Piece
+observations** records or withdraws advisory evidence only; no observed piece becomes
+nesting stock, reserved inventory, certified material or material credit through this
+release.
+
+Rollback uses a compatible API/worker/frontend release, retains migrations 101–104 and
+immutable policy/draft/run/piece-observation history, and does not change cron settings. A failed runtime can
 still leave history readable, but new calculations remain unavailable. No successful
 calculation, stock reservation, manufacturing approval or automatic material credit is
 implied by a worker startup or a completed deployment.

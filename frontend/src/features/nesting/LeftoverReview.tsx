@@ -67,9 +67,9 @@ export default function LeftoverReview({
         <>
           <p>
             {areaFt2(sheet.remainingArea)} ft² remains in {sheet.regions.length} connected{' '}
-            {sheet.regions.length === 1 ? 'region' : 'regions'} after margins and reserved part envelopes. Amber areas
-            need physical review for handling, storage and material traceability. A connected region can still be an
-            unusable skeleton.
+            {sheet.regions.length === 1 ? 'region' : 'regions'} after margins, excluded stock and reserved part
+            envelopes. Amber areas need physical review for handling, storage and material traceability. A connected
+            region can still be an unusable skeleton.
           </p>
           {sheet.regions.length ? (
             <div className="leftover-regions">
@@ -127,6 +127,7 @@ export default function LeftoverReview({
                 [
                   ['Gross sheet', sheet.grossArea],
                   ['Outside edge margins', sheet.edgeMarginArea],
+                  ['Excluded stock within margins', sheet.excludedArea ?? 0],
                   ['Nominal finished parts', sheet.nominalPartArea],
                   ['Reserved internal cutouts', sheet.reservedCutoutArea],
                   ['Clearance and numerical protection', sheet.clearanceAndProtectionArea],

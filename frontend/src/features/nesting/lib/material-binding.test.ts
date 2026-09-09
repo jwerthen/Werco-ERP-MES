@@ -79,6 +79,10 @@ describe('explicit ERP material and price provenance', () => {
       expect(populated).toHaveLength(2);
       expect(populated.map(group => group.quote.materialBinding!.catalog.id)).toEqual([11, second.catalog.id]);
       expect(populated.map(group => group.quote.materialBinding!.companyId)).toEqual([2, second.companyId]);
+      // Retain the pre-profile version 5 compatibility case explicitly.
+      project.groups.forEach(group => {
+        delete group.quote.geometryProfile;
+      });
       const saved = projectToFile(project);
       expect(saved.version).toBe(5);
       const reopened = projectFromFile(JSON.parse(JSON.stringify(saved)));
@@ -92,7 +96,9 @@ describe('explicit ERP material and price provenance', () => {
         expect(bounds(group.quote.parts[0].loops[0]).width).toBeCloseTo(20, 10);
         expect(bounds(group.quote.parts[0].loops[0]).height).toBeCloseTo(10, 10);
       }
-      expect(projectToFile(createBlankProject(createBlankQuote())).version).toBe(4);
+      const legacyBlank = createBlankQuote();
+      delete legacyBlank.geometryProfile;
+      expect(projectToFile(createBlankProject(legacyBlank)).version).toBe(4);
     }
   );
 });

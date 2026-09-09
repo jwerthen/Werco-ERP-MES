@@ -54,7 +54,7 @@ describe('Draft nesting review records', () => {
     const { project, snapshots } = fixture();
     const nest = snapshots['group-1'].comparison.results[0].nest!;
     nest.placements[1] = { ...nest.placements[1], x: nest.placements[0].x, y: nest.placements[0].y };
-    await expect(buildRunManifest(project, snapshots, identity)).rejects.toThrow('spacing');
+    await expect(buildRunManifest(project, snapshots, identity)).rejects.toThrow('Compensated part envelopes overlap');
   });
 
   it('checks unplaced identity/counts and empty-sheet conservation', () => {

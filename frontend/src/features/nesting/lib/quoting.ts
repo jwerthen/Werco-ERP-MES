@@ -1,8 +1,31 @@
+import {
+  CURRENT_GEOMETRY_PROFILE,
+  resolveGeometryProfile,
+  requireCurrentGeometryProfile,
+  type GeometryProfileRef,
+} from './geometry-profile';
 import { analyzeLeftovers, type LeftoverAnalysis } from './leftovers';
-import { allowedRotations, hasOrientationConstraints, orientationExplanation, type GrainAxis } from './orientation';
+import { hasOrientationConstraints, orientationExplanation, type GrainAxis } from './orientation';
 import { autoQuotingSpacing } from './spacing';
-import { bounds, validatePart, validateJob, nestParts, type Part, type Stock, type Nest, demoJob } from './nesting';
+import {
+  validatePolicySnapshot,
+  validateSpacingOverride,
+  type SpacingPolicySnapshot,
+  type SpacingOverride,
+} from './spacing-policy';
+import {
+  validatePart,
+  validateJob,
+  nestParts,
+  partFitsUsableStock,
+  type Part,
+  type Stock,
+  type Nest,
+  demoJob,
+} from './nesting';
 import { compareStableText } from './stable-order';
+import { exclusionVertexCount, validateStockExclusions, type StockExclusion } from './stock-exclusions';
+import { exclusionsFromFile, exclusionsToFile } from './stock-exclusion-files';
 import { jobFromFile, jobToFile, mmToIn, inToMm } from './units';
 import {
   catalogFamily,
@@ -11,6 +34,7 @@ import {
   type MaterialBinding,
 } from './material-binding';
 export type SheetOption = {
+  exclusions?: StockExclusion[];
   id: string;
   width: number;
   height: number;
@@ -18,17 +42,22 @@ export type SheetOption = {
   price: number | null;
 };
 export function editSheetOption(option: SheetOption, patch: Partial<SheetOption>): SheetOption {
-  return {
+  const changed = {
     ...option,
     ...patch,
     ...(patch.width !== undefined || patch.height !== undefined ? { price: null } : {}),
   };
+  if (changed.exclusions !== undefined) validateStockExclusions(changed.exclusions, changed.width, changed.height);
+  return changed;
 }
 export type Quote = {
   version: 1;
+  geometryProfile?: GeometryProfileRef;
   grainAxis?: GrainAxis;
   materialBinding?: MaterialBinding;
-  spacingMode?: 'auto' | 'manual';
+  spacingMode?: 'auto' | 'manual' | 'policy';
+  spacingPolicy?: SpacingPolicySnapshot;
+  spacingOverride?: SpacingOverride;
   name: string;
   material: string;
   thickness: number;
@@ -79,6 +108,7 @@ export const standardOptions: SheetOption[] = [
 export function createBlankQuote(): Quote {
   return {
     version: 1,
+    geometryProfile: { ...CURRENT_GEOMETRY_PROFILE },
     name: 'New material estimate',
     material: 'Carbon steel',
     thickness: inToMm(0.125),
@@ -103,8 +133,19 @@ export const demoQuote: Quote = {
 export function validateQuote(value: unknown): Quote {
   const q = value as Quote;
   check(q && q.version === 1, 'Unsupported estimate version.');
+  resolveGeometryProfile(q.geometryProfile);
   check(q.grainAxis === undefined || ['x', 'y'].includes(q.grainAxis), 'Invalid sheet grain axis.');
-  check(q.spacingMode === undefined || ['auto', 'manual'].includes(q.spacingMode), 'Invalid spacing mode.');
+  check(q.spacingMode === undefined || ['auto', 'manual', 'policy'].includes(q.spacingMode), 'Invalid spacing mode.');
+  check(
+    (q.spacingMode === 'policy') === (q.spacingPolicy !== undefined),
+    'Applied policy requires policy spacing mode.'
+  );
+  check(!(q.spacingPolicy && q.spacingOverride), 'Policy conformance and a custom override cannot both apply.');
+  if (q.spacingPolicy !== undefined) validatePolicySnapshot(q.spacingPolicy, q.material, q.thickness, q.gap, q.margin);
+  if (q.spacingOverride !== undefined) {
+    validateSpacingOverride(q.spacingOverride);
+    check(q.spacingMode === 'manual', 'A custom-spacing reason requires manual mode.');
+  }
   check(typeof q.name === 'string' && q.name.length > 0 && q.name.length < 200, 'Enter an estimate name.');
   check(['Carbon steel', 'Stainless steel', 'Aluminum'].includes(q.material), 'Choose a supported material.');
 
@@ -165,6 +206,7 @@ export function validateQuote(value: unknown): Quote {
         o.height <= 20000,
       'Stock dimensions must be positive, up to 787.4 inches.'
     );
+    if (o.exclusions !== undefined) validateStockExclusions(o.exclusions, o.width, o.height);
     check(
       o.price === null || (Number.isFinite(o.price) && o.price >= 0),
       'Enter a valid sheet price or leave it blank.'
@@ -182,6 +224,18 @@ export function validateQuote(value: unknown): Quote {
     );
   });
   check(
+    q.parts.reduce(
+      (sum, part) =>
+        sum +
+        part.loops.reduce((n, loop) => n + (loop.type === 'circle' ? 1 : loop.points.length), 0) +
+        (part.referencePaths?.reduce((n, path) => n + path.length, 0) ?? 0),
+      0
+    ) +
+      q.options.reduce((sum, option) => sum + exclusionVertexCount(option.exclusions ?? []), 0) <=
+      20000,
+    'Maximum 20,000 source vertices across parts and stock exclusions.'
+  );
+  check(
     q.options.some(o => o.enabled),
     'Enable at least one stock size to compare.'
   );
@@ -189,7 +243,9 @@ export function validateQuote(value: unknown): Quote {
 }
 export function stockFor(q: Quote, o: SheetOption): Stock {
   return {
+    ...(q.geometryProfile !== undefined ? { geometryProfile: q.geometryProfile } : {}),
     ...(q.grainAxis !== undefined ? { grainAxis: q.grainAxis } : {}),
+    ...(o.exclusions !== undefined ? { exclusions: o.exclusions } : {}),
     width: o.width,
     height: o.height,
     margin: q.margin,
@@ -204,6 +260,7 @@ export function stockFor(q: Quote, o: SheetOption): Stock {
 }
 /** Shared browser/server calculation. Call validateQuote before evaluating options. */
 export function calculateSheetOption(q: Quote, option: SheetOption): OptionResult {
+  requireCurrentGeometryProfile(q.geometryProfile);
   const requested = q.parts.reduce((a, p) => a + p.quantity, 0);
   try {
     const nest = nestParts(q.parts, stockFor(q, option));
@@ -239,6 +296,7 @@ export function calculateSheetOption(q: Quote, option: SheetOption): OptionResul
 
 export function compareSheets(q: Quote): Comparison {
   validateQuote(q);
+  requireCurrentGeometryProfile(q.geometryProfile);
   const requested = q.parts.reduce((a, p) => a + p.quantity, 0);
   const results = q.options.filter(o => o.enabled).map(option => calculateSheetOption(q, option));
   if (!requested)
@@ -298,7 +356,19 @@ export function quoteToFile(q: Quote) {
   return {
     // Quote 7 is distinct from project 6 and legacy job 8; old readers must
     // reject a constraint-bearing file instead of silently relaxing its rules.
-    version: hasOrientationConstraints(q.parts, q) ? 7 : 3,
+    version:
+      q.geometryProfile !== undefined
+        ? 14
+        : q.options.some(option => option.exclusions !== undefined)
+          ? 11
+          : q.spacingPolicy || q.spacingOverride
+            ? 9
+            : hasOrientationConstraints(q.parts, q)
+              ? 7
+              : 3,
+    ...(q.geometryProfile !== undefined ? { geometryProfile: q.geometryProfile } : {}),
+    ...(q.spacingPolicy ? { spacingPolicy: q.spacingPolicy } : {}),
+    ...(q.spacingOverride ? { spacingOverride: q.spacingOverride } : {}),
     ...(q.grainAxis !== undefined ? { grainAxis: q.grainAxis } : {}),
     units: 'in',
     currency: 'USD',
@@ -308,28 +378,51 @@ export function quoteToFile(q: Quote) {
     material: q.material,
     thickness: mmToIn(q.thickness),
     parts: jobToFile(job).parts,
-    margin: mmToIn(q.margin),
-    gap: mmToIn(q.gap),
+    margin: q.spacingPolicy ? Number(q.spacingPolicy.margin_in) : mmToIn(q.margin),
+    gap: q.spacingPolicy ? Number(q.spacingPolicy.gap_in) : mmToIn(q.gap),
     objective: q.objective,
     options: q.options.map(o => ({
       ...o,
       width: mmToIn(o.width),
       height: mmToIn(o.height),
+      ...(o.exclusions !== undefined ? { exclusions: exclusionsToFile(o.exclusions) } : {}),
     })),
   };
 }
 export function quoteFromFile(input: unknown): Quote {
   if (!input || typeof input !== 'object') throw new Error('Invalid estimate file.');
   const d = input as Record<string, unknown>;
-  if (d.version === 3 || d.version === 7) {
+  if (d.version === 14) requireCurrentGeometryProfile(d.geometryProfile);
+  else
+    check(
+      !Object.prototype.hasOwnProperty.call(d, 'geometryProfile'),
+      'Geometry profiles require a version 14 estimate.'
+    );
+  check(
+    d.version === 9 ||
+      d.version === 11 ||
+      d.version === 14 ||
+      (d.spacingPolicy === undefined && d.spacingOverride === undefined && d.spacingMode !== 'policy'),
+    'Spacing policies require a version 9 or 11 estimate.'
+  );
+  check(
+    d.version === 11 ||
+      d.version === 14 ||
+      !Array.isArray(d.options) ||
+      d.options.every(option => !option || !Object.prototype.hasOwnProperty.call(option, 'exclusions')),
+    'Stock exclusions require a version 11 estimate.'
+  );
+  if (d.version === 3 || d.version === 7 || d.version === 9 || d.version === 11 || d.version === 14) {
     check(d.units === 'in', 'Estimate file must explicitly declare inches.');
-    check(d.version === 7 || d.grainAxis === undefined, 'Sheet grain requires a version 7 estimate.');
+    check(d.version !== 3 || d.grainAxis === undefined, 'Sheet grain requires estimate version 7 or 9.');
     check(d.currency === undefined || d.currency === 'USD', 'This estimate uses USD sheet prices.');
     check(Array.isArray(d.options) && d.options.length <= 12, 'Invalid stock options.');
+    const partSource = { ...d };
+    delete partSource.geometryProfile;
     const parts = (
       jobFromFile({
-        ...d,
-        version: d.version === 7 ? 8 : 2,
+        ...partSource,
+        version: d.version === 7 || d.version === 9 || d.version === 11 || d.version === 14 ? 8 : 2,
         stock: {
           width: 1,
           height: 1,
@@ -344,9 +437,12 @@ export function quoteFromFile(input: unknown): Quote {
     ).parts;
     return validateQuote({
       version: 1,
+      ...(d.version === 14 ? { geometryProfile: d.geometryProfile } : {}),
       ...(d.grainAxis !== undefined ? { grainAxis: d.grainAxis } : {}),
       name: d.name,
       spacingMode: d.spacingMode ?? 'manual',
+      ...(d.spacingPolicy !== undefined ? { spacingPolicy: d.spacingPolicy } : {}),
+      ...(d.spacingOverride !== undefined ? { spacingOverride: d.spacingOverride } : {}),
       ...(d.materialBinding !== undefined ? { materialBinding: d.materialBinding } : {}),
       material: d.material,
       thickness: inToMm(dim(d.thickness)),
@@ -358,6 +454,9 @@ export function quoteFromFile(input: unknown): Quote {
         ...o,
         width: inToMm(dim(o.width)),
         height: inToMm(dim(o.height)),
+        ...(o.exclusions !== undefined
+          ? { exclusions: exclusionsFromFile(o.exclusions, inToMm(dim(o.width)), inToMm(dim(o.height))) }
+          : {}),
       })),
     });
   }
@@ -365,6 +464,7 @@ export function quoteFromFile(input: unknown): Quote {
   return validateQuote({
     version: 1,
     name: old.name,
+    ...(old.stock.geometryProfile !== undefined ? { geometryProfile: old.stock.geometryProfile } : {}),
     ...(old.stock.grainAxis !== undefined ? { grainAxis: old.stock.grainAxis } : {}),
     material: old.material,
     thickness: old.thickness,
@@ -377,6 +477,7 @@ export function quoteFromFile(input: unknown): Quote {
         id: 'saved-stock',
         width: old.stock.width,
         height: old.stock.height,
+        ...(old.stock.exclusions !== undefined ? { exclusions: old.stock.exclusions } : {}),
         enabled: true,
         price: null,
       },
@@ -387,15 +488,12 @@ export function quoteFromFile(input: unknown): Quote {
   });
 }
 export function oversizeParts(q: Quote, o: SheetOption) {
-  const w = o.width - 2 * q.margin,
-    h = o.height - 2 * q.margin;
-  return q.parts.filter(p => {
-    const b = bounds(p.loops[0]);
-    const guard = 2 * (p.geometryToleranceMm ?? 0);
-    return !allowedRotations(p, q).some(
-      rotation =>
-        (rotation % 180 ? b.height : b.width) + guard <= w + 1e-7 &&
-        (rotation % 180 ? b.width : b.height) + guard <= h + 1e-7
-    );
-  });
+  try {
+    const stock = stockFor(q, o);
+    return q.parts.filter(part => !partFitsUsableStock(part, stock));
+  } catch {
+    // A bounded geometry-analysis failure is reported by the option result.
+    // Do not mislabel unassessed parts as oversized or crash the review panel.
+    return [];
+  }
 }

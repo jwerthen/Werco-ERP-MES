@@ -24,6 +24,7 @@ COPY vite.config.ts ./
 COPY tsconfig.json ./
 COPY tailwind.config.js ./
 COPY postcss.config.js ./
+COPY tools/verify-nesting-profile.mjs ./tools/
 
 # Build argument for API URL
 ARG REACT_APP_API_URL

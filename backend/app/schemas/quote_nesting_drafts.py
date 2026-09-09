@@ -6,6 +6,9 @@ from typing import Annotated, Any, ClassVar, Literal, Optional
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
+from app.core.nesting_geometry_profile import is_current_geometry_profile
+from app.schemas.quote_nesting_spacing import SpacingOverride, SpacingPolicySnapshot, normalize_thickness
+
 MAX_ESTIMATE_BYTES = 5 * 1024 * 1024
 MAX_DRAFT_REQUEST_BYTES = MAX_ESTIMATE_BYTES + 16 * 1024
 MAX_INCHES = 20000 / 25.4
@@ -193,16 +196,69 @@ class SavedBinding(InputModel):
         return self
 
 
+class SavedExclusion(InputModel):
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    label: str = Field(min_length=1, max_length=120)
+    reason: str = Field(min_length=1, max_length=1000)
+    outline: SavedLoop
+    clearance: float = Field(ge=0, le=100)
+
+    @model_validator(mode="after")
+    def explicit_text(self):
+        if any(not text.strip() or text != text.strip() for text in (self.label, self.reason)):
+            raise ValueError("Exclusion label and reason must be nonblank and trimmed")
+        return self
+
+
 class SavedStock(InputModel):
     id: Identifier
     width: float = Field(gt=0, le=MAX_INCHES)
     height: float = Field(gt=0, le=MAX_INCHES)
     enabled: bool
     price: Optional[float] = Field(ge=0)
+    exclusions: Optional[list[SavedExclusion]] = Field(default=None, max_length=16)
+
+    @model_validator(mode="after")
+    def bounded_exclusions(self):
+        exclusions = self.exclusions or []
+        if len({region.id for region in exclusions}) != len(exclusions):
+            raise ValueError("Duplicate stock exclusion ID")
+        vertices = 0
+        for region in exclusions:
+            loop = region.outline
+            if isinstance(loop, SavedPolygon):
+                vertices += len(loop.points)
+                inside = all(0 <= point.x <= self.width and 0 <= point.y <= self.height for point in loop.points)
+            else:
+                vertices += 1
+                inside = (
+                    0 <= loop.cx - loop.r
+                    and loop.cx + loop.r <= self.width
+                    and 0 <= loop.cy - loop.r
+                    and loop.cy + loop.r <= self.height
+                )
+            if not inside:
+                raise ValueError("Stock exclusion outline must lie inside the gross sheet")
+        if vertices > 2000:
+            raise ValueError("Stock exclusions exceed 2,000 source vertices per option")
+        # These are bounded, unapproved source primitives. Shared Node validation
+        # checks topology and guarded geometry before emitting any checkpoint.
+        return self
+
+
+class SavedGeometryProfile(InputModel):
+    id: Literal['werco-compensated-v1']
+    sha256: Hash
+
+    @model_validator(mode='after')
+    def supported_identity(self):
+        if not is_current_geometry_profile(self.model_dump()):
+            raise ValueError('Unknown geometry profile identity')
+        return self
 
 
 class SavedQuote(InputModel):
-    version: Literal[3, 7]
+    version: Literal[3, 7, 9, 11, 14]
     units: Literal["in"]
     currency: Literal["USD"]
     name: Name
@@ -213,9 +269,37 @@ class SavedQuote(InputModel):
     objective: Literal["area", "cost"]
     options: list[SavedStock] = Field(min_length=1, max_length=12)
     parts: list[SavedPart] = Field(max_length=300)
-    spacingMode: Optional[Literal["auto", "manual"]] = None
+    spacingMode: Optional[Literal["auto", "manual", "policy"]] = None
+    spacingPolicy: Optional[SpacingPolicySnapshot] = None
+    spacingOverride: Optional[SpacingOverride] = None
     grainAxis: Optional[Axis] = None
     materialBinding: Optional[SavedBinding] = None
+    geometryProfile: Optional[SavedGeometryProfile] = None
+
+    @model_validator(mode="after")
+    def spacing_governance(self):
+        if (self.version == 14) != ('geometryProfile' in self.model_fields_set):
+            raise ValueError('Geometry profile requires quote version 14 and its exact identity')
+        for field in ("spacingPolicy", "spacingOverride"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError("Omit unused spacing governance fields instead of supplying null")
+        if (self.spacingPolicy is not None) != (self.spacingMode == "policy"):
+            raise ValueError("Policy spacing mode requires exactly one policy snapshot")
+        if self.spacingOverride is not None and (self.spacingPolicy is not None or self.spacingMode != "manual"):
+            raise ValueError("Custom spacing requires manual mode and cannot claim policy conformance")
+        if self.version not in (9, 11, 14) and (self.spacingPolicy is not None or self.spacingOverride is not None):
+            raise ValueError("Spacing governance requires quote version 9")
+        if self.version not in (11, 14) and any("exclusions" in stock.model_fields_set for stock in self.options):
+            raise ValueError("Stock exclusions require quote version 11")
+        snapshot = self.spacingPolicy
+        if snapshot is not None and (
+            snapshot.band.material != self.material
+            or snapshot.thickness_in != normalize_thickness(str(self.thickness))
+            or float(snapshot.gap_in) != self.gap
+            or float(snapshot.margin_in) != self.margin
+        ):
+            raise ValueError("Policy snapshot must match the exact material, thickness and spacing")
+        return self
 
 
 class SavedGroup(InputModel):
@@ -224,7 +308,7 @@ class SavedGroup(InputModel):
 
 
 class SavedProject(InputModel):
-    version: Literal[4, 5, 6]
+    version: Literal[4, 5, 6, 10, 12, 15]
     units: Literal["in"]
     currency: Literal["USD"]
     name: Name
@@ -250,8 +334,21 @@ class SavedProject(InputModel):
             if key in material_keys:
                 raise ValueError("Duplicate material/thickness group")
             material_keys.add(key)
-            if quote.version == 7 and self.version != 6:
+            if quote.version == 7 and self.version not in (6, 10, 12, 15):
                 raise ValueError("Orientation constraints require project version 6")
+            if quote.version == 9 and self.version not in (10, 12, 15):
+                raise ValueError("Spacing governance requires project version 10")
+            if quote.version == 11 and self.version not in (12, 15):
+                raise ValueError("Stock exclusions require project version 12")
+            if quote.version == 14 and self.version != 15:
+                raise ValueError('Geometry profile requires project version 15')
+            vertices += sum(
+                len(region.outline.points) if isinstance(region.outline, SavedPolygon) else 1
+                for stock in quote.options
+                for region in (stock.exclusions or [])
+            )
+            if vertices > 20000:
+                raise ValueError("Estimate exceeds 300 parts or 20,000 geometry vertices")
             if len({stock.id for stock in quote.options}) != len(quote.options):
                 raise ValueError("Duplicate stock option IDs")
             if not any(stock.enabled for stock in quote.options):
@@ -269,7 +366,7 @@ class SavedProject(InputModel):
                 != quote.material
             ):
                 raise ValueError("Catalog category does not match material family")
-            if quote.version != 7 and (
+            if quote.version not in (7, 9, 11, 14) and (
                 quote.grainAxis is not None
                 or any(part.rotationMode is not None or part.grainAxis is not None for part in quote.parts)
             ):

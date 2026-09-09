@@ -50,7 +50,7 @@ async def test_real_node_worker_persists_checked_checkpoint_and_report(db_sessio
     assert checkpoint.result_json["result"]["nest"]["sheets"] == 1
     assert len(checkpoint.result_json["result"]["nest"]["placements"]) == 2
     report = service.export_report(db_session, 1, run["id"])
-    assert report["status"] == "UNAPPROVED" and report["estimate"] == helpers.estimate()
+    assert report["status"] == "UNAPPROVED" and report["estimate"] == helpers.current_estimate()
     assert report["checkpoints"][0]["content_sha256"] == checkpoint.content_sha256
     assert checkpoint.result_json["result"]["leftovers"]["creditUSD"] == 0
 

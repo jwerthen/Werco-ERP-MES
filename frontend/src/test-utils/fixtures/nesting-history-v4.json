@@ -1,0 +1,238 @@
+{
+  "synthetic": true,
+  "origin": "Produced once by the original versioned Node kernel; do not regenerate with the current solver",
+  "input_sha256": "eb3b82002f6bfee5ea0b57dadc18fac5332fdde6262d1f82dc33c840f6b54aca",
+  "checkpoint_sha256": "dfee8c379a1a78dbfc206b60c756c8134f76cd3f5f7cd2b52ad01bbd12495056",
+  "estimate": {
+    "version": 4,
+    "units": "in",
+    "currency": "USD",
+    "name": "New material estimate",
+    "activeGroupId": "group-1",
+    "groups": [
+      {
+        "id": "group-1",
+        "quote": {
+          "version": 3,
+          "units": "in",
+          "currency": "USD",
+          "spacingMode": "auto",
+          "name": "New material estimate",
+          "material": "Carbon steel",
+          "thickness": 0.125,
+          "parts": [
+            {
+              "id": "historical-rectangle",
+              "name": "Synthetic historical rectangle",
+              "quantity": 1,
+              "rotate": false,
+              "color": 0,
+              "loops": [
+                {
+                  "type": "poly",
+                  "points": [
+                    {
+                      "x": 0,
+                      "y": 0
+                    },
+                    {
+                      "x": 0.39370078740157477,
+                      "y": 0
+                    },
+                    {
+                      "x": 0.39370078740157477,
+                      "y": 0.7874015748031495
+                    },
+                    {
+                      "x": 0,
+                      "y": 0.7874015748031495
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "margin": 0.07874015748031496,
+          "gap": 0.03937007874015748,
+          "objective": "area",
+          "options": [
+            {
+              "id": "historical-stock",
+              "width": 3.937007874015748,
+              "height": 3.937007874015748,
+              "price": 25,
+              "enabled": true
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "run": {
+    "solver_version": "werco-contour-v4",
+    "bundle_sha256": "27ffe43b9bd6fa031db89c2adb5f288459c28294a4e6e9af92f5a01f2f4d5240",
+    "node_version": "v22.22.3",
+    "release_identity": "synthetic-history-v4",
+    "settings": {
+      "profile": "standard-v1",
+      "protocol": 1,
+      "solver_version": "werco-contour-v4",
+      "max_seconds": 120,
+      "max_option_evaluations": 36,
+      "max_input_bytes": 5242880,
+      "max_message_bytes": 8388608,
+      "max_checkpoint_bytes": 25165824,
+      "node_heap_mib": 512,
+      "seed": null,
+      "units": "mm",
+      "approved": false,
+      "remnant_credit_usd": 0,
+      "runtime": {
+        "release": "synthetic-history-v4",
+        "protocol": 1,
+        "solver_version": "werco-contour-v4",
+        "bundle_sha256": "27ffe43b9bd6fa031db89c2adb5f288459c28294a4e6e9af92f5a01f2f4d5240",
+        "node_version": "v22.22.3"
+      }
+    }
+  },
+  "checkpoint": {
+    "type": "option",
+    "protocol": 1,
+    "input_sha256": "eb3b82002f6bfee5ea0b57dadc18fac5332fdde6262d1f82dc33c840f6b54aca",
+    "sequence": 1,
+    "group_id": "group-1",
+    "option_id": "historical-stock",
+    "units": "mm",
+    "requested": 1,
+    "stock": {
+      "width": 100,
+      "height": 100,
+      "margin": 1.9999999999999998,
+      "gap": 0.9999999999999999,
+      "maxSheets": 1,
+      "bedWidth": 100,
+      "bedHeight": 100
+    },
+    "result": {
+      "leftovers": {
+        "inputSignature": "{\"parts\":[{\"geometryToleranceMm\":0,\"grainAxis\":null,\"id\":\"historical-rectangle\",\"loops\":[{\"points\":[{\"x\":0,\"y\":0},{\"x\":9.999999999999998,\"y\":0},{\"x\":9.999999999999998,\"y\":19.999999999999996},{\"x\":0,\"y\":19.999999999999996}],\"type\":\"poly\"}],\"quantity\":1,\"referencePaths\":[],\"rotate\":false,\"rotationMode\":null}],\"placements\":[[\"historical-rectangle\",0,0,1.9999999999999998,1.9999999999999998,9.999999999999998,19.999999999999996,0]],\"sheets\":1,\"stock\":[100,100,1.9999999999999998,0.9999999999999999,1,100,100,null],\"unplaced\":[],\"version\":\"werco-leftover-inputs-v1\"}",
+        "version": "werco-leftovers-v1",
+        "status": "potential_review_only",
+        "creditUSD": 0,
+        "assumptions": {
+          "profile": {
+            "integerGridMm": 0.0001,
+            "circleRadialExcessMm": 0.00254,
+            "numericalProtectionMm": 0.0004,
+            "usableBoundaryInsetMm": 0.0004,
+            "partGapFraction": 0.5,
+            "importedCurveToleranceIncluded": true,
+            "offsetJoin": "square-tangent",
+            "maximumConvexJoinRadiusFactor": 1.4142135623730951,
+            "maxInputVertices": 60000,
+            "maxOutputVertices": 120000,
+            "maxSheetOutputVertices": 30000,
+            "maxRegions": 2000,
+            "maxCircleVertices": 8192,
+            "absoluteAreaToleranceMm2": 1e-7,
+            "relativeAreaTolerance": 1e-12
+          },
+          "reservation": "Half of part gap plus imported curve tolerance and numerical protection around full outer profiles; square tangent joins; inward-protected usable boundary. Not physical kerf.",
+          "internalHolesReserved": true,
+          "boundsAreUsableRectangles": false,
+          "eligibilityVerified": false
+        },
+        "sheets": [
+          {
+            "sheet": 0,
+            "grossArea": 10000,
+            "usableArea": 9216,
+            "edgeMarginArea": 784,
+            "nominalPartArea": 199.99999999999994,
+            "reservedCutoutArea": 0,
+            "clearanceAndProtectionArea": 15.360645554999849,
+            "remainingArea": 9000.639354445,
+            "reconciliationResidualArea": 0,
+            "regions": [
+              {
+                "id": "leftover-v1-sheet-1-region-1",
+                "outer": [
+                  {
+                    "x": 2.0004,
+                    "y": 22.5004
+                  },
+                  {
+                    "x": 12.2073,
+                    "y": 22.5004
+                  },
+                  {
+                    "x": 12.5004,
+                    "y": 22.2073
+                  },
+                  {
+                    "x": 12.5004,
+                    "y": 2.0004
+                  },
+                  {
+                    "x": 97.9996,
+                    "y": 2.0004
+                  },
+                  {
+                    "x": 97.9996,
+                    "y": 97.9996
+                  },
+                  {
+                    "x": 2.0004,
+                    "y": 97.9996
+                  }
+                ],
+                "holes": [],
+                "area": 9000.639354445,
+                "bounds": {
+                  "x": 2.0004,
+                  "y": 2.0004,
+                  "width": 95.9992,
+                  "height": 95.9992
+                },
+                "classification": "review",
+                "creditUSD": 0,
+                "explanation": "Potential leftover only. Review actual cuts, access, handling and material condition. Bounds are extents, not a guaranteed usable rectangle; no inventory eligibility or credit is established."
+              }
+            ]
+          }
+        ]
+      },
+      "option": {
+        "id": "historical-stock",
+        "width": 100,
+        "height": 100,
+        "price": 25,
+        "enabled": true
+      },
+      "nest": {
+        "placements": [
+          {
+            "sheet": 0,
+            "x": 1.9999999999999998,
+            "y": 1.9999999999999998,
+            "width": 9.999999999999998,
+            "height": 19.999999999999996,
+            "rotation": 0,
+            "partId": "historical-rectangle",
+            "instance": 0
+          }
+        ],
+        "unplaced": [],
+        "sheets": 1,
+        "area": 199.99999999999994,
+        "utilization": 1.9999999999999993,
+        "method": "True contour nesting · rectangular outer profiles"
+      },
+      "complete": true,
+      "area": 10000,
+      "cost": 25,
+      "error": null
+    }
+  }
+}

@@ -50,6 +50,7 @@ from app.api.endpoints import (
     quote_nesting_drafts,
     quote_nesting_materials,
     quote_nesting_runs,
+    quote_nesting_spacing,
     quotes,
     receiving,
     reports,
@@ -64,6 +65,7 @@ from app.api.endpoints import (
     shipping,
     shop_floor,
     spc,
+    stock_piece,
     supplier_scorecards,
     tool_management,
     traceability,
@@ -92,6 +94,7 @@ api_router.include_router(materials.router, prefix="/materials", tags=["Material
 api_router.include_router(bom.router, prefix="/bom", tags=["Bill of Materials"])
 api_router.include_router(routing.router, prefix="/routing", tags=["Routing"])
 api_router.include_router(process_sheets.router, prefix="/process-sheets", tags=["Process Sheets"])
+api_router.include_router(stock_piece.router, prefix="/inventory", tags=["Inventory"])
 api_router.include_router(inventory.router, prefix="/inventory", tags=["Inventory"])
 api_router.include_router(mrp.router, prefix="/mrp", tags=["Material Requirements Planning"])
 api_router.include_router(quality.router, prefix="/quality", tags=["Quality Management"])
@@ -127,6 +130,9 @@ api_router.include_router(quote_calculator.router, prefix="/quote-calc", tags=["
 api_router.include_router(quote_nesting_materials.router, prefix="/quote-nesting", tags=["Quote Nesting"])
 api_router.include_router(quote_nesting_drafts.router, prefix="/quote-nesting/drafts", tags=["Quote Nesting Drafts"])
 api_router.include_router(quote_nesting_runs.router, prefix="/quote-nesting/runs", tags=["Quote Nesting Runs"])
+api_router.include_router(
+    quote_nesting_spacing.router, prefix="/quote-nesting/spacing-policies", tags=["Quote Nesting Spacing Policies"]
+)
 api_router.include_router(dxf_parser.router, prefix="/dxf-parser", tags=["DXF Parser"])
 api_router.include_router(rfq_quotes.router, prefix="/rfq-packages", tags=["AI RFQ Quotes"])
 api_router.include_router(estimate_workbench.router, prefix="/estimate-workbench", tags=["Estimate Workbench"])

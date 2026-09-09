@@ -36,8 +36,8 @@ Two complementary layers, mirroring 081/082:
    model declares exactly the column the migration adds.
 
 2. A real upgrade -> downgrade -> upgrade round-trip (integration/slow) over a disposable
-   SQLite file bootstrapped create_all -> stamp(085). The DDL is dialect-neutral, so SQLite
-   exercises it for real, and the round-trip re-runs ``upgrade()`` over a DB that ALREADY
+   SQLite file bootstrapped from Part and its FK parents -> stamp(085). The DDL is
+   dialect-neutral, so SQLite exercises it for real, and the round-trip re-runs ``upgrade()`` over a DB that ALREADY
    has the column to prove the guard makes it idempotent rather than relying on alembic's
    version bookkeeping to skip it.
 
@@ -350,19 +350,42 @@ def _has_column(engine, table: str, column: str) -> bool:
     return any(c["name"] == column for c in sa.inspect(engine).get_columns(table))
 
 
+def _bootstrap_part_schema(engine) -> None:
+    """Preserve the model's Part shape without importing future table hooks into 085.
+
+    Current create_all includes later stock-history triggers referencing parts. Those
+    did not exist at 085/086 and prevent SQLite's temporary table rebuild. Copy Part
+    and its FK dependency closure into isolated metadata, preserving the declared
+    columns, constraints and indexes checked below. Current model/bootstrap guards
+    remain covered by their own migration/parity tests.
+    """
+    import app.models  # noqa: F401 (resolve all referenced tables in model metadata)
+    from app.models.part import Part
+
+    dependencies = {}
+    pending = [Part.__table__]
+    while pending:
+        table = pending.pop()
+        if table.key in dependencies:
+            continue
+        dependencies[table.key] = table
+        pending.extend(foreign_key.column.table for foreign_key in table.foreign_keys)
+
+    metadata = sa.MetaData()
+    for table in dependencies.values():
+        table.to_metadata(metadata)
+    metadata.create_all(engine)
+
+
 @pytest.mark.integration
 @pytest.mark.slow
 def test_migration_086_upgrade_downgrade_upgrade_round_trip(tmp_path):
     db_path = tmp_path / "mig086.db"
     db_url = f"sqlite:///{db_path}"
 
-    # Bootstrap exactly as production does on an empty DB: create_all -> stamp.
-    import app.models  # noqa: F401  (registers every table on Base.metadata)
-    from app.db.database import Base
-
     engine = sa.create_engine(db_url)
     try:
-        Base.metadata.create_all(engine)
+        _bootstrap_part_schema(engine)
         # create_all must build the post-086 shape straight from the model.
         assert _has_column(engine, TABLE, COLUMN), "create_all did not build the column"
 
@@ -432,12 +455,9 @@ def test_pre_existing_parts_land_on_null_not_a_fabricated_value(tmp_path):
     db_path = tmp_path / "mig086_backfill.db"
     db_url = f"sqlite:///{db_path}"
 
-    import app.models  # noqa: F401
-    from app.db.database import Base
-
     engine = sa.create_engine(db_url)
     try:
-        Base.metadata.create_all(engine)
+        _bootstrap_part_schema(engine)
         # create_all already built the post-086 shape, so reach the PRE-086 shape by
         # stamping the parent, marking 086 applied, and running ITS downgrade -- a bare
         # `downgrade -1` from 085 would run 085's downgrade, a different migration.

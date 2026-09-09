@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
+from app.core.nesting_geometry_profile import geometry_profile_identity, is_current_geometry_profile
 from app.core.queue import enqueue_job, get_redis_pool
 from app.core.time_utils import to_utc_iso
 from app.db.database import atomic_transaction
@@ -65,8 +66,17 @@ async def verify_runtime() -> dict:
         manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
         exact(
             manifest,
-            {"protocol", "solver_version", "bundle_sha256", "node_major", "max_option_evaluations", "entrypoint"},
+            {
+                "protocol",
+                "solver_version",
+                "bundle_sha256",
+                "node_major",
+                "max_option_evaluations",
+                "entrypoint",
+                "geometry_profile",
+            },
         )
+        require(is_current_geometry_profile(manifest['geometry_profile']))
         require(manifest["protocol"] == 1 and type(manifest["protocol"]) is int)
         require(manifest["solver_version"] == SOLVER_VERSION and manifest["node_major"] == 22)
         require(manifest["max_option_evaluations"] == MAX_OPTIONS and manifest["entrypoint"] == "solver.cjs")
@@ -204,7 +214,11 @@ async def run_quote_nesting_task(*, company_id: int, run_id: int) -> dict:
             raw = canonical_json(payload).encode("utf-8") + b"\n"
             require(len(raw) <= MAX_ESTIMATE_BYTES + 1024)
             planned = expected_options(payload["estimate"])
-            manifest = {"solver_version": runtime["solver_version"], "bundle_sha256": runtime["bundle_sha256"]}
+            manifest = {
+                "solver_version": runtime["solver_version"],
+                "bundle_sha256": runtime["bundle_sha256"],
+                "geometry_profile": geometry_profile_identity(),
+            }
             loop = asyncio.get_running_loop()
             deadline = loop.time() + MAX_SECONDS
             next_heartbeat = loop.time() + HEARTBEAT_SECONDS

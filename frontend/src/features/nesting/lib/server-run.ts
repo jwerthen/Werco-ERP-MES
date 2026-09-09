@@ -1,5 +1,5 @@
 import { validateNest, type Stock } from './nesting';
-import { projectFromFile } from './quote-project';
+import { projectFromFile, requireCurrentProjectGeometry } from './quote-project';
 import { calculateSheetOption, stockFor, type OptionResult } from './quoting';
 import { SOLVER_VERSION } from './run-manifest';
 
@@ -46,6 +46,7 @@ export function* calculateSavedProject(
 ): Generator<ServerOptionMessage | ServerSummaryMessage> {
   if (!/^[a-f0-9]{64}$/.test(inputSha256)) throw new Error('Invalid input fingerprint.');
   const project = projectFromFile(estimate);
+  requireCurrentProjectGeometry(project);
   const groups = project.groups.filter(group => group.quote.parts.length > 0);
   if (!groups.length) throw new Error('A saved server calculation requires at least one part.');
   const totalOptions = groups.reduce((count, group) => count + group.quote.options.filter(o => o.enabled).length, 0);

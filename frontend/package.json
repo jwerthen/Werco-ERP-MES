@@ -67,7 +67,7 @@
   "scripts": {
     "start": "vite",
     "dev": "vite",
-    "build": "vite build",
+    "build": "node tools/verify-nesting-profile.mjs && vite build",
     "preview": "vite preview",
     "test": "jest --config jest.config.js --watchAll=false",
     "test:watch": "jest --config jest.config.js --watch",

@@ -1,4 +1,4 @@
-"""Exercise migrations 095–102 and runtime p75 on CI's disposable PostgreSQL.
+"""Exercise migrations 095–103 and runtime p75 on CI's disposable PostgreSQL.
 
 This uses an isolated schema, rolls everything back, and refuses remote/production DBs.
 Run before the E2E seed so schema migration failures stop the browser suite early.
@@ -20,6 +20,8 @@ from alembic.operations import Operations
 from app.models.runtime_metric import RuntimeMetricSample
 from app.services.runtime_metric_service import summarize_runtime_metrics
 from scripts.verify_nesting_runs_postgres import assert_nesting_run_races
+from scripts.verify_nesting_spacing_postgres import assert_spacing_policy_races
+from scripts.verify_stock_piece_postgres import assert_stock_piece_races
 
 DATA_API_ROLES = ("anon", "authenticated")
 TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
@@ -118,6 +120,7 @@ def verify():
         "100_receiving_supplier_followup",
         "101_quote_nesting_drafts",
         "102_quote_nesting_runs",
+        "103_quote_nesting_spacing_policies",
     ):
         path = Path(__file__).resolve().parents[1] / "alembic/versions" / (filename + ".py")
         spec = importlib.util.spec_from_file_location(filename, path)
@@ -246,18 +249,32 @@ def verify():
                 assert not sa.inspect(connection).get_sequence_names(schema=schema)
                 assert not sa.inspect(connection).get_indexes("work_orders", schema=schema)
             print(
-                "PostgreSQL migrations 095–102 passed upgrade/downgrade twice, "
+                "PostgreSQL migrations 095–103 passed upgrade/downgrade twice, "
                 "RLS and Data API table/sequence privilege checks, and p75 cohorts 1/4/5/8."
             )
         finally:
             transaction.rollback()
     try:
         assert_nesting_run_races(engine)
+        assert_spacing_policy_races(engine)
+        assert_stock_piece_races(engine)
         # A separate process prevents FastAPI/auth/queue test doubles or startup
         # state from leaking into other checks. This child repeats the local/test
         # database guard and owns a disposable schema, never the E2E seed tables.
         subprocess.run(
             [sys.executable, '-m', 'scripts.verify_nesting_runs_api_postgres'],
+            check=True,
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [sys.executable, '-m', 'scripts.verify_nesting_spacing_api_postgres'],
+            check=True,
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [sys.executable, '-m', 'scripts.verify_stock_piece_api_postgres'],
             check=True,
             timeout=60,
             stdin=subprocess.DEVNULL,

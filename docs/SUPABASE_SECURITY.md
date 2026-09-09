@@ -126,6 +126,54 @@ input history and saved calculations; dropping these tables is destructive and
 requires a separate retention/rollback decision. Runtime results remain
 unapproved and do not create physical inventory or material credits.
 
+## Governed quote-spacing policies
+
+Migration `103_nesting_spacing_policies` adds a single policy header per
+company, immutable content revisions, and immutable command events for draft
+creation, publication and withdrawal. It creates no policy rows and approves no
+defaults. Every command advances the header by exactly one version; only a new
+revision advances its revision counter. Publication and withdrawal reference the
+exact company, policy, revision number, revision ID and content hash. A withdrawal
+must reference a publication of that same content. Company-wide request UUIDs,
+policy event versions and publication effective times are unique; a publication
+can be withdrawn only once. Publication cannot be backdated before its recorded
+approval instant.
+
+All three tables have deny-default RLS, with no Data API policies and explicit
+PUBLIC/anon/authenticated table and sequence revokes. Both Alembic and model
+`create_all` install the same PostgreSQL guards: header identity/deletion and
+revision/event UPDATE, DELETE and TRUNCATE are refused. Trigger functions pin an
+empty search path and scope parent checks to their owning schema. ORM and SQLite
+guards provide development parity; production protection does not depend on ORM
+events alone. Required audit evidence and command writes share one transaction.
+The API still enforces active-company, Admin/effective nesting permissions,
+credential eligibility and read-only context; the database owner connection can
+bypass RLS and is not an authorization boundary by itself.
+
+Resolution selects the latest effective publication first, then checks withdrawal.
+It never falls back to an earlier approval. Withdrawing a future publication leaves
+the current policy effective until that scheduled instant, when policy resolution
+becomes unavailable unless another publication replaces it. Existing saved input
+and queued-run snapshots remain immutable. Fresh conformance claims on save/new
+run must match current server records. Policy approval does not approve a nest,
+material grade, machine parameters or projected remnants.
+
+Independent validation is in
+`backend/tests/test_migration_103_quote_nesting_spacing_policies.py` and
+`backend/tests/api/test_quote_nesting_spacing_contract.py`. The existing disposable
+PostgreSQL verifier now includes migration 103 plus
+`verify_nesting_spacing_postgres.py` and the bounded subprocess
+`verify_nesting_spacing_api_postgres.py`. Local PostgreSQL 15 execution verified
+upgrade/downgrade twice, inherited Data API grant revocation, immutable SQL guards,
+concurrent publication/withdrawal CAS, real JWT/API 200/409 conflicts, identical
+same-key event recovery, audit-failure rollback and save-versus-withdraw serialization.
+API race sessions use a unique disposable schema and real authorization; no policy
+runtime or queue is mocked. This is local test evidence, not a statement that
+migration 103 has been applied to production. The verifier rejects remote or
+non-test databases and removes its generated schemas. Ordinary application rollback
+must retain policy history; a destructive schema downgrade requires its own
+retention decision.
+
 ## Dashboard checklist (manual — cannot be done via SQL)
 
 These are Supabase dashboard settings; migrations can't reach them. Where the current state wasn't
