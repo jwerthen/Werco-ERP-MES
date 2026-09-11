@@ -271,3 +271,42 @@ def test_supplier_version_compares_equivalent_timezone_instants(client, db_sessi
         },
     )
     assert response.status_code == 200, response.text
+
+
+def test_receiving_events_snapshot_each_received_line_not_cumulative_po_quantity(client, db_session):
+    from app.models.operational_event import OperationalEvent
+    from app.services.notification_dispatch import _receipt_email_context
+
+    user, first, second, body = setup_delivery(db_session)
+    original_number, original_name = first.part.part_number, first.part.name
+    response = client.post('/api/v1/receiving/deliveries', headers=headers_for(user), json=body)
+    assert response.status_code == 200, response.text
+    events = (
+        db_session.query(OperationalEvent)
+        .filter(
+            OperationalEvent.company_id == 1,
+            OperationalEvent.event_type == 'purchase_order_received',
+        )
+        .order_by(OperationalEvent.id)
+        .all()
+    )
+    assert len(events) == 2
+    assert [e.event_payload['quantity_received'] for e in events] == [3, 5]
+    assert [e.event_payload['lot_number'] for e in events] == ['LOT-A', 'LOT-B']
+    assert all(e.event_payload['part_number'] == original_number for e in events)
+    assert all(e.event_payload['part_name'] == original_name for e in events)
+    assert all(e.event_payload['unit_of_measure'] for e in events)
+    first.part.name = 'Renamed after receiving'
+    db_session.commit()
+    assert _receipt_email_context(events[0])['received_items'][0]['part_name'] == original_name
+    # Replaying the delivery cannot create another receipt notification event.
+    again = client.post('/api/v1/receiving/deliveries', headers=headers_for(user), json=body)
+    assert again.status_code == 200
+    assert (
+        db_session.query(OperationalEvent)
+        .filter(
+            OperationalEvent.event_type == 'purchase_order_received',
+        )
+        .count()
+        == 2
+    )

@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2 style="margin: 0 0 20px; color: #0a1628; font-size: 28px; line-height: 1.25; letter-spacing: -0.5px;">{{ title }}</h2>
+<p style="margin: 0 0 24px;">{% if po_number %}Material received against <strong style="color: #0a1628;">{{ po_number }}</strong>.{% else %}The following material was received.{% endif %}</p>
+
+<table width="100%" cellpadding="0" cellspacing="0" style="width: 100%; table-layout: fixed; border-collapse: collapse; margin: 0 0 20px;">
+    <thead>
+        <tr>
+            <th scope="col" align="left" width="68%" bgcolor="#f1f4f8" style="padding: 10px 12px; color: #64748b; font-size: 11px; line-height: 18px; letter-spacing: 1px;">RECEIVED ITEM</th>
+            <th scope="col" align="right" width="32%" bgcolor="#f1f4f8" style="padding: 10px 12px; color: #64748b; font-size: 11px; line-height: 18px; letter-spacing: 1px;">QUANTITY</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for item in received_items %}
+        <tr>
+            <td style="padding: 16px 12px; border-bottom: 1px solid #e6ebf1; vertical-align: top; overflow-wrap: anywhere; word-break: break-word;">
+                <strong style="color: #0a1628; font-size: 15px; line-height: 22px;">{{ item.part_number }}</strong>
+                {% if item.part_name %}<br><span style="font-size: 14px; line-height: 22px;">{{ item.part_name }}</span>{% endif %}
+                {% if item.lot_number %}<br><span style="color: #64748b; font-size: 12px; line-height: 20px;">Lot: {{ item.lot_number }}</span>{% endif %}
+            </td>
+            <td align="right" style="padding: 16px 12px; border-bottom: 1px solid #e6ebf1; vertical-align: top; color: #0a1628; font-size: 15px; line-height: 22px; overflow-wrap: anywhere; word-break: break-word;">
+                <strong>{{ item.quantity }}</strong>{% if item.unit %}<br><span style="color: #64748b; font-size: 12px;">{{ item.unit }}</span>{% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% if receipt_status %}<p style="margin: 0 0 16px; color: #42526a; font-size: 14px; line-height: 22px;"><strong>Receipt status:</strong> {{ receipt_status }}</p>{% endif %}
+<p style="margin: 0 0 16px; color: #64748b; font-size: 14px; line-height: 22px;">Open the receipt in Werco for inspection and inventory details.</p>
+{% endblock %}
