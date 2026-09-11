@@ -37,8 +37,8 @@ Content rules (revised 2026-07-29, after CMMC L2 was descoped — the boundary d
 record is ``docs/NOTIFICATIONS.md`` §11.1; read it before widening either allowlist):
 * EMAIL/in-app bodies carry the catalog description plus a detail line composed from the
   ``_DETAIL_KEYS`` payload allowlist (statuses, quantities, day counts, short reasons).
-  Composition reads the PAYLOAD only — no DB re-query — so part numbers and customer names
-  stay absent. That is a scope/N+1 decision, not a security boundary.
+  Composition reads the PAYLOAD only — no DB re-query. Receipt emails additionally
+  show the received line's part number/name, quantity/unit and lot snapshot.
 * SMS is relaxed far less, because an SMS renders on a locked screen: one classifier from
   the ``_SMS_DETAIL_KEYS`` FIELD allowlist, vetted again by ``safe_detail`` as a VALUE.
   Two fences, both required. ``reason`` is in the email allowlist and NOT the SMS one.
@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Optional, Sequence
 
 from sqlalchemy.orm import Session
@@ -231,6 +232,47 @@ def _content_for_event(entry: CatalogEntry, event) -> tuple[str, str]:
     detail = _payload_detail_line(payload)
     body = f"{entry.description}\n\n{detail}" if detail else entry.description
     return title, body
+
+
+def _receipt_email_context(event) -> Optional[Dict]:
+    """Explicit, receipt-only email fields from the immutable event snapshot.
+
+    Old events without a part snapshot retain the generic notification. Each
+    receipt represents one PO line; never show every ordered line as received.
+    """
+    if event.event_type != "purchase_order_received":
+        return None
+    payload = event.event_payload or {}
+    part_number = payload.get("part_number")
+    if not isinstance(part_number, str) or not part_number.strip():
+        return None
+    try:
+        quantity = Decimal(str(payload.get("quantity_received")))
+    except InvalidOperation:
+        return None
+    if not quantity.is_finite() or quantity <= 0:
+        return None
+    quantity_text = format(quantity, "f")
+    if "." in quantity_text:
+        quantity_text = quantity_text.rstrip("0").rstrip(".")
+
+    def text(key):
+        value = payload.get(key)
+        return value.strip() if isinstance(value, str) else ""
+
+    return {
+        "po_number": text("po_number"),
+        "receipt_status": text("status").replace("_", " ").capitalize(),
+        "received_items": [
+            {
+                "part_number": part_number.strip(),
+                "part_name": text("part_name"),
+                "quantity": quantity_text,
+                "unit": text("unit_of_measure"),
+                "lot_number": text("lot_number"),
+            }
+        ],
+    }
 
 
 def _link_for_event(event) -> Optional[str]:
@@ -792,6 +834,7 @@ async def dispatch_for_event(db: Session, event) -> int:
     related_type = event.entity_type
     related_id = event.entity_id
     candidates = _recipients_for_entry(db, entry, event, event.company_id)
+    receipt_context = _receipt_email_context(event)
 
     return await _fan_out(
         db,
@@ -804,8 +847,8 @@ async def dispatch_for_event(db: Session, event) -> int:
         title=title,
         body=body,
         link=link,
-        template=None,  # outbox uses the generic notification template
-        context={"title": title, "body": body},
+        template="receipt_received" if receipt_context else None,
+        context={"title": title, "body": body, **(receipt_context or {})},
         # The record number only -- the SMS body is built from this + the catalog
         # label, never from the payload at large (§3.4).
         sms_identifier=_payload_identifier(event.event_payload or {}),

@@ -507,6 +507,14 @@ def _receive_material(receipt_in, db, current_user, company_id, audit):
             "po_number": po.po_number,
             "po_line_id": po_line.id,
             "part_id": po_line.part_id,
+            # Snapshot the received line for email; delayed workers must not read
+            # a subsequently edited part master or cumulative PO quantities.
+            "part_number": po_line.part.part_number if po_line.part else None,
+            "part_name": po_line.part.name if po_line.part else None,
+            "unit_of_measure": (
+                getattr(po_line.part.unit_of_measure, "value", po_line.part.unit_of_measure) if po_line.part else None
+            ),
+            "lot_number": receipt.lot_number,
             "quantity_received": qty_received,
             "requires_inspection": receipt.requires_inspection,
             "status": (receipt.status.value if hasattr(receipt.status, "value") else receipt.status),

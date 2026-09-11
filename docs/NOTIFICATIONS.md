@@ -776,6 +776,16 @@ The `OperationalEvent` payload is itself redaction-filtered at emit time.
 notification-preferences matrix by `GET /notifications/catalog`, so it stays a static string.
 Body composition lives in `_content_for_event`.
 
+**Receiving email detail (2026-09-11, owner requested).** New `purchase_order_received`
+events snapshot the received part number, part name, unit of measure and lot alongside
+the receipt quantity and PO number. `receipt_received.html` lists that received line,
+with its quantity/unit, lot, PO reference and receipt status. Each receipt represents
+one PO line, including when several receipts are posted as a delivery; the email does
+not substitute the PO's cumulative quantity or list unreceived order lines. The worker
+reads this explicit event snapshot without querying current part or inventory data.
+Older events without the snapshot retain the generic email. This deliberately extends
+the email content rule for receiving; SMS content, recipients and preferences are unchanged.
+
 ### Terse SMS body rule (plan §3.4 / §11.1) — **narrowly relaxed 2026-07-29**
 
 Still a **standing rule**, not a per-call judgement — and deliberately relaxed **much less than
