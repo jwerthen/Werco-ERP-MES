@@ -8,7 +8,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { tabKeyboard } from '../components/operations/tabKeyboard';
 import api from '../services/api';
 import PurchaseOrderDetail from '../components/operations/PurchaseOrderDetail';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { canPublishDocuments, canDeleteDocuments } from '../utils/recordWriteAccess';
 import { hasPermission } from '../utils/permissions';
@@ -21,6 +21,7 @@ import {
   CheckCircleIcon,
   BuildingOfficeIcon,
   ClipboardDocumentListIcon,
+  ChartBarIcon,
   TrashIcon,
 } from '@heroicons/react/24/outline';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
@@ -1669,6 +1670,12 @@ export default function Purchasing() {
         <PurchaseOrderDetail id={detailPOId} onClose={closePODetail} onSaved={loadData} onLoaded={onPODetailLoaded} />
       )}
       <PageHeader title="Purchasing" description="Review supplier orders, deliveries and vendor records." actions={<>
+          {(hasPermission(user?.role, 'purchasing:view') || user?.is_superuser) && (
+            <Link to="/purchasing/price-history" className="btn-secondary flex items-center gap-2">
+              <ChartBarIcon className="h-5 w-5" />
+              Price history
+            </Link>
+          )}
           {canCreateVendor && (
             <Button variant="secondary" onClick={() => setShowVendorModal(true)} className="flex items-center">
               <BuildingOfficeIcon className="h-5 w-5 mr-2" />

@@ -1,4 +1,5 @@
 import type { BOMExploded } from '../types/engineering';
+import type { MaterialPriceHistoryParams, MaterialPriceHistoryResponse, MaterialPriceHistoryDetailParams, MaterialPriceHistoryDetail } from '../types/materialPriceHistory';
 import type { EmailRecipientsSettings } from '../types/emailRecipients';
 import type { NestingCatalogResponse, NestingMaterialRequest, NestingMaterialResolution } from '../types/quoteNesting';
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
@@ -2900,6 +2901,16 @@ class ApiService {
   }
 
   // Purchasing
+  async getMaterialPriceHistory(params: MaterialPriceHistoryParams = {}) {
+    const response = await this.api.get<MaterialPriceHistoryResponse>('/purchasing/price-history', { params });
+    return response.data;
+  }
+
+  async getMaterialPriceHistoryDetail(partId: number, params: MaterialPriceHistoryDetailParams = {}) {
+    const response = await this.api.get<MaterialPriceHistoryDetail>(`/purchasing/price-history/${partId}`, { params });
+    return response.data;
+  }
+
   // `deleted_only: true` inverts the endpoint's soft-delete filter and returns ONLY the
   // company's soft-deleted vendors (each carrying is_deleted / deleted_at / deleted_by_name),
   // which is the ONLY way to see one — every other read hard-filters them out, so nothing

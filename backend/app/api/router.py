@@ -31,6 +31,7 @@ from app.api.endpoints import (
     job_costing,
     laser_nests,
     maintenance,
+    material_price_history,
     materials,
     mrp,
     nesting_buyer_pdf,
@@ -117,6 +118,7 @@ api_router.include_router(work_order_blockers.router, prefix="/work-order-blocke
 api_router.include_router(work_order_templates.router, prefix="/work-order-templates", tags=["Work Order Templates"])
 api_router.include_router(shop_floor.router, prefix="/shop-floor", tags=["Shop Floor"])
 api_router.include_router(purchasing.router, prefix="/purchasing", tags=["Purchasing"])
+api_router.include_router(material_price_history.router, prefix="/purchasing", tags=["Purchasing"])
 api_router.include_router(scheduling.router, prefix="/scheduling", tags=["Scheduling"])
 api_router.include_router(documents.router, prefix="/documents", tags=["Documents"])
 api_router.include_router(reports.router, prefix="/reports", tags=["Reports"])

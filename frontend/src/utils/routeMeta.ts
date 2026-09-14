@@ -58,6 +58,7 @@ export const routeTitles: Record<string, string> = {
   '/receiving': 'Receiving',
   '/shipping': 'Shipping',
   '/purchasing': 'Purchase Orders',
+  '/purchasing/price-history': 'Material Price History',
   '/po-upload': 'Upload PO',
   '/mrp': 'MRP',
 
@@ -138,6 +139,11 @@ interface DetailRoute {
 }
 
 const detailRoutes: DetailRoute[] = [
+  {
+    pattern: /^\/purchasing\/price-history$/,
+    title: 'Material Price History',
+    parent: { label: 'Purchase Orders', href: '/purchasing' },
+  },
   // Static-mapped above (so the title comes from `routeTitles`); listed here
   // only so the breadcrumb resolves its parent from the same source.
   {

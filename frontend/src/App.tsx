@@ -53,6 +53,7 @@ const MRP = lazyWithRetry(() => import('./pages/MRP'));
 const Quality = lazyWithRetry(() => import('./pages/Quality'));
 const CustomFields = lazyWithRetry(() => import('./pages/CustomFields'));
 const Purchasing = lazyWithRetry(() => import('./pages/Purchasing'));
+const MaterialPriceHistory = lazyWithRetry(() => import('./pages/MaterialPriceHistory'));
 const Scheduling = lazyWithRetry(() => import('./pages/Scheduling'));
 const DispatchBoard = lazyWithRetry(() => import('./pages/DispatchBoard'));
 const Documents = lazyWithRetry(() => import('./pages/Documents'));
@@ -744,6 +745,18 @@ function AppRoutes() {
         />
 
         {/* Purchasing & Receiving */}
+        <Route
+          path="/purchasing/price-history"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <MaterialPriceHistory />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
         <Route
           path="/purchasing"
           element={

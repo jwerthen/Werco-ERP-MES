@@ -30,6 +30,7 @@ import React from 'react';
 import { render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { getPermissionsForRole } from '../utils/permissions';
+import { canAccessPath } from '../utils/routeAccess';
 
 // --- Heavy child components reduced to inert stand-ins. -------------------
 jest.mock('./CompanySwitcher', () => ({ __esModule: true, default: () => null }));
@@ -207,5 +208,30 @@ describe('Material Nesting navigation', () => {
   it.each(['operator', 'quality', 'shipping'])('hides Material Nesting from %s without purchasing:view', (role) => {
     renderLayout(role, '/nest');
     expect(within(sidebar()).queryByRole('link', { name: 'Material Nesting' })).not.toBeInTheDocument();
+  });
+});
+
+describe('Material Price History navigation', () => {
+  afterEach(() => {
+    mockUser.value = null;
+  });
+
+  it.each(['admin', 'manager', 'supervisor', 'viewer'])('offers price history to %s with purchasing:view', (role) => {
+    renderLayout(role, '/purchasing/price-history?part=42');
+    const historyLink = within(sidebar()).getByRole('link', { name: 'Material Price History' });
+    expect(historyLink).toHaveAttribute('href', '/purchasing/price-history');
+    expect(historyLink).toHaveClass('text-fd-ink');
+    expect(within(sidebar()).getByRole('link', { name: 'Purchase Orders' })).not.toHaveClass('text-fd-ink');
+    expect(canAccessPath('/purchasing/price-history?part=42', permission =>
+      getPermissionsForRole(role as any).includes(permission)
+    )).toBe(true);
+  });
+
+  it.each(['operator', 'quality', 'shipping'])('hides price history from %s without purchasing:view', (role) => {
+    renderLayout(role, '/purchasing/price-history');
+    expect(within(sidebar()).queryByRole('link', { name: 'Material Price History' })).not.toBeInTheDocument();
+    expect(canAccessPath('/purchasing/price-history', permission =>
+      getPermissionsForRole(role as any).includes(permission)
+    )).toBe(false);
   });
 });

@@ -87,11 +87,20 @@ const quickActions = [
   { name: 'Import Center', url: '/import-center', icon: ArrowUpTrayIcon },
   { name: 'Traceability', url: '/traceability', icon: DocumentDuplicateIcon },
   { name: 'Purchasing', url: '/purchasing', icon: TruckIcon },
+  { name: 'Material Price History', url: '/purchasing/price-history', icon: CurrencyDollarIcon },
   { name: 'Customers', url: '/customers', icon: BuildingOfficeIcon },
   { name: 'Quotes', url: '/quotes', icon: CurrencyDollarIcon },
 ];
 
 const commandActions: SearchResult[] = [
+  {
+    id: -7,
+    type: 'action',
+    title: 'Open Material Price History',
+    subtitle: 'Compare inventory unit costs from one purchase order to the next',
+    url: '/purchasing/price-history',
+    icon: 'currency',
+  },
   {
     id: -6,
     type: 'action',

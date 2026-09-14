@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import api from '../services/api';
 import { Part, PartType } from '../types';
 import { MATERIAL_SUPPLY_PART_TYPE_OPTIONS } from '../utils/catalogGroups';
@@ -24,6 +24,7 @@ import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import {
   ArrowUpTrayIcon,
+  ChartBarIcon,
   CubeIcon,
   MagnifyingGlassIcon,
   PencilIcon,
@@ -132,6 +133,7 @@ export default function MaterialsPage() {
   const [deleteTarget, setDeleteTarget] = useState<Part | null>(null);
   const [deletePending, setDeletePending] = useState(false);
   const { user } = useAuth();
+  const canViewPriceHistory = hasPermission(user?.role, 'purchasing:view') || !!user?.is_superuser;
   // Deliberately NARROWER than parts:edit (which reaches supervisor). Mirrors
   // require_role([ADMIN, MANAGER]) on POST /parts/{id}/renumber, so a hidden
   // control and a refused call agree.
@@ -454,6 +456,17 @@ export default function MaterialsPage() {
       align: 'right',
       render: material => (
         <div className="flex items-center justify-end gap-2">
+          {canViewPriceHistory && (
+            <Link
+              to={`/purchasing/price-history?part=${material.id}`}
+              onClick={event => event.stopPropagation()}
+              className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-800 hover:text-slate-200"
+              title={`Price history for ${material.part_number}`}
+              aria-label={`Price history for ${material.part_number}`}
+            >
+              <ChartBarIcon className="h-4 w-4" />
+            </Link>
+          )}
           <button
             type="button"
             onClick={event => { event.stopPropagation(); openEdit(material); }}
@@ -475,7 +488,7 @@ export default function MaterialsPage() {
         </div>
       ),
     },
-  ], []);
+  ], [canViewPriceHistory]);
 
   const renderMobileCard = useCallback((material: Part) => (
     <MobileDataCard
@@ -499,6 +512,16 @@ export default function MaterialsPage() {
       ]}
       actions={(
         <>
+          {canViewPriceHistory && (
+            <Link
+              to={`/purchasing/price-history?part=${material.id}`}
+              onClick={event => event.stopPropagation()}
+              className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-800 hover:text-slate-200"
+              aria-label={`Price history for ${material.part_number}`}
+            >
+              <ChartBarIcon className="h-4 w-4" />
+            </Link>
+          )}
           <button
             type="button"
             onClick={event => { event.stopPropagation(); openEdit(material); }}
@@ -518,7 +541,7 @@ export default function MaterialsPage() {
         </>
       )}
     />
-  ), []);
+  ), [canViewPriceHistory]);
 
   const hasFilters = Boolean(search || typeFilter || statusFilter || activityFilter);
 
@@ -532,6 +555,12 @@ export default function MaterialsPage() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {canViewPriceHistory && (
+            <Link to="/purchasing/price-history" className="btn-secondary flex items-center gap-2">
+              <ChartBarIcon className="h-4 w-4" />
+              Price history
+            </Link>
+          )}
           <input ref={importInputRef} type="file" accept=".csv" className="hidden" onChange={handleImport} aria-label="Import materials from CSV file" />
           <button type="button" onClick={() => importInputRef.current?.click()} className="btn-secondary flex items-center gap-2">
             <ArrowUpTrayIcon className="h-4 w-4" />

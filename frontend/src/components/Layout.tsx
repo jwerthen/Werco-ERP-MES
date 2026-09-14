@@ -78,6 +78,7 @@ interface LayoutProps {
 interface NavItem {
   name: string;
   href?: string;
+  exact?: boolean;
   icon: React.ComponentType<{ className?: string }>;
   children?: NavItem[];
   badge?: number;
@@ -177,7 +178,8 @@ const navSections: NavSection[] = [
         name: 'Purchasing',
         icon: TruckIcon,
         children: [
-          { name: 'Purchase Orders', href: '/purchasing', icon: TruckIcon },
+          { name: 'Purchase Orders', href: '/purchasing', icon: TruckIcon, exact: true },
+          { name: 'Material Price History', href: '/purchasing/price-history', icon: ChartBarIcon, permission: 'purchasing:view' },
           { name: 'Upload PO', href: '/po-upload', icon: DocumentDuplicateIcon },
           { name: 'MRP', href: '/mrp', icon: CalculatorIcon },
         ],
@@ -254,7 +256,7 @@ const navSections: NavSection[] = [
 ];
 
 /** Check if a nav href matches the current location (supports query params in href) */
-function isHrefActive(href: string | undefined, location: { pathname: string; search: string }): boolean {
+function isHrefActive(href: string | undefined, location: { pathname: string; search: string }, exact = false): boolean {
   if (!href) return false;
   if (href.includes('?')) {
     const [path, query] = href.split('?');
@@ -268,7 +270,7 @@ function isHrefActive(href: string | undefined, location: { pathname: string; se
     if (!match) return false;
     return true;
   }
-  return location.pathname === href || (href !== '/' && location.pathname.startsWith(`${href}/`));
+  return location.pathname === href || (!exact && href !== '/' && location.pathname.startsWith(`${href}/`));
 }
 
 const NavGroup = React.memo(function NavGroup({
@@ -294,20 +296,20 @@ const NavGroup = React.memo(function NavGroup({
 
   const [isOpen, setIsOpen] = useState(() => {
     if (visibleChildren) {
-      return visibleChildren.some(child => isHrefActive(child.href, location));
+      return visibleChildren.some(child => isHrefActive(child.href, location, child.exact));
     }
     return false;
   });
 
   // Auto-open when navigating to a child
   useEffect(() => {
-    if (visibleChildren?.some(child => isHrefActive(child.href, location))) {
+    if (visibleChildren?.some(child => isHrefActive(child.href, location, child.exact))) {
       setIsOpen(true);
     }
   }, [location.pathname, location.search, visibleChildren]);
 
-  const isActive = isHrefActive(item.href, location);
-  const hasActiveChild = visibleChildren?.some(child => isHrefActive(child.href, location));
+  const isActive = isHrefActive(item.href, location, item.exact);
+  const hasActiveChild = visibleChildren?.some(child => isHrefActive(child.href, location, child.exact));
 
   if (item.href) {
     return (
@@ -365,7 +367,7 @@ const NavGroup = React.memo(function NavGroup({
       {!collapsed && isOpen && visibleChildren && visibleChildren.length > 0 && (
         <div className="mt-0.5 ml-[18px] pl-3 border-l border-fd-line space-y-px">
           {visibleChildren.map(child => {
-            const isChildActive = isHrefActive(child.href, location);
+            const isChildActive = isHrefActive(child.href, location, child.exact);
             return (
               <Link
                 key={child.name}

@@ -29,6 +29,14 @@ describe('getRouteTitle', () => {
     expect(getRouteTitle(loc('/'))).toBe('Dashboard');
   });
 
+  it('titles material price history and links back to Purchase Orders', () => {
+    expect(getRouteTitle(loc('/purchasing/price-history', '?part=42'))).toBe('Material Price History');
+    expect(getBreadcrumbParent('/purchasing/price-history')).toEqual({
+      label: 'Purchase Orders',
+      href: '/purchasing',
+    });
+  });
+
   it('titles the native Material Nesting route consistently with navigation', () => {
     expect(getRouteTitle(loc('/nest'))).toBe('Material Nesting');
     expect(getRouteTitle(loc('/nest', '?source=quotes'))).toBe('Material Nesting');

@@ -39,6 +39,7 @@ Shipped modules, grouped by domain:
 
 ### Purchasing & Supply Chain
 - Vendors, **purchase orders** (create/send), **MRP** (shortage detection and suggested-PO generation), receiving, **supplier scorecards**, and **PO upload** (AI parsing of PO/quote PDFs, single or multi-document batch).
+- **Material price history** — track inventory unit costs from PO to PO, with price movement filters, per-item charts, supplier/date comparisons, source-PO links, and CSV export. Reads existing committed POs automatically; see [Material Price History](docs/MATERIAL_PRICE_HISTORY.md).
 
 ### Quality & Compliance
 - **NCR / CAR / FAI**, **SPC**, **calibration** management, **customer complaints**, **QMS standards**, and **operator certifications / skill matrix**.
