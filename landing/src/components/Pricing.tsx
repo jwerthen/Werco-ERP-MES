@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 
 const plans = [
   {
@@ -9,7 +9,7 @@ const plans = [
     features: [
       'Up to 5 users',
       'Work Order Management',
-      Parts & BOM',
+      'Parts & BOM',
       'Shop Floor Tracking',
       'Basic Reports',
       'Email Support'
@@ -95,7 +95,7 @@ export default function Pricing() {
         </div>
 
         <div className="grid md:grid-cols-3 gap-8">
-          {plans.map((plan, index) => (
+          {plans.map((plan) => (
             <div
               key={plan.name}
               className={`card relative ${

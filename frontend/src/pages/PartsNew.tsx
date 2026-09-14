@@ -15,6 +15,7 @@ import { useToast } from '../components/ui/Toast';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { useAuth } from '../context/AuthContext';
+import { canPublishDocuments } from '../utils/recordWriteAccess';
 import { hasPermission } from '../utils/permissions';
 import { BOMImportWizard } from '../components/parts/BOMImportWizard';
 import { SkeletonTable } from '../components/ui/Skeleton';
@@ -103,6 +104,7 @@ export default function PartsPage() {
   // reach this page -- was shown "New Part", could fill the whole modal in, and only
   // found out at submit, via a 403.
   const { user } = useAuth();
+  const canPublish = canPublishDocuments(user);
   const canCreateParts = hasPermission(user?.role, 'parts:create') || !!user?.is_superuser;
   const [showImport, setShowImport] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -490,7 +492,7 @@ export default function PartsPage() {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (createDrawingPdf) {
+    if (canPublish && createDrawingPdf) {
       const isPdf = createDrawingPdf.type === 'application/pdf' || createDrawingPdf.name.toLowerCase().endsWith('.pdf');
       if (!isPdf) {
         showToast('error', 'Please choose a PDF drawing file');
@@ -502,7 +504,7 @@ export default function PartsPage() {
     try {
       const newPart = await api.createPart(createForm);
 
-      if (createDrawingPdf) {
+      if (canPublish && createDrawingPdf) {
         try {
           const formData = new FormData();
           formData.append('file', createDrawingPdf);
@@ -1179,25 +1181,27 @@ export default function PartsPage() {
                 </FormField>
               </div>
 
-              <FormField label="Drawing PDF">
-                {field => (
-                  <>
-                    <input
-                      {...field}
-                      key={createDrawingInputKey}
-                      type="file"
-                      accept=".pdf,application/pdf"
-                      onChange={e => setCreateDrawingPdf(e.target.files?.[0] || null)}
-                      className="block w-full text-sm text-slate-300 file:mr-3 file:rounded file:border-0 file:bg-slate-700 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-100 hover:file:bg-slate-600"
-                    />
-                    {createDrawingPdf && (
-                      <p className="mt-1 text-xs text-slate-400">
-                        {createDrawingPdf.name}
-                      </p>
-                    )}
-                  </>
-                )}
-              </FormField>
+              {canPublish && (
+                <FormField label="Drawing PDF">
+                  {field => (
+                    <>
+                      <input
+                        {...field}
+                        key={createDrawingInputKey}
+                        type="file"
+                        accept=".pdf,application/pdf"
+                        onChange={e => setCreateDrawingPdf(e.target.files?.[0] || null)}
+                        className="block w-full text-sm text-slate-300 file:mr-3 file:rounded file:border-0 file:bg-slate-700 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-100 hover:file:bg-slate-600"
+                      />
+                      {createDrawingPdf && (
+                        <p className="mt-1 text-xs text-slate-400">
+                          {createDrawingPdf.name}
+                        </p>
+                      )}
+                    </>
+                  )}
+                </FormField>
+              )}
 
               <FormField label="Flags">
                 <div className="flex gap-4">

@@ -1,7 +1,7 @@
 version: '3.8'
 
 # Production Docker Compose Configuration for Werco ERP
-# Usage: docker-compose -f docker-compose.prod.yml up -d
+# Usage: docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 #
 # Prerequisites:
 # 1. Create .env.prod file with all required secrets (see .env.prod.example)
@@ -14,11 +14,13 @@ services:
   redis:
     image: redis:7-alpine
     container_name: werco-redis-prod
+    # This store owns ARQ jobs/leases too. Eviction would silently discard queued work.
+    # Keep memory headroom below the container limit; a full store rejects new writes.
     command: >
       redis-server 
       --appendonly yes 
       --maxmemory 256mb 
-      --maxmemory-policy allkeys-lru
+      --maxmemory-policy noeviction
       --requirepass ${REDIS_PASSWORD}
     volumes:
       - redis_data:/data

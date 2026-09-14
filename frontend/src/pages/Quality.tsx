@@ -22,6 +22,7 @@ import {
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { formatCentralDate } from '../utils/centralTime';
 import { usePermissions } from '../hooks/usePermissions';
+import { canEditFAIs } from '../utils/recordWriteAccess';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
 import type { FAIPrefillResult } from '../types/processSheet';
 import { ScrapReasonCode, SCRAP_CATEGORIES } from '../types/scrapReason';
@@ -73,6 +74,7 @@ interface CAR {
 }
 
 interface FAI {
+  completed_date?: string | null;
   id: number;
   fai_number: string;
   part_id: number;
@@ -293,8 +295,10 @@ export default function QualityPage() {
   // scrap picker. Loaded lazily when the tab first opens, isolated from the
   // NCR/CAR/FAI loadData. Writes mirror the backend's SCRAP_REASON_WRITE_ROLES
   // (ADMIN/MANAGER/QUALITY) via the quality:approve permission.
-  const { can } = usePermissions();
+  const { can, role, isSuperuser } = usePermissions();
   const canManageScrapCodes = can('quality:approve');
+  const canEditFAI = canEditFAIs({ role, is_superuser: isSuperuser });
+  const faiIsFinal = !!faiDetail?.completed_date || ['passed', 'failed', 'conditional'].includes(faiDetail?.status || '');
   // Voiding an NCR mirrors DELETE /quality/ncr/{id} (require_role ADMIN / MANAGER
   // / QUALITY). usePermissions().can already returns true for a superuser, and
   // quality:approve is held by exactly admin/manager/quality — so this matches.
@@ -424,6 +428,7 @@ export default function QualityPage() {
 
   const handleCreateFAI = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canEditFAI) return;
     if (creating) return;
     setCreating(true);
     setCreateError('');
@@ -566,7 +571,7 @@ export default function QualityPage() {
    * fill/unmatched summary renders from the response.
    */
   const handlePrefillFromSteps = async () => {
-    if (faiDetailId == null || prefilling) return;
+    if (!canEditFAI || faiIsFinal || faiDetailId == null || prefilling) return;
     setPrefilling(true);
     try {
       const result = await api.prefillFAIFromSteps(faiDetailId);
@@ -1178,9 +1183,11 @@ export default function QualityPage() {
           <>
             <div className="flex flex-wrap justify-between items-start gap-3 mb-4">
               <h2 className="text-lg font-semibold">First Article Inspections</h2>
-              <Button onClick={() => setShowFAIModal(true)} className="flex items-center">
-                <PlusIcon className="h-5 w-5 mr-1" /> New FAI
-              </Button>
+              {canEditFAI && (
+                <Button onClick={() => setShowFAIModal(true)} className="flex items-center">
+                  <PlusIcon className="h-5 w-5 mr-1" /> New FAI
+                </Button>
+              )}
             </div>
             <TableWorkspaceControls workspace={faiWorkspace} />
             <DataTable
@@ -1197,7 +1204,7 @@ export default function QualityPage() {
                 icon: DocumentMagnifyingGlassIcon,
                 title: 'No FAIs found',
                 description: 'First article inspections will appear here once they are created.',
-                action: { label: 'New FAI', onClick: () => setShowFAIModal(true) },
+                action: canEditFAI ? { label: 'New FAI', onClick: () => setShowFAIModal(true) } : undefined,
               }}
               mobileCards={fai => (
                 <MobileDataCard
@@ -1446,17 +1453,19 @@ export default function QualityPage() {
                 <span className="text-green-500">{faiDetail.characteristics_passed} passed</span> ·{' '}
                 <span className="text-red-400">{faiDetail.characteristics_failed} failed</span>
               </span>
-              <LoadingButton
-                loading={prefilling}
-                loadingText="Prefilling…"
-                variant="secondary"
-                size="sm"
-                data-testid="fai-prefill-button"
-                onClick={() => void handlePrefillFromSteps()}
-                title="Copy conforming measurement step records from the linked work order into empty actual values"
-              >
-                Prefill from process steps
-              </LoadingButton>
+              {canEditFAI && !faiIsFinal && (
+                <LoadingButton
+                  loading={prefilling}
+                  loadingText="Prefilling…"
+                  variant="secondary"
+                  size="sm"
+                  data-testid="fai-prefill-button"
+                  onClick={() => void handlePrefillFromSteps()}
+                  title="Copy conforming measurement step records from the linked work order into empty actual values"
+                >
+                  Prefill from process steps
+                </LoadingButton>
+              )}
             </div>
 
             {prefillResult && (
@@ -1761,7 +1770,7 @@ export default function QualityPage() {
       </Modal>
 
       {/* FAI Modal */}
-      <Modal open={showFAIModal} onClose={requestCloseFAIModal} size="lg" closeOnBackdrop={false}>
+      <Modal open={canEditFAI && showFAIModal} onClose={requestCloseFAIModal} size="lg" closeOnBackdrop={false}>
         <div className="flex flex-wrap justify-between items-start gap-3 mb-4">
           <h3 className="text-lg font-semibold">New First Article Inspection</h3>
           <button onClick={requestCloseFAIModal} aria-label="Close dialog">

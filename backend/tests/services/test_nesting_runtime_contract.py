@@ -12,6 +12,20 @@ from app.schemas.quote_nesting_runs import SOLVER_VERSION
 from app.services import nesting_runtime as runtime
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
+REFERENCE_TIME = datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _fixed_runtime_clock(monkeypatch):
+    # Parametrized payloads are built at collection, potentially minutes before
+    # execution. Use the same fixed instant for their timestamps and the service's
+    # age check, so a future-invalid heartbeat cannot age into a ready one.
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return REFERENCE_TIME.astimezone(tz) if tz is not None else REFERENCE_TIME.replace(tzinfo=None)
+
+    monkeypatch.setattr(runtime, 'datetime', FixedDatetime)
 
 
 def identity(**changes):
@@ -24,7 +38,7 @@ def identity(**changes):
             node_version='v22.20.0',
             instance_id='12345678-1234-4234-8234-123456789abc',
             deployment_id=None,
-            observed_at=datetime.now(timezone.utc).isoformat(),
+            observed_at=REFERENCE_TIME.isoformat(),
         ),
         **changes,
     }
@@ -39,8 +53,8 @@ def identity(**changes):
         ({'node_version': 'v20.0.0'}, 'invalid_identity'),
         ({'solver_version': 'unknown-solver'}, 'invalid_identity'),
         ({'deployment_id': ['not-a-string']}, 'invalid_identity'),
-        ({'observed_at': (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat()}, 'stale'),
-        ({'observed_at': (datetime.now(timezone.utc) + timedelta(minutes=3)).isoformat()}, 'stale'),
+        ({'observed_at': (REFERENCE_TIME - timedelta(minutes=3)).isoformat()}, 'stale'),
+        ({'observed_at': (REFERENCE_TIME + timedelta(minutes=3)).isoformat()}, 'stale'),
     ],
 )
 async def test_untrusted_stale_or_mismatched_identity_never_enables_start(monkeypatch, changes, reason):

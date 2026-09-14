@@ -1,3 +1,5 @@
+import hashlib
+import logging
 import mimetypes
 import os
 import uuid
@@ -7,15 +9,16 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import or_
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, with_loader_criteria
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.document import Document, DocumentType
 from app.models.part import Part
 from app.models.purchasing import POReceipt, Vendor
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
+from app.services.audit_service import AuditService, AuditWriteError
 from app.services.document_numbering import generate_document_number as generate_shared_document_number
 from app.services.storage_service import (
     delete_ref,
@@ -28,8 +31,66 @@ from app.services.storage_service import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+# Manual uploads publish immediately. These are release-capable office roles;
+# generated receipt/shipping artifacts retain their own business-route gates.
+DOCUMENT_WRITE_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY]
 
 UPLOAD_DIR = resolve_upload_dir()
+
+
+def _document_query(db: Session, company_id: int):
+    # Historical documents still name a removed part, but never another tenant's
+    # part. Refresh loaded relationships too, including after a write/commit.
+    return (
+        db.query(Document)
+        .options(joinedload(Document.part), with_loader_criteria(Part, Part.company_id == company_id))
+        .filter(Document.company_id == company_id)
+        .populate_existing()
+    )
+
+
+def _audit_values(document: Document) -> dict:
+    return {
+        "document_number": document.document_number,
+        "revision": document.revision,
+        "previous_revision_id": document.previous_revision_id,
+        "revision_notes": document.revision_notes,
+        "title": document.title,
+        "document_type": document.document_type.value,
+        "description": document.description,
+        "part_id": document.part_id,
+        "work_order_id": document.work_order_id,
+        "vendor_id": document.vendor_id,
+        "file_name": document.file_name,
+        "file_size": document.file_size,
+        "status": document.status,
+        "released_by": document.released_by,
+        "released_at": document.released_at.isoformat() if document.released_at else None,
+    }
+
+
+def _commit_audited_document(db, audit, document, *, action, old_values=None, extra_data=None):
+    try:
+        db.flush()
+        audit.log_required(
+            action=action,
+            resource_type="document",
+            resource_id=document.id,
+            resource_identifier=document.document_number,
+            old_values=old_values,
+            new_values=_audit_values(document) if action != "DELETE" else None,
+            extra_data=extra_data,
+        )
+        if action == "DELETE":
+            db.delete(document)
+        db.commit()
+    except AuditWriteError as exc:
+        db.rollback()
+        raise HTTPException(503, "Unable to save audit record") from exc
+    except Exception:
+        db.rollback()
+        raise
 
 
 class DocumentPartResponse(BaseModel):
@@ -99,7 +160,7 @@ def list_documents(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    query = db.query(Document).options(joinedload(Document.part)).filter(Document.company_id == company_id)
+    query = _document_query(db, company_id)
 
     if part_id:
         query = query.filter(Document.part_id == part_id)
@@ -135,10 +196,15 @@ async def upload_document(
     previous_revision_id: Optional[int] = Form(None),
     revision_notes: Optional[str] = Form(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(DOCUMENT_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Upload a new document"""
+    """Upload and release a document as Admin/Manager/Quality, with atomic audit.
+
+    Revisions retain the previous document's type and linked records; existing
+    files remain available. Failure to save the required audit refuses publication.
+    """
     try:
         parsed_document_type = DocumentType(document_type)
     except ValueError as exc:
@@ -149,16 +215,23 @@ async def upload_document(
     normalized_vendor_id = vendor_id if vendor_id and vendor_id > 0 else None
 
     if normalized_part_id:
-        part = db.query(Part).filter(Part.id == normalized_part_id, Part.company_id == company_id).first()
+        part_query = db.query(Part).filter(Part.id == normalized_part_id, Part.company_id == company_id)
+        # A revision keeps its historical links, validated against the locked
+        # predecessor below. A fresh upload cannot select a removed record.
+        if not previous_revision_id:
+            part_query = part_query.filter(Part.is_deleted == False)
+        part = part_query.first()
         if not part:
             raise HTTPException(status_code=404, detail="Part not found")
 
     if normalized_work_order_id:
-        work_order = (
-            db.query(WorkOrder)
-            .filter(WorkOrder.id == normalized_work_order_id, WorkOrder.company_id == company_id)
-            .first()
+        work_order_query = db.query(WorkOrder).filter(
+            WorkOrder.id == normalized_work_order_id,
+            WorkOrder.company_id == company_id,
         )
+        if not previous_revision_id:
+            work_order_query = work_order_query.filter(WorkOrder.is_deleted == False)
+        work_order = work_order_query.first()
         if not work_order:
             raise HTTPException(status_code=404, detail="Work order not found")
 
@@ -227,6 +300,9 @@ async def upload_document(
     if not revision.strip() or len(revision.strip()) > 20:
         raise HTTPException(status_code=422, detail="Revision must contain 1–20 characters")
 
+    # Allocate before storing bytes so a numbering failure cannot leave an orphan.
+    doc_number = generate_document_number(db, document_type)
+
     # Generate unique filename and persist through the configured storage backend.
     content = await file.read()
     storage = get_storage()
@@ -238,9 +314,6 @@ async def upload_document(
         file_ext = os.path.splitext(file.filename)[1] if file.filename else ""
         key = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}{file_ext}")
     file_path = storage.save(content, key=key)
-
-    # Create document record
-    doc_number = generate_document_number(db, document_type)
 
     document = Document(
         document_number=doc_number,
@@ -258,15 +331,30 @@ async def upload_document(
         file_size=len(content),
         mime_type=file.content_type,
         status="released",
+        released_by=current_user.id,
+        released_at=datetime.utcnow(),
         created_by=current_user.id,
         company_id=company_id,
     )
 
-    db.add(document)
-    db.commit()
-    db.refresh(document)
-
-    return document
+    try:
+        db.add(document)
+        _commit_audited_document(
+            db,
+            audit,
+            document,
+            action="CREATE",
+            extra_data={"release": True, "content_sha256": hashlib.sha256(content).hexdigest()},
+        )
+    except Exception:
+        # A refused publication must not retain newly uploaded bytes. Earlier
+        # revision files are never touched by this compensation.
+        try:
+            storage.delete(file_path)
+        except Exception:
+            logger.error("Could not remove an unpublished document upload")
+        raise
+    return _document_query(db, company_id).filter(Document.id == document.id).one()
 
 
 @router.get("/types/list")
@@ -281,7 +369,7 @@ def get_document_revisions(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    documents = db.query(Document).options(joinedload(Document.part)).filter(Document.company_id == company_id).all()
+    documents = _document_query(db, company_id).all()
     by_id = {doc.id: doc for doc in documents}
     if document_id not in by_id:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -306,7 +394,7 @@ def get_document(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    document = db.query(Document).filter(Document.id == document_id, Document.company_id == company_id).first()
+    document = _document_query(db, company_id).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     return document
@@ -352,15 +440,26 @@ def attach_document_to_work_order(
     document_id: int,
     payload: WorkOrderDocumentAttachRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(DOCUMENT_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    document = db.query(Document).filter(Document.id == document_id, Document.company_id == company_id).first()
+    """Attach an unlinked PDF to a live tenant work order; existing history stays bound."""
+    document = (
+        db.query(Document)
+        .filter(Document.id == document_id, Document.company_id == company_id)
+        .with_for_update()
+        .first()
+    )
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
     work_order = (
-        db.query(WorkOrder).filter(WorkOrder.id == payload.work_order_id, WorkOrder.company_id == company_id).first()
+        db.query(WorkOrder)
+        .filter(
+            WorkOrder.id == payload.work_order_id, WorkOrder.company_id == company_id, WorkOrder.is_deleted == False
+        )
+        .first()
     )
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
@@ -370,10 +469,21 @@ def attach_document_to_work_order(
     if not is_pdf:
         raise HTTPException(status_code=400, detail="Only PDF documents can be attached as work order drawings")
 
+    if document.work_order_id == payload.work_order_id:
+        return _document_query(db, company_id).filter(Document.id == document_id).one()
+    if (
+        document.work_order_id is not None
+        or document.previous_revision_id
+        or db.query(Document.id)
+        .filter(Document.company_id == company_id, Document.previous_revision_id == document.id)
+        .first()
+    ):
+        raise HTTPException(409, "An existing work-order or revision-history attachment cannot be reassigned")
+
+    old_values = _audit_values(document)
     document.work_order_id = payload.work_order_id
-    db.commit()
-    db.refresh(document)
-    return document
+    _commit_audited_document(db, audit, document, action="UPDATE", old_values=old_values)
+    return _document_query(db, company_id).filter(Document.id == document_id).one()
 
 
 @router.delete("/{document_id}")
@@ -382,7 +492,9 @@ def delete_document(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
+    """Delete an unretained document as Admin/Manager, preserving audited metadata."""
     document = (
         db.query(Document)
         .filter(Document.id == document_id, Document.company_id == company_id)
@@ -411,13 +523,15 @@ def delete_document(
             409, "This certificate belongs to a receipt and must remain available, including after a receipt is voided."
         )
 
-    # Delete stored bytes if they exist (per-ref dispatch covers local and s3 rows).
-    # Document is hard-deleted today (no SoftDeleteMixin), so removing the bytes
-    # preserves the existing semantics.
-    if document.file_path and ref_exists(document.file_path):
-        delete_ref(document.file_path)
-
-    db.delete(document)
-    db.commit()
+    file_path = document.file_path
+    _commit_audited_document(db, audit, document, action="DELETE", old_values=_audit_values(document))
+    # Only remove bytes after metadata and required audit commit together. An
+    # object-store failure can leave an orphan, never a live row with lost bytes.
+    if file_path:
+        try:
+            if ref_exists(file_path):
+                delete_ref(file_path)
+        except Exception:
+            logger.error("Document %s deleted; stored-file cleanup requires retry", document_id)
 
     return {"message": "Document deleted"}

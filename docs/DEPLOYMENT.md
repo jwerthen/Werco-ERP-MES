@@ -19,6 +19,13 @@ This guide covers deploying Werco ERP to production environments.
 
 Create a secure `.env` file in the backend directory:
 
+This file supports a direct host deployment. Docker images exclude local environment
+files and credentials; inject values through runtime environment settings instead.
+For Compose, use `docker compose --env-file .env.prod -f docker-compose.prod.yml …`.
+See [Docker build contexts](DOCKER_PRODUCTION.md#build-contexts-and-runtime-secrets)
+for the inclusion checks and [Redis queue retention](DOCKER_PRODUCTION.md#redis-queue-retention-and-memory-pressure)
+for the required `noeviction` policy on shared queue/cache Redis, including managed Redis.
+
 ```env
 # Database
 DATABASE_URL=postgresql://postgres.meatfdvteugbeksckgqg:<SUPABASE_DB_PASSWORD>@aws-1-us-west-2.pooler.supabase.com:5432/postgres
@@ -767,13 +774,13 @@ git pull origin main
 # Backend
 cd backend
 source venv/bin/activate
-pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements.lock
 alembic upgrade head
 sudo systemctl restart werco-erp-backend
 
 # Frontend
 cd /opt/werco-erp/frontend
-npm install
+npm ci --include=dev
 npm run build
 sudo systemctl restart werco-erp-frontend
 ```

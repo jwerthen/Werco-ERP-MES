@@ -1,5 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import api from '../services/api';
+import { usePermissions } from '../hooks/usePermissions';
+import { canWriteJobCosts } from '../utils/recordWriteAccess';
 import {
   CurrencyDollarIcon,
   ChartBarIcon,
@@ -123,6 +125,8 @@ const todayISO = () => getCentralTodayISODate();
 // ── Component ────────────────────────────────────────────────────
 
 export default function JobCosting() {
+  const { role, isSuperuser } = usePermissions();
+  const canWrite = canWriteJobCosts({ role, is_superuser: isSuperuser });
   const { showToast } = useToast();
 
   // Data
@@ -280,6 +284,7 @@ export default function JobCosting() {
   // ── Create job cost ────────────────────────────────────────────
 
   const openCreateModal = () => {
+    if (!canWrite) return;
     loadWorkOrders();
     setCreateForm({
       work_order_id: 0,
@@ -294,6 +299,7 @@ export default function JobCosting() {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canWrite) return;
     if (!createForm.work_order_id) {
       showToast('error', 'Please select a work order');
       return;
@@ -315,6 +321,7 @@ export default function JobCosting() {
   // ── Add cost entry ─────────────────────────────────────────────
 
   const openEntryModal = (jobCostId: number) => {
+    if (!canWrite) return;
     setEntryJobCostId(jobCostId);
     setEntryForm({
       entry_type: 'material',
@@ -330,6 +337,7 @@ export default function JobCosting() {
 
   const handleAddEntry = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canWrite) return;
     if (!entryJobCostId) return;
     try {
       await api.post(`/job-costs/${entryJobCostId}/entries`, entryForm);
@@ -346,11 +354,12 @@ export default function JobCosting() {
   // ── Delete entry ───────────────────────────────────────────────
 
   const handleDeleteEntry = (jobCostId: number, entryId: number) => {
+    if (!canWrite) return;
     setDeleteEntryTarget({ jobCostId, entryId });
   };
 
   const handleConfirmDeleteEntry = async () => {
-    if (!deleteEntryTarget || deleteEntryPending) return;
+    if (!canWrite || !deleteEntryTarget || deleteEntryPending) return;
     const { jobCostId, entryId } = deleteEntryTarget;
     setDeleteEntryPending(true);
     try {
@@ -370,6 +379,7 @@ export default function JobCosting() {
   // ── Recalculate ────────────────────────────────────────────────
 
   const handleRecalculate = async (jobCostId: number) => {
+    if (!canWrite) return;
     try {
       await api.post(`/job-costs/${jobCostId}/calculate`, {});
       showToast('success', 'Costs recalculated');
@@ -395,13 +405,15 @@ export default function JobCosting() {
             Track estimated vs. actual costs, margins, and variances across work orders
           </p>
         </div>
-        <button
-          onClick={openCreateModal}
-          className="du-btn du-btn-primary du-btn-sm gap-1 flex-shrink-0"
-        >
-          <PlusIcon className="h-4 w-4" />
-          New Job Cost
-        </button>
+        {canWrite && (
+          <button
+            onClick={openCreateModal}
+            className="du-btn du-btn-primary du-btn-sm gap-1 flex-shrink-0"
+          >
+            <PlusIcon className="h-4 w-4" />
+            New Job Cost
+          </button>
+        )}
       </div>
 
       {/* KPI strip + Variance chart, side-by-side */}
@@ -548,7 +560,7 @@ export default function JobCosting() {
                     icon={CurrencyDollarIcon}
                     title="No job costs found"
                     description="Track estimated vs. actual costs by creating a job cost for a work order."
-                    action={{ label: 'New Job Cost', onClick: openCreateModal }}
+                    action={canWrite ? { label: 'New Job Cost', onClick: openCreateModal } : undefined}
                   />
                 </td>
               </tr>
@@ -600,22 +612,24 @@ export default function JobCosting() {
                       <StatusBadge status={jc.status} />
                     </td>
                     <td aria-label="Job cost actions" onClick={(e) => e.stopPropagation()}>
-                      <div className="flex gap-1">
-                        <button
-                          onClick={() => openEntryModal(jc.id)}
-                          className="du-btn du-btn-ghost du-btn-xs"
-                          title="Add Cost Entry"
-                        >
-                          <PlusIcon className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          onClick={() => handleRecalculate(jc.id)}
-                          className="du-btn du-btn-ghost du-btn-xs"
-                          title="Recalculate from Time Entries"
-                        >
-                          <ArrowPathIcon className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
+                      {canWrite && (
+                        <div className="flex gap-1">
+                          <button
+                            onClick={() => openEntryModal(jc.id)}
+                            className="du-btn du-btn-ghost du-btn-xs"
+                            title="Add Cost Entry"
+                          >
+                            <PlusIcon className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            onClick={() => handleRecalculate(jc.id)}
+                            className="du-btn du-btn-ghost du-btn-xs"
+                            title="Recalculate from Time Entries"
+                          >
+                            <ArrowPathIcon className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      )}
                     </td>
                   </tr>
 
@@ -662,13 +676,15 @@ export default function JobCosting() {
                           <div>
                             <div className="flex justify-between items-center mb-2">
                               <h3 className="font-semibold text-sm">Cost Entries</h3>
-                              <button
-                                onClick={() => openEntryModal(jc.id)}
-                                className="du-btn du-btn-primary du-btn-xs gap-1"
-                              >
-                                <PlusIcon className="h-3 w-3" />
-                                Add Entry
-                              </button>
+                              {canWrite && (
+                                <button
+                                  onClick={() => openEntryModal(jc.id)}
+                                  className="du-btn du-btn-primary du-btn-xs gap-1"
+                                >
+                                  <PlusIcon className="h-3 w-3" />
+                                  Add Entry
+                                </button>
+                              )}
                             </div>
 
                             {entriesLoading ? (
@@ -682,7 +698,7 @@ export default function JobCosting() {
                               <EmptyState
                                 title="No cost entries yet"
                                 description="Add one manually or recalculate from time entries."
-                                action={{ label: 'Add Entry', onClick: () => openEntryModal(jc.id) }}
+                                action={canWrite ? { label: 'Add Entry', onClick: () => openEntryModal(jc.id) } : undefined}
                               />
                             ) : (
                               <div className="overflow-x-auto">
@@ -733,13 +749,15 @@ export default function JobCosting() {
                                           {fmt(entry.total_cost)}
                                         </td>
                                         <td>
-                                          <button
-                                            onClick={() => handleDeleteEntry(jc.id, entry.id)}
-                                            className="du-btn du-btn-ghost du-btn-xs text-red-500"
-                                            title="Delete entry"
-                                          >
-                                            <TrashIcon className="h-3.5 w-3.5" />
-                                          </button>
+                                          {canWrite && (
+                                            <button
+                                              onClick={() => handleDeleteEntry(jc.id, entry.id)}
+                                              className="du-btn du-btn-ghost du-btn-xs text-red-500"
+                                              title="Delete entry"
+                                            >
+                                              <TrashIcon className="h-3.5 w-3.5" />
+                                            </button>
+                                          )}
                                         </td>
                                       </tr>
                                     ))}
@@ -760,7 +778,7 @@ export default function JobCosting() {
       </div>
 
       {/* ── Create Job Cost Modal ───────────────────────────────── */}
-      {showCreateModal && (
+      {canWrite && showCreateModal && (
         <div className="du-modal du-modal-open">
           <div className="du-modal-box max-w-lg">
             <div className="flex justify-between items-center mb-4">
@@ -930,7 +948,7 @@ export default function JobCosting() {
       )}
 
       {/* ── Add Entry Modal ─────────────────────────────────────── */}
-      {showEntryModal && (
+      {canWrite && showEntryModal && (
         <div className="du-modal du-modal-open">
           <div className="du-modal-box max-w-lg">
             <div className="flex justify-between items-center mb-4">
@@ -1116,7 +1134,7 @@ export default function JobCosting() {
 
       {/* Delete cost entry confirm */}
       <ConfirmDialog
-        open={deleteEntryTarget !== null}
+        open={canWrite && deleteEntryTarget !== null}
         title="Delete Cost Entry"
         message="Are you sure you want to delete this cost entry?"
         confirmLabel="Delete"

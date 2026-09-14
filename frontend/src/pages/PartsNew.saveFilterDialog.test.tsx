@@ -13,6 +13,7 @@ import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import { Part } from '../types';
 import PartsNew from './PartsNew';
+let mockRole = 'admin';
 import { ToastProvider } from '../components/ui';
 
 // PartsNew reads the signed-in role to decide whether to offer "New Part"
@@ -20,7 +21,7 @@ import { ToastProvider } from '../components/ui';
 // dialog, so it just needs a role that renders the page normally.
 jest.mock('../context/AuthContext', () => ({
   useAuth: () => ({
-    user: { id: 1, role: 'admin', is_superuser: false },
+    user: { id: 1, role: mockRole, is_superuser: false },
     isAuthenticated: true,
     isLoading: false,
   }),
@@ -60,6 +61,7 @@ async function openSaveFilterDialog() {
 }
 
 beforeEach(() => {
+  mockRole = 'admin';
   jest.clearAllMocks();
   window.localStorage.clear();
   sessionStorage.clear();
@@ -149,4 +151,14 @@ test('applying a different saved Parts view keeps the selector and discards a la
   expect(screen.queryByText('PURCHASED-STALE')).not.toBeInTheDocument();
   expect(selector).toHaveValue('Made view');
   sessionStorage.clear();
+});
+
+
+it('a supervisor can open part creation without a controlled drawing upload', async () => {
+  mockRole = 'supervisor';
+  renderParts();
+  fireEvent.click((await screen.findAllByRole('button', { name: /new part/i }))[0]);
+  expect(await screen.findByLabelText(/^Part Number/)).toBeInTheDocument();
+  expect(screen.queryByLabelText('Drawing PDF')).not.toBeInTheDocument();
+  expect(mockedApi.uploadDocument).not.toHaveBeenCalled();
 });

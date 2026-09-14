@@ -1,5 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import api from '../services/api';
+import { usePermissions } from '../hooks/usePermissions';
+import { canPublishDocuments, canDeleteDocuments } from '../utils/recordWriteAccess';
 import { useSearchParams } from 'react-router-dom';
 import DocumentDetail from '../components/operations/DocumentDetail';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
@@ -67,6 +69,10 @@ const formatFileSize = (bytes?: number) => {
 };
 
 export default function Documents() {
+  const { role, isSuperuser } = usePermissions();
+  const actor = { role, is_superuser: isSuperuser };
+  const canPublish = canPublishDocuments(actor);
+  const canDelete = canDeleteDocuments(actor);
   const { showToast } = useToast();
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState('');
@@ -141,6 +147,7 @@ export default function Documents() {
 
   const handleUpload = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canPublish) return;
     if (!uploadForm.file) {
       showToast('error', 'Please select a file');
       return;
@@ -204,7 +211,7 @@ export default function Documents() {
   }, []);
 
   const handleConfirmDelete = useCallback(async () => {
-    if (deleteDocTarget === null || deleteDocPending) return;
+    if (!canDelete || deleteDocTarget === null || deleteDocPending) return;
     setDeleteDocPending(true);
     try {
       await api.deleteDocument(deleteDocTarget);
@@ -216,7 +223,7 @@ export default function Documents() {
       setDeleteDocPending(false);
       setDeleteDocTarget(null);
     }
-  }, [deleteDocTarget, deleteDocPending, showToast, loadData]);
+  }, [canDelete, deleteDocTarget, deleteDocPending, showToast, loadData]);
 
   const filteredDocs = useMemo(() => {
     if (!debouncedSearch) return documents;
@@ -317,22 +324,24 @@ export default function Documents() {
             >
               <ArrowDownTrayIcon className="h-5 w-5" aria-hidden="true" />
             </button>
-            <button
-              onClick={e => {
-                e.stopPropagation();
-                handleDelete(doc.id);
-              }}
-              className="text-red-500 hover:text-red-400"
-              title="Delete"
-              aria-label="Delete document"
-            >
-              <TrashIcon className="h-5 w-5" aria-hidden="true" />
-            </button>
+            {canDelete && (
+              <button
+                onClick={e => {
+                  e.stopPropagation();
+                  handleDelete(doc.id);
+                }}
+                className="text-red-500 hover:text-red-400"
+                title="Delete"
+                aria-label="Delete document"
+              >
+                <TrashIcon className="h-5 w-5" aria-hidden="true" />
+              </button>
+            )}
           </div>
         ),
       },
     ],
-    [partNumberFor, handleDownload, handleDelete, selectDocument]
+    [canDelete, partNumberFor, handleDownload, handleDelete, selectDocument]
   );
 
   const renderMobileCard = useCallback(
@@ -357,17 +366,19 @@ export default function Documents() {
             >
               <ArrowDownTrayIcon className="h-4 w-4" /> Download
             </button>
-            <button
-              onClick={() => handleDelete(doc.id)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-500 border border-fd-line rounded-sm hover:bg-slate-700/40"
-            >
-              <TrashIcon className="h-4 w-4" /> Delete
-            </button>
+            {canDelete && (
+              <button
+                onClick={() => handleDelete(doc.id)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-500 border border-fd-line rounded-sm hover:bg-slate-700/40"
+              >
+                <TrashIcon className="h-4 w-4" /> Delete
+              </button>
+            )}
           </>
         }
       />
     ),
-    [partNumberFor, handleDownload, handleDelete, selectDocument]
+    [canDelete, partNumberFor, handleDownload, handleDelete, selectDocument]
   );
 
   return (
@@ -377,10 +388,12 @@ export default function Documents() {
       )}
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Documents</h1>
-        <button onClick={() => setShowUploadModal(true)} className="btn-primary flex items-center">
-          <ArrowUpTrayIcon className="h-5 w-5 mr-2" />
-          Upload Document
-        </button>
+        {canPublish && (
+          <button onClick={() => setShowUploadModal(true)} className="btn-primary flex items-center">
+            <ArrowUpTrayIcon className="h-5 w-5 mr-2" />
+            Upload Document
+          </button>
+        )}
       </div>
 
       {/* Filters */}
@@ -432,12 +445,12 @@ export default function Documents() {
           description:
             search || filterType ? 'Try adjusting your search or type filter.' : 'Upload a document to get started.',
           action:
-            search || filterType ? undefined : { label: 'Upload Document', onClick: () => setShowUploadModal(true) },
+            search || filterType || !canPublish ? undefined : { label: 'Upload Document', onClick: () => setShowUploadModal(true) },
         }}
       />
 
       {/* Upload Modal */}
-      <Modal open={showUploadModal} onClose={() => setShowUploadModal(false)} size="md" closeOnBackdrop={false}>
+      <Modal open={canPublish && showUploadModal} onClose={() => setShowUploadModal(false)} size="md" closeOnBackdrop={false}>
         {actionError && (
           <p role="alert" className="text-red-300 p-3">
             {actionError}
@@ -544,7 +557,7 @@ export default function Documents() {
 
       {/* Delete document confirm */}
       <ConfirmDialog
-        open={deleteDocTarget !== null}
+        open={canDelete && deleteDocTarget !== null}
         title="Delete Document"
         message="Delete this document?"
         confirmLabel="Delete"

@@ -55,7 +55,7 @@ from app.schemas.user import (
     UserCreate,
     UserResponse,
 )
-from app.services.audit_service import AuditService
+from app.services.audit_service import AuditService, AuditWriteError
 from app.services.display_token_service import (
     claim_display_token,
     issue_display_token,
@@ -71,6 +71,7 @@ from app.services.user_identity import (
     is_synthetic_email,
     synthetic_email_for_employee_id,
 )
+from app.services.user_provisioning import atomic_security_write, audit_user_created, create_tenant_user
 
 router = APIRouter()
 
@@ -120,6 +121,7 @@ def log_auth_event(
     request: Request = None,
     error: str = None,
     employee_id: str = None,
+    required: bool = False,
 ):
     """Log authentication events for CMMC compliance using AuditService.
 
@@ -151,7 +153,8 @@ def log_auth_event(
         if employee_id:
             identifiers["employee_id"] = _bounded_audit_value(employee_id)
         audit_service = AuditService(db, user, request)
-        audit_service.log(
+        write = audit_service.log_required if required else audit_service.log
+        write(
             action=action,
             resource_type="authentication",
             resource_id=user.id if user else None,
@@ -162,6 +165,8 @@ def log_auth_event(
             extra_data=identifiers or None,
         )
     except Exception as e:
+        if required:
+            raise
         # Don't let audit logging failures break authentication
         import logging
 
@@ -1341,33 +1346,23 @@ def register(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Register a new user within the current company (admin only)"""
-    # Check if email already exists within this company
-    if db.query(User).filter(User.email == user_in.email, User.company_id == company_id).first():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
-
-    # Check if employee_id already exists within this company
-    if db.query(User).filter(User.employee_id == user_in.employee_id, User.company_id == company_id).first():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Employee ID already exists")
-
-    user = User(
-        email=user_in.email,
-        employee_id=user_in.employee_id,
-        first_name=user_in.first_name,
-        last_name=user_in.last_name,
-        role=user_in.role,
-        department=user_in.department,
-        hashed_password=get_password_hash(user_in.password),
-        company_id=company_id,
-    )
-
-    db.add(user)
-    db.flush()  # assign the PK without committing so the audit row carries a real resource_id
-
-    # Log BEFORE the terminal commit so the audit row commits atomically with the new user.
-    log_auth_event(db, "USER_REGISTERED", user=user, success=True, request=request)
-    db.commit()
+    with atomic_security_write(db):
+        user = create_tenant_user(
+            db,
+            company_id=company_id,
+            email=user_in.email,
+            employee_id=user_in.employee_id,
+            first_name=user_in.first_name,
+            last_name=user_in.last_name,
+            password=user_in.password,
+            role=user_in.role,
+            department=user_in.department,
+            created_by=current_user.id,
+        )
+        audit_user_created(audit, user, source="admin_register", authentication=True)
     db.refresh(user)
 
     return user
@@ -1746,9 +1741,21 @@ def register_public(
     # emp-...@users.werco.com address on the badge-only row, which is the same defect
     # facing the other way. Audit rows cannot be corrected afterwards (008/060 refuse
     # UPDATE/DELETE), so getting this wrong is permanent for every row written after it.
-    log_auth_event(db, action, user=user, success=True, request=request, email=user_in.email, employee_id=employee_id)
     try:
+        log_auth_event(
+            db,
+            action,
+            user=user,
+            success=True,
+            request=request,
+            email=user_in.email,
+            employee_id=employee_id,
+            required=True,
+        )
         db.commit()
+    except AuditWriteError as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Unable to save audit record") from exc
     except IntegrityError:
         # Lost the race to a concurrent registration of the same address or
         # badge (uq_users_company_email / uq_users_company_employee_id). Answer

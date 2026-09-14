@@ -48,6 +48,7 @@ def register_company(request: Request, payload: CompanyRegister, db: Session = D
         admin_first_name=payload.admin_first_name,
         admin_last_name=payload.admin_last_name,
         admin_password=payload.admin_password,
+        request=request,
     )
 
     access_token = create_access_token(subject=admin_user.id, company_id=company.id)

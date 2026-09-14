@@ -2,12 +2,26 @@ import secrets
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.api.deps import (
+    get_audit_service,
+    get_current_company_id,
+    get_current_user,
+    require_role,
+)
 from app.core.security import get_password_hash, verify_password
 from app.db.database import get_db
 from app.models.company import Company
@@ -23,7 +37,12 @@ from app.schemas.user import validate_password_strength
 from app.services import api_token_service
 from app.services.audit_service import AuditService
 from app.services.import_service import ImportFileError, parse_import_file
-from app.services.notification_catalog import ALL_CHANNELS, CATALOG, CHANNEL_SMS, get_entry
+from app.services.notification_catalog import (
+    ALL_CHANNELS,
+    CATALOG,
+    CHANNEL_SMS,
+    get_entry,
+)
 from app.services.notification_dispatch import (
     channels_from_pref,
     email_deliverable_for_user,
@@ -43,7 +62,20 @@ from app.services.sms_service import (
     send_sms,
     sms_configured,
 )
-from app.services.user_identity import IdentifierDerivationExhausted, synthetic_email_for_employee_id
+from app.services.user_identity import (
+    IdentifierDerivationExhausted,
+    synthetic_email_for_employee_id,
+)
+from app.services.user_provisioning import (
+    TENANT_ROLES,
+    atomic_security_write,
+    audit_user_created,
+    audit_user_update,
+    create_tenant_user,
+    require_manageable_user,
+    require_tenant_role,
+    required_security_audit,
+)
 
 router = APIRouter()
 
@@ -255,17 +287,6 @@ def _default_channel_map(entry) -> Dict[str, bool]:
     return {channel: channel in entry.default_channels for channel in sorted(ALL_CHANNELS)}
 
 
-def _reject_platform_admin_assignment(role: Optional[UserRole]) -> None:
-    """Reject assigning ``platform_admin`` from a tenant-scoped user endpoint.
-
-    ``platform_admin`` is Werco's cross-company oversight role; it must never be
-    mintable from a tenant path (create/update). Mirrors the inline guards in
-    approve/import (which keep their own distinct wording).
-    """
-    if role == UserRole.PLATFORM_ADMIN:
-        raise HTTPException(status_code=400, detail="Platform admin role cannot be assigned")
-
-
 @router.get("/", response_model=List[UserResponse])
 def list_users(
     include_inactive: bool = False,
@@ -412,7 +433,10 @@ def update_my_notification_preferences(
     """
     unknown = sorted(key for key in payload.preferences if get_entry(key) is None)
     if unknown:
-        raise HTTPException(status_code=400, detail=f"Unknown notification event(s): {', '.join(unknown)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown notification event(s): {', '.join(unknown)}",
+        )
 
     not_eligible = sorted(
         key for key, change in payload.preferences.items() if change.sms and not get_entry(key).sms_eligible
@@ -456,7 +480,10 @@ def update_my_notification_preferences(
         description=(
             f"{'Created' if created else 'Updated'} notification preferences for user {current_user.employee_id}"
         ),
-        extra_data={"source": "self_service", "changed_events": sorted(payload.preferences.keys())},
+        extra_data={
+            "source": "self_service",
+            "changed_events": sorted(payload.preferences.keys()),
+        },
     )
     db.commit()
     db.refresh(pref)
@@ -537,7 +564,11 @@ async def send_test_sms(
         # Scrubbed on the way into notification_logs.error (SUPERVISOR can read that
         # field but not `phone`); the caller is the number's owner, so the HTTP detail
         # they get back is unscrubbed.
-        raise _fail(f"invalid phone number on file: {scrub_phone_numbers(str(exc))}", 400, str(exc))
+        raise _fail(
+            f"invalid phone number on file: {scrub_phone_numbers(str(exc))}",
+            400,
+            str(exc),
+        )
     except SMSPermanentError as exc:
         raise _fail(
             f"provider rejected the message: {scrub_phone_numbers(str(exc))}",
@@ -599,43 +630,23 @@ def create_user(
     stays allowed per the RBAC matrix. The creation is recorded in the
     tamper-evident audit log.
     """
-    # platform_admin is the cross-company oversight role; a tenant admin must not
-    # be able to mint one here (mirrors the approve/import guards).
-    _reject_platform_admin_assignment(user_in.role)
-
-    # Check if email exists
-    if db.query(User).filter(User.email == user_in.email, User.company_id == company_id).first():
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    # Check if employee_id exists
-    if db.query(User).filter(User.employee_id == user_in.employee_id, User.company_id == company_id).first():
-        raise HTTPException(status_code=400, detail="Employee ID already exists")
-
-    user = User(
-        email=user_in.email,
-        employee_id=user_in.employee_id,
-        first_name=user_in.first_name,
-        last_name=user_in.last_name,
-        hashed_password=get_password_hash(user_in.password),
-        role=user_in.role,
-        department=user_in.department,
-        # Previously dropped on the floor (the schema field was a phantom, §9.4).
-        phone=_normalized_phone_or_400(user_in.phone),
-    )
-    user.company_id = company_id
-    db.add(user)
-    db.flush()
-    audit.log_create(
-        "user",
-        user.id,
-        user.employee_id,
-        # Deliberately not passing new_values: the model carries hashed_password
-        # and secrets must never land in the audit log.
-        description=f"Created user {user.employee_id}",
-        extra_data={"source": "admin", "role": user.role.value, "email": user.email},
-    )
-    db.commit()
+    with atomic_security_write(db):
+        user = create_tenant_user(
+            db,
+            company_id=company_id,
+            email=user_in.email,
+            employee_id=user_in.employee_id,
+            first_name=user_in.first_name,
+            last_name=user_in.last_name,
+            password=user_in.password,
+            role=user_in.role,
+            department=user_in.department,
+            phone=_normalized_phone_or_400(user_in.phone),
+            created_by=current_user.id,
+        )
+        audit_user_created(audit, user, source="admin")
     db.refresh(user)
+
     return user
 
 
@@ -656,7 +667,10 @@ async def import_users_csv(
     # are used sequentially from one worker thread — same as a sync endpoint).
     try:
         table = await run_in_threadpool(
-            parse_import_file, file.filename, content, required_columns={"employee_id", "first_name", "last_name"}
+            parse_import_file,
+            file.filename,
+            content,
+            required_columns={"employee_id", "first_name", "last_name"},
         )
     except ImportFileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -681,7 +695,7 @@ async def import_users_csv(
         fallback_password = (default_password or "").strip()
         # platform_admin is the cross-company Werco oversight role; it must never be
         # mintable from a tenant spreadsheet, so don't advertise it as valid either.
-        valid_roles = sorted(role.value for role in UserRole if role != UserRole.PLATFORM_ADMIN)
+        valid_roles = sorted(role.value for role in TENANT_ROLES)
 
         for row_number, row in table.iter_rows():
             total_rows += 1
@@ -733,7 +747,7 @@ async def import_users_csv(
                 )
                 continue
 
-            if role == UserRole.PLATFORM_ADMIN:
+            if role not in TENANT_ROLES:
                 # A company admin must not be able to mint a cross-company platform
                 # admin from a spreadsheet row.
                 errors.append(
@@ -831,28 +845,20 @@ async def import_users_csv(
                 continue
 
             try:
-                user = User(
-                    email=email,
-                    employee_id=employee_id,
-                    first_name=first_name,
-                    last_name=last_name,
-                    hashed_password=get_password_hash(password),
-                    role=role,
-                    department=department,
-                )
-                user.company_id = company_id
-                db.add(user)
-                db.flush()
-                audit.log_create(
-                    "user",
-                    user.id,
-                    user.employee_id,
-                    # Deliberately not passing new_values: the model carries
-                    # hashed_password and secrets must never land in the audit log.
-                    description=f"Created user {user.employee_id} via import",
-                    extra_data={"source": "import", "role": role.value, "email": user.email},
-                )
-                db.commit()
+                with atomic_security_write(db):
+                    user = create_tenant_user(
+                        db,
+                        company_id=company_id,
+                        email=email,
+                        employee_id=employee_id,
+                        first_name=first_name,
+                        last_name=last_name,
+                        password=password,
+                        role=role,
+                        department=department,
+                        created_by=current_user.id,
+                    )
+                    audit_user_created(audit, user, source="import")
                 db.refresh(user)
             except Exception:
                 db.rollback()
@@ -902,12 +908,13 @@ def update_user(
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    require_manageable_user(current_user, user)
 
     update_data = user_in.model_dump(exclude_unset=True)
 
     # platform_admin is the cross-company oversight role; a tenant admin must not
     # be able to promote anyone (incl. themselves) to it (mirrors approve/import).
-    _reject_platform_admin_assignment(update_data.get("role"))
+    require_tenant_role(update_data.get("role"))
 
     # Self role-escalation guard (mirrors deactivate's self-guard): an admin must
     # not change their OWN role. Editing one's own other fields stays allowed.
@@ -930,22 +937,22 @@ def update_user(
     old_values = {c.key: getattr(user, c.key) for c in user.__table__.columns}
     deactivating = update_data.get("is_active") is False and bool(user.is_active)
 
-    for field, value in update_data.items():
-        setattr(user, field, value)
+    with atomic_security_write(db):
+        for field, value in update_data.items():
+            setattr(user, field, value)
 
-    audit.log_update("user", user.id, user.employee_id, old_values=old_values, new_values=user)
-    if deactivating:
-        # Same rule as DELETE /users/{id}: losing is_active retires every live API
-        # token the user holds (audited), so a later is_active=true revives none.
-        api_token_service.revoke_api_tokens_for_user(
-            db,
-            company_id=company_id,
-            user_id=user.id,
-            revoked_by=current_user.id,
-            reason=api_token_service.DEACTIVATION_REVOKE_REASON,
-            audit=audit,
-        )
-    db.commit()
+        audit_user_update(audit, user, old_values)
+        if deactivating:
+            # Same rule as DELETE /users/{id}: losing is_active retires every live API
+            # token the user holds (audited), so a later is_active=true revives none.
+            api_token_service.revoke_api_tokens_for_user(
+                db,
+                company_id=company_id,
+                user_id=user.id,
+                revoked_by=current_user.id,
+                reason=api_token_service.DEACTIVATION_REVOKE_REASON,
+                audit=required_security_audit(audit),
+            )
     db.refresh(user)
     return user
 
@@ -964,12 +971,12 @@ def approve_user(
     Grants a role and activates the account, so the role + is_active transition is
     recorded in the tamper-evident audit log.
     """
-    if approval.role == UserRole.PLATFORM_ADMIN:
-        raise HTTPException(status_code=400, detail="Platform admin role cannot be assigned through approval")
+    require_tenant_role(approval.role, "Platform admin role cannot be assigned through approval")
 
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    require_manageable_user(current_user, user)
     if user.is_active:
         raise HTTPException(status_code=400, detail="User is already active")
     if user.role != UserRole.VIEWER:
@@ -979,21 +986,19 @@ def approve_user(
     # activation. _model_to_dict drops hashed_password/password from the diff.
     old_values = {c.key: getattr(user, c.key) for c in user.__table__.columns}
 
-    user.role = approval.role
-    if approval.department is not None:
-        user.department = approval.department
-    user.is_active = True
+    with atomic_security_write(db):
+        user.role = approval.role
+        if approval.department is not None:
+            user.department = approval.department
+        user.is_active = True
 
-    audit.log_update(
-        "user",
-        user.id,
-        user.employee_id,
-        old_values=old_values,
-        new_values=user,
-        action="approve",
-        description=f"Approved user {user.employee_id} as {user.role.value}",
-    )
-    db.commit()
+        audit_user_update(
+            audit,
+            user,
+            old_values,
+            action="approve",
+            description=f"Approved user {user.employee_id} as {user.role.value}",
+        )
     db.refresh(user)
     return user
 
@@ -1015,18 +1020,19 @@ def reset_user_password(
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    require_manageable_user(current_user, user)
 
-    user.hashed_password = get_password_hash(password_data.new_password)
-    # No old/new values: the password hash must never enter the audit log.
-    audit.log(
-        action=AuditService.ACTIONS["PASSWORD_CHANGE"],
-        resource_type="user",
-        resource_id=user.id,
-        resource_identifier=user.employee_id,
-        description=f"Reset password for user {user.employee_id}",
-        extra_data={"source": "admin_reset"},
-    )
-    db.commit()
+    with atomic_security_write(db):
+        user.hashed_password = get_password_hash(password_data.new_password)
+        # No old/new values: the password hash must never enter the audit log.
+        audit.log_required(
+            action=AuditService.ACTIONS["PASSWORD_CHANGE"],
+            resource_type="user",
+            resource_id=user.id,
+            resource_identifier=user.employee_id,
+            description=f"Reset password for user {user.employee_id}",
+            extra_data={"source": "admin_reset"},
+        )
 
     return {"message": "Password reset successfully"}
 
@@ -1084,25 +1090,27 @@ def deactivate_user(
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    require_manageable_user(current_user, user)
 
-    user.is_active = False
-    audit.log_status_change(
-        "user",
-        user.id,
-        user.employee_id,
-        "active",
-        "inactive",
-        description=f"Deactivated user {user.employee_id}",
-    )
-    revoked = api_token_service.revoke_api_tokens_for_user(
-        db,
-        company_id=company_id,
-        user_id=user.id,
-        revoked_by=current_user.id,
-        reason=api_token_service.DEACTIVATION_REVOKE_REASON,
-        audit=audit,
-    )
-    db.commit()
+    old_status = "active" if user.is_active else "inactive"
+    with atomic_security_write(db):
+        user.is_active = False
+        audit.log_required(
+            action="STATUS_CHANGE",
+            resource_type="user",
+            resource_id=user.id,
+            resource_identifier=user.employee_id,
+            old_values={"status": old_status},
+            new_values={"status": "inactive"},
+        )
+        revoked = api_token_service.revoke_api_tokens_for_user(
+            db,
+            company_id=company_id,
+            user_id=user.id,
+            revoked_by=current_user.id,
+            reason=api_token_service.DEACTIVATION_REVOKE_REASON,
+            audit=required_security_audit(audit),
+        )
 
     return {"message": "User deactivated", "api_tokens_revoked": len(revoked)}
 
@@ -1123,17 +1131,19 @@ def activate_user(
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    require_manageable_user(current_user, user)
 
-    user.is_active = True
-    audit.log_status_change(
-        "user",
-        user.id,
-        user.employee_id,
-        "inactive",
-        "active",
-        description=f"Activated user {user.employee_id}",
-    )
-    db.commit()
+    old_status = "active" if user.is_active else "inactive"
+    with atomic_security_write(db):
+        user.is_active = True
+        audit.log_required(
+            action="STATUS_CHANGE",
+            resource_type="user",
+            resource_id=user.id,
+            resource_identifier=user.employee_id,
+            old_values={"status": old_status},
+            new_values={"status": "active"},
+        )
 
     return {"message": "User activated"}
 
@@ -1158,11 +1168,14 @@ def unlock_user(
     lock, or failed attempts that never reached one — is logged as an UPDATE of the
     two fields, because no lockout status actually changed. Idempotent: unlocking a
     user with no lock state at all returns 200 and writes NO audit row (no
-    fabricated status changes).
+    fabricated status changes). Existing platform accounts require platform authority;
+    lock state and required audit evidence commit together or roll back (503 on audit loss).
     """
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
+    require_manageable_user(current_user, user)
 
     had_lock_state = bool(user.failed_login_attempts) or user.locked_until is not None
     if not had_lock_state:
@@ -1170,35 +1183,36 @@ def unlock_user(
 
     prior_locked_until = user.locked_until
     prior_failed_attempts = user.failed_login_attempts
-    user.failed_login_attempts = 0
-    user.locked_until = None
-    identifier = user.employee_id or user.email
-    was_locked_out = prior_locked_until is not None and prior_locked_until > datetime.utcnow()
-    if was_locked_out:
-        audit.log_status_change(
-            "user",
-            user.id,
-            identifier,
-            "locked",
-            "unlocked",
-            description=f"Cleared failed-login lockout for user {identifier}",
-            extra_data={
-                "failed_login_attempts": prior_failed_attempts,
-                "locked_until": prior_locked_until.isoformat() if prior_locked_until else None,
-            },
-        )
-    else:
-        audit.log_update(
-            "user",
-            user.id,
-            identifier,
-            old_values={
-                "failed_login_attempts": prior_failed_attempts,
-                "locked_until": prior_locked_until.isoformat() if prior_locked_until else None,
-            },
-            new_values={"failed_login_attempts": 0, "locked_until": None},
-            description=f"Cleared residual failed-login state for user {identifier} (no lock in force)",
-        )
-    db.commit()
+    audit = required_security_audit(audit)
+    with atomic_security_write(db):
+        user.failed_login_attempts = 0
+        user.locked_until = None
+        identifier = user.employee_id or user.email
+        was_locked_out = prior_locked_until is not None and prior_locked_until > datetime.utcnow()
+        if was_locked_out:
+            audit.log_status_change(
+                "user",
+                user.id,
+                identifier,
+                "locked",
+                "unlocked",
+                description=f"Cleared failed-login lockout for user {identifier}",
+                extra_data={
+                    "failed_login_attempts": prior_failed_attempts,
+                    "locked_until": (prior_locked_until.isoformat() if prior_locked_until else None),
+                },
+            )
+        else:
+            audit.log_update(
+                "user",
+                user.id,
+                identifier,
+                old_values={
+                    "failed_login_attempts": prior_failed_attempts,
+                    "locked_until": (prior_locked_until.isoformat() if prior_locked_until else None),
+                },
+                new_values={"failed_login_attempts": 0, "locked_until": None},
+                description=f"Cleared residual failed-login state for user {identifier} (no lock in force)",
+            )
 
     return {"message": "User unlocked"}

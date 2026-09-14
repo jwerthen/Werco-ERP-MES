@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from fastapi import WebSocket
 
@@ -30,8 +30,16 @@ class ConnectionManager:
         # Per-connection tenant identity, captured from the verified token at connect time.
         self.company_connections: Dict[int, List[WebSocket]] = {}
         self.connection_company: Dict[WebSocket, int] = {}
+        self.connection_authorizers: Dict[WebSocket, Callable[[], Awaitable[bool]]] = {}
 
-    async def connect(self, websocket: WebSocket, user_id: str = None, company_id: Optional[int] = None):
+    async def connect(
+        self,
+        websocket: WebSocket,
+        user_id: str = None,
+        company_id: Optional[int] = None,
+        *,
+        authorize: Optional[Callable[[], Awaitable[bool]]] = None,
+    ):
         """Accept and store a WebSocket connection.
 
         ``company_id`` is the *active* company for the connecting client (already
@@ -40,6 +48,8 @@ class ConnectionManager:
         """
         await websocket.accept()
         self.active_connections.append(websocket)
+        if authorize is not None:
+            self.connection_authorizers[websocket] = authorize
 
         if user_id:
             user_id = str(user_id)
@@ -56,6 +66,7 @@ class ConnectionManager:
 
     def disconnect(self, websocket: WebSocket, user_id: str = None):
         """Remove a WebSocket connection."""
+        self.connection_authorizers.pop(websocket, None)
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
 
@@ -84,6 +95,23 @@ class ConnectionManager:
 
         logger.info(f"WebSocket disconnected. Total connections: {len(self.active_connections)}")
 
+    async def _may_deliver(self, websocket: WebSocket) -> bool:
+        """Revalidate before every event so revocation cannot leak a final payload."""
+        authorize = self.connection_authorizers.get(websocket)
+        if authorize is None:
+            return websocket in self.active_connections
+        try:
+            if await authorize():
+                return websocket in self.active_connections
+        except Exception:
+            logger.warning("WebSocket delivery authorization unavailable")
+        try:
+            await websocket.close(code=1008)
+        except Exception:
+            pass
+        self.disconnect(websocket)
+        return False
+
     async def broadcast(self, message: Dict[str, Any], message_type: str = "update"):
         """Send a message to all connected clients."""
         if not self.active_connections:
@@ -94,8 +122,10 @@ class ConnectionManager:
         message_json = json.dumps(data)
         disconnected = []
 
-        for connection in self.active_connections:
+        for connection in list(self.active_connections):
             try:
+                if not await self._may_deliver(connection):
+                    continue
                 await connection.send_text(message_json)
             except Exception as e:
                 logger.error(f"Error sending to WebSocket: {e}")
@@ -124,6 +154,8 @@ class ConnectionManager:
         # Iterate a copy: disconnect() mutates company_connections.
         for connection in list(connections):
             try:
+                if not await self._may_deliver(connection):
+                    continue
                 await connection.send_text(message_json)
             except Exception as e:
                 logger.error(f"Error sending to company WebSocket: {e}")
@@ -142,8 +174,10 @@ class ConnectionManager:
         message_json = json.dumps(data)
         disconnected = []
 
-        for connection in self.user_connections[user_id]:
+        for connection in list(self.user_connections[user_id]):
             try:
+                if not await self._may_deliver(connection):
+                    continue
                 await connection.send_text(message_json)
             except Exception as e:
                 logger.error(f"Error sending to user WebSocket: {e}")

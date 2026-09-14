@@ -1,0 +1,44 @@
+FRONTEND POLICY SCAN
+
+> werco-erp-frontend@1.0.1 audit:ci
+> node scripts/audit-check.mjs
+
+[audit-check] npm audit (frontend) — blocking severities: high, critical
+[audit-check] audit totals: critical=0 high=2 moderate=1 low=0
+
+[audit-check] ALLOWLISTED (1 advisory/advisories — documented as not applicable):
+  - GHSA-qwww-vcr4-c8h2  React Router: RSC Mode CSRF Bypass Allows Action Execution Before 400 Response
+      packages:    react-router (high), react-router-dom (high)
+      reason:
+        The vulnerability is reachable ONLY in React Router's RSC (React Server Components) mode,
+        where a server action can execute before the framework returns its 400 CSRF response.
+        This app has no RSC mode and no server at all in front of the router. Verified:
+          - no RSC imports anywhere in frontend/src (`react-router/rsc`, `unstable_RSC`, `RSCErrorHandler`);
+          - no SSR / static-handler APIs (`createStaticHandler`, `StaticRouter`, `renderToString`,
+            `renderToPipeableStream`);
+          - no server dependencies (`express`, `@react-router/node`, `@react-router/serve`);
+          - the router is a plain client-side <BrowserRouter> in frontend/src/App.tsx;
+          - the build is a client-only `vite build` with no ssr configuration.
+        There is therefore no server action to execute and no CSRF boundary to bypass.
+        Also flagged transitively on `react-router-dom`, which has no advisory of its own.
+      remove when: react-router is upgraded to >=8.3.0, which requires the v8 migration that drops react-router-dom (no v8 of react-router-dom exists; the package folds into react-router in v8, so clearing this means rewriting imports across ~59 pages).
+      reviewed:    2026-07-24
+
+[audit-check] WARNING (non-fatal): 1 allowlist entry/entries no longer match any
+[audit-check] current high/critical advisory. Delete them from scripts/audit-allowlist.json:
+  - GHSA-mh99-v99m-4gvg  (brace-expansion)
+
+[audit-check] PASS — no un-allowlisted high/critical advisories (2 allowlisted, 1 stale allowlist entry/entries).
+
+PYTHON FRESH INSTALLED ENVIRONMENT SCAN
+Found 8 known vulnerabilities, ignored 2 in 1 package
+Name  Version ID              Fix Versions
+----- ------- --------------- ------------
+pypdf 6.14.2  PYSEC-2026-3656 6.15.0
+pypdf 6.14.2  PYSEC-2026-3655 6.15.0
+pypdf 6.14.2  PYSEC-2026-3655 6.15.0
+pypdf 6.14.2  PYSEC-2026-3656 6.15.0
+pypdf 6.14.2  PYSEC-2026-3912 6.15.0
+pypdf 6.14.2  PYSEC-2026-3910 6.16.1
+pypdf 6.14.2  PYSEC-2026-3911 6.16.1
+pypdf 6.14.2  PYSEC-2026-3913 6.16.0

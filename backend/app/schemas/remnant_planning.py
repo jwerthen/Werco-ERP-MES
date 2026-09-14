@@ -223,6 +223,7 @@ def validate_group_binding(selection: RemnantSelection, quote: dict) -> None:
         not known
         or evidence.grade is None
         or evidence.geometry.kind == "unknown"
+        or thickness is None
         or type(thickness) not in (int, float)
         or not math.isfinite(thickness)
         or not isinstance(quote.get("parts"), list)

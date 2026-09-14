@@ -118,3 +118,7 @@ it.each([
   const badge = await screen.findByText(status.replace(/_/g, ' '));
   expect(badge).toHaveClass(...classes);
 });
+
+jest.mock('../hooks/usePermissions', () => ({
+  usePermissions: () => ({ role: 'admin', isSuperuser: false }),
+}));

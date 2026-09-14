@@ -1,0 +1,87 @@
+{
+  "frontend_production": {
+    "files": 422,
+    "lines": 164111,
+    "as_any_occurrences": 10
+  },
+  "frontend_tests": {
+    "files": 438,
+    "lines": 95851
+  },
+  "endpoint_modules": 79,
+  "router_decorators": 784,
+  "backend_largest_functions": [
+    [
+      683,
+      "backend/app/api/endpoints/rfq_quotes.py",
+      "generate_estimate",
+      322
+    ],
+    [
+      520,
+      "backend/app/api/endpoints/shop_floor.py",
+      "clock_out",
+      1758
+    ],
+    [
+      474,
+      "backend/app/api/endpoints/shop_floor.py",
+      "complete_operation",
+      4345
+    ],
+    [
+      465,
+      "backend/app/services/rfq_parsing_service.py",
+      "build_normalized_part_specs",
+      982
+    ],
+    [
+      462,
+      "backend/app/api/endpoints/work_orders.py",
+      "_run_laser_nest_import",
+      2813
+    ],
+    [
+      443,
+      "backend/app/api/endpoints/work_orders.py",
+      "complete_operation",
+      5406
+    ],
+    [
+      429,
+      "backend/app/api/endpoints/work_orders.py",
+      "complete_work_order",
+      4488
+    ],
+    [
+      401,
+      "backend/app/services/inventory_combine_service.py",
+      "combine_inventory",
+      1702
+    ],
+    [
+      397,
+      "backend/app/api/endpoints/shop_floor.py",
+      "shop_floor_dashboard",
+      2918
+    ],
+    [
+      397,
+      "backend/app/api/endpoints/auth.py",
+      "login",
+      182
+    ],
+    [
+      339,
+      "backend/app/services/work_order_timeline_service.py",
+      "list_work_order_timeline",
+      39
+    ],
+    [
+      337,
+      "backend/app/api/endpoints/auth.py",
+      "register_public",
+      1433
+    ]
+  ]
+}

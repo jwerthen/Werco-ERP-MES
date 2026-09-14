@@ -906,7 +906,7 @@ class TestFAIPrefill:
         return fai
 
     def test_prefill_populates_matching_chars_and_reports_unmatched(self, client: TestClient, db_session: Session):
-        work_order, operation, user, headers = _fixture(db_session)
+        work_order, operation, user, headers = _fixture(db_session, role=UserRole.QUALITY)
         gauge = _make_gauge(db_session, name="Mitutoyo caliper 7")
         step = _add_step(db_session, operation, label="Bore dia")
         recorded = client.post(
@@ -961,7 +961,7 @@ class TestFAIPrefill:
         assert {entry["char_number"] for entry in extra["prefilled"]} == {1}
 
     def test_ambiguous_step_label_is_reported_not_guessed(self, client: TestClient, db_session: Session):
-        work_order, operation, user, headers = _fixture(db_session)
+        work_order, operation, user, headers = _fixture(db_session, role=UserRole.QUALITY)
         step_a = _add_step(db_session, operation, label="Width")
         step_b = _add_step(db_session, operation, label="Width")
         for step in (step_a, step_b):
@@ -981,7 +981,7 @@ class TestFAIPrefill:
     def test_second_prefill_is_idempotent(self, client: TestClient, db_session: Session):
         # Running prefill twice must not overwrite, duplicate, or re-audit:
         # the second call reports the filled char as already recorded.
-        work_order, operation, user, headers = _fixture(db_session)
+        work_order, operation, user, headers = _fixture(db_session, role=UserRole.QUALITY)
         step = _add_step(db_session, operation, label="Bore dia")
         recorded = client.post(
             RECORDS_URL.format(op=operation.id, step=step.id), json={"value_numeric": 1.001}, headers=headers
@@ -1007,7 +1007,7 @@ class TestFAIPrefill:
         )
 
     def test_fai_without_work_order_is_400(self, client: TestClient, db_session: Session):
-        work_order, operation, user, headers = _fixture(db_session)
+        work_order, operation, user, headers = _fixture(db_session, role=UserRole.QUALITY)
         fai = FirstArticleInspection(fai_number=f"FAI-TEST-{_next():05d}", part_id=work_order.part_id, company_id=1)
         db_session.add(fai)
         db_session.commit()

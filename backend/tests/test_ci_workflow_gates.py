@@ -77,6 +77,7 @@ GATE_JOBS = (
     ("ci-cd.yml", "backend-test"),
     ("ci-cd.yml", "frontend-lint"),
     ("ci-cd.yml", "frontend-test"),
+    ("ci-cd.yml", "landing-check"),
     ("pr-check.yml", "frontend-checks"),
 )
 
@@ -150,6 +151,44 @@ class TestGateStepsAreBlocking:
             "These jobs exist to block a bad merge; a step that cannot fail reports green. "
             "If the check is genuinely advisory, move it out of this job."
         )
+
+
+class TestDeploymentHygieneAndLandingGates:
+    def test_real_docker_hygiene_checks_run_in_the_required_backend_suite(self):
+        job = _load_workflow("ci-cd.yml")["jobs"]["backend-test"]
+        pytest_steps = [step for step in job["steps"] if re.search(r"\bpytest\s+tests/", step.get("run", ""))]
+        assert pytest_steps, "The required backend suite must still run."
+        assert all(step.get("env", {}).get("RUN_DOCKER_HYGIENE_TESTS") == "1" for step in pytest_steps)
+
+    def test_landing_typecheck_and_build_block_the_release_pipeline(self):
+        workflow = _load_workflow("ci-cd.yml")
+        jobs = workflow["jobs"]
+        job = jobs["landing-check"]
+        assert job["defaults"]["run"]["working-directory"] == "./landing"
+        commands = [step.get("run", "") for step in job["steps"]]
+        assert "npm ci" in commands
+        assert "npm run type-check" in commands
+        assert "npm run build" in commands
+        assert not job.get("continue-on-error")
+
+        def dependencies(name):
+            direct = jobs[name].get("needs", [])
+            direct = [direct] if isinstance(direct, str) else direct
+            return set(direct).union(*(dependencies(parent) for parent in direct))
+
+        assert "landing-check" in dependencies("deploy-production")
+
+    def test_landing_dependency_audit_is_blocking_in_the_nightly_workflow(self):
+        job = _load_workflow("dependency-audit.yml")["jobs"]["npm-audit-landing"]
+        audit_steps = [step for step in job["steps"] if step.get("run") == "npm run audit:ci"]
+        assert audit_steps
+        assert not job.get("continue-on-error")
+        assert all(
+            step.get("working-directory") == "./landing" and not step.get("continue-on-error") for step in audit_steps
+        )
+        scripts = json.loads((REPO_ROOT / "landing" / "package.json").read_text())["scripts"]
+        assert scripts["type-check"] == "tsc --noEmit"
+        assert "--audit-level=high" in scripts["audit:ci"]
 
 
 class TestPrCheckDoesNotDuplicateTheBackendSuite:

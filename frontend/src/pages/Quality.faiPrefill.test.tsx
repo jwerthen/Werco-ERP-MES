@@ -11,11 +11,13 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import QualityPage from './Quality';
+import type { UserRole } from '../types';
+let mockRole: UserRole = 'quality';
 import api from '../services/api';
 import { ToastProvider } from '../components/ui/Toast';
 
 jest.mock('../hooks/usePermissions', () => ({
-  usePermissions: () => ({ can: () => true, canAny: () => true }),
+  usePermissions: () => ({ role: mockRole, isSuperuser: false, can: () => true, canAny: () => true }),
 }));
 
 jest.mock('../services/api', () => ({
@@ -122,6 +124,7 @@ const PREFILL_RESULT = {
 };
 
 beforeEach(() => {
+  mockRole = 'quality';
   jest.clearAllMocks();
   mockedApi.getNCRs.mockResolvedValue([]);
   mockedApi.getCARs.mockResolvedValue([]);
@@ -145,7 +148,7 @@ async function openFaiDetail() {
   fireEvent.click(await screen.findByRole('tab', { name: /^fai$/i }));
   fireEvent.click((await screen.findAllByText('FAI-000007'))[0]);
   const dialog = await screen.findByRole('dialog');
-  await within(dialog).findByTestId('fai-prefill-button');
+  await within(dialog).findByText('Bore diameter');
   return dialog;
 }
 
@@ -187,4 +190,28 @@ describe('Quality FAI prefill from process steps', () => {
     expect(within(dialog).queryByTestId('fai-prefill-summary')).not.toBeInTheDocument();
     expect(mockedApi.getFAI).toHaveBeenCalledTimes(1);
   });
+});
+
+
+it.each<UserRole>(['admin', 'manager', 'platform_admin', 'supervisor', 'operator', 'quality', 'shipping', 'viewer'])(
+  '%s sees FAI evidence and only authorized authoring controls', async role => {
+    mockRole = role;
+    const dialog = await openFaiDetail();
+    expect(within(dialog).getByText('Bore diameter')).toBeInTheDocument();
+    const allowed = ['admin', 'manager', 'platform_admin', 'supervisor', 'quality'].includes(role);
+    expect(!!within(dialog).queryByTestId('fai-prefill-button')).toBe(allowed);
+    expect(!!screen.queryByText('New FAI')).toBe(allowed);
+    expect(mockedApi.prefillFAIFromSteps).not.toHaveBeenCalled();
+  }
+);
+
+it.each([
+  { status: 'passed' }, { status: 'failed' }, { status: 'conditional' },
+  { status: 'in_progress', completed_date: '2026-09-13' },
+])('final FAI evidence stays readable without a prefill action: %j', async finalFields => {
+  mockedApi.getFAI.mockResolvedValue({ ...FAI_DETAIL, ...finalFields });
+  const dialog = await openFaiDetail();
+  expect(within(dialog).getByText('Bore diameter')).toBeInTheDocument();
+  expect(within(dialog).queryByTestId('fai-prefill-button')).not.toBeInTheDocument();
+  expect(mockedApi.prefillFAIFromSteps).not.toHaveBeenCalled();
 });

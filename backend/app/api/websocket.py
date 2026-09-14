@@ -1,178 +1,122 @@
-"""WebSocket API endpoints for real-time updates."""
+"""Authenticated real-time updates, bound to a live user and active tenant."""
 
+import asyncio
 import logging
 from typing import Optional, Tuple
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
+from starlette.concurrency import run_in_threadpool
 
+from app.core.security import verify_token
 from app.core.websocket import manager
+from app.db.database import SessionLocal
+from app.db.tenant_filter import tenant_query
+from app.models.work_center import WorkCenter
+from app.models.work_order import WorkOrder
+from app.services.access_identity import resolve_access_identity
 
 logger = logging.getLogger(__name__)
-
 router = APIRouter()
-
-# WebSocket policy-violation close code (RFC 6455). Used when a connection
-# cannot be authenticated, matching the existing authenticated /ws routes.
 WS_POLICY_VIOLATION = 1008
+WS_AUTH_RECHECK_SECONDS = 30
 
 
-def _identity_from_token(token: str) -> Optional[Tuple[str, int]]:
-    """Resolve ``(user_id, company_id)`` for a WebSocket connection.
+def _identity_from_token(
+    token: str, *, work_center_id: Optional[int] = None, work_order_id: Optional[int] = None
+) -> Optional[Tuple[str, int]]:
+    """Check an interactive access token and any requested tenant-owned resource.
 
-    Derives the active company the same way ``get_current_company_id`` does:
-    the token's ``cid`` claim (which already reflects platform-admin company
-    switching), falling back to the user's own ``company_id`` for legacy tokens
-    that predate the ``cid`` claim. Returns ``None`` when the token is invalid,
-    carries no user, or no company can be resolved.
+    HTTP shares the live account/company resolver. Socket channels accept only
+    unscoped access JWTs; kiosk, API, display, station and refresh credentials do
+    not grant this separate real-time channel. Each check owns a short session.
     """
-    from app.core.security import verify_token
-
     payload = verify_token(token)
-    if not payload or not payload.get("user_id"):
+    if payload is None or payload.get("scope") is not None:
         return None
-
-    user_id = str(payload["user_id"])
-    company_id = payload.get("company_id")
-
-    if company_id is None:
-        # Legacy token without a cid claim: fall back to the user's own company,
-        # mirroring get_current_company_id's fallback to user.company_id.
-        from app.db.database import SessionLocal
-        from app.models.user import User
-
-        db = SessionLocal()
+    with SessionLocal() as db:
         try:
-            user = db.query(User).filter(User.id == int(user_id)).first()
-            if user is None or user.company_id is None:
+            identity = resolve_access_identity(db, payload)
+        except HTTPException:
+            return None
+        company_id = identity.company_id
+        if work_center_id is not None:
+            center = tenant_query(db, WorkCenter, company_id).filter(WorkCenter.id == work_center_id).first()
+            if center is None:
                 return None
-            company_id = user.company_id
-        finally:
-            db.close()
+        if work_order_id is not None:
+            order = (
+                tenant_query(db, WorkOrder, company_id)
+                .filter(WorkOrder.id == work_order_id, WorkOrder.is_deleted == False)
+                .first()
+            )
+            if order is None:
+                return None
+        return str(identity.user.id), company_id
 
-    return user_id, int(company_id)
+
+async def _serve_socket(websocket: WebSocket, token: Optional[str], **resource: int) -> None:
+    async def resolve():
+        if not token:
+            return None
+        try:
+            return await run_in_threadpool(_identity_from_token, token, **resource)
+        except Exception:
+            # A database outage must not leave an unverified socket authorized.
+            # Never put query-string credentials or received payloads in logs.
+            logger.warning("WebSocket identity check unavailable")
+            return None
+
+    identity = await resolve()
+    if identity is None:
+        await websocket.close(code=WS_POLICY_VIOLATION)
+        return
+    user_id, company_id = identity
+
+    async def still_authorized() -> bool:
+        return await resolve() == identity
+
+    await manager.connect(websocket, user_id, company_id=company_id, authorize=still_authorized)
+    try:
+        await websocket.send_json(
+            {
+                "type": "connected",
+                "data": {"message": "Connected to Werco ERP real-time updates", "user_id": user_id, **resource},
+            }
+        )
+        while True:
+            try:
+                await asyncio.wait_for(websocket.receive_json(), timeout=WS_AUTH_RECHECK_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+            if not await still_authorized():
+                await websocket.close(code=WS_POLICY_VIOLATION)
+                return
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.info("WebSocket connection ended")
+    finally:
+        manager.disconnect(websocket, user_id)
 
 
 @router.websocket("/ws/updates")
 async def websocket_updates(websocket: WebSocket, token: Optional[str] = Query(None)):
+    """Tenant updates for an active interactive user; revalidated before delivery.
+
+    Expired tokens and disabled/moved users or inactive companies close with
+    1008. Idle sockets also revalidate every 30 seconds. Access JWTs retain the
+    HTTP lifetime contract: logout does not revoke an unexpired access JWT.
     """
-    WebSocket endpoint for real-time dashboard and system updates.
-
-    Requires authentication: the connection is bound to the caller's active
-    company so tenant-scoped broadcasts (work-order / dashboard / shop-floor
-    completion events) reach only that company's clients. Unauthenticated
-    connections are rejected with a policy-violation close (tenant isolation,
-    invariant #1).
-    """
-    identity = None
-    if token:
-        try:
-            identity = _identity_from_token(token)
-        except Exception as e:
-            logger.warning(f"Invalid token in WebSocket connection: {e}")
-
-    if identity is None:
-        await websocket.close(code=WS_POLICY_VIOLATION)
-        return
-
-    user_id, company_id = identity
-    await manager.connect(websocket, user_id, company_id=company_id)
-
-    try:
-        # Welcome message
-        await websocket.send_json(
-            {"type": "connected", "data": {"message": "Connected to Werco ERP real-time updates", "user_id": user_id}}
-        )
-
-        # Keep connection alive
-        while True:
-            data = await websocket.receive_json()
-            logger.debug(f"Received WebSocket message: {data}")
-
-    except WebSocketDisconnect:
-        manager.disconnect(websocket, user_id)
-        logger.info("WebSocket client disconnected")
-
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-        manager.disconnect(websocket, user_id)
+    await _serve_socket(websocket, token)
 
 
 @router.websocket("/ws/shop-floor/{work_center_id}")
-async def websocket_shop_floor(websocket: WebSocket, work_center_id: int, token: str = Query(...)):
-    """
-    WebSocket endpoint for real-time shop floor updates for a specific work center.
-    Requires authentication.
-    """
-    # Verify authentication and resolve the active company for tenant scoping.
-    identity = _identity_from_token(token)
-    if identity is None:
-        await websocket.close(code=WS_POLICY_VIOLATION)
-        return
-
-    user_id, company_id = identity
-    await manager.connect(websocket, user_id, company_id=company_id)
-
-    try:
-        # Send initial data
-        await websocket.send_json(
-            {
-                "type": "connected",
-                "data": {
-                    "work_center_id": work_center_id,
-                    "user_id": user_id,
-                    "message": f"Connected to work center {work_center_id} updates",
-                },
-            }
-        )
-
-        while True:
-            # Receive heartbeat or commands
-            data = await websocket.receive_json()
-            logger.debug(f"Shop floor WebSocket message: {data}")
-
-    except WebSocketDisconnect:
-        manager.disconnect(websocket, user_id)
-        logger.info(f"Shop floor WebSocket disconnected for work center {work_center_id}")
-
-    except Exception as e:
-        logger.error(f"Shop floor WebSocket error: {e}")
-        manager.disconnect(websocket, user_id)
+async def websocket_shop_floor(websocket: WebSocket, work_center_id: int, token: Optional[str] = Query(None)):
+    """Live-user updates after resolving the work center inside the active tenant."""
+    await _serve_socket(websocket, token, work_center_id=work_center_id)
 
 
 @router.websocket("/ws/work-order/{work_order_id}")
-async def websocket_work_order(websocket: WebSocket, work_order_id: int, token: str = Query(...)):
-    """
-    WebSocket endpoint for real-time work order status updates.
-    Requires authentication.
-    """
-    identity = _identity_from_token(token)
-    if identity is None:
-        await websocket.close(code=WS_POLICY_VIOLATION)
-        return
-
-    user_id, company_id = identity
-    await manager.connect(websocket, user_id, company_id=company_id)
-
-    try:
-        await websocket.send_json(
-            {
-                "type": "connected",
-                "data": {
-                    "work_order_id": work_order_id,
-                    "user_id": user_id,
-                    "message": f"Connected to work order {work_order_id} updates",
-                },
-            }
-        )
-
-        while True:
-            data = await websocket.receive_json()
-            logger.debug(f"Work order WebSocket message: {data}")
-
-    except WebSocketDisconnect:
-        manager.disconnect(websocket, user_id)
-        logger.info(f"Work order WebSocket disconnected for work order {work_order_id}")
-
-    except Exception as e:
-        logger.error(f"Work order WebSocket error: {e}")
-        manager.disconnect(websocket, user_id)
+async def websocket_work_order(websocket: WebSocket, work_order_id: int, token: Optional[str] = Query(None)):
+    """Live-user updates after resolving an undeleted work order in the active tenant."""
+    await _serve_socket(websocket, token, work_order_id=work_order_id)

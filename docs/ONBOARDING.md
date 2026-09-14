@@ -75,7 +75,7 @@ venv\Scripts\activate
 source venv/bin/activate
 
 # Install dependencies
-pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements-dev.lock
 
 # Copy and configure environment
 cp .env.example .env
@@ -98,7 +98,7 @@ uvicorn app.main:app --reload --port 8000
 cd frontend
 
 # Install dependencies
-npm install
+npm ci
 
 # Copy and configure environment
 cp .env.example .env
@@ -276,11 +276,10 @@ alembic downgrade -1
 
 ### "Module not found" errors (Python)
 - Activate virtual environment: `source venv/bin/activate`
-- Reinstall: `pip install -r requirements.txt`
+- Reinstall from `backend/`: `python -m pip install --require-hashes -r requirements-dev.lock`
 
 ### "Module not found" errors (JavaScript)
-- Delete node_modules: `rm -rf node_modules`
-- Reinstall: `npm install`
+- Reinstall from `frontend/`: `npm ci` (replaces `node_modules` and keeps the lockfile intact)
 
 ### Database connection refused
 - Start PostgreSQL: `docker-compose up -d db`

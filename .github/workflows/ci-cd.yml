@@ -32,12 +32,14 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
+          cache-dependency-path: backend/requirements-dev.lock
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
+          python -m pip install --require-hashes -r requirements-dev.lock
+
+      - name: Verify Python dependency locks
+        run: python scripts/lock_dependencies.py --check
 
       - name: Run Black
         run: black --check --diff --config=.black app tests
@@ -73,8 +75,8 @@ jobs:
   #
   # Fidelity to production (Supabase Postgres) is bought elsewhere, on purpose: the
   # migration tests compile against a postgresql dialect, and the Alembic migrations
-  # themselves run against real Postgres at DEPLOY time -- no CI job exercises them, so
-  # do not read this as a CI safety net.
+  # themselves also have targeted PostgreSQL verifiers in e2e.yml. This job
+  # intentionally remains the fast SQLite regression suite.
   backend-test:
     name: Backend Tests
     runs-on: ubuntu-latest
@@ -89,17 +91,18 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
+          cache-dependency-path: backend/requirements-dev.lock
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
+          python -m pip install --require-hashes -r requirements-dev.lock
 
       # No DATABASE_URL / TEST_DATABASE_URL here: tests/conftest.py sets both, per
       # xdist worker, before app.main is imported. Exporting a Postgres URL that
       # conftest immediately overwrites is how the misreading above survived so long.
       - name: Run pytest with coverage
+        env:
+          RUN_DOCKER_HYGIENE_TESTS: "1"
         run: |
           pytest tests/ -v --cov=app --cov-report=xml --cov-report=term
 
@@ -167,10 +170,30 @@ jobs:
         env:
           CI: true
 
+  landing-check:
+    name: Landing Checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./landing
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: landing/package-lock.json
+      - name: Install landing dependencies
+        run: npm ci
+      - name: Check landing TypeScript
+        run: npm run type-check
+      - name: Build landing site
+        run: npm run build
+
   build:
     name: Build Docker Images
     runs-on: ubuntu-latest
-    needs: [backend-lint, backend-test, frontend-lint, frontend-test]
+    needs: [backend-lint, backend-test, frontend-lint, frontend-test, landing-check]
     if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v7
@@ -247,7 +270,7 @@ jobs:
 
       - name: Scan all files for committed private keys
         run: |
-          pip install pre-commit
+          pip install pre-commit==4.5.1
           pre-commit run detect-private-key --all-files
 
   security-scan:
@@ -355,7 +378,7 @@ jobs:
         continue-on-error: true
         run: |
           pip install pip-audit==2.10.0
-          pip-audit -r requirements.txt -r requirements-dev.txt \
+          pip-audit --require-hashes -r requirements-dev.lock \
             --ignore-vuln PYSEC-2026-1325
 
   deploy-staging:
@@ -735,7 +758,7 @@ jobs:
         # local development, which would trip the script's sanity checks.
         run: |
           cd backend
-          python3 -m pip install -q -r requirements.txt
+          python3 -m pip install -q --require-hashes -r requirements.lock
           railway run --no-local --service werco-api --environment production --project "${{ secrets.RAILWAY_PROJECT_ID }}" python3 -m scripts.verify_launch
 
       - name: Promote the public Vercel website after the API gate

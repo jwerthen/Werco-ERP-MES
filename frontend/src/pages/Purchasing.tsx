@@ -10,6 +10,7 @@ import api from '../services/api';
 import PurchaseOrderDetail from '../components/operations/PurchaseOrderDetail';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { canPublishDocuments, canDeleteDocuments } from '../utils/recordWriteAccess';
 import { hasPermission } from '../utils/permissions';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
@@ -192,6 +193,8 @@ export default function Purchasing() {
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState('');
   const { user } = useAuth();
+  const canPublish = canPublishDocuments(user);
+  const canDeleteDocument = canDeleteDocuments(user);
   // Mirror the backend role gates so no button 403s:
   // - POST /purchasing/purchase-orders allows admin/manager/supervisor → purchasing:create
   // - PO send and vendor create are admin/manager only → purchasing:approve (same role set)
@@ -878,6 +881,7 @@ export default function Purchasing() {
 
   const handleVendorDocUpload = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canPublish) return;
     if (!selectedVendor || !vendorDocForm.file) {
       showToast('error', 'Please select a file');
       return;
@@ -926,7 +930,7 @@ export default function Purchasing() {
   };
 
   const handleConfirmDeleteVendorDoc = async () => {
-    if (!deleteVendorDocTarget || deleteVendorDocPending) return;
+    if (!canDeleteDocument || !deleteVendorDocTarget || deleteVendorDocPending) return;
     setDeleteVendorDocPending(true);
     try {
       await api.deleteDocument(deleteVendorDocTarget.id);
@@ -2582,56 +2586,58 @@ export default function Purchasing() {
                 <h4 className="font-semibold">Documents</h4>
               </div>
 
-              <form onSubmit={handleVendorDocUpload} className="grid grid-cols-1 md:grid-cols-6 gap-3 mb-4">
-                <input
-                  type="text"
-                  value={vendorDocForm.title}
-                  onChange={e => setVendorDocForm({ ...vendorDocForm, title: e.target.value })}
-                  className="input md:col-span-2"
-                  placeholder="Title"
-                  aria-label="Document title"
-                />
-                <select
-                  value={vendorDocForm.document_type}
-                  onChange={e => setVendorDocForm({ ...vendorDocForm, document_type: e.target.value })}
-                  className="input md:col-span-1"
-                >
-                  {documentTypes.length > 0 ? (
-                    documentTypes.map(t => (
-                      <option key={t.value} value={t.value}>
-                        {t.label}
-                      </option>
-                    ))
-                  ) : (
-                    <option value="certificate">Certificate</option>
-                  )}
-                </select>
-                <input
-                  type="text"
-                  value={vendorDocForm.revision}
-                  onChange={e => setVendorDocForm({ ...vendorDocForm, revision: e.target.value })}
-                  className="input md:col-span-1"
-                  placeholder="Rev"
-                  aria-label="Document revision"
-                />
-                <input
-                  type="file"
-                  onChange={e => setVendorDocForm({ ...vendorDocForm, file: e.target.files?.[0] || null })}
-                  className="input md:col-span-1"
-                  aria-label="Document file"
-                />
-                <Button type="submit" className="md:col-span-1" disabled={actionBusy}>
-                  Upload
-                </Button>
-                <input
-                  type="text"
-                  value={vendorDocForm.description}
-                  onChange={e => setVendorDocForm({ ...vendorDocForm, description: e.target.value })}
-                  className="input md:col-span-6"
-                  placeholder="Description (optional)"
-                  aria-label="Document description"
-                />
-              </form>
+              {canPublish && (
+                <form onSubmit={handleVendorDocUpload} className="grid grid-cols-1 md:grid-cols-6 gap-3 mb-4">
+                  <input
+                    type="text"
+                    value={vendorDocForm.title}
+                    onChange={e => setVendorDocForm({ ...vendorDocForm, title: e.target.value })}
+                    className="input md:col-span-2"
+                    placeholder="Title"
+                    aria-label="Document title"
+                  />
+                  <select
+                    value={vendorDocForm.document_type}
+                    onChange={e => setVendorDocForm({ ...vendorDocForm, document_type: e.target.value })}
+                    className="input md:col-span-1"
+                  >
+                    {documentTypes.length > 0 ? (
+                      documentTypes.map(t => (
+                        <option key={t.value} value={t.value}>
+                          {t.label}
+                        </option>
+                      ))
+                    ) : (
+                      <option value="certificate">Certificate</option>
+                    )}
+                  </select>
+                  <input
+                    type="text"
+                    value={vendorDocForm.revision}
+                    onChange={e => setVendorDocForm({ ...vendorDocForm, revision: e.target.value })}
+                    className="input md:col-span-1"
+                    placeholder="Rev"
+                    aria-label="Document revision"
+                  />
+                  <input
+                    type="file"
+                    onChange={e => setVendorDocForm({ ...vendorDocForm, file: e.target.files?.[0] || null })}
+                    className="input md:col-span-1"
+                    aria-label="Document file"
+                  />
+                  <Button type="submit" className="md:col-span-1" disabled={actionBusy}>
+                    Upload
+                  </Button>
+                  <input
+                    type="text"
+                    value={vendorDocForm.description}
+                    onChange={e => setVendorDocForm({ ...vendorDocForm, description: e.target.value })}
+                    className="input md:col-span-6"
+                    placeholder="Description (optional)"
+                    aria-label="Document description"
+                  />
+                </form>
+              )}
 
               {vendorDocsLoading ? (
                 <div className="text-sm text-slate-400">Loading documents...</div>
@@ -2676,13 +2682,15 @@ export default function Purchasing() {
                               >
                                 Download
                               </button>
-                              <button
-                                type="button"
-                                onClick={() => handleVendorDocDelete(doc)}
-                                className="text-red-600 hover:text-red-300 text-sm"
-                              >
-                                Delete
-                              </button>
+                              {canDeleteDocument && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleVendorDocDelete(doc)}
+                                  className="text-red-600 hover:text-red-300 text-sm"
+                                >
+                                  Delete
+                                </button>
+                              )}
                             </div>
                           </td>
                         </tr>

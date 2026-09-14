@@ -71,8 +71,8 @@ jobs:
       # was never redirected -- and counted for nothing; `2>/dev/null` hid only
       # the tools' own failure output on stderr. These are the same invocations
       # ci-cd.yml's required jobs already run; the `--` passthrough is required
-      # because frontend/package.json's "lint" is a bare
-      # `eslint src --ext .ts,.tsx` with no warning cap of its own.
+      # because frontend/package.json's "lint" runs its config regression checks
+      # then ESLint, which has no warning cap of its own.
       - name: Run ESLint
         run: npm run lint -- --max-warnings=0
 

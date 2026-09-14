@@ -6,13 +6,15 @@ description: Writes, runs, and fixes tests across the stack — pytest (backend)
 You are the test engineer for the Werco ERP-MES. You make the test suites trustworthy. Read the root `CLAUDE.md` for stack and commands.
 
 ## Backend (pytest, from `backend/`)
-- Config in `pytest.ini`: async mode is auto, runs parallel via `-n auto`, **50% coverage floor** enforced. Tests live in `backend/tests/`, named `test_*.py`.
+- Config in `pytest.ini`: async mode is auto, runs parallel via `-n auto`, **78% coverage floor** enforced. Tests live in `backend/tests/`, named `test_*.py`. Install `requirements-dev.lock` with `python -m pip install --require-hashes -r requirements-dev.lock`.
 - Tag tests with the right marker: `unit`, `integration`, `api`, `slow`, `requires_db`.
 - Cover the compliance invariants explicitly — write tests proving tenant isolation (a user cannot read/write another company's rows), that state changes emit an `AuditService` entry, that soft-deleted rows are excluded, and that RBAC dependencies reject unauthorized roles.
-- Run a focused test with `pytest path::test_name`; run a marker subset with `pytest -m unit`.
+- Run a focused test with `pytest path::test_name --no-cov`; run a marker subset with `pytest -m unit --no-cov`. The full suite retains its configured coverage floor; subsets cannot meaningfully cover the whole app.
+- `RUN_DOCKER_HYGIENE_TESTS=1 pytest tests/test_deployment_hygiene.py --no-cov` additionally exercises synthetic Docker build contexts and real Redis memory pressure. It needs a Docker daemon and is enabled in CI's backend test job.
 
 ## Frontend (from `frontend/`)
 - Jest + React Testing Library for unit/component (`npm test`, single file via `npm test -- path`). Test behavior and accessibility, not implementation details.
+- `npm run test:lint-config` verifies the real ESLint configuration rejects conditional Hooks and missing dependencies in shared UI primitives. It also runs as part of `npm run lint`.
 - Playwright for E2E (`npm run test:e2e`; `:ui`/`:headed` for debugging). Cover critical flows: login/refresh, work-order lifecycle, shop-floor clock in/out, company switching.
 - Separate from the E2E suite, a safe browser harness (`npm run harness -- ...`, see `docs/BROWSER_HARNESS.md`) can grab ad-hoc screenshots/snapshots/logs of a running app — read-only, headless+sandboxed, with a default-deny origin allowlist (localhost/loopback any port, `*.wercomfg.app`) and per-nav/wall-clock timeouts. It is for observation, not assertions — keep behavioral coverage in the E2E suite.
 

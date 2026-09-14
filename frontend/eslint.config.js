@@ -27,16 +27,11 @@ module.exports = [
     rules: {
       "@typescript-eslint/no-unused-vars": ["warn", { argsIgnorePattern: "^_" }],
       "no-console": ["warn", { allow: ["warn", "error"] }],
+      "react-hooks/rules-of-hooks": "error",
 
       // ─── jsx-a11y: lock in accessibility compliance ──────────────────
-      // Spread the plugin's recommended ruleset: the currently-clean
-      // recommended rules stay `error`, so any NEW a11y regression in those
-      // categories fails CI (the regression gate). CI runs lint with
-      // `--max-warnings=0` (ci-cd.yml), so there is no non-blocking "warn"
-      // tier here — a rule is either an enforced error or `off`. The known
-      // high-volume debt families below are therefore `off` (not warn) so
-      // CI stays green; they are tracked as a follow-up, burned down by
-      // extending the FormField label-association pattern across the forms.
+      // All previously deferred accessibility families below are enforced.
+      // CI uses --max-warnings=0, so warning-level rules are also blocking.
       ...jsxA11yPlugin.configs.recommended.rules,
 
       // Icon-only / unnamed controls must carry an accessible name — burned
@@ -80,6 +75,15 @@ module.exports = [
       // Autofocus on the first field of create/edit forms is intentional
       // (Batch 6) — not an accessibility defect for this app.
       "jsx-a11y/no-autofocus": "off",
+    },
+  },
+  {
+    // Start the dependency-array ratchet at the shared UI primitives, which
+    // are already clean. Broader findings need behavior review: blindly adding
+    // dependencies can restart requests or reset an operator's in-progress form.
+    files: ["src/components/ui/**/*.{js,jsx,ts,tsx}"],
+    rules: {
+      "react-hooks/exhaustive-deps": "error",
     },
   },
 ];

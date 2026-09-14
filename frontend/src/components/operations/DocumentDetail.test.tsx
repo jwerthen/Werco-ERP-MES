@@ -3,6 +3,8 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import DocumentDetail from './DocumentDetail';
 import api from '../../services/api';
+import type { UserRole } from '../../types';
+let mockRole: UserRole = 'admin';
 jest.mock('../../services/api', () => ({
   __esModule: true,
   default: {
@@ -28,6 +30,7 @@ const original = { ...doc, id: 1, revision: 'A', previous_revision_id: null };
 const props = { id: 2, onClose: jest.fn(), onSaved: jest.fn(), onSelect: jest.fn() };
 const mocked = api as jest.Mocked<typeof api>;
 beforeEach(() => {
+  mockRole = 'admin';
   jest.clearAllMocks();
   URL.createObjectURL = jest.fn().mockReturnValue('blob:local-preview');
   URL.revokeObjectURL = jest.fn();
@@ -108,3 +111,21 @@ test('document close preserves the existing unsaved revision guard', async () =>
   expect(screen.getByLabelText(/New revision/)).toHaveValue('C');
   confirm.mockRestore();
 });
+
+jest.mock('../../hooks/usePermissions', () => ({
+  usePermissions: () => ({ role: mockRole, isSuperuser: false }),
+}));
+
+
+it.each<UserRole>(['admin', 'manager', 'platform_admin', 'quality', 'supervisor', 'operator', 'shipping', 'viewer'])(
+  '%s keeps document preview/history with only authorized revision publishing', async role => {
+    mockRole = role;
+    render(view());
+    expect(await screen.findByTitle('Preview Fixture drawing revision B')).toBeInTheDocument();
+    expect(screen.getByText('Revision history (2)')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Download file' })).toBeInTheDocument();
+    const allowed = ['admin', 'manager', 'platform_admin', 'quality'].includes(role);
+    expect(!!screen.queryByRole('button', { name: 'Upload new revision' })).toBe(allowed);
+    expect(mocked.uploadDocument).not.toHaveBeenCalled();
+  }
+);

@@ -136,17 +136,19 @@ def test_identity_from_token_rejects_invalid_token():
     assert _identity_from_token("not-a-real-jwt") is None
 
 
-def test_identity_from_token_uses_token_company_id(monkeypatch):
-    """A valid access token with a cid claim yields (user_id, company_id) without
-    a DB hit — matching get_current_company_id's primary path."""
-    import app.core.security as security_module
-    from app.api.websocket import _identity_from_token
+@pytest.mark.requires_db
+def test_identity_from_token_uses_token_company_id(db_session, monkeypatch):
+    """A persisted platform principal may switch to another active tenant."""
+    from sqlalchemy.orm import Session
 
-    def fake_verify_token(token: str):
-        assert token == "good-token"
-        return {"user_id": "7", "company_id": 42, "read_only": False}
+    from app.api import websocket as ws_api
+    from app.core.security import create_access_token
+    from app.models.user import UserRole
+    from tests.api.kiosk_test_helpers import ensure_company, make_user
 
-    # verify_token is imported lazily inside the helper, so patch it on its module.
-    monkeypatch.setattr(security_module, "verify_token", fake_verify_token)
+    platform = make_user(db_session, company_id=1, role=UserRole.PLATFORM_ADMIN)
+    ensure_company(db_session, 2)
+    monkeypatch.setattr(ws_api, 'SessionLocal', lambda: Session(bind=db_session.get_bind()))
+    token = create_access_token(platform.id, company_id=2)
 
-    assert _identity_from_token("good-token") == ("7", 42)
+    assert ws_api._identity_from_token(token) == (str(platform.id), 2)

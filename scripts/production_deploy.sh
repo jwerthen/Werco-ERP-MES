@@ -91,15 +91,14 @@ echo "Installing dependencies..."
 
 # Backend
 cd "$PROJECT_DIR/backend"
-if [ -f "requirements.txt" ]; then
-    pip install -r requirements.txt > /dev/null 2>&1
-    check "Backend dependencies installed"
-fi
+python -m pip install --require-hashes -r requirements.lock
+check "Backend dependencies installed from the runtime lock"
 
 # Frontend
 cd "$PROJECT_DIR/frontend"
 if [ -f "package.json" ]; then
-    npm ci --production
+    # The build needs Vite and TypeScript from devDependencies, even on a production host.
+    npm ci --include=dev
     check "Frontend dependencies installed"
     npm run build
     check "Frontend build completed"

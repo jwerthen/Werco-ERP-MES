@@ -17,6 +17,8 @@ import {
   Part,
 } from '../../types';
 import api from '../../services/api';
+import { usePermissions } from '../../hooks/usePermissions';
+import { canPublishDocuments } from '../../utils/recordWriteAccess';
 import { toDisplayString } from '../../utils/apiError';
 import { isProductionPartType, partitionMaterialTiers } from '../../utils/catalogGroups';
 import { useToast } from '../ui/Toast';
@@ -178,6 +180,8 @@ export default function LaserNestManualModal({
   workOrderOperationId,
   onSaved,
 }: LaserNestManualModalProps) {
+  const { role, isSuperuser } = usePermissions();
+  const canPublish = canPublishDocuments({ role, is_superuser: isSuperuser });
   const isEdit = Boolean(nest);
   const { showToast } = useToast();
   const [pdfFile, setPdfFile] = useState<File | null>(null);
@@ -615,7 +619,7 @@ export default function LaserNestManualModal({
       }
 
       // No reference PDF chosen — done.
-      if (!pdfFile) {
+      if (!canPublish || !pdfFile) {
         onSaved();
         onClose();
         return;
@@ -821,7 +825,7 @@ export default function LaserNestManualModal({
             </>
           )}
 
-          {!isEdit && (
+          {!isEdit && canPublish && (
             <div className="block sm:col-span-2">
               {/* The label wraps ONLY the file input so the input's accessible
                   name stays "Reference PDF (optional)". The descriptive helper

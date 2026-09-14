@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import api from '../../services/api';
+import { usePermissions } from '../../hooks/usePermissions';
+import { canPublishDocuments } from '../../utils/recordWriteAccess';
 import useUnsavedChanges from '../../hooks/useUnsavedChanges';
 import { RecordHeader } from '../ui/PageHeader';
 import { Modal } from '../ui/Modal';
@@ -15,6 +17,8 @@ export default function DocumentDetail({
   onSaved: () => void;
   onSelect: (id: number) => void;
 }) {
+  const { role, isSuperuser } = usePermissions();
+  const canPublish = canPublishDocuments({ role, is_superuser: isSuperuser });
   const [record, setRecord] = useState<any>(null);
   const [revisions, setRevisions] = useState<any[]>([]);
   const [preview, setPreview] = useState('');
@@ -83,7 +87,7 @@ export default function DocumentDetail({
   };
   const uploadRevision = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!file || uploading) return;
+    if (!canPublish || !file || uploading) return;
     setUploading(true);
     setError('');
     const data = new FormData();
@@ -144,7 +148,7 @@ export default function DocumentDetail({
             <Button variant="secondary" onClick={download}>
               Download file
             </Button>
-            {revisions.length > 0 && revisions[0].id !== id ? (
+            {canPublish && (revisions.length > 0 && revisions[0].id !== id ? (
               <Button variant="secondary" onClick={() => selectRevision(revisions[0].id)}>
                 Open latest revision to upload
               </Button>
@@ -152,7 +156,7 @@ export default function DocumentDetail({
               <Button variant="secondary" onClick={() => setShowRevision(value => !value)}>
                 Upload new revision
               </Button>
-            )}
+            ))}
           </div>
           {previewError && (
             <p role="alert" className="text-red-300">
@@ -200,7 +204,7 @@ export default function DocumentDetail({
               </li>
             ))}
           </ul>
-          {showRevision && (
+          {canPublish && showRevision && (
             <form onSubmit={uploadRevision} className="space-y-3 border-t border-fd-line pt-4">
               <p className="text-sm text-slate-400">
                 The new revision retains this document’s linked records. Previous files remain available in history.

@@ -1399,14 +1399,14 @@ between actions (operator tokens die in ≤5 minutes on their own).
    URL) or, for a suspected-PIN-leak only, use **Reset PIN** on a still-active station
    (PIN reset does not invalidate the already-minted 24 h station token — revoke for that).
 
-### Known residual: WebSocket auth is not path-fenced
+### WebSocket credential boundary
 
-The kiosk-scope path fence lives in `get_current_user`, which sees the HTTP request path. The
-WebSocket endpoints authenticate via `get_current_user_from_token` (`app/core/security.py`),
-which has no request path — so a `scope="kiosk"` operator token **can** open the `/ws/*`
-channels during its ≤5-minute life. Accepted residual: those channels are read-only,
-tenant-scoped broadcast streams (no mutations), and the token identifies a real operator of the
-same tenant. The crew station itself does not use WebSockets (v1 is poll-only, 10 s).
+All three `/ws/*` channels require an **unscoped access JWT**. Kiosk-scoped operator tokens and
+station tokens are refused with close code **1008**, as are API, display and refresh credentials.
+Socket admission and subsequent delivery also recheck the live user, active company and any
+work-center/work-order parent; idle connections recheck after 30 seconds. See
+[API: Real-time Updates](API.md#real-time-updates-websocket). The crew station remains poll-only
+(10 seconds); its HTTP scope fence and station revocation behavior are unchanged.
 
 ### Rate limits
 

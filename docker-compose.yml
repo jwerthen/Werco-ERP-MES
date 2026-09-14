@@ -14,7 +14,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-changeme}
+    # Queue payloads and leases must survive memory pressure; reject new writes instead.
+    command: redis-server --appendonly yes --maxmemory-policy noeviction --requirepass ${REDIS_PASSWORD:-changeme}
     restart: unless-stopped
 
   # Backend API

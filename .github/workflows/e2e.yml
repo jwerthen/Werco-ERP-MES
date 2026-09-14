@@ -75,6 +75,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
+          cache-dependency-path: backend/requirements.lock
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -86,8 +87,7 @@ jobs:
       - name: Install backend dependencies
         working-directory: ./backend
         run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install --require-hashes -r requirements.lock
 
       - name: Install frontend dependencies
         working-directory: ./frontend
