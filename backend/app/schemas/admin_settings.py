@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictInt
 
 from app.models.quote_config import CostUnit, MachineType, MaterialCategory, ProcessType
 from app.schemas.base import UTCModel
@@ -237,6 +237,34 @@ class SettingUpdate(BaseModel):
     value: str
     setting_type: str = "text"
     description: Optional[str] = None
+
+
+class EmailRecipientsUpdate(BaseModel):
+    # null restores defaults; [] explicitly disables this email.
+    user_ids: Optional[List[StrictInt]] = Field(..., max_length=2000)
+
+
+class EmailRecipientUser(BaseModel):
+    id: int
+    name: str
+    email: str
+    is_active: bool
+    email_deliverable: bool
+
+
+class EmailRecipientEvent(BaseModel):
+    event_key: str
+    label: str
+    description: str
+    category: str
+    user_ids: Optional[List[int]]
+    is_custom: bool
+    missing_default_emails: List[str]
+
+
+class EmailRecipientsResponse(BaseModel):
+    events: List[EmailRecipientEvent]
+    users: List[EmailRecipientUser]
 
 
 class SettingResponse(UTCModel):

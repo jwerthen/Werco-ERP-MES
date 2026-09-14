@@ -1,4 +1,5 @@
 import type { BOMExploded } from '../types/engineering';
+import type { EmailRecipientsSettings } from '../types/emailRecipients';
 import type { NestingCatalogResponse, NestingMaterialRequest, NestingMaterialResolution } from '../types/quoteNesting';
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
 import { normalizeAxiosErrorDetail } from '../utils/apiError';
@@ -752,6 +753,18 @@ class ApiService {
   }
 
   // Admin Settings - Work Center Types
+  async getEmailRecipients(): Promise<EmailRecipientsSettings> {
+    const response = await this.api.get('/admin/settings/email-recipients');
+    return response.data;
+  }
+
+  async updateEmailRecipients(eventKey: string, userIds: number[] | null): Promise<EmailRecipientsSettings> {
+    const response = await this.api.put(`/admin/settings/email-recipients/${encodeURIComponent(eventKey)}`, {
+      user_ids: userIds,
+    });
+    return response.data;
+  }
+
   async getAdminWorkCenterTypes(): Promise<{ types: string[]; in_use?: string[] }> {
     const response = await this.api.get('/admin/settings/work-center-types');
     return response.data;

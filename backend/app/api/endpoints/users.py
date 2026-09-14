@@ -48,6 +48,7 @@ from app.services.notification_dispatch import (
     email_deliverable_for_user,
     get_preference_row,
 )
+from app.services.notification_email_recipients import email_recipient_overrides
 from app.services.sms_content import build_test_sms_body
 from app.services.sms_service import (
     SMS_TEST_HOURLY_CAP_PER_USER,
@@ -250,7 +251,9 @@ def _normalized_phone_or_400(raw: Optional[str]) -> Optional[str]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-def _effective_preferences(pref: Optional[NotificationPreference], user: User) -> Dict[str, Dict[str, bool]]:
+def _effective_preferences(
+    pref: Optional[NotificationPreference], user: User, *, email_overrides: Optional[Dict[str, set]] = None
+) -> Dict[str, Dict[str, bool]]:
     """Resolve every catalog event's channels exactly as the dispatcher would.
 
     Uses the dispatcher's own ``channels_from_pref`` so the settings UI and the delivery
@@ -268,13 +271,18 @@ def _effective_preferences(pref: Optional[NotificationPreference], user: User) -
     parameter here is how the two halves drifted in the first place.
     """
     email_deliverable = email_deliverable_for_user(user)
-    return {
+    result = {
         event_key: {
             channel: channel in channels_from_pref(pref, entry, email_deliverable=email_deliverable)
             for channel in sorted(ALL_CHANNELS)
         }
         for event_key, entry in CATALOG.items()
     }
+    for key, ids in (email_overrides or {}).items():
+        if key in result:
+            result[key]["email"] = user.id in ids
+            result[key]["digest"] = False
+    return result
 
 
 def _default_channel_map(entry) -> Dict[str, bool]:
@@ -399,7 +407,9 @@ def get_my_notification_preferences(
     pref = get_preference_row(db, current_user.id)
     allow_sms = db.query(Company.allow_sms_egress).filter(Company.id == company_id).scalar()
     return NotificationPreferencesResponse(
-        preferences=_effective_preferences(pref, current_user),
+        preferences=_effective_preferences(
+            pref, current_user, email_overrides=email_recipient_overrides(db, company_id)
+        ),
         has_saved_preferences=pref is not None,
         phone=current_user.phone,
         sms_egress_enabled=bool(allow_sms),
@@ -490,7 +500,9 @@ def update_my_notification_preferences(
 
     allow_sms = db.query(Company.allow_sms_egress).filter(Company.id == company_id).scalar()
     return NotificationPreferencesResponse(
-        preferences=_effective_preferences(pref, current_user),
+        preferences=_effective_preferences(
+            pref, current_user, email_overrides=email_recipient_overrides(db, company_id)
+        ),
         has_saved_preferences=True,
         phone=current_user.phone,
         sms_egress_enabled=bool(allow_sms),

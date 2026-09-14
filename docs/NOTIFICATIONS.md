@@ -853,6 +853,12 @@ now actually send. Before enabling in production, verify DNS for the `SMTP_FROM`
 
 ---
 
+## Admin email recipients
+
+Administrators can now select an exclusive audience per automated email in **Admin Settings → Email Recipients**.
+Werco's work order completion and material receipt emails default to Ashley Werthen, Jon Werthen, and Jon Werthen Jr.
+See [configuration, delivery behavior, and deployment notes](notification-email-recipients.md).
+
 ## Compliance invariants (checklist)
 
 The dispatcher runs in the **worker** with no request-scoped tenancy protection, so these are hard
@@ -870,7 +876,8 @@ requirements (enforced in `notification_dispatch.py` / `notification_catalog.py`
 - [ ] **No preference auto-create** — prefs are resolved in memory; an absent row means catalog
       defaults. `_fan_out` never constructs a `NotificationPreference` (the old auto-create omitted
       `company_id` → `IntegrityError` on Postgres, defect §9.8).
-- [ ] **Actor exclusion** — the acting user (`event.user_id`) is never notified of their own action.
+- [ ] **Actor exclusion** — automatic audiences exclude the acting user (`event.user_id`). An explicit admin
+      email selection includes the recipient's own actions; in-app and SMS keep actor exclusion.
 - [ ] **`is_active` filter** — deactivated users are excluded from every recipient source.
 - [ ] **Mark-read is NOT audited** — read state is UI state, not domain state (no `audit_log` write).
 - [ ] **Mandatory channels forced on** — a `mandatory_channel` entry can't be fully muted (e.g.
