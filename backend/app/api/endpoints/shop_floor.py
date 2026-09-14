@@ -4998,6 +4998,15 @@ def put_operation_on_hold(
     if operation.status == OperationStatus.COMPLETE:
         raise HTTPException(status_code=400, detail="Cannot put completed operation on hold")
 
+    # A stale screen can still name an operation whose nest was cancelled.
+    # Accepting Hold here promises a reversible pause, but Resume correctly
+    # refuses that deleted nest. Apply the same cancellation fence before
+    # changing status, stopping labor or recording a successful hold.
+    if dispatch_service.operation_has_cancelled_nest(db, company_id, operation.id):
+        raise HTTPException(
+            status_code=409, detail="This nest was cancelled. Restore the nest before putting it on hold."
+        )
+
     # A0.1 adoption-telemetry channel of THIS hold write (kiosk-token forcing + import
     # guard). Resolved before any mutation so a disallowed 'import' 422s without changing
     # operation state or closing any entry.

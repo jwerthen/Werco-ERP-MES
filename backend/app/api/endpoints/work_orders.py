@@ -797,11 +797,26 @@ def _enrich_work_order_operations(work_order: WorkOrder, *, db: Session, company
         op.id for op in work_order.operations if op.id is not None and op.status == OperationStatus.ON_HOLD
     ]
     hold_contexts: Dict[int, HoldContext] = {}
+    # Query the cancellation marker independently of the relationship: rendering
+    # hides that relationship with set_committed_value, including on repeated reads.
+    cancelled_nests: Dict[int, int] = {}
     if held_operation_ids:
         with db.no_autoflush:
+            cancelled_nests = dict(
+                db.query(LaserNest.work_order_operation_id, LaserNest.id)
+                .join(WorkOrderOperation, LaserNest.work_order_operation_id == WorkOrderOperation.id)
+                .filter(
+                    LaserNest.company_id == company_id,
+                    LaserNest.is_deleted.is_(True),
+                    WorkOrderOperation.company_id == company_id,
+                    WorkOrderOperation.id.in_(held_operation_ids),
+                )
+                .all()
+            )
             hold_contexts = hold_contexts_for_operations(db, company_id=company_id, operation_ids=held_operation_ids)
 
     for op in work_order.operations:
+        op.cancelled_nest_id = cancelled_nests.get(op.id)
         # Only an ON_HOLD row carries provenance; every other row is explicitly None rather
         # than left unset, so the response shape does not depend on attribute presence.
         #

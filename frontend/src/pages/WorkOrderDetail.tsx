@@ -70,6 +70,7 @@ import {
   ArrowDownTrayIcon,
   ArrowPathIcon,
   PlayIcon,
+  PauseIcon,
   CheckCircleIcon,
   ExclamationTriangleIcon,
   PrinterIcon,
@@ -561,6 +562,9 @@ export default function WorkOrderDetail() {
   // never from a local draft (see handleSequencingToggle).
   const [savingSequencing, setSavingSequencing] = useState(false);
   const [deleteNestTarget, setDeleteNestTarget] = useState<LaserNestInfo | null>(null);
+  const [restoreNestTarget, setRestoreNestTarget] = useState<WorkOrderOperation | null>(null);
+  const [holdNestTarget, setHoldNestTarget] = useState<WorkOrderOperation | null>(null);
+  const [holdingNestOpId, setHoldingNestOpId] = useState<number | null>(null);
   const [completing, setCompleting] = useState(false);
   const [completingOpId, setCompletingOpId] = useState<number | null>(null);
   // Which operation's read-only "Process steps" evidence panel is expanded
@@ -1747,17 +1751,8 @@ export default function WorkOrderDetail() {
    * but did not do everything asked" case. BOTH at once compose into ONE toast:
    * two stacked toasts about one click read as two failures.
    *
-   * NOT PRE-CHECKED HERE, deliberately: the cancelled-nest tombstone. The resume
-   * endpoint 409s on an operation whose laser nest was soft-deleted, but THIS
-   * branch's `WorkOrderOperationResponse` carries no `cancelled_nest_id` (it
-   * ships with the laser-nest-removal work, which is not merged here) and the
-   * enrich step nulls a soft-deleted nest out of the row entirely -- so the page
-   * has no signal to gate on before the click. The non-optimistic path is what
-   * keeps that honest: the row does not move and the server's own 409 reason is
-   * what the user reads. When that field lands, guard the button on
-   * `op.cancelled_nest_id != null && op.status !== 'complete'` (the status pair
-   * matters: the read path can flip a marked operation to COMPLETE, and calling
-   * that row a leftover nest would claim work that never happened).
+   * Cancelled nests use the separate Restore nest action. The resume endpoint
+   * still refuses cancellation races and older responses without the marker.
    */
   const handleConfirmClearHold = async () => {
     const op = clearHoldTarget;
@@ -1834,6 +1829,48 @@ export default function WorkOrderDetail() {
   const handleDeleteNest = (nest: LaserNestInfo) => {
     if (nestActionId !== null) return;
     setDeleteNestTarget(nest);
+  };
+
+  const handleConfirmRestoreNest = async () => {
+    const op = restoreNestTarget;
+    if (op?.cancelled_nest_id == null || nestActionId !== null) return;
+    setNestActionId(op.cancelled_nest_id);
+    try {
+      const result = await api.restoreLaserNest(op.cancelled_nest_id);
+      await loadWorkOrder();
+      setRestoreNestTarget(null);
+      const held = result.operation_status === 'on_hold';
+      const pending = result.operation_status === 'pending';
+      showToast(
+        held || pending ? 'warning' : 'success',
+        `${operationLabel(op)}: nest restored.` +
+          (held
+            ? ' An open blocker keeps it on hold; review the Blockers panel.'
+            : pending
+              ? ' It is pending and will appear on the board once eligible.'
+              : ' It is available to run.')
+      );
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to restore the nest');
+    } finally {
+      setNestActionId(null);
+    }
+  };
+
+  const handleConfirmHoldNest = async () => {
+    const op = holdNestTarget;
+    if (!op?.laser_nest || holdingNestOpId !== null) return;
+    setHoldingNestOpId(op.id);
+    try {
+      await api.holdOperation(op.id, { source: 'desktop' });
+      await loadWorkOrder();
+      setHoldNestTarget(null);
+      showToast('info', `${operationLabel(op)}: nest on hold. Use Clear hold to make it available again.`);
+    } catch (err: any) {
+      showToast('error', err.response?.data?.detail || 'Failed to put the nest on hold');
+    } finally {
+      setHoldingNestOpId(null);
+    }
   };
 
   const handleConfirmDeleteNest = async () => {
@@ -2337,7 +2374,8 @@ export default function WorkOrderDetail() {
                     // pre-click reason and the in-dialog reason cannot diverge.
                     // Non-null only for an ON_HOLD row -- `hold_context` is null on
                     // every other one, by construction on the server.
-                    const holdSummary = op.status === 'on_hold' ? summarizeHold(op.hold_context) : null;
+                    const cancelledNest = op.cancelled_nest_id != null;
+                    const holdSummary = op.status === 'on_hold' && !cancelledNest ? summarizeHold(op.hold_context) : null;
 
                     const groupColors: Record<string, string> = {
                       'LASER': 'bg-fd-red/15 text-fd-red',
@@ -2420,6 +2458,11 @@ export default function WorkOrderDetail() {
                                 make exactly that case read as anonymous AND reasonless.
                                 Free text is read straight off note/title: this response
                                 withholds nothing, and `has_note` is not sent. */}
+                            {cancelledNest && (
+                              <p className="mt-2 text-xs text-amber-300">
+                                This nest was cancelled. Restore it to return its planned runs to this work order.
+                              </p>
+                            )}
                             {holdSummary && (
                               <div className="mt-2 rounded-sm border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs">
                                 <div className="flex flex-wrap items-center gap-1.5 font-semibold text-amber-300">
@@ -2479,11 +2522,22 @@ export default function WorkOrderDetail() {
                         )}
                         <td className="px-4 py-3">
                           <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium capitalize ${statusColor(op.status)}`}>
-                            {op.status.replace('_', ' ')}
+                            {cancelledNest ? 'Nest cancelled' : op.status.replace('_', ' ')}
                           </span>
                         </td>
                         <td className="px-4 py-3 text-center">
                           <div className="flex items-center justify-center gap-3">
+                            {op.laser_nest && !cancelledNest && ['pending', 'ready', 'in_progress'].includes(op.status) && CURRENT_WORK_ORDER_STATUSES.includes(workOrder.status) && (
+                              <button
+                                type="button"
+                                onClick={() => setHoldNestTarget(op)}
+                                disabled={holdingNestOpId !== null || clearingHoldOpId !== null}
+                                className="text-amber-400 hover:text-amber-300 text-sm font-medium disabled:opacity-50"
+                                title="Temporarily hold this nest"
+                              >
+                                <PauseIcon className="h-5 w-5 inline" /> Hold nest
+                              </button>
+                            )}
                             {/* CLEAR HOLD -- first in the group because on a held row
                                 it is the only action that moves the job. Ungated on
                                 purpose: `PUT /shop-floor/operations/{id}/resume` takes
@@ -2491,11 +2545,21 @@ export default function WorkOrderDetail() {
                                 so gating it here would hide a control the server allows.
                                 Styled like its siblings (icon + text) rather than as a
                                 <Button>, which is the established chrome for this cell. */}
-                            {op.status === 'on_hold' && (
+                            {cancelledNest && canCorrectCount && op.status === 'on_hold' && !['complete', 'closed', 'cancelled'].includes(workOrder.status) && (
+                              <button
+                                type="button"
+                                onClick={() => setRestoreNestTarget(op)}
+                                disabled={nestActionId !== null}
+                                className="text-amber-400 hover:text-amber-300 text-sm font-medium disabled:opacity-50"
+                              >
+                                <ArrowPathIcon className="h-5 w-5 inline" /> Restore nest
+                              </button>
+                            )}
+                            {op.status === 'on_hold' && !cancelledNest && (
                               <button
                                 type="button"
                                 onClick={() => setClearHoldTarget(op)}
-                                disabled={clearingHoldOpId !== null}
+                                disabled={clearingHoldOpId !== null || holdingNestOpId !== null}
                                 className="text-amber-400 hover:text-amber-300 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                                 title="Lift the hold on this operation"
                               >
@@ -2537,7 +2601,7 @@ export default function WorkOrderDetail() {
                                 <CubeIcon className="h-5 w-5 inline" /> Material
                               </button>
                             )}
-                            {canCompleteOperation && op.status !== 'complete' && workOrder.status !== 'draft' && (
+                            {canCompleteOperation && !cancelledNest && op.status !== 'complete' && workOrder.status !== 'draft' && (
                               <button
                                 onClick={() => handleCompleteOperation(op)}
                                 disabled={completingOpId === op.id || sequenceBlockReason !== null}
@@ -2967,6 +3031,9 @@ export default function WorkOrderDetail() {
                             <span className="font-mono text-lg font-bold text-fd-ink">
                               {nest.cnc_number || nest.nest_name}
                             </span>
+                            <span className={`rounded-full px-2 py-0.5 text-xs font-medium capitalize ${statusColor(operation.status)}`}>
+                              {operation.status.replace('_', ' ')}
+                            </span>
                             {nest.cnc_number && nest.nest_name !== nest.cnc_number && (
                               <span className="text-sm text-fd-mute">{nest.nest_name}</span>
                             )}
@@ -2998,7 +3065,30 @@ export default function WorkOrderDetail() {
                           </div>
                         </div>
 
-                        {canManageNests && (
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {CURRENT_WORK_ORDER_STATUSES.includes(workOrder.status) && operation.status === 'on_hold' && (
+                            <button
+                              type="button"
+                              onClick={() => setClearHoldTarget(operation)}
+                              disabled={clearingHoldOpId !== null || holdingNestOpId !== null}
+                              className="btn-secondary btn-sm flex items-center gap-1 text-amber-400"
+                              aria-label={`Clear hold on nest ${nest.cnc_number || nest.nest_name}`}
+                            >
+                              <PlayIcon className="h-4 w-4" /> Clear hold
+                            </button>
+                          )}
+                          {CURRENT_WORK_ORDER_STATUSES.includes(workOrder.status) && ['pending', 'ready', 'in_progress'].includes(operation.status) && (
+                            <button
+                              type="button"
+                              onClick={() => setHoldNestTarget(operation)}
+                              disabled={holdingNestOpId !== null || clearingHoldOpId !== null}
+                              className="btn-secondary btn-sm flex items-center gap-1 text-amber-400"
+                              aria-label={`Hold nest ${nest.cnc_number || nest.nest_name}`}
+                            >
+                              <PauseIcon className="h-4 w-4" /> Hold nest
+                            </button>
+                          )}
+                          {canManageNests && (
                           <div className="flex flex-wrap items-center gap-1.5">
                             <select
                               value={String(operation.work_center_id)}
@@ -3079,12 +3169,14 @@ export default function WorkOrderDetail() {
                               onClick={() => handleDeleteNest(nest)}
                               disabled={acting}
                               className="btn-secondary btn-sm flex items-center gap-1 text-fd-red hover:text-fd-red/80"
-                              title="Delete nest"
+                              title="Cancel nest"
                             >
                               <TrashIcon className="h-4 w-4" />
+                              Cancel nest
                             </button>
                           </div>
-                        )}
+                          )}
+                        </div>
                       </div>
 
                       {showPreview && nest.has_document && (
@@ -3717,16 +3809,55 @@ export default function WorkOrderDetail() {
         }}
       />
 
+      <ConfirmDialog
+        open={holdNestTarget !== null}
+        title="Put nest on hold"
+        message={holdNestTarget
+          ? `${operationLabel(holdNestTarget)} on ${workOrder.work_order_number}\n\n` +
+            'Temporarily pause this nest? Active time entries will be stopped. ' +
+            'The nest, drawing and planned runs stay on this work order. ' +
+            'Use Clear hold to return it to work.'
+          : ''}
+        confirmLabel="Hold nest"
+        cancelLabel="Keep available"
+        pending={holdingNestOpId !== null}
+        variant="warning"
+        onConfirm={handleConfirmHoldNest}
+        onCancel={() => {
+          if (holdingNestOpId === null) setHoldNestTarget(null);
+        }}
+      />
+
+      <ConfirmDialog
+        open={restoreNestTarget !== null}
+        title="Restore cancelled nest"
+        message={restoreNestTarget
+          ? `${operationLabel(restoreNestTarget)} on ${workOrder.work_order_number}\n\n` +
+            'Restore this nest and add its planned runs back to the work order? ' +
+            'Its original drawing and production history are retained. ' +
+            'Open blockers stay open and keep the operation on hold.'
+          : ''}
+        confirmLabel="Restore nest"
+        cancelLabel="Keep cancelled"
+        pending={nestActionId !== null}
+        variant="warning"
+        onConfirm={handleConfirmRestoreNest}
+        onCancel={() => {
+          if (nestActionId === null) setRestoreNestTarget(null);
+        }}
+      />
+
       {/* Delete laser nest confirm */}
       <ConfirmDialog
         open={deleteNestTarget !== null}
-        title="Delete Laser Nest"
+        title="Cancel laser nest"
         message={
           deleteNestTarget
-            ? `Delete laser nest ${deleteNestTarget.cnc_number || deleteNestTarget.nest_name}? This puts its operation on hold.`
+            ? `Cancel laser nest ${deleteNestTarget.cnc_number || deleteNestTarget.nest_name}? This removes its planned runs from the work order. You can restore it from its operation row.`
             : ''
         }
-        confirmLabel="Delete"
+        confirmLabel="Cancel nest"
+        cancelLabel="Keep nest"
         pending={deleteNestTarget !== null && nestActionId === deleteNestTarget.id}
         variant="danger"
         onConfirm={handleConfirmDeleteNest}

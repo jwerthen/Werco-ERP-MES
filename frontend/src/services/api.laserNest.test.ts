@@ -90,6 +90,13 @@ describe('manual laser-nest api methods', () => {
     expect(result).toEqual({ message: 'Laser nest deleted', id: 5 });
   });
 
+  it('restoreLaserNest POSTs to restore and returns the resulting operation state', async () => {
+    mockPost.mockResolvedValueOnce(ok({ id: 206, operation_status: 'ready' }));
+    const result = await api.restoreLaserNest(206);
+    expect(mockPost).toHaveBeenCalledWith('/laser-nests/206/restore');
+    expect(result.operation_status).toBe('ready');
+  });
+
   it('fetchLaserNestDocument GETs the inline PDF as a blob and returns an object URL', async () => {
     const blobBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]); // %PDF
     mockGet.mockResolvedValueOnce(ok(blobBytes));

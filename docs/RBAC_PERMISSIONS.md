@@ -262,7 +262,7 @@ and `/api-tokens` so it can never mint another credential.
 > order is still `DRAFT`, resumes to `PENDING` and stays off the board.
 >
 > **Reach widened again on the office side, and again no gate moved.** The Work Order page now
-> carries a **Clear hold** action on every `on_hold` operation row (it previously had *no* control
+> carries a **Clear hold** action on every non-cancelled `on_hold` operation row (it previously had *no* control
 > that lifted a hold — `resumeOperation` had zero call sites there, so an owner who held a nest had
 > to walk to a kiosk or a shop-floor page). It calls the same role-open
 > `PUT /api/v1/shop-floor/operations/{id}/resume`, so it is deliberately **not** role-gated in the
@@ -273,6 +273,13 @@ and `/api-tokens` so it can never mint another credential.
 > `work_orders:view` route), but it is now a prominent office-page button for two roles with no
 > other write on that page. Narrowing it is an **endpoint** change, not a UI one; do it there or not
 > at all, so the hidden control and the refused call keep agreeing.
+>
+> Live nest rows and their Laser Nest Package cards also expose **Hold nest**, through the
+> existing authenticated `PUT /api/v1/shop-floor/operations/{id}/hold`. The card exposes
+> **Clear hold** while held, using the same role-open resume verb as the operation row.
+> **Cancel nest / Restore nest** remain restricted to Admin / Manager / Supervisor; temporary
+> hold never deletes a nest or removes its planned quantity. Hold now rejects a cancelled
+> nest with 409 so a stale screen cannot report an unrecoverable pause as successful.
 >
 > **The Blockers panel's Resolve button is now gated to the tier the endpoint always required.** It
 > used to render for every role, so an Operator, Quality user, Shipping user or Viewer looking at a
@@ -434,7 +441,10 @@ and `/api-tokens` so it can never mint another credential.
 > `require_role([ADMIN, MANAGER, SUPERVISOR])`: `POST /api/v1/work-orders/{id}/laser-nests/manual`
 > (create), `PATCH /api/v1/laser-nests/{id}` (edit), `POST /api/v1/laser-nests/{id}/attach-document`
 > and `DELETE /api/v1/laser-nests/{id}/document` (attach/detach the reference PDF), and
-> `DELETE /api/v1/laser-nests/{id}` (soft-delete; the operation goes `ON_HOLD`). This matches the
+> `DELETE /api/v1/laser-nests/{id}` (soft-delete; the operation goes `ON_HOLD`) and
+> `POST /api/v1/laser-nests/{id}/restore` (restore the original nest and planned quantity).
+> Cancelled operation rows show **Restore nest** only to this trio; the ordinary Clear hold
+> action remains unavailable on cancelled nests. This matches the
 > laser-nest **package import** endpoints — the per-WO pair (`…/{id}/laser-nest-packages/preview`
 > and `…/import`) and the no-WO **standalone** pair
 > (`…/laser-nest-packages/standalone/preview|import`, whose import creates a fresh part-less

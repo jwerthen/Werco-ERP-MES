@@ -26,8 +26,9 @@ from app.schemas.work_order import (
     LaserNestPdfExtractionResponse,
     LaserNestUpdate,
 )
-from app.services.audit_service import AuditService
+from app.services.audit_service import AuditService, AuditWriteError
 from app.services.laser_nest_extraction_service import extract_nest_fields_from_pdf
+from app.services.laser_nest_restore_service import restore_laser_nest
 from app.services.laser_nest_service import (
     manual_nest_response_dict,
     soft_delete_laser_nest,
@@ -287,6 +288,25 @@ def get_laser_nest_document(
         media_type="application/pdf",
         headers={"Content-Disposition": inline_disposition},
     )
+
+
+@router.post("/{laser_nest_id}/restore", response_model=LaserNestManualResponse)
+def restore_laser_nest_endpoint(
+    laser_nest_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_NEST_WRITE_ROLES),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Restore a cancelled nest, its planned quantity and eligible operation."""
+    try:
+        nest = restore_laser_nest(db, nest_id=laser_nest_id, company_id=company_id, audit=audit)
+    except AuditWriteError as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="The restoration audit could not be saved; please retry") from exc
+    response = LaserNestManualResponse(**manual_nest_response_dict(nest))
+    db.commit()
+    return response
 
 
 @router.delete("/{laser_nest_id}")

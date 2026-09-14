@@ -48,6 +48,9 @@ jest.mock('../services/api', () => ({
     getWorkOrderBlockers: jest.fn(),
     resolveWorkOrderBlocker: jest.fn(),
     resumeOperation: jest.fn(),
+    holdOperation: jest.fn(),
+    deleteLaserNest: jest.fn(),
+    restoreLaserNest: jest.fn(),
     getActiveUsers: jest.fn(),
     getUsers: jest.fn(),
     getDocuments: jest.fn(),
@@ -377,10 +380,8 @@ describe('WorkOrderDetail — Clear Hold (fix A)', () => {
   });
 
   it('shows the server refusal verbatim and leaves the row on hold', async () => {
-    // The cancelled-nest tombstone reaches the user THIS way: this branch's
-    // operation payload carries no `cancelled_nest_id`, so the page cannot gate
-    // the button before the click — the non-optimistic path is what keeps that
-    // honest, by rendering the server's own reason and moving nothing.
+    // The server still handles a cancellation race or an older response that
+    // did not carry the cancellation marker.
     const refusal = 'This nest was cancelled; its operation cannot be resumed.';
     mockedApi.resumeOperation.mockRejectedValue({ response: { data: { detail: refusal } } });
     renderDetail();
@@ -445,3 +446,83 @@ async function findClearHoldToast(): Promise<HTMLElement> {
     return match;
   });
 }
+
+describe('cancelled laser nest recovery', () => {
+  beforeEach(() => {
+    setOperations([{ ...heldOperation(null), cancelled_nest_id: 206, name: 'Laser Cut - 06203' }]);
+    mockedApi.restoreLaserNest.mockResolvedValue({ operation_status: 'ready' } as any);
+  });
+
+  it('offers restore instead of clear hold, restores the nest id, and refetches', async () => {
+    renderDetail();
+    fireEvent.click(await screen.findByRole('button', { name: /restore nest/i }));
+    expect(screen.queryByTitle('Lift the hold on this operation')).not.toBeInTheDocument();
+    expect(screen.getByText('Nest cancelled')).toBeInTheDocument();
+    expect(screen.queryByText('On hold — reason not recorded')).not.toBeInTheDocument();
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText(/add its planned runs back/i)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: /restore nest/i }));
+    await waitFor(() => expect(mockedApi.restoreLaserNest).toHaveBeenCalledWith(206));
+    await waitFor(() => expect(mockedApi.getWorkOrder.mock.calls.length).toBeGreaterThan(1));
+    expect(mockedApi.resumeOperation).not.toHaveBeenCalled();
+    expect(await screen.findByText(/nest restored.*available to run/i)).toBeInTheDocument();
+  });
+
+  it('keeps the dialog open and displays a refusal without success', async () => {
+    mockedApi.restoreLaserNest.mockRejectedValue({ response: { data: { detail: 'Work order is finished' } } });
+    renderDetail();
+    fireEvent.click(await screen.findByRole('button', { name: /restore nest/i }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /restore nest/i }));
+    expect(await screen.findByText('Work order is finished')).toBeInTheDocument();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(mockedApi.getWorkOrder).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not offer restore or clear hold to an operator for cancelled work', async () => {
+    mockUser = { id: 2, role: 'operator', is_superuser: false };
+    renderDetail();
+    await screen.findByText('Laser Cut - 06203');
+    expect(screen.queryByRole('button', { name: /restore nest|clear hold/i })).not.toBeInTheDocument();
+  });
+});
+
+describe('temporary nest holds', () => {
+  const nest = { id: 206, nest_name: '06203', cnc_number: '06203', planned_runs: 1, completed_runs: 0, remaining_runs: 1, has_document: false };
+  const ready = { ...heldOperation(null), name: 'Laser Cut - 06203', status: 'ready', laser_nest: nest, cancelled_nest_id: null };
+
+  it('can hold and clear the same nest repeatedly without cancelling it', async () => {
+    setOperations([ready]);
+    mockedApi.holdOperation.mockResolvedValue({ status: 'on_hold' });
+    renderDetail();
+    for (let i = 0; i < 2; i += 1) {
+      fireEvent.click(await screen.findByRole('button', { name: 'Hold nest 06203' }));
+      let dialog = screen.getByRole('dialog');
+      expect(within(dialog).getByText(/planned runs stay on this work order/i)).toBeInTheDocument();
+      setOperations([{ ...ready, status: 'on_hold' }]);
+      fireEvent.click(within(dialog).getByRole('button', { name: /^hold nest$/i }));
+      await waitFor(() => expect(mockedApi.holdOperation).toHaveBeenCalledTimes(i + 1));
+      expect(mockedApi.holdOperation).toHaveBeenLastCalledWith(71, { source: 'desktop' });
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      fireEvent.click(await screen.findByRole('button', { name: 'Clear hold on nest 06203' }));
+      dialog = screen.getByRole('dialog');
+      setOperations([ready]);
+      fireEvent.click(within(dialog).getByRole('button', { name: /^clear hold$/i }));
+      await waitFor(() => expect(mockedApi.resumeOperation).toHaveBeenCalledTimes(i + 1));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    }
+    expect(mockedApi.deleteLaserNest).not.toHaveBeenCalled();
+    expect(mockedApi.restoreLaserNest).not.toHaveBeenCalled();
+    expect(await screen.findByRole('button', { name: 'Hold nest 06203' })).toBeInTheDocument();
+  });
+
+  it('leaves the hold dialog open with the server error when a stale nest was cancelled', async () => {
+    setOperations([ready]);
+    mockedApi.holdOperation.mockRejectedValue({ response: { data: { detail: 'This nest was cancelled. Restore it first.' } } });
+    renderDetail();
+    fireEvent.click(await screen.findByTitle('Temporarily hold this nest'));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /^hold nest$/i }));
+    expect(await screen.findByText('This nest was cancelled. Restore it first.')).toBeInTheDocument();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(mockedApi.getWorkOrder).toHaveBeenCalledTimes(1);
+  });
+});

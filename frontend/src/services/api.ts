@@ -1495,6 +1495,11 @@ class ApiService {
     return response.data;
   }
 
+  async restoreLaserNest(laserNestId: number): Promise<LaserNestManualResponse> {
+    const response = await this.api.post<LaserNestManualResponse>(`/laser-nests/${laserNestId}/restore`);
+    return response.data;
+  }
+
   /**
    * Fetch the nest's attached PDF through the authenticated Axios client as a
    * blob and return a same-origin object URL suitable for an <iframe>/<object>
