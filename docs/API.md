@@ -2054,10 +2054,11 @@ a deleted record. Customer pickers independently exclude tombstoned rows.
 > **Pure read, and free when nothing is held.** The lookup runs *before* the enrichment normalizes
 > any mapped column and inside `no_autoflush`, so rendering a work order still writes nothing — no
 > ledger row, no audit row, no event. A work order with no `ON_HOLD` operation costs **zero** extra
-> queries; a held set costs two batched ones however many rows are held.
+> queries; a held set costs two batched provenance queries plus one batched cancelled-nest
+> lookup, however many rows are held.
 >
 > **Clearing a hold from the office is the existing shop-floor verb, not a new endpoint.** Work
-> Orders → Operations / Routing carries a **Clear hold** action on each `on_hold` row, calling
+> Orders → Operations / Routing carries a **Clear hold** action on each non-cancelled `on_hold` row, calling
 > `PUT /shop-floor/operations/{id}/resume` and nothing else — that page previously had no control
 > that lifted a hold at all. It is deliberately **not** role-gated, because that endpoint takes a
 > bare `get_current_user`. The **Resolve** button on the same page's Blockers panel now *is* gated to
@@ -3194,6 +3195,31 @@ mixed**:
 | DELETE | `/laser-nests/{id}/document` | Detach the PDF (clears the FK; the Document row is left intact) | Admin / Manager / Supervisor |
 | GET | `/laser-nests/{id}/document` | Serve the attached PDF **inline** for operator preview | Yes (any authenticated user) |
 | DELETE | `/laser-nests/{id}` | Soft-delete the nest; its operation goes `ON_HOLD` | Admin / Manager / Supervisor |
+| POST | `/laser-nests/{id}/restore` | Restore a cancelled nest and its planned runs, retaining the original operation and drawing | Admin / Manager / Supervisor |
+
+Restoration returns `LaserNestManualResponse`. The work-order operation response includes
+`cancelled_nest_id` on a held, cancelled nest (otherwise null), allowing Operations / Routing to show **Nest cancelled**
+and **Restore nest** instead of offering Clear hold or Complete. The marker costs one batched,
+tenant-scoped read per work order with held operations; deleted nest details remain hidden.
+
+**Temporary holds and cancellation have separate controls.** On an active work order, the
+Operations / Routing row and the Laser Nest Package card offer **Hold nest**, using
+`PUT /shop-floor/operations/{id}/hold` with `source=desktop`. This pauses the operation and
+closes active time entries while keeping the nest, drawing and ordered runs. Both locations
+offer **Clear hold** for a live held nest through the existing resume endpoint; clearing it
+never clocks an operator back in. **Cancel nest** is the separately labeled, management-only
+delete action. The hold endpoint now refuses 409 for a cancelled nest before changing status,
+closing time entries or auditing a successful hold; a stale screen must restore that nest first.
+
+Restore requires a live, non-terminal laser work order and the original held operation with
+no completion timestamp. Missing/cross-company records return 404; already-active nests,
+finished work orders and conflicting operation state return 409. Restoring recomputes ordered
+quantity from active nests without changing completed runs, labor, drawing links or material
+allocations. An open/acknowledged blocker keeps the operation on hold; otherwise prior labor
+returns it to in progress, an unstarted released nest becomes ready, and a draft stays pending.
+Audit evidence for the nest, operation status and changed order quantity is required in the
+same transaction; audit failure returns 503 and rolls back the restoration. No migration,
+environment variable or deployment configuration change is needed.
 
 > **Package import replaces everything (`POST …/laser-nest-packages/import`).** Importing a
 > package **replaces all existing nests on the target laser WO — including any manually-entered

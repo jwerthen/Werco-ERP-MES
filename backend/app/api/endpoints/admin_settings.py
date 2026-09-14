@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_company_id, require_role
 from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
+from app.models.company import Company
 from app.models.quote_config import (
     CostUnit,
     LaborRate,
@@ -24,6 +25,8 @@ from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.schemas.admin_settings import (
     AuditLogWithUser,
+    EmailRecipientsResponse,
+    EmailRecipientsUpdate,
     FinishCreate,
     FinishResponse,
     FinishUpdate,
@@ -44,6 +47,14 @@ from app.schemas.admin_settings import (
     WorkCenterRateUpdate,
     WorkCenterTypesResponse,
     WorkCenterTypesUpdate,
+)
+from app.services.notification_email_recipients import (
+    EMAIL_EVENTS,
+    SETTING_PREFIX,
+    deliverable,
+    email_recipient_ids,
+    email_settings_response,
+    setting_key,
 )
 from app.services.work_center_type_service import (
     get_in_use_work_center_types,
@@ -102,6 +113,76 @@ def get_client_ip(request: Request) -> str:
     if forwarded:
         return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
+
+
+# ============ EMAIL RECIPIENTS ============
+
+
+@router.get("/email-recipients", response_model=EmailRecipientsResponse)
+def get_email_recipients(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id),
+):
+    return email_settings_response(db, company_id)
+
+
+@router.put("/email-recipients/{event_key}", response_model=EmailRecipientsResponse)
+def update_email_recipients(
+    event_key: str,
+    data: EmailRecipientsUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(admin_only),
+    company_id: int = Depends(get_current_company_id),
+):
+    if event_key not in EMAIL_EVENTS:
+        raise HTTPException(status_code=400, detail="This email type does not have configurable recipients.")
+    ids = sorted(set(data.user_ids)) if data.user_ids is not None else None
+    if ids:
+        users = db.query(User).filter(User.company_id == company_id, User.id.in_(ids), User.is_active.is_(True)).all()
+        if {user.id for user in users if deliverable(user)} != set(ids):
+            raise HTTPException(
+                status_code=400, detail="Select active users in this company with deliverable email addresses."
+            )
+
+    # Serialize first saves as well as updates for this company.
+    db.query(Company).filter(Company.id == company_id).with_for_update().one()
+    key = setting_key(event_key)
+    setting = (
+        db.query(QuoteSettings).filter(QuoteSettings.company_id == company_id, QuoteSettings.setting_key == key).first()
+    )
+    previous_ids = email_recipient_ids(db, company_id, event_key)
+    old_value = sorted(previous_ids) if previous_ids is not None else None
+    if ids is None:
+        if setting is not None:
+            db.delete(setting)
+    elif setting is not None:
+        setting.setting_value = json.dumps(ids)
+    else:
+        db.add(
+            QuoteSettings(
+                company_id=company_id,
+                setting_key=key,
+                setting_value=json.dumps(ids),
+                setting_type="json",
+                description=f"Email recipients: {EMAIL_EVENTS[event_key].label}",
+            )
+        )
+    log_change(
+        db,
+        "email_recipients",
+        None,
+        EMAIL_EVENTS[event_key].label,
+        "update",
+        current_user,
+        "user_ids",
+        old_value,
+        ids,
+        get_client_ip(request),
+    )
+    db.commit()
+    return email_settings_response(db, company_id)
 
 
 # ============ MATERIALS ============
@@ -726,6 +807,8 @@ def get_overhead_settings(
     settings = db.query(QuoteSettings).filter(QuoteSettings.company_id == company_id).all()
     result = {}
     for s in settings:
+        if s.setting_key.startswith(SETTING_PREFIX):
+            continue
         result[s.setting_key] = {
             "value": s.setting_value,
             "type": s.setting_type,
@@ -745,6 +828,8 @@ def update_overhead_setting(
     company_id: int = Depends(get_current_company_id),
 ):
     """Update an overhead/markup setting"""
+    if key.startswith(SETTING_PREFIX):
+        raise HTTPException(status_code=400, detail="Use Email Recipients to update notification recipients.")
     setting = (
         db.query(QuoteSettings).filter(QuoteSettings.setting_key == key, QuoteSettings.company_id == company_id).first()
     )

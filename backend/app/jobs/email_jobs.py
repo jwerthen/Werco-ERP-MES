@@ -30,6 +30,7 @@ async def send_email_task(
     from app.models.user import User
     from app.services.background_email_status import notify_background_email_failure
     from app.services.email_service import EmailBeforeSubmissionFailure, EmailRejected, EmailSubmissionUnknown
+    from app.services.notification_email_recipients import email_recipient_allowed, email_recipient_overrides
     from app.services.user_identity import is_synthetic_email
 
     # Preserve already queued pre-upgrade jobs. New dispatcher jobs always carry
@@ -76,6 +77,24 @@ async def send_email_task(
             notify_background_email_failure(db, log)
             db.commit()
             return {'sent': False, 'status': 'failed'}
+        # Recheck the current audience immediately before claiming the delivery:
+        # edits apply to jobs already queued and to automatic retries as well.
+        allowed = email_recipient_allowed(db, company_id, log.event_type, user_id)
+        if log.event_type == "email.daily_digest":
+            context = dict(context or {})
+            overrides = email_recipient_overrides(db, company_id)
+            context["events"] = {
+                key: items
+                for key, items in context.get("events", {}).items()
+                if key not in overrides or user_id in overrides[key]
+            }
+            allowed = bool(context["events"])
+        if not allowed:
+            log.sent = False
+            log.provider_status = "suppressed"
+            log.error = "Email disabled for this recipient in Admin Settings. No email was sent."
+            db.commit()
+            return {"sent": False, "status": "suppressed"}
         recipient = str(user.email)
         claim_id = str(uuid.uuid4())
         log.provider_status = 'sending'
@@ -272,7 +291,7 @@ async def send_daily_digest_task():
                 logger.exception('Digest delivery log %s did not finish; a later pass will recover its claim', log_id)
                 db.rollback()
                 continue
-            if result.get('sent') or result.get('status') == 'unknown':
+            if result.get("sent") or result.get("status") in {"unknown", "suppressed"}:
                 # Do not automatically repeat a digest whose SMTP outcome is
                 # unknown. Its delivery warning remains visible for review.
                 from app.models.notification import DigestQueue

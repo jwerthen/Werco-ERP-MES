@@ -14,7 +14,8 @@ Compliance (``NOTIFICATIONS_PLAN.md`` §8, ``PR1_DESIGN_SPEC.md`` §C/§D/§K):
   ``User.is_active``;
 * every written row (``Notification``, ``NotificationLog``, ``DigestQueue``) stamps
   ``company_id`` from the event — never derived-from-nothing;
-* the acting user is never notified of their own action (actor exclusion);
+* actor exclusion applies to automatic audiences; explicit admin email subscriptions
+  receive emails for their own actions as well;
 * preferences are resolved in memory with NO row auto-create (§9.8);
 * mandatory-channel events force their catalog-named channel on regardless of prefs — and
   where that channel is EMAIL but the recipient has no deliverable address, IN_APP is forced
@@ -74,6 +75,7 @@ from app.services.notification_catalog import (
     get_entry,
     should_fire,
 )
+from app.services.notification_email_recipients import email_recipient_ids
 from app.services.sms_content import build_sms_body
 from app.services.sms_service import SMS_COLLAPSE_DELAY_SECONDS, SMS_HOURLY_CAP_PER_USER, reserve_sms_quota
 from app.services.user_identity import is_synthetic_email
@@ -522,16 +524,27 @@ async def _fan_out(
         logger.error("Dropping non-relative notification link %r for %s", link, entry.event_key)
         link = None
 
-    # Actor exclusion + is_active + de-dup by id.
+    # Preserve existing in-app/SMS audiences. Explicit email subscribers can be
+    # any active company user, including the actor, regardless of role or prefs.
+    selected_email_ids = email_recipient_ids(db, company_id, entry.event_key)
     recipients: Dict[int, User] = {}
     for user in candidates:
         if user is None:
             continue
         if actor_user_id is not None and user.id == actor_user_id:
             continue
-        if not getattr(user, "is_active", False):
+        if not getattr(user, "is_active", False) or user.company_id != company_id:
             continue
         recipients[user.id] = user
+
+    automatic_ids = set(recipients)
+    if selected_email_ids:
+        for user in (
+            db.query(User)
+            .filter(User.company_id == company_id, User.is_active.is_(True), User.id.in_(selected_email_ids))
+            .all()
+        ):
+            recipients[user.id] = user
 
     for user in recipients.values():
         # Deliverability is resolved ONCE per recipient, before any leg runs, because two
@@ -563,7 +576,16 @@ async def _fan_out(
         # this branch lived in the fan-out the screen and the sender disagreed for exactly
         # the recipients the fallback exists to protect. Today one entry is affected
         # (``account.locked``, mandatory EMAIL); see channels_from_pref for the scoping.
-        channels = resolve_channels(db, user, entry, email_deliverable=email_deliverable)
+        channels = (
+            resolve_channels(db, user, entry, email_deliverable=email_deliverable)
+            if user.id in automatic_ids
+            else set()
+        )
+        if selected_email_ids is not None:
+            channels.discard(CHANNEL_EMAIL)
+            channels.discard(CHANNEL_DIGEST)
+            if user.id in selected_email_ids:
+                channels.add(CHANNEL_EMAIL)
 
         if not channels:
             continue

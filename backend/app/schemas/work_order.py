@@ -613,6 +613,7 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
     started_by: Optional[int] = None
     completed_by: Optional[int] = None
     laser_nest: Optional[LaserNestOperationInfo] = None
+    cancelled_nest_id: Optional[int] = None
 
     # WHY this operation is held, WHO held it and WHEN -- so the Work Order page can disclose the
     # reason BEFORE anyone clicks Clear Hold. NOT an ORM column: injected as an in-memory attr by

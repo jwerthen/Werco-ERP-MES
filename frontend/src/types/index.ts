@@ -206,6 +206,7 @@ export interface WorkOrderOperation {
   started_by?: number;
   completed_by?: number;
   laser_nest?: LaserNestInfo | null;
+  cancelled_nest_id?: number | null;
   /**
    * WHY this operation is held, WHO placed the hold and WHEN.
    *
