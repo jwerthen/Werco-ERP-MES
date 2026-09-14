@@ -21,7 +21,7 @@ import Quality from './Quality';
 // `can` is mutated per test to flip the quality:approve gate.
 let mockCan: (perm: string) => boolean = () => true;
 jest.mock('../hooks/usePermissions', () => ({
-  usePermissions: () => ({ can: (p: string) => mockCan(p), canAny: () => true }),
+  usePermissions: () => ({ role: 'quality', isSuperuser: false, can: (p: string) => mockCan(p), canAny: () => true }),
 }));
 
 jest.mock('../services/api', () => ({

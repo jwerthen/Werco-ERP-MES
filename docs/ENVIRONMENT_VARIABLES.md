@@ -408,6 +408,15 @@ reconciled when opened in its detail / operations-list views; nothing is permane
 One Redis serves three things: the response cache, the slowapi rate-limit storage, and the
 ARQ background-job queue. **`REDIS_URL` is the single source of truth for all three.**
 
+The Redis server must use **`maxmemory-policy noeviction`** because the shared store
+contains durable job payloads, queue indexes and leases. Both Compose configurations
+set this explicitly; managed Redis must be configured separately. At its memory limit,
+Redis preserves existing keys and rejects new writes, so monitor capacity and enqueue
+failures. The cache handles rejected cache writes, but new jobs may still fail to enqueue.
+Separate database numbers do not isolate server-wide eviction. No `CACHE_REDIS_URL`
+setting or second Redis service is introduced. See
+[Docker queue retention](DOCKER_PRODUCTION.md#redis-queue-retention-and-memory-pressure).
+
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `REDIS_URL` | No | - | Full Redis connection URL. **Takes precedence over the individual settings** — for the cache, the limiter, *and* the job queue |

@@ -1,0 +1,4 @@
+{"repro": "MRP_MULTI_DATE", "total_demand": 10.0, "recommended_quantities": [5.0, 10.0], "total_recommended": 15.0}
+{"repro": "app.jobs.mrp_jobs", "tenants_attempted": [1, 2], "failures": [{"company_id": 1, "error": "IntegrityError"}, {"company_id": 2, "error": "PendingRollbackError"}], "result": {"companies_processed": 0, "runs": []}}
+{"repro": "app.jobs.scheduling_jobs", "tenants_attempted": [1, 2], "failures": [{"company_id": 1, "error": "IntegrityError"}, {"company_id": 2, "error": "PendingRollbackError"}], "result": {"companies_processed": 0, "runs": []}}
+{"repro": "COST_BEST_EFFORT", "returned": null, "caller_session_usable": false}

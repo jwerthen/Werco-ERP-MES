@@ -1,0 +1,337 @@
+{
+  "generated_at_utc": "2026-09-13T23:15:59.142851+00:00",
+  "base_commit": "a4a085a31ae3783f5be7d26e182b91951ab67693",
+  "branch": "codex/cleanup-deployment-hygiene",
+  "scope": [
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5",
+    "A9"
+  ],
+  "deployment_performed": false,
+  "live_database_or_customer_accounts_inspected": false,
+  "database_migration_added": false,
+  "backend_database": "Repository-standard in-memory SQLite per worker; Docker hygiene integration enabled",
+  "backend_line_coverage_percent": 87.28,
+  "backend_coverage_floor_percent": 78,
+  "checks": [
+    {
+      "id": "backend_full_final",
+      "status": "passed",
+      "command_or_scope": "backend: RUN_DOCKER_HYGIENE_TESTS=1 .venv/bin/python -m pytest -n 8 --dist=worksteal --cov-report=xml:/tmp/werco-access-coverage-final.xml",
+      "local_log": "/tmp/werco-access-backend-full-final.log",
+      "log_sha256": "f58406ac05c9322644ee10857f994537ec8736ec1c7d164433edfda158979e28",
+      "summary": [
+        "Required test coverage of 78% reached. Total coverage: 87.28%",
+        "========== 8817 passed, 19 skipped, 27 warnings in 360.08s (0:06:00) ==========="
+      ]
+    },
+    {
+      "id": "accounts_final",
+      "status": "passed",
+      "command_or_scope": "Focused real HTTP account/provisioning, auth, unlock and API-token regression suite",
+      "local_log": "/tmp/werco-provisioning-unlock-final.log",
+      "log_sha256": "97661b488b8b59faabd342545f9f1e0d1855fa32327771691703ec5c121f0970",
+      "summary": [
+        "============================= 270 passed in 13.07s ============================="
+      ]
+    },
+    {
+      "id": "fai_final",
+      "status": "passed",
+      "command_or_scope": "Focused FAI, process-sheet integration and audit rollback suite after 503 alignment",
+      "local_log": "/tmp/werco-audit-2026-09-13/fai-access-503-final.log",
+      "log_sha256": "4d7615487993ff745c35d5cad864fec24018fad544340dfebaec48fdba4457ea",
+      "summary": [
+        "============================= 198 passed in 20.88s ============================="
+      ]
+    },
+    {
+      "id": "job_cost_final",
+      "status": "passed",
+      "command_or_scope": "135 real HTTP job-cost cases after historical read preservation",
+      "local_log": "/tmp/werco-audit-2026-09-13/job-cost-access-final.log",
+      "log_sha256": "4ce52920707242baa74ae3d639ab6eb84afd18fe6150fd1c0a6547ccffa03373",
+      "summary": [
+        "============================= 135 passed in 22.37s ============================="
+      ]
+    },
+    {
+      "id": "websocket_http_final",
+      "status": "passed",
+      "command_or_scope": "All three actual WebSocket routes, shared HTTP identity, previous tenant socket tests, auth and API tokens",
+      "local_log": "/tmp/werco-audit-2026-09-13/websocket-http-access-final.log",
+      "log_sha256": "74dae28f0d5a001229d54d796cc0141604bd426ae9bbef792369766c45e72c69",
+      "summary": [
+        "============================= 182 passed in 10.71s ============================="
+      ]
+    },
+    {
+      "id": "documents_storage_final",
+      "status": "passed",
+      "command_or_scope": "Document access, work-order documents, local/S3 storage and BOM released document control",
+      "local_log": "/tmp/werco-doc-access-final.log",
+      "log_sha256": "b0d0a1379224b926400c735a0a781dcaaf4f36214ec1d4cd70ff1b2d44ff97a4",
+      "summary": [
+        "======================= 134 passed, 6 warnings in 21.10s ======================="
+      ]
+    },
+    {
+      "id": "document_role_final",
+      "status": "passed",
+      "command_or_scope": "Final 30 document access cases, including added Manager/Quality lifecycle role split",
+      "local_log": "/tmp/werco-doc-access-role-final.log",
+      "log_sha256": "fbc2d706d4d0b9f968e653cc9aa2c050480bfa3d37333d9f770c7187e21d37ee",
+      "summary": [
+        "============================== 30 passed in 3.02s =============================="
+      ]
+    },
+    {
+      "id": "completion_fixture_final",
+      "status": "passed",
+      "command_or_scope": "All 25 completion-quality-gate cases with a valid active tenant fixture",
+      "local_log": "/tmp/werco-audit-2026-09-13/completion-tenant-fixture-final.log",
+      "log_sha256": "33a8c39eb186baaef6b46c52f6d2147ddf89655d4bd4b3c1402e7f37b893b85a",
+      "summary": [
+        "======================== 25 passed in 103.77s (0:01:43) ========================"
+      ]
+    },
+    {
+      "id": "frontend_full_final",
+      "status": "passed",
+      "command_or_scope": "frontend: npm test -- --runInBand --silent",
+      "local_log": "/tmp/werco-audit-2026-09-13/access-ui-full-jest-final.log",
+      "log_sha256": "5f0636f6b414e640101e5031c3834a0073af8b03e98880b8d1d50ac6c3d5eae4",
+      "summary": [
+        "Test Suites: 440 passed, 440 total",
+        "Tests:       4344 passed, 4344 total",
+        "Time:        236.472 s"
+      ]
+    },
+    {
+      "id": "frontend_lint_final",
+      "status": "passed",
+      "command_or_scope": "frontend: npm run lint (includes actual Hook configuration checks)",
+      "local_log": "/tmp/werco-audit-2026-09-13/access-ui-lint-final.log",
+      "log_sha256": "e1c2209044f19ee388e25a0bf6c78fc235a16f4a5cef6c9724e05d780c234c31",
+      "summary": []
+    },
+    {
+      "id": "frontend_types_final",
+      "status": "passed",
+      "command_or_scope": "frontend: npm run type-check (all three TypeScript programs)",
+      "local_log": "/tmp/werco-audit-2026-09-13/access-ui-types-final.log",
+      "log_sha256": "e2791dc2c2f094fe73dd4d66a346d84ed6c762d20f366986b898782c35e7308d",
+      "summary": []
+    },
+    {
+      "id": "frontend_build",
+      "status": "passed",
+      "command_or_scope": "frontend: npm run build",
+      "local_log": "/tmp/werco-audit-2026-09-13/access-ui-build.log",
+      "log_sha256": "439f77e21cff1cdd179b21acaf2854804c9fd8f126f36f127c36c906066956a9",
+      "summary": []
+    },
+    {
+      "id": "black_final",
+      "status": "passed",
+      "command_or_scope": "backend: .venv/bin/python -m black --check --config=.black app tests",
+      "local_log": "/tmp/werco-access-black-final.log",
+      "log_sha256": "a34fff5f43fb8753f1273ceb4940d7add6cb6aa900d0da2ce14012b6bd1e68a0",
+      "summary": []
+    },
+    {
+      "id": "isort_final",
+      "status": "passed",
+      "command_or_scope": "backend: .venv/bin/python -m isort --check-only --settings-path=.isort.cfg app tests",
+      "local_log": "/tmp/werco-access-isort-final.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "summary": []
+    },
+    {
+      "id": "flake8_final",
+      "status": "passed",
+      "command_or_scope": "backend: .venv/bin/python -m flake8 app",
+      "local_log": "/tmp/werco-access-flake8-final.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "summary": []
+    },
+    {
+      "id": "mypy_final",
+      "status": "passed",
+      "command_or_scope": "backend: .venv/bin/python -m mypy app",
+      "local_log": "/tmp/werco-access-mypy-final.log",
+      "log_sha256": "67c9dce74fe5a28cf445ea2b540ca75bc348a1fbf89bfc46b6f4e70aab3a0e53",
+      "summary": [
+        "Success: no issues found in 447 source files"
+      ]
+    },
+    {
+      "id": "bandit_final",
+      "status": "passed",
+      "command_or_scope": "backend: .venv/bin/python -m bandit -r app -s B101 -ll",
+      "local_log": "/tmp/werco-access-bandit-final.log",
+      "log_sha256": "4ef43180208bc955d0f62701f699a3c74f0c379f25d98c91a0dbb5db43a761cb",
+      "summary": []
+    },
+    {
+      "id": "tracked_hooks",
+      "status": "passed",
+      "command_or_scope": "repository: backend/.venv/bin/pre-commit run --all-files",
+      "local_log": "/tmp/werco-access-precommit-tracked.log",
+      "log_sha256": "920adbcae439be9edd67c420e4366ab9883989c234b44c027021dbe357e36cf2",
+      "summary": []
+    },
+    {
+      "id": "new_file_hooks",
+      "status": "passed",
+      "command_or_scope": "repository: backend/.venv/bin/pre-commit run --files <all 42 new files, including verification artifacts>",
+      "local_log": "/tmp/werco-access-precommit-new.log",
+      "log_sha256": "97b175916019fba2702312c898bca444dcc5eccbea1a1d78ed379575441e283b",
+      "summary": []
+    },
+    {
+      "id": "backend_full_initial",
+      "status": "superseded",
+      "command_or_scope": "Initial full sweep before final review corrections; sole failure was a missing Company test fixture",
+      "local_log": "/tmp/werco-access-backend-full.log",
+      "log_sha256": "f639cb77fc6e889992763e62b3d9dabb1d62026677f029a2c0e6a901785c0573",
+      "summary": [
+        "Required test coverage of 78% reached. Total coverage: 86.61%",
+        "===== 1 failed, 8802 passed, 19 skipped, 27 warnings in 574.72s (0:09:34) ======"
+      ]
+    },
+    {
+      "id": "provisioning_before",
+      "status": "expected_failure",
+      "command_or_scope": "New regressions against the original provisioning behavior",
+      "local_log": "/tmp/werco-provisioning-before.log",
+      "log_sha256": "0f974945887cd8bed63132d886b3a614dd7facfff07c3081bba98a9ef4129d52",
+      "summary": [
+        "========================= 13 failed, 1 passed in 1.39s ========================="
+      ]
+    },
+    {
+      "id": "unlock_before",
+      "status": "expected_failure",
+      "command_or_scope": "New protected-target and required-audit regressions before unlock correction",
+      "local_log": "/tmp/werco-unlock-before.log",
+      "log_sha256": "a7299bfd5995382c6935182000a2cd8b4ea1d8d0da1c060ad3b2dfb58edf1bf2",
+      "summary": [
+        "================== 6 failed, 4 passed, 51 deselected in 1.18s =================="
+      ]
+    },
+    {
+      "id": "fai_before",
+      "status": "expected_failure",
+      "command_or_scope": "Selected real HTTP FAI regressions before the FAI service repair",
+      "local_log": "/tmp/werco-audit-2026-09-13/fai-access-before.log",
+      "log_sha256": "5daada5f83958cc2222e7d176c9f5c10465836ed352e04bb7e232ef403c8bb4c",
+      "summary": [
+        "================= 27 failed, 6 passed, 41 deselected in 5.08s =================="
+      ]
+    },
+    {
+      "id": "documents_before",
+      "status": "expected_failure",
+      "command_or_scope": "Real HTTP document publication and audit-loss regressions before repair",
+      "local_log": "/tmp/werco-doc-access-before.log",
+      "log_sha256": "e13400233143868e63e89d945618e82325634ad8dd4ed03ca647b2f90eaa09c9",
+      "summary": [
+        "============================== 6 failed in 0.77s ==============================="
+      ]
+    },
+    {
+      "id": "job_cost_before",
+      "status": "expected_failure",
+      "command_or_scope": "Four real HTTP foreign-tenant read/write regressions before repair",
+      "local_log": "/tmp/werco-audit-2026-09-13/job-cost-access-before.log",
+      "log_sha256": "c4b3b60690a5a0b016fbf52eb8f6cdc8a467f6ffb571564292e1f92dfb53fc67",
+      "summary": [
+        "============================== 4 failed in 0.63s ==============================="
+      ]
+    },
+    {
+      "id": "websocket_legacy_before",
+      "status": "expected_failure",
+      "command_or_scope": "Original HEAD resolver injected into actual /api/v1/ws handlers in an isolated test harness; no source reset",
+      "local_log": "/tmp/werco-audit-2026-09-13/websocket-legacy-admission-before.log",
+      "log_sha256": "2f2f1e5f370dce16d59080acce91252435ea7ca7f7d5a9e89a7545bcf2fcb455",
+      "summary": [
+        "====================== 24 failed, 89 deselected in 2.04s ======================="
+      ]
+    }
+  ],
+  "review": {
+    "test_engineer": "Approved after final unlock, document role/history and completion fixture review",
+    "compliance_and_code_review": "No remaining blocker in reviewed access-control scope",
+    "documentation": "API, RBAC, Kiosk and CLAUDE updated; no new environment/deployment requirements"
+  },
+  "source_fingerprints_note": "Changed/new application and test files in the cumulative working tree, including retained cleanup changes; evidence artifacts excluded.",
+  "source_sha256": {
+    "backend/app/api/deps.py": "a2ccaaf9cbefb9216533ad2365f42f60f3aef322dd713ccd2237cd24a1420b99",
+    "backend/app/api/endpoints/auth.py": "5e4b16aac95fd76d2d3c7d7fd9d6de1329c59ad930790d52d32fe549d31a5e8a",
+    "backend/app/api/endpoints/companies.py": "a49e8b0d60c166ac21cd118a1ec83acce65da94102ac9edd722496c57f905a18",
+    "backend/app/api/endpoints/documents.py": "e772d96d5cacbe6fef0023349ed647d4803217ef536b1aa73c35db7c3d3087b8",
+    "backend/app/api/endpoints/job_costing.py": "b9e34b5214fc5fdd09bb73290b72e77d7815bbe8a13cb55a78e89caf2afe8caf",
+    "backend/app/api/endpoints/platform.py": "bc52b644fb984f13aad7debe55cbab262f83517ffe8f40209726a586a086feb7",
+    "backend/app/api/endpoints/quality.py": "58f6dc28aef6c7326b13a4aba6b2fc4d614111630ad4de016f9824e4ead5b487",
+    "backend/app/api/endpoints/users.py": "49e0dec8645fc9775af94dbb1628b8e79727531a9939abd606383d12d6fb87e8",
+    "backend/app/api/websocket.py": "91c1e52f8be3ce0be68a9486193292bb6b72e18f82e922beb82f3bc9e6582714",
+    "backend/app/core/websocket.py": "93f5ed7d90da77d08ae6733574ed337d8d889fe50d2c765072637abfe0526362",
+    "backend/app/schemas/job_costing.py": "2d849512587adb5e929205166c2dc71a32e58407dd1df1b6e45dd1814bc69b8d",
+    "backend/app/schemas/remnant_planning.py": "cbb69661f29fa418aa5f036187be61a589e43abff6ce9c72c744b4094fe9f258",
+    "backend/app/services/access_identity.py": "4fdffa54a0448d7a15d45ae55c708af53559cca8909fa038f3459b7afc16c84f",
+    "backend/app/services/company_onboarding.py": "246906df03b16c4e2e1dd5c13002f6c422f2776c62707167eb580ec877695927",
+    "backend/app/services/fai_service.py": "7b7cafd92b0533ff88df8e1edb9e02acf134ca369f7995bf5eb415a3a4cb777f",
+    "backend/app/services/job_costing_access_service.py": "7744008145659cc9fe006501ac898dcf9c852a5c34d8aae3c19534b16c43ff6e",
+    "backend/app/services/process_sheet_service.py": "2078fa40eb9a0ffd3bfe5e54b97c7d74ef845da68a2f326376fb367de9778044",
+    "backend/app/services/user_provisioning.py": "fdce2105c98859cf47ee9ab44f5659d803c619fd2297d3ae23ef8898b189897e",
+    "backend/tests/api/test_account_provisioning_boundary.py": "93e24a48c3391eab86754ff56f7a075647b2369730c6ec91e2e3569aa984bb1c",
+    "backend/tests/api/test_completion_quality_gates_batch4.py": "4b955afe3033b1b0ffc2b1371fb7ac0de0282b59f0fd340ca48b5f271aac65a9",
+    "backend/tests/api/test_document_access_control.py": "74791bb758b209d53ca5a2cf1e635e9e5ac0618d5762f36368912fc5be2ec380",
+    "backend/tests/api/test_fai_access_controls.py": "3fa81ee99e6f763f3dfa813dd5f666634fb6ef61a058c4205449ba31f9a4de21",
+    "backend/tests/api/test_job_costing_access_control.py": "9f287e4158a55da5df480ad634318e4390d60dd2e9ff0f56d168e540d720d56a",
+    "backend/tests/api/test_process_sheet_audit_fixes.py": "3cace2309b38928ac000c45d1dcd7c0ae2556046107681e5239d8bfada4a5bbc",
+    "backend/tests/api/test_process_sheet_integrations.py": "215159247d294bf78e1b9bcaa800d1f700cee09797e5abac6a3985b90cd8b974",
+    "backend/tests/api/test_websocket_access_control.py": "9069beabf88034ef80a9860cedcfd2e379c101032d310a088b264b01ebc316c9",
+    "backend/tests/services/test_nesting_runtime_contract.py": "59a845c2c187806d21e33600b52196992bf3bd0601151f551a9d36c2d79ac32e",
+    "backend/tests/test_ci_workflow_gates.py": "48181567ca96700b26323e6ca64abfe2b7e540690255b45fc7f0f20df1f72030",
+    "backend/tests/test_dependency_locks.py": "7b84e95e7157bc97df3f59b0ef3a6175a80b0cfa70a4ecc20849b6a93c260a64",
+    "backend/tests/test_deployment_hygiene.py": "bb21c61d289a529cbedb40a0aa04dec03f5917acb552d791cec56a495bccdd6d",
+    "backend/tests/test_mypy_boundary_checks.py": "633599dbfd05caca7829059b2ec97cb3b13a597815061405f311e2da76e2dbbb",
+    "backend/tests/test_websocket_tenant_isolation.py": "3ad4ed354967b36762cb84c2463808cf72bfb17108a392d3fbb16cf8e5444933",
+    "frontend/src/components/laser/LaserNestManualModal.materialTie.test.tsx": "f06969fc25f567a1027a1e2153ade22354aa37f97b6e8f761eeaad775f6b7594",
+    "frontend/src/components/laser/LaserNestManualModal.test.tsx": "1a82603bceb8b2b257f1d94c6592380ba8029a25c494499396d48bd449a9be16",
+    "frontend/src/components/laser/LaserNestManualModal.tsx": "2b91672187909bf636320f980307dc64f210a5eb2ebdea1481909646592851c2",
+    "frontend/src/components/operations/DocumentDetail.test.tsx": "4cb6efbd9ca3bcf6c39ff6912231062307a86bf99dee8f36919b2985e72e8547",
+    "frontend/src/components/operations/DocumentDetail.tsx": "d2b7e5c89342ac004b981b1d547c2107d3dd9abf45186547251afac4db02d8d7",
+    "frontend/src/pages/Documents.tsx": "8414adc702d46a53f100e2fb8ebc9a72076a9db39390ccf247a80fae42e8a079",
+    "frontend/src/pages/Documents.writeAccess.test.tsx": "1ca94db5bbcb58c964d0f8b5ec0c1672d8a7727138369069c2b75003d1154256",
+    "frontend/src/pages/JobCosting.cockpit.test.tsx": "7038dd482413a85461f4f2ea4f377540818c34c768358fb286deab751be6eb68",
+    "frontend/src/pages/JobCosting.statusBadge.test.tsx": "f8c3b8ab9d2e8ee629d45181382dca7fa4993593b52fd3ee4b1296bd7aac27d9",
+    "frontend/src/pages/JobCosting.tsx": "18b1d1eb46b21c59145fe423f78bed990a0b46d40b3165dd17c8d226f6526170",
+    "frontend/src/pages/PartsNew.saveFilterDialog.test.tsx": "be18f4525595fd2baa1a0ca6282193e2383c116f2832093da7f6bf91a5579ce3",
+    "frontend/src/pages/PartsNew.tsx": "10548c28ec43f824a2fdd1e9bc78e487854e535e92e2a61285f17c645554ac85",
+    "frontend/src/pages/Purchasing.tsx": "bd68ed65a924192d85ae14711b8a8593d67fff7c00f6b5789e95f33a701554b7",
+    "frontend/src/pages/Quality.cockpit.test.tsx": "d6c2afd4b9f5372fe20b8a5a0043a524c9e7c54dc2812fc0148d8ffcf8c55dc8",
+    "frontend/src/pages/Quality.deepLink.test.tsx": "47ab8d53f9472e56cb9cbcdac05cb38cddb0d52eb31c59f78310ee1cc3f8f0b0",
+    "frontend/src/pages/Quality.faiPrefill.test.tsx": "e1c2dba9b71d9a15fcdf5b902aaea1ad0e4d2b41e7595e107a132aee23de04b8",
+    "frontend/src/pages/Quality.formA11yUnsavedGuard.test.tsx": "ae371adb899efc5282fcd1ea344acabe32b7088338ec5b56143db4139c5adc7d",
+    "frontend/src/pages/Quality.ncrVoid.test.tsx": "a642c531abd09582c3f0510ec4be8501ec80a61f3db6d90ac8ba17d0551600b4",
+    "frontend/src/pages/Quality.scrapCodes.test.tsx": "adf31b5c30968603d608ed5fad971c384f0231bc30f83e0ddec45699c79f476a",
+    "frontend/src/pages/Quality.tsx": "bfe667a22faee3d9c28fd1194e846e1448f0fe73e9a7528ffb22da4007da6fde",
+    "frontend/src/pages/WorkOrderDetail.tsx": "130b32f4353d3728697d32aa6d384bf5522c23dabf903ec7d8b0b3ea52050e8d",
+    "frontend/src/utils/recordWriteAccess.test.ts": "fec226bb07daa366a0012c2407b819ee0ce62a2db36fad3acdf6b6933f794dd9",
+    "frontend/src/utils/recordWriteAccess.ts": "e2b4cdd9f67133fae180adafc6af6314b91ee697b2a0b2b4715862f37b8864d3"
+  },
+  "limits": [
+    "Focused suites overlap; their pass counts must not be summed.",
+    "Original audit and cleanup verification remain separate historical records.",
+    "No browser E2E, live PostgreSQL concurrency or production performance validation.",
+    "A6/A12 session/cache/permission-state repairs and A7/A8/A10/A11 planning/transaction repairs remain.",
+    "Existing stateless access-JWT logout semantics remain."
+  ]
+}

@@ -1,121 +1,58 @@
 # Manufacturing ERP Landing Page
 
-A professional, brand-neutral landing page for the ERP/MES SaaS platform.
-
-## View the Landing Page
-
-Simply open `index.html` in your web browser to view the complete landing page with all sections:
-- Hero with customizable branding
-- Features overview
-- Interactive demo
-- Pricing plans
-- CTA sections
-- And more!
-
-## Project Structure
-
-This landing page includes both:
-
-1. **Standalone HTML Version** (`index.html`)
-   - Ready to view immediately in any browser
-   - Uses Tailwind CSS via CDN
-   - Fully responsive
-   - No build process required
-
-2. **React + Vite Development Version** (in `src/` directory)
-   - Full TypeScript implementation
-   - Component-based architecture
-   - Requires npm dependencies installation
+The shipped marketing site is the static `index.html`. Vite serves and builds that
+entry. The optional React implementation under `src/` is not imported by the HTML,
+so editing those components does not change the published site.
 
 ## Development
 
-### Using the React Version (Optional)
-
-If you want to develop with React + Vite:
+Use Node.js 22 and the committed lockfile:
 
 ```bash
 cd landing
-
-# Note: npm install may have issues on some systems. If dependencies don't install,
-# the standalone HTML version works perfectly without any installation.
-
-npm install
+npm ci
 npm run dev
 ```
 
-The React version provides:
-- Full TypeScript support
-- Component reusability
-- Development server with hot reload
-- Production build optimization
+Open **http://localhost:3001**. This serves the same static HTML entry used by the
+production build; it does not switch to the React implementation. You can also open
+`index.html` directly in a browser, though its Tailwind CDN script and remote assets
+still require network access.
 
-## Features of the Landing Page
-
-1. **Hero Section**
-   - Compelling headline and value proposition
-   - Compliance badges (AS9100D, ISO 9001, CMMC Level 2)
-   - CTAs for trial and demo
-
-2. **Features Overview**
-   - 6 key feature cards
-   - Highlights shop floor control, work orders, quality, compliance, etc.
-
-3. **Interactive Demo**
-   - Mock interface preview
-   - Shows dashboard view
-   - Demonstrates the intuitive UI
-
-4. **Pricing Section**
-   - Three pricing tiers (Starter, Professional, Enterprise)
-   - Clear feature comparison
-   - Monthly pricing with annual discount mention
-
-5. **CTA Section**
-   - Strong call-to-action
-   - Emphasizes free trial
-   - No credit card required
-
-6. **Responsive Design**
-   - Mobile-optimized
-   - Touch-friendly interface
-   - Works on all screen sizes
-
-## Customization
-
-The landing page is designed to be brand-neutral and easily customizable:
-
-- Change colors in Tailwind configuration
-- Update company name and branding
-- Add your logo
-- Customize pricing and features
-- Add real testimonials
-- Update contact information
-
-## Deployment
-
-### Static HTML Deployment
-
-The standalone HTML version can be deployed anywhere:
-- Netlify
-- Vercel
-- GitHub Pages
-- Any static hosting service
-
-Simply upload the `index.html` file and it will work immediately.
-
-### React Production Build
-
-After installing dependencies (if they install successfully):
+## Checks and build
 
 ```bash
+npm run type-check
 npm run build
+npm run audit:ci
 ```
 
-The production files will be in the `dist/` directory.
+- `type-check` validates the optional React/TypeScript source independently of the
+  shipped entry. Keeping it type-correct does not mount it or assert that it has the
+  same content as the static page.
+- `build` produces the static site's deployment output in `dist/`.
+- `audit:ci` checks the locked npm tree and exits nonzero for high/critical advisories.
 
-## Notes
+The main CI pipeline runs **Landing Checks** (`npm ci`, type-check, build) before
+Docker builds. The separate nightly/manual dependency-audit workflow runs the landing
+audit. The CDN script in `index.html` is outside the npm lockfile and npm audit's scope.
 
-- The npm installation may have issues on some systems due to npm version compatibility
-- The standalone HTML version works perfectly without any dependencies
-- Both versions contain the same content and sections
-- The React version is ideal for ongoing development and maintenance
+## Project structure
+
+| Path | Purpose |
+|---|---|
+| `index.html` | Shipped page, including layout, copy, styling configuration, and scripts |
+| `src/` | Optional React implementation; separately type-checked, currently unmounted |
+| `vite.config.ts` | Development server and `dist/` build configuration |
+| `package-lock.json` | Reproducible npm dependency tree |
+
+## Customization and deployment
+
+Edit `index.html` to change the current site's copy, branding, pricing, sections,
+and interactions. Review marketing claims and sample testimonials before publication.
+Adopting the React source would require an explicit HTML-entry change and browser
+validation; it is not part of the current development or build command.
+
+For the existing Vite deployment, run `npm run build` and publish `dist/` to the
+configured static host. This repository's landing site deploys independently from
+the ERP application. Running local checks does not publish either site.

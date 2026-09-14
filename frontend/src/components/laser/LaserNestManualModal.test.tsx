@@ -2,6 +2,7 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import LaserNestManualModal from './LaserNestManualModal';
 import api from '../../services/api';
+let mockRole = 'admin';
 
 jest.mock('../../services/api', () => ({
   __esModule: true,
@@ -41,6 +42,7 @@ async function selectPdf(file = pdfFile()) {
 describe('LaserNestManualModal', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockRole = 'admin';
     // Default: a clean AI read. Individual tests override as needed. The
     // PDF-chain/attach-failure tests don't assert on extraction, but the modal
     // still calls it on select, so give it something resolvable by default.
@@ -54,6 +56,23 @@ describe('LaserNestManualModal', () => {
       source: 'ai',
       warning: null,
     });
+  });
+
+  it('a supervisor can create a manual nest without being offered document publishing', async () => {
+    mockRole = 'supervisor';
+    mockApi.createManualLaserNest.mockResolvedValue({
+      id: 7, nest_name: '8001', planned_runs: 5, completed_runs: 0, remaining_runs: 5,
+    });
+    const onSaved = jest.fn();
+    render(<LaserNestManualModal open workOrderId={42} onClose={jest.fn()} onSaved={onSaved} />);
+    expect(screen.queryByLabelText(/reference pdf/i)).not.toBeInTheDocument();
+    fillField(/cnc number/i, '8001');
+    fillField(/qty to cut/i, '5');
+    fillField(/material/i, '304 SS');
+    fireEvent.click(screen.getByRole('button', { name: /add nest/i }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(mockApi.createManualLaserNest).toHaveBeenCalledTimes(1);
+    expect(mockApi.uploadDocument).not.toHaveBeenCalled();
   });
 
   it('submits the manual-create body with cnc_number and planned_runs', async () => {
@@ -380,3 +399,7 @@ describe('LaserNestManualModal', () => {
     expect(onSaved).toHaveBeenCalled();
   });
 });
+
+jest.mock('../../hooks/usePermissions', () => ({
+  usePermissions: () => ({ role: mockRole, isSuperuser: false }),
+}));

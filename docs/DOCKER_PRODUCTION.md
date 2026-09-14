@@ -28,12 +28,12 @@ mkdir -p nginx/certs
 # - nginx/certs/privkey.pem (private key)
 
 # 4. Build and start services
-docker-compose -f docker-compose.prod.yml build
-docker-compose -f docker-compose.prod.yml up -d
+docker compose --env-file .env.prod -f docker-compose.prod.yml build
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 
 # 5. Check status
-docker-compose -f docker-compose.prod.yml ps
-docker-compose -f docker-compose.prod.yml logs -f
+docker compose --env-file .env.prod -f docker-compose.prod.yml ps
+docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f
 ```
 
 ## Architecture
@@ -80,6 +80,58 @@ No environment or cron selection is changed by this packaging. Server calculatio
 require a fresh published runtime identity and the selected nesting relay schedule;
 see [WORKER_SERVICE.md](WORKER_SERVICE.md#saved-nesting-calculation-runtime).
 
+### Build contexts and runtime secrets
+
+The API and frontend use their own directories as Docker build contexts; the worker
+uses the repository root. Each context has its own `.dockerignore` because Docker
+does not inherit parent ignore rules or use `.gitignore` for local builds. The rules
+exclude local `.env` variants, package-manager and cloud credentials, private keys,
+virtual environments, SQLite files, uploads, logs and backups. `.env.example` and
+`.env.*.example` templates remain available, along with dependency lockfiles, release
+stamps and the worker's frontend source/build inputs. There is no landing Docker
+context in the shipped Compose configurations.
+
+Pass deployment values at runtime through Compose's `environment` entries, using
+`docker compose --env-file .env.prod -f docker-compose.prod.yml …`. Do not depend on a
+developer's `backend/.env` being copied into `/app`; images do not contain it. Frontend
+public build values must be passed explicitly as build arguments. Uploads remain in
+configured storage or mounted volumes instead of becoming part of an image layer.
+Railway's normal CLI upload also applies Git/railway ignore rules before Docker runs;
+the Docker rules independently protect local builds.
+
+To verify the policies using only synthetic files and an isolated Redis container:
+
+```bash
+cd backend
+RUN_DOCKER_HYGIENE_TESTS=1 pytest tests/test_deployment_hygiene.py --no-cov -n 0
+```
+
+This check requires a running Docker daemon. It uses Docker's actual context matcher,
+checks required inputs survive, and fills a temporary Redis to verify queued keys
+survive cache pressure. It never builds from real environment files or uploads.
+
+### Redis queue retention and memory pressure
+
+The shared cache/queue Redis explicitly uses `maxmemory-policy noeviction` in both
+Compose files. Production keeps the existing 256 MiB Redis limit within a 512 MiB
+container and retains append-only persistence plus the Redis data volume. Cache
+eviction policies such as `allkeys-lru` can silently discard ARQ job payloads, queue
+indexes and leases; a separate Redis database number does not isolate eviction.
+
+With `noeviction`, existing keys stay present under memory pressure, but Redis rejects
+new memory-allocating writes. Cache writes can fail and new jobs can fail to enqueue;
+this is backpressure, not a guarantee that every new job is accepted. Monitor Redis
+memory, rejected writes, enqueue failures and the pending queue/outbox. Increase the
+Redis allocation and container headroom before saturation. A separate cache instance
+is a future capacity option; this change introduces no `CACHE_REDIS_URL` setting or
+new service. Never clear the shared database to free cache space.
+
+For managed Redis, including Railway, set and verify `maxmemory-policy=noeviction`
+through the provider's Redis configuration; the Compose change does not modify that
+service. Keep the policy when rolling application images back. Redis configuration
+changes need their own operational rollout; deploying the application does not change
+a separately managed Redis service's eviction policy.
+
 ## Security Features
 
 ### Network Isolation
@@ -116,7 +168,7 @@ see [WORKER_SERVICE.md](WORKER_SERVICE.md#saved-nesting-calculation-runtime).
 apt-get install certbot
 
 # Get certificates (stop nginx first)
-docker-compose -f docker-compose.prod.yml stop nginx
+docker compose --env-file .env.prod -f docker-compose.prod.yml stop nginx
 certbot certonly --standalone -d erp.yourcompany.com
 
 # Copy certificates
@@ -124,7 +176,7 @@ cp /etc/letsencrypt/live/erp.yourcompany.com/fullchain.pem nginx/certs/
 cp /etc/letsencrypt/live/erp.yourcompany.com/privkey.pem nginx/certs/
 
 # Start nginx
-docker-compose -f docker-compose.prod.yml up -d nginx
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d nginx
 
 # Set up auto-renewal (add to crontab)
 0 0 1 * * certbot renew --pre-hook "docker-compose -f /path/to/docker-compose.prod.yml stop nginx" --post-hook "docker-compose -f /path/to/docker-compose.prod.yml start nginx"
@@ -146,13 +198,13 @@ openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
 
 ```bash
 # All services
-docker-compose -f docker-compose.prod.yml logs -f
+docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f
 
 # Specific service
-docker-compose -f docker-compose.prod.yml logs -f backend
+docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f backend
 
 # Last 100 lines
-docker-compose -f docker-compose.prod.yml logs --tail=100 backend
+docker compose --env-file .env.prod -f docker-compose.prod.yml logs --tail=100 backend
 ```
 
 ### Database Backup
@@ -172,20 +224,20 @@ psql "$DATABASE_URL" < backup.sql
 git pull origin main
 
 # Rebuild and restart
-docker-compose -f docker-compose.prod.yml build
-docker-compose -f docker-compose.prod.yml up -d
+docker compose --env-file .env.prod -f docker-compose.prod.yml build
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 
 # Or zero-downtime update (one service at a time)
-docker-compose -f docker-compose.prod.yml up -d --no-deps --build backend
-docker-compose -f docker-compose.prod.yml up -d --no-deps --build frontend
-docker-compose -f docker-compose.prod.yml up -d --no-deps --build worker
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --no-deps --build backend
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --no-deps --build frontend
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --no-deps --build worker
 ```
 
 ### Scaling
 
 ```bash
 # Scale worker instances
-docker-compose -f docker-compose.prod.yml up -d --scale worker=3
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --scale worker=3
 ```
 
 ### Background Jobs (ARQ Worker)
@@ -250,7 +302,7 @@ The other `AUDIT_*` settings (`AUDIT_ARCHIVE_ENABLED`, `AUDIT_RETENTION_DAYS_DEF
 
 ```bash
 # Check all services
-docker-compose -f docker-compose.prod.yml ps
+docker compose --env-file .env.prod -f docker-compose.prod.yml ps
 
 # Backend health
 curl -k https://localhost/health/ready
@@ -268,13 +320,13 @@ docker exec werco-redis-prod redis-cli -a $REDIS_PASSWORD ping
 
 ```bash
 # Check logs
-docker-compose -f docker-compose.prod.yml logs backend
+docker compose --env-file .env.prod -f docker-compose.prod.yml logs backend
 
 # Check container status
 docker inspect werco-backend-prod
 
 # Verify environment variables
-docker-compose -f docker-compose.prod.yml config
+docker compose --env-file .env.prod -f docker-compose.prod.yml config
 ```
 
 ### Database Connection Issues

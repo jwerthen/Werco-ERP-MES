@@ -5,7 +5,7 @@ This guide covers development practices, testing, and contribution guidelines fo
 ## Environment Setup
 
 ### Prerequisites
-- Python 3.11+
+- Python 3.11 (supported production and CI runtime)
 - Node.js 22+ (LTS; see frontend/.nvmrc)
 - PostgreSQL 15+ (only for the Postgres/Supabase path; local dev defaults to SQLite)
 - Docker & Docker Compose (optional but recommended)
@@ -24,14 +24,13 @@ This guide covers development practices, testing, and contribution guidelines fo
    cd backend
    python -m venv venv
    venv\Scripts\activate  # Windows
-   pip install -r requirements.txt
-   pip install -r requirements-dev.txt
+   python -m pip install --require-hashes -r requirements-dev.lock
    ```
 
 3. **Frontend Setup**
    ```bash
    cd frontend
-   npm install
+   npm ci
    ```
 
 4. **Environment Variables**
@@ -83,6 +82,39 @@ This guide covers development practices, testing, and contribution guidelines fo
    > through the company-onboarding flow (`POST /api/v1/companies/register`), which enforces
    > the password-strength policy.
 
+### Dependency updates
+
+`backend/requirements.txt` and `requirements-dev.txt` are editable dependency inputs.
+Development includes the runtime input; install the committed **hash locks** rather
+than resolving those inputs during routine setup:
+
+```bash
+cd backend
+python -m pip install --require-hashes -r requirements-dev.lock  # development / CI
+# Runtime-only environments use: python -m pip install --require-hashes -r requirements.lock
+
+# uv is included in the development lock. Bootstrap the compiler if needed:
+python -m pip install uv==0.11.15
+python scripts/lock_dependencies.py
+python scripts/lock_dependencies.py --check
+# For a targeted transitive dependency upgrade:
+python scripts/lock_dependencies.py --upgrade-package PACKAGE_NAME
+```
+
+Edit direct requirements in the `.txt` inputs first, regenerate both locks, and
+review the resulting version/hash changes. The helper requires exactly uv 0.11.15,
+prefers the compiler beside the active Python interpreter, and retains existing
+locked versions unless the inputs or `--upgrade-package` require a change. It resolves
+both outputs in a temporary directory before publishing either; `--check` fails on
+drift without changing files and may require registry access. Development resolution is
+constrained to the runtime lock. Universal resolution includes OS/architecture markers
+for Python >=3.11; it does not expand the supported production/CI runtime beyond 3.11.
+
+CI installs `requirements-dev.lock` and checks regeneration. Runtime containers and
+the E2E API install `requirements.lock`, all with `--require-hashes`. Do not delete
+lockfiles to fix an environment: reinstall from them. Frontend and landing dependencies
+likewise use their separate `package-lock.json` files and `npm ci`.
+
 ## Development Workflow
 
 ### Running the Application
@@ -117,22 +149,27 @@ docker-compose up
 cd backend
 
 # Format code
-black app/
-isort app/
+black --config=.black app tests
+isort --settings-path=.isort.cfg app tests
 
 # Lint code
-flake8 app/
+flake8 app --max-line-length=120
 
 # Type checking
-mypy app
+mypy app --config-file=mypy.ini
 
 # Run security checks
-bandit -r app
+bandit -r app -s B101 -ll
 
 # Run tests
 pytest tests/ -v
 pytest tests/ --cov=app --cov-report=html
 ```
+
+MyPy's legacy global suppressions remain, but `app.schemas.*`,
+`app.db.tenant_filter`, and `app.services.pdf_text` enforce `arg-type`,
+`return-value`, `union-attr`, `call-arg`, and `attr-defined`. Expand this boundary
+ratchet after reviewing each module; do not silence new findings in covered modules.
 
 **Frontend**
 ```bash
@@ -141,17 +178,37 @@ cd frontend
 # Format code
 npm run format
 
-# Lint code
-npm run lint
+# Verify the real ESLint config, then lint source with CI's warning cap
+npm run lint -- --max-warnings=0
 npm run lint:fix
 
-# Type checking (BOTH programs — src and the test files; see Testing → Frontend)
+# Type checking (application, tests, and Node nesting worker)
 npm run type-check
 
 # Run tests
 npm test
 npm run test:coverage
 ```
+
+`frontend/eslint.config.js` is the only ESLint configuration; the obsolete CRA
+`.eslintrc.json` and package `eslintConfig` are removed. `rules-of-hooks` is an error
+throughout `src`. `exhaustive-deps` is an error in `src/components/ui`; the broader
+effect-dependency backlog needs individual behavior review before extending that
+scope. `npm run test:lint-config` independently exercises the actual configuration
+with accepted and rejected Hook examples, and is included in `npm run lint`.
+
+**Landing site**
+```bash
+cd landing
+npm ci
+npm run type-check
+npm run build
+npm run audit:ci
+npm run dev
+```
+Vite serves the existing static `index.html` at **http://localhost:3001**. The optional
+React source under `src/` is type-checked separately; it is not mounted by the shipped
+HTML entry. See [the landing README](../landing/README.md).
 
 ### Pre-commit Hooks
 
@@ -302,9 +359,11 @@ npm run test:coverage
 
 **Test files are type-checked (since 2026-08-03)**
 
-`npm run type-check` runs two `tsc --noEmit` programs: `tsconfig.json` (application
+`npm run type-check` runs three `tsc --noEmit` programs: `tsconfig.json` (application
 source, which *excludes* tests) and `tsconfig.test.json` (the `*.test.*` / `*.spec.*`
-files, `src/test-utils`, `src/setupTests.ts`). CI runs the same npm script.
+files, `src/test-utils`, `src/setupTests.ts`), followed by
+`tsconfig.nesting-worker.json` (the Node worker and shared solver kernel).
+CI runs the same npm script.
 
 This matters because the test runner does **not** type-check: `jest.config.js` hands
 ts-jest an inline tsconfig inheriting `"isolatedModules": true`, so ts-jest is
@@ -369,10 +428,24 @@ yet (known follow-up); the admin-modal test still runs.
 In CI the same suite runs via `.github/workflows/e2e.yml` — see the CI/CD Pipeline
 section below.
 
-### Test Coverage Targets
+### Test coverage gates
 
-- Backend: 70% minimum coverage
-- Frontend: 70% minimum coverage
+- Backend: **78%** floor from `backend/pytest.ini`; do not override it with a lower CLI value. Use `--no-cov` for focused subsets.
+- Frontend: `frontend/jest.config.js` enforces statements **52%**, branches **43%**, functions **38%**, and lines **52%** when coverage runs. These are ratchets, not estimates of current coverage.
+
+The fast deployment-hygiene tests inspect Compose configuration. To also run the
+seven Docker integrations locally:
+
+```bash
+cd backend
+RUN_DOCKER_HYGIENE_TESTS=1 pytest tests/test_deployment_hygiene.py --no-cov
+```
+
+They build five synthetic `FROM scratch` contexts using Docker's real ignore matcher
+and run two Redis memory-pressure checks. They never copy the repository's real
+`.env`, database, upload, or credential data into Docker. A running Docker daemon is
+required when enabled; otherwise these integrations skip locally. CI's Backend Tests
+sets this flag explicitly.
 
 ## Project Structure
 
@@ -393,8 +466,10 @@ Werco-ERP/
 │   │   └── ...
 │   ├── alembic/              # Database migrations
 │   ├── scripts/              # Utility scripts
-│   ├── requirements.txt      # Production dependencies
-│   └── requirements-dev.txt  # Development dependencies
+│   ├── requirements.txt      # Runtime dependency inputs
+│   ├── requirements-dev.txt  # Development dependency inputs (includes runtime)
+│   ├── requirements.lock     # Hashed runtime dependency tree
+│   └── requirements-dev.lock # Hashed development/CI dependency tree
 ├── frontend/
 │   ├── src/
 │   │   ├── components/       # Reusable React components
@@ -868,7 +943,7 @@ uvicorn app.main:app --reload --port 8000
 - Check port 8000 is not in use
 
 ### Frontend build errors
-- Clear node_modules: `rm -rf node_modules package-lock.json && npm install`
+- Reinstall the committed tree with `npm ci`; keep `package-lock.json` intact.
 - Check TypeScript errors with `npm run type-check`
 
 ### Docker issues
@@ -881,6 +956,7 @@ uvicorn app.main:app --reload --port 8000
 The project uses GitHub Actions for CI/CD:
 - Runs on every push and pull request
 - Executes tests, linting, and type checking
+- Verifies Python hash-lock regeneration and the landing site's separate type/build checks
 - Builds Docker images
 - Runs security scans
 - Deploys after successful runs

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 
 const features = [
   {
@@ -124,7 +124,7 @@ export default function Features() {
                 <div className="flex items-center space-x-3 mb-6">
                   <div className={`p-4 rounded-xl ${features[activeFeature].color}`}>
                     <div className="text-white">
-                      {React.cloneElement(features[activeFeature].icon as React.ReactElement, {
+                      {React.cloneElement(features[activeFeature].icon as React.ReactElement<React.SVGProps<SVGSVGElement>>, {
                         className: 'w-12 h-12'
                       })}
                     </div>

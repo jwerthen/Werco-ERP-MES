@@ -1,0 +1,6 @@
+SIMULTANEOUS_REFRESH_COUNT 2
+TOKEN_AFTER_LOGOUT_AND_LATE_REFRESH A-resurrected
+TOKEN_AFTER_NEW_LOGIN_AND_LATE_OLD_REFRESH A-overwrote-B
+OLD_COMPANY_MUTATION_RETRY_AUTH Bearer B-new
+LATE_RESPONSE_CACHE_AFTER_SWITCH {"data":{"company":"A","rows":["A-data"]},"fromCache":true,"changed":false,"stale":true}
+CACHE_ON_403 {"data":{"private":"data"},"fromCache":true,"changed":false,"stale":true}

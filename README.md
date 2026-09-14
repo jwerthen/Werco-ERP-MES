@@ -59,7 +59,7 @@ Monorepo with a layered FastAPI backend and a React SPA frontend.
 
 - **`backend/`** — FastAPI app under `app/`: thin routers in `api/endpoints/` (~59 routers under `/api/v1/`), business logic in `services/`, SQLAlchemy 2.0 `models/`, Pydantic 2 `schemas/`, and the auth/tenancy/RBAC dependency seam in `api/deps.py`.
 - **`frontend/`** — React 19 + TypeScript + Vite SPA; typed Axios client with ETag conditional caching and a refresh-token interceptor; React Context for auth and active-company switching.
-- **`landing/`** — separate marketing site (React + Vite), deployed independently.
+- **`landing/`** — separate static marketing site served/built by Vite, deployed independently; optional React source is type-checked but not mounted by the shipped entry.
 - **`docs/`** — operational runbooks and compliance documents.
 - **infra** — `docker-compose*.yml`, `nginx/`, `supabase/`, `load-tests/`.
 
@@ -123,9 +123,17 @@ docker compose exec backend python -m scripts.seed_data
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
+
+For local Python development, install `backend/requirements-dev.lock` with
+`python -m pip install --require-hashes -r requirements-dev.lock` from `backend/`.
+Production images use the runtime-only `requirements.lock`. Edit the `.txt` inputs
+and regenerate both locks with `python scripts/lock_dependencies.py`; see
+[Development Guide](docs/DEVELOPMENT.md#dependency-updates) for the pinned compiler
+and verification commands. The landing site has separate type/build/audit checks;
+see [landing/README.md](landing/README.md).
 
 ## Default accounts (development)
 
@@ -229,7 +237,7 @@ Werco-ERP-MES/
 │       ├── services/         # Axios API client (ETag + refresh interceptor)
 │       ├── context/          # auth, active-company, shortcuts, tours
 │       └── validation/       # Zod schemas
-├── landing/                  # marketing site (React + Vite → Vercel)
+├── landing/                  # static HTML + Vite → Vercel; optional React source
 ├── load-tests/               # load testing suite
 ├── docs/                     # runbooks + compliance docs
 ├── nginx/ · supabase/        # infra

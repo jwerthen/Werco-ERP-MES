@@ -1,4 +1,3 @@
-import React from 'react';
 
 const compliance = [
   {
@@ -27,7 +26,7 @@ export default function Compliance() {
       <div className="container-custom">
         <div className="text-center mb-12">
           <h2 className="headingxl text-neutral-900 mb-4">
-            Compliance Built<br>
+            Compliance Built<br />
             <span className="text-primary-600">Into Every Workflow</span>
           </h2>
           <p className="text-subtle max-w-2xl mx-auto">

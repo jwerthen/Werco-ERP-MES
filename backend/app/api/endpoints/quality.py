@@ -11,7 +11,6 @@ from app.db.locks import acquire_generator_lock
 from app.models.quality import (
     CARStatus,
     CorrectiveActionRequest,
-    FAICharacteristic,
     FAIStatus,
     FirstArticleInspection,
     NCRSource,
@@ -37,7 +36,7 @@ from app.schemas.quality import (
     NCRUpdate,
     NCRVoidRequest,
 )
-from app.services import process_sheet_service
+from app.services import fai_service, process_sheet_service
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
 
@@ -560,22 +559,6 @@ def update_car(
 # ============== FAI Endpoints ==============
 
 
-def generate_fai_number(db: Session, company_id: int = None) -> str:
-    acquire_generator_lock(db, "fai_number", company_id)
-    today = datetime.now().strftime("%Y%m%d")
-    prefix = f"FAI-{today}-"
-    query = db.query(FirstArticleInspection).filter(FirstArticleInspection.fai_number.like(f"{prefix}%"))
-    if company_id is not None:
-        query = query.filter(FirstArticleInspection.company_id == company_id)
-    last = query.order_by(FirstArticleInspection.fai_number.desc()).first()
-
-    if last:
-        num = int(last.fai_number.split("-")[-1]) + 1
-    else:
-        num = 1
-    return f"{prefix}{num:03d}"
-
-
 @router.get("/fai", response_model=List[FAIResponse])
 def list_fais(
     skip: int = Query(0, ge=0),
@@ -586,18 +569,12 @@ def list_fais(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """List all FAIs"""
-    query = (
-        db.query(FirstArticleInspection)
-        .filter(FirstArticleInspection.company_id == company_id)
-        .options(joinedload(FirstArticleInspection.part), joinedload(FirstArticleInspection.characteristics))
-    )
-
+    """List the active company's FAIs, including only its related evidence."""
+    query = fai_service.fai_query(db, company_id)
     if status:
         query = query.filter(FirstArticleInspection.status == status)
     if part_id:
         query = query.filter(FirstArticleInspection.part_id == part_id)
-
     return query.order_by(FirstArticleInspection.created_at.desc()).offset(skip).limit(limit).all()
 
 
@@ -605,36 +582,12 @@ def list_fais(
 def create_fai(
     fai_in: FAICreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(fai_service.WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new FAI"""
-    _validate_work_order_reference(db, company_id, fai_in.work_order_id)
-    fai = FirstArticleInspection(fai_number=generate_fai_number(db, company_id), **fai_in.model_dump())
-    fai.company_id = company_id
-    db.add(fai)
-    db.flush()
-    OperationalEventService(db).emit_best_effort(
-        company_id=company_id,
-        event_type="fai_created",
-        source_module="quality",
-        entity_type="fai",
-        entity_id=fai.id,
-        work_order_id=fai.work_order_id,
-        user_id=current_user.id,
-        severity="medium",
-        event_payload={
-            "fai_number": fai.fai_number,
-            "part_id": fai.part_id,
-            "status": _enum_value(fai.status),
-            "fai_type": fai.fai_type,
-            "reason": fai.reason,
-            "due_date": fai.due_date.isoformat() if fai.due_date else None,
-        },
-    )
-    db.commit()
-    db.refresh(fai)
-    return fai
+    """Create an inspection with validated tenant-owned references."""
+    return fai_service.create_fai(db, company_id, fai_in, current_user, audit)
 
 
 @router.get("/fai/{fai_id}", response_model=FAIResponse)
@@ -644,17 +597,8 @@ def get_fai(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Get FAI details"""
-    fai = (
-        db.query(FirstArticleInspection)
-        .options(joinedload(FirstArticleInspection.part), joinedload(FirstArticleInspection.characteristics))
-        .filter(FirstArticleInspection.id == fai_id, FirstArticleInspection.company_id == company_id)
-        .first()
-    )
-
-    if not fai:
-        raise HTTPException(status_code=404, detail="FAI not found")
-    return fai
+    """Get FAI details."""
+    return fai_service.get_fai(db, company_id, fai_id)
 
 
 @router.put("/fai/{fai_id}", response_model=FAIResponse)
@@ -662,73 +606,26 @@ def update_fai(
     fai_id: int,
     fai_in: FAIUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(fai_service.WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a FAI"""
-    fai = (
-        db.query(FirstArticleInspection)
-        .filter(FirstArticleInspection.id == fai_id, FirstArticleInspection.company_id == company_id)
-        .first()
-    )
-    if not fai:
-        raise HTTPException(status_code=404, detail="FAI not found")
-
-    previous_status = fai.status
-    update_data = fai_in.model_dump(exclude_unset=True)
-
-    if "status" in update_data:
-        if update_data["status"] in [FAIStatus.PASSED, FAIStatus.FAILED, FAIStatus.CONDITIONAL]:
-            fai.completed_date = date.today()
-            fai.approved_by = current_user.id
-
-    for field, value in update_data.items():
-        setattr(fai, field, value)
-
-    OperationalEventService(db).emit_best_effort(
-        company_id=company_id,
-        event_type="fai_updated",
-        source_module="quality",
-        entity_type="fai",
-        entity_id=fai.id,
-        work_order_id=fai.work_order_id,
-        user_id=current_user.id,
-        severity="high" if fai.status == FAIStatus.FAILED else "info",
-        event_payload={
-            "fai_number": fai.fai_number,
-            "changed_fields": [field for field in update_data.keys() if field != "version"],
-            "previous_status": _enum_value(previous_status),
-            "status": _enum_value(fai.status),
-            "characteristics_passed": fai.characteristics_passed,
-            "characteristics_failed": fai.characteristics_failed,
-        },
-    )
-    db.commit()
-    db.refresh(fai)
-    return fai
+    """Edit an unfinished FAI; final disposition requires approval authority."""
+    return fai_service.update_fai(db, company_id, fai_id, fai_in, current_user, audit)
 
 
 @router.post("/fai/{fai_id}/prefill-from-steps", response_model=FAIPrefillResponse)
 def prefill_fai_from_steps(
     fai_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(fai_service.WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Pre-fill FAI characteristics from the linked WO's process-sheet step records (PR 4).
+    """Pre-fill unfinished FAI measurements from matching conforming process-step records.
 
-    AS9102 accelerator: each characteristic with no ``actual_value`` is matched to a
-    live CONFORMING measurement step record — v1 heuristic: characteristic description
-    == step label (trimmed, case-insensitive), refused when a parseable
-    nominal/tolerance contradicts the snapshot config. Matches copy the latest
-    record's value into ``actual_value`` and the recording gauge's name into
-    ``measuring_device``; everything else lands in ``unmatched`` with a reason
-    (ambiguous label, spec mismatch, already recorded, no match). Never sets
-    ``is_conforming`` — disposition stays with the inspector. Audited.
-
-    Same role posture as the other FAI endpoints (any authenticated office user; the
-    kiosk token fence keeps shop-floor-scoped tokens out of /quality entirely).
+    Existing values are preserved; ambiguous labels and specification mismatches are
+    reported unmatched. Conformance disposition remains the inspector's decision.
     """
     return process_sheet_service.prefill_fai_from_step_records(
         db, company_id, fai_id=fai_id, user=current_user, audit=audit
@@ -740,26 +637,12 @@ def add_fai_characteristic(
     fai_id: int,
     char_in: FAICharacteristicCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(fai_service.WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Add a characteristic to FAI"""
-    fai = (
-        db.query(FirstArticleInspection)
-        .filter(FirstArticleInspection.id == fai_id, FirstArticleInspection.company_id == company_id)
-        .first()
-    )
-    if not fai:
-        raise HTTPException(status_code=404, detail="FAI not found")
-
-    char = FAICharacteristic(fai_id=fai_id, **char_in.model_dump())
-    db.add(char)
-
-    fai.total_characteristics += 1
-
-    db.commit()
-    db.refresh(char)
-    return char
+    """Add a characteristic to an unfinished FAI."""
+    return fai_service.add_characteristic(db, company_id, fai_id, char_in, audit)
 
 
 @router.put("/fai/{fai_id}/characteristics/{char_id}", response_model=FAICharacteristicResponse)
@@ -768,71 +651,12 @@ def update_fai_characteristic(
     char_id: int,
     char_in: FAICharacteristicUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(fai_service.WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update/record measurement for a characteristic"""
-    fai = (
-        db.query(FirstArticleInspection)
-        .filter(FirstArticleInspection.id == fai_id, FirstArticleInspection.company_id == company_id)
-        .first()
-    )
-    if not fai:
-        raise HTTPException(status_code=404, detail="FAI not found")
-
-    char = (
-        db.query(FAICharacteristic).filter(FAICharacteristic.id == char_id, FAICharacteristic.fai_id == fai_id).first()
-    )
-
-    if not char:
-        raise HTTPException(status_code=404, detail="Characteristic not found")
-
-    # Track pass/fail changes
-    was_conforming = char.is_conforming
-
-    update_data = char_in.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(char, field, value)
-
-    # Update FAI pass/fail counts
-    if "is_conforming" in update_data:
-        if was_conforming is None:
-            # First time recording
-            if char.is_conforming:
-                fai.characteristics_passed += 1
-            else:
-                fai.characteristics_failed += 1
-        elif was_conforming != char.is_conforming:
-            # Changed
-            if char.is_conforming:
-                fai.characteristics_passed += 1
-                fai.characteristics_failed -= 1
-            else:
-                fai.characteristics_passed -= 1
-                fai.characteristics_failed += 1
-
-    if "is_conforming" in update_data:
-        OperationalEventService(db).emit_best_effort(
-            company_id=company_id,
-            event_type="fai_characteristic_recorded",
-            source_module="quality",
-            entity_type="fai_characteristic",
-            entity_id=char.id,
-            work_order_id=fai.work_order_id,
-            user_id=current_user.id,
-            severity="high" if char.is_conforming is False else "info",
-            event_payload={
-                "fai_id": fai.id,
-                "fai_number": fai.fai_number,
-                "char_number": char.char_number,
-                "is_conforming": char.is_conforming,
-                "characteristics_passed": fai.characteristics_passed,
-                "characteristics_failed": fai.characteristics_failed,
-            },
-        )
-    db.commit()
-    db.refresh(char)
-    return char
+    """Record or correct a measurement on an unfinished inspection."""
+    return fai_service.update_characteristic(db, company_id, fai_id, char_id, char_in, current_user, audit)
 
 
 @router.delete("/fai/{fai_id}/characteristics/{char_id}")
@@ -840,28 +664,12 @@ def delete_fai_characteristic(
     fai_id: int,
     char_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(fai_service.WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Delete a characteristic"""
-    char = (
-        db.query(FAICharacteristic).filter(FAICharacteristic.id == char_id, FAICharacteristic.fai_id == fai_id).first()
-    )
-
-    if not char:
-        raise HTTPException(status_code=404, detail="Characteristic not found")
-
-    fai = db.query(FirstArticleInspection).filter(FirstArticleInspection.id == fai_id).first()
-    fai.total_characteristics -= 1
-    if char.is_conforming is True:
-        fai.characteristics_passed -= 1
-    elif char.is_conforming is False:
-        fai.characteristics_failed -= 1
-
-    db.delete(char)
-    db.commit()
-
-    return {"message": "Characteristic deleted"}
+    """Remove an unfinished characteristic, retaining its contents in the audit log."""
+    return fai_service.delete_characteristic(db, company_id, fai_id, char_id, audit)
 
 
 # ============== Dashboard/Summary ==============

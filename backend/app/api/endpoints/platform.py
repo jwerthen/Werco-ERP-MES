@@ -6,11 +6,11 @@ Provides read-only cross-company browsing and company management.
 
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_platform_admin
+from app.api.deps import get_audit_service, require_platform_admin
 from app.db.database import get_db
 from app.models.company import Company
 from app.models.part import Part
@@ -19,7 +19,9 @@ from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.schemas.company import CompanyCreate, CompanyListResponse, CompanyResponse, CompanyUpdate
 from app.schemas.user import UserResponse
+from app.services.audit_service import AuditService
 from app.services.company_onboarding import onboard_company
+from app.services.user_provisioning import atomic_security_write
 
 router = APIRouter()
 
@@ -61,7 +63,12 @@ def list_companies(db: Session = Depends(get_db), _: User = Depends(require_plat
 
 
 @router.post("/companies", response_model=CompanyResponse, summary="Create a company")
-def create_company(payload: CompanyCreate, db: Session = Depends(get_db), _: User = Depends(require_platform_admin)):
+def create_company(
+    request: Request,
+    payload: CompanyCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_platform_admin),
+):
     """Create a new company with initial admin user."""
     # Check email uniqueness
     if db.query(User).filter(User.email == payload.admin_email).first():
@@ -78,6 +85,8 @@ def create_company(payload: CompanyCreate, db: Session = Depends(get_db), _: Use
         parent_company_id=payload.parent_company_id,
         logo_url=payload.logo_url,
         timezone=payload.timezone,
+        actor=current_user,
+        request=request,
     )
 
     user_count = db.query(User).filter(User.company_id == company.id).count()
@@ -101,7 +110,11 @@ def get_company(company_id: int, db: Session = Depends(get_db), _: User = Depend
 
 @router.put("/companies/{company_id}", response_model=CompanyResponse, summary="Update a company")
 def update_company(
-    company_id: int, payload: CompanyUpdate, db: Session = Depends(get_db), _: User = Depends(require_platform_admin)
+    company_id: int,
+    payload: CompanyUpdate,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_platform_admin),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Update company details (activate/deactivate, etc.)."""
     company = db.query(Company).filter(Company.id == company_id).first()
@@ -109,10 +122,22 @@ def update_company(
         raise HTTPException(status_code=404, detail="Company not found")
 
     update_data = payload.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(company, field, value)
-
-    db.commit()
+    changes = {key: value for key, value in update_data.items() if getattr(company, key) != value}
+    old_values = {key: getattr(company, key) for key in changes}
+    with atomic_security_write(db):
+        for field, value in changes.items():
+            setattr(company, field, value)
+        if changes:
+            audit.log_required(
+                action="UPDATE",
+                resource_type="company",
+                resource_id=company.id,
+                resource_identifier=company.name,
+                company_id=company.id,
+                description=f"Updated company {company.name}",
+                old_values=old_values,
+                new_values=changes,
+            )
     db.refresh(company)
     return CompanyResponse.model_validate(company)
 

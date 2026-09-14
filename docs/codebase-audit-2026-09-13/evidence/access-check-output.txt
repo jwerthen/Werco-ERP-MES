@@ -1,0 +1,198 @@
+Access-control verification: synthetic local data only.
+Focused suites overlap; do not sum their counts.
+[backend_full_final] passed
+backend: RUN_DOCKER_HYGIENE_TESTS=1 .venv/bin/python -m pytest -n 8 --dist=worksteal --cov-report=xml:/tmp/werco-access-coverage-final.xml
+Log SHA-256: f58406ac05c9322644ee10857f994537ec8736ec1c7d164433edfda158979e28
+Required test coverage of 78% reached. Total coverage: 87.28%
+========== 8817 passed, 19 skipped, 27 warnings in 360.08s (0:06:00) ===========
+
+[accounts_final] passed
+Focused real HTTP account/provisioning, auth, unlock and API-token regression suite
+Log SHA-256: 97661b488b8b59faabd342545f9f1e0d1855fa32327771691703ec5c121f0970
+============================= 270 passed in 13.07s =============================
+
+[fai_final] passed
+Focused FAI, process-sheet integration and audit rollback suite after 503 alignment
+Log SHA-256: 4d7615487993ff745c35d5cad864fec24018fad544340dfebaec48fdba4457ea
+============================= 198 passed in 20.88s =============================
+
+[job_cost_final] passed
+135 real HTTP job-cost cases after historical read preservation
+Log SHA-256: 4ce52920707242baa74ae3d639ab6eb84afd18fe6150fd1c0a6547ccffa03373
+============================= 135 passed in 22.37s =============================
+
+[websocket_http_final] passed
+All three actual WebSocket routes, shared HTTP identity, previous tenant socket tests, auth and API tokens
+Log SHA-256: 74dae28f0d5a001229d54d796cc0141604bd426ae9bbef792369766c45e72c69
+============================= 182 passed in 10.71s =============================
+
+[documents_storage_final] passed
+Document access, work-order documents, local/S3 storage and BOM released document control
+Log SHA-256: b0d0a1379224b926400c735a0a781dcaaf4f36214ec1d4cd70ff1b2d44ff97a4
+======================= 134 passed, 6 warnings in 21.10s =======================
+
+[document_role_final] passed
+Final 30 document access cases, including added Manager/Quality lifecycle role split
+Log SHA-256: fbc2d706d4d0b9f968e653cc9aa2c050480bfa3d37333d9f770c7187e21d37ee
+============================== 30 passed in 3.02s ==============================
+
+[completion_fixture_final] passed
+All 25 completion-quality-gate cases with a valid active tenant fixture
+Log SHA-256: 33a8c39eb186baaef6b46c52f6d2147ddf89655d4bd4b3c1402e7f37b893b85a
+======================== 25 passed in 103.77s (0:01:43) ========================
+
+[frontend_full_final] passed
+frontend: npm test -- --runInBand --silent
+Log SHA-256: 5f0636f6b414e640101e5031c3834a0073af8b03e98880b8d1d50ac6c3d5eae4
+Test Suites: 440 passed, 440 total
+Tests:       4344 passed, 4344 total
+Time:        236.472 s
+
+[frontend_lint_final] passed
+frontend: npm run lint (includes actual Hook configuration checks)
+Log SHA-256: e1c2209044f19ee388e25a0bf6c78fc235a16f4a5cef6c9724e05d780c234c31
+  type: 'test'
+  ...
+# Subtest: shared UI primitives reject missing effect dependencies
+ok 4 - shared UI primitives reject missing effect dependencies
+  ---
+  duration_ms: 2.782209
+  type: 'test'
+  ...
+1..4
+# tests 4
+# suites 0
+# pass 4
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 825.624084
+
+[frontend_types_final] passed
+frontend: npm run type-check (all three TypeScript programs)
+Log SHA-256: e2791dc2c2f094fe73dd4d66a346d84ed6c762d20f366986b898782c35e7308d
+
+> werco-erp-frontend@1.0.1 type-check
+> tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json && tsc --noEmit -p tsconfig.nesting-worker.json
+
+
+[frontend_build] passed
+frontend: npm run build
+Log SHA-256: 439f77e21cff1cdd179b21acaf2854804c9fd8f126f36f127c36c906066956a9
+build/assets/useProductionReportRequest-DiiPqAaw.js     76.88 kB │ gzip:  20.10 kB
+build/assets/schemas-0buHtdpu.js                       101.29 kB │ gzip:  29.90 kB
+build/assets/AdminSettings-CBRq4bDY.js                 103.78 kB │ gzip:  22.61 kB
+build/assets/icons-BImaq-_J.js                         105.31 kB │ gzip:  16.31 kB
+build/assets/react-kq_0chj8.js                         106.44 kB │ gzip:  35.97 kB
+build/assets/WorkOrderDetail-DYUpDcUz.js               138.62 kB │ gzip:  37.12 kB
+build/assets/Warehouse-CGNU8_kn.js                     176.48 kB │ gzip:  44.62 kB
+build/assets/charts-Bhu3Cxwj.js                        401.87 kB │ gzip: 116.29 kB
+build/assets/pdf-DMRcuM1e.js                           434.00 kB │ gzip: 129.31 kB
+build/assets/index-D3JzVxp0.js                         572.22 kB │ gzip: 160.82 kB
+build/assets/MaterialNesting-D2_66T7c.js               706.44 kB │ gzip: 210.62 kB
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 4.50s
+
+[black_final] passed
+backend: .venv/bin/python -m black --check --config=.black app tests
+Log SHA-256: a34fff5f43fb8753f1273ceb4940d7add6cb6aa900d0da2ce14012b6bd1e68a0
+All done! ✨ 🍰 ✨
+870 files would be left unchanged.
+
+[isort_final] passed
+backend: .venv/bin/python -m isort --check-only --settings-path=.isort.cfg app tests
+Log SHA-256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+
+
+[flake8_final] passed
+backend: .venv/bin/python -m flake8 app
+Log SHA-256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+
+
+[mypy_final] passed
+backend: .venv/bin/python -m mypy app
+Log SHA-256: 67c9dce74fe5a28cf445ea2b540ca75bc348a1fbf89bfc46b6f4e70aab3a0e53
+Success: no issues found in 447 source files
+
+[bandit_final] passed
+backend: .venv/bin/python -m bandit -r app -s B101 -ll
+Log SHA-256: 4ef43180208bc955d0f62701f699a3c74f0c379f25d98c91a0dbb5db43a761cb
+Code scanned:
+	Total lines of code: 137923
+	Total lines skipped (#nosec): 0
+	Total potential issues skipped due to specifically being disabled (e.g., #nosec BXXX): 3
+
+Run metrics:
+	Total issues (by severity):
+		Undefined: 0
+		Low: 54
+		Medium: 0
+		High: 0
+	Total issues (by confidence):
+		Undefined: 0
+		Low: 0
+		Medium: 19
+		High: 35
+Files skipped (0):
+
+[tracked_hooks] passed
+repository: backend/.venv/bin/pre-commit run --all-files
+Log SHA-256: 920adbcae439be9edd67c420e4366ab9883989c234b44c027021dbe357e36cf2
+check yaml...............................................................Passed
+check toml...............................................................Passed
+check json...............................................................Passed
+check for added large files..............................................Passed
+check for merge conflicts................................................Passed
+detect private key.......................................................Passed
+
+[new_file_hooks] passed
+repository: backend/.venv/bin/pre-commit run --files <all 42 new files, including verification artifacts>
+Log SHA-256: 97b175916019fba2702312c898bca444dcc5eccbea1a1d78ed379575441e283b
+check yaml...........................................(no files to check)Skipped
+check toml...........................................(no files to check)Skipped
+check json...............................................................Passed
+check for added large files..............................................Passed
+check for merge conflicts................................................Passed
+detect private key.......................................................Passed
+
+[backend_full_initial] superseded
+Initial full sweep before final review corrections; sole failure was a missing Company test fixture
+Log SHA-256: f639cb77fc6e889992763e62b3d9dabb1d62026677f029a2c0e6a901785c0573
+Required test coverage of 78% reached. Total coverage: 86.61%
+===== 1 failed, 8802 passed, 19 skipped, 27 warnings in 574.72s (0:09:34) ======
+
+[provisioning_before] expected_failure
+New regressions against the original provisioning behavior
+Log SHA-256: 0f974945887cd8bed63132d886b3a614dd7facfff07c3081bba98a9ef4129d52
+========================= 13 failed, 1 passed in 1.39s =========================
+
+[unlock_before] expected_failure
+New protected-target and required-audit regressions before unlock correction
+Log SHA-256: a7299bfd5995382c6935182000a2cd8b4ea1d8d0da1c060ad3b2dfb58edf1bf2
+================== 6 failed, 4 passed, 51 deselected in 1.18s ==================
+
+[fai_before] expected_failure
+Selected real HTTP FAI regressions before the FAI service repair
+Log SHA-256: 5daada5f83958cc2222e7d176c9f5c10465836ed352e04bb7e232ef403c8bb4c
+================= 27 failed, 6 passed, 41 deselected in 5.08s ==================
+
+[documents_before] expected_failure
+Real HTTP document publication and audit-loss regressions before repair
+Log SHA-256: e13400233143868e63e89d945618e82325634ad8dd4ed03ca647b2f90eaa09c9
+============================== 6 failed in 0.77s ===============================
+
+[job_cost_before] expected_failure
+Four real HTTP foreign-tenant read/write regressions before repair
+Log SHA-256: c4b3b60690a5a0b016fbf52eb8f6cdc8a467f6ffb571564292e1f92dfb53fc67
+============================== 4 failed in 0.63s ===============================
+
+[websocket_legacy_before] expected_failure
+Original HEAD resolver injected into actual /api/v1/ws handlers in an isolated test harness; no source reset
+Log SHA-256: 2f2f1e5f370dce16d59080acce91252435ea7ca7f7d5a9e89a7545bcf2fcb455
+====================== 24 failed, 89 deselected in 2.04s =======================
+

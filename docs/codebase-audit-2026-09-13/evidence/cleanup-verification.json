@@ -1,0 +1,242 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-13",
+  "base_commit": "a4a085a31ae3783f5be7d26e182b91951ab67693",
+  "branch": "codex/cleanup-deployment-hygiene",
+  "scope": "Local cleanup and deployment hygiene; no production deployment or live database changes.",
+  "workspace_cleanup": {
+    "duplicates_removed": 236,
+    "duplicate_bytes_removed": 1872809,
+    "backup_directory": "/Users/jonwerthen/.codex/backups/werco-cleanup-2026-09-13"
+  },
+  "checks": {
+    "backend_full": {
+      "command": "TEST_DATABASE_URL='sqlite:///file:werco_cleanup_master?mode=memory&cache=shared&uri=true' .venv/bin/python -m pytest tests/ -n 8 --cov=app --cov-report=xml:/tmp/werco-cleanup-backend-coverage.xml --cov-report=term",
+      "cwd": "/Users/jonwerthen/Documents/Werco-ERP-MES/backend",
+      "exit_code": 1,
+      "passed": 8346,
+      "failed": 1,
+      "skipped": 26,
+      "duration_seconds": 595.17,
+      "coverage_percent": 86.74,
+      "coverage_floor_percent": 78,
+      "failed_node": "tests/services/test_nesting_runtime_contract.py::test_untrusted_stale_or_mismatched_identity_never_enables_start[changes7-stale]",
+      "cause": "Future timestamp created at collection aged into the valid freshness window before the test executed; runtime correctly returned ready.",
+      "resolution": "Test-only fixed UTC clock with shared payload anchor; targeted verification recorded separately. Full suite was not repeated."
+    },
+    "backend_ci_final": {
+      "passed": 67,
+      "duration_seconds": 2.93
+    },
+    "backend_lock_tests": {
+      "passed": 5
+    },
+    "backend_pdf_tests": {
+      "passed": 199
+    },
+    "mypy_boundary_and_remnant_tests": {
+      "passed": 50
+    },
+    "backend_static": {
+      "black": "passed",
+      "isort": "passed",
+      "flake8": "passed",
+      "mypy": "passed; 442 files",
+      "bandit": "passed at CI threshold"
+    },
+    "frontend": {
+      "jest_suites_passed": 438,
+      "jest_tests_passed": 4303,
+      "jest_duration_seconds": 192.535,
+      "type_programs_passed": 3,
+      "lint": "passed, zero warnings",
+      "eslint_config_tests_passed": 4,
+      "build": "passed",
+      "audit_total_vulnerabilities": 0
+    },
+    "landing": {
+      "type_check": "passed",
+      "build": "passed",
+      "audit_total_vulnerabilities": 0,
+      "entry": "Unchanged static index.html; React source remains unmounted."
+    },
+    "python_dependencies": {
+      "hash_installs": "passed for development and runtime",
+      "pip_check": "passed",
+      "lock_freshness": "passed",
+      "linux_cpython311_x86_64_wheel_resolution": "passed",
+      "unaccepted_audit_findings": 0,
+      "accepted_suppression": "PYSEC-2026-1325 (ecdsa); scanner reports two ignored alias entries"
+    },
+    "docker_and_redis_tests": {
+      "passed": 13,
+      "real_docker_context_builds": 5,
+      "real_redis_memory_pressure_tests": 2,
+      "compose_policy_tests": 3,
+      "ci_gate_tests": 3,
+      "contexts": "Synthetic markers only; no real secrets or customer files used.",
+      "temporary_redis_containers": "removed"
+    },
+    "api_image": {
+      "dockerfile": "backend/Dockerfile.prod",
+      "platform": "linux/arm64",
+      "local_tag": "werco-cleanup-api:2026-09-13",
+      "id": "sha256:45711d3b95d1aec0d96eaae5304efb52d5c3197a7f9cbfbf0c2e22d716865b5a",
+      "build": "passed",
+      "smoke": "API/worker imports, non-root user, PDF tools, migration files retained, pytest and /app/.env absent",
+      "isolation": "network disabled, synthetic configuration, no lifespan or migrations run"
+    },
+    "pre_commit": "All configured validity/large-file/merge-conflict/private-key hooks passed for tracked and new files.",
+    "deployment_shell": "bash -n passed; deployment script was not executed.",
+    "backend_clock_fix": {
+      "scope": "Test-only fixed UTC clock; no production runtime edit",
+      "normal_module_passed": 22,
+      "simulated_four_minute_collection_delay_passed": 22,
+      "demonstration": "Advanced the service clock after collection without sleeping; confirmed the old future payload becomes ready at age60 seconds, then verified each test restores its fixed anchor and all22 cases pass.",
+      "black": "passed",
+      "isort": "passed"
+    },
+    "final_diff_check": "passed"
+  },
+  "not_run": [
+    "Second complete backend suite after test-only clock correction",
+    "Browser E2E",
+    "Live PostgreSQL verification",
+    "Production performance tests",
+    "Full worker image build",
+    "Production deployment",
+    "Managed Redis configuration change"
+  ],
+  "source_logs": {
+    "backend_full": {
+      "path": "/tmp/werco-cleanup-backend-tests.log",
+      "bytes": 2082057,
+      "sha256": "4f581ca8a43a740c80dfb1e60f6e9367dd312adf1dcbdaf1591163d5dabef81a"
+    },
+    "backend_ci_final": {
+      "path": "/tmp/werco-cleanup-ci-final.log",
+      "bytes": 10238,
+      "sha256": "413cde06fe2651950359a41196cec4e466c8423d13244cfbd200a2fe03da9bee"
+    },
+    "backend_lock_tests": {
+      "path": "/tmp/werco-audit-2026-09-13/cleanup-lock-tests-final.log",
+      "bytes": 1160,
+      "sha256": "ab2eb325e53d4670556d7b8ad2b6c58a8b4bc498b97fc398a7cc91c78064543e"
+    },
+    "backend_pdf_tests": {
+      "path": "/tmp/werco-audit-2026-09-13/cleanup-pdf-tests.log",
+      "bytes": 47778,
+      "sha256": "818a6f1a12edffbd76faf987ba0d3604783f454f6ae825f9f962db6c19596671"
+    },
+    "mypy_boundary_and_remnant_tests": {
+      "path": "/tmp/werco-cleanup-mypy-tests.log",
+      "bytes": 13243,
+      "sha256": "1b9acd731567c815f61b53cdbb9d9e640dc7084d8dd5d2d3ff1b4873d5fed65b"
+    },
+    "frontend_jest": {
+      "path": "/tmp/werco-audit-2026-09-13/frontend-cleanup-jest.log",
+      "bytes": 296,
+      "sha256": "2b566cea640fdd0fd06b804635bb68f7b1c3d196ad0bfc80c675077fcbefd70e"
+    },
+    "frontend_types": {
+      "path": "/tmp/werco-audit-2026-09-13/frontend-cleanup-types.log",
+      "bytes": 158,
+      "sha256": "e2791dc2c2f094fe73dd4d66a346d84ed6c762d20f366986b898782c35e7308d"
+    },
+    "frontend_lint": {
+      "path": "/tmp/werco-audit-2026-09-13/frontend-cleanup-lint.log",
+      "bytes": 1102,
+      "sha256": "d87b4ba6a20c67f5f8faa5d40bfa03731547be2c0482b7f9c5614f8e3e8b2827"
+    },
+    "frontend_build": {
+      "path": "/tmp/werco-audit-2026-09-13/frontend-cleanup-build.log",
+      "bytes": 12578,
+      "sha256": "3a66ebf1581cbd8d9599d87b6d37310b61580120a51c21bbfc5d74a07743d576"
+    },
+    "frontend_audit": {
+      "path": "/tmp/werco-audit-2026-09-13/frontend-cleanup-audit.log",
+      "bytes": 324,
+      "sha256": "121148fdb7282436342aa3824bf07ad3d0d9433f708abf50cc35659ba3b9ec61"
+    },
+    "landing_types": {
+      "path": "/tmp/werco-cleanup-landing-types.log",
+      "bytes": 62,
+      "sha256": "97b65f540350e07dbbbe4208a334615446e80a96dc20f65fa618837e9280d8a8"
+    },
+    "landing_build": {
+      "path": "/tmp/werco-cleanup-landing-build.log",
+      "bytes": 263,
+      "sha256": "acc116dc27ddd65dc8f4ac28b4a3e894ccc43f71f5faaab9a2b740aac92792e1"
+    },
+    "landing_audit": {
+      "path": "/tmp/werco-cleanup-landing-audit.log",
+      "bytes": 100,
+      "sha256": "4a5b4959217f537f674be38f21d1e16c04916740f22bb402b25c25a057293fe8"
+    },
+    "python_audit": {
+      "path": "/tmp/werco-audit-2026-09-13/cleanup-pip-audit-final.log",
+      "bytes": 42,
+      "sha256": "a0104a97f4ceab4e4fcbc54bec01e7c49c819d7c7d1da2f079677812171b55d4"
+    },
+    "docker_and_redis_tests": {
+      "path": "/tmp/werco-audit-2026-09-13/deployment-hygiene-final-test-transcript.log",
+      "bytes": 1670,
+      "sha256": "984fa648688d9a4d4449cae730ede00a312f7b56a8cc1d137f26bc930a53e34e"
+    },
+    "api_image_build": {
+      "path": "/tmp/werco-cleanup-api-image.log",
+      "bytes": 103322,
+      "sha256": "f3a1b4161c1712cb3714726e8b51b4f46c3695057dbd60fdf7cf2df87bb15b9f"
+    },
+    "api_image_smoke": {
+      "path": "/tmp/werco-cleanup-api-smoke.log",
+      "bytes": 779,
+      "sha256": "96016330a3e837429e79895082ce37b68e4580196b8ae1702e3671e6b5ac3f7e"
+    },
+    "pre_commit": {
+      "path": "/tmp/werco-cleanup-precommit.log",
+      "bytes": 480,
+      "sha256": "920adbcae439be9edd67c420e4366ab9883989c234b44c027021dbe357e36cf2"
+    },
+    "black": {
+      "path": "/tmp/werco-cleanup-black.log",
+      "bytes": 58,
+      "sha256": "af69bd7d14a8e36a06adba175d99892678f65796089ab4ee3e79f673acc3ff83"
+    },
+    "isort": {
+      "path": "/tmp/werco-cleanup-isort.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "flake8": {
+      "path": "/tmp/werco-cleanup-flake8.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "mypy": {
+      "path": "/tmp/werco-cleanup-mypy.log",
+      "bytes": 45,
+      "sha256": "23a457eab4f694cb67f8b82c48b69debcb310f0fd72e753318ad63a8f8cf6f36"
+    },
+    "bandit": {
+      "path": "/tmp/werco-cleanup-bandit.log",
+      "bytes": 3815,
+      "sha256": "5ec734456cd28a59f1a7b8a2211d745f3f3a52b5dc9c5388874852891538a1a2"
+    },
+    "backend_clock_normal": {
+      "path": "/tmp/werco-audit-2026-09-13/nesting-runtime-fixed-clock-tests.log",
+      "bytes": 706,
+      "sha256": "b2b38c6865f8440f073c216be2ac32aceb9302dc8dd7e8f8e3727b4179d677b9"
+    },
+    "backend_clock_delayed": {
+      "path": "/tmp/werco-audit-2026-09-13/nesting-runtime-delayed-collection-tests.log",
+      "bytes": 952,
+      "sha256": "1df96ed6b9cd55c9e57ac23ae169a0c3979952cd1a3f903a47a702ccd47a34f8"
+    },
+    "pre_commit_final": {
+      "path": "/tmp/werco-cleanup-precommit-final.log",
+      "bytes": 480,
+      "sha256": "920adbcae439be9edd67c420e4366ab9883989c234b44c027021dbe357e36cf2"
+    }
+  }
+}

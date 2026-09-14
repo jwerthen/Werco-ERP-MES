@@ -7,8 +7,6 @@
     "@headlessui/react": "^2.2.9",
     "@heroicons/react": "^2.2.0",
     "@hookform/resolvers": "^5.2.2",
-    "ajv": "^8.17.1",
-    "ajv-keywords": "^5.1.0",
     "axios": "^1.18.1",
     "class-variance-authority": "^0.7.1",
     "clipper-lib": "6.4.2",
@@ -20,7 +18,7 @@
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-hook-form": "^7.71.1",
-    "react-router-dom": "^7.18.0",
+    "react-router-dom": "^7.18.2",
     "recharts": "^3.7.0",
     "tailwind-merge": "^3.6.0",
     "tw-animate-css": "^1.4.0",
@@ -49,9 +47,7 @@
     "daisyui": "^5.5.19",
     "esbuild": "0.28.1",
     "eslint": "^9.39.4",
-    "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-jsx-a11y": "^6.10.2",
-    "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^7.0.1",
     "husky": "^9.1.7",
     "identity-obj-proxy": "^3.0.0",
@@ -72,13 +68,14 @@
     "test": "jest --config jest.config.js --watchAll=false",
     "test:watch": "jest --config jest.config.js --watch",
     "test:coverage": "jest --config jest.config.js --coverage",
+    "test:lint-config": "node --test scripts/eslint-config.test.mjs",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:report": "playwright show-report",
     "harness": "node tools/browser-harness/cli.mjs",
     "audit:ci": "node scripts/audit-check.mjs",
-    "lint": "eslint src --ext .ts,.tsx",
+    "lint": "npm run test:lint-config && eslint src --ext .ts,.tsx",
     "lint:fix": "eslint src --ext .ts,.tsx --fix",
     "format": "prettier --write \"src/**/*.{ts,tsx,css,json}\"",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css,json}\"",
@@ -93,13 +90,6 @@
     ],
     "src/**/*.{css,json}": [
       "prettier --write"
-    ]
-  },
-  "eslintConfig": {
-    "extends": [
-      "react-app",
-      "react-app/jest",
-      "prettier"
     ]
   },
   "browserslist": {

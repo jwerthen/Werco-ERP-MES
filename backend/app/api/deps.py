@@ -19,6 +19,7 @@ from app.models.display_token import DisplayToken
 from app.models.kiosk_station import KioskStation
 from app.models.signin_station import SigninStation
 from app.models.user import User, UserRole
+from app.services.access_identity import require_active_company, resolve_access_identity
 from app.services.api_token_service import resolve_api_token_user
 from app.services.audit_service import AuditService
 
@@ -151,10 +152,6 @@ def get_current_user(
                 detail="API token cannot access this resource",
             )
     else:
-        user_id = payload.get("user_id")
-        if user_id is None:
-            raise credentials_exception
-
         # Kiosk-scope path fence: a badge-minted operator token (scope=="kiosk") is
         # only honored on the shop-floor paths (+ employee-logout). 403 — not 401 —
         # everywhere else: the token IS valid, it just cannot reach this resource.
@@ -165,14 +162,25 @@ def get_current_user(
                 detail="Kiosk-scoped token cannot access this resource",
             )
 
-        user = db.query(User).filter(User.id == int(user_id)).first()
-        if user is None:
-            raise credentials_exception
+        # Session exit must remain possible after the viewed tenant is disabled.
+        # This never permits data access; the existing logout/switch routes own
+        # their further checks. WebSockets never receive this narrow exemption.
+        identity = resolve_access_identity(
+            db,
+            payload,
+            allow_inactive_company=_is_read_only_exempt_path(request.url.path),
+            # Stored platform principals retain platform company administration
+            # so they can reactivate even their home/sole tenant. This is not a
+            # tenant-data exemption, and the resolver verifies the live role.
+            allow_inactive_platform_company=request.url.path.startswith(f"{_API_PREFIX}/platform/"),
+        )
+        user = identity.user
 
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account is disabled")
 
     if api_token_record is not None:
+        require_active_company(db, api_token_record.company_id)
         # The ROW pins tenancy: never the user's current company, never a claim,
         # and never a platform admin's switched context -- an API token cannot
         # switch company (the fence refuses /auth/switch-company too). Never
@@ -196,13 +204,12 @@ def get_current_user(
 
     # Attach active company context from JWT (may differ from user.company_id
     # when a platform admin switches to view another company)
-    token_company_id = payload.get("company_id")
-    user._active_company_id = token_company_id if token_company_id is not None else user.company_id
-    user._read_only_company_context = bool(payload.get("read_only", False))
+    user._active_company_id = identity.company_id
+    user._read_only_company_context = identity.read_only
     # Token scope ("kiosk" for badge-minted crew-station operator tokens, None
     # otherwise) — surfaced so shop-floor writes can derive their adoption-telemetry
     # channel (TimeEntrySource KIOSK vs DESKTOP) from the credential, not the client.
-    user._token_scope = payload.get("scope")
+    user._token_scope = identity.scope
 
     if (
         user._read_only_company_context

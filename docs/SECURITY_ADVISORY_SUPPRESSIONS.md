@@ -20,7 +20,36 @@ justification for any gate that is not hard-blocking.
   `--ignore-vuln` flag on the command. **There is no backend allowlist file** —
   the flag plus this document is the whole record.
 
+## Dependency cleanup — 2026-09-13
+
+Python installs and audits now consume committed hash locks:
+`requirements.lock` for runtime images/E2E and `requirements-dev.lock` for development,
+CI checks, and the dependency audit. The `.txt` files remain editable inputs.
+`python scripts/lock_dependencies.py` regenerates both with pinned **uv 0.11.15**;
+`--check` resolves in a temporary directory and refuses drift without rewriting files.
+See [Development Guide](DEVELOPMENT.md#dependency-updates).
+
+The runtime change is **pypdf 6.14.2 → 6.16.1**, addressing the newer parser advisories,
+including the upstream [XForm extraction advisory](https://github.com/py-pdf/pypdf/security/advisories/GHSA-763m-79hh-57f2).
+The compiler is a development dependency only. Local verification included 199
+PDF-focused tests, five dependency-lock tests, fresh hash-checked runtime/development
+installs, and `pip check`.
+The final dev-tree audit reported no unsuppressed vulnerabilities; the existing
+`ecdsa` exception below remains the only backend suppression. A Linux CPython 3.11
+x86_64 binary-wheel dry run also passed; it was not a Linux application execution
+or a deployed-image inspection.
+
+The frontend lock now uses **react-router/react-router-dom 7.18.3** and
+**@humanfs/node 0.16.8**. Fresh `npm audit` reported zero vulnerabilities. Both prior
+frontend allowlist entries were retired; their disposition is recorded under
+[Current suppressions](#current-suppressions). The landing lock is audited separately
+by `dependency-audit.yml`. These are local verification results, not a claim that a
+new nightly workflow run or production deployment has occurred.
+
 ## Known open advisories (as of 2026-07-30)
+
+The following is the historical July 30 snapshot. Use the September 13 cleanup above
+and current workflow output for today's resolved dependencies.
 
 **None outstanding.** Every backend advisory the nightly has surfaced is now
 fixed by upgrade — or, in `bleach`'s case, by **deleting the dependency** — rather
@@ -87,9 +116,9 @@ calls.
 
 ## Backend (`pip-audit`) — advisory on PRs, blocking nightly
 
-The backend scan step runs `pip-audit -r requirements.txt -r requirements-dev.txt
+The backend scan step runs `pip-audit --require-hashes -r requirements-dev.lock
 --ignore-vuln PYSEC-2026-1325` (PyPA/OSV database). It is **scoped to this app's
-resolved dependency set** via the `-r` flags, preceded by an
+locked runtime and development dependency set** via `-r`, preceded by an
 `actions/setup-python` step; the `--ignore-vuln` id is the one accepted
 suppression, justified below.
 
@@ -101,7 +130,7 @@ dependency tree), not this app's dependencies. That produced ~44 phantom
 advisories across ~15 packages the app never installs (e.g. `configobj 5.0.8`,
 stale runner-bundled `cryptography 41.0.7`, `pyopenssl 23.2.0`, `requests
 2.31.0`). The new invocation scans the real dependency tree, so its output is
-meaningful instead of noise. **Keep the `-r` flags** — dropping them regresses to
+meaningful instead of noise. **Keep the hash-lock `-r` argument** — dropping it regresses to
 scanning the ambient runner env.
 
 The step does **not** fail the job (`continue-on-error: true`). Rationale: the
@@ -824,46 +853,19 @@ and re-run `npm run audit:ci`.
 
 ### Current suppressions
 
-- **GHSA-qwww-vcr4-c8h2** (`react-router`, high) — "RSC Mode CSRF Bypass Allows
-  Action Execution Before 400 Response", vulnerable `>=7.12.0 <8.3.0`.
-  Reachable **only in React Router's RSC (React Server Components) mode**. This
-  app has no RSC and no server in front of the router — verified: no
-  `react-router/rsc` / `unstable_RSC` / `RSCErrorHandler` imports; no
-  `createStaticHandler` / `StaticRouter` / `renderToString` /
-  `renderToPipeableStream`; no `express` / `@react-router/node` /
-  `@react-router/serve`; a plain client-side `<BrowserRouter>` in
-  `frontend/src/App.tsx`; and a client-only `vite build` with no ssr config.
-  No server action exists to execute, so there is no CSRF boundary to bypass.
-  Also flagged transitively on `react-router-dom`.
-  *Remove when* react-router reaches `>=8.3.0` — which requires the v8 migration
-  that **drops `react-router-dom`** (no v8 of that package exists; it folds into
-  `react-router`), i.e. rewriting imports across ~59 pages.
+**None in the frontend allowlist as of 2026-09-13.** The wrapper remains in place
+and fails on any new unallowlisted high/critical advisory.
 
-- **GHSA-mh99-v99m-4gvg** (`brace-expansion`, high) — "DoS via unbounded
-  expansion length causing an out-of-memory process crash", vulnerable `<=5.0.7`.
-  **Development-only transitive dependency — it ships in nothing.** Verified:
-  `npm ls brace-expansion --all --omit=dev` resolves to **empty**. Every path in
-  is lint/test tooling — eslint 9.x and `@eslint/config-array` / `@eslint/eslintrc`,
-  `eslint-plugin-react`, `eslint-plugin-jsx-a11y` (all via `minimatch` 3.x),
-  `@typescript-eslint/*` (via `minimatch` 9.x), and
-  `jest` / `ts-jest` / `@jest/transform` / `test-exclude` / `babel-plugin-istanbul`.
-  The `vite build` client bundle contains none of it.
-  Exploitation needs an **attacker-controlled** glob fed to minimatch; the only
-  patterns these tools expand are the repo's own developer-authored globs in
-  `eslint.config` / `jest.config` / npm scripts — no runtime, user, or request
-  input reaches them. CI does run eslint/jest on PR branches, so a PR author can
-  influence those globs, but that is not an escalation: a PR that can edit
-  `jest.config` can already exhaust the runner with an infinite loop. Blast radius
-  is a crashed ephemeral CI job, never the shipped app or production data.
-  *Remove when* any consumer upgrade pulls `brace-expansion >= 5.0.8`.
+Retired entries:
 
-> **Do not add a blanket `brace-expansion` override.** `5.0.8` is the only patched
-> release, and its API is incompatible with the `minimatch` 3.x that eslint's
-> plugin set pins. Tested: `overrides: { "brace-expansion": "^5.0.8" }` does clear
-> the advisory, but `npm run lint` then dies with
-> `TypeError: expand is not a function` in `@eslint/config-array`. npm's own
-> `fixAvailable` suggestions for this advisory are semver-major and include a
-> nonsensical **downgrade to jest 25**.
+- **GHSA-qwww-vcr4-c8h2 (`react-router`)** — the client-only SPA did not use the
+  affected RSC mode. The [upstream advisory](https://github.com/remix-run/react-router/security/advisories/GHSA-qwww-vcr4-c8h2)
+  now lists a **7.18.2 backport**, so the earlier statement that remediation required
+  a v8 migration is superseded. The committed router lock is 7.18.3; source imports
+  and the client-side router architecture are unchanged.
+- **GHSA-mh99-v99m-4gvg (`brace-expansion`)** — no longer appeared in the fresh audit,
+  so its stale suppression was deleted. No blanket transitive-version override was
+  added. The unused legacy React ESLint plugin was also removed during cleanup.
 
-> **Never run `npm audit fix --force` here.** It resolves `react-router-dom`
-> **down** to 7.11.0 and reintroduces four advisories patched in 7.18.0.
+Review proposed version changes before using automated audit fixes; do not force a
+major upgrade or transitive override solely to make an advisory disappear.

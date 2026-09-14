@@ -8,6 +8,7 @@ import { WorkOrderBlocker, WorkOrderBlockerCategory, WorkOrderBlockerSeverity } 
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { useAuth } from '../context/AuthContext';
+import { canPublishDocuments } from '../utils/recordWriteAccess';
 import { hasPermission } from '../utils/permissions';
 import LaserNestManualModal from '../components/laser/LaserNestManualModal';
 import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
@@ -469,6 +470,7 @@ export default function WorkOrderDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const canPublish = canPublishDocuments(user);
   const { showToast } = useToast();
   const isAdminView = user?.role === 'admin' || !!user?.is_superuser;
   // Soft-deleting a WO is admin/manager (plus superuser) — the backend widened
@@ -1544,7 +1546,7 @@ export default function WorkOrderDetail() {
 
   const handleUploadWorkOrderPdf = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!workOrder || !documentUploadFile) return;
+    if (!canPublish || !workOrder || !documentUploadFile) return;
 
     const isPdfFile =
       documentUploadFile.type === 'application/pdf' ||
@@ -1578,7 +1580,7 @@ export default function WorkOrderDetail() {
 
   const handleAttachExistingPdf = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!workOrder || !attachDocumentId) return;
+    if (!canPublish || !workOrder || !attachDocumentId) return;
 
     setDocumentBusy(true);
     setDocumentError('');
@@ -1867,12 +1869,14 @@ export default function WorkOrderDetail() {
 
   // Trigger the hidden file input for the nest whose "Attach PDF" was clicked.
   const promptAttachNestPdf = (nestId: number) => {
+    if (!canPublish) return;
     setNestAttachTargetId(nestId);
     setNestActionError('');
     nestAttachInputRef.current?.click();
   };
 
   const handleNestAttachFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (!canPublish) return;
     const file = event.target.files?.[0] || null;
     const targetId = nestAttachTargetId;
     // Reset the input so re-selecting the same file fires onChange again.
@@ -2759,71 +2763,75 @@ export default function WorkOrderDetail() {
               </div>
             </div>
 
-            <form onSubmit={handleUploadWorkOrderPdf} className="rounded-lg border border-fd-line bg-slate-900/40 p-4 space-y-3">
-              <h3 className="text-sm font-semibold text-white">Upload PDF</h3>
-              <label className="block">
-                <span className="text-xs font-medium text-slate-400">PDF File</span>
-                <input
-                  key={documentUploadInputKey}
-                  type="file"
-                  aria-label="PDF File"
-                  accept=".pdf,application/pdf"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0] || null;
-                    setDocumentUploadFile(file);
-                    if (file && !documentTitle.trim()) {
-                      setDocumentTitle(file.name.replace(/\.pdf$/i, ''));
-                    }
-                    setDocumentError('');
-                  }}
-                  className="mt-1 block w-full text-sm text-slate-300 file:mr-3 file:rounded file:border-0 file:bg-slate-700 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-100 hover:file:bg-slate-600"
-                />
-              </label>
-              <label className="block">
-                <span className="text-xs font-medium text-slate-400">Title</span>
-                <input
-                  type="text"
-                  aria-label="Title"
-                  value={documentTitle}
-                  onChange={(event) => setDocumentTitle(event.target.value)}
-                  placeholder="Drawing title"
-                  className="input mt-1 w-full"
-                />
-              </label>
-              <Button
-                type="submit"
-                disabled={documentBusy || !documentUploadFile}
-                className="w-full flex items-center justify-center"
-              >
-                <ArrowUpTrayIcon className="h-4 w-4 mr-2" />
-                {documentBusy ? 'Uploading...' : 'Upload PDF'}
-              </Button>
-            </form>
+            {canPublish && (
+              <form onSubmit={handleUploadWorkOrderPdf} className="rounded-lg border border-fd-line bg-slate-900/40 p-4 space-y-3">
+                <h3 className="text-sm font-semibold text-white">Upload PDF</h3>
+                <label className="block">
+                  <span className="text-xs font-medium text-slate-400">PDF File</span>
+                  <input
+                    key={documentUploadInputKey}
+                    type="file"
+                    aria-label="PDF File"
+                    accept=".pdf,application/pdf"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] || null;
+                      setDocumentUploadFile(file);
+                      if (file && !documentTitle.trim()) {
+                        setDocumentTitle(file.name.replace(/\.pdf$/i, ''));
+                      }
+                      setDocumentError('');
+                    }}
+                    className="mt-1 block w-full text-sm text-slate-300 file:mr-3 file:rounded file:border-0 file:bg-slate-700 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-slate-100 hover:file:bg-slate-600"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-xs font-medium text-slate-400">Title</span>
+                  <input
+                    type="text"
+                    aria-label="Title"
+                    value={documentTitle}
+                    onChange={(event) => setDocumentTitle(event.target.value)}
+                    placeholder="Drawing title"
+                    className="input mt-1 w-full"
+                  />
+                </label>
+                <Button
+                  type="submit"
+                  disabled={documentBusy || !documentUploadFile}
+                  className="w-full flex items-center justify-center"
+                >
+                  <ArrowUpTrayIcon className="h-4 w-4 mr-2" />
+                  {documentBusy ? 'Uploading...' : 'Upload PDF'}
+                </Button>
+              </form>
+            )}
 
-            <form onSubmit={handleAttachExistingPdf} className="rounded-lg border border-fd-line bg-slate-900/40 p-4 space-y-3">
-              <h3 className="text-sm font-semibold text-white">Attach Existing PDF</h3>
-              <select
-                value={attachDocumentId}
-                onChange={(event) => setAttachDocumentId(event.target.value)}
-                className="input w-full"
-              >
-                <option value="">Select unassigned PDF</option>
-                {availablePdfDocuments.map((document) => (
-                  <option key={document.id} value={document.id}>
-                    {document.title} - {document.file_name || document.document_number}
-                  </option>
-                ))}
-              </select>
-              <Button
-                type="submit"
-                variant="secondary"
-                disabled={documentBusy || !attachDocumentId}
-                className="w-full flex items-center justify-center"
-              >
-                <PaperClipIcon className="h-4 w-4 mr-2" />
-                {documentBusy ? 'Attaching...' : 'Attach PDF'}
-              </Button>
-            </form>
+            {canPublish && (
+              <form onSubmit={handleAttachExistingPdf} className="rounded-lg border border-fd-line bg-slate-900/40 p-4 space-y-3">
+                <h3 className="text-sm font-semibold text-white">Attach Existing PDF</h3>
+                <select
+                  value={attachDocumentId}
+                  onChange={(event) => setAttachDocumentId(event.target.value)}
+                  className="input w-full"
+                >
+                  <option value="">Select unassigned PDF</option>
+                  {availablePdfDocuments.map((document) => (
+                    <option key={document.id} value={document.id}>
+                      {document.title} - {document.file_name || document.document_number}
+                    </option>
+                  ))}
+                </select>
+                <Button
+                  type="submit"
+                  variant="secondary"
+                  disabled={documentBusy || !attachDocumentId}
+                  className="w-full flex items-center justify-center"
+                >
+                  <PaperClipIcon className="h-4 w-4 mr-2" />
+                  {documentBusy ? 'Attaching...' : 'Attach PDF'}
+                </Button>
+              </form>
+            )}
           </div>
 
           <div className="rounded-sm border border-fd-line bg-slate-950/60 overflow-hidden">
@@ -2923,14 +2931,14 @@ export default function WorkOrderDetail() {
           </div>
 
           {/* Hidden file input shared by all per-nest "Attach PDF" actions. */}
-          <input
+          {canPublish && (<input
             ref={nestAttachInputRef}
             type="file"
             aria-label="Attach nest PDF"
             accept="application/pdf"
             onChange={handleNestAttachFileChange}
             className="hidden"
-          />
+          />)}
 
           {nestActionError && (
             <div className="mt-3 rounded border border-fd-red/40 bg-fd-red/10 px-3 py-2 text-sm text-fd-red">
@@ -3047,7 +3055,7 @@ export default function WorkOrderDetail() {
                                 </button>
                               </>
                             ) : (
-                              <button
+                              canPublish && (<button
                                 type="button"
                                 onClick={() => promptAttachNestPdf(nest.id)}
                                 disabled={acting}
@@ -3055,7 +3063,7 @@ export default function WorkOrderDetail() {
                               >
                                 <PaperClipIcon className="h-4 w-4" />
                                 Attach PDF
-                              </button>
+                              </button>)
                             )}
                             <button
                               type="button"

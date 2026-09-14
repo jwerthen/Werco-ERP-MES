@@ -1,0 +1,2 @@
+BEFORE_BACKEND_DEFAULTS {"parts:renumber":true,"inventory:combine":true,"process_sheets:author":true,"process_sheets:release":true,"visitor_logs:view":true}
+AFTER_BACKEND_DEFAULTS {"parts:renumber":false,"inventory:combine":false,"process_sheets:author":false,"process_sheets:release":false,"visitor_logs:view":false}

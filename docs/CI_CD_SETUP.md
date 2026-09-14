@@ -4,11 +4,12 @@ This document explains how to set up and use the GitHub Actions CI/CD pipeline f
 
 ## Overview
 
-The pipeline consists of three workflow files:
+The primary workflows covered here are:
 
 1. **ci-cd.yml** - Main CI/CD pipeline (runs on push to main/develop)
 2. **pr-check.yml** - Pull request checks (runs on PRs)
 3. **e2e.yml** - Playwright E2E suite against a real, seeded full stack (PRs, nightly, manual; deliberately **non-blocking** — see below)
+4. **dependency-audit.yml** - Blocking nightly/manual dependency audits for the backend, frontend, and landing site
 
 ## Pipeline Stages
 
@@ -41,14 +42,33 @@ stages are separately branch-gated to pushes, so a PR run does the full CI and n
 
 | Stage | Description | Requires |
 |-------|-------------|----------|
-| Backend Lint | Black, isort, Flake8, MyPy, Bandit | - |
+| Backend Lint | Hash-lock verification, Black, isort, Flake8, MyPy, Bandit | - |
 | Backend Tests | pytest with coverage | - |
-| Frontend Lint | ESLint, TypeScript | - |
+| Frontend Lint | ESLint-config regressions, ESLint, three TypeScript programs | - |
 | Frontend Tests | Jest tests | - |
-| Build | Docker images | All lint/test jobs |
+| Landing Checks | Type-check optional React source and build the static HTML entry | - |
+| Build | Docker images | All lint/test jobs and Landing Checks |
 | Security Scan | Trivy, npm audit, pip-audit | Build |
 | Deploy Staging | Railway deployment | Security (develop branch) |
 | Deploy Production | Railway deployment, then post-deploy health verification | Security (main branch) |
+
+Backend lint/tests install `requirements-dev.lock` with `--require-hashes`; the lint
+job runs `python scripts/lock_dependencies.py --check` using the locked uv 0.11.15
+compiler. Runtime images and E2E install `requirements.lock`. MyPy enforces five
+previously suppressed correctness categories in `app.schemas.*`,
+`app.db.tenant_filter`, and `app.services.pdf_text`; other modules keep the existing
+baseline. Frontend lint enforces Hook ordering globally and effect dependencies in
+shared `components/ui`. See [Development Guide](DEVELOPMENT.md#dependency-updates).
+
+`Landing Checks` is a prerequisite for Docker builds. It runs `npm ci`,
+`npm run type-check`, and `npm run build` in `landing/`; it does not replace the
+shipped static `index.html` with the optional React source. Adding this workflow job
+does not change remote branch-protection settings.
+
+CI's backend test job also sets `RUN_DOCKER_HYGIENE_TESTS=1`: five synthetic Docker
+context builds and two Redis memory-pressure tests run in addition to the fast
+configuration checks. No real repository credentials or database files enter those
+contexts. Local opt-in instructions are in the Development Guide.
 
 The build stage also requires `backend/Dockerfile.worker` and a non-root,
 network-disabled solver smoke. Its manifest artifact binds the compiled shared
@@ -215,11 +235,12 @@ You can manually trigger the CI/CD pipeline:
 
 ### Pre-commit Hooks
 
-The project includes pre-commit hooks that run the same checks locally:
+Pre-commit checks file validity, merge conflicts, large files, and private keys.
+Lint, formatting, typing, and test gates are CI-owned and run separately:
 
 ```bash
-# Install pre-commit
-pip install pre-commit
+# Install the locked development tools first (from the repository root)
+python -m pip install --require-hashes -r backend/requirements-dev.lock
 
 # Install hooks
 pre-commit install
@@ -233,18 +254,29 @@ pre-commit run --all-files
 ```bash
 # Backend
 cd backend
-pip install -r requirements-dev.txt
-black --check app tests
-isort --check-only app tests
-flake8 app
+python -m pip install --require-hashes -r requirements-dev.lock
+python scripts/lock_dependencies.py --check
+black --check --config=.black app tests
+isort --check-only --settings-path=.isort.cfg app tests
+flake8 app --max-line-length=120
+mypy app --config-file=mypy.ini
+bandit -r app -s B101 -ll
 pytest tests/ -v --cov=app
 
 # Frontend
-cd frontend
-npm install
-npm run lint
+cd ../frontend
+npm ci
+npm run lint -- --max-warnings=0
+npm run type-check
 npm test
 npm run build
+
+# Landing site
+cd ../landing
+npm ci
+npm run type-check
+npm run build
+npm run audit:ci
 ```
 
 ## Troubleshooting
@@ -255,7 +287,7 @@ npm run build
 2. Run tests locally: `pytest tests/ -v`
 3. Common issues:
    - Missing environment variables
-   - Database connection (uses PostgreSQL service in CI)
+   - In-memory SQLite fixture/bootstrap errors (the separate E2E workflow uses PostgreSQL)
    - Missing dependencies
 
 ### Pipeline Failed: Frontend Build
@@ -278,7 +310,7 @@ npm run build
 Security scans may show warnings that don't fail the build:
 - `npm audit` findings below **high** severity (the frontend gate blocks only
   high/critical), plus a non-fatal warning for any stale allowlist entry
-- `pip-audit -r requirements.txt -r requirements-dev.txt` for Python packages
+- `pip-audit --require-hashes -r requirements-dev.lock` for Python packages
   (scoped to the app's dependency set), plus `--ignore-vuln PYSEC-2026-1325` for
   the one accepted backend suppression — there is no backend allowlist file, so
   that flag and
@@ -287,9 +319,11 @@ Security scans may show warnings that don't fail the build:
 
 Review these periodically and update dependencies.
 
-The frontend step (`Run npm audit (Frontend)` → `npm run audit:ci`) **does** fail
-the build on any high/critical advisory that is not explicitly allowlisted with a
-written not-applicable justification. See
+`npm run audit:ci` exits nonzero on any unallowlisted frontend high/critical advisory.
+The copy in `ci-cd.yml` is advisory (`continue-on-error`); the separate nightly/manual
+`dependency-audit.yml` enforces it. That workflow also runs the landing site's
+`npm audit --audit-level=high` gate and the backend hash-lock audit. The frontend
+allowlist is currently empty following the September 13 dependency cleanup. See
 [Security Advisory Suppressions](SECURITY_ADVISORY_SUPPRESSIONS.md).
 
 ## Customization

@@ -1,147 +1,19 @@
 from datetime import date, datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-from sqlalchemy.orm import Session, joinedload
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_company_id, get_current_user
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
-from app.models.job_costing import CostEntry, CostEntrySource, CostEntryType, JobCost, JobCostStatus
-from app.models.user import User
-from app.models.work_order import WorkOrder
-from app.services.job_costing_service import recompute_from_time_entries
+from app.models.job_costing import CostEntry, JobCost, JobCostStatus
+from app.models.user import User, UserRole
+from app.schemas.job_costing import CostEntryCreate, CostEntryResponse, JobCostCreate, JobCostResponse, JobCostUpdate
+from app.services import job_costing_access_service as access
+from app.services.audit_service import AuditService
 
 router = APIRouter()
-
-
-# ── Pydantic Schemas ──────────────────────────────────────────────
-
-
-class JobCostCreate(BaseModel):
-    work_order_id: int
-    estimated_material_cost: float = 0.0
-    estimated_labor_cost: float = 0.0
-    estimated_overhead_cost: float = 0.0
-    revenue: float = 0.0
-    notes: Optional[str] = None
-
-
-class JobCostUpdate(BaseModel):
-    estimated_material_cost: Optional[float] = None
-    estimated_labor_cost: Optional[float] = None
-    estimated_overhead_cost: Optional[float] = None
-    revenue: Optional[float] = None
-    status: Optional[str] = None
-    notes: Optional[str] = None
-
-
-class CostEntryCreate(BaseModel):
-    entry_type: str  # material, labor, overhead, other
-    description: str
-    quantity: float = 1.0
-    unit_cost: float = 0.0
-    work_order_operation_id: Optional[int] = None
-    source: str = "manual"
-    reference: Optional[str] = None
-    entry_date: date
-
-
-class CostEntryResponse(BaseModel):
-    id: int
-    job_cost_id: int
-    entry_type: str
-    description: str
-    quantity: float
-    unit_cost: float
-    total_cost: float
-    work_order_operation_id: Optional[int] = None
-    source: str
-    reference: Optional[str] = None
-    entry_date: date
-    created_by: Optional[int] = None
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
-class JobCostResponse(BaseModel):
-    id: int
-    work_order_id: int
-    estimated_material_cost: float
-    estimated_labor_cost: float
-    estimated_overhead_cost: float
-    estimated_total_cost: float
-    actual_material_cost: float
-    actual_labor_cost: float
-    actual_overhead_cost: float
-    actual_total_cost: float
-    material_variance: float
-    labor_variance: float
-    overhead_variance: float
-    total_variance: float
-    margin_amount: float
-    margin_percent: float
-    revenue: float
-    status: str
-    notes: Optional[str] = None
-    created_at: datetime
-    updated_at: datetime
-    # Enriched fields from work order
-    work_order_number: Optional[str] = None
-    part_number: Optional[str] = None
-    part_name: Optional[str] = None
-    customer_name: Optional[str] = None
-
-    class Config:
-        from_attributes = True
-
-
-# ── Helper Functions ──────────────────────────────────────────────
-
-
-def recalculate_job_cost(job_cost: JobCost):
-    """Recalculate totals, variances, and margin from entries and estimates."""
-    # Sum actual costs from entries
-    material_total = 0.0
-    labor_total = 0.0
-    overhead_total = 0.0
-    other_total = 0.0
-
-    for entry in job_cost.entries:
-        if entry.entry_type == CostEntryType.MATERIAL or entry.entry_type == "material":
-            material_total += entry.total_cost
-        elif entry.entry_type == CostEntryType.LABOR or entry.entry_type == "labor":
-            labor_total += entry.total_cost
-        elif entry.entry_type == CostEntryType.OVERHEAD or entry.entry_type == "overhead":
-            overhead_total += entry.total_cost
-        else:
-            other_total += entry.total_cost
-
-    job_cost.actual_material_cost = material_total
-    job_cost.actual_labor_cost = labor_total
-    job_cost.actual_overhead_cost = overhead_total + other_total
-    job_cost.actual_total_cost = material_total + labor_total + overhead_total + other_total
-
-    # Estimated total
-    job_cost.estimated_total_cost = (
-        job_cost.estimated_material_cost + job_cost.estimated_labor_cost + job_cost.estimated_overhead_cost
-    )
-
-    # Variances
-    job_cost.material_variance = job_cost.actual_material_cost - job_cost.estimated_material_cost
-    job_cost.labor_variance = job_cost.actual_labor_cost - job_cost.estimated_labor_cost
-    job_cost.overhead_variance = job_cost.actual_overhead_cost - job_cost.estimated_overhead_cost
-    job_cost.total_variance = job_cost.actual_total_cost - job_cost.estimated_total_cost
-
-    # Margin
-    if job_cost.revenue and job_cost.revenue > 0:
-        job_cost.margin_amount = job_cost.revenue - job_cost.actual_total_cost
-        job_cost.margin_percent = (job_cost.margin_amount / job_cost.revenue) * 100
-    else:
-        job_cost.margin_amount = 0.0
-        job_cost.margin_percent = 0.0
+WRITE_ROLES = [UserRole.ADMIN, UserRole.MANAGER]
 
 
 def build_job_cost_response(job_cost: JobCost) -> dict:
@@ -196,14 +68,7 @@ def list_job_costs(
     company_id: int = Depends(get_current_company_id),
 ):
     """List all job costs with optional filtering."""
-    query = (
-        db.query(JobCost)
-        .filter(JobCost.company_id == company_id)
-        .options(
-            joinedload(JobCost.work_order).joinedload(WorkOrder.part),
-            joinedload(JobCost.entries),
-        )
-    )
+    query = access.job_cost_query(db, company_id)
 
     if status:
         query = query.filter(JobCost.status == status)
@@ -225,14 +90,7 @@ def get_summary(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get summary statistics for job costing dashboard."""
-    all_jobs = (
-        db.query(JobCost)
-        .filter(JobCost.company_id == company_id)
-        .options(
-            joinedload(JobCost.entries),
-        )
-        .all()
-    )
+    all_jobs = access.job_cost_query(db, company_id).all()
 
     in_progress = [j for j in all_jobs if j.status == JobCostStatus.IN_PROGRESS or j.status == "in_progress"]
     completed = [j for j in all_jobs if j.status == JobCostStatus.COMPLETED or j.status == "completed"]
@@ -280,18 +138,7 @@ def get_job_cost(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get a single job cost with all details."""
-    job_cost = (
-        db.query(JobCost)
-        .options(
-            joinedload(JobCost.work_order).joinedload(WorkOrder.part),
-            joinedload(JobCost.entries),
-        )
-        .filter(JobCost.id == job_cost_id, JobCost.company_id == company_id)
-        .first()
-    )
-
-    if not job_cost:
-        raise HTTPException(status_code=404, detail="Job cost not found")
+    job_cost = access.resolve_job_cost(db, job_cost_id, company_id)
 
     return build_job_cost_response(job_cost)
 
@@ -300,54 +147,15 @@ def get_job_cost(
 def create_job_cost(
     data: JobCostCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new job cost record for a work order."""
-    # Verify work order exists
-    wo = db.query(WorkOrder).filter(WorkOrder.id == data.work_order_id).first()
-    if not wo:
-        raise HTTPException(status_code=404, detail="Work order not found")
-
-    # Check for existing job cost on this work order
-    existing = db.query(JobCost).filter(JobCost.work_order_id == data.work_order_id).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Job cost already exists for this work order")
-
-    estimated_total = data.estimated_material_cost + data.estimated_labor_cost + data.estimated_overhead_cost
-
-    job_cost = JobCost(
-        work_order_id=data.work_order_id,
-        estimated_material_cost=data.estimated_material_cost,
-        estimated_labor_cost=data.estimated_labor_cost,
-        estimated_overhead_cost=data.estimated_overhead_cost,
-        estimated_total_cost=estimated_total,
-        revenue=data.revenue,
-        notes=data.notes,
-    )
-
-    # Calculate initial margin if revenue provided
-    if data.revenue and data.revenue > 0:
-        job_cost.margin_amount = data.revenue
-        job_cost.margin_percent = 100.0
-
-    job_cost.company_id = company_id
-    db.add(job_cost)
-    db.commit()
-    db.refresh(job_cost)
-
-    # Reload with relationships
-    job_cost = (
-        db.query(JobCost)
-        .options(
-            joinedload(JobCost.work_order).joinedload(WorkOrder.part),
-            joinedload(JobCost.entries),
-        )
-        .filter(JobCost.id == job_cost.id)
-        .first()
-    )
-
-    return build_job_cost_response(job_cost)
+    """Create a cost record for a live work order in the active company."""
+    with access.job_cost_transaction(db):
+        job_cost = access.create_job_cost(db, data, company_id, audit)
+        job_cost_id = job_cost.id
+    return build_job_cost_response(access.resolve_job_cost(db, job_cost_id, company_id))
 
 
 @router.put("/{job_cost_id}", response_model=JobCostResponse)
@@ -355,47 +163,14 @@ def update_job_cost(
     job_cost_id: int,
     data: JobCostUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a job cost record."""
-    job_cost = (
-        db.query(JobCost)
-        .options(
-            joinedload(JobCost.work_order).joinedload(WorkOrder.part),
-            joinedload(JobCost.entries),
-        )
-        .filter(JobCost.id == job_cost_id)
-        .first()
-    )
-
-    if not job_cost:
-        raise HTTPException(status_code=404, detail="Job cost not found")
-
-    update_data = data.model_dump(exclude_unset=True)
-    if "status" in update_data:
-        update_data["status"] = JobCostStatus(update_data["status"])
-
-    for field, value in update_data.items():
-        setattr(job_cost, field, value)
-
-    recalculate_job_cost(job_cost)
-
-    db.commit()
-    db.refresh(job_cost)
-
-    # Reload with relationships
-    job_cost = (
-        db.query(JobCost)
-        .options(
-            joinedload(JobCost.work_order).joinedload(WorkOrder.part),
-            joinedload(JobCost.entries),
-        )
-        .filter(JobCost.id == job_cost.id)
-        .first()
-    )
-
-    return build_job_cost_response(job_cost)
+    """Update estimates, revenue, notes or status with required audit evidence."""
+    with access.job_cost_transaction(db):
+        access.update_job_cost(db, job_cost_id, data, company_id, audit)
+    return build_job_cost_response(access.resolve_job_cost(db, job_cost_id, company_id))
 
 
 @router.get("/{job_cost_id}/entries", response_model=List[CostEntryResponse])
@@ -403,39 +178,16 @@ def list_entries(
     job_cost_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
-    """List all cost entries for a job cost."""
-    job_cost = db.query(JobCost).filter(JobCost.id == job_cost_id).first()
-    if not job_cost:
-        raise HTTPException(status_code=404, detail="Job cost not found")
-
+    """List active-company entries under an authorized job-cost parent."""
+    job_cost = access.resolve_job_cost(db, job_cost_id, company_id)
     entries = (
-        db.query(CostEntry)
-        .filter(CostEntry.job_cost_id == job_cost_id)
+        access.cost_entry_query(db, job_cost, company_id)
         .order_by(CostEntry.entry_date.desc(), CostEntry.created_at.desc())
         .all()
     )
-
-    result = []
-    for e in entries:
-        result.append(
-            {
-                "id": e.id,
-                "job_cost_id": e.job_cost_id,
-                "entry_type": e.entry_type.value if hasattr(e.entry_type, 'value') else e.entry_type,
-                "description": e.description,
-                "quantity": e.quantity,
-                "unit_cost": e.unit_cost,
-                "total_cost": e.total_cost,
-                "work_order_operation_id": e.work_order_operation_id,
-                "source": e.source.value if hasattr(e.source, 'value') else e.source,
-                "reference": e.reference,
-                "entry_date": e.entry_date,
-                "created_by": e.created_by,
-                "created_at": e.created_at,
-            }
-        )
-    return result
+    return [access.build_cost_entry_response(entry) for entry in entries]
 
 
 @router.post("/{job_cost_id}/entries", response_model=CostEntryResponse)
@@ -443,62 +195,16 @@ def add_entry(
     job_cost_id: int,
     data: CostEntryCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Add a cost entry to a job cost."""
-    job_cost = (
-        db.query(JobCost)
-        .options(
-            joinedload(JobCost.entries),
-            joinedload(JobCost.work_order).joinedload(WorkOrder.part),
-        )
-        .filter(JobCost.id == job_cost_id)
-        .first()
-    )
-    if not job_cost:
-        raise HTTPException(status_code=404, detail="Job cost not found")
-
-    total_cost = data.quantity * data.unit_cost
-
-    entry = CostEntry(
-        job_cost_id=job_cost_id,
-        entry_type=CostEntryType(data.entry_type),
-        description=data.description,
-        quantity=data.quantity,
-        unit_cost=data.unit_cost,
-        total_cost=total_cost,
-        work_order_operation_id=data.work_order_operation_id,
-        source=CostEntrySource(data.source),
-        reference=data.reference,
-        entry_date=data.entry_date,
-        created_by=current_user.id,
-    )
-
-    db.add(entry)
-    db.flush()
-
-    # Recalculate job cost totals
-    job_cost.entries.append(entry)
-    recalculate_job_cost(job_cost)
-
-    db.commit()
-    db.refresh(entry)
-
-    return {
-        "id": entry.id,
-        "job_cost_id": entry.job_cost_id,
-        "entry_type": entry.entry_type.value if hasattr(entry.entry_type, 'value') else entry.entry_type,
-        "description": entry.description,
-        "quantity": entry.quantity,
-        "unit_cost": entry.unit_cost,
-        "total_cost": entry.total_cost,
-        "work_order_operation_id": entry.work_order_operation_id,
-        "source": entry.source.value if hasattr(entry.source, 'value') else entry.source,
-        "reference": entry.reference,
-        "entry_date": entry.entry_date,
-        "created_by": entry.created_by,
-        "created_at": entry.created_at,
-    }
+    """Add an audited entry; operation references must belong to this work order."""
+    with access.job_cost_transaction(db):
+        entry_id = access.add_cost_entry(db, job_cost_id, data, company_id, current_user.id, audit).id
+    job_cost = access.resolve_job_cost(db, job_cost_id, company_id)
+    entry = access.cost_entry_query(db, job_cost, company_id).filter(CostEntry.id == entry_id).one()
+    return access.build_cost_entry_response(entry)
 
 
 @router.delete("/{job_cost_id}/entries/{entry_id}")
@@ -506,36 +212,13 @@ def delete_entry(
     job_cost_id: int,
     entry_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Delete a cost entry."""
-    entry = (
-        db.query(CostEntry)
-        .filter(
-            CostEntry.id == entry_id,
-            CostEntry.job_cost_id == job_cost_id,
-        )
-        .first()
-    )
-    if not entry:
-        raise HTTPException(status_code=404, detail="Cost entry not found")
-
-    db.delete(entry)
-    db.flush()
-
-    # Recalculate job cost totals
-    job_cost = (
-        db.query(JobCost)
-        .options(
-            joinedload(JobCost.entries),
-        )
-        .filter(JobCost.id == job_cost_id)
-        .first()
-    )
-    if job_cost:
-        recalculate_job_cost(job_cost)
-
-    db.commit()
+    """Delete one authorized entry and audit the corresponding total changes."""
+    with access.job_cost_transaction(db):
+        access.delete_cost_entry(db, job_cost_id, entry_id, company_id, audit)
     return {"detail": "Cost entry deleted"}
 
 
@@ -543,44 +226,14 @@ def delete_entry(
 def calculate_costs(
     job_cost_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Recalculate actual costs from time entries and existing cost entries.
-
-    Delegates the TimeEntry -> labor recompute to the shared
-    ``job_costing_service.recompute_from_time_entries`` (COST-2) so the on-demand
-    endpoint and the completion cost rollup use ONE implementation and the SAME
-    configurable labor rate (COST-5: per work center via ``WorkCenter.hourly_rate``,
-    falling back to ``settings.DEFAULT_LABOR_RATE`` -- no more hardcoded $45). Now
-    tenant-scoped on ``company_id``.
-    """
-    job_cost = (
-        db.query(JobCost)
-        .options(
-            joinedload(JobCost.work_order).joinedload(WorkOrder.part),
-            joinedload(JobCost.entries),
-        )
-        .filter(JobCost.id == job_cost_id, JobCost.company_id == company_id)
-        .first()
-    )
-
-    if not job_cost:
-        raise HTTPException(status_code=404, detail="Job cost not found")
-
-    recompute_from_time_entries(db, job_cost=job_cost, company_id=company_id, user_id=current_user.id)
-    db.commit()
-
-    job_cost = (
-        db.query(JobCost)
-        .options(
-            joinedload(JobCost.work_order).joinedload(WorkOrder.part),
-            joinedload(JobCost.entries),
-        )
-        .filter(JobCost.id == job_cost_id, JobCost.company_id == company_id)
-        .first()
-    )
-    return build_job_cost_response(job_cost)
+    """Regenerate labor using the shared configurable-rate cost service, atomically audited."""
+    with access.job_cost_transaction(db):
+        access.calculate_job_cost(db, job_cost_id, company_id, current_user.id, audit)
+    return build_job_cost_response(access.resolve_job_cost(db, job_cost_id, company_id))
 
 
 @router.get("/{job_cost_id}/variance-report")
@@ -588,20 +241,10 @@ def variance_report(
     job_cost_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
-    """Get detailed variance breakdown for a job cost."""
-    job_cost = (
-        db.query(JobCost)
-        .options(
-            joinedload(JobCost.work_order).joinedload(WorkOrder.part),
-            joinedload(JobCost.entries),
-        )
-        .filter(JobCost.id == job_cost_id)
-        .first()
-    )
-
-    if not job_cost:
-        raise HTTPException(status_code=404, detail="Job cost not found")
+    """Get detailed variance breakdown within the active company."""
+    job_cost = access.resolve_job_cost(db, job_cost_id, company_id)
 
     wo = job_cost.work_order
 

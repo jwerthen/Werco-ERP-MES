@@ -13,10 +13,12 @@
  * stub it at the top of the file.
  */
 import React from 'react';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, within, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import JobCosting from './JobCosting';
+import type { UserRole } from '../types';
+let mockRole: UserRole = 'admin';
 
 // recharts ResponsiveContainer relies on ResizeObserver, absent in jsdom.
 global.ResizeObserver = class {
@@ -78,6 +80,7 @@ const jobCosts = [
 ];
 
 beforeEach(() => {
+  mockRole = 'admin';
   mockedApi.get.mockImplementation((url: string) => {
     if (url === '/job-costs/summary') {
       return Promise.resolve({ data: summary });
@@ -85,6 +88,7 @@ beforeEach(() => {
     if (url === '/job-costs/') {
       return Promise.resolve({ data: jobCosts });
     }
+    if (url.endsWith('/entries')) return Promise.resolve({ data: [{ id: 7, job_cost_id: 1, entry_type: 'material', description: 'Recorded cost', quantity: 2, unit_cost: 5, total_cost: 10, source: 'manual', entry_date: '2026-09-13' }] });
     return Promise.resolve({ data: [] });
   });
 });
@@ -141,4 +145,34 @@ describe('JobCosting cockpit', () => {
       screen.getByRole('heading', { name: /Job Costing & Financial Integration/i })
     ).toBeInTheDocument();
   });
+});
+
+jest.mock('../hooks/usePermissions', () => ({
+  usePermissions: () => ({ role: mockRole, isSuperuser: false }),
+}));
+
+
+it.each<UserRole>(['admin', 'manager', 'platform_admin', 'supervisor', 'operator', 'quality', 'shipping', 'viewer'])(
+  '%s gets financial reads with only authorized write controls', async role => {
+    mockRole = role;
+    renderPage();
+    fireEvent.click(await screen.findByText('WO-1001'));
+    expect(await screen.findByText('Recorded cost')).toBeInTheDocument();
+    const allowed = ['admin', 'manager', 'platform_admin'].includes(role);
+    expect(!!screen.queryByRole('button', { name: 'New Job Cost' })).toBe(allowed);
+    expect(!!screen.queryByTitle('Add Cost Entry')).toBe(allowed);
+    expect(!!screen.queryByTitle('Recalculate from Time Entries')).toBe(allowed);
+    expect(!!screen.queryByTitle('Delete entry')).toBe(allowed);
+    expect(!!screen.queryByRole('button', { name: 'Add Entry' })).toBe(allowed);
+    expect(mockedApi.post).not.toHaveBeenCalled();
+    expect(mockedApi.delete).not.toHaveBeenCalled();
+  }
+);
+
+it('a viewer empty state does not offer job-cost creation', async () => {
+  mockRole = 'viewer';
+  mockedApi.get.mockImplementation((url: string) => Promise.resolve({ data: url === '/job-costs/summary' ? summary : [] }));
+  renderPage();
+  expect(await screen.findByText('No job costs found')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'New Job Cost' })).not.toBeInTheDocument();
 });

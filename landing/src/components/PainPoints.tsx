@@ -97,7 +97,7 @@ export default function PainPoints() {
                   <div className={`p-2 rounded-lg transition-colors ${
                     activeIndex === index ? 'bg-primary-500' : 'bg-neutral-700'
                   }`}>
-                    {React.cloneElement(point.icon as React.ReactElement, {
+                    {React.cloneElement(point.icon as React.ReactElement<React.SVGProps<SVGSVGElement>>, {
                       className: 'w-5 h-5 text-white'
                     })}
                   </div>

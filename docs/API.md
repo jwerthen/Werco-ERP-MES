@@ -456,13 +456,13 @@ email (see [Excel migration runbook](EXCEL_MIGRATION_RUNBOOK.md) → Step 2).
 
 That **422 is a request-shape refusal, not an oracle**: it is raised by the `PublicRegister` schema
 before the handler runs, so it depends only on the submitted body and never on whether an account
-exists. The admin paths (`POST /auth/register`, `POST /users/`) are unchanged and still require
-both identifiers.
+exists. The admin paths (`POST /auth/register`, `POST /users/`) still require both identifiers;
+their tenant-role and audit requirements are documented under [Users](#users-admin).
 
 It used to answer `400 Email already registered` or, distinctly, `400 Employee ID already
 exists` — two account-existence oracles over every tenant's user list and badge numbers, on a
 route that also inserts rows into `users`. Both 400s are gone. Outside the first-user bootstrap
-**every** outcome returns the same body — a badge-only signup included, since minting the address is
+accepted registrations and identifier refusals return the same body — a badge-only signup included, since minting the address is
 a storage detail rather than a distinguishable outcome — and a duplicate does not insert:
 
 ```json
@@ -565,6 +565,13 @@ The first-user bootstrap is unchanged and still returns its distinct
 `{"message": "Admin account created successfully", "is_first_user": true}` — with zero users
 nothing can collide, so it never reaches the uniform path.
 
+Both successful creation branches require their `USER_REGISTERED` audit row in the same
+transaction: failure to save that evidence returns **503** (`"Unable to save audit record"`)
+and creates no account. The empty-install bootstrap selects an active Platform Admin/superuser
+server-side; subsequent public signups select an inactive Viewer without superuser authority.
+Neither branch accepts caller-selected role, superuser authority, or company context. The ordinary
+duplicate/refusal response above remains unchanged.
+
 The uniqueness checks stay install-wide **on purpose**: scoping them per company would let this
 public route mint the cross-tenant duplicate emails and badge numbers that make login and
 badge login refuse with 409. The synthetic-address mint dedups install-wide for the same reason —
@@ -576,6 +583,22 @@ Include the token in the Authorization header:
 ```http
 Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
+
+Access JWTs resolve against the **current stored user and company on each authenticated HTTP
+request**. A disabled user or unavailable company returns **403**; an ordinary user's token
+company must match their current account company (**401** otherwise). Platform Admin/superuser
+accounts may use a switched company context. The active company comes from the verified
+`company_id` claim, with the current user's company as the legacy-token fallback.
+
+An inactive viewed company does not prevent session exit through `POST /auth/logout` or
+`POST /auth/switch-company/{target_company_id}`; the switch route still requires platform
+authority and an available destination. A **stored** Platform Admin/superuser also retains the
+`/platform/` control-plane routes so they can reactivate an inactive home or sole company.
+These exceptions grant no ordinary tenant-data access, do not apply to WebSockets, and do not
+bypass the existing read-only-context write fence. Logout and switch retain their existing
+read-only-context exceptions. API tokens still require an active company and have no access to
+the auth routes. Logout does **not** revoke an unexpired access JWT; this change adds no
+server-side access/refresh-token revocation mechanism.
 
 ### API tokens (bots and MCP clients)
 
@@ -786,10 +809,9 @@ see [docs/KIOSK.md](KIOSK.md) → Crew station mode):
 > `backend/tests/api/test_kiosk_resume_fence.py`, which also asserts the fence did not otherwise open.
 > Tokens without a `scope` claim are
 > unaffected. On the allowed paths the operator IS `current_user`, so audit attribution, tenant
-> isolation, and RBAC apply unchanged. Known residual: the WebSocket auth path
-> (`get_current_user_from_token`) has no request path to fence, so a kiosk-scoped token can open
-> the read-only `/ws/*` broadcast channels during its ≤5-minute life (documented in
-> [docs/KIOSK.md](KIOSK.md)).
+> isolation, and RBAC apply unchanged. WebSockets require an **unscoped access JWT**: kiosk-scoped
+> operator tokens and station tokens are refused with close code **1008**. See
+> [Real-time Updates](#real-time-updates-websocket) and [docs/KIOSK.md](KIOSK.md).
 
 ## Core Endpoints
 
@@ -6296,6 +6318,109 @@ the caller's most recent closed unapproved session.)
 > This closes a prior gap where the ordinary `PUT /quality/ncr/{ncr_id}` update path emitted only an
 > operational event and **no** `audit_log` row.
 
+#### First article inspections (FAI)
+
+FAI reads remain available to every authenticated user in the active tenant. Authoring requires
+**Admin / Manager / Supervisor / Quality**; a final disposition requires **Admin / Manager /
+Quality**. Platform Admin/superuser role overrides retain the same tenant and record-state checks.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/quality/fai` | List tenant inspections | Yes |
+| GET | `/quality/fai/{fai_id}` | Read an inspection and its tenant-owned characteristics | Yes |
+| POST | `/quality/fai` | Create an inspection for an undeleted tenant part and optional undeleted tenant work order | Admin / Manager / Supervisor / Quality |
+| PUT | `/quality/fai/{fai_id}` | Edit an unfinished inspection; setting `passed`, `failed`, or `conditional` requires approval authority | Authoring roles; Admin / Manager / Quality for final disposition |
+| POST | `/quality/fai/{fai_id}/characteristics` | Add a characteristic with the parent's company context | Admin / Manager / Supervisor / Quality |
+| PUT | `/quality/fai/{fai_id}/characteristics/{char_id}` | Record/correct an unfinished characteristic | Admin / Manager / Supervisor / Quality |
+| DELETE | `/quality/fai/{fai_id}/characteristics/{char_id}` | Remove an unfinished characteristic and retain its prior contents in the audit trail | Admin / Manager / Supervisor / Quality |
+| POST | `/quality/fai/{fai_id}/prefill-from-steps` | Fill missing values from matching conforming process-step records | Admin / Manager / Supervisor / Quality |
+
+Every writer locks and resolves the same tenant-owned FAI before changing it. A characteristic
+must belong to both that FAI and company; unknown/foreign parents, children, inspectors, or
+referenced records return **404**. A forbidden authoring/approval role returns **403**, without
+changing the inspection. Finalization records the actual actor in `approved_by` and the completion
+date. A final status (`passed`, `failed`, `conditional`) **or any existing `completed_date`** makes
+all header, characteristic, and prefill writes return **409**: corrections require a new inspection.
+The legacy `version` request field is not an optimistic-lock guarantee for the FAI model.
+
+Prefill preserves existing measurement values/devices and never sets `is_conforming`; ambiguous
+labels and specification mismatches remain unmatched for the inspector to resolve. A conformance
+value of `null` is unrecorded, not failed. Characteristic counts, evidence changes and required audit
+rows commit together; failed audit persistence returns **503** (`"Unable to save audit record"`)
+and rolls them back. Historical part labels remain visible for same-company soft-deleted parts;
+foreign related records are not expanded.
+
+### Job costing
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/job-costs/` | List tenant job costs | Yes |
+| GET | `/job-costs/summary` | Summarize tenant costs | Yes |
+| GET | `/job-costs/{id}` | Read one job cost | Yes |
+| GET | `/job-costs/{id}/entries` | Read its tenant-owned entries | Yes |
+| GET | `/job-costs/{id}/variance-report` | Read its variance report | Yes |
+| POST | `/job-costs/` | Create for an undeleted tenant work order | Admin / Manager |
+| PUT | `/job-costs/{id}` | Update estimates/status | Admin / Manager |
+| POST | `/job-costs/{id}/entries` | Add a manual cost entry | Admin / Manager |
+| DELETE | `/job-costs/{id}/entries/{entry_id}` | Remove a cost entry, retaining its prior contents in the audit trail | Admin / Manager |
+| POST | `/job-costs/{id}/calculate` | Regenerate TimeEntry labor entries and recompute totals, preserving other entries | Admin / Manager |
+
+All reads and writes resolve the job cost through a work order in the active company; writes
+require it to be undeleted, while reads preserve historical costs after work-order soft deletion.
+Explicit foreign/missing parent and entry ids return **404**; a submitted operation reference must belong to
+that work order and company. Manual entries may omit the operation. Relationship expansion never
+reveals foreign ordinary users, parts, or entries: legacy foreign entries are omitted and invalid
+operation/user references are rendered `null`. Same-company historical part labels and legitimate
+platform-actor attribution remain readable. A second job cost for an already-costed work order
+returns **400**; a conflicting legacy row outside the tenant returns **409** without exposing it.
+Explicit `null` estimates/status and invalid enum values return **422**.
+
+Every manual write requires **Admin / Manager**, including recalculation (**403** otherwise).
+Cost entries, parent totals, and required audit rows commit atomically; audit failure returns
+**503** (`"Unable to save audit record"`) and leaves all unchanged. Delete/recalculation audit
+evidence retains the removed/rebuilt entry contents and before/after totals; calculation preserves
+non-TimeEntry cost entries. These routes add no
+new financial approval workflow; automatic work-order completion keeps its existing business path.
+
+### Documents
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/documents/` | List tenant documents | Yes |
+| GET | `/documents/types/list` | List document types | Yes |
+| GET | `/documents/{id}` | Read document metadata | Yes |
+| GET | `/documents/{id}/revisions` | Read retained revision history | Yes |
+| GET | `/documents/{id}/download` | Download the tenant document | Yes |
+| POST | `/documents/upload` | Multipart manual upload/revision, published as released | Admin / Manager / Quality |
+| POST | `/documents/{id}/attach-work-order` | Body `{"work_order_id": id}`; attach an unlinked PDF | Admin / Manager / Quality |
+| DELETE | `/documents/{id}` | Delete a document only when no retention reference protects it | Admin / Manager |
+
+Manual upload is a release action: the persisted Document stores `status="released"`, the actual
+`released_by` actor, and UTC `released_at`. Returned metadata exposes the released status;
+the audit details retain release actor/time, which are not fields of `DocumentResponse`.
+Upload/release and PDF attachment require **Admin /
+Manager / Quality** (**403** otherwise); deletion retains its **Admin / Manager** gate.
+Generated receipt/shipping artifacts continue to use their owning business-route permissions.
+Document and related-record lookups use the active tenant (**404** for foreign/missing ids).
+New part/work-order links require undeleted rows. A revision may retain a same-company deleted
+part/work order only when its links exactly match the validated, locked predecessor. Vendor
+links and historical part labels may retain same-company soft-deleted records for traceability.
+
+A revision upload supplies `previous_revision_id`, a new nonblank `revision` (1–20 characters,
+not an ancestor's label ignoring case), and nonblank `revision_notes`. It must retain the previous
+type and part/work-order/vendor links (**422** for an invalid revision), and must extend the latest
+revision (**409** if a newer one exists). Prior files remain available. PDF attachment may link an
+unlinked document without revision history; attaching to the same work order is a no-op, while
+rebinding an existing work-order link or revision history returns **409**. A non-PDF is **400**.
+
+Deleting any member of a revision chain, or a certificate referenced by a receipt **including a
+voided receipt**, returns **409** and preserves both row and bytes. Allowed metadata mutations
+and required audit rows commit together; audit failure returns **503** (`"Unable to save audit
+record"`) and rolls back the mutation. Upload failure removes only the new uploaded object;
+deletion removes bytes only after the audited metadata transaction commits. Storage cleanup
+failure is logged and may leave an orphan, without removing a prior revision or a live document's
+file. Manual upload audit evidence includes the file hash and release metadata.
+
 ### QMS Standards & Audit Readiness
 
 Standards/clause/evidence management for AS9100D, ISO 9001, CMMC and similar quality systems, all
@@ -8306,23 +8431,39 @@ records, targets) require **Admin / Manager / Supervisor**.
 |--------|----------|-------------|---------------|
 | GET | `/users/` | List all users | Admin / Manager |
 | POST | `/users/` | Create user | Admin |
+| POST | `/auth/register` | Alternate tenant-user creation path with the same role policy | Admin |
+| POST | `/users/import-csv` | Import CSV/XLSX users; existing dry-run and per-row error contracts apply | Admin |
 | PUT | `/users/{id}` | Update user. `is_active: false` also revokes every live API token the user holds (reason `user deactivated`, audited) — see [API tokens](#api-tokens-bots-and-mcp-clients) | Admin |
+| POST | `/users/{id}/approve` | Approve a pending tenant account with a tenant role | Admin |
+| POST | `/users/{id}/reset-password` | Reset another account's password | Admin |
+| POST | `/users/{id}/activate` | Reactivate an account, without restoring revoked API tokens | Admin |
 | DELETE | `/users/{id}` | Deactivate user (sets `is_active=false`; cannot deactivate yourself). Revokes every live API token the user holds in the same transaction (reason `user deactivated`, one `API_TOKEN_REVOKED` audit trail each); the response carries `api_tokens_revoked`. Reactivation (`POST /users/{id}/activate`) restores the account, never a token | Admin |
 | POST | `/users/{id}/unlock` | Clear failed-login lockout | Admin |
 
 > **User writes are Admin-only; the list read is Admin / Manager.** `GET /users/` (and
 > `GET /users/{id}`) are `require_role([ADMIN, MANAGER])`; `POST` / `PUT` / `DELETE` are
-> `require_role([ADMIN])`. Two guards apply to role assignment on the write paths:
-> `role = platform_admin` is rejected with **400** (`"Platform admin role cannot be assigned"`) on
-> both `POST /users/` and `PUT /users/{id}` — the cross-company oversight role is never assignable
-> from a tenant path (matching the import and `POST /users/{id}/approve` guards) — and on
-> `PUT /users/{id}` an Admin cannot change **their own** role (**400**, `"You cannot change your own
-> role"`; editing one's own other fields stays allowed). Every user mutation (create, update,
-> approve, password-reset, deactivate, activate, unlock) is recorded in the tamper-evident audit
-> log; the self-service `POST /users/change-password` likewise records a `PASSWORD_CHANGE` audit
-> event (`extra_data.source = "self_service"`, mirroring the admin `reset-password` path — the
-> password/hash is never included). See
-> [docs/RBAC_PERMISSIONS.md](RBAC_PERMISSIONS.md) → Users.
+> `require_role([ADMIN])`. The shared tenant-account policy covers **both** create routes,
+> update, approval, and CSV/XLSX import. `role = platform_admin` returns **400** on create/update/
+> approval and a per-row error on import, even for a platform caller. Tenant Admin remains an
+> assignable role. Creation derives the active company server-side and forces `is_superuser=false`;
+> extra body/import fields cannot grant platform authority or choose another company. On
+> `PUT /users/{id}`, changing one's own role remains **400** (`"You cannot change your own role"`).
+>
+> **Existing platform accounts are protected too.** Update, approval, password reset,
+> activation, deactivation and unlock of a stored Platform Admin or superuser require a stored
+> platform principal (**403** for a tenant Admin); foreign-company target ids remain **404**.
+> An Admin-held API token does not gain platform authority.
+>
+> Creation, update, approval, password reset, activation, deactivation and unlock require audit
+> persistence in the same transaction (**503**, `"Unable to save audit record"`, with rollback
+> on audit loss). Deactivation includes the companion API-token revocation rows in that guarantee.
+> CSV/XLSX import preserves its per-row transaction/error result: a failed row creates no account,
+> while previously successful rows remain committed. `/auth/register` records the initiating Admin
+> as actor and the new account as target. Unchanged account updates and unlocks with no lock state
+> do not add audit rows. Passwords
+> and hashes are never included. Other self-service/auth audit paths retain their existing
+> behavior; this is not a global replacement of best-effort logging. See
+> [docs/RBAC_PERMISSIONS.md](RBAC_PERMISSIONS.md#users).
 >
 > **`POST /users/{id}/unlock` — the admin remedy for the failed-login lockout.** After 5 failed
 > logins the auth endpoints set `locked_until` 30 minutes out and refuse further attempts with
@@ -8519,6 +8660,24 @@ The active company's own profile and self-managed settings. Mounted under `/comp
 > configuration and a per-user opt-in with a saved phone number. Exposed in the UI at
 > **Admin Settings → SMS Privacy** (`/admin/settings?tab=smsprivacy`). See
 > [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
+
+### Company onboarding and platform administration
+
+`POST /companies/register` remains unauthenticated company onboarding;
+`POST /platform/companies` requires a stored Platform Admin/superuser. Both create a new company
+and its initial **tenant Admin**, explicitly without superuser authority. Company, seeded setup,
+initial account, and required company/user `CREATE` audit rows commit together; audit failure
+returns **503** and rolls back the whole onboarding transaction. The public flow attributes the
+creation to the new initial Admin; platform creation attributes it to the initiating platform user.
+The separate empty-install `/auth/register-public` bootstrap is documented under Authentication.
+
+`PUT /platform/companies/{company_id}` requires platform authority and records changed fields,
+including activation/deactivation, in a required `UPDATE` audit row scoped to the **target company**.
+Mutation and audit commit together (**503** and rollback on audit loss); unchanged values do not
+produce a fictitious update. A missing company is **404**, and an ordinary tenant Admin is **403**.
+The stored-platform-only inactive-company recovery exception permits this control-plane route,
+while ordinary tenant-data routes and WebSockets still require an active company. A switched
+read-only context still cannot mutate companies; logout/switch provide the existing exit path.
 
 ### Carrier Integrations (Admin)
 
@@ -9176,23 +9335,36 @@ The PIN and its `pin_hash` are never returned. The tablet URL for a station is
 
 ## Real-time Updates (WebSocket)
 
-Real-time work-order, dashboard, and shop-floor updates are delivered over WebSocket. **All three
-endpoints require a valid JWT**, passed as a `token` query parameter (the frontend's API client
-already attaches it). An unauthenticated or invalid-token connection is rejected with WebSocket
-close code **1008** (policy violation).
+Real-time work-order, dashboard, and shop-floor updates require a valid **unscoped access JWT**,
+passed as a `token` query parameter. Kiosk-scoped operator, API, display, station and refresh
+credentials do not authorize these channels. Missing/invalid credentials or failed live
+authorization close the connection with **1008** (policy violation). Paths below are relative to
+the API prefix, normally `/api/v1`.
 
 | Endpoint | Purpose |
 |----------|---------|
-| `WS /ws/updates?token=<jwt>` | Dashboard and system-wide updates |
+| `WS /ws/updates?token=<jwt>` | Dashboard and general updates within the active company |
 | `WS /ws/shop-floor/{work_center_id}?token=<jwt>` | Shop-floor updates for one work center |
-| `WS /ws/work-orders/{work_order_id}?token=<jwt>` | Status updates for one work order |
+| `WS /ws/work-order/{work_order_id}?token=<jwt>` | Status updates for one work order |
 
-> **Tenant-scoped broadcasts.** Each connection is bound at connect time to the caller's **active
-> company** (resolved the same way as `get_current_company_id` — via the token's `cid` claim, with
-> a fallback to the user's own company for legacy tokens). Work-order / dashboard / shop-floor
-> completion broadcasts are delivered **only to that company's connections**, never globally, so a
-> client never sees another tenant's events. `/ws/updates` previously accepted unauthenticated
-> connections for general updates; that is no longer permitted (tenant isolation).
+All three routes use the shared HTTP/access identity resolver against the current user and
+company. An ordinary account's token company must still match its stored company; a platform
+account may retain an authorized switched context. Admission requires an active user and company.
+The two resource routes also require a work center in that company or an **undeleted** work order
+in that company; a foreign or missing resource is refused before connection.
+
+Connections retain their original user/company identity. Authorization is rechecked with a fresh
+database session **before each event delivery**, after incoming messages, and after **30 seconds
+of idle time**. Expiry, account disablement/reassignment, company deactivation, loss of platform
+authority for a switched context, or loss of access to the parent resource closes the connection
+before further event delivery. Database-check failure also refuses delivery. Domain broadcasts
+remain tenant-scoped; a read-only company context can receive these read-only channels but cannot
+use them to mutate records. HTTP logout/switch/platform recovery exceptions do not apply here.
+
+This is live identity/resource validation, not a token revocation list. Logout does **not** revoke
+an unexpired access JWT, and no server-side refresh revocation is introduced. The crew-station
+kiosk remains poll-only. Client-side controls reflect these policies; the API and socket checks
+remain authoritative.
 
 ## Common Response Formats
 

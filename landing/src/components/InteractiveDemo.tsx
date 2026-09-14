@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 
 export default function InteractiveDemo() {
   const [activeView, setActiveView] = useState<'dashboard' | 'schedule' | 'queue'>('dashboard');

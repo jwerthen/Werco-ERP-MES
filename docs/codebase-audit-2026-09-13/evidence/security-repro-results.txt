@@ -1,0 +1,47 @@
+2026-09-13 21:01:13 - INFO - app.main - Host-header validation disabled (ALLOWED_HOSTS='*' = allow-any); allowed_hosts=['*']
+2026-09-13 21:01:14 - WARNING - passlib.handlers.bcrypt - (trapped) error reading bcrypt version
+2026-09-13 21:01:14 - [6fa0cdf0] WARNING - app.middleware.logging_middleware - Request error: POST /api/v1/users/
+2026-09-13 21:01:14 - INFO - httpx2 - HTTP Request: POST http://testserver/api/v1/users/ "HTTP/1.1 400 Bad Request"
+2026-09-13 21:01:14 - INFO - httpx2 - HTTP Request: POST http://testserver/api/v1/auth/register "HTTP/1.1 200 OK"
+1 register: 400 200
+2026-09-13 21:01:14 - INFO - httpx2 - HTTP Request: POST http://testserver/api/v1/auth/login "HTTP/1.1 200 OK"
+2026-09-13 21:01:14 - INFO - httpx2 - HTTP Request: GET http://testserver/api/v1/platform/companies/2 "HTTP/1.1 200 OK"
+1 other-tenant read: 200
+2026-09-13 21:01:14 - INFO - httpx2 - HTTP Request: PUT http://testserver/api/v1/platform/companies/2 "HTTP/1.1 200 OK"
+2 deactivate: 200 is_active False audit delta 0
+2026-09-13 21:01:14 - INFO - httpx2 - HTTP Request: DELETE http://testserver/api/v1/quality/fai/2/characteristics/1 "HTTP/1.1 200 OK"
+3 cross-tenant delete: 200 characteristic present 0 other-tenant counts 0 0 audit delta 0
+2026-09-13 21:01:14 - [17ea9f49] ERROR - app.core.queue - Failed to enqueue background job dispatch_notification_job; continuing without it
+2026-09-13 21:01:14 - INFO - httpx2 - HTTP Request: PUT http://testserver/api/v1/quality/fai/1 "HTTP/1.1 200 OK"
+4 viewer FAI approval: 200 status FAIStatus.PASSED approved by 2 viewer 2 audit delta 0
+2026-09-13 21:01:14 - [56b787ed] ERROR - app.middleware.logging_middleware - Request exception: POST /api/v1/quality/fai/1/characteristics
+2026-09-13 21:01:14 - ERROR - app.main - Unhandled exception: (sqlite3.IntegrityError) NOT NULL constraint failed: fai_characteristics.company_id
+[SQL: INSERT INTO fai_characteristics (fai_id, char_number, characteristic, nominal, tolerance_plus, tolerance_minus, specification, actual_value, measuring_device, is_conforming, notes, is_critical, is_major, created_at, company_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)]
+[parameters: (1, 2, 'New dimension', None, None, None, None, None, None, None, None, 0, 0, '2026-09-13 21:01:14.784464', None)]
+(Background on this error at: https://sqlalche.me/e/20/gkpj)
+2026-09-13 21:01:14 - INFO - httpx2 - HTTP Request: POST http://testserver/api/v1/quality/fai/1/characteristics "HTTP/1.1 500 Internal Server Error"
+5 add characteristic: 500 {"detail":"Internal server error"}
+2026-09-13 21:01:14 - [e190f7f0] WARNING - app.middleware.logging_middleware - Request error: GET /api/v1/users/me
+2026-09-13 21:01:14 - INFO - httpx2 - HTTP Request: GET http://testserver/api/v1/users/me "HTTP/1.1 403 Forbidden"
+6 disabled HTTP: 403
+2026-09-13 21:01:14 - INFO - app.core.websocket - WebSocket connected. Total connections: 1
+6 disabled WebSocket: connected
+2026-09-13 21:01:14 - INFO - app.core.websocket - WebSocket disconnected. Total connections: 0
+2026-09-13 21:01:14 - INFO - app.api.websocket - WebSocket client disconnected
+2026-09-13 21:01:14 - [32b6259b] WARNING - app.middleware.logging_middleware - Request error: GET /api/v1/users/me
+2026-09-13 21:01:14 - INFO - httpx2 - HTTP Request: GET http://testserver/api/v1/users/me "HTTP/1.1 403 Forbidden"
+6 kiosk HTTP general: 403
+2026-09-13 21:01:14 - INFO - app.core.websocket - WebSocket connected. Total connections: 1
+6 kiosk general WebSocket: connected
+2026-09-13 21:01:14 - INFO - app.core.websocket - WebSocket disconnected. Total connections: 0
+2026-09-13 21:01:14 - INFO - app.api.websocket - WebSocket client disconnected
+2026-09-13 21:01:14 - INFO - httpx2 - HTTP Request: POST http://testserver/api/v1/documents/upload "HTTP/1.1 200 OK"
+7 Viewer document upload: 200 status released audit delta 0
+2026-09-13 21:01:14 - INFO - httpx2 - HTTP Request: GET http://testserver/api/v1/job-costs/1/entries "HTTP/1.1 200 OK"
+8 cross-tenant read /api/v1/job-costs/1/entries 200 [{"id":1,"job_cost_id":1,"entry_type":"material","description":"Confidential cost","quantity":1.0,"u
+2026-09-13 21:01:14 - INFO - httpx2 - HTTP Request: GET http://testserver/api/v1/job-costs/1/variance-report "HTTP/1.1 200 OK"
+8 cross-tenant read /api/v1/job-costs/1/variance-report 200 {"job_cost_id":1,"work_order_number":"AUDIT-WO-B","customer_name":"Private tenant B customer","varia
+2026-09-13 21:01:14 - INFO - httpx2 - HTTP Request: PUT http://testserver/api/v1/job-costs/1 "HTTP/1.1 200 OK"
+8 cross-tenant mutate 200 persisted revenue 1.0
+2026-09-13 21:01:14 - INFO - httpx2 - HTTP Request: DELETE http://testserver/api/v1/job-costs/1/entries/1 "HTTP/1.1 200 OK"
+8 cross-tenant cost delete 200 remaining 0

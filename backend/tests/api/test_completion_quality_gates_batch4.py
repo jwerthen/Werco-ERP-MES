@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token
 from app.models.audit_log import AuditLog
+from app.models.company import Company
 from app.models.operational_event import OperationalEvent
 from app.models.part import Part
 from app.models.quality import (
@@ -55,6 +56,11 @@ def _next() -> int:
 
 
 def make_user(db: Session, *, role: UserRole = UserRole.ADMIN, company_id: int = COMPANY_A) -> User:
+    # Authentication checks live company membership before the resource gate.
+    # Both test tenants must exist so cross-tenant tests actually reach that gate.
+    if db.get(Company, company_id) is None:
+        db.add(Company(id=company_id, name=f"Company {company_id}", slug=f"company-{company_id}", is_active=True))
+        db.flush()
     n = _next()
     user = User(
         email=f"b4-{n}@co{company_id}.test",
@@ -485,6 +491,9 @@ def test_mark_inspected_tenant_scoped_404(client: TestClient, db_session: Sessio
         headers=headers_for(quality_b),
     )
     assert resp.status_code == status.HTTP_404_NOT_FOUND, resp.text
+    db_session.refresh(op)
+    assert op.inspection_complete is False
+    assert db_session.query(AuditLog).count() == 0
 
 
 # ---------------------------------------------------------------------------

@@ -264,7 +264,7 @@ class TestFAIPrefillDevicePreservation:
         return step
 
     def test_inspector_entered_device_is_kept_and_reported(self, client: TestClient, db_session: Session):
-        work_order, operation, user, headers = _fixture(db_session)
+        work_order, operation, user, headers = _fixture(db_session, role=UserRole.QUALITY)
         gauge = _make_gauge(db_session, name="Prefill mic 9")
         self._record_measurement(client, db_session, operation, headers, gauge=gauge)
         # Device entered by the inspector, value still blank -> value fills, device stays.
@@ -292,7 +292,7 @@ class TestFAIPrefillDevicePreservation:
         assert "measuring_devices" not in (new_values or {})
 
     def test_blank_device_is_set_and_audited_with_old_new_pairs(self, client: TestClient, db_session: Session):
-        work_order, operation, user, headers = _fixture(db_session)
+        work_order, operation, user, headers = _fixture(db_session, role=UserRole.QUALITY)
         gauge = _make_gauge(db_session, name="Prefill mic 10")
         self._record_measurement(client, db_session, operation, headers, gauge=gauge)
         fai = self._fai_with_char(db_session, work_order, measuring_device=None)

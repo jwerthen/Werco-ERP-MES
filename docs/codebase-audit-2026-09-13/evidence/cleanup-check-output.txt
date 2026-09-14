@@ -1,0 +1,79 @@
+Cleanup verification excerpts — 2026-09-13
+The original full backend sweep has one test failure. Its deterministic-clock correction was verified separately; no second full sweep is implied.
+
+--- backend_full ---
+Source: /tmp/werco-cleanup-backend-tests.log
+=========================== short test summary info ============================
+FAILED tests/services/test_nesting_runtime_contract.py::test_untrusted_stale_or_mismatched_identity_never_enables_start[changes7-stale]
+===== 1 failed, 8346 passed, 26 skipped, 27 warnings in 595.17s (0:09:55) ======
+
+--- frontend_jest ---
+Source: /tmp/werco-audit-2026-09-13/frontend-cleanup-jest.log
+Test Suites: 438 passed, 438 total
+Tests:       4303 passed, 4303 total
+Snapshots:   0 total
+Time:        192.535 s
+
+--- backend_ci_final ---
+Source: /tmp/werco-cleanup-ci-final.log
+
+============================== 67 passed in 2.93s ==============================
+
+--- backend_clock_normal ---
+Source: /tmp/werco-audit-2026-09-13/nesting-runtime-fixed-clock-tests.log
+
+backend/tests/services/test_nesting_runtime_contract.py ................ [ 72%]
+......                                                                   [100%]
+
+============================== 22 passed in 0.04s ==============================
+
+--- backend_clock_delayed ---
+Source: /tmp/werco-audit-2026-09-13/nesting-runtime-delayed-collection-tests.log
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 22 items
+DELAY DEMO: advanced service clock 4 minutes after collection without sleeping; future-invalid payload now has age 60 seconds and runtime correctly returns ready. Each test must restore its anchored clock to retain the intended age -180 seconds.
+
+backend/tests/services/test_nesting_runtime_contract.py ................ [ 72%]
+......                                                                   [100%]
+
+============================== 22 passed in 0.04s ==============================
+
+--- docker_and_redis_tests ---
+Source: /tmp/werco-audit-2026-09-13/deployment-hygiene-final-test-transcript.log
+plugins: mock-3.15.1, xdist-3.8.0, Faker-40.4.0, asyncio-1.3.0, env-1.2.0, anyio-4.15.1, cov-7.0.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 13 items
+
+backend/tests/test_deployment_hygiene.py ..........                      [ 76%]
+backend/tests/test_ci_workflow_gates.py ...                              [100%]
+
+============================== 13 passed in 3.27s ==============================
+
+Additional verification:
+- docker compose --env-file /dev/null -f docker-compose.yml config --quiet: passed using synthetic variable values.
+- docker compose --env-file /dev/null -f docker-compose.prod.yml config --quiet: passed using synthetic variable values.
+- docker ps --filter name=werco-redis-hygiene --format '{{.Names}}': no retained test containers.
+- bash -n scripts/production_deploy.sh: passed after locked pip / development-build npm changes. Deployment script not executed.
+
+--- api_image_smoke ---
+Source: /tmp/werco-cleanup-api-smoke.log
+PASS: API/worker imports, non-root runtime, PDF tools, migrations retained, pytest and .env absent; no network or migrations executed
+
+--- frontend_audit ---
+Source: /tmp/werco-audit-2026-09-13/frontend-cleanup-audit.log
+
+[audit-check] npm audit (frontend) — blocking severities: high, critical
+[audit-check] audit totals: critical=0 high=0 moderate=0 low=0
+
+[audit-check] PASS — no un-allowlisted high/critical advisories (0 allowlisted, 0 stale allowlist entry/entries).
+
+--- landing_audit ---
+Source: /tmp/werco-cleanup-landing-audit.log
+> manufacturing-erp-landing@1.0.0 audit:ci
+> npm audit --audit-level=high
+
+found 0 vulnerabilities
+
+--- python_audit ---
+Source: /tmp/werco-audit-2026-09-13/cleanup-pip-audit-final.log
+No known vulnerabilities found, 2 ignored

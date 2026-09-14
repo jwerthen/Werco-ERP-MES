@@ -72,6 +72,21 @@ A worker whose Redis resolves to the localhost default in `production`/`staging`
 **refuses to start** (`assert_redis_configured`, raised at import of `app.worker`, before
 arq builds anything). "Started successfully and consumed nothing" is no longer reachable.
 
+### Queue keys must not be evicted
+
+Configure the Redis server behind `REDIS_URL` with `maxmemory-policy=noeviction`.
+The API, worker, cache and rate limiter share this store, so an LRU/LFU eviction
+policy can delete a queued job or lease to make room for cache data. Both Compose
+files enforce `noeviction`; Railway/other managed Redis needs the equivalent provider
+configuration. An alternate database number on the same server is not isolation.
+
+At the memory limit, new writes can fail while existing queued keys remain. Monitor
+Redis capacity and enqueue/worker errors, and retain memory headroom for persistence.
+The outbox can relay durable pending events later, but not every job producer has an
+outbox, so this is not a blanket retry guarantee. See
+[Docker queue retention](DOCKER_PRODUCTION.md#redis-queue-retention-and-memory-pressure)
+for capacity and rollback guidance. This change adds no new Redis URL setting.
+
 ### Redis transport profiles — same target, different patience
 
 Added 2026-08-05 after the worker's **first production boot crashed 22 seconds in**:

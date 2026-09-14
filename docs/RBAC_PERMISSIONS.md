@@ -2,19 +2,21 @@
 
 ## Overview
 
-Werco ERP implements a comprehensive RBAC system with 7 predefined roles. Permissions are enforced both on the backend (API endpoints) and frontend (UI elements).
+Werco ERP has seven tenant roles and a separate Platform Admin role. Backend API checks enforce
+authorization; frontend controls reflect those policies for usability.
 
 ## Roles
 
 | Role | Description | Use Case |
 |------|-------------|----------|
-| **Admin** | Full system access | System administrators, IT staff |
+| **Admin** | Tenant administration and domain access | Company administrators, IT staff |
 | **Manager** | Department-wide access with approval capabilities | Department managers, production managers |
 | **Supervisor** | Team-level access with create/edit permissions | Shift supervisors, team leads |
 | **Operator** | View and update assigned work | Machine operators, production workers |
 | **Quality** | Quality-specific actions | Quality inspectors, QC staff |
 | **Shipping** | Shipping operations | Shipping clerks, warehouse staff |
 | **Viewer** | Read-only access | Auditors, executives, guests |
+| **Platform Admin** | Cross-company administration and context switching | Platform operators; not assignable through tenant account APIs |
 
 ## Access enforcement model
 
@@ -27,6 +29,22 @@ Permissions are enforced at two layers, and the two layers **intentionally diffe
 - **Bulk data export is its own access category, not a domain read, and _is_ enforced server-side** — `require_role([ADMIN, MANAGER])` plus an `EXPORT` audit row on every one of them. See [Bulk data export is not a domain read](#bulk-data-export-is-not-a-domain-read) immediately below, and [Bulk Data Export](#bulk-data-export) in the matrix for the route list.
 
 > If the business requires least-privilege on domain reads (e.g. hiding vendor pricing / PO financials from Operator/Quality/Shipping at the API), enforce it **uniformly** by adding `require_role` to the read endpoints across modules, with authorization tests — not per-router. Until then, treat the **View** columns for operational modules as UI-visibility, not as a server-enforced control.
+
+Authenticated HTTP requests resolve the current stored user and active company. Disabled users
+and unavailable companies are refused; an ordinary user's token company must match the account's
+current company. Platform principals may use a switched context. An inactive viewed company
+still permits logout/switch, subject to those routes' own checks. Only **stored** Platform Admin/
+superuser principals retain `/platform/` control-plane access for reactivation of an inactive home
+or sole company; ordinary tenant-data access remains blocked. Read-only contexts still refuse
+writes, with the existing logout/switch exceptions. API tokens receive no inactive-company escape.
+
+WebSockets accept only **unscoped access JWTs**, not kiosk/operator-scoped, API, display, station
+or refresh credentials. All three routes validate the live account/company; work-center and
+work-order routes also resolve an owned parent (work orders must be undeleted). These checks
+run at admission, before event delivery, after incoming messages and after 30 seconds idle;
+failure closes with **1008**. HTTP inactive-company recovery exceptions do not apply. Logout
+does not revoke an unexpired access JWT; these checks introduce no access/refresh revocation list.
+See [API authentication](API.md#using-the-token) and [WebSockets](API.md#real-time-updates-websocket).
 
 ### Bulk data export is not a domain read
 
@@ -1630,6 +1648,8 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 | View | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ |
 | Inspect | ✓ | ✓ | ✓ | | ✓ | | |
 | Approve | ✓ | ✓ | | | ✓ | | |
+| Author unfinished FAI / characteristics / process-step prefill | ✓ | ✓ | ✓ | | ✓ | | |
+| Final FAI disposition (`passed` / `failed` / `conditional`) | ✓ | ✓ | | | ✓ | | |
 | Calibration | ✓ | ✓ | | | ✓ | | |
 | Manage scrap reason codes | ✓ | ✓ | | | ✓ | | |
 | Void / restore NCR | ✓ | ✓ | | | ✓ | | |
@@ -1641,6 +1661,17 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > `require_role([ADMIN, MANAGER, SUPERVISOR, QUALITY])` (`app/api/endpoints/shop_floor.py`,
 > `mark_operation_inspected`). The role set matches the matrix exactly — this repo has no separate
 > `INSPECTOR` role, so operation inspection is performed by Admin / Manager / Supervisor / Quality.
+>
+> **FAI evidence has separate authoring and final-disposition gates.** Every FAI/characteristic
+> write, including prefill, requires Admin / Manager / Supervisor / Quality. Setting a final status
+> requires Admin / Manager / Quality and records the actual approver and completion date. A final
+> status or existing completion date blocks every subsequent header/characteristic/prefill write
+> with **409**, including platform callers; corrections require a new inspection. Parent/child
+> lookups are tenant-scoped (**404** for foreign/missing ids), and manual characteristics derive
+> their company from the parent context. Required audit rows, counts and evidence commit together
+> (**503** with rollback on audit loss). Unfinished-characteristic deletion retains its full prior
+> contents in the audit trail. Reads remain broad within the tenant; prefill never overwrites an
+> existing measurement or sets conformance. See [API: FAI](API.md#first-article-inspections-fai).
 >
 > **Scrap reason codes (Lean Phase 1) — read-broad / write-restricted.** Managing the tenant's
 > structured scrap vocabulary (`POST /api/v1/quality/scrap-reason-codes`,
@@ -1725,6 +1756,47 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > user — this row records the tightened authorization landed in WO-completion remediation Batch 11A
 > (G4-Fix1), alongside the ECO router's tenant scoping and audit logging.
 
+### Job costing
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| Read (API) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Create / edit estimates and status | ✓ | ✓ | | | | | |
+| Add / delete manual entries | ✓ | ✓ | | | | | |
+| Recalculate actual costs | ✓ | ✓ | | | | | |
+
+Every `/job-costs` mutation enforces Admin / Manager (**403** otherwise). Both reads and writes
+resolve a tenant-owned job cost through an owned work order; writes require an undeleted parent,
+while reads preserve costs after work-order soft deletion. Entries and operation references
+must belong to that parent/company (**404** for explicitly requested foreign/missing ids).
+Legacy foreign entries are omitted on reads and invalid operation/user references render `null`.
+Recalculation regenerates TimeEntry labor entries, preserves other entries and recomputes totals. Required audits include
+entry snapshots and total changes; audit loss returns **503** and rolls back the whole mutation.
+Deletion and recalculation retain removed entry evidence in the audit log. Same-company historical
+part labels remain readable. No new financial approval workflow is introduced, and automatic
+work-order completion retains its existing business path. See [API: Job costing](API.md#job-costing).
+
+### Documents
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| Read / download (API) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Manual upload / revision and immediate release | ✓ | ✓ | | | ✓ | | |
+| Attach an unlinked PDF to a work order | ✓ | ✓ | | | ✓ | | |
+| Delete an unretained document | ✓ | ✓ | | | | | |
+
+Manual uploads publish as released and record the actual release actor and UTC instant, so
+upload/revision and attachment require Admin / Manager / Quality. Delete retains Admin / Manager.
+Generated artifacts use their existing receipt/shipping business-route gates. Foreign document
+or linked-record ids return **404**; role refusals return **403**. Revision histories cannot be
+rebound or deleted, and receipt certificates remain protected even after a receipt is voided
+(**409**). New revisions retain prior files, type and links. Required audit loss returns **503**
+and rolls back metadata changes; bytes are removed only by the corresponding failure cleanup
+or after an audited deletion commits. Same-company historical part labels remain available.
+The Documents, Quality and Job Costing UI write controls reflect the fixed role gates and FAI
+final-state rules; the server also enforces read-only context, parent validity and retention.
+UI controls do not grant API authority. See [API: Documents](API.md#documents).
+
 ### Users
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
@@ -1755,8 +1827,9 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 >   catalog's `mandatory_channel` at send time regardless of the stored row, so a mandatory-critical
 >   event can never be fully muted.
 
-> **User writes are Admin-only, and both `require_role([ADMIN])`** — `POST /users/` (create),
-> `PUT /users/{id}` (edit, incl. role assignment), `DELETE /users/{id}` (deactivate), and
+> **Tenant account administration is Admin-only (`require_role([ADMIN])`)** — both creation
+> paths (`POST /auth/register`, `POST /users/`), CSV/XLSX import, approval, password reset,
+> activation, `PUT /users/{id}` (edit, including role assignment), `DELETE /users/{id}` (deactivate), and
 > `POST /users/{id}/unlock` (clear the 5-failed-logins/30-minute lockout: resets
 > `failed_login_attempts`, clears `locked_until`) all gate to
 > **Admin** (`app/api/endpoints/users.py`). The **View** rows are the governance-read exception noted
@@ -1764,13 +1837,14 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > **Supervisor** gets a **failed load** (403), not a read — user records are *not* on the read-broad
 > domain default. Superuser / Platform Admin bypass role checks, as elsewhere.
 >
-> **`platform_admin` is never assignable from a tenant path, and admins cannot self-elevate.** Both
-> user-write endpoints now enforce the same guards as user import (below, under Bulk Imports):
-> - **`POST /users/` and `PUT /users/{id}` reject `role = platform_admin` with 400**
->   (`"Platform admin role cannot be assigned"`). `platform_admin` is the cross-company Werco
->   oversight role and can never be minted from a tenant-scoped path — not by create, update,
->   approval (`POST /users/{id}/approve`, `"…cannot be assigned through approval"`), or import — even
->   by a company Admin.
+> **Tenant provisioning uses one role policy (`services/user_provisioning.py`).**
+> - Both creation routes, update and approval reject `role = platform_admin` with **400**;
+>   CSV/XLSX import returns a per-row error. This applies even to platform callers. Tenant Admin
+>   remains assignable. Creation forces `is_superuser=false` and derives company context
+>   server-side; body/import fields cannot grant platform authority or redirect the account.
+> - Existing stored Platform Admin/superuser targets are protected on update, approval, password
+>   reset, activation, deactivation and unlock: only a stored platform principal may manage them
+>   (**403** for a tenant Admin). Foreign-company targets remain **404**.
 > - **Self role-escalation guard:** on `PUT /users/{id}`, an Admin editing **their own** record cannot
 >   change **their own** role (**400**, `"You cannot change your own role"`); editing their own
 >   name/email/other fields stays allowed. This mirrors the delete endpoint's "cannot deactivate
@@ -1784,6 +1858,22 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > endpoint is idempotent: a no-op unlock writes no row); the self-service
 > `POST /users/change-password` likewise records a `PASSWORD_CHANGE` audit event (mirroring
 > `reset-password`; the password/hash is never included).
+>
+> Creation, update, approval, password reset, activation, deactivation and unlock commit their
+> required evidence atomically (**503** and rollback on audit loss). Deactivation includes every
+> companion API-token revocation audit. Import keeps its per-row transaction/error behavior;
+> previously accepted rows remain committed, while an audit failure creates no account for that
+> row. `/auth/register` attributes the event to the initiating Admin and targets the new user.
+> Unchanged account updates and unlocks with no lock state do not add audit rows. Other self-service/auth logging retains its existing
+> behavior; the required-audit guarantee is specific to these paths.
+>
+> Public `/auth/register-public` chooses roles server-side: the empty-install bootstrap creates
+> an active Platform Admin/superuser; later signups create inactive Viewers without superuser
+> authority. Accepted creation requires an atomic registration audit (**503** on loss); ordinary
+> duplicate/refusal responses remain uniform. Both company-onboarding routes create a tenant
+> Admin without superuser authority and atomically record company/user creation. Platform company
+> updates, including activation, require a target-company audit in the same transaction (**503**
+> and rollback on loss). See [API: onboarding](API.md#company-onboarding-and-platform-administration).
 >
 > **Password-strength policy.** A password set on any of these paths — `POST /users/` (create),
 > `POST /users/{id}/reset-password`, and self-service `POST /users/change-password` — must satisfy
@@ -2370,7 +2460,11 @@ Intent, storage-attempt and completion mutations each require `AuditService.log_
 
 ## Superuser Override
 
-Users with `is_superuser=true` bypass all permission checks. This is reserved for system administrators who need full access regardless of role assignment.
+Stored `is_superuser=true` and Platform Admin principals bypass role gates. They still obey
+tenant context, credential scope, read-only-context restrictions, active-company requirements
+(except the narrow HTTP recovery paths above), record-retention/finalization guards and required
+audits. Tenant provisioning never grants `platform_admin` or superuser authority, even when the
+caller is a platform principal.
 
 ## Adding New Permissions
 

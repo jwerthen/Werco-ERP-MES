@@ -102,8 +102,8 @@ function advisoryIdOf(via) {
  *
  * `via[]` holds EITHER advisory objects (the real GHSA record) OR plain strings
  * naming another vulnerable package this one inherits from. The transitive case
- * is not decorative: today `react-router-dom` has `via: ["react-router"]` and
- * carries no advisory object of its own, so a parser that only reads objects
+ * is not decorative: `react-router-dom` can have `via: ["react-router"]` and
+ * carry no advisory object of its own, so a parser that only reads objects
  * resolves ZERO ids for it and would report it as un-allowlisted forever.
  */
 function resolveAdvisories(name, vulnerabilities, seen = new Set()) {
@@ -276,8 +276,7 @@ function main() {
     console.error('[audit-check] If — and only if — the advisory is genuinely not applicable to this app, add a');
     console.error('[audit-check] documented entry to frontend/scripts/audit-allowlist.json.');
     console.error('[audit-check] See docs/SECURITY_ADVISORY_SUPPRESSIONS.md.');
-    console.error('[audit-check] Do NOT run `npm audit fix --force` — it downgrades react-router-dom to 7.11.0');
-    console.error('[audit-check] and reintroduces four advisories patched in 7.18.0.\n');
+    console.error('[audit-check] Do not run `npm audit fix --force` without reviewing its version changes.\n');
     process.exit(1);
   }
 

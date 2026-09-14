@@ -1,0 +1,100 @@
+{
+  "date": "2026-09-13",
+  "commit": "a4a085a31ae3783f5be7d26e182b91951ab67693",
+  "application_code_changed": false,
+  "environment": {
+    "node": "22.22.3",
+    "python": "3.11.14",
+    "frontend": "fresh npm ci --ignore-scripts --no-audit --no-fund",
+    "backend": "fresh uv environment; installed requirements.txt and requirements-dev.txt",
+    "database": "per-process shared in-memory SQLite; no production database",
+    "snapshot": "tracked files copied to /tmp/werco-audit-2026-09-13/clean"
+  },
+  "frontend": {
+    "build": {
+      "command": "npm run build",
+      "exit_code": 0
+    },
+    "type_check": {
+      "command": "npm run type-check",
+      "exit_code": 0,
+      "programs": 3
+    },
+    "lint": {
+      "command": "npm run lint -- --max-warnings=0",
+      "exit_code": 0
+    },
+    "tests": {
+      "command": "npm test -- --coverage --watchAll=false --maxWorkers=4",
+      "exit_code": 0,
+      "suites_passed": 438,
+      "tests_passed": 4303,
+      "seconds": 155.281,
+      "coverage_percent": {
+        "statements": 70.37,
+        "branches": 61.44,
+        "functions": 56.28,
+        "lines": 71.04
+      }
+    }
+  },
+  "backend": {
+    "black": "pass: 857 files unchanged",
+    "isort": "pass",
+    "flake8": "pass",
+    "mypy": "pass under existing configuration: 442 source files",
+    "bandit": "pass at -s B101 -ll threshold",
+    "tests": {
+      "command": "python -m pytest tests/ -n 4 --cov=app --cov-report=xml --cov-report=term",
+      "database_environment": "TEST_DATABASE_URL=sqlite:///file:werco_audit_master?mode=memory&cache=shared&uri=true",
+      "exit_code": 1,
+      "passed": 8328,
+      "skipped": 20,
+      "failed": 7,
+      "warnings": 27,
+      "seconds": 657.04,
+      "coverage_percent": 86.74,
+      "coverage_floor_percent": 78,
+      "failure_cause": "All seven failures in test_frontend_no_raw_html_render_guard.py: git grep requires .git metadata absent from temporary snapshot.",
+      "corrective_rerun": {
+        "change": "git init -q in temporary clean snapshot; no application changes",
+        "command": "python -m pytest tests/test_frontend_no_raw_html_render_guard.py -n 0 --no-cov",
+        "exit_code": 0,
+        "passed": 18,
+        "seconds": 0.52
+      },
+      "unique_passed_after_rerun": 8335,
+      "second_full_run_performed": false
+    }
+  },
+  "dependency_audits": {
+    "frontend": "Policy scan passed with 2 allowlisted findings and 1 stale entry",
+    "backend": "Manifest resolution hit local ensurepip subprocess SIGABRT; fallback audited fresh venv site-packages and found fixable pypdf 6.14.2 advisories. Existing ecdsa suppression retained.",
+    "pypdf_unique_reported_ids": [
+      "PYSEC-2026-3656",
+      "PYSEC-2026-3655",
+      "PYSEC-2026-3912",
+      "PYSEC-2026-3910",
+      "PYSEC-2026-3911",
+      "PYSEC-2026-3913"
+    ]
+  },
+  "not_run": [
+    "Browser end-to-end flow tests",
+    "Local PostgreSQL concurrency/migration runs",
+    "Production query plans/load profiling",
+    "Deployed configuration or database review",
+    "Exploit payload PDF",
+    "Docker image build"
+  ],
+  "original_untracked_files": {
+    "count": 236,
+    "byte_identical_to_canonical": 236,
+    "retained_unchanged": true
+  },
+  "notes": [
+    "Passing checks do not negate reproduced security/domain/session defects.",
+    "CI model uses SQLite intentionally; PostgreSQL verifiers are separate.",
+    "Frontend reproduction harnesses use controlled fake transport, not browser/server E2E."
+  ]
+}

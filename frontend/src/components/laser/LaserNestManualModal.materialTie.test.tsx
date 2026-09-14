@@ -907,3 +907,7 @@ describe('edit path: a legacy produced-part tie is never dropped by accident', (
     expect(screen.queryByText(/removes the tie/i)).not.toBeInTheDocument();
   });
 });
+
+jest.mock('../../hooks/usePermissions', () => ({
+  usePermissions: () => ({ role: 'admin', isSuperuser: false }),
+}));

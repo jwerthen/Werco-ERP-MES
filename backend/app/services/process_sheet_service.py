@@ -48,7 +48,6 @@ from app.models.process_sheet import (
 )
 from app.models.quality import (
     FAICharacteristic,
-    FirstArticleInspection,
     NCRSource,
     NonConformanceReport,
 )
@@ -69,6 +68,7 @@ from app.schemas.process_sheet import (
 from app.schemas.work_order_blocker import WorkOrderBlockerCreate
 from app.services.audit_service import AuditService
 from app.services.document_numbering import generate_document_number
+from app.services.fai_service import editable_fai, fai_transaction
 from app.services.operational_event_service import OperationalEventService
 from app.services.operator_qualification_service import evaluate_operator_qualification
 from app.services.storage_service import get_storage, resolve_upload_dir, sanitize_ext
@@ -1885,6 +1885,14 @@ def _fai_spec_mismatch(char: FAICharacteristic, config: Dict[str, Any]) -> Optio
 def prefill_fai_from_step_records(
     db: Session, company_id: int, *, fai_id: int, user: User, audit: AuditService
 ) -> Dict[str, Any]:
+    """Copy measurement evidence and required audit in one transaction."""
+    with fai_transaction(db):
+        return _prefill_fai_from_step_records(db, company_id, fai_id=fai_id, user=user, audit=audit)
+
+
+def _prefill_fai_from_step_records(
+    db: Session, company_id: int, *, fai_id: int, user: User, audit: AuditService
+) -> Dict[str, Any]:
     """Pre-fill AS9102 FAI characteristics from the WO's conforming measurement records (PR 4).
 
     For a FAI linked to a work order: each characteristic with no ``actual_value`` yet
@@ -1899,16 +1907,9 @@ def prefill_fai_from_step_records(
     in ``unmatched`` with a reason instead of being filled. When the FAI carries a
     ``serial_number``, only that serial's records are considered. ``is_conforming`` is
     NOT set here — the inspector still disposition each characteristic through the
-    existing FAI update endpoint. Audited; commits (owns its unit of work).
+    existing FAI update endpoint. The public wrapper owns the transaction.
     """
-    fai = (
-        tenant_query(db, FirstArticleInspection, company_id)
-        .options(selectinload(FirstArticleInspection.characteristics))
-        .filter(FirstArticleInspection.id == fai_id)
-        .first()
-    )
-    if not fai:
-        raise HTTPException(status_code=404, detail="FAI not found")
+    fai = editable_fai(db, company_id, fai_id)
     if fai.work_order_id is None:
         raise HTTPException(status_code=400, detail="This FAI is not linked to a work order — nothing to pre-fill from")
     work_order = (
@@ -1963,7 +1964,15 @@ def prefill_fai_from_step_records(
     unmatched: List[Dict[str, Any]] = []
     old_devices: Dict[str, Any] = {}  # SF-2: measuring_device audit pairs (chars we SET)
     new_devices: Dict[str, Any] = {}
-    for char in sorted(fai.characteristics, key=lambda c: (c.char_number or 0, c.id)):
+    old_actual_values: Dict[str, Any] = {}
+    characteristic_changes: List[Dict[str, Any]] = []
+    characteristics = (
+        tenant_query(db, FAICharacteristic, company_id)
+        .filter(FAICharacteristic.fai_id == fai.id)
+        .order_by(FAICharacteristic.char_number, FAICharacteristic.id)
+        .all()
+    )
+    for char in characteristics:
 
         def _skip(reason: str) -> None:
             unmatched.append({"char_number": char.char_number, "characteristic": char.characteristic, "reason": reason})
@@ -1986,6 +1995,9 @@ def prefill_fai_from_step_records(
 
         # ``.10g`` (not bare ``g``): the default 6 significant digits would silently
         # truncate a recorded value like 1234.5678 on the AS9102 form.
+        old_actual_value = char.actual_value
+        old_device = char.measuring_device
+        old_actual_values[str(char.char_number)] = old_actual_value
         char.actual_value = f"{record.value_numeric:.10g}"[:100]
         # SF-2 (compliance audit): measuring_device is only WRITTEN when currently
         # blank — an inspector-entered device is never overwritten by the pre-fill
@@ -1997,6 +2009,13 @@ def prefill_fai_from_step_records(
             old_devices[str(char.char_number)] = char.measuring_device
             char.measuring_device = gauge_name[:255]
             new_devices[str(char.char_number)] = char.measuring_device
+        characteristic_changes.append(
+            {
+                "characteristic_id": char.id,
+                "old_values": {"actual_value": old_actual_value, "measuring_device": old_device},
+                "new_values": {"actual_value": char.actual_value, "measuring_device": char.measuring_device},
+            }
+        )
         prefilled.append(
             {
                 "char_number": char.char_number,
@@ -2011,26 +2030,33 @@ def prefill_fai_from_step_records(
         )
 
     if prefilled:
-        old_values: Dict[str, Any] = {"actual_values": {str(e["char_number"]): None for e in prefilled}}
+        old_values: Dict[str, Any] = {"actual_values": old_actual_values}
         new_values: Dict[str, Any] = {"actual_values": {str(e["char_number"]): e["actual_value"] for e in prefilled}}
         if new_devices:
             # SF-2: device changes are part of the tamper-evident diff, not just prose.
             old_values["measuring_devices"] = old_devices
             new_values["measuring_devices"] = new_devices
-        audit.log_update(
+        audit.log_required(
+            "UPDATE",
             "fai",
-            fai.id,
-            fai.fai_number,
+            resource_id=fai.id,
+            resource_identifier=fai.fai_number,
+            company_id=company_id,
             old_values=old_values,
             new_values=new_values,
             description=(
                 f"Pre-filled {len(prefilled)} FAI characteristic(s) on {fai.fai_number} from process-sheet "
                 f"step records of WO {work_order.work_order_number}"
             ),
-            extra_data={"work_order_id": work_order.id, "prefilled": prefilled, "unmatched": unmatched},
+            extra_data={
+                "work_order_id": work_order.id,
+                "prefilled": prefilled,
+                "unmatched": unmatched,
+                # Balloon numbers are not unique in legacy data. Preserve each
+                # changed row's exact before/after evidence by database identity.
+                "characteristic_changes": characteristic_changes,
+            },
         )
-    db.commit()
-
     return {
         "fai_id": fai.id,
         "fai_number": fai.fai_number,

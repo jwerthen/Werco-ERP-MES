@@ -57,6 +57,18 @@ jobs:
         # package-lock.json alone, so the checkout is sufficient.
         run: npm run audit:ci
 
+  npm-audit-landing:
+    name: npm audit (Landing)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Audit landing dependencies
+        working-directory: ./landing
+        run: npm run audit:ci
+
   pip-audit:
     name: pip-audit (Backend)
     runs-on: ubuntu-latest
@@ -86,5 +98,5 @@ jobs:
         # reports has a fix available and gets fixed, not suppressed.
         run: |
           pip install pip-audit==2.10.0
-          pip-audit -r requirements.txt -r requirements-dev.txt \
+          pip-audit --require-hashes -r requirements-dev.lock \
             --ignore-vuln PYSEC-2026-1325

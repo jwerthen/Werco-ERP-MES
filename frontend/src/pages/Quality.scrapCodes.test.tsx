@@ -16,7 +16,7 @@ import api from '../services/api';
 import Quality from './Quality';
 
 jest.mock('../hooks/usePermissions', () => ({
-  usePermissions: () => ({ can: () => true, canAny: () => true }),
+  usePermissions: () => ({ role: 'quality', isSuperuser: false, can: () => true, canAny: () => true }),
 }));
 
 jest.mock('../services/api', () => ({
