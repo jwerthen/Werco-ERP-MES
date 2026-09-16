@@ -5,12 +5,27 @@ import contextlib
 import json
 import logging
 import os
+import sys
 from datetime import datetime, timezone
 from uuid import uuid4
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _log_runtime_identity(identity: dict) -> None:
+    # ARQ configures its own logger, leaving application logs at WARNING. Keep
+    # this fixed, credential-free receipt observable without widening other logs.
+    identity_logger = logging.getLogger("werco.worker_runtime_identity")
+    identity_logger.setLevel(logging.INFO)
+    identity_logger.propagate = False
+    if not identity_logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        identity_logger.addHandler(handler)
+    identity_logger.info("%s", json.dumps({"event": "worker_runtime_ready", "identity": identity}))
 
 
 async def publish_identity(redis, instance_id: str) -> dict:
@@ -22,7 +37,7 @@ async def publish_identity(redis, instance_id: str) -> dict:
     }
     # A log is proof only after the running worker successfully writes to its Redis.
     await redis.set(f"werco:worker:runtime:{instance_id}", json.dumps(identity), ex=90)
-    logger.info(json.dumps({"event": "worker_runtime_ready", "identity": identity}))
+    _log_runtime_identity(identity)
     return identity
 
 
