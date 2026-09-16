@@ -260,35 +260,13 @@ def verify():
         assert_spacing_policy_races(engine)
         assert_stock_piece_races(engine)
         assert_nesting_source_races(engine)
+        # The retired quote-nesting APIs have no runtime verifiers. Their historical
+        # database guards remain above; the live inventory API is still checked.
         # A separate process prevents FastAPI/auth/queue test doubles or startup
         # state from leaking into other checks. This child repeats the local/test
         # database guard and owns a disposable schema, never the E2E seed tables.
         subprocess.run(
-            [sys.executable, '-m', 'scripts.verify_nesting_runs_api_postgres'],
-            check=True,
-            timeout=60,
-            stdin=subprocess.DEVNULL,
-        )
-        subprocess.run(
-            [sys.executable, '-m', 'scripts.verify_nesting_spacing_api_postgres'],
-            check=True,
-            timeout=60,
-            stdin=subprocess.DEVNULL,
-        )
-        subprocess.run(
             [sys.executable, '-m', 'scripts.verify_stock_piece_api_postgres'],
-            check=True,
-            timeout=60,
-            stdin=subprocess.DEVNULL,
-        )
-        subprocess.run(
-            [sys.executable, '-m', 'scripts.verify_nesting_sources_api_postgres'],
-            check=True,
-            timeout=60,
-            stdin=subprocess.DEVNULL,
-        )
-        subprocess.run(
-            [sys.executable, '-m', 'scripts.verify_remnant_planning_postgres'],
             check=True,
             timeout=60,
             stdin=subprocess.DEVNULL,

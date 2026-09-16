@@ -74,24 +74,48 @@ test('purchase-order draft can be continued from its list and removed explicitly
   await expect(page.getByRole('button', { name: 'Resume draft', exact: true })).toHaveCount(0);
 });
 
-test('new quote draft preserves its entries after returning to the quote list', async ({ adminPage: page }) => {
+test('customer quote entry opens fabrication quoting and its saved draft survives reload and library reopen', async ({ adminPage: page }) => {
   page.on('dialog', dialog => dialog.accept());
   await page.goto('/quotes');
   await page.getByRole('button', { name: 'New Quote', exact: true }).first().click();
-  const editor = page.getByRole('dialog');
-  await expect(editor.getByRole('button', { name: 'Save draft now', exact: true })).toBeEnabled();
-  await editor.getByRole('textbox', { name: /Customer Name/ }).fill('Synthetic quote recovery');
-  await editor.getByRole('button', { name: 'Save draft now', exact: true }).click();
-  await expect(editor.getByText(/Draft saved \d/)).toBeVisible();
-  await page.reload();
-  await page.getByRole('button', { name: 'Continue quote draft', exact: true }).click();
-  await page.getByRole('button', { name: 'Resume draft', exact: true }).click();
-  await expect(page.getByRole('dialog').getByRole('textbox', { name: /Customer Name/ })).toHaveValue(
-    'Synthetic quote recovery'
+  await expect(page).toHaveURL(/\/fabrication-quotes$/);
+  await expect(page.getByLabel('Quote title', { exact: true })).toBeEnabled();
+
+  const title = `Synthetic quote recovery ${Date.now()}`;
+  const partName = 'Synthetic recovery fixture';
+  await page.getByLabel('Quote title', { exact: true }).fill(title);
+  await page.getByRole('button', { name: 'Add part', exact: true }).click();
+  await page.getByLabel('Part number / description', { exact: true }).fill(partName);
+  await page.getByRole('button', { name: 'Add demand', exact: true }).click();
+  await page.getByLabel('Customer quantity', { exact: true }).fill('17');
+
+  const savedResponse = page.waitForResponse(response =>
+    response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/fabrication-quotes')
   );
+  await page.getByRole('button', { name: 'Save draft', exact: true }).click();
+  const response = await savedResponse;
+  expect(response.ok()).toBeTruthy();
+  const saved = await response.json();
+  expect(saved.title).toBe(title);
+  expect(saved.status).toBe('draft');
+  expect(saved.plan.parts).toEqual([expect.objectContaining({ name: partName })]);
+  expect(saved.plan.roots).toEqual([{ part_id: saved.plan.parts[0].id, quantity: '17' }]);
+  await expect(page).toHaveURL(new RegExp(`/fabrication-quotes\\?id=${saved.id}$`));
+  const savedUrl = page.url();
+
   await page.reload();
-  await page.getByRole('button', { name: 'Continue quote draft', exact: true }).click();
-  await page.getByRole('button', { name: 'Remove saved draft', exact: true }).click();
-  await page.getByRole('button', { name: 'Confirm removal', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Resume draft', exact: true })).toHaveCount(0);
+  await expect(page.getByLabel('Quote title', { exact: true })).toHaveValue(title);
+  await expect(page.getByLabel('Part number / description', { exact: true })).toHaveValue(partName);
+  await expect(page.getByLabel('Customer quantity', { exact: true })).toHaveValue('17');
+
+  await page.goto('/quotes');
+  await page.getByRole('button', { name: 'New Quote', exact: true }).first().click();
+  await expect(page.getByLabel('Quote title', { exact: true })).toHaveValue('');
+  const library = page.getByRole('complementary', { name: 'Quote library' });
+  await library.getByLabel('Find a quote', { exact: true }).fill(title);
+  await library.getByRole('button', { name: new RegExp(title) }).click();
+  await expect(page).toHaveURL(savedUrl);
+  await expect(page.getByLabel('Quote title', { exact: true })).toHaveValue(title);
+  await expect(page.getByLabel('Part number / description', { exact: true })).toHaveValue(partName);
+  await expect(page.getByLabel('Customer quantity', { exact: true })).toHaveValue('17');
 });
