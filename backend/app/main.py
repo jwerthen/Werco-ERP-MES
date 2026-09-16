@@ -188,11 +188,10 @@ tags_metadata = [
         "name": "Admin Settings",
         "description": "System administration and configuration",
     },
-    {"name": "DXF Parser", "description": "DXF file parsing for part dimensions"},
     {"name": "PO Upload", "description": "Purchase order file upload and parsing"},
     {
-        "name": "AI RFQ Quotes",
-        "description": "AI-assisted RFQ package parsing and sheet-metal quote estimating",
+        "name": "Fabrication Quoting",
+        "description": "Reviewed fabrication estimates, source evidence and versioned process profiles",
     },
     {
         "name": "OEE Tracking",

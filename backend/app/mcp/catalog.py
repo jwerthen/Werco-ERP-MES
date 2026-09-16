@@ -264,10 +264,10 @@ def _schema_title(schema: Any, components: Mapping[str, Any], *, depth: int = 0)
 
 
 def wrapped_body_description(title: Optional[str], existing: Optional[str] = None) -> str:
-    """``"The request body (Cutting Speeds), sent as-is."`` -- the schema's title says what the dict IS.
+    """``"The request body (CustomerCreate), sent as-is."`` -- the schema's title says what the dict IS.
 
     A wrapped body is the one place the tool argument is an opaque ``body``; without the
-    title, ``quote_calculator_create_machine`` reads as "a dict". An existing description
+    title, a body-only tool reads as "a dict". An existing description
     on the schema is kept after the label.
     """
     label = f"The request body ({title}), sent as-is." if title else "The request body, sent as-is."
