@@ -49,7 +49,7 @@ pytestmark = pytest.mark.api
 API_TOKENS_URL = "/api/v1/api-tokens/"
 PARTS_URL = "/api/v1/parts/"
 USERS_URL = "/api/v1/users/"
-ADMIN_ONLY_URL = "/api/v1/admin/settings/materials"
+ADMIN_ONLY_URL = "/api/v1/admin/settings/work-center-rates"
 FENCE_DETAIL = "API token cannot access this resource"
 TEST_PASSWORD_HASH = "$2b$12$abcdefghijklmnopqrstuv"  # nosec B105 - not a real credential
 

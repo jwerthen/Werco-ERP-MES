@@ -36,7 +36,6 @@ from typing import Dict, List, Sequence, Set
 
 from arq import cron
 from arq.cron import CronJob
-from arq.worker import func
 
 from app.core.config import settings
 from app.core.observability import init_sentry
@@ -315,20 +314,6 @@ async def poll_tracking_job(ctx):
     return await poll_tracking_task()
 
 
-async def run_quote_nesting_job(ctx, *, company_id: int, run_id: int):
-    """Calculate one saved revision; queue payload contains identifiers only."""
-    from app.jobs.quote_nesting_runs import run_quote_nesting_task
-
-    return await run_quote_nesting_task(company_id=company_id, run_id=run_id)
-
-
-async def relay_quote_nesting_runs_job(ctx):
-    """Requeue committed nesting requests and audit expired worker leases."""
-    from app.jobs.quote_nesting_runs import relay_quote_nesting_runs_task
-
-    return await relay_quote_nesting_runs_task()
-
-
 async def dispatch_notification_job(ctx, event_id: int):
     """Fan out notifications for one committed OperationalEvent (transactional outbox).
 
@@ -388,9 +373,6 @@ async def dispatch_notification_direct_job(
 # line is the schedule in the CONTAINER's local timezone -- arq defaults to
 # `datetime.now().astimezone().tzinfo`, which on Railway is UTC unless TZ is set, so "6 AM"
 # means 06:00 UTC (01:00 Central) until somebody sets TZ. See docs/WORKER_SERVICE.md.
-# Sentry wraps CronJob.coroutine in place before on_startup. Keep the configured
-# schedule object as the readiness identity rather than comparing its callable.
-NESTING_RELAY_CRON = cron(relay_quote_nesting_runs_job, second={0, 30})
 ALL_CRON_JOBS: List[CronJob] = [
     cron(run_mrp_auto_draft_job, hour=6, minute=0),  # 6 AM daily (MRP AUTO_DRAFT) -- WRITES draft POs/WOs
     cron(send_daily_digest_job, hour=8, minute=0),  # 8 AM daily -- sends email
@@ -407,7 +389,6 @@ ALL_CRON_JOBS: List[CronJob] = [
     # Notification relay sweeper: every 5 min re-enqueue catalog-mapped events whose
     # after_commit enqueue was lost (e.g. Redis outage). See notification_jobs.
     cron(relay_pending_notifications_job, minute=set(range(0, 60, 5))),
-    NESTING_RELAY_CRON,  # internal ID-only queue/lease relay
 ]
 
 
@@ -439,7 +420,7 @@ def select_cron_jobs(spec: str = None, available: Sequence[CronJob] = None) -> L
         ``"none"``; it is not treated as a mistake.
 
     The denylist exists so that switching ONE cron off does not require freezing the other
-    eleven into an allowlist. An allowlist silently drops any cron added to ``ALL_CRON_JOBS``
+    jobs into an allowlist. An allowlist silently drops any cron added to ``ALL_CRON_JOBS``
     later -- "I enabled the cron and nothing happened", the exact failure mode this module
     exists to eliminate, just delayed until the next release.
 
@@ -704,18 +685,17 @@ async def startup(ctx):
     else:
         logger.info("ARQ worker cron: none armed; draining enqueue-driven jobs only")
 
-    from app.jobs.quote_nesting_runs import startup_nesting_runtime
+    from app.core.worker_runtime import start_runtime_heartbeat
 
-    ctx["nesting_relay_enabled"] = any(job is NESTING_RELAY_CRON for job in registered)
-    await startup_nesting_runtime(ctx)
+    await start_runtime_heartbeat(ctx)
     logger.info("ARQ worker ready (%d job functions registered)", len(WorkerSettings.functions))
 
 
 async def shutdown(ctx):
     """Worker shutdown - cleanup"""
-    from app.jobs.quote_nesting_runs import shutdown_nesting_runtime
+    from app.core.worker_runtime import stop_runtime_heartbeat
 
-    await shutdown_nesting_runtime(ctx)
+    await stop_runtime_heartbeat(ctx)
     logger.info("ARQ worker shutting down...")
 
 
@@ -768,8 +748,6 @@ class WorkerSettings:
         process_tracking_webhook_job,
         print_receiving_label_job,
         run_oee_auto_calc_job,
-        func(run_quote_nesting_job, keep_result=0),
-        relay_quote_nesting_runs_job,
         dispatch_notification_job,
         relay_pending_notifications_job,
         dispatch_notification_direct_job,

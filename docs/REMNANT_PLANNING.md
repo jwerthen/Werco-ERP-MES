@@ -1,5 +1,7 @@
 # Recorded-piece nesting foundations
 
+> Historical reference: the legacy quote-nesting workspace, solver and APIs were retired on 2026-09-16. Use [Fabrication Quoting](FABRICATION_QUOTING.md) for new estimates. Existing inventory observations and historical database evidence remain preserved.
+
 This document describes validated source selection and actual-domain geometry.
 The workspace now integrates these foundations with conditional piece-versus-full-sheet
 comparisons, saved projects and staged server calculations. See

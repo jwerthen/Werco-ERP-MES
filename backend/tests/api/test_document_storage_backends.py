@@ -23,7 +23,6 @@ from app.core.security import create_access_token
 from app.models.company import Company
 from app.models.document import Document
 from app.models.purchasing import PurchaseOrder, Vendor
-from app.models.rfq_quote import RfqPackageFile
 from app.models.user import User, UserRole
 from app.services import storage_service
 from app.services.storage_service import S3StorageBackend, is_s3_ref, parse_s3_ref
@@ -485,29 +484,3 @@ class TestPoUploadPdfServingLocal:
 
         assert response.status_code == status.HTTP_404_NOT_FOUND
         assert response.json()["detail"] == "PDF not found"
-
-
-@pytest.mark.api
-@pytest.mark.requires_db
-class TestRfqPackageStorageS3:
-    def test_rfq_files_persist_s3_refs(
-        self, client: TestClient, admin_headers: dict, db_session: Session, fake_remote_storage
-    ):
-        response = client.post(
-            "/api/v1/rfq-packages/",
-            headers=admin_headers,
-            data={"customer_name": "Acme"},
-            files=[("files", ("drawing.pdf", b"%PDF-1.4 rfq\n", "application/pdf"))],
-        )
-
-        assert response.status_code == status.HTTP_200_OK
-        package_id = response.json()["id"]
-        rows = db_session.query(RfqPackageFile).filter(RfqPackageFile.rfq_package_id == package_id).all()
-        assert rows
-        for row in rows:
-            assert is_s3_ref(row.file_path)
-            _, key = parse_s3_ref(row.file_path)
-            company_prefix, category = key.split("/")[0], key.split("/")[1]
-            assert company_prefix == str(row.company_id)
-            assert category == "rfq_packages"
-            assert fake_remote_storage.read_bytes(row.file_path) == b"%PDF-1.4 rfq\n"

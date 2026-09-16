@@ -1,5 +1,7 @@
 # Actual-shape recorded-piece leftover ledger
 
+> Historical reference: the legacy quote-nesting calculation workflow was retired on 2026-09-16. Use [Fabrication Quoting](FABRICATION_QUOTING.md) for new estimates. Existing inventory observations and historical evidence remain preserved.
+
 This describes the actual-domain area ledger used by conditional material planning,
 including saved projects and staged server calculations. See
 [the recorded-piece workflow](RECORDED_PIECE_PLANNING.md) for selection and review.

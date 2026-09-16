@@ -10,8 +10,8 @@
 #
 # `railway up` already honors .gitignore, so node_modules/.venv/build output need no entry.
 
-# The worker compiles the same nesting kernel as the browser. Keep its package
-# lock, source and profile-verified build tools in the archive; omit unrelated output.
+# Preserve API and frontend source inputs for their separate upload roots.
+# Omit local output and test-only browser artifacts.
 frontend/build/
 frontend/dist/
 frontend/e2e/
@@ -20,7 +20,6 @@ frontend/playwright-report/
 frontend/test-results/
 frontend/.browser-harness/
 frontend/tools/browser-harness/
-backend/nesting-runtime/
 landing/
 load-tests/
 docs/

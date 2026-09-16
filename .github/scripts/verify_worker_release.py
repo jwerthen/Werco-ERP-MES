@@ -1,9 +1,9 @@
-"""Fail closed until Railway's active worker publishes the tested runtime identity.
+"""Fail closed until Railway's active worker publishes a fresh release identity.
 
 No API credentials, Redis credentials or private geometry are read or printed. The
 CLI uses the existing project token. Logs alone cannot pass: the identity must be
-fresh, belong to the currently active SUCCESS deployment, and match the exact CI
-image. The worker emits this event only after its Redis heartbeat write succeeds.
+fresh, belong to the currently active SUCCESS deployment, and match the expected
+release. The worker emits this event only after its Redis heartbeat write succeeds.
 """
 
 import argparse
@@ -12,7 +12,6 @@ import re
 import subprocess
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 
 def timestamp(value):
@@ -42,7 +41,7 @@ def active_worker(status, service, environment):
     return None
 
 
-def matching_identity(lines, deployment, release, manifest, now):
+def matching_identity(lines, deployment, release, now):
     for line in reversed(lines.splitlines()):
         try:
             event = json.loads(line)
@@ -51,23 +50,19 @@ def matching_identity(lines, deployment, release, manifest, now):
             # events; never replace their identity with a nested message.
             if (
                 isinstance(event, dict)
-                and event.get("event") != "nesting_runtime_ready"
+                and event.get("event") != "worker_runtime_ready"
                 and isinstance(event.get("message"), str)
             ):
                 message = event["message"]
                 _, marker, payload = message.partition("{")
                 event = json.loads(marker + payload)
-            if not isinstance(event, dict) or event.get("event") != "nesting_runtime_ready":
+            if not isinstance(event, dict) or event.get("event") != "worker_runtime_ready":
                 continue
             identity = event["identity"]
             if not isinstance(identity, dict):
                 continue
             if set(identity) != {
                 "release",
-                "protocol",
-                "solver_version",
-                "bundle_sha256",
-                "node_version",
                 "instance_id",
                 "deployment_id",
                 "observed_at",
@@ -76,11 +71,6 @@ def matching_identity(lines, deployment, release, manifest, now):
             if (
                 identity["release"] != release
                 or identity["deployment_id"] != deployment["id"]
-                or type(identity["protocol"]) is not int
-                or identity["protocol"] != manifest["protocol"]
-                or identity["solver_version"] != manifest["solver_version"]
-                or identity["bundle_sha256"] != manifest["bundle_sha256"]
-                or identity["node_version"] != manifest["node_version"]
                 or not re.fullmatch(r"[0-9a-fA-F-]{36}", identity["instance_id"])
             ):
                 continue
@@ -101,15 +91,8 @@ def command(args):
 
 
 def verify(args):
-    manifest = json.loads(args.manifest.read_text())
-    if (
-        not re.fullmatch(r"[0-9a-f]{40}", args.expect)
-        or not re.fullmatch(r"[0-9a-f]{64}", manifest.get("bundle_sha256", ""))
-        or manifest.get("node_version") != "v22.23.2"
-        or manifest.get("protocol") != 1
-        or manifest.get("solver_version") != "werco-contour-v7"
-    ):
-        raise ValueError("Invalid expected release or CI runtime manifest")
+    if not re.fullmatch(r"[0-9a-f]{40}", args.expect):
+        raise ValueError("Invalid expected release")
     deadline = time.monotonic() + args.timeout
     while time.monotonic() < deadline:
         try:
@@ -135,7 +118,7 @@ def verify(args):
                     ]
                 )
                 identity = matching_identity(
-                    lines, deployment, args.expect, manifest, datetime.now(timezone.utc).timestamp()
+                    lines, deployment, args.expect, datetime.now(timezone.utc).timestamp()
                 )
                 if identity:
                     # A deployment replaced while logs were fetched is not proof of the
@@ -147,12 +130,10 @@ def verify(args):
                         rechecked
                         and rechecked["id"] == deployment["id"]
                         and matching_identity(
-                            lines, rechecked, args.expect, manifest, datetime.now(timezone.utc).timestamp()
+                            lines, rechecked, args.expect, datetime.now(timezone.utc).timestamp()
                         )
                     ):
-                        print(
-                            "Active worker verified: release " + args.expect + "; bundle " + manifest["bundle_sha256"]
-                        )
+                        print("Active worker verified: release " + args.expect)
                         return
         except (ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
             pass
@@ -164,7 +145,6 @@ def verify(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--expect", required=True)
     parser.add_argument("--service", default="werco-worker")
     parser.add_argument("--environment", default="production")

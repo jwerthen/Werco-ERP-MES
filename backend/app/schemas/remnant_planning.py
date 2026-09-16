@@ -3,7 +3,7 @@
 import hashlib
 import json
 import math
-from decimal import Context, Decimal, localcontext
+from decimal import ROUND_HALF_UP, Context, Decimal, localcontext
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -15,7 +15,6 @@ from app.core.remnant_evidence import (
     evidence_sha256,
     target_group_sha256,
 )
-from app.schemas.quote_nesting_spacing import normalize_thickness
 from app.schemas.stock_piece import ID, Hash, ObservationEvidence, decimal_value
 
 MAX_SELECTION_BYTES = 256 * 1024
@@ -23,6 +22,18 @@ ADVISORY = 'Recorded piece — availability and eligibility unverified.'
 Name = Annotated[str, Field(min_length=1, max_length=120)]
 Note = Annotated[str, Field(min_length=1, max_length=1000)]
 LegacyText = Annotated[str, Field(max_length=1024)]
+
+
+def normalize_thickness(value: str) -> str:
+    with localcontext(Context(prec=50)):
+        supplied = Decimal(value)
+        if not Decimal(0) < supplied <= Decimal(4):
+            raise ValueError("Thickness must be greater than zero and at most 4 inches")
+        result = supplied.quantize(Decimal("0.000000001"), rounding=ROUND_HALF_UP)
+    if not Decimal(0) < result <= Decimal(4):
+        raise ValueError("Normalized thickness must be greater than zero and at most 4 inches")
+    text = format(result, "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 class StrictModel(BaseModel):

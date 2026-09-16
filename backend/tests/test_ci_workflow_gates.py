@@ -1007,10 +1007,10 @@ class TestCoordinatedProductionReleaseOrdering:
             ('mixed', False),
             ('delete_backend', False),
             ('rename_backend', False),
-            ('worker_kernel', False),
+            ('worker_runtime', False),
             ('worker_build', False),
             ('worker_lock', False),
-            ('nesting_ui', True),
+            ('quote_ui', True),
         ],
     )
     def test_classifies_backend_edits_deletions_and_renames(self, release_git_repo, tmp_path, change, expected):
@@ -1023,12 +1023,12 @@ class TestCoordinatedProductionReleaseOrdering:
             backend.unlink()
         elif change == 'rename_backend':
             backend.rename(repo / 'frontend/archived.py')
-        elif change in ('worker_kernel', 'worker_build', 'worker_lock', 'nesting_ui'):
+        elif change in ('worker_runtime', 'worker_build', 'worker_lock', 'quote_ui'):
             path = {
-                'worker_kernel': 'frontend/src/features/nesting/lib/contour-packing.ts',
-                'worker_build': 'frontend/tools/build-nesting-worker.mjs',
-                'worker_lock': 'frontend/package-lock.json',
-                'nesting_ui': 'frontend/src/features/nesting/nesting.css',
+                'worker_runtime': 'backend/app/core/worker_runtime.py',
+                'worker_build': 'backend/Dockerfile.worker',
+                'worker_lock': 'backend/requirements.lock',
+                'quote_ui': 'frontend/src/features/fabrication-quote/fabrication-quote.css',
             }[change]
             file = repo / path
             file.parent.mkdir(parents=True, exist_ok=True)

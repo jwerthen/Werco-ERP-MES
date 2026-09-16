@@ -272,9 +272,9 @@ async def generate_routing_from_drawing(
             warnings.append("Very little text extracted from the PDF. The routing may be incomplete.")
 
     elif ext == ".dxf":
-        from app.services.rfq_parsing_service import parse_dxf_geometry
+        from app.services.routing_geometry import inspect_routing_geometry
 
-        geometry = parse_dxf_geometry(str(file_path), file.filename or safe_name)
+        geometry = inspect_routing_geometry(str(file_path), file.filename or safe_name)
         # Build a text summary from geometry for the LLM
         parts_desc = []
         if geometry.get("cut_length"):
@@ -293,9 +293,9 @@ async def generate_routing_from_drawing(
         drawing_text = f"DXF flat pattern for part {part.part_number} ({part.name}).\n" + "\n".join(parts_desc)
 
     elif ext in (".step", ".stp"):
-        from app.services.rfq_parsing_service import parse_step_fallback
+        from app.services.routing_geometry import inspect_routing_geometry
 
-        geometry = parse_step_fallback(str(file_path), file.filename or safe_name)
+        geometry = inspect_routing_geometry(str(file_path), file.filename or safe_name)
         drawing_text = f"STEP file for part {part.part_number} ({part.name})."
         if geometry.get("warning"):
             warnings.append(geometry["warning"])

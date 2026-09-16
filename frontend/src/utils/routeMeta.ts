@@ -63,11 +63,7 @@ export const routeTitles: Record<string, string> = {
   '/mrp': 'MRP',
 
   // Sales & Quoting
-  '/rfq-packages/new': 'AI RFQ Quote',
-  '/nest': 'Material Nesting',
-  '/quote-calculator': 'Quote Calculator',
-  '/estimate-workbench': 'Estimate Workbench',
-  '/shop-data': 'Shop Data',
+  '/fabrication-quotes': 'Fabrication Quoting',
   '/quotes': 'Quotes',
   '/customers': 'Customers',
 
@@ -174,18 +170,6 @@ const detailRoutes: DetailRoute[] = [
     pattern: /^\/po-upload$/,
     title: 'Upload PO',
     parent: { label: 'Purchase Orders', href: '/purchasing' },
-  },
-  {
-    // There is no /rfq-packages list page; Quotes is the hub an AI RFQ
-    // package publishes into, so that's where "back" goes.
-    pattern: /^\/rfq-packages\/new$/,
-    title: 'AI RFQ Quote',
-    parent: { label: 'Quotes', href: '/quotes' },
-  },
-  {
-    pattern: /^\/estimate-workbench\/(?!new$)[^/]+$/,
-    title: 'Estimate Workbench',
-    parent: { label: 'Estimate Workbench', href: '/estimate-workbench' },
   },
   {
     pattern: /^\/work-orders\/(?!new$)[^/]+$/,

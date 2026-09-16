@@ -25,6 +25,7 @@
   "/engineering-changes",
   "/estimate-workbench",
   "/estimate-workbench/:estimateId",
+  "/fabrication-quotes",
   "/import-center",
   "/inventory",
   "/inventory/materials",

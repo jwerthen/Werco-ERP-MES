@@ -2,17 +2,17 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **677 tools** — 15 hand-written *convenience* tools plus
-**662 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **691 tools** — 15 hand-written *convenience* tools plus
+**676 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app.
 
 This is the runbook: how to run it, how to authenticate, what the tools are called, which rules
 the convenience tools enforce, what a result looks like, and what to do when a call fails.
 
-**Counts and names in this file come from `python -m app.mcp --print-catalog` on the commit that
-shipped API tokens** (15 + 662 tools, 16 shadowed raw operations, 2 excluded cutover loaders,
-66 tags in the OpenAPI document, 62 of them in the catalog). Generated names are derived, not
-curated — re-run the command after adding a router before quoting a name in a prompt.
+**Counts and names were checked with `python -m app.mcp --print-catalog` during the September 2026
+fabrication quoting cutover** (15 convenience + 676 generated tools, 16 shadowed raw operations).
+Generated names are derived, not curated — re-run the command after changing a router before
+quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
 quote against the live catalog, so a name that shifts fails CI instead of going stale here.
 
@@ -354,7 +354,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `CustomFields` (`/custom-fields`) | Custom Fields | `list_field_definitions`, `create_field_definition`, `set_custom_field_value`, `get_entity_custom_fields` |
 | `Warehouse` (`/warehouse`) | — hub that mounts the Inventory, Receiving and Shipping pages | see those three rows |
 | `Inventory` (`/inventory`) | Inventory, Parts | `list_inventory`★, `receive_inventory`, `adjust_inventory`, `transfer_inventory`, `list_transactions`, `preview_inventory_combine`, `combine_inventory`, `list_cycle_counts` |
-| `Materials` (`/materials`) | Materials & Supplies | `materials_supplies_list_materials`, `materials_supplies_get_material`, `materials_supplies_create_material`, `materials_supplies_update_material`, `import_materials_csv` |
+| `Materials` (`/materials`) | Materials & Supplies | `list_materials`, `get_material`, `create_material`, `update_material`, `import_materials_csv` |
 | `Receiving` (`/receiving`) | Receiving & Inspection, Purchasing | `get_open_purchase_orders`, `receive_material`, `get_inspection_queue`, `inspect_receipt`, `correct_receipt`, `void_receipt`, `print_receiving_label` |
 | `Shipping` (`/shipping`) | Shipping | `get_ready_to_ship`, `create_shipment`, `mark_shipped`, `rate_shop`, `buy_label`, `get_tracking`, `issue_certificate_of_conformance` |
 | `MRP` (`/mrp`) | Material Requirements Planning | `create_mrp_run`, `get_latest_mrp_run`, `get_mrp_actions`, `get_current_shortages`, `process_mrp_action` |
@@ -362,11 +362,10 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `POUpload` (`/po-upload`) | PO Upload | `upload_and_extract_po`, `upload_and_extract_quote`, `upload_and_extract_invoice`, `create_po_from_upload`, `search_vendors` |
 | `SupplierScorecards` (`/supplier-scorecards`) | Supplier Scorecards | `list_scorecards`, `scorecard_dashboard`, `auto_calculate_scorecard`, `create_audit`, `list_approved_suppliers` |
 | `Traceability` (`/traceability`) | Traceability | `search_lots`, `trace_lot`, `trace_serial` |
-| `Quotes` (`/quotes`) | Quotes, Parts | `list_quotes`, `get_quote`, `create_quote`, `add_quote_line`, `send_quote`, `generate_quote_pdf`, `convert_to_work_order` |
-| `RFQQuoting` (`/rfq-packages/new`) | AI RFQ Quotes, Quotes, Customers | `create_rfq_package`, `get_rfq_package`, `generate_estimate`, `approve_estimate`, `export_internal_estimate` |
-| `QuoteCalculator` (`/quote-calculator`) | Quote Calculator, DXF Parser | `calculate_sheet_metal_quote`, `calculate_cnc_quote`, `quote_calculator_list_materials`, `analyze_dxf`, `preview_dxf` |
-| `EstimateWorkbench` (`/estimate-workbench`) | Estimate Workbench | `create_workbench`, `get_workbench`, `extract_from_rfq`, `recalc_estimate`, `finalize_workbench`, `export_customer_pdf` |
-| `ShopData` (`/shop-data`) | Estimate Workbench | `get_shop_data`, `post_shop_data_row`, `patch_shop_data_row`, `get_shop_data_history` |
+| `Quotes` (`/quotes`) | Quotes, Parts | `quotes_list_quotes`, `quotes_get_quote`, `quotes_update_quote`, `quotes_send_quote`, `generate_quote_pdf`, `get_conversion_plan`, `convert_to_work_order` |
+| `FabricationQuoting` (`/fabrication-quotes`) | Fabrication Quoting | `fabrication_quoting_list_quotes`, `fabrication_quoting_create_quote`, `fabrication_quoting_get_quote`, `fabrication_quoting_update_quote`, `calculate`, `fabrication_quoting_approve_quote`, `fabrication_quoting_revise_quote`, `fabrication_quoting_handoff_quote`, `export_package` |
+| `FabricationQuoting` sources, nesting and actuals | Fabrication Quoting | `upload_file`, `original_file`, `nest`, `save_nest`, `revisions`, `revision`, `list_actuals`, `record_actuals` |
+| `FabricationQuoting` process profiles | Fabrication Quoting | `list_profiles`, `list_revisions`, `save_profile`, `capabilities` |
 | `Customers` (`/customers`) | Customers | `list_customers`, `create_customer`, `update_customer`, `get_customer_stats`, `import_customers_csv` |
 | `Quality` (`/quality`) | Quality Management, Parts | `list_quality_ncrs`★, `get_ncr`, `create_ncr`, `update_ncr`, `void_ncr`, `list_cars`, `create_fai`, `get_quality_summary`, `list_scrap_reason_codes` |
 | `SPC` (`/spc`) | Statistical Process Control, Parts | `list_characteristics`, `add_measurements`, `get_chart_data`, `calculate_control_limits`, `get_capability`, `statistical_process_control_get_dashboard` |
@@ -387,7 +386,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `AuditLog` (`/audit-log`) | Audit | `list_audit_logs`, `get_audit_summary`, `verify_audit_integrity`, `get_integrity_status` |
 | `VisitorLog` (`/visitor-log`) | Visitor Logs | `list_visitors`, `manual_entry`, `sign_out`, `export_visitors_csv`, `create_station`, `revoke_station` |
 | `VisitorSignIn` (`/visitor-signin`) | Visitor Logs | `sign_in`, `sign_out` (under the caller's own role; the tablet's shared-PIN station login is unauthenticated plumbing and is not a tool) |
-| `AdminSettings` (`/admin/settings`) | Admin Settings, Users, Quote Calculator | `list_labor_rates`, `update_overhead_setting`, `get_role_permissions`, `update_role_permissions`, `admin_settings_list_machines`, `admin_settings_update_machine`, `get_audit_log`, `list_users` |
+| `AdminSettings` (`/admin/settings`) | Admin Settings, Users | `list_work_center_rates`, `update_work_center_rate`, `list_work_center_types_admin`, `update_work_center_types_admin`, `get_email_recipients`, `update_email_recipients`, `get_role_permissions`, `update_role_permissions`, `get_audit_log`, `list_users` |
 | `PlatformOverview` (`/platform`) | Platform Administration | `platform_overview`, `list_companies`, `company_dashboard`, `browse_company_users` (platform admins only — the route decides) |
 | `CompanyRegister` (`/register-company`) | Company Management | `get_my_company`, `update_my_company`, `update_my_company_ai_egress`, `update_my_company_sms_egress` — the public registration form itself is unauthenticated and has no tool |
 | *(no page — Admin tooling, `curl` or these tools)* | API Tokens | `create_api_token`, `list_api_tokens`, `revoke_api_token` (Admin only; a call authenticated **by** an API token gets the route's 403 fence — §4) |
@@ -442,7 +441,7 @@ On the commit that shipped API tokens: 706 operations, 689 secured, 680 candidat
    `customer_complaints_rma`). Real examples: `work_orders_start_operation` / `shop_floor_start_operation`;
    `preventive_maintenance_get_dashboard` / `customer_complaints_rma_get_dashboard` /
    `statistical_process_control_get_dashboard` / `tool_fixture_management_get_dashboard`;
-   `materials_supplies_list_materials` / `admin_settings_list_materials` / `quote_calculator_list_materials`;
+   `quotes_get_quote` / `fabrication_quoting_get_quote`;
    `reports_get_quality_metrics` / `analytics_bi_get_quality_metrics`.
 4. **The prefix propagates to the family.** Every function name has a *noun phrase*: the tokens
    after the first (verb) token, with the last token singularized — `ies` → `y`; `es` dropped when
@@ -451,11 +450,9 @@ On the commit that shipped API tokens: 706 operations, 689 secured, 680 candidat
    token ending in `ss` is left alone. Within one tag, the noun phrases of the collision-prefixed
    functions form a set, and **every other function in that tag whose noun phrase is in the set is
    prefixed with the tag slug too**, so a resource family reads as one family rather than two
-   prefixed and two bare members. Real examples: Admin Settings' `create_machine` / `list_machines`
-   collide with Quote Calculator's, so `admin_settings_update_machine` and
-   `admin_settings_delete_machine` are prefixed with them (and `admin_settings_update_finish` /
-   `admin_settings_delete_finish` beside `admin_settings_list_finishes`);
-   `materials_supplies_get_material` beside `materials_supplies_list_materials`;
+   prefixed and two bare members. The customer-document and fabrication routers both define
+   `get_quote` / `list_quotes`, so `quotes_send_quote` and `fabrication_quoting_approve_quote`
+   carry the same family prefixes as their siblings. Other examples:
    `routing_delete_operation` / `routing_reorder_operations` beside `routing_add_operation`;
    `shop_floor_resume_operation` beside `shop_floor_start_operation`;
    `work_orders_delete_work_order` / `work_orders_restore_work_order` beside
@@ -508,8 +505,8 @@ result with `isError: false`.
 | Path parameter | Required top-level property |
 | Query parameter | Top-level property (required per spec) |
 | JSON body that is an object | Its properties **merged at the top level**; the executor splits them back out. If a body field shares a name with a path/query parameter it is renamed `body_<x>` (no route needs this today) |
-| JSON body that is not an object (a bare array, a free-form dict, an optional model) | A single `body` property sent as-is, **described with the body schema's own title** so a free-form dict says what it is: `The request body (Cutting Speeds), sent as-is.` on `quote_calculator_create_machine`, `Sheet Pricing` on `quote_calculator_create_material`, `Operation Order` on `routing_reorder_operations`, `Permissions` on `update_role_permissions` |
-| Multipart / form | Form fields as properties; each file field is an object `{"filename": str, "content_base64": str, "content_type"?: str}` (a list of them for multi-file fields). 23 tools take files (`upload_document`, `import_parts_csv`, `create_rfq_package`, `analyze_dxf`, …). FastAPI 0.136 emits `{"type": "string", "contentMediaType": "application/octet-stream"}` for an `UploadFile`; the older `format: binary` is recognised too |
+| JSON body that is not an object (a bare array, a free-form dict, an optional model) | A single `body` property sent as-is, **described with the body schema's own title** so a free-form dict says what it is: `The request body (Operation Order), sent as-is.` on `routing_reorder_operations`, `Permissions` on `update_role_permissions` |
+| Multipart / form | Form fields as properties; each file field is an object `{"filename": str, "content_base64": str, "content_type"?: str}` (a list of them for multi-file fields). File tools include `upload_document`, `import_parts_csv` and fabrication source `upload_file`. FastAPI 0.136 emits `{"type": "string", "contentMediaType": "application/octet-stream"}` for an `UploadFile`; the older `format: binary` is recognised too |
 | Header / cookie parameter | Dropped — transport concerns the executor never forwards (the API has exactly one: `if-none-match` on `GET /shop-floor/dashboard`) |
 
 Arguments are validated against that schema with `jsonschema` before dispatch; a failure is a

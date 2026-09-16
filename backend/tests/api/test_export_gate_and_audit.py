@@ -600,21 +600,6 @@ def test_single_record_document_routes_are_not_role_gated(client: TestClient, db
         assert response.status_code == http_status.HTTP_404_NOT_FOUND, f"{route}: {response.status_code}"
 
 
-def test_estimate_workbench_export_keeps_its_own_supervisor_tier(client: TestClient, db_session: Session):
-    """A single estimate's audit workbook is not a bulk export and was not re-tiered.
-
-    ``/estimate-workbench/{id}/export/audit.xlsx`` is ``[ADMIN, MANAGER,
-    SUPERVISOR]``. Had it been folded into the uniform ADMIN/MANAGER tier, the
-    supervisor case below would be 403 instead of 404.
-    """
-    supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
-    operator = make_user(db_session, role=UserRole.OPERATOR)
-    route = "/api/v1/estimate-workbench/999999/export/audit.xlsx"
-
-    assert client.get(route, headers=headers_for(supervisor)).status_code == http_status.HTTP_404_NOT_FOUND
-    assert client.get(route, headers=headers_for(operator)).status_code == http_status.HTTP_403_FORBIDDEN
-
-
 def test_visitor_log_export_keeps_its_own_pii_tier_and_audit(client: TestClient, db_session: Session):
     """The audit-shape precedent is untouched: still ADMIN/MANAGER, still audited.
 

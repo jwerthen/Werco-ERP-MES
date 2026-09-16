@@ -313,47 +313,6 @@ export const tours: Record<string, Tour> = {
     ],
   },
 
-  'quote-calculator': {
-    id: 'quote-calculator',
-    name: 'Quote Calculator',
-    description: 'Generate instant quotes for CNC and sheet metal work',
-    category: 'production',
-    icon: 'CalculatorIcon',
-    startPath: '/quote-calculator',
-    roles: ['admin', 'manager', 'supervisor'],
-    roleDescriptions: {
-      supervisor: 'Generate quick cost estimates for parts to support planning',
-      manager: 'Create detailed quotes with full cost breakdowns for customer proposals',
-      admin: 'Full quoting access with rate configuration',
-    },
-    steps: [
-      {
-        target: '[data-tour="quote-type"]',
-        title: 'Select Quote Type',
-        description:
-          'Choose between CNC Machining for milled/turned parts, or Sheet Metal for laser cut and formed parts.',
-        position: 'bottom',
-        path: '/quote-calculator',
-      },
-      {
-        target: '[data-tour="quote-inputs"]',
-        title: 'Enter Part Details',
-        description:
-          'Input dimensions, material, complexity factors, and quantity. For sheet metal, you can upload a DXF file to auto-extract cut length and features.',
-        position: 'right',
-        path: '/quote-calculator',
-      },
-      {
-        target: '[data-tour="quote-result"]',
-        title: 'Quote Result',
-        description:
-          'See the calculated price with full cost breakdown: material, machining time, setup, and any finishing operations.',
-        position: 'left',
-        path: '/quote-calculator',
-      },
-    ],
-  },
-
   'shipping-receiving': {
     id: 'shipping-receiving',
     name: 'Shipping & Receiving',

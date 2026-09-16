@@ -195,19 +195,19 @@ describe('Layout sidebar — permission-gated nav item', () => {
   });
 });
 
-describe('Material Nesting navigation', () => {
+describe('Fabrication Quoting navigation', () => {
   afterEach(() => {
     mockUser.value = null;
   });
 
-  it.each(['admin', 'manager', 'supervisor', 'viewer'])('offers the authenticated nesting route to %s with purchasing:view', (role) => {
-    renderLayout(role, '/nest');
-    expect(within(sidebar()).getByRole('link', { name: 'Material Nesting' })).toHaveAttribute('href', '/nest');
+  it.each(['admin', 'manager', 'supervisor', 'viewer'])('offers the fabrication quoting route to %s with purchasing:view', (role) => {
+    renderLayout(role, '/fabrication-quotes');
+    expect(within(sidebar()).getByRole('link', { name: 'Fabrication Quoting' })).toHaveAttribute('href', '/fabrication-quotes');
   });
 
-  it.each(['operator', 'quality', 'shipping'])('hides Material Nesting from %s without purchasing:view', (role) => {
-    renderLayout(role, '/nest');
-    expect(within(sidebar()).queryByRole('link', { name: 'Material Nesting' })).not.toBeInTheDocument();
+  it.each(['operator', 'quality', 'shipping'])('hides Fabrication Quoting from %s without purchasing:view', (role) => {
+    renderLayout(role, '/fabrication-quotes');
+    expect(within(sidebar()).queryByRole('link', { name: 'Fabrication Quoting' })).not.toBeInTheDocument();
   });
 });
 

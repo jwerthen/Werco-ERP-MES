@@ -44,7 +44,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from app.services.sheet_metal_costing_service import GAUGE_TO_INCHES, parse_thickness_to_inches
+from app.services.sheet_thickness import GAUGE_TO_INCHES, parse_thickness_to_inches
 
 
 @dataclass(frozen=True)
@@ -167,7 +167,7 @@ def is_sheet_like(
 def thickness_inches(value: Optional[str]) -> Optional[float]:
     """A thickness string as inches, or ``None`` when it cannot be read.
 
-    Delegates the grammar to ``sheet_metal_costing_service.parse_thickness_to_inches``
+    Delegates the grammar to ``sheet_thickness.parse_thickness_to_inches``
     (gauge table, fractions, mm, decimal inches) rather than growing a second one,
     then applies the plausibility bound above.
 

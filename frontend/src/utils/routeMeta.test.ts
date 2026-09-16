@@ -37,11 +37,11 @@ describe('getRouteTitle', () => {
     });
   });
 
-  it('titles the native Material Nesting route consistently with navigation', () => {
-    expect(getRouteTitle(loc('/nest'))).toBe('Material Nesting');
-    expect(getRouteTitle(loc('/nest', '?source=quotes'))).toBe('Material Nesting');
-    expect(formatTabTitle(getRouteTitle(loc('/nest')))).toBe('Material Nesting · Werco ERP');
-    expect(getBreadcrumbParent('/nest')).toBeNull();
+  it('titles the Fabrication Quoting route consistently with navigation', () => {
+    expect(getRouteTitle(loc('/fabrication-quotes'))).toBe('Fabrication Quoting');
+    expect(getRouteTitle(loc('/fabrication-quotes', '?source=quotes'))).toBe('Fabrication Quoting');
+    expect(formatTabTitle(getRouteTitle(loc('/fabrication-quotes')))).toBe('Fabrication Quoting · Werco ERP');
+    expect(getBreadcrumbParent('/fabrication-quotes')).toBeNull();
   });
 
   it('resolves the BOM unit-mismatch sub-route ahead of the bare /bom title', () => {
@@ -195,13 +195,6 @@ describe('getBreadcrumbParent', () => {
     });
   });
 
-  it('crumbs the AI RFQ package form back to Quotes (its publishing hub)', () => {
-    // There is no /rfq-packages list page; Quotes is where a package lands.
-    expect(getBreadcrumbParent('/rfq-packages/new')).toEqual({
-      label: 'Quotes',
-      href: '/quotes',
-    });
-  });
 
   it('returns null for an unknown route', () => {
     expect(getBreadcrumbParent('/totally-unknown')).toBeNull();

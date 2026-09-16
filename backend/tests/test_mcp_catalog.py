@@ -205,11 +205,11 @@ class TestNames:
         # with a collision in its own tag and would otherwise have been the bare odd-one-out.
         propagated = {entries[key][0] for key in prefixed - collision_keys}
         assert propagated == {
-            "delete_finish",
-            "delete_machine",
-            "update_finish",
-            "update_machine",
-            "get_material",
+            "create_quote",
+            "approve_quote",
+            "revise_quote",
+            "handoff_quote",
+            "send_quote",
             "delete_operation",
             "reorder_operations",
             "resume_operation",
@@ -233,11 +233,9 @@ class TestNames:
         """The family rule, on the live catalog: the ten names it moved, and the neighbours it left alone."""
         names = {tool.name for tool in catalog}
         family = {
-            "admin_settings_delete_finish",
-            "admin_settings_delete_machine",
-            "admin_settings_update_finish",
-            "admin_settings_update_machine",
-            "materials_supplies_get_material",
+            "fabrication_quoting_approve_quote",
+            "fabrication_quoting_revise_quote",
+            "fabrication_quoting_handoff_quote",
             "routing_delete_operation",
             "routing_reorder_operations",
             "shop_floor_resume_operation",
@@ -247,11 +245,6 @@ class TestNames:
         assert family <= names
         assert names.isdisjoint(
             {
-                "delete_finish",
-                "delete_machine",
-                "update_finish",
-                "update_machine",
-                "get_material",
                 "delete_operation",
                 "reorder_operations",
                 "resume_operation",
@@ -262,7 +255,6 @@ class TestNames:
         # Same tags, different noun phrase: untouched. (A noun phrase is the whole tail, so
         # ``work_order_by_number`` and ``operation_on_hold`` are not ``work_order`` / ``operation``.)
         assert {
-            "create_labor_rate",
             "list_work_center_types_admin",
             "import_materials_csv",
             "copy_routing",
@@ -609,8 +601,6 @@ class TestSyntheticMappingRules:
     def test_live_wrapped_bodies_say_what_they_are(self, catalog):
         by_name = {tool.name: tool for tool in catalog}
         for name, title in (
-            ("quote_calculator_create_machine", "Cutting Speeds"),
-            ("quote_calculator_create_material", "Sheet Pricing"),
             ("routing_reorder_operations", "Operation Order"),
             ("update_role_permissions", "Permissions"),
         ):

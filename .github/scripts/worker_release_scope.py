@@ -6,19 +6,11 @@ import subprocess
 
 WORKER_PATHS = (
     "backend/",
-    "frontend/package.json",
-    "frontend/package-lock.json",
-    "frontend/tsconfig.json",
-    "frontend/tsconfig.nesting-worker.json",
-    "frontend/tools/build-nesting-worker.mjs",
-    "frontend/tools/nesting-server-worker.ts",
-    "frontend/src/features/nesting/lib/",
     "railway.toml",
     ".railwayignore",
     ".dockerignore",
     ".github/scripts/worker_release_scope.py",
     ".github/scripts/verify_worker_release.py",
-    ".github/scripts/smoke_nesting_worker.py",
     ".github/workflows/ci-cd.yml",
 )
 

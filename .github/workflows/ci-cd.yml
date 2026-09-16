@@ -129,9 +129,6 @@ jobs:
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Verify generated nesting geometry profile
-        run: python3 ../.github/scripts/generate_nesting_profile.py --check
-
       - name: Install dependencies
         run: npm ci
 
@@ -213,21 +210,24 @@ jobs:
           docker build --build-arg REACT_APP_API_URL="$REACT_APP_API_URL" -t werco-erp-frontend:${{ github.sha }} ./frontend
           docker build --build-arg REACT_APP_API_URL="$REACT_APP_API_URL" -t werco-erp-frontend:latest ./frontend
 
-      - name: Build worker image with the shared nesting kernel
+      - name: Verify packaged native quotation parsing without network access
+        run: |
+          docker run --rm --network=none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=128m \
+            werco-erp-backend:${{ github.sha }} \
+            /opt/werco-quote-worker/bin/python scripts/smoke_fabrication_quote_worker.py
+
+      - name: Build shared ARQ worker image
         run: docker build -f backend/Dockerfile.worker -t werco-erp-worker:${{ github.sha }} .
 
-      - name: Verify the worker image without network access
+      - name: Verify shared worker imports without network access
         run: |
-          python3 .github/scripts/smoke_nesting_worker.py \
-            --image werco-erp-worker:${{ github.sha }} \
-            --manifest-out worker-runtime/manifest.json
-
-      - name: Preserve the tested worker identity
-        uses: actions/upload-artifact@v7
-        with:
-          name: worker-runtime-${{ github.sha }}
-          path: worker-runtime/manifest.json
-          if-no-files-found: error
+          docker run --rm --network=none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            -e ENVIRONMENT=test -e WORKER_CRON_JOBS=none \
+            -e DATABASE_URL=sqlite:///:memory: \
+            -e SECRET_KEY=ci-worker-image-smoke-placeholder \
+            -e REFRESH_TOKEN_SECRET_KEY=ci-worker-image-refresh-placeholder \
+            werco-erp-worker:${{ github.sha }} \
+            python -c 'from app.worker import WorkerSettings; assert WorkerSettings.functions; assert not WorkerSettings.cron_jobs'
 
       - name: Test Docker Compose
         # docker-compose.yml uses required-variable interpolation (e.g. ${DATABASE_URL:?...}).
@@ -548,13 +548,6 @@ jobs:
             exit 1
           fi
 
-      - name: Load the exact tested worker identity
-        if: steps.release_head.outputs.current == 'true' && steps.worker_scope.outputs.changed == 'true'
-        uses: actions/download-artifact@v8
-        with:
-          name: worker-runtime-${{ github.sha }}
-          path: worker-runtime
-
       # Stamp the commit SHA into the artifact BEFORE it is uploaded. app/core/config.py
       # reads backend/RELEASE into APP_RELEASE, which is reported to Sentry (`release`)
       # and by /health/detailed (checks.application.release) -- so "is commit X actually
@@ -726,13 +719,13 @@ jobs:
           fi
           echo "Railway accepted the worker upload and queued a build."
 
-      - name: Verify the active worker has this release and tested runtime
+      - name: Verify the active worker has this release and a fresh heartbeat
         if: steps.release_head.outputs.current == 'true' && steps.worker_scope.outputs.changed == 'true'
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           python3 .github/scripts/verify_worker_release.py \
-            --expect "$GITHUB_SHA" --manifest worker-runtime/manifest.json
+            --expect "$GITHUB_SHA"
 
       # Backend identity was verified before publishing dependent code. Finish
       # by checking the frontend artifact's SHA (a plain HTTP 200 is insufficient

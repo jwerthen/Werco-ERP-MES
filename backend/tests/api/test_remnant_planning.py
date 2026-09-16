@@ -3,10 +3,8 @@
 import copy
 import json
 from datetime import datetime
-from decimal import Inexact, Rounded, getcontext, setcontext
 
 import pytest
-from fastapi import HTTPException
 from sqlalchemy import event
 
 from app.core.remnant_domain_profile import remnant_profile_identity
@@ -234,54 +232,6 @@ def test_expected_company_and_foreign_observation_are_not_disclosed(
     db_session.commit()
     token = create_access_token(subject=admin_user.id, company_id=2)
     assert resolve(client, {'Authorization': 'Bearer ' + token}, observed, expected_company_id=2).status_code == 404
-
-
-@pytest.mark.parametrize(
-    'mutate',
-    [
-        lambda q: q.update(thickness=0.125000001),
-        lambda q: q.update(material='Aluminum'),
-        lambda q: q.update(grainAxis='x'),
-        lambda q: q['parts'][0].update(quantity=3),
-        lambda q: q.update(options=[]),
-    ],
-)
-def test_assignment_is_invalidated_by_any_raw_group_change(client, admin_headers, observed, mutate):
-    selection, quote = selection_for(resolve(client, admin_headers, observed).json())
-    service.verify_assignment(selection, quote)
-    mutate(quote)
-    with pytest.raises(HTTPException) as exc:
-        service.verify_assignment(selection, quote)
-    assert exc.value.status_code == 409
-
-
-def test_exact_grade_and_thickness_rules_ignore_ambient_decimal_context(client, admin_headers, observed):
-    resolved = resolve(client, admin_headers, observed).json()
-    selection, quote = selection_for(resolved)
-    original = getcontext().copy()
-    try:
-        getcontext().prec = 2
-        getcontext().traps[Inexact] = True
-        getcontext().traps[Rounded] = True
-        service.verify_assignment(selection, quote)
-    finally:
-        setcontext(original)
-    selection.assignment.requiredGrade = 'a36'
-    selection.assignment.targetGroupSha256 = target_group_sha256('group', 'a36', quote)
-    with pytest.raises(HTTPException):
-        service.verify_assignment(selection, quote)
-
-
-def test_forged_snapshot_with_recomputed_hash_is_refused_against_actual_observation(
-    client, admin_headers, observed, admin_user, db_session
-):
-    selection, quote = selection_for(resolve(client, admin_headers, observed).json())
-    service.verify_current_selection(db_session, admin_user, 1, selection, quote)
-    selection.snapshot.observerName = 'Different observer'
-    selection.snapshotSha256 = evidence_sha256(selection.snapshot.model_dump(mode='json'))
-    with pytest.raises(HTTPException) as exc:
-        service.verify_current_selection(db_session, admin_user, 1, selection, quote)
-    assert exc.value.status_code == 409
 
 
 @pytest.mark.parametrize('status', ['on_hold', 'quarantine', 'rejected'])

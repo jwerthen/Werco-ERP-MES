@@ -1,5 +1,7 @@
 # Recorded-piece planning
 
+> Historical reference: the legacy quote-nesting workspace, solver and APIs were retired on 2026-09-16. Use [Fabrication Quoting](FABRICATION_QUOTING.md) for new estimates. Existing inventory observations and historical database evidence remain preserved.
+
 The nesting workspace can explicitly compare one recorded material piece with its
 full-sheet baseline. This is a conditional material plan. The piece remains
 availability-unverified: selection does not reserve it, consume inventory, approve

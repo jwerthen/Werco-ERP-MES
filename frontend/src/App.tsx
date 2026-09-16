@@ -59,7 +59,6 @@ const DispatchBoard = lazyWithRetry(() => import('./pages/DispatchBoard'));
 const Documents = lazyWithRetry(() => import('./pages/Documents'));
 const Reports = lazyWithRetry(() => import('./pages/Reports'));
 const Quotes = lazyWithRetry(() => import('./pages/Quotes'));
-const RFQQuoting = lazyWithRetry(() => import('./pages/RFQQuoting'));
 const Users = lazyWithRetry(() => import('./pages/Users'));
 const Customers = lazyWithRetry(() => import('./pages/Customers'));
 const Calibration = lazyWithRetry(() => import('./pages/Calibration'));
@@ -70,10 +69,7 @@ const Traceability = lazyWithRetry(() => import('./pages/Traceability'));
 const PrintPackingSlip = lazyWithRetry(() => import('./pages/PrintPackingSlip'));
 const PrintShippingLabel = lazyWithRetry(() => import('./pages/PrintShippingLabel'));
 const AuditLog = lazyWithRetry(() => import('./pages/AuditLog'));
-const MaterialNesting = lazyWithRetry(() => import('./pages/MaterialNesting'));
-const QuoteCalculator = lazyWithRetry(() => import('./pages/QuoteCalculator'));
-const EstimateWorkbench = lazyWithRetry(() => import('./pages/EstimateWorkbench'));
-const ShopData = lazyWithRetry(() => import('./pages/ShopData'));
+const FabricationQuoting = lazyWithRetry(() => import('./pages/FabricationQuoting'));
 const AdminSettings = lazyWithRetry(() => import('./pages/AdminSettings'));
 const POUpload = lazyWithRetry(() => import('./pages/POUpload'));
 const Analytics = lazyWithRetry(() => import('./pages/Analytics'));
@@ -858,11 +854,7 @@ function AppRoutes() {
           path="/nest"
           element={
             <PrivateRoute>
-              <Layout>
-                <LazyRoute>
-                  <MaterialNesting />
-                </LazyRoute>
-              </Layout>
+              <Navigate to="/fabrication-quotes" replace />
             </PrivateRoute>
           }
         />
@@ -871,11 +863,7 @@ function AppRoutes() {
           path="/rfq-packages/new"
           element={
             <PrivateRoute>
-              <Layout>
-                <LazyRoute>
-                  <RFQQuoting />
-                </LazyRoute>
-              </Layout>
+              <Navigate to="/fabrication-quotes" replace />
             </PrivateRoute>
           }
         />
@@ -892,14 +880,22 @@ function AppRoutes() {
           }
         />
         <Route
-          path="/quote-calculator"
+          path="/fabrication-quotes"
           element={
             <PrivateRoute>
               <Layout>
                 <LazyRoute>
-                  <QuoteCalculator />
+                  <FabricationQuoting />
                 </LazyRoute>
               </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/quote-calculator"
+          element={
+            <PrivateRoute>
+              <Navigate to="/fabrication-quotes" replace />
             </PrivateRoute>
           }
         />
@@ -907,11 +903,7 @@ function AppRoutes() {
           path="/estimate-workbench"
           element={
             <PrivateRoute>
-              <Layout>
-                <LazyRoute>
-                  <EstimateWorkbench />
-                </LazyRoute>
-              </Layout>
+              <Navigate to="/fabrication-quotes" replace />
             </PrivateRoute>
           }
         />
@@ -919,11 +911,7 @@ function AppRoutes() {
           path="/estimate-workbench/:estimateId"
           element={
             <PrivateRoute>
-              <Layout>
-                <LazyRoute>
-                  <EstimateWorkbench />
-                </LazyRoute>
-              </Layout>
+              <Navigate to="/fabrication-quotes" replace />
             </PrivateRoute>
           }
         />
@@ -931,11 +919,7 @@ function AppRoutes() {
           path="/shop-data"
           element={
             <PrivateRoute>
-              <Layout>
-                <LazyRoute>
-                  <ShopData />
-                </LazyRoute>
-              </Layout>
+              <Navigate to="/fabrication-quotes" replace />
             </PrivateRoute>
           }
         />

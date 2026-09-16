@@ -20,7 +20,6 @@ coverage.xml
 .mypy_cache
 .pytest_cache
 .hypothesis
-nesting-runtime/
 
 # Local configuration, credentials and runtime data never belong in an image.
 # Keep the example templates; deploy injects real values at runtime.

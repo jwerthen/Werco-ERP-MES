@@ -50,11 +50,12 @@ const routeAccessRequirements: RouteAccessRequirement[] = [
   { prefix: '/qms-standards', permission: 'quality:view' },
   { prefix: '/supplier-scorecards', permission: 'purchasing:view' },
   { prefix: '/quotes', permission: 'purchasing:view' },
+  { prefix: '/fabrication-quotes', permission: 'purchasing:view' },
   { prefix: '/nest', permission: 'purchasing:view' },
   { prefix: '/quote-calculator', permission: 'purchasing:view' },
   { prefix: '/estimate-workbench', permission: 'purchasing:view' },
   { prefix: '/shop-data', permission: 'purchasing:view' },
-  { prefix: '/rfq-packages', permission: 'purchasing:create' },
+  { prefix: '/rfq-packages', permission: 'purchasing:view' },
   { prefix: '/customers', permission: 'purchasing:view' },
   { prefix: '/scheduling', permission: 'work_orders:view' },
   // Dispatch Board is a dispatching WRITE tool (it sets the run order operators

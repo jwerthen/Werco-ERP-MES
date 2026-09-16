@@ -158,7 +158,7 @@ def test_no_security_email_or_generic_setting_bypass(client, admin_user):
             json={"value": "[1]"},
             headers=headers(admin_user),
         ).status_code
-        == 400
+        == 404
     )
 
 

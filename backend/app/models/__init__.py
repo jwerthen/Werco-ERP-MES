@@ -39,6 +39,8 @@ from .estimate_workbench import (
     QuoteFabLineItem,
     QuoteMachinedLineItem,
 )
+from .fabrication_quote import FabricationQuote, FabricationQuoteActual, FabricationQuoteFile, FabricationQuoteRevision
+from .fabrication_quote_profile import FabricationQuoteProfile
 from .governance import (
     ClassificationReview,
     ClassificationReviewType,
@@ -193,6 +195,11 @@ from .work_order_template import WorkOrderTemplate
 from .working_calendar import WorkingCalendar
 
 __all__ = [
+    "FabricationQuote",
+    "FabricationQuoteActual",
+    "FabricationQuoteFile",
+    "FabricationQuoteRevision",
+    "FabricationQuoteProfile",
     "StockPiece",
     "StockPieceObservation",
     "QuoteNestingDraft",

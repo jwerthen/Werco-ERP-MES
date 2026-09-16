@@ -100,3 +100,17 @@ jobs:
           pip install pip-audit==2.10.0
           pip-audit --require-hashes -r requirements-dev.lock \
             --ignore-vuln PYSEC-2026-1325
+
+  pip-audit-quoting:
+    name: pip-audit (Native Quotation Worker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Audit the isolated native parser dependency lock
+        working-directory: ./backend
+        run: |
+          pip install pip-audit==2.10.0
+          pip-audit -r requirements-quoting.lock --require-hashes

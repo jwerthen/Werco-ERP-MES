@@ -182,7 +182,7 @@ npm run format
 npm run lint -- --max-warnings=0
 npm run lint:fix
 
-# Type checking (application, tests, and Node nesting worker)
+# Type checking (application and tests)
 npm run type-check
 
 # Run tests
@@ -359,10 +359,9 @@ npm run test:coverage
 
 **Test files are type-checked (since 2026-08-03)**
 
-`npm run type-check` runs three `tsc --noEmit` programs: `tsconfig.json` (application
+`npm run type-check` runs two `tsc --noEmit` programs: `tsconfig.json` (application
 source, which *excludes* tests) and `tsconfig.test.json` (the `*.test.*` / `*.spec.*`
-files, `src/test-utils`, `src/setupTests.ts`), followed by
-`tsconfig.nesting-worker.json` (the Node worker and shared solver kernel).
+files, `src/test-utils`, `src/setupTests.ts`). The retired quote-nesting Node worker is no longer built.
 CI runs the same npm script.
 
 This matters because the test runner does **not** type-check: `jest.config.js` hands

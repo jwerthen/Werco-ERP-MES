@@ -29,7 +29,6 @@ import { formatTabTitle, getRouteTitle } from '../utils/routeMeta';
 import { formatCentralTime } from '../utils/centralTime';
 import {
   HomeIcon,
-  Squares2X2Icon,
   ClipboardDocumentListIcon,
   ClipboardDocumentCheckIcon,
   CogIcon,
@@ -193,11 +192,7 @@ const navSections: NavSection[] = [
         name: 'Sales & Quoting',
         icon: CurrencyDollarIcon,
         children: [
-          { name: 'AI RFQ Quote', href: '/rfq-packages/new', icon: SparklesIcon },
-          { name: 'Material Nesting', href: '/nest', icon: Squares2X2Icon, permission: 'purchasing:view' },
-          { name: 'Quote Calculator', href: '/quote-calculator', icon: CalculatorIcon },
-          { name: 'Estimate Workbench', href: '/estimate-workbench', icon: CalculatorIcon },
-          { name: 'Shop Data', href: '/shop-data', icon: AdjustmentsHorizontalIcon },
+          { name: 'Fabrication Quoting', href: '/fabrication-quotes', icon: CalculatorIcon, permission: 'purchasing:view' },
           { name: 'Quotes', href: '/quotes', icon: CurrencyDollarIcon },
           { name: 'Customers', href: '/customers', icon: BuildingOfficeIcon },
         ],

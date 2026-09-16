@@ -1,13 +1,13 @@
 jest.mock('../context/AuthContext', () => ({ useAuth: () => ({ user: { id: 1, company_id: 1, role: 'admin', is_superuser: false } }) }));
 import React from 'react';
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import Quotes from './Quotes';
 import { ToastProvider } from '../components/ui/Toast';
 
 jest.mock('../services/api', () => ({ __esModule: true, default: {
-  getQuotes: jest.fn(), getParts: jest.fn(), getQuote: jest.fn(), updateQuote: jest.fn(), createQuote: jest.fn(),
+  getQuotes: jest.fn(), getParts: jest.fn(), getQuote: jest.fn(), updateQuote: jest.fn(),
 } }));
 const mockedApi = api as jest.Mocked<typeof api>;
 
@@ -33,51 +33,37 @@ it('keeps entered draft values after a stale snapshot conflict and sends the rev
   expect(mockedApi.updateQuote).toHaveBeenCalledTimes(1);
 });
 
-describe('quote creation replay protection', () => {
-  const draft = { customer_name: 'Acme', lines: [{ description: 'Fixture', part_id: 0, quantity: 4, unit_price: 10, labor_hours: 0 }] };
-  const saved = { id: 7, quote_number: 'QUO-SAVED', revision: 'A', customer_name: 'Acme', status: 'draft', quote_date: '2026-09-06', updated_at: '2026-09-06T12:00:00', subtotal: 40, total: 40, lines: [{ ...draft.lines[0], id: 12, line_number: 1, line_total: 40 }] };
-  beforeEach(() => {
-    jest.clearAllMocks();
-    mockedApi.getQuotes.mockResolvedValue([]);
-    mockedApi.getParts.mockResolvedValue([]);
-    mockedApi.getQuote.mockResolvedValue(saved);
-  });
-  function renderDraft() {
-    render(<MemoryRouter initialEntries={[{ pathname: '/quotes', state: { calculatorDraft: draft } }]}><ToastProvider><Quotes /></ToastProvider></MemoryRouter>);
-  }
-  it('reuses one create request key after an ambiguous failure', async () => {
-    mockedApi.createQuote.mockRejectedValueOnce(new Error('Response lost')).mockResolvedValueOnce(saved);
-    renderDraft();
-    const dialog = await screen.findByRole('dialog');
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Create Quote' }));
-    expect(await within(dialog).findByText(/retrying this draft will recover its saved quote/)).toBeInTheDocument();
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Create Quote' }));
-    await waitFor(() => expect(mockedApi.createQuote).toHaveBeenCalledTimes(2));
-    const first = mockedApi.createQuote.mock.calls[0][0];
-    const retry = mockedApi.createQuote.mock.calls[1][0];
-    expect(first.request_key).toEqual(expect.any(String));
-    expect(first.request_key.length).toBeGreaterThanOrEqual(8);
-    expect(retry.request_key).toBe(first.request_key);
-  });
-  it('freezes the submitted fields while the create response is pending', async () => {
-    let resolveCreate!: (value: typeof saved) => void;
-    mockedApi.createQuote.mockImplementationOnce(() => new Promise(resolve => { resolveCreate = resolve; }));
-    renderDraft();
-    const dialog = await screen.findByRole('dialog');
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Create Quote' }));
-    expect(within(dialog).getByRole('textbox', { name: 'Notes' })).toBeDisabled();
-    expect(within(dialog).getByRole('spinbutton', { name: 'Line item quantity' })).toBeDisabled();
-    resolveCreate(saved);
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-  });
-  it('keeps the draft and exposes the saved quote when its committed key conflicts', async () => {
-    mockedApi.createQuote.mockRejectedValue({ response: { status: 409, data: { detail: { message: 'Request already saved with different content', quote_id: 7, quote_number: 'QUO-SAVED' } } } });
-    renderDraft();
-    const dialog = await screen.findByRole('dialog');
-    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Notes' }), { target: { value: 'My changed terms' } });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Create Quote' }));
-    expect(await within(dialog).findByText('Request already saved with different content')).toBeInTheDocument();
-    expect(within(dialog).getByRole('textbox', { name: 'Notes' })).toHaveValue('My changed terms');
-    expect(within(dialog).getByRole('button', { name: 'Open existing quote QUO-SAVED' })).toBeInTheDocument();
-  });
+
+it('starts new estimates in fabrication quoting and ignores retired calculator navigation state', async () => {
+  mockedApi.getQuotes.mockResolvedValue([]);
+  const Location = () => {
+    const location = useLocation();
+    return <div data-testid="quote-location">{location.pathname}</div>;
+  };
+  render(<MemoryRouter initialEntries={[{ pathname: '/quotes', state: { calculatorDraft: { customer_name: 'Old draft', lines: [] } } }]}><ToastProvider><Quotes /><Location /></ToastProvider></MemoryRouter>);
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  fireEvent.click(screen.getAllByRole('button', { name: 'New Quote' })[0]);
+  expect(screen.getByTestId('quote-location')).toHaveTextContent('/fabrication-quotes');
+});
+
+it.each([null, 42])('keeps customer quote prices read only and saves only commercial fields (fabrication link %s)', async fabricationId => {
+  const quote = {
+    id: 8, quote_number: 'QUO-0008', revision: 'A', customer_name: 'Acme', status: 'draft',
+    quote_date: '2026-09-06', updated_at: '2026-09-06T12:00:00', subtotal: 100, total: 100,
+    fabrication_quote_id: fabricationId, lines: [{ id: 13, line_number: 1, description: 'Approved fabrication package', quantity: 1, unit_price: 100, line_total: 100 }],
+  };
+  mockedApi.getQuotes.mockResolvedValue([quote]);
+  mockedApi.updateQuote.mockResolvedValue(quote);
+  render(<MemoryRouter initialEntries={['/quotes?id=8']}><ToastProvider><Quotes /></ToastProvider></MemoryRouter>);
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit draft' }));
+  const dialog = await screen.findByRole('dialog');
+  expect(within(dialog).queryByRole('spinbutton', { name: 'Line item unit price' })).not.toBeInTheDocument();
+  expect(within(dialog).queryByRole('button', { name: /Add Line/i })).not.toBeInTheDocument();
+  expect(within(dialog).getByRole('link', { name: fabricationId ? 'Open fabrication estimate to revise' : 'Create a fabrication estimate for new pricing' })).toHaveAttribute('href', fabricationId ? '/fabrication-quotes?id=42' : '/fabrication-quotes');
+  fireEvent.change(within(dialog).getByRole('textbox', { name: 'Notes' }), { target: { value: 'Customer delivery note' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save draft' }));
+  await waitFor(() => expect(mockedApi.updateQuote).toHaveBeenCalledWith(8, expect.objectContaining({ notes: 'Customer delivery note' })));
+  const payload = mockedApi.updateQuote.mock.calls.at(-1)?.[1];
+  expect(payload).not.toHaveProperty('lines');
+  expect(payload).not.toHaveProperty('valid_days');
 });

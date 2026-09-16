@@ -22,7 +22,6 @@ from app.models.work_order_blocker import (
 from app.services.ai_action_applier import AIActionApplier, AIActionApplyError
 from app.services.ai_learners import run_domain_learners
 from app.services.ai_learners.cycle_time import run_cycle_time_learner
-from app.services.ai_learners.estimate_calibration import run_estimate_calibration_learner
 from app.services.ai_sensors.morning_brief import run_morning_brief_sensor
 
 
@@ -285,27 +284,6 @@ class TestPhase3And4:
         )
         assert "late" in rec.summary.lower() or "Late" in rec.summary
 
-    def test_estimate_calibration_learner(self, db_session: Session):
-        part = _part(db_session, "EC-1")
-        now = datetime.utcnow()
-        for i in range(3):
-            db_session.add(
-                WorkOrder(
-                    work_order_number=f"WO-EC-{i}",
-                    part_id=part.id,
-                    quantity_ordered=1,
-                    status=WorkOrderStatus.COMPLETE,
-                    actual_end=now - timedelta(days=i + 1),
-                    estimated_cost=100.0,
-                    actual_cost=150.0,
-                    company_id=1,
-                )
-            )
-        db_session.commit()
-        created = run_estimate_calibration_learner(db_session, 1)
-        db_session.commit()
-        assert created >= 1
-
     def test_cycle_time_learner(self, db_session: Session):
         wc = WorkCenter(
             code="WC-CT",
@@ -351,4 +329,4 @@ class TestPhase3And4:
 
     def test_run_domain_learners_smoke(self, db_session: Session):
         counts = run_domain_learners(db_session, 1)
-        assert set(counts.keys()) == {"cycle_time", "estimate_calibration", "correction_preference"}
+        assert set(counts.keys()) == {"cycle_time", "correction_preference"}

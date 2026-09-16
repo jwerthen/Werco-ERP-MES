@@ -1,22 +1,18 @@
 import { PageHeader } from '../components/ui/PageHeader';
 import { DocumentDeliveryComposer } from '../components/DocumentDeliveryComposer';
 import { useAuth } from '../context/AuthContext';
-import { useResumableDraft } from '../hooks/useResumableDraft';
-import { DraftRecovery } from '../components/ui/DraftRecovery';
 import React, { useEffect, useRef, useState } from 'react';
 import api from '../services/api';
-import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { formatCentralDate } from '../utils/centralTime';
 import {
   PlusIcon,
   PaperAirplaneIcon,
   ArrowRightIcon,
-  SparklesIcon,
   DocumentTextIcon,
 } from '@heroicons/react/24/outline';
 import { Modal } from '../components/ui/Modal';
 import { useUnsavedChanges } from '../hooks/useUnsavedChanges';
-import { ComboBox } from '../components/ui/ComboBox';
 import { FormField } from '../components/ui/FormField';
 import {
   LoadingButton,
@@ -66,14 +62,7 @@ interface Quote {
   lead_time_days?: number;
   lines: QuoteLine[];
   work_order_id?: number;
-}
-
-interface Part {
-  id: number;
-  part_number: string;
-  name: string;
-  part_type: string;
-  standard_cost: number;
+  fabrication_quote_id?: number | null;
 }
 
 interface QuoteDraft {
@@ -83,7 +72,6 @@ interface QuoteDraft {
   customer_email: string;
   customer_phone: string;
   customer_po?: string;
-  valid_days: number;
   valid_until?: string;
   lead_time_days: number;
   payment_terms: string;
@@ -117,7 +105,6 @@ const emptyDraft = (): QuoteDraft => ({
   customer_contact: '',
   customer_email: '',
   customer_phone: '',
-  valid_days: 30,
   lead_time_days: 14,
   payment_terms: 'Net 30',
   notes: '',
@@ -130,23 +117,16 @@ export default function Quotes() {
   const { user } = useAuth();
   const canEmail = !!user?.is_superuser || ['admin', 'manager', 'supervisor'].includes(user?.role || '');
   const [emailQuoteId, setEmailQuoteId] = useState<number | null>(null);
-  const location = useLocation();
-  const calculatorDraft = location.state?.calculatorDraft as Partial<QuoteDraft> | undefined;
   const { showToast } = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
   const [quotes, setQuotes] = useState<Quote[]>([]);
-  const [parts, setParts] = useState<Part[]>([]);
-  const [partsLoading, setPartsLoading] = useState(true);
-  const [partsError, setPartsError] = useState(false);
-  const partsRequest = useRef(0);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
-  const [showCreateModal, setShowCreateModal] = useState(Boolean(calculatorDraft));
+  const [showCreateModal, setShowCreateModal] = useState(false);
   const [editId, setEditId] = useState<number | null>(null);
+  const [fabricationQuoteId, setFabricationQuoteId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
-  const createRequestKey = useRef(crypto.randomUUID?.() || `quote-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  const [recoveryQuote, setRecoveryQuote] = useState<{ id: number; number: string } | null>(null);
   const [formError, setFormError] = useState('');
   const [sendingIds, setSendingIds] = useState<Set<number>>(new Set());
   const sendingRef = useRef(new Set<number>());
@@ -164,19 +144,9 @@ export default function Quotes() {
   const [detailError, setDetailError] = useState(false);
   const requestedDetailId = useRef<number | null>(null);
 
-  const [newQuote, setNewQuote] = useState<QuoteDraft>(() => ({ ...emptyDraft(), ...calculatorDraft }));
-  const [initialDraft, setInitialDraft] = useState(() => JSON.stringify({ ...emptyDraft(), ...calculatorDraft }));
+  const [newQuote, setNewQuote] = useState<QuoteDraft>(emptyDraft);
+  const [initialDraft, setInitialDraft] = useState(() => JSON.stringify(emptyDraft()));
   const { confirmDiscard, markSaved } = useUnsavedChanges(showCreateModal && JSON.stringify(newQuote) !== initialDraft);
-  const recoveryValue = { quote: newQuote, requestKey: createRequestKey.current };
-  const quoteDraft = useResumableDraft({ namespace: 'quotes', value: recoveryValue,
-    dirty: JSON.stringify(newQuote) !== JSON.stringify(emptyDraft()), enabled: showCreateModal && !editId,
-    valid: (data: unknown): data is typeof recoveryValue => {
-      const saved = data as typeof recoveryValue | null;
-      return !!saved && typeof saved.requestKey === 'string' && !!saved.quote
-        && typeof saved.quote.customer_name === 'string' && Array.isArray(saved.quote.lines)
-        && saved.quote.lines.every(line => !!line && typeof line.description === 'string' && typeof line.quantity === 'number' && typeof line.unit_price === 'number');
-    }, restore: saved => { setNewQuote({ ...emptyDraft(), ...saved.quote }); createRequestKey.current = saved.requestKey; },
-  });
   const listRequest = useRef(0);
   const detailRequest = useRef(0);
   const status = quoteStatuses.includes(searchParams.get('status') || '') ? searchParams.get('status')! : 'open';
@@ -190,30 +160,11 @@ export default function Quotes() {
   useEffect(() => {
     void loadData();
   }, [status, query]);
-  const loadParts = async () => {
-    const request = ++partsRequest.current;
-    setPartsLoading(true);
-    setPartsError(false);
-    try {
-      const rows = await api.getParts({ active_only: true });
-      if (request === partsRequest.current) setParts(rows);
-    } catch {
-      if (request === partsRequest.current) setPartsError(true);
-    } finally {
-      if (request === partsRequest.current) setPartsLoading(false);
-    }
-  };
-  useEffect(() => {
-    void loadParts();
-  }, []);
   const closeEditor = () => {
     if (savingRef.current || !confirmDiscard()) return;
     setShowCreateModal(false);
-    if (calculatorDraft) navigate('/quote-calculator');
   };
-  const openEditor = (quote?: Quote) => {
-    createRequestKey.current = crypto.randomUUID?.() || `quote-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    setRecoveryQuote(null);
+  const openEditor = (quote: Quote) => {
     const draft = quote
       ? {
           ...emptyDraft(),
@@ -233,7 +184,8 @@ export default function Quotes() {
       : emptyDraft();
     setNewQuote(draft);
     setInitialDraft(JSON.stringify(draft));
-    setEditId(quote?.id || null);
+    setEditId(quote.id);
+    setFabricationQuoteId(quote.fabrication_quote_id || null);
     setFormError('');
     setShowCreateModal(true);
   };
@@ -311,8 +263,7 @@ export default function Quotes() {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (savingRef.current) return;
-    if (quoteDraft.blocked) { setFormError('Resume or remove your saved draft before creating a quote.'); return; }
+    if (savingRef.current || !editId) return;
     if (
       !newQuote.customer_name.trim() ||
       newQuote.lines.length === 0 ||
@@ -331,20 +282,29 @@ export default function Quotes() {
     savingRef.current = true;
     setSaving(true);
     setFormError('');
-    setRecoveryQuote(null);
-    if (!editId && !createRequestKey.current)
-      createRequestKey.current = crypto.randomUUID?.() || `quote-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     try {
-      const result = editId
-        ? await api.updateQuote(editId, { ...newQuote, valid_until: newQuote.valid_until || null })
-        : await api.createQuote({ ...newQuote, request_key: createRequestKey.current });
-      if (!editId && !await quoteDraft.clear()) showToast('warning', 'Quote created, but the recovery draft could not be removed. Its request key will recover this quote if resumed.');
+      const commercialFields = {
+        expected_updated_at: newQuote.expected_updated_at,
+        customer_name: newQuote.customer_name,
+        customer_contact: newQuote.customer_contact,
+        customer_email: newQuote.customer_email,
+        customer_phone: newQuote.customer_phone,
+        customer_po: newQuote.customer_po,
+        lead_time_days: newQuote.lead_time_days,
+        payment_terms: newQuote.payment_terms,
+        notes: newQuote.notes,
+        internal_notes: newQuote.internal_notes,
+      };
+      const result = await api.updateQuote(editId, {
+        ...commercialFields,
+        valid_until: newQuote.valid_until || null,
+      });
       // Mark clean before navigation; a successful save must not trigger the leave guard.
       markSaved();
       setInitialDraft(JSON.stringify(newQuote));
       setShowCreateModal(false);
       setEditId(null);
-      showToast('success', editId ? 'Quote draft updated' : 'Quote created');
+      showToast('success', 'Quote draft updated');
       selectQuote(result);
       void loadData();
     } catch (err: any) {
@@ -352,12 +312,8 @@ export default function Quotes() {
       setFormError(
         typeof detail === 'string'
           ? detail
-          : detail?.message || (editId
-            ? 'Could not save quote. Your entries have been kept. Refresh the quote before retrying if another editor has changed it.'
-            : 'Could not save quote. Your entries have been kept; retrying this draft will recover its saved quote if the request already completed.')
+          : detail?.message || 'Could not save quote. Your entries have been kept. Refresh the quote before retrying if another editor has changed it.'
       );
-      if (err.response?.status === 409 && detail?.quote_id)
-        setRecoveryQuote({ id: detail.quote_id, number: detail.quote_number || String(detail.quote_id) });
       if (err.response?.status === 409) void loadData();
     } finally {
       savingRef.current = false;
@@ -457,33 +413,6 @@ export default function Quotes() {
     const nextParams = new URLSearchParams(searchParams);
     nextParams.set('id', String(quote.id));
     setSearchParams(nextParams);
-  };
-
-  const addLine = () => {
-    setNewQuote({
-      ...newQuote,
-      lines: [...newQuote.lines, { part_id: 0, description: '', quantity: 1, unit_price: 0, labor_hours: 0 }],
-    });
-  };
-
-  const updateLine = (index: number, field: string, value: any) => {
-    const lines = [...newQuote.lines];
-    lines[index] = { ...lines[index], [field]: value };
-
-    // Auto-fill description and price from part
-    if (field === 'part_id' && value > 0) {
-      const part = parts.find(p => p.id === value);
-      if (part) {
-        lines[index].description = `${part.part_number} - ${part.name}`;
-        if (!calculatorDraft && !editId) lines[index].unit_price = part.standard_cost * 1.5;
-      }
-    }
-
-    setNewQuote({ ...newQuote, lines });
-  };
-
-  const removeLine = (index: number) => {
-    setNewQuote({ ...newQuote, lines: newQuote.lines.filter((_, i) => i !== index) });
   };
 
   const calculateTotal = () => {
@@ -632,13 +561,8 @@ export default function Quotes() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Quotes & Estimates" description="Prepare customer quotes and follow their progress into production." actions={<>
-          <Button variant="secondary" onClick={() => navigate('/rfq-packages/new')} className="flex items-center">
-            <SparklesIcon className="h-5 w-5 mr-2" />
-            AI RFQ Quote
-          </Button>
-          {quoteDraft.available && <Button variant="secondary" onClick={() => openEditor()}>Continue quote draft</Button>}
-          <Button onClick={() => openEditor()} className="flex items-center">
+      <PageHeader title="Customer Quotes" description="Review approved estimates, prepare customer documents and follow quotes into production." actions={<>
+          <Button onClick={() => navigate('/fabrication-quotes')} className="flex items-center">
             <PlusIcon className="h-5 w-5 mr-2" />
             New Quote
           </Button>
@@ -808,14 +732,14 @@ export default function Quotes() {
           empty={{
             icon: DocumentTextIcon,
             title: query ? 'No matching quotes' : status === 'open' ? 'No open quotes' : 'No quotes in this view',
-            description: 'Create a quote or generate one from an RFQ to get started.',
-            action: { label: 'New Quote', onClick: () => openEditor() },
+            description: 'Build and approve a fabrication estimate, then hand it off for customer review.',
+            action: { label: 'New Quote', onClick: () => navigate('/fabrication-quotes') },
           }}
         />
       </div>
 
       {emailQuoteId && <DocumentDeliveryComposer key={emailQuoteId} entityType="quote" entityId={emailQuoteId} canReconcile={!!user?.is_superuser || ['admin', 'manager'].includes(user?.role || '')} onClose={() => setEmailQuoteId(null)} onAccepted={() => void loadData()} />}
-      {/* Create Quote Modal */}
+      {/* Customer quote review */}
       <Modal
         open={showCreateModal}
         onClose={closeEditor}
@@ -825,48 +749,20 @@ export default function Quotes() {
         ariaLabelledBy="quote-editor-title"
       >
         <h3 id="quote-editor-title" className="text-lg font-semibold mb-4">
-          {editId ? 'Edit quote draft' : 'Create Quote'}
+          Edit quote draft
         </h3>
-        <DraftRecovery draft={quoteDraft} />
-        {calculatorDraft && (
-          <p className="text-sm text-slate-300 mb-4">
-            Calculation carried over. Select the business part and customer before saving; the original calculation is
-            retained in the internal record.
-          </p>
-        )}
-        {partsLoading && (
-          <p role="status" className="mb-3 text-sm text-slate-300">
-            Loading production parts…
-          </p>
-        )}
-        {partsError && (
-          <div role="alert" className="mb-3 border border-amber-500/40 p-3 text-sm text-amber-200">
-            Part lookup is unavailable. Your entries are kept.{' '}
-            <button type="button" className="underline" onClick={() => void loadParts()} disabled={saving}>
-              Retry part lookup
-            </button>
-          </div>
-        )}
+        <p className="text-sm text-slate-300 mb-4">
+          Pricing and quantities are preserved with this customer quote.{' '}
+          <Link className="text-fd-link underline" to={fabricationQuoteId ? `/fabrication-quotes?id=${fabricationQuoteId}` : '/fabrication-quotes'}>
+            {fabricationQuoteId ? 'Open fabrication estimate to revise' : 'Create a fabrication estimate for new pricing'}
+          </Link>.
+        </p>
         <form onSubmit={handleCreate} className="space-y-4">
           <fieldset disabled={saving} className="min-w-0 space-y-4">
             {formError && (
               <p role="alert" className="text-red-300 p-3 border border-red-500/30 rounded">
                 {formError}
               </p>
-            )}
-            {recoveryQuote && (
-              <button
-                type="button"
-                className="text-fd-link underline"
-                onClick={() => {
-                  if (!confirmDiscard()) return;
-                  setShowCreateModal(false);
-                  setEditId(null);
-                  updateFilter('id', String(recoveryQuote.id));
-                }}
-              >
-                Open existing quote {recoveryQuote.number}
-              </button>
             )}
             {/* Customer Info */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -927,21 +823,14 @@ export default function Quotes() {
                   />
                 )}
               </FormField>
-              <FormField label={editId ? 'Valid Until' : 'Valid Days'}>
+              <FormField label="Valid Until">
                 {field => (
                   <input
                     {...field}
-                    type={editId ? 'date' : 'number'}
-                    value={editId ? newQuote.valid_until || '' : newQuote.valid_days}
-                    onChange={e =>
-                      setNewQuote(
-                        editId
-                          ? { ...newQuote, valid_until: e.target.value }
-                          : { ...newQuote, valid_days: parseInt(e.target.value) || 1 }
-                      )
-                    }
+                    type="date"
+                    value={newQuote.valid_until || ''}
+                    onChange={e => setNewQuote({ ...newQuote, valid_until: e.target.value })}
                     className="input"
-                    min={editId ? undefined : 1}
                   />
                 )}
               </FormField>
@@ -958,93 +847,20 @@ export default function Quotes() {
               </FormField>
             </div>
 
-            {/* Line Items */}
-            <div>
-              <div className="flex justify-between items-center mb-2">
-                <span className="label">Line Items</span>
-                <button type="button" onClick={addLine} className="text-fd-link text-sm hover:underline">
-                  + Add Line
-                </button>
-              </div>
-              {newQuote.lines.length > 0 && (
-                <div className="hidden md:flex gap-2 mb-1 text-xs text-slate-400 font-medium">
-                  <div className="w-48">Part</div>
-                  <div className="flex-1">Description</div>
-                  <div className="w-20">Qty</div>
-                  <div className="w-24">Unit Price</div>
-                  <div className="w-24">Total</div>
-                  <div className="w-6"></div>
-                </div>
-              )}
-              {newQuote.lines.map((line, idx) => (
-                <div key={idx} className="flex flex-wrap md:flex-nowrap gap-2 mb-4 items-start">
-                  <div className="w-48">
-                    <ComboBox
-                      disabled={partsLoading || partsError || saving}
-                      value={line.part_id ? String(line.part_id) : ''}
-                      onChange={value => updateLine(idx, 'part_id', Number(value))}
-                      ariaLabel={`Part for line ${idx + 1}`}
-                      emptyOptionLabel="Custom item (quote only)"
-                      options={parts
-                        .filter(p => ['manufactured', 'assembly'].includes(p.part_type))
-                        .map(p => ({ value: String(p.id), label: p.part_number, hint: p.name }))}
-                    />
-                  </div>
-                  <div className="flex-1">
-                    <input
-                      type="text"
-                      value={line.description}
-                      onChange={e => updateLine(idx, 'description', e.target.value)}
-                      className="input text-sm"
-                      placeholder="Description"
-                      aria-label="Line item description"
-                      required
-                    />
-                  </div>
-                  <div className="w-20">
-                    <input
-                      type="number"
-                      value={line.quantity}
-                      onChange={e => updateLine(idx, 'quantity', parseFloat(e.target.value))}
-                      className="input text-sm"
-                      aria-label="Line item quantity"
-                      min={0.000001}
-                      step="any"
-                      required
-                    />
-                  </div>
-                  <div className="w-24">
-                    <input
-                      type="number"
-                      value={line.unit_price}
-                      onChange={e => updateLine(idx, 'unit_price', parseFloat(e.target.value))}
-                      className="input text-sm"
-                      aria-label="Line item unit price"
-                      step={0.01}
-                      min={0}
-                    />
-                  </div>
-                  <div className="w-24 text-right pt-2 font-medium">
-                    ${(line.quantity * line.unit_price).toFixed(2)}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => removeLine(idx)}
-                    aria-label={`Remove line ${idx + 1}`}
-                    className="text-red-500 hover:text-red-400 mt-2"
-                  >
-                    &times;
-                  </button>
-                </div>
-              ))}
-              {newQuote.lines.length === 0 && <p className="text-slate-400 text-sm">Click "+ Add Line" to add items</p>}
-              {newQuote.lines.length > 0 && (
-                <div className="text-right mt-4 pt-4 border-t">
-                  <span className="text-lg font-bold">
-                    Total: ${calculateTotal().toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                  </span>
-                </div>
-              )}
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm text-left">
+                <caption className="text-left font-semibold mb-2">Quoted line items (read only)</caption>
+                <thead><tr><th className="p-2">Description</th><th className="p-2">Quantity</th><th className="p-2">Unit price</th><th className="p-2">Total</th></tr></thead>
+                <tbody>{newQuote.lines.map((line, index) => (
+                  <tr key={line.id || index} className="border-t border-fd-line">
+                    <td className="p-2">{line.description}</td>
+                    <td className="p-2">{line.quantity.toLocaleString()}</td>
+                    <td className="p-2">${line.unit_price.toFixed(2)}</td>
+                    <td className="p-2">${(line.quantity * line.unit_price).toFixed(2)}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+              <p className="text-right font-semibold mt-3">Total: ${calculateTotal().toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
             </div>
 
             <FormField label="Payment terms">
@@ -1074,7 +890,7 @@ export default function Quotes() {
                 Cancel
               </Button>
               <LoadingButton type="submit" loading={saving}>
-                {editId ? 'Save draft' : 'Create Quote'}
+                Save draft
               </LoadingButton>
             </div>
           </fieldset>

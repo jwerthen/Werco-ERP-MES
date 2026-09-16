@@ -118,7 +118,7 @@ describe('Quotes convert-to-work-order confirm (info variant)', () => {
     expect(mockedApi.convertQuote).not.toHaveBeenCalled();
   });
 
-  it('edits the actual expiry date and preserves line identity and internal costs', async () => {
+  it('edits the actual expiry date without resubmitting archived line costs', async () => {
     const draft = {
       ...sentQuote,
       status: 'draft',
@@ -156,19 +156,10 @@ describe('Quotes convert-to-work-order confirm (info variant)', () => {
         expect.objectContaining({
           valid_until: '2026-11-02',
           customer_po: 'PO-FIXTURE',
-          lines: [
-            expect.objectContaining({
-              id: 91,
-              quantity: 2,
-              labor_hours: 3,
-              material_cost: 9,
-              labor_cost: 12,
-              notes: 'Keep line notes',
-            }),
-          ],
         })
       )
     );
+    expect(mockedApi.updateQuote.mock.calls[0][1]).not.toHaveProperty('lines');
   });
 
   it('keeps fresh production links when the list refresh fails after conversion', async () => {

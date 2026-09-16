@@ -40,6 +40,7 @@ from app.core.security import create_access_token
 from app.models.company import Company
 from app.models.quote_config import SettingsAuditLog
 from app.models.user import User, UserRole
+from app.models.work_center import WorkCenter
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -116,14 +117,22 @@ def headers_for(user: User, *, active_company_id: int = None) -> dict:
     return {"Authorization": f"Bearer {token}", "X-Requested-With": "XMLHttpRequest"}
 
 
-def _material_payload(name: str) -> dict:
-    """Minimal valid body for POST /materials.
-
-    ``MaterialCreate`` (app/schemas/admin_settings.py) requires only ``name``
-    (str) and ``category`` (a ``MaterialCategory`` enum value); every other field
-    has a default. ``"steel"`` is ``MaterialCategory.STEEL``.
-    """
-    return {"name": name, "category": "steel"}
+def _rate_update(client, db, user, company_id):
+    name = f"Test cell {_next()}"
+    wc = WorkCenter(company_id=company_id, code=f"AUD-{_next()}", name=name, work_center_type="laser", hourly_rate=40)
+    db.add(wc)
+    db.commit()
+    response = client.put(
+        f"/api/v1/admin/settings/work-center-rates/{wc.id}",
+        json={"hourly_rate": 60},
+        headers=headers_for(user, active_company_id=company_id),
+    )
+    assert response.status_code == status.HTTP_200_OK, response.text
+    return (
+        db.query(SettingsAuditLog)
+        .filter(SettingsAuditLog.entity_type == "work_center_rate", SettingsAuditLog.entity_id == wc.id)
+        .one()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -133,95 +142,17 @@ def _material_payload(name: str) -> dict:
 
 
 def test_settings_write_attributes_audit_to_active_company(client: TestClient, db_session: Session):
-    """A PLATFORM_ADMIN whose home company is 1, switched into company 2, makes a
-    settings WRITE through ``log_change``. The resulting ``SettingsAuditLog`` row
-    must carry company_id == 2 (the ACTIVE company), NOT 1 (home).
-
-    This is the regression guard for the fix: against the pre-fix code (which
-    used ``current_user.company_id``) the row would be stamped 1 and this would
-    fail. ``admin_only = require_role([UserRole.ADMIN])`` admits a PLATFORM_ADMIN,
-    so the switched token can hit the endpoint.
-    """
     _ensure_company(db_session, 2)
     platform_admin = make_user(db_session, role=UserRole.PLATFORM_ADMIN, company_id=1)
-
-    name = f"Inconel {_next()}"
-    resp = client.post(
-        "/api/v1/admin/settings/materials",
-        json=_material_payload(name),
-        headers=headers_for(platform_admin, active_company_id=2),
-    )
-    assert resp.status_code == status.HTTP_200_OK, resp.text
-
-    # The audit row for this create must be stamped with the ACTIVE company (2).
-    audit = (
-        db_session.query(SettingsAuditLog)
-        .filter(
-            SettingsAuditLog.entity_type == "material",
-            SettingsAuditLog.entity_name == name,
-        )
-        .one()
-    )
-    assert audit.action == "create"
-    assert audit.changed_by == platform_admin.id
-    assert audit.company_id == 2  # ACTIVE company, NOT the admin's home company (1)
-    assert platform_admin.company_id == 1  # sanity: home company is unchanged
-
-
-def test_overhead_write_attributes_audit_to_active_company(client: TestClient, db_session: Session):
-    """Same invariant via a different endpoint/body: PUT /overhead/{key}
-    (``SettingUpdate``) by a switched platform admin stamps the ACTIVE company."""
-    _ensure_company(db_session, 2)
-    platform_admin = make_user(db_session, role=UserRole.PLATFORM_ADMIN, company_id=1)
-
-    key = f"markup_pct_{_next()}"
-    resp = client.put(
-        f"/api/v1/admin/settings/overhead/{key}",
-        json={"value": "1.25", "setting_type": "number"},
-        headers=headers_for(platform_admin, active_company_id=2),
-    )
-    assert resp.status_code == status.HTTP_200_OK, resp.text
-
-    audit = (
-        db_session.query(SettingsAuditLog)
-        .filter(
-            SettingsAuditLog.entity_type == "overhead",
-            SettingsAuditLog.entity_name == key,
-        )
-        .one()
-    )
-    assert audit.company_id == 2  # ACTIVE company, NOT home (1)
-
-
-# ---------------------------------------------------------------------------
-# 2. Baseline (API-level): a normal company-1 ADMIN attributes to company 1.
-# ---------------------------------------------------------------------------
+    audit = _rate_update(client, db_session, platform_admin, 2)
+    assert audit.action == "update" and audit.changed_by == platform_admin.id
+    assert audit.company_id == 2 and platform_admin.company_id == 1
 
 
 def test_settings_write_attributes_audit_to_home_company_for_normal_admin(client: TestClient, db_session: Session):
-    """A normal company-1 ADMIN performing the same write tags the audit row with
-    company_id == 1. Here the active company *is* the home company, so the row is
-    correctly attributed to 1 (and never leaks to another tenant)."""
-    admin1 = make_user(db_session, role=UserRole.ADMIN, company_id=1)
-
-    name = f"6061-T6 {_next()}"
-    resp = client.post(
-        "/api/v1/admin/settings/materials",
-        json=_material_payload(name),
-        headers=headers_for(admin1),  # no switch: active == home == 1
-    )
-    assert resp.status_code == status.HTTP_200_OK, resp.text
-
-    audit = (
-        db_session.query(SettingsAuditLog)
-        .filter(
-            SettingsAuditLog.entity_type == "material",
-            SettingsAuditLog.entity_name == name,
-        )
-        .one()
-    )
-    assert audit.action == "create"
-    assert audit.changed_by == admin1.id
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    audit = _rate_update(client, db_session, admin, 1)
+    assert audit.action == "update" and audit.changed_by == admin.id
     assert audit.company_id == 1
 
 

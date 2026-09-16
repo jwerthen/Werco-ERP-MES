@@ -1,5 +1,7 @@
 # Recorded-piece planning validation
 
+> Historical reference: the legacy quote-nesting calculation workflow was retired on 2026-09-16. Use [Fabrication Quoting](FABRICATION_QUOTING.md) for new estimates. Existing inventory observations and historical evidence remain preserved.
+
 September 9, 2026. This records local acceptance evidence for the conditional
 nesting/material-planning increment. Production promotion is a separate gate.
 Pricing integration, reservations, inventory consumption and automatic remnant

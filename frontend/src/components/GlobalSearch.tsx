@@ -89,7 +89,8 @@ const quickActions = [
   { name: 'Purchasing', url: '/purchasing', icon: TruckIcon },
   { name: 'Material Price History', url: '/purchasing/price-history', icon: CurrencyDollarIcon },
   { name: 'Customers', url: '/customers', icon: BuildingOfficeIcon },
-  { name: 'Quotes', url: '/quotes', icon: CurrencyDollarIcon },
+  { name: 'Fabrication Quoting', url: '/fabrication-quotes', icon: CurrencyDollarIcon },
+  { name: 'Customer Quotes', url: '/quotes', icon: CurrencyDollarIcon },
 ];
 
 const commandActions: SearchResult[] = [

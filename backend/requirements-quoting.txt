@@ -1,0 +1,6 @@
+# Isolated quotation CAD/document worker, packaged in both deployed API images.
+# Install the generated universal Python 3.11 hash lock; do not merge with API dependencies.
+ezdxf==1.4.3
+cadquery-ocp==7.9.3.1.1
+pdfplumber==0.11.9
+pypdf==6.16.1

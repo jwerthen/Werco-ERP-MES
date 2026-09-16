@@ -23,13 +23,13 @@ def _seed_vendor_and_part(db_session):
     return vendor, part
 
 
-def test_create_quote(client, admin_user, db_session):
+def test_create_quote_is_retired(client, admin_user, db_session):
     resp = client.post(
         "/api/v1/quotes/",
         headers=_headers(admin_user),
         json={"customer_name": "Repro Co", "lines": [{"description": "Widget", "quantity": 3, "unit_price": 99.5}]},
     )
-    assert resp.status_code in (200, 201), resp.text
+    assert resp.status_code == 405
 
 
 def test_create_purchase_order(client, admin_user, db_session):
@@ -46,18 +46,13 @@ def test_create_purchase_order(client, admin_user, db_session):
     assert resp.status_code in (200, 201), resp.text
 
 
-def test_add_quote_line(client, admin_user, db_session):
-    # The add-line-to-existing-quote path builds a QuoteLine too — same missing-company_id risk.
-    headers = _headers(admin_user)
-    created = client.post("/api/v1/quotes/", headers=headers, json={"customer_name": "Repro Co", "lines": []})
-    assert created.status_code in (200, 201), created.text
-    quote_id = created.json()["id"]
+def test_add_quote_line_is_retired(client, admin_user):
     resp = client.post(
-        f"/api/v1/quotes/{quote_id}/lines",
-        headers=headers,
+        "/api/v1/quotes/1/lines",
+        headers=_headers(admin_user),
         json={"description": "Late-added widget", "quantity": 2, "unit_price": 50},
     )
-    assert resp.status_code in (200, 201), resp.text
+    assert resp.status_code == 404
 
 
 def test_create_ncr(client, admin_user, db_session):

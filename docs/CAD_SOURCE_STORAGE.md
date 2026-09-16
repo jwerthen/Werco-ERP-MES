@@ -1,5 +1,7 @@
 # Original DXF evidence for saved nests
 
+> Historical reference: the legacy quote-nesting workspace, solver and APIs were retired on 2026-09-16. Use [Fabrication Quoting](FABRICATION_QUOTING.md) for new estimates. Existing inventory observations and historical database evidence remain preserved.
+
 Original DXFs can be attached explicitly to an exact saved nest revision. The server
 compares raw bytes with the original-byte hash recorded for every selected part.
 Completion records what bytes were retained and when they were checked. It does

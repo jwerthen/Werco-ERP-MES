@@ -19,11 +19,11 @@ from app.api.endpoints import (
     document_deliveries,
     documents,
     downtime,
-    dxf_parser,
     engineering_changes,
     errors,
-    estimate_workbench,
     exports,
+    fabrication_quote_profiles,
+    fabrication_quotes,
     import_batches,
     import_templates,
     integrations,
@@ -34,7 +34,6 @@ from app.api.endpoints import (
     material_price_history,
     materials,
     mrp,
-    nesting_buyer_pdf,
     notifications,
     oee,
     operational_events,
@@ -48,16 +47,9 @@ from app.api.endpoints import (
     purchasing,
     qms_standards,
     quality,
-    quote_calculator,
-    quote_nesting_drafts,
-    quote_nesting_materials,
-    quote_nesting_runs,
-    quote_nesting_sources,
-    quote_nesting_spacing,
     quotes,
     receiving,
     reports,
-    rfq_quotes,
     routing,
     runtime_metrics,
     scanner,
@@ -83,7 +75,6 @@ from app.api.endpoints import (
 )
 
 api_router = APIRouter()
-api_router.include_router(nesting_buyer_pdf.router, prefix="/quote-nesting", tags=["Quote Nesting"])
 api_router.include_router(document_deliveries.router, prefix="/document-deliveries", tags=["Document Deliveries"])
 api_router.include_router(operations_inbox.router, prefix="/operations-inbox", tags=["Operations Inbox"])
 api_router.include_router(user_workspaces.router, prefix="/user-workspaces", tags=["User Workspaces"])
@@ -124,6 +115,10 @@ api_router.include_router(documents.router, prefix="/documents", tags=["Document
 api_router.include_router(reports.router, prefix="/reports", tags=["Reports"])
 api_router.include_router(shipping.router, prefix="/shipping", tags=["Shipping"])
 api_router.include_router(quotes.router, prefix="/quotes", tags=["Quotes"])
+api_router.include_router(fabrication_quotes.router, prefix="/fabrication-quotes", tags=["Fabrication Quoting"])
+api_router.include_router(
+    fabrication_quote_profiles.router, prefix="/fabrication-quote-profiles", tags=["Fabrication Quoting"]
+)
 api_router.include_router(users.router, prefix="/users", tags=["Users"])
 api_router.include_router(api_tokens.router, prefix="/api-tokens", tags=["API Tokens"])
 api_router.include_router(customers.router, prefix="/customers", tags=["Customers"])
@@ -131,17 +126,6 @@ api_router.include_router(calibration.router, prefix="/calibration", tags=["Cali
 api_router.include_router(scanner.router, prefix="/scanner", tags=["Scanner"])
 api_router.include_router(traceability.router, prefix="/traceability", tags=["Traceability"])
 api_router.include_router(audit.router, prefix="/audit", tags=["Audit"])
-api_router.include_router(quote_calculator.router, prefix="/quote-calc", tags=["Quote Calculator"])
-api_router.include_router(quote_nesting_materials.router, prefix="/quote-nesting", tags=["Quote Nesting"])
-api_router.include_router(quote_nesting_drafts.router, prefix="/quote-nesting/drafts", tags=["Quote Nesting Drafts"])
-api_router.include_router(quote_nesting_sources.router, prefix="/quote-nesting/drafts", tags=["Quote Nesting Drafts"])
-api_router.include_router(quote_nesting_runs.router, prefix="/quote-nesting/runs", tags=["Quote Nesting Runs"])
-api_router.include_router(
-    quote_nesting_spacing.router, prefix="/quote-nesting/spacing-policies", tags=["Quote Nesting Spacing Policies"]
-)
-api_router.include_router(dxf_parser.router, prefix="/dxf-parser", tags=["DXF Parser"])
-api_router.include_router(rfq_quotes.router, prefix="/rfq-packages", tags=["AI RFQ Quotes"])
-api_router.include_router(estimate_workbench.router, prefix="/estimate-workbench", tags=["Estimate Workbench"])
 api_router.include_router(admin_settings.router, prefix="/admin/settings", tags=["Admin Settings"])
 api_router.include_router(integrations.router, prefix="/admin/settings", tags=["Carrier Integrations"])
 api_router.include_router(carrier_webhooks.router, prefix="/webhooks", tags=["Carrier Webhooks"])

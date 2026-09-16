@@ -194,7 +194,7 @@ allowlist), or start from everything and subtract the ones you don't (a denylist
   accepted for exclusions exactly as they already are for inclusions.
 
 **Why the exclusion form exists.** Switching one cron off with an allowlist means listing the
-other twelve, which **freezes the set**: a cron added to `ALL_CRON_JOBS` in a later release
+other jobs, which **freezes the set**: a cron added to `ALL_CRON_JOBS` in a later release
 silently never registers on that worker. That is "I enabled the cron and nothing happened" —
 precisely the failure this module exists to eliminate — arriving one deploy late instead of
 immediately. A denylist subtracts from whatever the release declares, so new crons arrive
@@ -435,13 +435,13 @@ adding the next:
 Then, once all are wanted: `WORKER_CRON_JOBS=all` (or unset it).
 
 **Switching one back off later — do not go back to an allowlist.** Use the exclusion form, so
-the other eleven stay whatever the current release declares:
+the remaining jobs stay whatever the current release declares:
 
 ```
 WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job    # everything except the MRP auto-draft pass
 ```
 
-Listing the other eleven by name would work today and rot at the next release that adds a
+Listing the remaining jobs by name would work today and rot at the next release that adds a
 cron. Procedure and blast radius: `WORKER_DEPLOYMENT_RUNBOOK.md` §6.4.
 
 ### 5.7 Turn on the CI deploy
@@ -458,150 +458,25 @@ Until these are set, both workflow steps are skipped and merging changes nothing
 
 ## 6. Verifying it is actually working
 
-### Saved nesting calculation runtime
+### Shared worker release verification
 
-The worker image builds the same TypeScript contour kernel used by the browser with
-the committed frontend lockfile. The build stage uses official
-[`node:22.23.2-bookworm-slim`](https://hub.docker.com/_/node), pinned to manifest digest
-`sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5`.
-Only its Node executable and the compiled `solver.cjs`/`manifest.json` reach the
-Python worker image; npm, frontend assets and node_modules remain outside it.
-The API Dockerfiles do not gain Node. Repo-root build/upload ignores retain the
-compiler/kernel inputs, while backend-only image contexts exclude generated bundles.
-Both Compose workers build this image; a whole-backend mount must not hide `/app/nesting-runtime`.
+The ARQ worker runs ERP queue jobs and scheduled work. Legacy quote-nesting jobs,
+Node bundles, solver profiles and relay crons have been retired. Fabrication quote
+file analysis uses a bounded Python subprocess inside the API image, with its
+own hash-locked dependencies in `/opt/werco-quote-worker`. It does not require ARQ.
 
-CI requires a non-root, network-disabled, read-only image smoke that checks Node's
-exact version, the executable SHA against the manifest and its hello message, a
-complete synthetic contour result, and malformed-unit rejection. Its manifest artifact
-is the expected production identity. Node is limited to 512 MiB heap and one nesting
-child per ARQ process; this does not reserve memory against other background jobs.
+CI builds and imports the shared ARQ image without network access. Production
+promotion still requires an active SUCCESS deployment matching the release SHA
+and a fresh `worker_runtime_ready` event. The worker publishes that event only
+after successfully writing its identity to Redis, then refreshes every 30 seconds.
+The identity contains release, instance ID, Railway deployment ID and observation
+time; stale, superseded or unrelated deployment events cannot pass the gate.
 
-The worker publishes `quote-nesting:runtime:v1:<release>` in the existing Redis target
-every 30 seconds with a 90 second TTL. Only after a successful publication does the safe
-`nesting_runtime_ready` JSON event include release, protocol, solver version, bundle SHA,
-Node version, worker instance ID, Railway deployment ID, and UTC observation time.
-No geometry or credentials are logged. The permissioned API runtime endpoint exposes
-availability/identity; missing or stale identity prevents new run creation.
-The selected ARQ schedules must include `relay_quote_nesting_runs_job`, which
-recovers queued/expired leases. A legacy cron allowlist that omits this relay, or
-`WORKER_CRON_JOBS=none`, deliberately prevents the runtime from advertising readiness.
-The release does not change any production cron variable; review existing selection
-as part of the normal release gate instead of silently enabling schedules.
-
-Readiness identifies the original configured `NESTING_RELAY_CRON` object among the
-selected schedules. Sentry's ARQ integration wraps its coroutine in place before
-startup; comparing the callable would falsely disable a running relay. Matching a
-schedule name alone is insufficient. If production intentionally disables all other
-crons, `WORKER_CRON_JOBS=relay_quote_nesting_runs_job` enables only the required
-nesting relay. Coordinate this worker-only setting explicitly; `none` remains unavailable.
-
-Railway JSON logs can expose the readiness event and identity directly as structured
-fields with an empty `message`, or wrap application JSON in a message string. The
-verifier recognizes the intended event in either representation, then applies the
-same exact identity/freshness checks. It reads bounded recent logs without a text-only
-filter, which would hide structured event attributes. Unrelated or malformed records
-cannot establish readiness.
-
-For worker-touched production releases, `.github/scripts/verify_worker_release.py`
-combines Railway's active SUCCESS deployment state with fresh events fetched for that
-exact deployment, compares all build identities to the tested image, then rechecks that
-deployment is still active. A queued build, an inactive latest deployment, a prior
-release's heartbeat, or startup verification without successful Redis publication cannot
-pass. The check uses the existing Railway project token and changes no service settings.
-An unrelated frontend UI/CSS change retains the standalone frontend release path;
-shared kernel/build inputs defer to the combined API/worker pipeline.
-
-Spacing-policy calculations require the shared bundle, API and frontend to support
-project 10/quote 9 together, after additive migration 103 follows 102. A changed policy-aware
-kernel is a worker release input and gets a new tested bundle identity. No policy is
-seeded by migration and no new cron, secret or environment variable is introduced.
-Retain policy/draft/run history on application rollback; do not remove policy snapshots
-or custom-spacing reasons from saved inputs to make an older runtime accept them.
-
-Stock exclusions require solver `werco-contour-v5` and quote 11/project 12 support
-across API, frontend and compiled worker. The local job 13 wrapper is not a server
-project format. API validation bounds IDs, finite dimensions, gross-sheet containment
-and complexity; the shared TypeScript kernel validates source topology and guarded
-exclusion/part geometry before emitting a checkpoint. Nonempty regions select the
-v2 leftover profile and `excludedArea`; absent/empty lists retain v1. Rebuild and test
-the image and use its new manifest identity in the unchanged active-deployment/fresh
-post-Redis heartbeat gate. There is no new migration, cron, environment variable or
-physical-stock reservation implied by this geometry increment.
-
-The compensated-envelope increment introduced solver `werco-contour-v6`. The normative source
-is `backend/app/data/nesting_profiles/werco-compensated-v1.json`; its reviewed generated
-frontend adapter keeps the frontend-only deployment context intact. CI runs
-`python3 .github/scripts/generate_nesting_profile.py --check`, while standalone
-frontend/Node builds recompute the adapter digest and Python validates the normative
-wrapper. The source identity is `werco-compensated-v1`, SHA-256
-`21e8689fb2ce80c72befbc5866f658cd74fe8ed336d1b5c070e182f3081aa55a`.
-It is separate from the compiled bundle SHA and remains a versioned engineering
-profile, not caller-supplied cutting parameters or policy approval.
-
-The v6 manifest and Node hello include exact `geometry_profile`; source, runtime and
-v3 checkpoint/ledger evidence must agree. The heartbeat DTO is unchanged and exposes
-no geometry payload: public promotion still requires an active deployment plus a
-fresh post-Redis identity matching release, strict solver, tested bundle and Node.
-Do not use a v4/v5 verifier pin with a v6 image or relax equality to accept any solver.
-New populated groups require quote 14 inside project 15; generic Save/Open retains
-older inputs without injection. Existing same-key request recovery remains available;
-an old queued run cannot silently execute a new release/profile. Historical v4/v5
-checkpoints retain their recorded validation and are never recomputed during display.
-No database migration, secret, environment variable or cron change is introduced.
-
-The physical-piece observation register adds migration104 after103 through API boot;
-model-bootstrap DDL mirrors its PostgreSQL source/tenant, immutable-history and RLS/
-privilege guards. It adds no ARQ job, cron, environment variable, dependency or solver/
-profile revision. Existing saved nesting calculations continue to require the same
-active-release and fresh post-Redis runtime proof. **Warehouse → Inventory → Piece
-observations** records or withdraws advisory evidence only; no observed piece becomes
-nesting stock, reserved inventory, certified material or material credit through this
-release.
-
-Original DXF attachment migration105 adds audited source intents, storage attempts,
-verified receipts and exact saved-part bindings. File transfer and verification run
-through the authenticated API and the existing storage adapter; no ARQ job, cron,
-solver profile or worker runtime is added. The normal worker identity gate still
-applies when releasing the whole application. Source receipts do not create or
-approve a nesting calculation. See `CAD_SOURCE_STORAGE.md` for upload recovery and
-the separate storage-retention acceptance boundary.
-
-Recorded-piece planning now requires strict solver `werco-contour-v7`. Ordinary
-full-sheet inputs still select protocol1; project18 with an explicit `remnantPlan`
-selects protocol2 while nested group quotes remain14. The manifest retains base
-`protocol:1` and declares exact ordered `supported_protocols:[1,2]`, both geometry
-identities and the compiled bundle SHA. Startup validates these against the source
-profiles before readiness. The remnant identity is `werco-remnant-domain-v1`, SHA256
-`114171806c36fee380801a72b2beb346a41fa1af83884097f9604f417cdd445b`; it binds the unchanged
-compensated profile. Protocol2 hello adds that domain identity. The heartbeat still
-has the same eight fields and base protocol1, so do not change the availability DTO
-or accept protocol2 there to accommodate a staged request.
-
-Package both capabilities in the one existing worker image. Required offline image
-smoke must exercise ordinary protocol1 and a protocol2 baseline/recorded-piece/residual
-plan, with exact manifest/bundle/profile identity and rejected protocol mismatches.
-The normal release gate keeps the strict v7 solver pin and all release, deployment,
-Node, bundle, freshness and active-SUCCESS checks. Preserve top-level structured
-Railway events even when the outer message is empty; do not restore a text-only filter.
-Fresh readiness is still published only after Redis SET succeeds and the original
-selected relay CronJob is present, including after Sentry wraps its coroutine.
-
-All stages share the existing 120-second, 512-MiB child heap, 36-work, 8-MiB message
-and 24-MiB retained-checkpoint limits. A recorded-piece checkpoint alone completes
-no baseline or conditional alternative; timeout/cancel keeps only previously verified
-work. Existing frozen v4/v5/v6 reports are not recomputed. This adds no migration,
-environment variable, secret, cron, separate service or inventory write. See
-`RECORDED_PIECE_PLANNING.md` for source access/currentness and comparison semantics.
-
-Rollback uses a compatible API/worker/frontend release, retains migrations 101–105 and
-immutable policy/draft/run/piece-observation history plus source intent/attempt/receipt/
-binding history, plus project18/protocol2 source and stage evidence, and does not
-change cron settings. Retained history must be served by a compatible API that enforces
-`inventory:view` on remnant-bearing draft/run/CAD evidence; a pre-remnant reader may
-lack that gate even when the schema is retained. A failed runtime can still leave
-authorized history readable, but new calculations remain unavailable. No successful
-calculation, stock reservation, manufacturing approval or automatic material credit is
-implied by a worker startup or a completed deployment.
+Both API Dockerfiles install the isolated CAD runtime. CI exercises DXF, STEP,
+mesh/flat geometry, PDF, CSV and nesting inside the built non-root API container,
+with its network disabled and root filesystem read-only. API startup runs
+`alembic upgrade head` before serving requests; the shared ARQ image never runs
+migrations. See [fabrication quoting](FABRICATION_QUOTING.md) for parser limits.
 
 There is no HTTP endpoint to curl — the worker serves none, by design. Use:
 

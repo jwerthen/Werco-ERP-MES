@@ -1,5 +1,3 @@
-import hashlib
-import json
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from typing import Any, Dict, List, Optional
@@ -12,8 +10,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.api.deps import get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
-from app.db.locks import acquire_generator_lock
-from app.models.part import Part
+from app.models.fabrication_quote import FabricationQuote
 from app.models.quote import Quote, QuoteLine, QuoteStatus
 from app.models.rfq_quote import QuoteEstimate, RfqPackage
 from app.models.user import User, UserRole
@@ -36,21 +33,6 @@ class QuoteLineCreate(BaseModel):
     labor_hours: float = Field(default=0.0, allow_inf_nan=False)
     labor_cost: float = Field(default=0.0, allow_inf_nan=False)
     notes: Optional[str] = None
-
-
-class QuoteCreate(BaseModel):
-    request_key: Optional[str] = Field(default=None, min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
-    customer_name: str
-    customer_contact: Optional[str] = None
-    customer_email: Optional[str] = None
-    customer_phone: Optional[str] = None
-    customer_po: Optional[str] = None
-    valid_days: int = 30
-    lead_time_days: Optional[int] = None
-    payment_terms: Optional[str] = None
-    notes: Optional[str] = None
-    internal_notes: Optional[str] = None
-    lines: List[QuoteLineCreate] = Field(default_factory=list)
 
 
 class QuoteUpdate(BaseModel):
@@ -145,28 +127,13 @@ class QuoteResponse(BaseModel):
     lines: List[QuoteLineResponse] = []
     work_order_id: Optional[int] = None
     ai_estimate: Optional[AIEstimateResponse] = None
+    fabrication_quote_id: Optional[int] = None
     created_at: datetime
     updated_at: datetime
 
     class Config:
         from_attributes = True
         use_enum_values = True
-
-
-def generate_quote_number(db: Session) -> str:
-    acquire_generator_lock(db, "quote_number")
-    today = datetime.now().strftime("%Y%m")
-    prefix = f"QTE-{today}-"
-
-    last = db.query(Quote).filter(Quote.quote_number.like(f"{prefix}%")).order_by(Quote.quote_number.desc()).first()
-
-    if last:
-        last_num = int(last.quote_number.split("-")[-1])
-        new_num = last_num + 1
-    else:
-        new_num = 1
-
-    return f"{prefix}{new_num:04d}"
 
 
 def _format_date_for_pdf(value: Optional[date]) -> Optional[str]:
@@ -242,7 +209,7 @@ def _load_ai_estimate(db: Session, quote_id: int) -> Optional[AIEstimateResponse
     )
 
 
-def _quote_response(quote: Quote, ai_estimate=None) -> QuoteResponse:
+def _quote_response(quote: Quote, ai_estimate=None, fabrication_quote_id=None) -> QuoteResponse:
     return QuoteResponse(
         **{
             key: getattr(quote, key)
@@ -269,6 +236,7 @@ def _quote_response(quote: Quote, ai_estimate=None) -> QuoteResponse:
         },
         status=quote.status.value if hasattr(quote.status, "value") else quote.status,
         ai_estimate=ai_estimate,
+        fabrication_quote_id=fabrication_quote_id,
         updated_at=quote.updated_at or quote.created_at,
         lines=[
             QuoteLineResponse(
@@ -295,15 +263,6 @@ def _quote_response(quote: Quote, ai_estimate=None) -> QuoteResponse:
             for line in sorted(quote.lines, key=lambda line: (line.line_number, line.id))
         ],
     )
-
-
-def _validate_quote_parts(db: Session, lines: List[QuoteLineCreate], company_id: int) -> None:
-    ids = {line.part_id for line in lines if line.part_id and line.part_id > 0}
-    found = (
-        {part.id for part in db.query(Part).filter(Part.id.in_(ids), Part.company_id == company_id)} if ids else set()
-    )
-    if found != ids:
-        raise HTTPException(status_code=422, detail="One or more quote parts are unavailable in this company")
 
 
 @router.get("/", response_model=List[QuoteResponse])
@@ -337,94 +296,18 @@ def list_quotes(
     if search:
         query = query.filter(or_(Quote.quote_number.ilike(f"%{search}%"), Quote.customer_name.ilike(f"%{search}%")))
     quotes = query.order_by(Quote.created_at.desc(), Quote.id.desc()).offset(offset).limit(limit).all()
-    return [_quote_response(quote) for quote in quotes]
-
-
-@router.post("/", response_model=QuoteResponse)
-def create_quote(
-    quote_in: QuoteCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id),
-):
-    request_hash = None
-    if quote_in.request_key:
-        # Use the existing global quote-number transaction lock so a retried create
-        # observes the first committed outcome before it can allocate another number.
-        acquire_generator_lock(db, "quote_number")
-        canonical = quote_in.model_dump(mode="json", exclude={"request_key"})
-        for line in canonical["lines"]:
-            line.pop("id", None)  # IDs are not used when a new line is created.
-            line["part_id"] = line["part_id"] if line["part_id"] and line["part_id"] > 0 else None
-        request_hash = hashlib.sha256(
-            json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode(
-                "utf-8"
+    fabrication_links = (
+        dict(
+            db.query(FabricationQuote.erp_quote_id, FabricationQuote.id)
+            .filter(
+                FabricationQuote.company_id == company_id, FabricationQuote.erp_quote_id.in_([q.id for q in quotes])
             )
-        ).hexdigest()
-        existing = (
-            db.query(Quote).filter(Quote.company_id == company_id, Quote.request_key == quote_in.request_key).first()
+            .all()
         )
-        if existing:
-            if existing.request_hash != request_hash:
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "message": "This create request already saved a different quote. Open the existing quote to review it before making changes.",
-                        "quote_id": existing.id,
-                        "quote_number": existing.quote_number,
-                    },
-                )
-            return _quote_response(existing)
-    _validate_quote_parts(db, quote_in.lines, company_id)
-    quote_number = generate_quote_number(db)
-
-    quote = Quote(
-        request_key=quote_in.request_key,
-        request_hash=request_hash,
-        quote_number=quote_number,
-        customer_name=quote_in.customer_name,
-        customer_contact=quote_in.customer_contact,
-        customer_email=quote_in.customer_email,
-        customer_phone=quote_in.customer_phone,
-        customer_po=quote_in.customer_po,
-        valid_until=date.today() + timedelta(days=quote_in.valid_days),
-        lead_time_days=quote_in.lead_time_days,
-        payment_terms=quote_in.payment_terms,
-        notes=quote_in.notes,
-        internal_notes=quote_in.internal_notes,
-        created_by=current_user.id,
+        if quotes
+        else {}
     )
-    quote.company_id = company_id
-    db.add(quote)
-    db.flush()
-
-    subtotal = 0.0
-    for idx, line_data in enumerate(quote_in.lines, 1):
-        line_total = line_data.quantity * line_data.unit_price
-        line = QuoteLine(
-            quote_id=quote.id,
-            company_id=company_id,
-            line_number=idx,
-            part_id=line_data.part_id if line_data.part_id and line_data.part_id > 0 else None,
-            description=line_data.description,
-            quantity=line_data.quantity,
-            unit_price=line_data.unit_price,
-            line_total=line_total,
-            material_cost=line_data.material_cost,
-            labor_hours=line_data.labor_hours,
-            labor_cost=line_data.labor_cost,
-            notes=line_data.notes,
-        )
-        db.add(line)
-        subtotal += line_total
-
-    quote.subtotal = subtotal
-    quote.total = subtotal
-
-    db.commit()
-    db.refresh(quote)
-
-    return _quote_response(quote)
+    return [_quote_response(quote, fabrication_quote_id=fabrication_links.get(quote.id)) for quote in quotes]
 
 
 @router.get("/{quote_id}", response_model=QuoteResponse)
@@ -447,7 +330,12 @@ def get_quote(
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
 
-    return _quote_response(quote, _load_ai_estimate(db, quote.id))
+    fabrication = (
+        db.query(FabricationQuote.id)
+        .filter(FabricationQuote.company_id == company_id, FabricationQuote.erp_quote_id == quote.id)
+        .first()
+    )
+    return _quote_response(quote, _load_ai_estimate(db, quote.id), fabrication.id if fabrication else None)
 
 
 @router.put("/{quote_id}", response_model=QuoteResponse)
@@ -496,27 +384,10 @@ def update_quote(
     if quote.status == QuoteStatus.CONVERTED and "status" in update_data:
         raise HTTPException(status_code=409, detail="Converted quotes retain their production links")
     if line_data is not None:
-        incoming = [QuoteLineCreate(**line) for line in line_data]
-        if not incoming:
-            raise HTTPException(status_code=422, detail="Add at least one quote line")
-        _validate_quote_parts(db, incoming, company_id)
-        existing = {line.id: line for line in quote.lines}
-        supplied = [line.id for line in incoming if line.id is not None]
-        if len(supplied) != len(set(supplied)) or not set(supplied).issubset(existing):
-            raise HTTPException(status_code=422, detail="Quote line selection is invalid")
-        next_lines = []
-        for index, value in enumerate(incoming, 1):
-            line = existing.get(value.id) or QuoteLine(company_id=company_id)
-            fields = value.model_dump(exclude={"id"})
-            fields["part_id"] = value.part_id if value.part_id and value.part_id > 0 else None
-            for key, item in fields.items():
-                setattr(line, key, item)
-            line.line_number = index
-            line.line_total = value.quantity * value.unit_price
-            next_lines.append(line)
-        quote.lines = next_lines
-        quote.subtotal = sum(line.line_total for line in next_lines)
-        quote.total = quote.subtotal + (quote.tax or 0)
+        raise HTTPException(
+            status_code=409,
+            detail="Customer quote prices and lines are frozen. Revise and approve the estimate in Fabrication Quoting.",
+        )
     for field, value in update_data.items():
         setattr(quote, field, value)
     if content_keys or line_data is not None:
@@ -540,7 +411,12 @@ def update_quote(
 
     db.commit()
     db.refresh(quote)
-    return _quote_response(quote)
+    fabrication = (
+        db.query(FabricationQuote.id)
+        .filter(FabricationQuote.company_id == company_id, FabricationQuote.erp_quote_id == quote.id)
+        .first()
+    )
+    return _quote_response(quote, fabrication_quote_id=fabrication.id if fabrication else None)
 
 
 @router.post("/{quote_id}/send")
@@ -726,65 +602,4 @@ def generate_quote_pdf(
         BytesIO(pdf_bytes),
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-@router.post("/{quote_id}/lines", response_model=QuoteLineResponse)
-def add_quote_line(
-    quote_id: int,
-    line_in: QuoteLineCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    company_id: int = Depends(get_current_company_id),
-):
-    quote = db.query(Quote).filter(Quote.id == quote_id, Quote.company_id == company_id).first()
-    if not quote:
-        raise HTTPException(status_code=404, detail="Quote not found")
-
-    if quote.status not in [QuoteStatus.DRAFT, QuoteStatus.PENDING]:
-        raise HTTPException(status_code=400, detail="Can only add lines to draft or pending quotes")
-
-    # Get next line number
-    from sqlalchemy import func
-
-    max_line = db.query(func.max(QuoteLine.line_number)).filter(QuoteLine.quote_id == quote_id).scalar() or 0
-
-    line_total = line_in.quantity * line_in.unit_price
-    line = QuoteLine(
-        quote_id=quote_id,
-        company_id=company_id,
-        line_number=max_line + 1,
-        part_id=line_in.part_id if line_in.part_id and line_in.part_id > 0 else None,
-        description=line_in.description,
-        quantity=line_in.quantity,
-        unit_price=line_in.unit_price,
-        line_total=line_total,
-        material_cost=line_in.material_cost,
-        labor_hours=line_in.labor_hours,
-        labor_cost=line_in.labor_cost,
-        notes=line_in.notes,
-    )
-    db.add(line)
-
-    # Update quote totals
-    quote.subtotal += line_total
-    quote.total = quote.subtotal
-
-    db.commit()
-    db.refresh(line)
-
-    part = db.query(Part).filter(Part.id == line.part_id).first() if line.part_id else None
-
-    return QuoteLineResponse(
-        id=line.id,
-        line_number=line.line_number,
-        part_id=line.part_id,
-        part_number=part.part_number if part else None,
-        description=line.description,
-        quantity=line.quantity,
-        unit_price=line.unit_price,
-        line_total=line.line_total,
-        material_cost=line.material_cost,
-        labor_hours=line.labor_hours,
-        labor_cost=line.labor_cost,
     )

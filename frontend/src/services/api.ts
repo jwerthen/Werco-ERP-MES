@@ -1,7 +1,6 @@
 import type { BOMExploded } from '../types/engineering';
 import type { MaterialPriceHistoryParams, MaterialPriceHistoryResponse, MaterialPriceHistoryDetailParams, MaterialPriceHistoryDetail } from '../types/materialPriceHistory';
 import type { EmailRecipientsSettings } from '../types/emailRecipients';
-import type { NestingCatalogResponse, NestingMaterialRequest, NestingMaterialResolution } from '../types/quoteNesting';
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
 import { normalizeAxiosErrorDetail } from '../utils/apiError';
 import {
@@ -222,6 +221,12 @@ const CACHE_TTL = 5 * 60 * 1000;
 const importTimeout = (dryRun: boolean): number => (dryRun ? 120_000 : 600_000);
 
 class ApiService {
+  /** Feature APIs share the authenticated, tenant-aware transport and refresh logic. */
+  async request<T>(config: AxiosRequestConfig): Promise<T> {
+    const response = await this.api.request<T>(config);
+    return response.data;
+  }
+
   async getRuntimeMetricSummary(params: { days?: number; page?: number; device?: string; release?: string; route?: string }): Promise<import('../types/runtimeMetrics').RuntimeMetricSummary> {
     return (await this.api.get('/runtime-metrics/summary', { params })).data;
   }
@@ -2711,10 +2716,6 @@ class ApiService {
     return (await this.api.get(`/inventory/stock-pieces/${pieceId}/observations/${observation}`, { signal })).data;
   }
 
-  async resolveRemnantPlanningSnapshot(pieceId: number, observation: number, request: import('../types/remnantPlanning').RemnantSnapshotRequest, signal?: AbortSignal): Promise<import('../types/remnantPlanning').RemnantResolution> {
-    return (await this.api.post(`/inventory/stock-pieces/${pieceId}/observations/${observation}/planning-snapshot`, request, { signal })).data;
-  }
-
   async createStockPiece(request: import('../types/stockPiece').CreateStockPiece, signal?: AbortSignal): Promise<import('../types/stockPiece').StockPieceDetail> {
     return (await this.api.post('/inventory/stock-pieces', request, { signal })).data;
   }
@@ -3465,11 +3466,6 @@ class ApiService {
     return response.data;
   }
 
-  async createQuote(data: any) {
-    const response = await this.api.post('/quotes/', data);
-    return response.data;
-  }
-
   async updateQuote(quoteId: number, data: any) {
     const response = await this.api.put(`/quotes/${quoteId}`, data);
     return response.data;
@@ -3493,169 +3489,6 @@ class ApiService {
   async generateCustomerQuotePdf(quoteId: number): Promise<Blob> {
     const response = await this.api.post(`/quotes/${quoteId}/generate-pdf`, null, {
       responseType: 'blob'
-    });
-    return response.data;
-  }
-
-  // AI RFQ Quotes
-  async createRfqPackage(formData: FormData) {
-    const response = await this.api.post('/rfq-packages/', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    });
-    return response.data;
-  }
-
-  async getRfqPackage(packageId: number) {
-    const response = await this.api.get(`/rfq-packages/${packageId}`);
-    return response.data;
-  }
-
-  async generateRfqEstimate(packageId: number, data: { target_margin_pct?: number; valid_days?: number }) {
-    const response = await this.api.post(`/rfq-packages/${packageId}/generate-estimate`, data);
-    return response.data;
-  }
-
-  async approveRfqEstimate(packageId: number) {
-    const response = await this.api.post(`/rfq-packages/${packageId}/approve-create-quote`);
-    return response.data;
-  }
-
-  async exportInternalEstimate(packageId: number): Promise<Blob> {
-    const response = await this.api.get(`/rfq-packages/${packageId}/internal-estimate-export`, {
-      responseType: 'blob'
-    });
-    return response.data;
-  }
-
-  // Estimate Workbench (Excel-replacement quoting)
-  async recalcEstimateWorkbench(data: {
-    assemblies: unknown[];
-    machined_parts?: unknown[];
-    rates?: Record<string, number>;
-  }) {
-    const response = await this.api.post('/estimate-workbench/recalc', data);
-    return response.data;
-  }
-
-  async createEstimateWorkbench(rfqPackageId: number) {
-    const response = await this.api.post('/estimate-workbench/', {
-      rfq_package_id: rfqPackageId,
-    });
-    return response.data;
-  }
-
-  async getEstimateWorkbench(estimateId: number) {
-    const response = await this.api.get(`/estimate-workbench/${estimateId}`);
-    return response.data;
-  }
-
-  async saveEstimateWorkbench(
-    estimateId: number,
-    data: {
-      version: number;
-      assemblies: unknown[];
-      machined_parts?: unknown[];
-    }
-  ) {
-    const response = await this.api.put(`/estimate-workbench/${estimateId}`, data);
-    return response.data;
-  }
-
-  async getEstimateWorkbenchVerification(estimateId: number) {
-    const response = await this.api.get(`/estimate-workbench/${estimateId}/verification`);
-    return response.data;
-  }
-
-  async finalizeEstimateWorkbench(
-    estimateId: number,
-    data: { valid_days?: number; force?: boolean } = {}
-  ) {
-    const response = await this.api.post(`/estimate-workbench/${estimateId}/finalize`, data);
-    return response.data;
-  }
-
-  async extractEstimateWorkbenchFromRfq(
-    estimateId: number,
-    data: {
-      rfq_package_id?: number;
-      use_llm?: boolean;
-      apply?: boolean;
-      replace?: boolean;
-      version?: number;
-    } = {}
-  ) {
-    const response = await this.api.post(
-      `/estimate-workbench/${estimateId}/extract-from-rfq`,
-      data
-    );
-    return response.data;
-  }
-
-  async getEstimateShopData() {
-    const response = await this.api.get('/estimate-workbench/shop-data');
-    return response.data;
-  }
-
-  async getEstimateShopDataHistory(params: { kind?: string; limit?: number } = {}) {
-    const response = await this.api.get('/estimate-workbench/shop-data/history', { params });
-    return response.data;
-  }
-
-  async patchEstimateShopDataRow(
-    kind: string,
-    rowId: number,
-    data: Record<string, unknown> & { note: string }
-  ) {
-    const response = await this.api.patch(
-      `/estimate-workbench/shop-data/${kind}/rows/${rowId}`,
-      data
-    );
-    return response.data;
-  }
-
-  async createEstimateShopDataRow(kind: string, data: Record<string, unknown> & { note: string }) {
-    const response = await this.api.post(`/estimate-workbench/shop-data/${kind}/rows`, data);
-    return response.data;
-  }
-
-  async getEstimateJobActuals(params: { limit?: number } = {}) {
-    const response = await this.api.get('/estimate-workbench/job-actuals', { params });
-    return response.data;
-  }
-
-  async upsertEstimateJobActual(data: {
-    quote_estimate_id?: number;
-    work_order_id?: number;
-    job_label?: string;
-    actual_laser_hours?: number | null;
-    actual_brake_hours?: number | null;
-    actual_weld_hours?: number | null;
-    quoted_laser_hours?: number;
-    quoted_brake_hours?: number;
-    quoted_weld_hours?: number;
-    notes?: string;
-  }) {
-    const response = await this.api.post('/estimate-workbench/job-actuals', data);
-    return response.data;
-  }
-
-  async exportEstimateWorkbenchAuditXlsx(estimateId: number): Promise<Blob> {
-    const response = await this.api.get(`/estimate-workbench/${estimateId}/export/audit.xlsx`, {
-      responseType: 'blob',
-    });
-    return response.data;
-  }
-
-  async exportEstimateWorkbenchAuditJson(estimateId: number): Promise<Blob> {
-    const response = await this.api.get(`/estimate-workbench/${estimateId}/export/audit.json`, {
-      responseType: 'blob',
-    });
-    return response.data;
-  }
-
-  async exportEstimateWorkbenchCustomerPdf(estimateId: number): Promise<Blob> {
-    const response = await this.api.get(`/estimate-workbench/${estimateId}/export/customer.pdf`, {
-      responseType: 'blob',
     });
     return response.data;
   }
@@ -3878,315 +3711,6 @@ class ApiService {
     return response.data;
   }
 
-  // Quote Calculator
-  async getNestingMaterials(offset = 0, limit = 200, signal?: AbortSignal): Promise<NestingCatalogResponse> {
-    const response = await this.api.get<NestingCatalogResponse>('/quote-nesting/materials', {
-      params: { offset, limit }, signal,
-    });
-    return response.data;
-  }
-
-  async resolveNestingMaterial(data: NestingMaterialRequest, signal?: AbortSignal): Promise<NestingMaterialResolution> {
-    const response = await this.api.post<NestingMaterialResolution>('/quote-nesting/material-resolution', data, { signal });
-    return response.data;
-  }
-
-  async generateNestingBuyerPdf(report: import('../features/nesting/lib/buyer-pdf-types').BuyerPdfReport, signal?: AbortSignal): Promise<Blob> {
-    const body = new FormData();
-    body.append('report', new Blob([JSON.stringify(report)], { type: 'application/json' }), 'buyer-report.json');
-    // The company is frozen with the report, including after token refresh.
-    body.append('expected_company_id', String(report.expectedCompanyId));
-    try {
-      return (await this.api.post('/quote-nesting/buyer-pdf', body, {
-        signal, timeout: 120_000, responseType: 'blob',
-        headers: { 'Content-Type': 'multipart/form-data' },
-      })).data;
-    } catch (cause) {
-      const data = (cause as { response?: { data?: unknown } })?.response?.data;
-      if (data instanceof Blob) {
-        let detail: unknown;
-        if (data.size <= 64 * 1024) {
-          try {
-            detail = (JSON.parse(await data.text()) as { detail?: unknown }).detail;
-          } catch {
-            // A non-JSON error response must never be downloaded as a PDF.
-          }
-        }
-        throw new Error(typeof detail === 'string' ? detail : 'The buyer PDF could not be generated. Please try again.');
-      }
-      const detail = (data as { detail?: unknown })?.detail;
-      if (typeof detail === 'string') throw new Error(detail);
-      throw cause;
-    }
-  }
-
-  async listNestingDrafts(page = 1, signal?: AbortSignal): Promise<import('../types/nestingDraft').NestingDraftPage> {
-    return (await this.api.get('/quote-nesting/drafts', { params: { page, per_page: 10 }, signal })).data;
-  }
-
-  async listNestingDraftRevisions(draftId: number, page = 1, signal?: AbortSignal): Promise<import('../types/nestingDraft').NestingDraftPage> {
-    return (await this.api.get(`/quote-nesting/drafts/${draftId}/revisions`, { params: { page, per_page: 10 }, signal })).data;
-  }
-
-  async getNestingDraftRevision(draftId: number, revision: number, signal?: AbortSignal): Promise<import('../types/nestingDraft').NestingDraftRevision> {
-    return (await this.api.get(`/quote-nesting/drafts/${draftId}/revisions/${revision}`, { signal })).data;
-  }
-
-  async saveNestingDraft(request: import('../types/nestingDraft').NestingDraftSave, signal?: AbortSignal): Promise<import('../types/nestingDraft').NestingDraftRevision> {
-    const body = new FormData();
-    body.append('estimate', new Blob([request.estimateJson], { type: 'application/json' }), 'estimate.json');
-    body.append('request_key', request.requestKey);
-    // A refreshed credential may have a different active company. The server
-    // checks this explicit intent before any write, including idempotent retries.
-    body.append('expected_company_id', String(request.companyId));
-    if (request.target) body.append('expected_version', String(request.target.expectedVersion));
-    const path = request.target ? `/quote-nesting/drafts/${request.target.draftId}/revisions` : '/quote-nesting/drafts';
-    return (await this.api.post(path, body, {
-      signal, timeout: 120_000, headers: { 'Content-Type': 'multipart/form-data' },
-    })).data;
-  }
-
-  async getNestingSpacingPolicies(page = 1, signal?: AbortSignal): Promise<import('../types/nestingPolicy').NestingPolicyState> {
-    return (await this.api.get('/quote-nesting/spacing-policies', { params: { page, per_page: 20 }, signal })).data;
-  }
-
-  async listNestingSources(draftId: number, revision: number, page = 1, signal?: AbortSignal): Promise<import('../types/nestingSource').NestingSourcePage> {
-    return (await this.api.get(`/quote-nesting/drafts/${draftId}/revisions/${revision}/sources`, {
-      params: { page, per_page: 10 }, signal,
-    })).data;
-  }
-
-  async createNestingSourceIntent(draftId: number, revision: number, request: import('../types/nestingSource').NestingSourceRequest, signal?: AbortSignal): Promise<import('../types/nestingSource').NestingSourceIntent> {
-    return (await this.api.post(`/quote-nesting/drafts/${draftId}/revisions/${revision}/sources`, request, { signal })).data;
-  }
-
-  async uploadNestingSource(draftId: number, revision: number, intentId: number, companyId: number, bytes: ArrayBuffer, signal?: AbortSignal): Promise<import('../types/nestingSource').NestingSourceIntent> {
-    return (await this.api.post(`/quote-nesting/drafts/${draftId}/revisions/${revision}/sources/${intentId}/content`, bytes, {
-      params: { expected_company_id: companyId }, signal, timeout: 120_000,
-      headers: { 'Content-Type': 'application/octet-stream' },
-    })).data;
-  }
-
-  async finalizeNestingSource(draftId: number, revision: number, intentId: number, companyId: number, signal?: AbortSignal): Promise<import('../types/nestingSource').NestingSourceIntent> {
-    return (await this.api.post(`/quote-nesting/drafts/${draftId}/revisions/${revision}/sources/${intentId}/finalize`, {
-      expected_company_id: companyId,
-    }, { signal, timeout: 120_000 })).data;
-  }
-
-  async downloadNestingSource(draftId: number, revision: number, intentId: number, signal?: AbortSignal): Promise<Blob> {
-    return (await this.api.get(`/quote-nesting/drafts/${draftId}/revisions/${revision}/sources/${intentId}/download`, {
-      signal, timeout: 120_000, responseType: 'blob',
-    })).data;
-  }
-
-  async getNestingSpacingRevision(revision: number, signal?: AbortSignal): Promise<import('../types/nestingPolicy').NestingPolicyRevision & {content: import('../features/nesting/lib/spacing-policy').SpacingPolicyContent}> {
-    return (await this.api.get(`/quote-nesting/spacing-policies/revisions/${revision}`, { signal })).data;
-  }
-
-  async createNestingSpacingRevision(request: import('../types/nestingPolicy').NestingPolicyRevisionRequest, signal?: AbortSignal): Promise<import('../types/nestingPolicy').NestingPolicyReceipt> {
-    return (await this.api.post('/quote-nesting/spacing-policies/revisions', request, { signal })).data;
-  }
-
-  async publishNestingSpacingPolicy(request: import('../types/nestingPolicy').NestingPolicyPublishRequest, signal?: AbortSignal): Promise<import('../types/nestingPolicy').NestingPolicyReceipt> {
-    return (await this.api.post('/quote-nesting/spacing-policies/publications', request, { signal })).data;
-  }
-
-  async withdrawNestingSpacingPolicy(publicationId: number, request: import('../types/nestingPolicy').NestingPolicyCommandBase, signal?: AbortSignal): Promise<import('../types/nestingPolicy').NestingPolicyReceipt> {
-    return (await this.api.post(`/quote-nesting/spacing-policies/publications/${publicationId}/withdraw`, request, { signal })).data;
-  }
-
-  async resolveNestingSpacingPolicy(request: import('../types/nestingPolicy').NestingPolicyResolveRequest, signal?: AbortSignal): Promise<import('../types/nestingPolicy').NestingPolicyResolution> {
-    return (await this.api.post('/quote-nesting/spacing-policies/resolve', request, { signal })).data;
-  }
-
-  async getNestingRuntime(signal?: AbortSignal): Promise<import('../types/nestingRun').NestingRuntime> {
-    return (await this.api.get('/quote-nesting/runs/runtime', { signal })).data;
-  }
-
-  async listNestingRuns(draftId: number, revision: number, page = 1, signal?: AbortSignal): Promise<import('../types/nestingRun').NestingRunPage> {
-    return (await this.api.get('/quote-nesting/runs', { params: { draft_id: draftId, revision_number: revision, page, per_page: 10 }, signal })).data;
-  }
-
-  async getNestingRun(runId: number, signal?: AbortSignal): Promise<import('../types/nestingRun').NestingRunDetail> {
-    return (await this.api.get(`/quote-nesting/runs/${runId}`, { signal })).data;
-  }
-
-  async startNestingRun(request: import('../types/nestingRun').NestingRunRequest, signal?: AbortSignal): Promise<import('../types/nestingRun').NestingRunSummary> {
-    return (await this.api.post('/quote-nesting/runs', request, { signal })).data;
-  }
-
-  async cancelNestingRun(runId: number, companyId: number, expectedVersion: number, signal?: AbortSignal): Promise<import('../types/nestingRun').NestingRunSummary> {
-    return (await this.api.post(`/quote-nesting/runs/${runId}/cancel`, { expected_company_id: companyId, expected_version: expectedVersion }, { signal })).data;
-  }
-
-  async getNestingRunCheckpoint(runId: number, sequence: number, signal?: AbortSignal): Promise<import('../types/nestingRun').NestingRunCheckpoint> {
-    return (await this.api.get(`/quote-nesting/runs/${runId}/checkpoints/${sequence}`, { signal })).data;
-  }
-
-  async getNestingRunReport(runId: number, signal?: AbortSignal): Promise<import('../types/nestingRun').NestingRunReport> {
-    return (await this.api.get(`/quote-nesting/runs/${runId}/report`, { signal, timeout: 120_000 })).data;
-  }
-
-  async getQuoteMaterials(category?: string) {
-    const response = await this.api.get('/quote-calc/materials', { params: { category } });
-    return response.data;
-  }
-
-  async getQuoteMachines(machineType?: string) {
-    const response = await this.api.get('/quote-calc/machines', { params: { machine_type: machineType } });
-    return response.data;
-  }
-
-  async getQuoteFinishes() {
-    const response = await this.api.get('/quote-calc/finishes');
-    return response.data;
-  }
-
-  async getQuoteSettings() {
-    const response = await this.api.get('/quote-calc/settings');
-    return response.data;
-  }
-
-  async seedQuoteDefaults() {
-    const response = await this.api.post('/quote-calc/seed-defaults');
-    return response.data;
-  }
-
-  async calculateCNCQuote(data: any) {
-    const response = await this.api.post('/quote-calc/cnc', data);
-    return response.data;
-  }
-
-  async calculateSheetMetalQuote(data: any) {
-    const response = await this.api.post('/quote-calc/sheet-metal', data);
-    return response.data;
-  }
-
-  async createQuoteMaterial(data: any) {
-    const response = await this.api.post('/quote-calc/materials', null, { params: data });
-    return response.data;
-  }
-
-  async createQuoteMachine(data: any) {
-    const response = await this.api.post('/quote-calc/machines', null, { params: data });
-    return response.data;
-  }
-
-  async createQuoteFinish(data: any) {
-    const response = await this.api.post('/quote-calc/finishes', null, { params: data });
-    return response.data;
-  }
-
-  async updateQuoteSetting(key: string, value: string, settingType: string = 'text') {
-    const response = await this.api.post(`/quote-calc/settings/${key}`, null, { 
-      params: { value, setting_type: settingType } 
-    });
-    return response.data;
-  }
-
-  // DXF Parser
-  async analyzeDXF(file: File, maxHoleDiameter: number = 2.0, units: string = 'inches') {
-    const formData = new FormData();
-    formData.append('file', file);
-    const response = await this.api.post('/dxf-parser/analyze', formData, {
-      params: { max_hole_diameter: maxHoleDiameter, units },
-      headers: { 'Content-Type': 'multipart/form-data' }
-    });
-    return response.data;
-  }
-
-  // Admin Settings - Materials
-  async getAdminMaterials(includeInactive = false, category?: string) {
-    const response = await this.api.get('/admin/settings/materials', { 
-      params: { include_inactive: includeInactive, category } 
-    });
-    return response.data;
-  }
-
-  async createAdminMaterial(data: any) {
-    const response = await this.api.post('/admin/settings/materials', data);
-    return response.data;
-  }
-
-  async updateAdminMaterial(id: number, data: any) {
-    const response = await this.api.put(`/admin/settings/materials/${id}`, data);
-    return response.data;
-  }
-
-  async deleteAdminMaterial(id: number) {
-    const response = await this.api.delete(`/admin/settings/materials/${id}`);
-    return response.data;
-  }
-
-  // Admin Settings - Machines
-  async getAdminMachines(includeInactive = false, machineType?: string) {
-    const response = await this.api.get('/admin/settings/machines', { 
-      params: { include_inactive: includeInactive, machine_type: machineType } 
-    });
-    return response.data;
-  }
-
-  async createAdminMachine(data: any) {
-    const response = await this.api.post('/admin/settings/machines', data);
-    return response.data;
-  }
-
-  async updateAdminMachine(id: number, data: any) {
-    const response = await this.api.put(`/admin/settings/machines/${id}`, data);
-    return response.data;
-  }
-
-  async deleteAdminMachine(id: number) {
-    const response = await this.api.delete(`/admin/settings/machines/${id}`);
-    return response.data;
-  }
-
-  // Admin Settings - Finishes
-  async getAdminFinishes(includeInactive = false, category?: string) {
-    const response = await this.api.get('/admin/settings/finishes', { 
-      params: { include_inactive: includeInactive, category } 
-    });
-    return response.data;
-  }
-
-  async createAdminFinish(data: any) {
-    const response = await this.api.post('/admin/settings/finishes', data);
-    return response.data;
-  }
-
-  async updateAdminFinish(id: number, data: any) {
-    const response = await this.api.put(`/admin/settings/finishes/${id}`, data);
-    return response.data;
-  }
-
-  async deleteAdminFinish(id: number) {
-    const response = await this.api.delete(`/admin/settings/finishes/${id}`);
-    return response.data;
-  }
-
-  // Admin Settings - Labor Rates
-  async getAdminLaborRates(includeInactive = false) {
-    const response = await this.api.get('/admin/settings/labor-rates', { 
-      params: { include_inactive: includeInactive } 
-    });
-    return response.data;
-  }
-
-  async createAdminLaborRate(data: any) {
-    const response = await this.api.post('/admin/settings/labor-rates', data);
-    return response.data;
-  }
-
-  async updateAdminLaborRate(id: number, data: any) {
-    const response = await this.api.put(`/admin/settings/labor-rates/${id}`, data);
-    return response.data;
-  }
-
-  async deleteAdminLaborRate(id: number) {
-    const response = await this.api.delete(`/admin/settings/labor-rates/${id}`);
-    return response.data;
-  }
-
   // Admin Settings - Work Center Rates
   async getAdminWorkCenterRates(includeInactive = false) {
     const response = await this.api.get('/admin/settings/work-center-rates', { 
@@ -4200,58 +3724,11 @@ class ApiService {
     return response.data;
   }
 
-  // Admin Settings - Outside Services
-  async getAdminOutsideServices(includeInactive = false, processType?: string) {
-    const response = await this.api.get('/admin/settings/outside-services', { 
-      params: { include_inactive: includeInactive, process_type: processType } 
-    });
-    return response.data;
-  }
-
-  async createAdminOutsideService(data: any) {
-    const response = await this.api.post('/admin/settings/outside-services', data);
-    return response.data;
-  }
-
-  async updateAdminOutsideService(id: number, data: any) {
-    const response = await this.api.put(`/admin/settings/outside-services/${id}`, data);
-    return response.data;
-  }
-
-  async deleteAdminOutsideService(id: number) {
-    const response = await this.api.delete(`/admin/settings/outside-services/${id}`);
-    return response.data;
-  }
-
-  // Admin Settings - Overhead
-  async getAdminOverhead() {
-    const response = await this.api.get('/admin/settings/overhead');
-    return response.data;
-  }
-
-  async updateAdminOverhead(key: string, value: string, settingType: string = 'text', description?: string) {
-    const response = await this.api.put(`/admin/settings/overhead/${key}`, { 
-      value, setting_type: settingType, description 
-    });
-    return response.data;
-  }
-
   // Admin Settings - Audit Log
   async getSettingsAuditLog(entityType?: string, days = 30, limit = 100) {
     const response = await this.api.get('/admin/settings/audit-log', { 
       params: { entity_type: entityType, days, limit } 
     });
-    return response.data;
-  }
-
-  // Admin Settings - Seed defaults
-  async seedAdminLaborRates() {
-    const response = await this.api.post('/admin/settings/seed-labor-rates');
-    return response.data;
-  }
-
-  async seedAdminOutsideServices() {
-    const response = await this.api.post('/admin/settings/seed-outside-services');
     return response.data;
   }
 

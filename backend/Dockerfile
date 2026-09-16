@@ -9,11 +9,23 @@ RUN apt-get update && apt-get install -y \
     poppler-utils \
     tesseract-ocr \
     antiword \
+    libgl1 \
+    libglu1-mesa \
+    libglib2.0-0 \
+    libxrender1 \
+    libsm6 \
+    libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
 COPY requirements.lock .
 RUN pip install --no-cache-dir --require-hashes -r requirements.lock
+
+# Native CAD stays in an isolated runtime so its dependencies cannot alter the API.
+COPY requirements-quoting.lock .
+RUN python -m venv /opt/werco-quote-worker \
+    && /opt/werco-quote-worker/bin/pip install --no-cache-dir --require-hashes -r requirements-quoting.lock
+ENV WERCO_QUOTE_WORKER_PYTHON=/opt/werco-quote-worker/bin/python
 
 # Create non-root user for security
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser

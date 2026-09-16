@@ -157,7 +157,7 @@ export function deriveSheetSpec(part: SheetPartLike | null | undefined): SheetSp
 
 /**
  * Gauge → decimal inches. Mirrors the backend `GAUGE_TO_INCHES`
- * (`sheet_metal_costing_service.py`), which is what the server-side matcher's
+ * (`sheet_thickness.py`), which is what the server-side matcher's
  * thickness gate runs on — two implementations of the same table would be a
  * silent disagreement about which sheet is which.
  *

@@ -103,6 +103,10 @@ jobs:
         working-directory: ./backend
         run: python -m scripts.verify_operations_postgres
 
+      - name: Verify fabrication quoting migrations and database boundaries
+        working-directory: ./backend
+        run: python scripts/verify_fabrication_quoting_postgres.py --database-url "$DATABASE_URL"
+
       - name: Seed database
         working-directory: ./backend
         run: python -m scripts.seed_data

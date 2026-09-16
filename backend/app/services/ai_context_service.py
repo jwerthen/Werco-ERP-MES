@@ -126,7 +126,6 @@ class AIContextService:
                 "pending_recommendations": self.pending_recommendations_for(
                     company_id=company_id, entity_type="part", entity_id=entity_id, limit=5
                 ),
-                "estimate_calibration": self._latest_estimate_factor(company_id=company_id, part_id=entity_id),
             }
 
         counts = {
@@ -193,31 +192,6 @@ class AIContextService:
             for r in rows
         ]
 
-    def _latest_estimate_factor(self, *, company_id: int, part_id: int) -> Optional[Dict[str, Any]]:
-        from app.models.ai_learning import AIRecommendation
-
-        rec = (
-            self.db.query(AIRecommendation)
-            .filter(
-                AIRecommendation.company_id == company_id,
-                AIRecommendation.recommendation_type == "estimate_calibration",
-                AIRecommendation.target_entity_type == "part",
-                AIRecommendation.target_entity_id == part_id,
-                AIRecommendation.status.in_(["pending", "accepted"]),
-            )
-            .order_by(AIRecommendation.created_at.desc())
-            .first()
-        )
-        if not rec:
-            return None
-        action = rec.suggested_action or {}
-        return {
-            "suggested_factor": action.get("suggested_factor"),
-            "confidence": rec.confidence_score,
-            "status": rec.status,
-            "summary": rec.summary,
-        }
-
     def explain_context_sources(self) -> List[str]:
         return [
             "work_orders",
@@ -228,5 +202,4 @@ class AIContextService:
             "work_centers",
             "learned_preferences",
             "pending_recommendations",
-            "estimate_calibration",
         ]
