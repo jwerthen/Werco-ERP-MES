@@ -39,6 +39,7 @@ jest.mock('../services/api', () => ({
     updateWorkOrder: jest.fn(),
     deleteWorkOrder: jest.fn(),
     releaseWorkOrder: jest.fn(),
+    getWorkOrder: jest.fn(),
   },
 }));
 
@@ -411,12 +412,17 @@ describe('WorkOrders inline due-date quick edit', () => {
     // to one of them — an earlier version of this test did exactly that and passed
     // against the widened swallow it was written to catch.
     const dateText = within(cell!).getByText(formatCentralDate('2099-03-04'));
+    mockedApi.getWorkOrder.mockResolvedValue({ ...openWorkOrder, operations: [] });
     fireEvent.click(dateText);
-    expect(mockNavigate).toHaveBeenCalledWith('/work-orders/1');
+    const dialog = await screen.findByRole('dialog', { name: 'Operations for WO-1001' });
+    expect(await within(dialog).findByText('No operations on this work order')).toBeInTheDocument();
+    expect(mockNavigate).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close operations' }));
 
     // The button itself does not.
     mockNavigate.mockClear();
     fireEvent.click(pencil);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(mockNavigate).not.toHaveBeenCalled();
   });
 });

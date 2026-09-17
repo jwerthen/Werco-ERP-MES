@@ -83,23 +83,20 @@ test.describe('Work Orders', () => {
     await expect(page.getByText(/select a part to see available operations/i)).toBeVisible();
   });
 
-  test('can view work order details', async ({ page }) => {
+  test('can open operations without leaving the work order list', async ({ page }) => {
     await page.goto('/work-orders');
 
-    // This test OWNS row click-through, so nothing in it may be optional. It used
-    // to wrap the click in `if (isVisible())` and swallow the navigation wait with
-    // `.catch(() => null)`, which made it incapable of failing — and it resolved
-    // against the Suspense skeleton besides (see firstDataRow).
     const row = await firstDataRow(page);
     test.skip(row === null, 'no seeded work orders');
 
-    // Deliberately the ROW, not a link inside it: the point is that DataTable's
-    // onRowClick still reaches the detail page. The click is PINNED to the first
-    // cell's padding rather than the bounding-box centre, so it cannot drift onto
-    // an in-row control (the due-date pencil stops propagation by design) as
-    // column widths change with content.
+    // Row padding exercises onRowClick without hitting an independent row action.
     await row!.click({ position: { x: 6, y: 6 } });
-    await page.waitForURL(/\/work-orders\/\d+/, { timeout: 15000 });
+    const popup = page.getByRole('dialog', { name: /^Operations for / });
+    await expect(popup).toBeVisible();
+    await expect(page).toHaveURL(/\/work-orders$/);
+    await popup.getByRole('button', { name: 'Close operations' }).click();
+    await expect(popup).not.toBeVisible();
+    await expect(row!).toBeVisible();
   });
 });
 
@@ -114,7 +111,7 @@ test.describe('Work Order Lifecycle', () => {
     // Find a draft work order
     const draftRow = page.locator('table tbody tr').filter({ hasText: /draft/i }).first();
     if (await draftRow.isVisible()) {
-      await draftRow.click();
+      await draftRow.getByRole('link', { name: /^View / }).click();
       await page.waitForURL(/\/work-orders\/\d+/);
       
       // Should show release action
@@ -128,7 +125,7 @@ test.describe('Work Order Lifecycle', () => {
     // Find a released work order
     const releasedRow = page.locator('table tbody tr').filter({ hasText: /released/i }).first();
     if (await releasedRow.isVisible()) {
-      await releasedRow.click();
+      await releasedRow.getByRole('link', { name: /^View / }).click();
       await page.waitForURL(/\/work-orders\/\d+/);
       
       // Should show start or in-progress actions
@@ -143,7 +140,7 @@ test.describe('Work Order Lifecycle', () => {
     // before opening its link; the separate row-click test owns that affordance.
     const row = await firstDataRow(page);
     expect(row, 'The seeded database must contain a work order').not.toBeNull();
-    await row!.locator('a[href^="/work-orders/"]').first().click();
+    await row!.getByRole('link', { name: /^View / }).click();
     await page.waitForURL(/\/work-orders\/\d+/);
     await expect(page.getByRole('heading', { name: 'Operations / Routing', exact: true })).toBeVisible();
   });
@@ -160,7 +157,7 @@ test.describe('Work Order Status Changes', () => {
     // Find an in-progress work order
     const row = page.locator('table tbody tr').filter({ hasText: /in.?progress/i }).first();
     if (await row.isVisible()) {
-      await row.click();
+      await row.getByRole('link', { name: /^View / }).click();
       await page.waitForURL(/\/work-orders\/\d+/);
       
       // Look for hold action
@@ -180,7 +177,7 @@ test.describe('Work Order Status Changes', () => {
     // Find a draft work order
     const row = page.locator('table tbody tr').filter({ hasText: /draft/i }).first();
     if (await row.isVisible()) {
-      await row.click();
+      await row.getByRole('link', { name: /^View / }).click();
       await page.waitForURL(/\/work-orders\/\d+/);
       
       // Look for cancel action

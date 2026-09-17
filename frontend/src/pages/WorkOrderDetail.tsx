@@ -12,7 +12,7 @@ import { canPublishDocuments } from '../utils/recordWriteAccess';
 import { hasPermission } from '../utils/permissions';
 import LaserNestManualModal from '../components/laser/LaserNestManualModal';
 import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
-import LaserNestPdfPreview from '../components/laser/LaserNestPdfPreview';
+import WorkOrderPdfPreviewModal from '../components/workorders/WorkOrderPdfPreviewModal';
 import { CompleteWorkModal, CompleteWorkSubmit } from '../components/workorders/CompleteWorkModal';
 import MaterialTiesPanel from '../components/workorders/MaterialTiesPanel';
 import OperationMaterialTieModal from '../components/workorders/OperationMaterialTieModal';
@@ -67,7 +67,6 @@ import {
 import { sortWorkCentersForLaserDispatch } from '../utils/laserWorkCenters';
 import {
   ArrowLeftIcon,
-  ArrowDownTrayIcon,
   ArrowPathIcon,
   PlayIcon,
   PauseIcon,
@@ -705,11 +704,8 @@ export default function WorkOrderDetail() {
   const [documentError, setDocumentError] = useState('');
   const [documentUploadInputKey, setDocumentUploadInputKey] = useState(0);
   const [selectedDocumentId, setSelectedDocumentId] = useState<number | null>(null);
-  const [documentPreviewUrl, setDocumentPreviewUrl] = useState<string | null>(null);
-  const [documentPreviewLoading, setDocumentPreviewLoading] = useState(false);
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const loadRequestRef = useRef(0);
-  const documentPreviewObjectUrlRef = useRef<string | null>(null);
   const workOrderId = useMemo(() => (id ? parseInt(id, 10) : null), [id]);
   const realtimeUrl = useMemo(() => {
     if (!id) return null;
@@ -717,14 +713,6 @@ export default function WorkOrderDetail() {
     if (!token) return null;
     return buildWsUrl(`/ws/work-order/${id}`, { token });
   }, [id]);
-
-  const replaceDocumentPreviewUrl = useCallback((url: string | null) => {
-    if (documentPreviewObjectUrlRef.current) {
-      window.URL.revokeObjectURL(documentPreviewObjectUrlRef.current);
-    }
-    documentPreviewObjectUrlRef.current = url;
-    setDocumentPreviewUrl(url);
-  }, []);
 
   const loadWorkOrder = useCallback(async () => {
     if (!id) return;
@@ -820,8 +808,8 @@ export default function WorkOrderDetail() {
     setAttachDocumentId('');
     setDocumentError('');
     setSelectedDocumentId(null);
-    replaceDocumentPreviewUrl(null);
-  }, [workOrderId, replaceDocumentPreviewUrl]);
+    setPreviewNestId(null);
+  }, [workOrderId]);
 
   useEffect(() => {
     loadWorkOrder();
@@ -833,55 +821,14 @@ export default function WorkOrderDetail() {
         clearTimeout(realtimeRefreshRef.current);
         realtimeRefreshRef.current = null;
       }
-      replaceDocumentPreviewUrl(null);
     };
-  }, [replaceDocumentPreviewUrl]);
+  }, []);
 
   useEffect(() => {
-    if (workOrderDocuments.length === 0) {
+    if (selectedDocumentId && !workOrderDocuments.some((document) => document.id === selectedDocumentId)) {
       setSelectedDocumentId(null);
-      return;
-    }
-    if (!selectedDocumentId || !workOrderDocuments.some((document) => document.id === selectedDocumentId)) {
-      setSelectedDocumentId(workOrderDocuments[0].id);
     }
   }, [selectedDocumentId, workOrderDocuments]);
-
-  useEffect(() => {
-    if (!selectedDocumentId) {
-      replaceDocumentPreviewUrl(null);
-      setDocumentPreviewLoading(false);
-      return;
-    }
-
-    let cancelled = false;
-
-    const loadPreview = async () => {
-      setDocumentPreviewLoading(true);
-      try {
-        const response = await api.downloadDocument(selectedDocumentId);
-        const url = window.URL.createObjectURL(new Blob([response], { type: 'application/pdf' }));
-        if (cancelled) {
-          window.URL.revokeObjectURL(url);
-          return;
-        }
-        replaceDocumentPreviewUrl(url);
-      } catch {
-        if (!cancelled) {
-          replaceDocumentPreviewUrl(null);
-        }
-      } finally {
-        if (!cancelled) {
-          setDocumentPreviewLoading(false);
-        }
-      }
-    };
-
-    loadPreview();
-    return () => {
-      cancelled = true;
-    };
-  }, [replaceDocumentPreviewUrl, selectedDocumentId]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -1569,11 +1516,10 @@ export default function WorkOrderDetail() {
       formData.append('document_type', 'drawing');
       formData.append('revision', 'A');
       formData.append('work_order_id', String(workOrder.id));
-      const uploadedDocument = await api.uploadDocument(formData);
+      await api.uploadDocument(formData);
       setDocumentUploadFile(null);
       setDocumentTitle('');
       setDocumentUploadInputKey((key) => key + 1);
-      setSelectedDocumentId(uploadedDocument.id);
       await loadWorkOrder();
     } catch (err: any) {
       setDocumentError(err.response?.data?.detail || 'Failed to upload work order PDF');
@@ -1589,30 +1535,13 @@ export default function WorkOrderDetail() {
     setDocumentBusy(true);
     setDocumentError('');
     try {
-      const attachedDocument = await api.attachDocumentToWorkOrder(Number(attachDocumentId), workOrder.id);
+      await api.attachDocumentToWorkOrder(Number(attachDocumentId), workOrder.id);
       setAttachDocumentId('');
-      setSelectedDocumentId(attachedDocument.id);
       await loadWorkOrder();
     } catch (err: any) {
       setDocumentError(err.response?.data?.detail || 'Failed to attach PDF to work order');
     } finally {
       setDocumentBusy(false);
-    }
-  };
-
-  const handleDownloadWorkOrderPdf = async (document: WorkOrderDocument) => {
-    try {
-      const response = await api.downloadDocument(document.id);
-      const url = window.URL.createObjectURL(new Blob([response], { type: document.mime_type || 'application/pdf' }));
-      const link = window.document.createElement('a');
-      link.href = url;
-      link.setAttribute('download', document.file_name || `${document.title}.pdf`);
-      window.document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.URL.revokeObjectURL(url);
-    } catch {
-      setDocumentError('Failed to download PDF');
     }
   };
 
@@ -1974,6 +1903,7 @@ export default function WorkOrderDetail() {
   const laserNests = (workOrder.operations || [])
     .filter((op): op is WorkOrderOperation & { laser_nest: LaserNestInfo } => Boolean(op.laser_nest))
     .map((op) => ({ operation: op, nest: op.laser_nest }));
+  const previewNest = laserNests.find(({ nest }) => nest.id === previewNestId && nest.has_document)?.nest;
   // The Laser Nest Package card renders the full per-nest detail (material,
   // thickness, sheet, runs, PDF actions) on every WO type — on laser_cutting
   // WOs (child or standalone) the import/manual endpoints operate on the WO
@@ -2764,9 +2694,7 @@ export default function WorkOrderDetail() {
             <div className="min-w-0">
               <h2 className="card-title">Part Drawing PDF</h2>
               <p className="card-subtitle truncate">
-                {selectedDocument
-                  ? `${selectedDocument.title} • Rev ${selectedDocument.revision || '-'}`
-                  : 'Attach a PDF drawing to show the part preview on this work order.'}
+                Click a drawing or nest to open a full preview.
               </p>
             </div>
           </div>
@@ -2781,53 +2709,53 @@ export default function WorkOrderDetail() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 xl:grid-cols-[360px_1fr] gap-4">
-          <div className="space-y-4">
-            <div className="rounded-lg border border-fd-line bg-slate-900/40">
-              <div className="border-b border-fd-line px-4 py-3">
-                <h3 className="text-sm font-semibold text-white">Attached PDFs</h3>
-              </div>
-              <div className="divide-y divide-slate-700">
-                {secondaryErrors.documents && <ErrorState message={`Could not verify attached drawings. Previously loaded drawings may be out of date.${lastVerifiedSuffix('documents')}`} onRetry={loadWorkOrder} />}
-                {secondaryLoading.documents && <p role="status" className="p-4 text-sm text-slate-400">Loading attached drawings…</p>}
-                {workOrderDocuments.length === 0 ? (!secondaryErrors.documents && !secondaryLoading.documents && (
-                  <EmptyState
-                    icon={DocumentTextIcon}
-                    title="No drawing PDF attached"
-                    description="Upload a PDF or attach an existing drawing to preview the part here."
-                    className="px-4 py-5"
-                  />
-                )) : (
-                  workOrderDocuments.map((document) => (
-                    <button
-                      key={document.id}
-                      type="button"
-                      aria-label={`Preview ${document.title}`}
-                      onClick={() => setSelectedDocumentId(document.id)}
-                      className={`w-full px-4 py-3 text-left transition-colors ${
-                        selectedDocumentId === document.id
-                          ? 'bg-fd-blue/10 text-white'
-                          : 'hover:bg-slate-800/50 text-slate-300'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-semibold">{document.title}</div>
-                          <div className="mt-1 truncate text-xs text-slate-400">
-                            {document.file_name || document.document_number}
-                          </div>
+        <div className={`grid grid-cols-1 gap-4 ${canPublish ? 'xl:grid-cols-[minmax(0,1fr)_320px]' : ''}`}>
+          <div className="min-w-0 self-start rounded-lg border border-fd-line bg-slate-900/40 overflow-hidden">
+            <div className="border-b border-fd-line px-4 py-3">
+              <h3 className="text-sm font-semibold text-white">Attached PDFs</h3>
+            </div>
+            <div className="max-h-[28rem] overflow-y-auto divide-y divide-slate-700">
+              {secondaryErrors.documents && <ErrorState message={`Could not verify attached drawings. Previously loaded drawings may be out of date.${lastVerifiedSuffix('documents')}`} onRetry={loadWorkOrder} />}
+              {secondaryLoading.documents && <p role="status" className="p-4 text-sm text-slate-400">Loading attached drawings…</p>}
+              {workOrderDocuments.length === 0 ? (!secondaryErrors.documents && !secondaryLoading.documents && (
+                <EmptyState
+                  icon={DocumentTextIcon}
+                  title="No drawing PDF attached"
+                  description="Upload a PDF or attach an existing drawing to preview the part here."
+                  className="px-4 py-5"
+                />
+              )) : (
+                workOrderDocuments.map((document) => (
+                  <button
+                    key={document.id}
+                    type="button"
+                    aria-label={`Preview ${document.title}`}
+                    aria-haspopup="dialog"
+                    onClick={() => setSelectedDocumentId(document.id)}
+                    className="w-full px-4 py-3 text-left text-slate-300 transition-colors hover:bg-slate-800/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-fd-blue"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-semibold">{document.title}</div>
+                        <div className="mt-1 truncate text-xs text-slate-400">
+                          {document.file_name || document.document_number}
                         </div>
-                        <span className="shrink-0 rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-300">
+                      </div>
+                      <span className="flex shrink-0 items-center gap-3">
+                        <span className="rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-300">
                           {formatFileSize(document.file_size)}
                         </span>
-                      </div>
-                    </button>
-                  ))
-                )}
-              </div>
+                        <EyeIcon className="h-5 w-5 text-fd-blue" aria-hidden="true" />
+                      </span>
+                    </div>
+                  </button>
+                ))
+              )}
             </div>
+          </div>
 
-            {canPublish && (
+          {canPublish && (
+            <div className="min-w-0 space-y-4">
               <form onSubmit={handleUploadWorkOrderPdf} className="rounded-lg border border-fd-line bg-slate-900/40 p-4 space-y-3">
                 <h3 className="text-sm font-semibold text-white">Upload PDF</h3>
                 <label className="block">
@@ -2868,9 +2796,7 @@ export default function WorkOrderDetail() {
                   {documentBusy ? 'Uploading...' : 'Upload PDF'}
                 </Button>
               </form>
-            )}
 
-            {canPublish && (
               <form onSubmit={handleAttachExistingPdf} className="rounded-lg border border-fd-line bg-slate-900/40 p-4 space-y-3">
                 <h3 className="text-sm font-semibold text-white">Attach Existing PDF</h3>
                 <select
@@ -2895,61 +2821,33 @@ export default function WorkOrderDetail() {
                   {documentBusy ? 'Attaching...' : 'Attach PDF'}
                 </Button>
               </form>
-            )}
-          </div>
-
-          <div className="rounded-sm border border-fd-line bg-slate-950/60 overflow-hidden">
-            <div className="flex items-center justify-between border-b border-fd-line px-4 py-2.5 gap-3">
-              <div className="min-w-0">
-                <h3 className="truncate text-sm font-semibold text-white">
-                  {selectedDocument?.file_name || selectedDocument?.title || 'Preview'}
-                </h3>
-                <p className="text-xs text-slate-400 truncate">
-                  {selectedDocument ? `${selectedDocument.document_number} • ${formatCentralDate(selectedDocument.created_at)}` : 'No PDF selected'}
-                </p>
-              </div>
-              {selectedDocument && (
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => setSelectedDocumentId(selectedDocument.id)}
-                    className="flex items-center"
-                  >
-                    <EyeIcon className="h-4 w-4 mr-1" />
-                    Preview
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => handleDownloadWorkOrderPdf(selectedDocument)}
-                    className="flex items-center"
-                  >
-                    <ArrowDownTrayIcon className="h-4 w-4 mr-1" />
-                    Download
-                  </Button>
-                </div>
-              )}
             </div>
-            {documentPreviewLoading ? (
-              <div className="flex h-72 lg:h-[clamp(320px,46vh,520px)] items-center justify-center text-sm text-slate-400">
-                Loading PDF preview...
-              </div>
-            ) : documentPreviewUrl ? (
-              <iframe
-                title={selectedDocument?.title || 'Work order drawing PDF'}
-                src={documentPreviewUrl}
-                className="h-72 lg:h-[clamp(320px,46vh,520px)] w-full bg-white"
-              />
-            ) : (
-              <div className="flex h-32 flex-col items-center justify-center px-4 text-center text-slate-400">
-                <DocumentTextIcon className="mb-2 h-8 w-8 text-slate-600" />
-                <p className="text-sm">No PDF preview available.</p>
-              </div>
-            )}
-          </div>
+          )}
         </div>
       </div>
+
+      {selectedDocument && (
+        <WorkOrderPdfPreviewModal
+          key={`document-${selectedDocument.id}`}
+          source="document"
+          sourceId={selectedDocument.id}
+          title={selectedDocument.title}
+          fileName={selectedDocument.file_name || `${selectedDocument.title}.pdf`}
+          description={`${selectedDocument.file_name || selectedDocument.document_number} • Rev ${selectedDocument.revision || '-'} • ${formatCentralDate(selectedDocument.created_at)}`}
+          onClose={() => setSelectedDocumentId(null)}
+        />
+      )}
+
+      {previewNest && (
+        <WorkOrderPdfPreviewModal
+          key={`nest-${previewNest.id}`}
+          source="nest"
+          sourceId={previewNest.id}
+          title={`Nest ${previewNest.cnc_number || previewNest.nest_name}`}
+          fileName={previewNest.document_file_name || `${previewNest.nest_name}.pdf`}
+          onClose={() => setPreviewNestId(null)}
+        />
+      )}
 
       {/* Rendered for every WO type: on laser_cutting WOs (child or standalone)
           the backend operates on the WO directly, so this card doubles as the
@@ -3018,7 +2916,6 @@ export default function WorkOrderDetail() {
               <div className="space-y-2">
                 {laserNests.map(({ operation, nest }) => {
                   const acting = nestActionId === nest.id;
-                  const showPreview = previewNestId === nest.id;
                   return (
                     <div
                       key={nest.id}
@@ -3028,9 +2925,21 @@ export default function WorkOrderDetail() {
                       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
-                            <span className="font-mono text-lg font-bold text-fd-ink">
-                              {nest.cnc_number || nest.nest_name}
-                            </span>
+                            {nest.has_document ? (
+                              <button
+                                type="button"
+                                aria-label={`Preview nest ${nest.cnc_number || nest.nest_name}`}
+                                aria-haspopup="dialog"
+                                onClick={() => setPreviewNestId(nest.id)}
+                                className="rounded font-mono text-lg font-bold text-fd-blue hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fd-blue"
+                              >
+                                {nest.cnc_number || nest.nest_name}
+                              </button>
+                            ) : (
+                              <span className="font-mono text-lg font-bold text-fd-ink">
+                                {nest.cnc_number || nest.nest_name}
+                              </span>
+                            )}
                             <span className={`rounded-full px-2 py-0.5 text-xs font-medium capitalize ${statusColor(operation.status)}`}>
                               {operation.status.replace('_', ' ')}
                             </span>
@@ -3128,11 +3037,12 @@ export default function WorkOrderDetail() {
                               <>
                                 <button
                                   type="button"
-                                  onClick={() => setPreviewNestId(showPreview ? null : nest.id)}
+                                  onClick={() => setPreviewNestId(nest.id)}
+                                  aria-haspopup="dialog"
                                   className="btn-secondary btn-sm flex items-center gap-1"
                                 >
                                   <EyeIcon className="h-4 w-4" />
-                                  {showPreview ? 'Hide PDF' : 'View PDF'}
+                                  View PDF
                                 </button>
                                 <button
                                   type="button"
@@ -3178,16 +3088,6 @@ export default function WorkOrderDetail() {
                           )}
                         </div>
                       </div>
-
-                      {showPreview && nest.has_document && (
-                        <div className="mt-3">
-                          <LaserNestPdfPreview
-                            laserNestId={nest.id}
-                            fileName={nest.document_file_name}
-                            heightClassName="h-72 lg:h-[clamp(320px,42vh,460px)]"
-                          />
-                        </div>
-                      )}
                     </div>
                   );
                 })}
