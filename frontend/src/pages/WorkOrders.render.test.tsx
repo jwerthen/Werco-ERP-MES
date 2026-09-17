@@ -330,20 +330,8 @@ describe('WorkOrders row actions: Duplicate is gated on work_orders:edit', () =>
     expect(mockNavigate).not.toHaveBeenCalledWith('/work-orders/undefined');
   });
 
-  it('a row click opens that work order (list click-through)', async () => {
-    /**
-     * The POSITIVE direction, which no test asserted before.
-     *
-     * DataTable.test.tsx proves the primitive fires onRowClick, and
-     * WorkOrders.dueDateQuickEdit.test.tsx proves the due-date editor does NOT
-     * navigate — but nothing asserted that an ordinary row click on THIS page still
-     * reaches the detail route. Breaking it (dropping onRowClick, or widening an
-     * in-row stopPropagation to a whole cell) would have shipped green.
-     *
-     * That gap mattered: the only thing covering it was a Playwright test that was
-     * itself resolving against a loading skeleton, so it could not have caught a
-     * real break either.
-     */
+  it('a row click opens operations without leaving the list', async () => {
+    mockedApi.getWorkOrder.mockResolvedValue({ ...inProgressWorkOrder, operations: [] });
     renderWorkOrders();
     const table = await getDesktopTable();
 
@@ -352,6 +340,9 @@ describe('WorkOrders row actions: Duplicate is gated on work_orders:edit', () =>
     expect(row).not.toBeNull();
 
     fireEvent.click(row!);
-    expect(mockNavigate).toHaveBeenCalledWith('/work-orders/2');
+    const dialog = await screen.findByRole('dialog', { name: 'Operations for WO-1002' });
+    expect(await within(dialog).findByText('No operations on this work order')).toBeInTheDocument();
+    expect(mockedApi.getWorkOrder).toHaveBeenCalledWith(2);
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 });

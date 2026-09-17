@@ -58,6 +58,7 @@ import DuplicateWorkOrderModal from '../components/workorders/DuplicateWorkOrder
 import SaveAsTemplateModal from '../components/workorders/SaveAsTemplateModal';
 import { createdWorkOrders } from '../components/workorders/UseTemplateModal';
 import WorkOrderTemplatesPanel from '../components/workorders/WorkOrderTemplatesPanel';
+import WorkOrderOperationsModal from '../components/workorders/WorkOrderOperationsModal';
 
 
 
@@ -329,6 +330,7 @@ function RowActionsCell({
 }
 
 interface WorkOrderColumnOptions {
+  onOpen: (wo: WorkOrderSummary) => void;
   hideColumn?: 'customer' | 'part';
   onDelete?: (wo: WorkOrderSummary) => void;
   onDuplicate?: (wo: WorkOrderSummary) => void;
@@ -341,6 +343,7 @@ interface WorkOrderColumnOptions {
 }
 
 function buildWorkOrderColumns({
+  onOpen,
   hideColumn,
   onDelete,
   onDuplicate,
@@ -360,7 +363,15 @@ function buildWorkOrderColumns({
         <div className="min-w-0">
           <Link
             to={`/work-orders/${wo.id}`}
-            onClick={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+                e.preventDefault();
+                onOpen(wo);
+              }
+            }}
+            aria-haspopup="dialog"
+            title="View operations"
             className="font-semibold text-fd-link hover:text-sky-200 hover:underline"
           >
             {wo.work_order_number}
@@ -485,6 +496,7 @@ export default function WorkOrders() {
   const canDuplicateWorkOrders = canEditWorkOrders;
   const canEditDueDate = canEditWorkOrders;
   const [nestWizardOpen, setNestWizardOpen] = useState(false);
+  const [operationsTarget, setOperationsTarget] = useState<WorkOrderSummary | null>(null);
   const [browseSort, setBrowseSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>({ key: 'priority', dir: 'asc' });
   // --- The deleted book -----------------------------------------------------
   // Its OWN state, NEVER merged into `workOrders`, and that is load-bearing rather
@@ -1228,6 +1240,7 @@ export default function WorkOrders() {
   const workOrderColumns = useMemo(
     () =>
       buildWorkOrderColumns({
+        onOpen: setOperationsTarget,
         onDelete: canDeleteWorkOrders ? handleDelete : undefined,
         onDuplicate: canDuplicateWorkOrders ? handleDuplicate : undefined,
         onSaveTemplate: canEditWorkOrders ? handleSaveTemplate : undefined,
@@ -1709,6 +1722,7 @@ export default function WorkOrders() {
               <div className="hidden lg:block">
                 <DataTable
                   columns={workspace.displayColumns(buildWorkOrderColumns({
+                    onOpen: setOperationsTarget,
                     hideColumn: groupBy === 'customer' ? 'customer' : groupBy === 'part' ? 'part' : undefined,
                     onDelete: canDeleteWorkOrders ? handleDelete : undefined,
                     onDuplicate: canDuplicateWorkOrders ? handleDuplicate : undefined,
@@ -1722,7 +1736,7 @@ export default function WorkOrders() {
                   data={orders}
                   manualSorting
                   rowKey={(wo) => wo.id}
-                  onRowClick={(wo) => navigate(`/work-orders/${wo.id}`)}
+                  onRowClick={setOperationsTarget}
                   className="border-0"
                   csvExport={{ filename: `work-orders-${groupCsvSlug(groupName)}`, label: 'Export loaded rows' }}
                 />
@@ -1731,6 +1745,7 @@ export default function WorkOrders() {
                 mobile={
               <WorkOrderMobileList
                 workOrders={orders}
+                onOpen={setOperationsTarget}
                 onDelete={canDeleteWorkOrders ? handleDelete : undefined}
                 onDuplicate={canDuplicateWorkOrders ? handleDuplicate : undefined}
                 onSaveTemplate={canEditWorkOrders ? handleSaveTemplate : undefined}
@@ -1760,7 +1775,7 @@ export default function WorkOrders() {
                   {...workspace.tableProps}
                   data={filteredWorkOrders}
                   rowKey={(wo) => wo.id}
-                  onRowClick={(wo) => navigate(`/work-orders/${wo.id}`)}
+                  onRowClick={setOperationsTarget}
                   defaultSort={{ key: 'priority', dir: 'asc' }}
                   serverPagination={{ page: browse.page, pageSize: 50, hasNext: browse.has_next, onPageChange: browse.setPage, loading: browse.refreshing }}
                   csvExport={{ filename: 'work-orders' }}
@@ -1770,6 +1785,7 @@ export default function WorkOrders() {
                 mobile={
               <WorkOrderMobileList
                 workOrders={filteredWorkOrders}
+                onOpen={setOperationsTarget}
                 onDelete={canDeleteWorkOrders ? handleDelete : undefined}
                 onDuplicate={canDuplicateWorkOrders ? handleDuplicate : undefined}
                 onSaveTemplate={canEditWorkOrders ? handleSaveTemplate : undefined}
@@ -1835,6 +1851,16 @@ export default function WorkOrders() {
           // the templates panel only on the TEMPLATES tab, so the two are never
           // co-mounted: switching tabs remounts the panel, which fetches on mount.
           onSaved={() => setSaveTemplateTarget(null)}
+        />
+      )}
+
+      {operationsTarget && (
+        <WorkOrderOperationsModal
+          key={operationsTarget.id}
+          workOrderId={operationsTarget.id}
+          workOrderNumber={operationsTarget.work_order_number}
+          onClose={() => setOperationsTarget(null)}
+          onUpdated={() => { void loadWorkOrders(); }}
         />
       )}
 
@@ -1913,6 +1939,7 @@ function isWorkOrderOverdue(wo: WorkOrderSummary) {
 
 interface WorkOrderMobileListProps {
   workOrders: WorkOrderSummary[];
+  onOpen: (wo: WorkOrderSummary) => void;
   onDelete?: (wo: WorkOrderSummary) => void;
   onDuplicate?: (wo: WorkOrderSummary) => void;
   onSaveTemplate?: (wo: WorkOrderSummary) => void;
@@ -1922,7 +1949,7 @@ interface WorkOrderMobileListProps {
   className?: string;
 }
 
-const WorkOrderMobileList = React.memo(function WorkOrderMobileList({ workOrders, onDelete, onDuplicate, onSaveTemplate, onRelease, releasingIds, deletePending, className = '' }: WorkOrderMobileListProps) {
+const WorkOrderMobileList = React.memo(function WorkOrderMobileList({ workOrders, onOpen, onDelete, onDuplicate, onSaveTemplate, onRelease, releasingIds, deletePending, className = '' }: WorkOrderMobileListProps) {
   if (workOrders.length === 0) return null;
 
   return (
@@ -1931,6 +1958,7 @@ const WorkOrderMobileList = React.memo(function WorkOrderMobileList({ workOrders
         <WorkOrderMobileCard
           key={wo.id}
           workOrder={wo}
+          onOpen={onOpen}
           onDelete={onDelete}
           onDuplicate={onDuplicate}
           onSaveTemplate={onSaveTemplate}
@@ -1945,6 +1973,7 @@ const WorkOrderMobileList = React.memo(function WorkOrderMobileList({ workOrders
 
 interface WorkOrderMobileCardProps {
   workOrder: WorkOrderSummary;
+  onOpen: (wo: WorkOrderSummary) => void;
   onDelete?: (wo: WorkOrderSummary) => void;
   onDuplicate?: (wo: WorkOrderSummary) => void;
   onSaveTemplate?: (wo: WorkOrderSummary) => void;
@@ -1953,7 +1982,7 @@ interface WorkOrderMobileCardProps {
   isDeleting?: boolean;
 }
 
-const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder: wo, onDelete, onDuplicate, onSaveTemplate, onRelease, isReleasing, isDeleting }: WorkOrderMobileCardProps) {
+const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder: wo, onOpen, onDelete, onDuplicate, onSaveTemplate, onRelease, isReleasing, isDeleting }: WorkOrderMobileCardProps) {
   const overdue = isWorkOrderOverdue(wo);
   const canRelease = onRelease && wo.status === 'draft';
   const canDelete = Boolean(onDelete);
@@ -1967,6 +1996,14 @@ const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder:
         <div className="min-w-0">
           <Link
             to={`/work-orders/${wo.id}`}
+            onClick={(event) => {
+              if (!event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+                event.preventDefault();
+                onOpen(wo);
+              }
+            }}
+            aria-haspopup="dialog"
+            title="View operations"
             className="block font-semibold text-werco-400 hover:text-werco-300 truncate"
           >
             {wo.work_order_number}
@@ -2070,13 +2107,10 @@ const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder:
               Delete
             </Button>
           )}
-          <Link
-            to={`/work-orders/${wo.id}`}
-            className="btn-secondary btn-sm"
-          >
-            Details
+          <Button variant="secondary" size="sm" onClick={() => onOpen(wo)} aria-haspopup="dialog">
+            Operations
             <ChevronRightIcon className="h-4 w-4 ml-1" />
-          </Link>
+          </Button>
         </div>
       </div>
     </article>

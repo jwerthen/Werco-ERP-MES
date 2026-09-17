@@ -57,6 +57,8 @@ interface CompleteWorkModalProps {
   title: string;
   /** Optional context line under the title (e.g. "Ordered: 10"). */
   subtitle?: string;
+  /** Server refusal for the current attempt; keep quantities editable for retry. */
+  error?: string | null;
   /** Pre-fills the quantity-complete field and caps it (the ordered/target qty). */
   defaultQuantityComplete: number;
 }
@@ -68,6 +70,7 @@ export function CompleteWorkModal({
   submitting,
   title,
   subtitle,
+  error,
   defaultQuantityComplete,
 }: CompleteWorkModalProps) {
   const [qtyComplete, setQtyComplete] = useState<string>(String(defaultQuantityComplete));
@@ -169,6 +172,7 @@ export function CompleteWorkModal({
           {needsReason && (
             <ScrapReasonFields codes={scrapCodes} value={scrap} onChange={setScrap} disabled={submitting} />
           )}
+          {error && <p role="alert" className="rounded border border-fd-red/40 bg-fd-red/10 p-3 text-sm text-fd-red">{error}</p>}
         </div>
 
         <div className="modal-footer">
