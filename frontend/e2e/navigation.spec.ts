@@ -267,12 +267,9 @@ test.describe('Browser Tab Titles', () => {
     const row = await firstDataRow(page);
     test.skip(row === null, 'no seeded work orders to open a detail route from');
 
-    // Click the work-order LINK, not the row's bounding-box centre. A centre click
-    // is a layout-dependent point: it drifts as column widths change and can land
-    // on an in-row control that stops propagation by design (the due-date pencil).
-    // This test's subject is the detail route's TITLE; row click-through itself is
-    // owned by work-orders.spec.ts and by the jest suites.
-    await row!.locator('a[href^="/work-orders/"]').first().click();
+    // The number and row open the operations popup. Use the explicit full-detail
+    // link here because this test covers the detail page's browser-tab title.
+    await row!.getByRole('link', { name: /^View / }).click();
     await page.waitForURL(/\/work-orders\/\d+/);
     await expect(page).toHaveTitle('Work Order · Werco ERP', { timeout: TITLE_TIMEOUT });
   });
