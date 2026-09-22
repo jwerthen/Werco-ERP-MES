@@ -65,6 +65,8 @@ export function KeyboardShortcutsProvider({
     },
     {
       ...GLOBAL_SHORTCUTS.ESCAPE,
+      // Let the active page dialog handle Escape when shortcut help is closed.
+      preventDefault: isHelpOpen,
       action: () => {
         if (isHelpOpen) {
           hideHelp();

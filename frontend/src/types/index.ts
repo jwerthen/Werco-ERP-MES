@@ -1515,6 +1515,8 @@ export interface ActiveAssignment {
     name: string | null;
     status: OperationStatus | null;
     sequence?: number | null;
+    /** Nest identity for the dashboard; full details and PDF are fetched on demand. */
+    laser_nest?: Pick<LaserNestInfo, 'id' | 'nest_name' | 'cnc_number' | 'cnc_file_name'> | null;
     /**
      * THIS operation's quantity target, resolved server-side by the one rule
      * (`operation_target_quantity`): a laser nest's own `planned_runs`, a batch/pool
