@@ -2855,7 +2855,7 @@ def _dashboard_state_fingerprint(
     unchanged dashboard can 304 having touched only these aggregates.
 
     For every source table the payload reads, we hash ``(count, max(updated_at))``.
-    All six models carry ``updated_at`` (``onupdate=datetime.utcnow``), so an INSERT
+    All source models carry ``updated_at`` (``onupdate=datetime.utcnow``), so an INSERT
     bumps ``count`` and any in-place UPDATE/soft-delete bumps ``max(updated_at)`` --
     together they faithfully DOMINATE every payload field derived from those rows
     (counts, statuses, quantities, timestamps). ``Part`` is included because
@@ -2900,6 +2900,11 @@ def _dashboard_state_fingerprint(
         .filter(Part.company_id == company_id, Part.is_deleted == False)  # noqa: E712
         .one()
     )
+    nest_count, nest_max = (
+        db.query(func.count(LaserNest.id), func.max(LaserNest.updated_at))
+        .filter(LaserNest.company_id == company_id)
+        .one()
+    )
     fingerprint = {
         "today": date.today().isoformat(),
         "central_today": datetime.now(CENTRAL_TIME_ZONE).date().isoformat(),
@@ -2909,6 +2914,7 @@ def _dashboard_state_fingerprint(
         "work_centers": (int(wc_count or 0), wc_max.isoformat() if wc_max else None),
         "users": (int(user_count or 0), user_max.isoformat() if user_max else None),
         "parts": (int(part_count or 0), part_max.isoformat() if part_max else None),
+        "laser_nests": (int(nest_count or 0), nest_max.isoformat() if nest_max else None),
         "presence": sorted([user_id, connected_since_by_id.get(user_id)] for user_id in connected_user_ids),
     }
     return hashlib.md5(json.dumps(fingerprint, sort_keys=True, default=str).encode(), usedforsecurity=False).hexdigest()
@@ -3050,7 +3056,7 @@ def shop_floor_dashboard(
         .options(
             joinedload(TimeEntry.user),
             joinedload(TimeEntry.work_order).joinedload(WorkOrder.part),
-            joinedload(TimeEntry.operation),
+            joinedload(TimeEntry.operation).joinedload(WorkOrderOperation.laser_nest),
             joinedload(TimeEntry.work_center),
         )
         .filter(TimeEntry.company_id == company_id, TimeEntry.clock_out.is_(None))
@@ -3062,6 +3068,7 @@ def shop_floor_dashboard(
     active_assignments: list[dict] = []
 
     for entry in active_entries:
+        nest = active_laser_nest(entry.operation) if entry.operation else None
         assignment = {
             "time_entry_id": entry.id,
             "clock_in": to_utc_iso(entry.clock_in),
@@ -3111,6 +3118,17 @@ def shop_floor_dashboard(
                     else (entry.operation.status if entry.operation else None)
                 ),
                 "sequence": entry.operation.sequence if entry.operation else None,
+                # Read-only identity for the live row; details/PDF load on demand.
+                "laser_nest": (
+                    {
+                        "id": nest.id,
+                        "nest_name": nest.nest_name,
+                        "cnc_number": nest.cnc_number,
+                        "cnc_file_name": nest.cnc_file_name,
+                    }
+                    if nest
+                    else None
+                ),
                 # THIS operation's target, resolved by the ONE server rule
                 # (``operation_target_quantity``): a laser nest is targeted at its own
                 # planned_runs, a batch/pool line at its own piece count, and only an

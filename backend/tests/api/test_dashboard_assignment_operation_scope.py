@@ -288,6 +288,8 @@ class TestLaserNestAssignmentIsNestScoped:
         wc = make_work_center(db_session)
         wo, ops, nests = make_laser_nest_wo(db_session, wc, planned_runs=[2, 16])
         small_op, big_op = ops
+        nests[0].cnc_number = "4101"
+        nests[1].cnc_number = "4102"
         # Mirror the floor: two operators, one on each nest, both clocked in.
         op_a = make_user(db_session)
         op_b = make_user(db_session)
@@ -322,6 +324,59 @@ class TestLaserNestAssignmentIsNestScoped:
         assert small["work_order"]["quantity_ordered"] == 18.0
         assert big["work_order"]["quantity_ordered"] == 18.0
         assert small["work_order"]["id"] == big["work_order"]["id"] == wo.id
+
+        # The CNC identity follows the assigned operation, never the first nest
+        # on the parent work order (both operators share that same work order).
+        for assignment, nest in [(small, nests[0]), (big, nests[1])]:
+            assert assignment["operation"]["laser_nest"] == {
+                "id": nest.id,
+                "nest_name": nest.nest_name,
+                "cnc_number": nest.cnc_number,
+                "cnc_file_name": nest.cnc_file_name,
+            }
+
+    def test_deleted_nest_is_not_advertised(self, client: TestClient, db_session: Session):
+        wc = make_work_center(db_session)
+        wo, ops, nests = make_laser_nest_wo(db_session, wc, planned_runs=[2])
+        operator = make_user(db_session)
+        entry = open_entry(db_session, operator, wo, ops[0])
+        nests[0].is_deleted = True
+        db_session.commit()
+
+        assignment = assignments_by_entry_id(client, operator)[entry.id]
+        assert assignment["operation"]["laser_nest"] is None
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("cnc_number", "NEW-4102"),
+            ("nest_name", "Revised nest"),
+            ("cnc_file_name", "revised.nc"),
+            ("is_deleted", True),
+        ],
+    )
+    def test_nest_identity_change_invalidates_cached_dashboard(
+        self, client: TestClient, db_session: Session, field: str, value
+    ):
+        wc = make_work_center(db_session)
+        wo, ops, nests = make_laser_nest_wo(db_session, wc, planned_runs=[2])
+        operator = make_user(db_session)
+        entry = open_entry(db_session, operator, wo, ops[0])
+        initial = client.get(DASHBOARD, headers=headers_for(operator))
+        assert initial.status_code == 200
+        cached_headers = {**headers_for(operator), "If-None-Match": initial.headers["ETag"]}
+        assert client.get(DASHBOARD, headers=cached_headers).status_code == 304
+
+        setattr(nests[0], field, value)
+        db_session.commit()
+        refreshed = client.get(DASHBOARD, headers=cached_headers)
+        assert refreshed.status_code == 200
+        assert refreshed.headers["ETag"] != initial.headers["ETag"]
+        assignment = next(a for a in refreshed.json()["active_assignments"] if a["time_entry_id"] == entry.id)
+        if field == "is_deleted":
+            assert assignment["operation"]["laser_nest"] is None
+        else:
+            assert assignment["operation"]["laser_nest"][field] == value
 
     def test_the_production_shape_a_nest_at_zero_of_two_reads_zero_of_two(
         self, client: TestClient, db_session: Session
@@ -378,6 +433,7 @@ class TestOrdinaryOperationAndNoOperation:
         assert assignment["operation"]["component_quantity"] in (None, 0, 0.0)
         assert assignment["operation"]["quantity_ordered"] == 100.0
         assert assignment["work_order"]["quantity_ordered"] == 100.0
+        assert assignment["operation"]["laser_nest"] is None
 
     def test_entry_with_no_operation_yields_null_not_zero(self, client: TestClient, db_session: Session):
         """Indirect / setup labor: ``quantity_ordered`` must be NULL, never 0.0.
@@ -403,6 +459,7 @@ class TestOrdinaryOperationAndNoOperation:
         assignment = assignments_by_entry_id(client, viewer)[entry.id]
 
         assert assignment["operation"]["id"] is None
+        assert assignment["operation"]["laser_nest"] is None
         assert assignment["operation"]["quantity_ordered"] is None
         # Explicit: NULL, not the falsy zero that reads the same in a truthiness test
         # but NOT in the client's ``??`` fallback.

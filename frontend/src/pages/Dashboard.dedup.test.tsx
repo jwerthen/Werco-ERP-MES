@@ -16,6 +16,7 @@ import { render, screen, fireEvent, within, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import Dashboard from './Dashboard';
+import { KeyboardShortcutsProvider } from '../context/KeyboardShortcutsContext';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -25,6 +26,8 @@ jest.mock('../services/api', () => ({
     getEquipmentDueSoon: jest.fn(),
     getLowStockAlerts: jest.fn(),
     getCapacityHeatmap: jest.fn(),
+    getOperationDetails: jest.fn(),
+    fetchLaserNestDocument: jest.fn(),
   },
 }));
 
@@ -175,9 +178,159 @@ const heatmap = {
 const renderDashboard = () =>
   render(
     <MemoryRouter>
-      <Dashboard />
+      <KeyboardShortcutsProvider>
+        <Dashboard />
+      </KeyboardShortcutsProvider>
     </MemoryRouter>
   );
+
+const nest = {
+  id: 92,
+  cnc_number: '4102',
+  cnc_file_name: '4102.nc',
+  nest_name: 'Nest 2',
+  planned_runs: 2,
+  completed_runs: 1,
+  remaining_runs: 1,
+  material: '304 stainless',
+  thickness: '0.125 in',
+  sheet_size: '48 x 96',
+  has_document: true,
+  document_file_name: 'nest-4102.pdf',
+};
+
+const operationDetails = {
+  operation: {
+    id: 12,
+    operation_number: 'Nest 2',
+    name: 'Laser cut nest 2',
+    status: 'in_progress',
+    quantity_ordered: 2,
+    quantity_complete: 1,
+    quantity_scrapped: 0,
+    setup_instructions: 'Verify sheet thickness before cutting.',
+    run_instructions: 'Run CNC 4102.',
+    laser_nest: nest,
+  },
+  work_order: dashboardData.active_assignments[0].work_order,
+  work_center: { name: 'Laser cell 1' },
+};
+
+const renderNestDashboard = () => {
+  const base = dashboardData.active_assignments[0];
+  mockedApi.getDashboardWithCache.mockResolvedValue({
+    data: {
+      ...dashboardData,
+      active_assignments: [
+        { ...base, operation: { ...base.operation, id: 11, laser_nest: { ...nest, id: 91, cnc_number: '4101' } } },
+        { ...base, time_entry_id: 102, operation: { ...base.operation, id: 12, laser_nest: nest } },
+      ],
+    } as any,
+    fromCache: false,
+    changed: true,
+  });
+  mockedApi.getOperationDetails.mockResolvedValue(operationDetails);
+  return renderDashboard();
+};
+
+describe('dashboard operation details and nest PDF', () => {
+  it('opens the clicked nest operation and its PDF, keeping the work-order link separate', async () => {
+    const revokeObjectUrl = jest.spyOn(window.URL, 'revokeObjectURL');
+    mockedApi.fetchLaserNestDocument.mockResolvedValue('blob:nest-4102');
+    renderNestDashboard();
+    const trigger = await screen.findByRole('button', { name: /View operation details for CNC# 4102/ });
+    expect(mockedApi.getOperationDetails).not.toHaveBeenCalled();
+    fireEvent.click(trigger);
+    const dialog = await screen.findByRole('dialog', { name: 'Operation details' });
+    await within(dialog).findByText('Run CNC 4102.');
+    expect(mockedApi.getOperationDetails).toHaveBeenCalledWith(12);
+    expect(within(dialog).getByText('1 / 2')).toBeInTheDocument();
+    expect(within(dialog).getByText('304 stainless • 0.125 in')).toBeInTheDocument();
+    expect(within(dialog).getByRole('link', { name: 'Open work order' })).toHaveAttribute('href', '/work-orders/3041');
+    expect(mockedApi.fetchLaserNestDocument).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'View nest PDF' }));
+    expect(await within(dialog).findByLabelText('nest-4102.pdf')).toHaveAttribute('data', 'blob:nest-4102');
+    expect(mockedApi.fetchLaserNestDocument).toHaveBeenCalledWith(92);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close operation details' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(revokeObjectUrl).toHaveBeenCalledWith('blob:nest-4102');
+    revokeObjectUrl.mockRestore();
+    expect(screen.getByRole('heading', { name: 'Live Shop Activity' })).toBeInTheDocument();
+  });
+
+  it('explains when a nest has no attached PDF', async () => {
+    renderNestDashboard();
+    mockedApi.getOperationDetails.mockResolvedValue({
+      ...operationDetails,
+      operation: { ...operationDetails.operation, laser_nest: { ...nest, has_document: false } },
+    });
+    fireEvent.click(await screen.findByRole('button', { name: /View operation details for CNC# 4102/ }));
+    expect(await screen.findByText('No PDF is attached to this nest.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'View nest PDF' })).not.toBeInTheDocument();
+  });
+
+  it('allows retrying a failed operation load', async () => {
+    renderNestDashboard();
+    mockedApi.getOperationDetails.mockRejectedValueOnce(new Error('offline'));
+    fireEvent.click(await screen.findByRole('button', { name: /View operation details for CNC# 4102/ }));
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText('Could not load this operation. Please try again.');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry' }));
+    expect(await within(dialog).findByText('Run CNC 4102.')).toBeInTheDocument();
+    expect(mockedApi.getOperationDetails).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not reopen a closed detail view when a slow response arrives', async () => {
+    renderNestDashboard();
+    let resolve!: (value: typeof operationDetails) => void;
+    mockedApi.getOperationDetails.mockReturnValueOnce(
+      new Promise(done => {
+        resolve = done;
+      })
+    );
+    fireEvent.click(await screen.findByRole('button', { name: /View operation details for CNC# 4102/ }));
+    expect(screen.getByText('Loading operation details…')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Close operation details' }));
+    await act(async () => {
+      resolve(operationDetails);
+    });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('closes on Escape with the app keyboard shortcuts enabled', async () => {
+    renderNestDashboard();
+    fireEvent.click(await screen.findByRole('button', { name: /View operation details for CNC# 4102/ }));
+    await screen.findByText('Run CNC 4102.');
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Close operation details' }), { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: 'Operation details' })).not.toBeInTheDocument();
+  });
+
+  it('opens ordinary operations without nest controls and leaves indirect labor at work-order scope', async () => {
+    const base = dashboardData.active_assignments[0];
+    mockedApi.getDashboardWithCache.mockResolvedValue({
+      data: {
+        ...dashboardData,
+        active_assignments: [base, { ...base, time_entry_id: 102, operation: { id: null } }],
+      } as any,
+      fromCache: false,
+      changed: true,
+    });
+    mockedApi.getOperationDetails.mockResolvedValue({
+      ...operationDetails,
+      operation: { ...operationDetails.operation, id: 1, laser_nest: null },
+    });
+    renderDashboard();
+    fireEvent.click(await screen.findByRole('button', { name: 'View operation details for Laser cut' }));
+    await screen.findByText('Run CNC 4102.');
+    expect(mockedApi.getOperationDetails).toHaveBeenCalledWith(1);
+    expect(screen.queryByRole('button', { name: 'View nest PDF' })).not.toBeInTheDocument();
+    expect(within(document.getElementById('assign-102')!).queryByRole('button')).not.toBeInTheDocument();
+    expect(within(document.getElementById('assign-102')!).getByRole('link', { name: 'WO-3041' })).toHaveAttribute(
+      'href',
+      '/work-orders/3041'
+    );
+  });
+});
 
 beforeAll(() => {
   // jsdom doesn't implement scrollIntoView; the cross-links call it.

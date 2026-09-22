@@ -7,6 +7,7 @@ import { SkeletonDashboard } from '../components/ui/Skeleton';
 import { EmptyState, ErrorState } from '../components/ui';
 import { MiniStat, CockpitPanel, SetupNudge } from '../components/cockpit';
 import { MorningBriefBanner } from '../components/ai/MorningBriefBanner';
+import DashboardOperationDetails from '../components/dashboard/DashboardOperationDetails';
 import { statusVariant, type StatusVariant } from '../components/ui';
 import { ActiveAssignment, DashboardData, SignedInUserStatus, WorkCenterStatus } from '../types';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -159,6 +160,7 @@ export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [selectedAssignment, setSelectedAssignment] = useState<ActiveAssignment | null>(null);
 
   const [openNCRs, setOpenNCRs] = useState<number | null>(null);
   const [lowInventory, setLowInventory] = useState<number | null>(null);
@@ -740,7 +742,12 @@ export default function Dashboard() {
                     </div>
                     <div className="divide-y divide-fd-line">
                       {assignments.map(assignment => (
-                        <ActiveAssignmentRow key={assignment.time_entry_id} assignment={assignment} nowMs={nowMs} />
+                        <ActiveAssignmentRow
+                          key={assignment.time_entry_id}
+                          assignment={assignment}
+                          nowMs={nowMs}
+                          onOpenOperation={() => setSelectedAssignment(assignment)}
+                        />
                       ))}
                     </div>
                   </div>
@@ -864,6 +871,14 @@ export default function Dashboard() {
         </CockpitPanel>
       </div>
 
+      {selectedAssignment?.operation.id != null && (
+        <DashboardOperationDetails
+          key={selectedAssignment.time_entry_id}
+          assignment={selectedAssignment}
+          onClose={() => setSelectedAssignment(null)}
+        />
+      )}
+
       {/* Recent Completions */}
       <div className="card card-compact flex flex-col min-w-0">
         <div className="card-header !pb-2 !mb-2">
@@ -985,7 +1000,15 @@ function MachineRow({
   );
 }
 
-function ActiveAssignmentRow({ assignment, nowMs }: { assignment: ActiveAssignment; nowMs: number }) {
+function ActiveAssignmentRow({
+  assignment,
+  nowMs,
+  onOpenOperation,
+}: {
+  assignment: ActiveAssignment;
+  nowMs: number;
+  onOpenOperation: () => void;
+}) {
   // Progress here is OPERATION-scoped, because a row IS one assignment to one
   // operation. It must print the same fraction Dispatch, the WO routing table and
   // Shop Floor Operations already print for that operation: a running nest reads
@@ -1006,6 +1029,10 @@ function ActiveAssignmentRow({ assignment, nowMs }: { assignment: ActiveAssignme
   // older than the bundle reading it. Keep the fallback: without it, a frontend that
   // ships ahead of the backend renders 0/102 again, and no test catches it.
   const hasOperation = assignment.operation?.id != null;
+  const nest = assignment.operation.laser_nest;
+  const operationName = nest
+    ? [nest.cnc_number ? `CNC# ${nest.cnc_number}` : nest.cnc_file_name, nest.nest_name].filter(Boolean).join(' · ')
+    : assignment.operation.name;
   const orderedQty = hasOperation
     ? Number(
         assignment.operation.quantity_ordered ??
@@ -1091,6 +1118,19 @@ function ActiveAssignmentRow({ assignment, nowMs }: { assignment: ActiveAssignme
           {completeQty}/{orderedQty || 0} ({progress}%)
         </span>
       </div>
+      {hasOperation && (
+        <button
+          type="button"
+          onClick={onOpenOperation}
+          aria-label={`View operation details for ${operationName || assignment.work_order.work_order_number}`}
+          className="mt-1 flex w-full flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded border border-fd-line px-2 py-1.5 text-left text-xs text-fd-link hover:bg-slate-800/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-fd-blue"
+        >
+          <span className={`min-w-0 break-words font-semibold ${nest ? 'font-mono' : ''}`}>
+            {operationName || 'Operation details'}
+          </span>
+          <span className="shrink-0 text-[11px]">View operation →</span>
+        </button>
+      )}
     </div>
   );
 }
