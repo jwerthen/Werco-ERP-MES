@@ -876,14 +876,17 @@ class TestLaserNestImport:
         assert "16-byte MCP upload cap" in result.structured_content["detail"]
         assert executor.calls == [] and fake_nest_import.calls == []
         assert db_session.query(WorkOrder).count() == 0
-        # A generated multipart tool decodes through the same cap.
-        upload_tools = [tool.name for tool in catalog if tool.file_fields]
+        # A generated multipart tool decodes through the same cap. Select its
+        # route explicitly: alphabetical catalog order can put an upload with
+        # additional required fields first, failing validation before decoding.
+        upload_tool = next(tool for tool in catalog if tool.key == ("POST", "/api/v1/laser-nests/extract"))
         result = await call(
             server,
-            upload_tools[0],
-            {catalog_by_name(catalog, upload_tools[0]).file_fields[0]: {"filename": "b.csv", "content_base64": blob}},
+            upload_tool.name,
+            {"file": {"filename": "big.pdf", "content_base64": blob}},
         )
         assert result.is_error and result.structured_content["status"] == 413
+        assert "16-byte MCP upload cap" in result.structured_content["detail"]
         assert executor.calls == []
 
     async def test_import_requires_a_file_or_a_source_path(self, client, manager_headers, catalog, fake_nest_import):

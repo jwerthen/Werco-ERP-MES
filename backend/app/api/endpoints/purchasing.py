@@ -32,7 +32,7 @@ from app.schemas.purchasing import (
     VendorUpdate,
 )
 from app.services.audit_service import AuditService
-from app.services.erp_draft_commands import create_purchase_order_command
+from app.services.erp_draft_commands import PurchaseOrderNumberConflict, create_purchase_order_command
 from app.services.erp_draft_commands import generate_po_number as generate_po_number  # noqa: F401 - legacy service seam
 from app.services.import_service import ImportFileError, parse_import_file
 from app.services.migration_import_service import import_open_purchase_orders
@@ -891,6 +891,9 @@ def create_purchase_order(
         db.commit()
         db.refresh(po)
         return po
+    except PurchaseOrderNumberConflict as exc:
+        db.rollback()
+        raise HTTPException(400, f"PO number '{exc.po_number}' already exists") from exc
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(400, "A generated PO record conflicts with an existing record") from exc

@@ -7,6 +7,7 @@ retains the existing tenant and business-state guards.
 from datetime import datetime
 
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.locks import acquire_generator_lock
@@ -15,6 +16,14 @@ from app.models.part import Part
 from app.models.purchasing import PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.work_order import WorkOrder
 from app.services.operational_event_service import OperationalEventService
+
+
+class PurchaseOrderNumberConflict(IntegrityError):
+    """Preserve the failed header's number while callers own rollback and HTTP mapping."""
+
+    def __init__(self, po_number: str, error: IntegrityError):
+        super().__init__(error.statement, error.params, error.orig, hide_parameters=error.hide_parameters)
+        self.po_number = po_number
 
 
 def generate_po_number(db: Session, company_id: int = None) -> str:
@@ -72,7 +81,12 @@ def create_purchase_order_command(db, po_in, current_user, company_id, audit):
     )
     po.company_id = company_id
     db.add(po)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        # The generator lock serializes Postgres creates; preserve the existing
+        # duplicate-number backstop for SQLite and any residual header conflict.
+        raise PurchaseOrderNumberConflict(po_number, exc) from exc
 
     # Add lines
     subtotal = 0.0

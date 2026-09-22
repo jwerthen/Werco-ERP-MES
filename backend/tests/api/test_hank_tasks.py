@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 
 from app.models.audit_log import AuditLog
 from app.models.company import Company
@@ -119,6 +120,50 @@ def test_purchase_order_receipt_stays_draft(client, db_session, auth_headers, ve
     assert result.json()['result']['references'][0]['url'] == f'/purchasing?po={po.id}'
     assert execute(client, auth_headers, response.json()).json() == result.json()
     assert db_session.query(PurchaseOrder).count() == 1
+
+
+def test_po_number_conflict_preserves_review_and_can_retry(
+    client, db_session, auth_headers, vendor, test_part, monkeypatch
+):
+    proposal = propose(
+        client,
+        auth_headers,
+        'draft_purchase_order',
+        {
+            'vendor_id': vendor.id,
+            'lines': [{'part_id': test_part.id, 'quantity_ordered': 2, 'unit_price': 3}],
+        },
+    )
+    assert proposal.status_code == 200, proposal.text
+    task = proposal.json()
+    real_flush = db_session.flush
+    failed = False
+
+    def conflict_at_po_header(*args, **kwargs):
+        nonlocal failed
+        if not failed and any(isinstance(row, PurchaseOrder) for row in db_session.new):
+            failed = True
+            raise IntegrityError('INSERT INTO purchase_orders', None, Exception('duplicate PO number'))
+        return real_flush(*args, **kwargs)
+
+    monkeypatch.setattr(db_session, 'flush', conflict_at_po_header)
+    response = execute(client, auth_headers, task)
+    assert response.status_code == 409, response.text
+    assert failed
+    # No manual rollback here: the endpoint must recover the failed transaction.
+    assert db_session.query(PurchaseOrder).count() == 0
+    assert db_session.query(AuditLog).filter_by(resource_type='purchase_order').count() == 0
+    saved = db_session.get(HankTask, task['id'])
+    assert saved.status == 'awaiting_review' and saved.version == task['version']
+    assert saved.result_json is None
+    assert db_session.query(AuditLog).filter_by(resource_type='hank_task').count() == 1
+
+    retry = execute(client, auth_headers, task)
+    assert retry.status_code == 200, retry.text
+    assert retry.json()['status'] == 'completed'
+    assert db_session.query(PurchaseOrder).count() == 1
+    assert db_session.query(AuditLog).filter_by(resource_type='purchase_order').count() == 1
+    assert db_session.query(AuditLog).filter_by(resource_type='hank_task').count() == 2
 
 
 def test_attachment_receipt_and_required_document_audit(client, db_session, auth_headers, document, test_work_order):
