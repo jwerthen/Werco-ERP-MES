@@ -1,7 +1,7 @@
 /**
- * Werco Copilot — read-only ask-anything chat drawer over the tenant's ERP data.
+ * Hank — shop teammate with ERP lookups and employee-reviewed tasks.
  *
- * - Opens from the header sparkles button or Ctrl+. (wired in Layout).
+ * - Opens from the header Hank button or Ctrl+. (wired in Layout).
  * - Conversation history is CLIENT-held, memory only: it survives open/close
  *   (the component stays mounted) but resets on reload. Nothing is persisted.
  * - Answers stream over SSE (api.copilotChatStream); tool activity renders as
@@ -11,9 +11,27 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { ArrowPathIcon, PaperAirplaneIcon, SparklesIcon, TrashIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import {
+  ArrowPathIcon,
+  ArrowUpTrayIcon,
+  PaperAirplaneIcon,
+  StopIcon,
+  TrashIcon,
+  XMarkIcon,
+} from '@heroicons/react/24/outline';
 import api from '../../services/api';
 import { CopilotMessage, CopilotReference, CopilotToolTraceEntry } from '../../types/copilot';
+import { usePermissions } from '../../hooks/usePermissions';
+import { canPublishDocuments } from '../../utils/recordWriteAccess';
+import { HankAvatar } from './HankAvatar';
+import { HankDocumentUpload } from './HankDocumentUpload';
+import { HankBriefing } from './HankBriefing';
+import { HankTaskWorkspace } from './HankTaskWorkspace';
+import { HankPreferences } from './HankPreferences';
+import { HankWorkWorkspace, HankWorkArea } from './HankWorkWorkspace';
+import { HankVoiceInput } from './HankVoiceInput';
+import { hankRecordContext } from './hankContext';
+import { getHankSessionScope, isHankReadOnlySession } from './hankSession';
 
 export interface CopilotPanelProps {
   isOpen: boolean;
@@ -31,7 +49,21 @@ interface ChatEntry {
 
 const MAX_HISTORY_SENT = 40; // matches the backend request schema cap
 const MAX_DISPLAYED_ENTRIES = 200; // render cap — very long sessions stay responsive
-const SUGGESTIONS = ["What's blocked right now?", 'How loaded is the laser this week?', 'Anything overdue?'];
+interface Suggestion {
+  label: string;
+  prompt: string;
+  draft?: boolean;
+}
+
+const SHOP_SUGGESTIONS: Suggestion[] = [
+  {
+    label: 'Brief me on the shop',
+    prompt:
+      'Give me a shop briefing: active jobs, open blockers, and schedule conflicts. Link to the records I should review.',
+  },
+  { label: "What's blocked right now?", prompt: "What's blocked right now?" },
+  { label: 'How loaded is the laser this week?', prompt: 'How loaded is the laser this week?' },
+];
 
 function toApiMessages(entries: ChatEntry[]): CopilotMessage[] {
   return entries
@@ -42,15 +74,31 @@ function toApiMessages(entries: ChatEntry[]): CopilotMessage[] {
 
 export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
   const location = useLocation();
+  const { role, isSuperuser } = usePermissions();
+  const canUpload = canPublishDocuments({ role, is_superuser: isSuperuser }) && !isHankReadOnlySession();
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [activity, setActivity] = useState<string | null>(null);
   const [streamText, setStreamText] = useState('');
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const [view, setView] = useState<'chat' | 'briefing' | 'tasks' | 'work' | 'preferences'>('chat');
+  const [taskBusy, setTaskBusy] = useState(false);
+  const [preferencesBusy, setPreferencesBusy] = useState(false);
+  const [workBusy, setWorkBusy] = useState(false);
+  const [workSelection, setWorkSelection] = useState<{ area: HankWorkArea; id?: number }>({ area: 'overview' });
+  const [workNavigation, setWorkNavigation] = useState('initial');
+  const recordContext = useMemo(
+    () => hankRecordContext(location.pathname, location.search),
+    [location.pathname, location.search]
+  );
   const panelRef = useRef<HTMLElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const turnGenerationRef = useRef(0);
+  const sessionScopeRef = useRef(getHankSessionScope());
   // Mirror of `entries` so send/retry can compute the next history without
   // putting side effects inside a state updater (StrictMode double-invokes those).
   const entriesRef = useRef<ChatEntry[]>(entries);
@@ -58,7 +106,85 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
     entriesRef.current = entries;
   }, [entries]);
 
-  const contextHint = useMemo(() => `viewing ${location.pathname}${location.search}`, [location]);
+  const contextHint = useMemo(() => `viewing ${location.pathname}${location.search}`.slice(0, 500), [location]);
+  const taskId = useMemo(() => {
+    const value = Number(new URLSearchParams(location.search).get('hank_task'));
+    return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+  }, [location.search]);
+  const workLink = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    const area = params.get('hank_work');
+    const id = Number(params.get('hank_id'));
+    return area && ['handoff', 'routine', 'intake'].includes(area) && Number.isSafeInteger(id) && id > 0
+      ? { area: area as HankWorkArea, id }
+      : undefined;
+  }, [location.search]);
+  const handledTaskNavigation = useRef<string | undefined>(undefined);
+  const [taskNavigation, setTaskNavigation] = useState('initial');
+  useEffect(() => {
+    const navigation = `${location.key}:${taskId ?? ''}:${workLink?.area ?? ''}:${workLink?.id ?? ''}`;
+    if (navigation === handledTaskNavigation.current || busy || taskBusy || workBusy || preferencesBusy || uploadBusy)
+      return;
+    handledTaskNavigation.current = navigation;
+    if (workLink) {
+      setUploadOpen(false);
+      setWorkSelection(workLink);
+      setWorkNavigation(navigation);
+      setView('work');
+    } else if (taskId) {
+      setUploadOpen(false);
+      setTaskNavigation(navigation);
+      setView('tasks');
+    }
+  }, [taskId, workLink, location.key, busy, taskBusy, workBusy, preferencesBusy, uploadBusy]);
+  const workOrderId = useMemo(() => {
+    const match = /^\/work-orders\/(\d+)$/.exec(location.pathname);
+    const id = match ? Number(match[1]) : undefined;
+    return id !== undefined && Number.isSafeInteger(id) && id > 0 ? id : undefined;
+  }, [location.pathname]);
+  const suggestions = useMemo(() => {
+    if (workOrderId !== undefined) {
+      return [
+        {
+          label: 'Brief me on this job',
+          prompt: `Look up work order ID ${workOrderId}. Summarize its status, operations, blockers, and recent activity, with a link to the job.`,
+        },
+        {
+          label: 'What is holding this job up?',
+          prompt: `Look up work order ID ${workOrderId} and explain its open blockers and current operation. Use the recorded facts.`,
+        },
+        SHOP_SUGGESTIONS[0],
+      ];
+    }
+    if (/^\/(inventory|parts)(\/|$)/.test(location.pathname)) {
+      return [
+        {
+          label: 'Check stock for a part…',
+          prompt: 'Check available inventory, locations, and lots for part ',
+          draft: true,
+        },
+        { label: 'Find a part…', prompt: 'Find part ', draft: true },
+        SHOP_SUGGESTIONS[0],
+      ];
+    }
+    if (/^\/(customers|purchasing)(\/|$)/.test(location.pathname)) {
+      return [
+        {
+          label: 'Look up customer orders…',
+          prompt: 'Show open work orders and active quotes for customer ',
+          draft: true,
+        },
+        { label: 'Find a purchase order…', prompt: 'Find purchase order ', draft: true },
+        SHOP_SUGGESTIONS[0],
+      ];
+    }
+    return SHOP_SUGGESTIONS;
+  }, [location.pathname, workOrderId]);
+
+  const replaceEntries = useCallback((next: ChatEntry[]) => {
+    entriesRef.current = next;
+    setEntries(next);
+  }, []);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -74,7 +200,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
       if (event.key !== 'Tab') return;
       const controls = Array.from(
         panelRef.current?.querySelectorAll<HTMLElement>(
-          'a[href],button:not([disabled]),textarea:not([disabled]),[tabindex="0"]'
+          'a[href],button:not(:disabled),input:not(:disabled):not([type="hidden"]),select:not(:disabled),textarea:not(:disabled),[tabindex="0"]'
         ) ?? []
       );
       const first = controls[0];
@@ -101,33 +227,63 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
   useEffect(() => {
     const el = scrollRef.current;
     if (el && typeof el.scrollTo === 'function') {
-      el.scrollTo({ top: el.scrollHeight });
+      el.scrollTo({ top: uploadOpen || view !== 'chat' ? 0 : el.scrollHeight });
     }
-  }, [entries, streamText, activity, isOpen]);
+  }, [entries, streamText, activity, isOpen, uploadOpen, view]);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(() => {
+    if (!isOpen) return;
+    if (uploadOpen) {
+      const target =
+        panelRef.current?.querySelector<HTMLElement>('input:not(:disabled)') ??
+        panelRef.current?.querySelector<HTMLElement>('button[aria-label="Close Hank"]');
+      target?.focus();
+    } else if (view !== 'chat') {
+      scrollRef.current?.querySelector<HTMLElement>('button:not(:disabled),a[href]')?.focus();
+    } else {
+      inputRef.current?.focus();
+    }
+  }, [uploadOpen, isOpen, view]);
+
+  useEffect(
+    () => () => {
+      turnGenerationRef.current += 1;
+      abortRef.current?.abort();
+    },
+    []
+  );
 
   const runTurn = useCallback(
     async (history: ChatEntry[]) => {
+      if (getHankSessionScope() !== sessionScopeRef.current) return;
+      const generation = ++turnGenerationRef.current;
       setBusy(true);
       setActivity(null);
       setStreamText('');
       const controller = new AbortController();
       abortRef.current = controller;
+      const isCurrentTurn = () =>
+        generation === turnGenerationRef.current &&
+        !controller.signal.aborted &&
+        getHankSessionScope() === sessionScopeRef.current;
       try {
         const final = await api.copilotChatStream(
           { messages: toApiMessages(history), context_hint: contextHint },
           {
-            onToolUse: (_tool, summary) => setActivity(summary),
+            onToolUse: (_tool, summary) => {
+              if (isCurrentTurn()) setActivity(summary);
+            },
             onDelta: text => {
+              if (!isCurrentTurn()) return;
               setActivity(null);
               setStreamText(prev => prev + text);
             },
           },
           controller.signal
         );
-        setEntries(prev => [
-          ...prev,
+        if (!isCurrentTurn()) return;
+        replaceEntries([
+          ...entriesRef.current,
           {
             role: 'assistant',
             content: final.answer,
@@ -137,55 +293,86 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
           },
         ]);
       } catch (err: unknown) {
-        if (!(err instanceof DOMException && err.name === 'AbortError')) {
-          setEntries(prev => [
-            ...prev,
+        if (isCurrentTurn() && !(err instanceof DOMException && err.name === 'AbortError')) {
+          replaceEntries([
+            ...entriesRef.current,
             {
               role: 'assistant',
-              content: err instanceof Error ? err.message : 'The copilot is unavailable right now.',
+              content: err instanceof Error ? err.message : 'Hank is unavailable right now.',
               error: true,
             },
           ]);
         }
       } finally {
-        setBusy(false);
-        setActivity(null);
-        setStreamText('');
-        abortRef.current = null;
+        if (generation === turnGenerationRef.current) {
+          setBusy(false);
+          setActivity(null);
+          setStreamText('');
+          abortRef.current = null;
+        }
       }
     },
-    [contextHint]
+    [contextHint, replaceEntries]
   );
 
   const send = useCallback(
     (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed || busy) return;
+      if (!trimmed || abortRef.current || uploadOpen || getHankSessionScope() !== sessionScopeRef.current) return;
       setInput('');
       const next: ChatEntry[] = [...entriesRef.current, { role: 'user', content: trimmed }];
-      setEntries(next);
+      replaceEntries(next);
       void runTurn(next);
     },
-    [busy, runTurn]
+    [uploadOpen, runTurn, replaceEntries]
   );
 
   const retry = useCallback(() => {
-    if (busy) return;
+    if (abortRef.current || uploadOpen) return;
     const next = [...entriesRef.current];
-    while (next.length && (next[next.length - 1].error || next[next.length - 1].role === 'assistant')) {
-      next.pop();
-    }
+    if (next[next.length - 1]?.error) next.pop();
     if (!next.length || next[next.length - 1].role !== 'user') return;
-    setEntries(next);
+    replaceEntries(next);
     void runTurn(next);
-  }, [busy, runTurn]);
+  }, [uploadOpen, runTurn, replaceEntries]);
 
-  const clear = useCallback(() => {
+  const stop = useCallback(() => {
+    turnGenerationRef.current += 1;
     abortRef.current?.abort();
-    setEntries([]);
+    abortRef.current = null;
+    setBusy(false);
     setStreamText('');
     setActivity(null);
   }, []);
+
+  const clear = useCallback(() => {
+    if (uploadBusy) return;
+    stop();
+    replaceEntries([]);
+    setInput('');
+  }, [stop, replaceEntries, uploadBusy]);
+
+  const handleUploaded = (document: { id: number; document_number: string; title: string; revision: string }) => {
+    if (getHankSessionScope() !== sessionScopeRef.current) return;
+    replaceEntries([
+      ...entriesRef.current,
+      { role: 'user', content: `File PDF: ${document.title}` },
+      {
+        role: 'assistant',
+        content: `Filed ${document.title} as ${document.document_number}, revision ${document.revision}. The PDF is saved and released in Documents.`,
+        references: [
+          {
+            type: 'document',
+            id: document.id,
+            label: `${document.document_number} · Rev ${document.revision}`,
+            url: `/documents?document=${document.id}`,
+          },
+        ],
+      },
+    ]);
+    setUploadOpen(false);
+    setUploadBusy(false);
+  };
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -212,7 +399,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
         hidden={!isOpen}
         aria-modal={isOpen ? true : undefined}
         role="dialog"
-        aria-label="Werco Copilot"
+        aria-label="Hank"
         aria-hidden={!isOpen}
         className={`fixed inset-y-0 right-0 z-50 w-full max-w-md flex flex-col transform transition-transform duration-200 ease-out ${
           isOpen ? 'translate-x-0' : 'translate-x-full pointer-events-none'
@@ -229,11 +416,11 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
           style={{ borderBottom: '1px solid var(--fd-line)' }}
         >
           <div className="flex items-center gap-2 min-w-0">
-            <SparklesIcon className="h-5 w-5 text-fd-blue flex-shrink-0" />
+            <HankAvatar className="h-9 w-9 flex-shrink-0" />
             <div className="min-w-0">
-              <h2 className="text-sm font-semibold text-fd-ink leading-4">Werco Copilot</h2>
+              <h2 className="text-sm font-semibold text-fd-ink leading-4">Hank</h2>
               <p className="font-mono text-[10px] uppercase tracking-[0.08em] text-fd-mute truncate">
-                read-only · your company data
+                AI shop teammate
               </p>
             </div>
           </div>
@@ -242,6 +429,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
               <button
                 type="button"
                 onClick={clear}
+                disabled={uploadBusy}
                 className="p-2 rounded-[3px] text-fd-mute hover:text-fd-ink hover:bg-white/5 transition-colors"
                 title="Clear conversation"
                 aria-label="Clear conversation"
@@ -253,101 +441,187 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
               type="button"
               onClick={onClose}
               className="p-2 rounded-[3px] text-fd-mute hover:text-fd-ink hover:bg-white/5 transition-colors"
-              aria-label="Close copilot"
+              aria-label="Close Hank"
             >
               <XMarkIcon className="h-5 w-5" />
             </button>
           </div>
         </div>
 
+        <div className="px-4 py-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--fd-line)' }}>
+          <p className="text-xs text-fd-mute">
+            Check your shift, manage tasks, and prepare work.
+            {canUpload ? ' File PDFs here, too.' : ' Ask Hank for the records behind each answer.'}
+          </p>
+          {canUpload && (
+            <button
+              type="button"
+              onClick={() => {
+                setView('chat');
+                setUploadOpen(true);
+              }}
+              disabled={busy || uploadOpen || taskBusy || workBusy || preferencesBusy}
+              className="mt-2 inline-flex items-center gap-2 px-3 py-1.5 rounded-[3px] text-xs text-fd-ink hover:bg-white/5 disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{ border: '1px solid var(--fd-line-bright)' }}
+            >
+              <ArrowUpTrayIcon className="h-4 w-4 text-fd-amber" />
+              Upload PDF
+            </button>
+          )}
+        </div>
+
+        {!uploadOpen && (
+          <nav aria-label="Hank workspace" className="flex flex-wrap gap-1 px-4 py-2 border-b border-slate-700">
+            {(
+              [
+                { id: 'briefing', label: 'My shift' },
+                { id: 'chat', label: 'Chat' },
+                { id: 'tasks', label: 'Tasks' },
+                { id: 'work', label: 'Work' },
+                { id: 'preferences', label: 'Preferences' },
+              ] as const
+            ).map(tab => (
+              <button
+                key={tab.id}
+                type="button"
+                aria-pressed={view === tab.id}
+                disabled={busy || taskBusy || workBusy || preferencesBusy}
+                onClick={() => setView(tab.id)}
+                className={`px-3 py-1.5 text-xs rounded-[3px] ${view === tab.id ? 'bg-slate-700 text-fd-ink' : 'text-fd-mute'}`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </nav>
+        )}
+
         {/* Messages */}
         <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
-          {entries.length === 0 && !busy && (
+          {!uploadOpen && view === 'briefing' && <HankBriefing onNavigate={onClose} />}
+          {!uploadOpen && view === 'tasks' && (
+            <HankTaskWorkspace key={taskNavigation} taskId={taskId} onNavigate={onClose} onBusyChange={setTaskBusy} />
+          )}
+          {!uploadOpen && view === 'work' && (
+            <HankWorkWorkspace
+              key={workNavigation}
+              context={recordContext}
+              initialArea={workSelection.area}
+              initialId={workSelection.id}
+              onNavigate={onClose}
+              onBusyChange={setWorkBusy}
+            />
+          )}
+          {!uploadOpen && view === 'preferences' && <HankPreferences onBusyChange={setPreferencesBusy} />}
+          {uploadOpen && canUpload && (
+            <HankDocumentUpload
+              workOrderId={workOrderId}
+              onUploaded={handleUploaded}
+              onBusyChange={setUploadBusy}
+              onCancel={() => {
+                if (!uploadBusy) setUploadOpen(false);
+              }}
+            />
+          )}
+          {entries.length === 0 && !busy && !uploadOpen && view === 'chat' && (
             <div className="space-y-3">
               <p className="text-sm text-fd-body">
-                Ask about jobs, blockers, schedule load, inventory, or customers. The copilot only reads data — it never
-                changes anything.
+                I’m Hank, named after the shop’s yellow Lab. I can help you find a job, check blockers, or look up
+                stock.
+                {canUpload && ' Have a PDF to file? Use Upload PDF and review its details before saving.'}
               </p>
               <div className="space-y-1.5">
-                {SUGGESTIONS.map(suggestion => (
+                {suggestions.map(suggestion => (
                   <button
-                    key={suggestion}
+                    key={suggestion.label}
                     type="button"
-                    onClick={() => send(suggestion)}
+                    onClick={() => {
+                      if (suggestion.draft) {
+                        setInput(suggestion.prompt);
+                        inputRef.current?.focus();
+                      } else {
+                        send(suggestion.prompt);
+                      }
+                    }}
                     className="block w-full text-left px-3 py-2 rounded-[3px] text-[13px] text-fd-body hover:text-fd-ink hover:bg-white/[0.03] transition-colors"
                     style={{ border: '1px solid var(--fd-line)' }}
                   >
-                    {suggestion}
+                    {suggestion.label}
                   </button>
                 ))}
               </div>
             </div>
           )}
 
-          {entries.slice(-MAX_DISPLAYED_ENTRIES).map((entry, index) => (
-            <div key={index} data-testid={`copilot-message-${entry.role}`}>
-              {entry.role === 'user' ? (
-                <div className="flex justify-end">
-                  <div
-                    className="max-w-[85%] px-3 py-2 rounded-[3px] text-[13px] text-fd-ink whitespace-pre-wrap"
-                    style={{ background: 'rgba(47,129,247,0.12)', border: '1px solid rgba(47,129,247,0.35)' }}
-                  >
-                    {entry.content}
-                  </div>
-                </div>
-              ) : (
-                <div
-                  className="max-w-[95%] px-3 py-2 rounded-[3px]"
-                  style={{
-                    background: entry.error ? 'rgba(200,53,43,0.08)' : 'var(--fd-raised)',
-                    border: `1px solid ${entry.error ? 'rgba(200,53,43,0.45)' : 'var(--fd-line)'}`,
-                  }}
-                >
-                  <p className={`text-[13px] whitespace-pre-wrap ${entry.error ? 'text-red-300' : 'text-fd-body'}`}>
-                    {entry.content}
-                  </p>
-                  {entry.truncated && (
-                    <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.06em] text-fd-amber">
-                      lookup limit reached — partial answer
-                    </p>
-                  )}
-                  {entry.error && (
-                    <button
-                      type="button"
-                      onClick={retry}
-                      className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[3px] font-mono text-[11px] text-fd-ink hover:bg-white/5 transition-colors"
-                      style={{ border: '1px solid var(--fd-line)' }}
+          {!uploadOpen &&
+            view === 'chat' &&
+            entries.slice(-MAX_DISPLAYED_ENTRIES).map((entry, index) => (
+              <div key={index} data-testid={`copilot-message-${entry.role}`}>
+                {entry.role === 'user' ? (
+                  <div className="flex justify-end">
+                    <div
+                      className="max-w-[85%] px-3 py-2 rounded-[3px] text-[13px] text-fd-ink whitespace-pre-wrap"
+                      style={{ background: 'rgba(47,129,247,0.12)', border: '1px solid rgba(47,129,247,0.35)' }}
                     >
-                      <ArrowPathIcon className="h-3.5 w-3.5" />
-                      Retry
-                    </button>
-                  )}
-                  {!!entry.references?.length && (
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {entry.references.map(reference => (
-                        <Link
-                          key={`${reference.type}-${reference.id}`}
-                          to={reference.url}
-                          onClick={onClose}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[3px] font-mono text-[11px] text-fd-blue hover:text-fd-ink hover:bg-white/5 transition-colors"
-                          style={{ border: '1px solid var(--fd-line-bright)' }}
-                        >
-                          {reference.label}
-                        </Link>
-                      ))}
+                      {entry.content}
                     </div>
-                  )}
-                  {!!entry.toolTrace?.length && (
-                    <p className="mt-1.5 font-mono text-[10px] text-fd-faint truncate">
-                      {entry.toolTrace.map(trace => trace.summary).join(' · ')}
+                  </div>
+                ) : (
+                  <div
+                    className="max-w-[95%] px-3 py-2 rounded-[3px]"
+                    style={{
+                      background: entry.error ? 'rgba(200,53,43,0.08)' : 'var(--fd-raised)',
+                      border: `1px solid ${entry.error ? 'rgba(200,53,43,0.45)' : 'var(--fd-line)'}`,
+                    }}
+                  >
+                    <p className={`text-[13px] whitespace-pre-wrap ${entry.error ? 'text-red-300' : 'text-fd-body'}`}>
+                      {entry.content}
                     </p>
-                  )}
-                </div>
-              )}
-            </div>
-          ))}
+                    {entry.truncated && (
+                      <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.06em] text-fd-amber">
+                        lookup limit reached — partial answer
+                      </p>
+                    )}
+                    {entry.error && entry === entries[entries.length - 1] && (
+                      <button
+                        type="button"
+                        onClick={retry}
+                        disabled={busy || uploadOpen}
+                        className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[3px] font-mono text-[11px] text-fd-ink hover:bg-white/5 transition-colors"
+                        style={{ border: '1px solid var(--fd-line)' }}
+                      >
+                        <ArrowPathIcon className="h-3.5 w-3.5" />
+                        Retry
+                      </button>
+                    )}
+                    {!!entry.references?.length && (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {entry.references.map(reference => (
+                          <Link
+                            key={`${reference.type}-${reference.id}`}
+                            to={reference.url}
+                            onClick={() => {
+                              if (reference.type === 'hank_task') setView('tasks');
+                              else onClose();
+                            }}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[3px] font-mono text-[11px] text-fd-blue hover:text-fd-ink hover:bg-white/5 transition-colors"
+                            style={{ border: '1px solid var(--fd-line-bright)' }}
+                          >
+                            {reference.label}
+                          </Link>
+                        ))}
+                      </div>
+                    )}
+                    {!!entry.toolTrace?.length && (
+                      <p className="mt-1.5 font-mono text-[10px] text-fd-faint truncate">
+                        {entry.toolTrace.map(trace => trace.summary).join(' · ')}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
 
-          {busy && (
+          {busy && !uploadOpen && (
             <div
               className="max-w-[95%] px-3 py-2 rounded-[3px]"
               style={{ background: 'var(--fd-raised)', border: '1px solid var(--fd-line)' }}
@@ -359,7 +633,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
                 </p>
               ) : (
                 <p className="font-mono text-[11px] text-fd-mute animate-pulse" data-testid="copilot-activity">
-                  {activity || 'thinking…'}
+                  {activity || 'Hank is looking into it…'}
                 </p>
               )}
             </div>
@@ -367,38 +641,61 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
         </div>
 
         {/* Composer */}
-        <div className="flex-shrink-0 p-3" style={{ borderTop: '1px solid var(--fd-line)' }}>
-          <div
-            className="flex items-end gap-2 px-3 py-2 rounded-[3px]"
-            style={{ background: 'var(--fd-sunken)', border: '1px solid var(--fd-line)' }}
-          >
-            <textarea
-              ref={inputRef}
-              value={input}
-              onChange={event => setInput(event.target.value)}
-              onKeyDown={handleKeyDown}
-              rows={1}
-              maxLength={8000}
-              placeholder="Ask about a job, blocker, or part…"
-              aria-label="Ask the copilot"
-              className="flex-1 resize-none bg-transparent text-[13px] text-fd-ink placeholder:text-fd-faint focus:outline-none max-h-32"
-            />
-            <button
-              type="button"
-              onClick={() => send(input)}
-              disabled={busy || !input.trim()}
-              className="p-1.5 rounded-[3px] text-fd-blue hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              aria-label="Send message"
+        {!uploadOpen && view === 'chat' && (
+          <div className="flex-shrink-0 p-3" style={{ borderTop: '1px solid var(--fd-line)' }}>
+            <div
+              className="flex items-end gap-2 px-3 py-2 rounded-[3px]"
+              style={{ background: 'var(--fd-sunken)', border: '1px solid var(--fd-line)' }}
             >
-              <PaperAirplaneIcon className="h-4 w-4" />
-            </button>
+              <textarea
+                ref={inputRef}
+                value={input}
+                onChange={event => setInput(event.target.value)}
+                onKeyDown={handleKeyDown}
+                rows={1}
+                maxLength={8000}
+                disabled={uploadOpen}
+                placeholder="Ask Hank about a job, blocker, or part…"
+                aria-label="Ask Hank"
+                className="flex-1 resize-none bg-transparent text-[13px] text-fd-ink placeholder:text-fd-faint focus:outline-none max-h-32"
+              />
+              {busy ? (
+                <button
+                  type="button"
+                  onClick={stop}
+                  className="p-1.5 rounded-[3px] text-fd-mute hover:bg-white/5"
+                  aria-label="Stop Hank's answer"
+                >
+                  <StopIcon className="h-4 w-4" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => send(input)}
+                  disabled={uploadOpen || !input.trim()}
+                  className="p-1.5 rounded-[3px] text-fd-blue hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  aria-label="Send message"
+                >
+                  <PaperAirplaneIcon className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+            <div className="mt-2">
+              <HankVoiceInput
+                disabled={busy || !isOpen}
+                onTranscript={text => setInput(previous => [previous, text].filter(Boolean).join(' ').slice(0, 8000))}
+              />
+            </div>
+            {lastEntryFailed ? (
+              <p className="mt-1.5 font-mono text-[10px] text-red-300">Last request failed — retry or rephrase.</p>
+            ) : (
+              <p className="mt-1.5 text-[10px] text-fd-mute">
+                Tasks require your review and submission. {canUpload && 'PDF filing releases on submission. '}
+                Conversation clears on reload.
+              </p>
+            )}
           </div>
-          {lastEntryFailed ? (
-            <p className="mt-1.5 font-mono text-[10px] text-red-300">Last request failed — retry or rephrase.</p>
-          ) : (
-            <p className="mt-1.5 font-mono text-[10px] text-fd-faint">Enter to send · Shift+Enter for a new line</p>
-          )}
-        </div>
+        )}
       </aside>
     </>
   );

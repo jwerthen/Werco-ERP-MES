@@ -15,7 +15,7 @@ from app.services.document_numbering import generate_document_number
 from app.services.storage_service import delete_ref, get_storage, ref_exists, resolve_upload_dir
 
 
-def validate_certificate(db, company_id, line, document_id):
+def validate_certificate(db, company_id, line, document_id, *, check_storage=True):
     if not document_id:
         return
     document = (
@@ -28,12 +28,12 @@ def validate_certificate(db, company_id, line, document_id):
         raise HTTPException(422, "Choose a certificate uploaded for this part and supplier")
     if document.document_type not in (DocumentType.CERTIFICATE, DocumentType.MATERIAL_CERT) or not document.file_path:
         raise HTTPException(422, "The linked document must be a stored certificate")
-    if not ref_exists(document.file_path):
+    if check_storage and not ref_exists(document.file_path):
         raise HTTPException(422, "Certificate file is unavailable. Upload it again before receiving.")
 
 
-def post_delivery(db, user, company_id, body, audit):
-    from app.api.endpoints.receiving import _receive_material, enqueue_receipt_label
+def post_delivery_command(db, user, company_id, body, audit, *, return_created=False):
+    from app.services.receiving_commands import _receive_material
     from app.services.supplier_followup_service import require_module_write
 
     require_module_write(db, user, company_id, "receiving", "create")
@@ -52,7 +52,7 @@ def post_delivery(db, user, company_id, body, audit):
             raise HTTPException(
                 409, "This delivery key belongs to a different submission. Review the original delivery."
             )
-        return previous.response
+        return (previous.response, False) if return_created else previous.response
     # Scope the entire worksheet to one real PO; never trust a line's submitted part/vendor.
     lines = (
         db.query(PurchaseOrderLine.id)
@@ -76,39 +76,48 @@ def post_delivery(db, user, company_id, body, audit):
         response={},
         created_by=user.id,
     )
+    db.add(batch)
+    db.flush()
+    receipts = []
+    for index, line in enumerate(body.lines):
+        try:
+            receipt = _receive_material(line, db, user, company_id, audit)
+        except HTTPException as exc:
+            raise HTTPException(
+                exc.status_code, f"Delivery line {index + 1}: {exc.detail}. No delivery lines were posted."
+            ) from exc
+        receipt.delivery_batch_id = batch.id
+        receipts.append(receipt)
+    db.flush()
+    result = {
+        "batch_id": batch.id,
+        "idempotency_key": body.idempotency_key,
+        "receipts": [ReceiptResponse.model_validate(row).model_dump(mode='json') for row in receipts],
+    }
+    batch.response = result
+    audit.log_create(
+        'receiving_delivery',
+        batch.id,
+        body.idempotency_key,
+        new_values={"purchase_order_id": body.purchase_order_id, "receipt_ids": [r.id for r in receipts]},
+    )
+    return (result, True) if return_created else result
+
+
+def post_delivery(db, user, company_id, body, audit):
+    # Printing remains explicit post-commit behavior of the receiving screen.
+    from app.api.endpoints.receiving import enqueue_receipt_label
+
     try:
-        db.add(batch)
-        db.flush()
-        receipts = []
-        for index, line in enumerate(body.lines):
-            try:
-                receipt = _receive_material(line, db, user, company_id, audit)
-            except HTTPException as exc:
-                raise HTTPException(
-                    exc.status_code, f"Delivery line {index + 1}: {exc.detail}. No delivery lines were posted."
-                ) from exc
-            receipt.delivery_batch_id = batch.id
-            receipts.append(receipt)
-        db.flush()
-        result = {
-            "batch_id": batch.id,
-            "idempotency_key": body.idempotency_key,
-            "receipts": [ReceiptResponse.model_validate(row).model_dump(mode='json') for row in receipts],
-        }
-        batch.response = result
-        audit.log_create(
-            'receiving_delivery',
-            batch.id,
-            body.idempotency_key,
-            new_values={"purchase_order_id": body.purchase_order_id, "receipt_ids": [r.id for r in receipts]},
-        )
+        result, created = post_delivery_command(db, user, company_id, body, audit, return_created=True)
         db.commit()
     except Exception:
         db.rollback()
         raise
-    # External side effects happen only after the entire delivery committed, never on replay.
-    for receipt in receipts:
-        enqueue_receipt_label(receipt, company_id, user.id)
+    if created:
+        for item in result['receipts']:
+            receipt = db.get(POReceipt, item['id'])
+            enqueue_receipt_label(receipt, company_id, user.id)
     return result
 
 

@@ -24,6 +24,13 @@ from app.api.endpoints import (
     exports,
     fabrication_quote_profiles,
     fabrication_quotes,
+    hank,
+    hank_intake,
+    hank_operations,
+    hank_preferences,
+    hank_tasks,
+    hank_teamwork,
+    hank_watches,
     import_batches,
     import_templates,
     integrations,
@@ -77,6 +84,13 @@ from app.api.endpoints import (
 api_router = APIRouter()
 api_router.include_router(document_deliveries.router, prefix="/document-deliveries", tags=["Document Deliveries"])
 api_router.include_router(operations_inbox.router, prefix="/operations-inbox", tags=["Operations Inbox"])
+api_router.include_router(hank.router, prefix="/hank", tags=["Hank"])
+api_router.include_router(hank_intake.router, prefix="/hank", tags=["Hank"])
+api_router.include_router(hank_operations.router, prefix="/hank", tags=["Hank"])
+api_router.include_router(hank_preferences.router, prefix="/hank", tags=["Hank"])
+api_router.include_router(hank_tasks.router, prefix="/hank", tags=["Hank"])
+api_router.include_router(hank_teamwork.router, prefix="/hank", tags=["Hank"])
+api_router.include_router(hank_watches.router, prefix="/hank", tags=["Hank"])
 api_router.include_router(user_workspaces.router, prefix="/user-workspaces", tags=["User Workspaces"])
 
 api_router.include_router(auth.router, prefix="/auth", tags=["Authentication"])

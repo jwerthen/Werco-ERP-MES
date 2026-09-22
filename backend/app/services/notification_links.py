@@ -58,6 +58,8 @@ from __future__ import annotations
 # Emittable link templates. Every one of these MUST resolve against App.tsx.
 # ---------------------------------------------------------------------------
 
+HANK_TASK = "/?hank_task={task_id}"
+HANK_HANDOFF = "/?hank_work=handoff&hank_id={handoff_id}"
 WORK_ORDER_DETAIL = "/work-orders/{work_order_id}"
 PART_DETAIL = "/parts/{part_id}"
 PURCHASE_ORDER = "/purchasing?po={po_id}"
@@ -81,6 +83,8 @@ SCHEDULING_LIST = "/scheduling"
 VISITOR_LOG = "/visitor-log"
 
 ALL_LINK_TEMPLATES: tuple[str, ...] = (
+    HANK_HANDOFF,
+    HANK_TASK,
     WORK_ORDER_DETAIL,
     PART_DETAIL,
     PURCHASE_ORDER,
@@ -142,3 +146,11 @@ def quality_fai_detail(fai_id: int) -> str:
     """Land on the Quality FAI tab with the report open. ``openFaiDetail`` does a real
     ``GET /quality/fai/{id}``, so this record-bearing link can always be honoured."""
     return QUALITY_FAI_DETAIL.format(fai_id=fai_id)
+
+
+def hank_task(task_id: int) -> str:
+    return HANK_TASK.format(task_id=task_id)
+
+
+def hank_handoff(handoff_id: int) -> str:
+    return HANK_HANDOFF.format(handoff_id=handoff_id)

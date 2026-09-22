@@ -1,4 +1,4 @@
-"""Request/response contracts for the Werco Copilot chat endpoint.
+"""Request/response contracts for the Hank chat endpoint.
 
 Conversation state is CLIENT-held: every request carries the full message
 history and the server is stateless between turns.
@@ -47,21 +47,21 @@ class CopilotReference(BaseModel):
 
 
 class CopilotToolTraceEntry(BaseModel):
-    """One read-only tool call the copilot made while answering."""
+    """One lookup or proposal tool call Hank made while answering."""
 
-    tool: str = Field(..., description="Tool name from the copilot tool registry.")
+    tool: str = Field(..., description="Tool name from Hank's tool registry.")
     summary: str = Field(..., description="Human-readable one-liner, e.g. 'looked up WO-2024-0512'.")
 
 
 class CopilotChatResponse(BaseModel):
     """Non-streaming (?stream=false) response; also the payload of the final SSE frame."""
 
-    answer: str = Field(..., description="The copilot's plain-text answer.")
+    answer: str = Field(..., description="Hank's plain-text answer.")
     references: List[CopilotReference] = Field(
         default_factory=list, description="Deep links to entities used in the answer."
     )
     tool_trace: List[CopilotToolTraceEntry] = Field(
-        default_factory=list, description="Read-only tool calls made while answering, in order."
+        default_factory=list, description="Lookup and proposal tool calls made while answering, in order."
     )
     interaction_id: Optional[int] = Field(
         None, description="AIInteractionEvent id recorded for this turn (learning loop)."

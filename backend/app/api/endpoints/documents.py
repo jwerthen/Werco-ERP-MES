@@ -13,13 +13,16 @@ from sqlalchemy.orm import Session, joinedload, with_loader_criteria
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
+from app.db.tenant_filter import tenant_query
 from app.models.document import Document, DocumentType
+from app.models.hank_intake import HankIntakeFile
 from app.models.part import Part
 from app.models.purchasing import POReceipt, Vendor
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
 from app.services.audit_service import AuditService, AuditWriteError
 from app.services.document_numbering import generate_document_number as generate_shared_document_number
+from app.services.erp_draft_commands import _audit_document, _audit_values, attach_document_command
 from app.services.storage_service import (
     delete_ref,
     get_storage,
@@ -50,40 +53,9 @@ def _document_query(db: Session, company_id: int):
     )
 
 
-def _audit_values(document: Document) -> dict:
-    return {
-        "document_number": document.document_number,
-        "revision": document.revision,
-        "previous_revision_id": document.previous_revision_id,
-        "revision_notes": document.revision_notes,
-        "title": document.title,
-        "document_type": document.document_type.value,
-        "description": document.description,
-        "part_id": document.part_id,
-        "work_order_id": document.work_order_id,
-        "vendor_id": document.vendor_id,
-        "file_name": document.file_name,
-        "file_size": document.file_size,
-        "status": document.status,
-        "released_by": document.released_by,
-        "released_at": document.released_at.isoformat() if document.released_at else None,
-    }
-
-
 def _commit_audited_document(db, audit, document, *, action, old_values=None, extra_data=None):
     try:
-        db.flush()
-        audit.log_required(
-            action=action,
-            resource_type="document",
-            resource_id=document.id,
-            resource_identifier=document.document_number,
-            old_values=old_values,
-            new_values=_audit_values(document) if action != "DELETE" else None,
-            extra_data=extra_data,
-        )
-        if action == "DELETE":
-            db.delete(document)
+        _audit_document(db, audit, document, action=action, old_values=old_values, extra_data=extra_data)
         db.commit()
     except AuditWriteError as exc:
         db.rollback()
@@ -445,45 +417,16 @@ def attach_document_to_work_order(
     audit: AuditService = Depends(get_audit_service),
 ):
     """Attach an unlinked PDF to a live tenant work order; existing history stays bound."""
-    document = (
-        db.query(Document)
-        .filter(Document.id == document_id, Document.company_id == company_id)
-        .with_for_update()
-        .first()
-    )
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    work_order = (
-        db.query(WorkOrder)
-        .filter(
-            WorkOrder.id == payload.work_order_id, WorkOrder.company_id == company_id, WorkOrder.is_deleted == False
-        )
-        .first()
-    )
-    if not work_order:
-        raise HTTPException(status_code=404, detail="Work order not found")
-
-    file_name = document.file_name or ""
-    is_pdf = document.mime_type == "application/pdf" or file_name.lower().endswith(".pdf")
-    if not is_pdf:
-        raise HTTPException(status_code=400, detail="Only PDF documents can be attached as work order drawings")
-
-    if document.work_order_id == payload.work_order_id:
+    try:
+        attach_document_command(db, document_id, payload.work_order_id, company_id, audit)
+        db.commit()
         return _document_query(db, company_id).filter(Document.id == document_id).one()
-    if (
-        document.work_order_id is not None
-        or document.previous_revision_id
-        or db.query(Document.id)
-        .filter(Document.company_id == company_id, Document.previous_revision_id == document.id)
-        .first()
-    ):
-        raise HTTPException(409, "An existing work-order or revision-history attachment cannot be reassigned")
-
-    old_values = _audit_values(document)
-    document.work_order_id = payload.work_order_id
-    _commit_audited_document(db, audit, document, action="UPDATE", old_values=old_values)
-    return _document_query(db, company_id).filter(Document.id == document_id).one()
+    except AuditWriteError as exc:
+        db.rollback()
+        raise HTTPException(503, "Unable to save audit record") from exc
+    except Exception:
+        db.rollback()
+        raise
 
 
 @router.delete("/{document_id}")
@@ -521,6 +464,20 @@ def delete_document(
     ):
         raise HTTPException(
             409, "This certificate belongs to a receipt and must remain available, including after a receipt is voided."
+        )
+
+    if (
+        tenant_query(db, HankIntakeFile, company_id)
+        .filter(
+            or_(
+                HankIntakeFile.storage_ref == document.file_path,
+                HankIntakeFile.result_json['document_id'].as_integer() == document.id,
+            )
+        )
+        .first()
+    ):
+        raise HTTPException(
+            409, 'This document is retained intake evidence. Its metadata and source file must remain available.'
         )
 
     file_path = document.file_path

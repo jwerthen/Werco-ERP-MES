@@ -6,8 +6,12 @@ A custom **Enterprise Resource Planning (ERP) + Manufacturing Execution System (
 
 Shipped modules, grouped by domain:
 
-### Werco Copilot (AI assistant)
-- **Ask-anything chat over your own ERP data** — a read-only copilot (header button or `Ctrl+.` from any screen) that answers shop questions ("where is WO-2024-0512?", "what's blocked?", "how loaded is the laser this week?") via Claude tool-use over live work orders, blockers, schedules, inventory, customers, and search, with deep links to the records it cites. Strictly read-only, tenant-scoped server-side, streamed answers, per-user rate-limited.
+### Hank (AI shop teammate)
+
+- **Ask Hank about the shop** — named after the shop's yellow Labrador, Hank opens from the application header or `Ctrl+.`. Page-aware questions cover jobs, blockers, schedules, inventory, customers and document metadata. **My shift** provides deterministic role-aware priorities with freshness and coverage labels. Tenant-scoped server-side, streamed chat answers, per-user rate-limited.
+- **Complete reviewed tasks with Hank** — prepare job/PO drafts, PDF attachment, delivery receipts, production reports or pending shipments; review exact changes before executing. Durable actor/credential-scoped receipts, source checks and required audits support recovery. Chat can save proposals but cannot execute them. Readiness, shipping packets, prior-run knowledge, genealogy and purchasing impact link current evidence without inventing approval.
+- **Review documents and coordinate work** — Admin/Manager/Quality users can submit PDF batches for evidence-bearing extraction, review the source and file a draft or explicitly release/attach a receipt certificate. The separate direct upload remains available. Participant handoffs/photos, approved step-by-step routines and a combined saved-work queue retain employee control. Local browser dictation and traveler scanning assist input where supported.
+- **Follow through with Hank** — explicit personal watches check for cleared blockers or a new matching PDF and save receipts with optional owner-only alerts. Personal preferences control briefing detail/focus, chat handoff style and alert muting. See [Hank capabilities](docs/HANK.md).
 - **Always-on Action Inbox** — nightly sensors + learners mint recommendations without a prompt; Claude (existing Anthropic `run_llm_task`) auto-executes allowlisted actions (draft PO, draft NCR, expedite priority, escalate blocker). Humans can still Accept & apply. Ambient strips on WO/Part detail + dashboard morning brief. See [docs/AI_ALWAYS_ON.md](docs/AI_ALWAYS_ON.md).
 
 ### Sales & Quoting
@@ -107,7 +111,7 @@ This brings up the backend (`:8000`), frontend (`:3000`), Redis, and the ARQ wor
 - `SECRET_KEY` — JWT signing secret.
 - `REFRESH_TOKEN_SECRET_KEY` — refresh-token signing secret.
 
-Set `ANTHROPIC_API_KEY` to enable the AI features (Werco Copilot chat, RFQ quoting, PO/BOM/QMS document parsing, routing learning, natural-language search). See **[docs/ENVIRONMENT_VARIABLES.md](docs/ENVIRONMENT_VARIABLES.md)** for the full list (Anthropic model tiers, SMTP, Sentry, Redis, webhook key, etc.).
+Set `ANTHROPIC_API_KEY` to enable the AI features (Hank chat and smart PDF intake, RFQ quoting, PO/BOM/QMS document parsing, routing learning, natural-language search). See **[docs/ENVIRONMENT_VARIABLES.md](docs/ENVIRONMENT_VARIABLES.md)** for the full list (Anthropic model tiers, SMTP, Sentry, Redis, webhook key, etc.).
 
 Once up:
 

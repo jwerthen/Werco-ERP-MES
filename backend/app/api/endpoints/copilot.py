@@ -1,4 +1,4 @@
-"""Werco Copilot chat endpoint — read-only ask-anything over tenant ERP data.
+"""Hank chat endpoint — tenant ERP lookups and employee-reviewed proposals.
 
 POST /api/v1/copilot/chat
 
@@ -75,7 +75,7 @@ def _check_rate_limit(user_id: int) -> None:
             # would otherwise leave an empty deque behind.
             if not bucket:
                 del _rate_buckets[user_id]
-            raise HTTPException(status_code=429, detail="Copilot rate limit exceeded; try again in a minute.")
+            raise HTTPException(status_code=429, detail="Hank rate limit exceeded; try again in a minute.")
         bucket.append(now)
 
 
@@ -94,11 +94,13 @@ def copilot_chat(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Ask the read-only Werco Copilot a question about your company's ERP data.
+    """Ask Hank a question about your company's ERP data.
 
     The copilot answers via tool calls against existing read endpoints (work
-    orders, blockers, schedule load/conflicts, inventory, customers, search).
-    It cannot create, update, or delete anything.
+    orders, blockers, schedule load/conflicts, inventory, customers, documents,
+    search) and can save a private task proposal for explicit employee review.
+    Business actions execute only through typed Hank task commands. The panel's
+    PDF upload uses the separate, role-gated document upload endpoint.
 
     Streaming frames (``data: <json>``):
     - ``{"type": "tool_use", "tool": ..., "summary": ...}`` — a lookup ran
@@ -120,7 +122,7 @@ def copilot_chat(
         try:
             final = service.run_chat(messages=plain_messages, context_hint=request.context_hint)
         except LLMNotConfiguredError:
-            raise HTTPException(status_code=503, detail="AI assistant is not configured on this server.")
+            raise HTTPException(status_code=503, detail="Hank is not configured on this server.")
         except LLMEgressDisabledError:
             raise HTTPException(status_code=403, detail="AI features are disabled for your company.")
         except ValueError as exc:
@@ -133,16 +135,24 @@ def copilot_chat(
 
     def event_stream() -> Generator[str, None, None]:
         try:
+            final_event = None
             for event in service.stream_chat(messages=plain_messages, context_hint=request.context_hint):
-                yield _sse_frame(event)
+                if event.get('type') == 'final':
+                    final_event = event
+                else:
+                    yield _sse_frame(event)
+            # A saved proposal link is a receipt: publish it only after commit.
             db.commit()
+            if final_event is not None:
+                yield _sse_frame(final_event)
         except LLMNotConfiguredError:
-            yield _sse_frame({"type": "error", "message": "AI assistant is not configured on this server."})
+            yield _sse_frame({"type": "error", "message": "Hank is not configured on this server."})
         except LLMEgressDisabledError:
             yield _sse_frame({"type": "error", "message": "AI features are disabled for your company."})
         except ValueError as exc:
             yield _sse_frame({"type": "error", "message": str(exc)})
         except Exception as exc:
+            db.rollback()
             logger.exception("Copilot chat stream failed")
             yield _sse_frame({"type": "error", "message": f"AI service error: {type(exc).__name__}"})
 

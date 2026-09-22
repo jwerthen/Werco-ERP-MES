@@ -39,11 +39,16 @@ from app.schemas.quality import (
 from app.services import fai_service, process_sheet_service
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
+from app.services.quality_numbering import generate_ncr_number as _generate_ncr_number
 
 router = APIRouter()
 
 
 # ============== NCR Endpoints ==============
+
+
+def generate_ncr_number(db: Session, company_id: int = None) -> str:
+    return _generate_ncr_number(db, company_id, lock=acquire_generator_lock)
 
 
 def _enum_value(value):
@@ -56,22 +61,6 @@ def _validate_work_order_reference(db: Session, company_id: int, work_order_id: 
     exists = db.query(WorkOrder.id).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not exists:
         raise HTTPException(status_code=404, detail="Work order not found")
-
-
-def generate_ncr_number(db: Session, company_id: int = None) -> str:
-    acquire_generator_lock(db, "ncr_number", company_id)
-    today = datetime.now().strftime("%Y%m%d")
-    prefix = f"NCR-{today}-"
-    query = db.query(NonConformanceReport).filter(NonConformanceReport.ncr_number.like(f"{prefix}%"))
-    if company_id is not None:
-        query = query.filter(NonConformanceReport.company_id == company_id)
-    last = query.order_by(NonConformanceReport.ncr_number.desc()).first()
-
-    if last:
-        num = int(last.ncr_number.split("-")[-1]) + 1
-    else:
-        num = 1
-    return f"{prefix}{num:03d}"
 
 
 @router.get("/ncr", response_model=List[NCRResponse])

@@ -458,8 +458,8 @@ def test_the_mandatory_email_and_in_app_entries_are_the_ones_these_tests_assume(
     an IN_APP-mandatory entry is switched to EMAIL the next test stops covering the
     entries it names. Both show up here first.
 
-    (The count in ``_fan_out``'s comment says "six" IN_APP-mandatory entries; there are
-    five. Asserting the SET, not a number, is what keeps this test honest either way.)
+    Assert the exact event set so a new mandatory channel cannot silently inherit
+    behavior covered only for another event.
     """
     by_channel = {}
     for key, entry in CATALOG.items():
@@ -468,6 +468,7 @@ def test_the_mandatory_email_and_in_app_entries_are_the_ones_these_tests_assume(
 
     assert by_channel[CHANNEL_EMAIL] == {"account.locked"}
     assert by_channel[CHANNEL_IN_APP] == {
+        'hank.handoff',
         "wo.blocker_created",
         "ncr.created",
         "quality.hold",

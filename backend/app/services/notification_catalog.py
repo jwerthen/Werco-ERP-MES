@@ -203,6 +203,25 @@ TRANSITION_GATES: Dict[str, Callable[..., bool]] = {
 # ---------------------------------------------------------------------------
 
 _ENTRIES: List[CatalogEntry] = [
+    CatalogEntry(
+        event_key="hank.handoff",
+        label="Hank handoff update",
+        description="A personal handoff was sent, acknowledged, completed or cancelled. Visible only to its participants.",
+        category=Category.SYSTEM,
+        severity="info",
+        default_channels=frozenset({CHANNEL_IN_APP}),
+        mandatory_channel=CHANNEL_IN_APP,
+    ),
+    CatalogEntry(
+        event_key="hank.follow_up",
+        label="Hank follow-up finished",
+        description="An explicitly saved personal follow-up found its requested condition. Manage follow-ups in Hank.",
+        category=Category.SYSTEM,
+        severity="info",
+        default_channels=frozenset({CHANNEL_IN_APP}),
+        # Direct, atomic insertion with the task receipt; never broad role fan-out,
+        # email/SMS delivery, or remapping an existing OperationalEvent type.
+    ),
     # ---------------- Production ----------------
     CatalogEntry(
         event_key="wo.blocker_created",

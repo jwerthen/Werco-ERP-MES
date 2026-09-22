@@ -171,7 +171,7 @@ export default function AIEgressTab() {
             </span>
             <span className="block text-xs text-surface-500 mt-1">
               Enabling this transmits uploaded document content to the Anthropic AI provider for PO/quote, BOM,
-              QMS-clause, routing-generation, and laser-nest extraction, and powers the AI copilot and
+              QMS-clause, routing-generation, and laser-nest extraction, and powers Hank’s AI chat and
               natural-language search. This content may be CUI under some DoD contracts — obtain CUI /
               data-egress sign-off before enabling. When OFF, no document content leaves the system boundary
               and AI features degrade gracefully (e.g. laser-nest extraction falls back to filename-only).
@@ -232,8 +232,8 @@ function EgressBanner({ enabled }: { enabled: boolean }) {
         <div className="text-sm">
           <p className="font-semibold text-green-400">AI egress is ENABLED</p>
           <p className="text-surface-500 mt-0.5">
-            Uploaded document content can be transmitted to the Anthropic AI provider for extraction, the AI
-            copilot, and natural-language search. Disable below if egress is no longer authorized.
+            Uploaded document content can be transmitted to the Anthropic AI provider for extraction, Hank’s
+            AI chat, and natural-language search. Disable below if egress is no longer authorized.
           </p>
         </div>
       </div>
@@ -245,7 +245,7 @@ function EgressBanner({ enabled }: { enabled: boolean }) {
       <div className="text-sm">
         <p className="font-semibold text-amber-400">AI egress is DISABLED</p>
         <p className="text-surface-500 mt-0.5">
-          No document content leaves the system boundary to the AI provider. AI-backed extraction, the copilot,
+          No document content leaves the system boundary to the AI provider. AI-backed extraction, Hank’s chat,
           and natural-language search are degraded (e.g. laser-nest extraction falls back to filename-only).
           Enabling egress transmits document content to a third-party AI provider and requires CUI /
           data-egress sign-off first.

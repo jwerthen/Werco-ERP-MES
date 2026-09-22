@@ -81,6 +81,42 @@
 
 ---
 
+**Hank task storage.** Deploy additive `108_hank_tasks` after 107 in the API before
+promoting the task-action frontend. The table starts empty; no production record
+or task is seeded. Verify RLS and table/sequence revokes from `PUBLIC`, `anon`, and
+`authenticated` on PostgreSQL, as well as the model-bootstrap equivalents. No new
+secret or environment setting is introduced. Keep previews/receipts on ordinary
+application rollback: the schema downgrade drops task history without undoing
+completed ERP actions. See [Hank task storage](DEPLOYMENT.md#hank-task-storage).
+
+**Hank follow-ups.** Reuse migration108 and release a matching API/worker/frontend
+set. Scheduled checks require changing the worker's existing production
+`WORKER_CRON_JOBS=none` to **`check_hank_watches_job`**, preserving every other disabled
+cron. No new variable or secret is introduced. Verify exact active release, fresh
+generic heartbeat, the one selected five-minute cron, and **13 of 14** suppressed
+crons. Verify one opted-in watch's check timestamp and owner-only in-app outcome;
+heartbeat health alone does not prove checks ran. **Check now** works independently
+of scheduling. Restore `none` to suspend scheduled checks while retaining evidence.
+See [Hank follow-up worker](DEPLOYMENT.md#hank-follow-up-worker).
+
+**Hank personal preferences.** Apply additive **109_hank_preferences** after 108
+before releasing the matching API/worker/frontend set. It seeds no rows and adds
+no environment variable or cron; retain the Hank-only schedule. Verify save/reset,
+current-company scoping, stale-version rejection and muted follow-up receipts.
+Retain preference storage on application rollback. A deliberate 109 downgrade drops
+only personal choices, preserving tasks/watch history. Suspend scheduled checks
+before reverting to a worker that ignores saved alert muting, or retain a compatible
+release. See [Hank personal preferences](DEPLOYMENT.md#hank-personal-preferences).
+
+**Hank workflow expansion.** Apply **110_hank_workflows** after 109 before the
+matching API/worker/frontend release. The empty intake, handoff and routine tables
+retain the same RLS/revoke protections and seed no approved work. Verify shared
+durable storage/Redis and registration of request-driven `process_hank_intake_file_job`;
+no new cron or environment variable is needed, and the existing Hank-only cron
+allowlist stays unchanged. Test upload/review/file recovery and participant/routine
+access; retain tables and file evidence on application rollback. See
+[Hank workflows and document intake](DEPLOYMENT.md#hank-workflows-and-document-intake).
+
 ## Table of Contents
 
 1. [Quick Reference](#quick-reference)

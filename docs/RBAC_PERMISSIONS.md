@@ -2106,29 +2106,132 @@ and writes an `EXPORT` audit row through `AuditService`:
 > row on every record/target create/update/delete (and the auto-calc upsert), so OEE mutations are on
 > the hash chain alongside the role gate. No role change — audit-trail coverage only.
 
-### Werco Copilot (read-only AI chat)
+<a id="werco-copilot-read-only-ai-chat"></a>
+
+### Hank (AI chat and PDF filing)
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
 |------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
 | Chat (`POST /copilot/chat`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Shift briefing (`GET /hank/briefing`; source permissions apply) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Repeat-job task (`work_orders:view` + `work_orders:create`) | ✓ | ✓ | ✓ | | | | |
+| Draft-PO task (`purchasing:view` + `purchasing:create`) | ✓ | ✓ | ✓ | | | | |
+| Attach-existing-PDF task (`work_orders:view`) | ✓ | ✓ | | | ✓ | | |
+| Personal work-order follow-up (`work_orders:view`; interactive session) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Personal Hank preferences (interactive save/reset) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Upload and release PDF (`POST /documents/upload`) | ✓ | ✓ | | | ✓ | | |
+| Smart PDF intake and reviewed filing (interactive document role) | ✓ | ✓ | | | ✓ | | |
+| Receive-delivery task (`receiving:view` + `receiving:create`) | ✓ | ✓ | ✓ | | | | |
+| Report-production task (`work_orders:view` + `work_orders:complete`; own active clock required) | ✓ | ✓ | ✓ | ✓ | ✓ | | |
+| Pending-shipment task (`shipping:view` + `shipping:create` + `work_orders:view`) | ✓ | ✓ | ✓ | | | ✓ | |
+| Handoffs and own routine runs (interactive `work_orders:view`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Draft/edit/archive a routine (interactive `work_orders:view`) | ✓ | ✓ | ✓ | | | | |
+| Approve a routine (interactive `work_orders:view`) | ✓ | ✓ | | | | | |
 
+> **Task authority applies to every stage.** Preparing, executing and cancelling a task
+> recheck its action-specific role and effective permissions. Reading/listing retains the
+> role fence and effective view permissions, without requiring create permission or a
+> writable company context, so an employee can still recover a receipt after write access ends.
+> Table checkmarks assume default permissions; a company override can remove access but
+> cannot bypass the action's role fence. Saved tasks belong to the active company, actor
+> and credential (interactive user session or originating API token). Other actors/tokens
+> receive 404. Commands carry expected company and task version; stale source fingerprints
+> require a fresh reviewed proposal. Read-only company contexts cannot perform task actions.
+> Existing Superuser/Platform Admin bypass and token fences remain. No new role is added.
+> Task inbox status filters and pagination preserve the same company/actor/credential and
+> current view-access predicates on every page. A filter cannot reveal another employee's
+> task or recover records whose source access was removed. Shared handoffs are a separate
+> participant-scoped resource; they do not expose another employee's private tasks.
+>
+> **Intake has document-publication authority.** Upload/analysis/review/file/retry/cancel
+> are restricted to interactive Admin/Manager/Quality (or existing elevated authority).
+> Read-only sessions can inspect their own saved files, sources and receipts but cannot
+> change them; API-token/kiosk credentials are excluded. Part, job, supplier, PO and receipt
+> matches/links independently require their module's effective view permission. Explicit
+> certificate release and receipt binding additionally require `receiving:view` and
+> `receiving:create`, matching the exact receipt part/supplier and refusing replacement of
+> an existing certificate. Required document/receipt/intake audits commit atomically.
+> No extraction constitutes material acceptance, drawing approval or production release.
+> The worker checks current user/company authority before analysis and before persisting
+> results; company AI egress independently controls the external extraction call.
+>
+> **Operational reads retain source access.** Readiness/knowledge require work-order view;
+> readiness quality details require quality view and material coverage requires inventory
+> plus purchasing view. Shipping packets require shipping and work-order view. Purchasing
+> impact requires purchasing view; stock requires inventory view, and direct downstream
+> jobs require work-order, BOM and inventory view. Genealogy requires inventory, quality,
+> work-order and purchasing view. These reports do not mutate or reconcile source records.
+>
+> **Handoffs and routines use interactive authority.** Same-company work-order access,
+> active membership/elevated access and writable context are required for changes.
+> Handoffs are readable only by their sender/recipient; only the recipient acknowledges/
+> completes and only the sender cancels. Either participant may attach verified photos
+> while the handoff and job are active. In-app participant notices accompany explicit
+> handoff changes, separately from the optional personal watch-alert preference.
+> Routine management permits Admin/Manager/Supervisor; approval permits Admin/Manager.
+> Other employees see approved routines and run them under their own current authority.
+> Approved routine snapshots do not confer permissions: completed action/intake/handoff
+> evidence is checked before advancing the corresponding step, and checklist notes do
+> not execute business actions. Editing a procedure returns it to draft; run history stays.
+> The combined work queue retains each source's private/participant and current access
+> predicates and bounds its results; it is not a company-wide employee surveillance view.
+>
+> **Personal follow-ups have a separate gate.** `can_watch` requires effective
+> `work_orders:view`, an active company and user, and company membership or existing
+> Superuser/Platform Admin access. It has no action-role fence and adds no permission.
+> Only interactive credentials can create/read/control watches; API tokens and kiosk
+> credentials are excluded. Read-only company contexts can read but cannot start, check,
+> snooze, resume or stop a watch. Every command retains company/owner/version checks.
+> The worker reloads current owner, company and permissions on every check; it stops with
+> generic `needs_attention` and no alert if access or the live work order is unavailable.
+> Completion writes only the personal task receipt, required audit and owner-only in-app
+> notification atomically; it cannot clear blockers, approve documents or change a job.
+>
+> **Preferences are personal presentation settings.** Reads scope to the current
+> company/user and return defaults without inserting rows. API credentials and read-only
+> sessions may read their own choices; save/reset require an active interactive user and
+> company, writable context, and membership or existing elevated company access. The
+> kiosk path fence remains. No module permission is granted by a focus-area choice:
+> briefings reorder only authorized sections. Saves/reset use expected company/version,
+> tenant/user locking and required audit in the same transaction. The alert preference
+> may suppress a new personal completion notification, never the completed receipt or
+> its audit evidence. Preferences do not alter business records or automation policy.
+>
+> **Shift briefing source permissions.** This deterministic read is separate from chat and
+> uses the active company's effective role overrides: `work_orders:view` for shared
+> blockers/late work and the caller's open-clock jobs, `quality:view` for NCRs,
+> `inventory:view` for stock/MRP exceptions, and `purchasing:view` for PO exceptions.
+> Shipping due-date review requires both `shipping:view` and `work_orders:view`. Sections
+> without access are omitted; roles choose display order, not additional authority. Existing
+> Superuser/Platform Admin bypass and token fences remain. No new permission or write is added.
+>
 > **Endpoint vs. tool-level access.** The endpoint (`app/api/endpoints/copilot.py`) requires only
-> an authenticated user (`get_current_user`) — it is **strictly read-only** (every copilot tool
-> wraps an existing read path; nothing can be created, updated, or deleted), so the chat itself
-> carries no role gate. **Tool-level access mirrors each tool's source endpoint**: all eight v1
-> tools wrap any-authenticated reads. The `search_erp` tool **excludes employee (`user`-type)
+> an authenticated user (`get_current_user`), so the chat itself carries no role gate.
+> Its thirteen read tools retain source access; `my_shift_briefing` additionally checks effective
+> permissions for each source. `prepare_hank_task` can save an audited review proposal only
+> under the action authority above. It cannot execute business changes. `search_documents`
+> returns bounded, tenant-scoped document
+> metadata and links, including revision/status; it does not read PDF contents or expose storage
+> paths. The `search_erp` tool **excludes employee (`user`-type)
 > results entirely** — data minimization, so employee names/emails never enter model prompts
 > regardless of the caller's role; the **Admin/Manager-only** gate on user results inside global
 > search now applies to `GET /search` only. The tool registry
 > (`CopilotToolSpec.allowed_roles` in `app/services/copilot_service.py`) supports fully
-> role-restricted tools for the future: such tools are omitted from other roles' tool lists and
-> refuse politely if invoked anyway.
+> role-restricted tools; the task preparation handler independently rechecks current
+> role/permission/company authority, even if the model attempts an unavailable action.
 >
 > **Tenant scope is never model-controlled.** `company_id` is injected server-side from the
 > active company (`get_current_company_id`) into every tool call; tool input schemas carry no
 > tenant identifier, and undeclared input keys supplied by the model (including a `company_id`)
 > are dropped before dispatch. Per-user rate limit: 20 requests/minute default
-> (`COPILOT_RATE_LIMIT_PER_MINUTE`). See [docs/API.md](API.md) → Werco Copilot.
+> (`COPILOT_RATE_LIMIT_PER_MINUTE`). See [API → Hank](API.md#hank-ai-shop-teammate).
+>
+> **PDF filing is a separate user action.** Hank's Upload PDF form calls the existing document
+> upload route, retaining its Admin/Manager/Quality release gate, active-company checks, and
+> required audit. The UI hides uploading for read-only sessions; the server remains authoritative.
+> Existing Superuser/Platform Admin role bypass behavior is unchanged. Submission creates a
+> released document, optionally linked to the current verified job when the user checks the
+> attachment box. Chat cannot invoke this write. No new role or permission is granted.
 
 ### Visitor Logs
 

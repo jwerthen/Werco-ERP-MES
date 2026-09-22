@@ -139,6 +139,25 @@ the emitted `OperationalEvent.event_type` strings that map to this key.
   row + the digest, not 14 emails. Recurring in PR 1: `wo.late`, `stock.low`, `calibration.due`,
   `quote.expiring`, `cert.expiring`, `maintenance.overdue`.
 
+### Hank personal follow-ups
+
+**Hank follow-ups (`hank.follow_up`).** An explicitly saved personal work-order follow-up
+can emit one informational, in-app notification to its owner when its selected condition
+is observed and the owner's current Hank `follow_up_alerts` choice is enabled (default).
+Muted watches still finish with a saved receipt and required audit, without a new notice;
+turning alerts back on does not replay completed watches or change existing notifications.
+`HankWatchService` inserts an enabled notice in the same transaction as the terminal
+task receipt and required audit, under the task row lock. It does not use outbox role
+fan-out, email, SMS, or digest delivery. The link `/?hank_task={id}` reopens the saved receipt
+under current company/owner permissions. This catalog entry has no mapped
+`OperationalEvent` source; unchanged checks and access/source failures do not notify.
+Manage follow-ups through Hank's snooze, resume and stop controls; the **Preferences** tab
+controls in-app completion alerts for that employee/company. Scheduled checks require
+the [Hank-only worker allowlist](DEPLOYMENT.md#hank-follow-up-worker); manual checks work
+without it. A PDF match reports attachment metadata, not content verification or approval.
+The existing notification-preferences read map reports `hank.follow_up` from the saved
+Hank choice and keeps its email/SMS/digest channels false; the SMS editor cannot alter it.
+
 ### What actually fires in PR 1
 
 The full v1 catalog is populated so the settings matrix (PR 3) and later PRs already have entries,

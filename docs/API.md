@@ -6421,6 +6421,11 @@ new financial approval workflow; automatic work-order completion keeps its exist
 | POST | `/documents/{id}/attach-work-order` | Body `{"work_order_id": id}`; attach an unlinked PDF | Admin / Manager / Quality |
 | DELETE | `/documents/{id}` | Delete a document only when no retention reference protects it | Admin / Manager |
 
+Deletion also refuses documents referenced by a same-company Hank intake result
+or sharing its retained source storage reference. This preserves the reviewed
+PDF, completed intake receipt and source-page recovery together with existing
+receipt-certificate and revision-history retention.
+
 Manual upload is a release action: the persisted Document stores `status="released"`, the actual
 `released_by` actor, and UTC `released_at`. Returned metadata exposes the released status;
 the audit details retain release actor/time, which are not fields of `DocumentResponse`.
@@ -8764,29 +8769,308 @@ are **scoped to the caller's active company** (`get_current_company_id`).
 > (`require_role([ADMIN, MANAGER])`), but the only consuming UI today is the AdminRoute-gated
 > Admin Settings page, so Managers can currently exercise the allowance only via direct API calls.
 
-### Werco Copilot (read-only AI chat)
+<a id="werco-copilot-read-only-ai-chat"></a>
+
+### Hank (AI shop teammate)
 
 Ask-anything chat over the caller's **own company's** ERP data, answered via Claude tool-use
 against existing read paths (`app/api/endpoints/copilot.py` + `app/services/copilot_service.py`).
-Surfaced in the app as the Copilot drawer (header button / `Ctrl+.`); not available on the
-`/kiosk` or `/wallboard` screens.
+Surfaced in the app as **Hank**, named after the shop's yellow Labrador (header button /
+`Ctrl+.`); not available on the `/kiosk` or `/wallboard` screens. Page-aware starter questions
+help employees investigate the current job, stock, or purchasing records. Chat can also save
+an audited proposal for employee review; it cannot execute that proposal. The panel's separate
+**Upload PDF** form uses the existing document upload route.
+See [Hank](HANK.md) for the employee workflows and their boundaries. Route names,
+`Copilot*` contracts, OpenAPI tag, model configuration, and telemetry identifiers stay stable.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | POST | `/copilot/chat` | One chat turn — SSE stream by default; `?stream=false` for plain JSON | Yes (any authenticated user) |
+| GET | `/hank/briefing` | Live, deterministic, role-ordered shift briefing; no LLM or database writes | Yes; effective view permissions gate each source |
+| GET | `/hank/capabilities` | Active company, reviewed-action `allowed_kinds`/`can_write`, and separate `can_watch` capability | Yes |
+| GET | `/hank/tasks` | Own saved proposals/receipts/watches; `limit` 1–100 (default 25), optional positive `before_id`, optional exact `status` | Yes; kind-specific current view gates |
+| GET | `/hank/tasks/{id}` | Own saved task under the same credential | Yes; kind-specific current view gates |
+| POST | `/hank/tasks` | Save and audit a task preview; does not execute the business action | Yes; action-specific role and effective permissions |
+| POST | `/hank/tasks/{id}/execute` | Execute the reviewed task and save its receipt atomically | Yes; same actor/credential and current action authority |
+| POST | `/hank/tasks/{id}/cancel` | Cancel an unexecuted proposal | Yes; same actor/credential and current action authority |
+| POST | `/hank/watches` | Explicitly save a personal work-order follow-up in `watching` state | Interactive user; effective `work_orders:view`, writable company context |
+| POST | `/hank/watches/{id}/{action}` | `check`, `snooze` (one hour), `resume`, or `cancel` a saved follow-up | Same company/owner, interactive user and current watch authority |
+| GET | `/hank/preferences` | Own saved choices or typed defaults; no write on read | Yes; current company/user |
+| PUT | `/hank/preferences` | Explicitly replace typed personal choices using the current version | Interactive user in writable company context |
+| POST | `/hank/preferences/reset` | Restore typed defaults while retaining task and audit history | Interactive user in writable company context |
+| POST | `/hank/intake` | Durably upload 1–5 PDFs and enqueue extraction; multipart `expected_company_id`, UUID `request_key`, `files` | Interactive Admin/Manager/Quality; writable company |
+| GET | `/hank/intake` | Own batches, newest first; `limit` 1–50 (default 20), optional `before_id` | Same company/owner and current document role |
+| GET | `/hank/intake/{batch_id}` | Recover all files in an owned batch | Same company/owner and current document role |
+| GET | `/hank/intake/files/{file_id}` | Recover one file's analysis, plan or receipt | Same company/owner and current document role |
+| GET | `/hank/intake/files/{file_id}/source` | Size/hash-verified PDF bytes; authenticated, private/no-store | Same company/owner and current document role |
+| POST | `/hank/intake/files/{file_id}/plan` | Save reviewed filing choices and source fingerprints | Same authority plus selected-source view permissions |
+| POST | `/hank/intake/files/{file_id}/{action}` | `execute`, `retry`, or `cancel` with expected company/version | Current interactive write authority; receipt release additionally requires receiving view/create |
+| GET | `/hank/work-orders/{id}/readiness` | Recorded material, blocker, instruction, traveler and quality gaps; never production authorization | `work_orders:view`; additional sources separately gated |
+| GET | `/hank/work-orders/{id}/knowledge` | Released document links and bounded prior-run notes | `work_orders:view` |
+| GET | `/hank/work-orders/{id}/shipping-packet` | Existing shipment, packing-slip and released-document evidence | `work_orders:view` + `shipping:view` |
+| GET | `/hank/purchase-orders/{id}/impact` | Outstanding supply, same-part alternatives, potential jobs and unsent follow-up draft | `purchasing:view`; stock/jobs separately gated |
+| GET | `/hank/trace/{kind}/{value}` | `lot` or `serial` recorded genealogy, value up to 100 characters | Inventory, quality, work-order and purchasing view permissions |
+| GET | `/hank/handoff-people` | Up to 100 eligible same-company recipients; optional `q` up to 100 characters | Interactive `work_orders:view` |
+| GET/POST | `/hank/handoffs` | List participant handoffs or explicitly send one | Interactive `work_orders:view`; writes require writable company |
+| GET | `/hank/handoffs/{id}` | Sender/recipient-only saved handoff | Same-company participant and current access |
+| POST | `/hank/handoffs/{id}/{action}` | Recipient `acknowledge`/`complete`, sender `cancel`; expected company/version | Authorized participant in writable company |
+| POST | `/hank/handoffs/{id}/attachments` | Multipart PNG/JPEG evidence: expected company/version, UUID `request_key`, `file` | Participant; active handoff and live job |
+| GET | `/hank/handoffs/{id}/attachments/{attachment_id}` | Verified private photo bytes | Same-company participant and current access |
+| GET/POST | `/hank/routines` | List approved routines/templates or create a draft | Interactive work-order access; create requires Admin/Manager/Supervisor |
+| GET/PUT | `/hank/routines/{id}` | Read a routine or edit it back into draft | Draft/archive visibility and editing require routine-management authority |
+| POST | `/hank/routines/{id}/{action}` | `approve`, `archive`, or `start` a reviewed current version | Approve: Admin/Manager; archive: Admin/Manager/Supervisor; start: interactive current access |
+| GET | `/hank/routine-runs` | Own runs; `limit` 1–100 (default 20), optional `before_id` | Interactive current work-order/context access |
+| GET | `/hank/routine-runs/{id}` | Own snapshotted routine and recorded step evidence | Same company/owner and current context access |
+| POST | `/hank/routine-runs/{id}/{action}` | `advance` one step with evidence or `cancel`; expected company/version | Own run in writable company; each business action retains its own authority |
+| GET | `/hank/work-queue` | Combined own tasks/intake/runs and participant handoffs; optional exact state filter | Interactive work-order access; each source retains its current read gates |
 
-**Request body:** `{ "messages": [...], "context_hint": "..."? }`. `messages` is the
+**Smart PDF intake.** Each PDF is at most 10 MB and 25 pages; a batch is at most
+25 MB. Upload request keys are company-scoped and bound to actor plus exact
+filename/hash inputs. Extraction uses the shared, company-egress-gated model
+client with `hank_document_intake` prompt 1.0.0. A request-driven ARQ job claims
+and commits before parsing/model work, then reloads current authority and saves
+its result with required audit. Parsing runs in a resource-bounded subprocess;
+no database transaction stays open during file or model I/O.
+
+Extraction suggests one of `purchase_order`, `vendor_quote`, `packing_slip`,
+`material_certificate`, `drawing`, or `other`, with bounded header fields, up to
+50 lines, confidence, page/excerpt evidence, warnings and permission-filtered
+exact identifier matches. Scanned-page evidence remains uncertain when native
+text cannot verify it. Drawings expose title-block metadata, not interpreted
+manufacturing requirements. Duplicate warnings cover same-company files
+submitted through intake; other employees' private file IDs are not returned.
+`analysis.has_duplicates` signals matching content even when both duplicate ID
+lists are empty because the matching intake is private. Clients use this flag to
+offer explicit duplicate acknowledgement before saving a plan.
+
+File states are `queued`, `analyzing`, `awaiting_review`, `planned`, `completed`,
+`failed`, and `cancelled`. File responses contain source identity, status/version,
+analysis, plan, result, safe error text and UTC timestamps. `analysis`/`plan`/`result`
+can be null. Batch responses contain `{id, company_id, request_key, created_at, files[]}`;
+lists contain `{batches[], has_more, next_before_id}`. The source route verifies
+saved size/hash before returning PDF bytes (409 on changed evidence). Clients
+must fetch with authentication and may use a blob URL with `#page=N` for review.
+
+Plan requests are `{expected_company_id, expected_version, plan}`. `plan` includes
+title, document type, revision, optional description and selected part/job/vendor/
+PO/receipt IDs, corrected `reviewed_fields`, `acknowledge_duplicate`, and
+`filing_mode` (`draft` or `release_receipt_certificate`). The first mode creates
+a draft with optional part/job/vendor links and retained PO/receipt provenance.
+The second explicitly releases a certificate for the selected receipt's exact
+part/supplier and fills its empty certificate slot; it never replaces a prior
+certificate or changes inspection/accepted quantities. Execution rechecks source
+fingerprints and concurrent duplicate filing, then commits document, optional
+receipt linkage, required audits and intake result atomically. Completed execution
+replays its receipt. Intake-linked documents and source bytes cannot be deleted
+through Documents. Retry requeues queued/failed files or analyzing work older than
+15 minutes. Late results cannot overwrite a cancelled/newer version. Upload and
+filing uncertainty is recovered by the same request key or saved file ID.
+
+**Operational reports.** Every report returns `{company_id, checked_at, title,
+summary, checks[], coverage_notes[], draft_text}`. Checks distinguish recorded
+facts, attention, unknown coverage and information. Readiness requires work-order
+view; material coverage additionally requires inventory and purchasing view,
+and quality exceptions require quality view. Purchasing impact identifies direct
+material/BOM demand only; downstream jobs require work-order, BOM and inventory
+view. Same-part stock excludes held/expired/unavailable quantities. Supplier
+messages are returned as drafts only. Knowledge links up to 50 released documents,
+five completed prior runs and five notes per run; it does not read those file
+contents. These routes do not reconcile job state or write records.
+Trace identifiers are URL-encoded as one value; encoded slashes in recorded lot
+or serial numbers remain part of the identifier. The 100-character value bound
+and source permissions still apply.
+
+**Handoffs, routines and queue.** Handoff creation includes a UUID request key,
+expected company, work order, recipient, summary and optional completed/remaining
+work, problems, quantity and up to ten document IDs. Lists accept `direction`
+(`all`, `sent`, `received`), exact status, `limit` and `before_id`. New and changed
+handoffs send private participant in-app notices, never email/SMS. Up to ten
+verified PNG/JPEG photos (10 MB/20 megapixels each) can be added while active;
+photo replay keys preserve uncertain saves. Document and photo references do not
+constitute quality approval.
+
+Routines contain 1–12 ordered typed steps. Editing an approved routine returns it
+to draft; each run retains the approved version's snapshot. `start` includes a
+request key, expected company/version and optional work-order/PO context.
+`advance` carries expected company/version and a review note or the required
+completed `task_id`, `intake_file_id` or `handoff_id`; evidence must belong to the
+employee/participants, correct context and current permissions. Checklists record
+employee statements, not automatic business execution. Routines seed no approved
+procedures and cannot grant authority. The queue filters each source before its
+50-row bound, returns `{checked_at, items[], truncated}`, and supports `working`,
+`waiting_on_you`, `waiting_on_other`, and `finished`; use source inboxes for more
+history. This expansion requires migration110, with no new environment variable
+or scheduled cron. Intake requires a matching enqueue-driven worker.
+
+**Reviewed task contract.** `POST /hank/tasks` accepts
+`{ expected_company_id, request_key, kind, input }`. `request_key` is normalized to a canonical
+UUID. The six `kind` values are listed below; each input is
+validated against its specific schema and undeclared fields are rejected. The task stores
+immutable input/preview evidence and fingerprints of the source plan. There is a cap of 100
+proposals awaiting review per actor/credential. Creating a proposal requires the same
+authority as its eventual action:
+
+| Kind | Required input | Authority / result |
+| --- | --- | --- |
+| `repeat_job` | `source_work_order_id`, positive `quantity_ordered`, optional `due_date` | Admin/Manager/Supervisor plus effective `work_orders:view` and `work_orders:create`; creates a **draft** through the existing duplicate service |
+| `draft_purchase_order` | `vendor_id`, 1–50 `lines` with `part_id`, positive `quantity_ordered`, nonnegative `unit_price`; optional PO dates/address/method/notes and line date/notes | Admin/Manager/Supervisor plus effective `purchasing:view` and `purchasing:create`; creates a **draft**, never approves/sends/receives |
+| `attach_document` | `document_id`, `work_order_id` | Admin/Manager/Quality plus effective `work_orders:view`; links an existing PDF using the document workflow, without approving its contents |
+| `receive_delivery` | `purchase_order_id`, 1–50 receipt lines; each requires `po_line_id`, positive actual `quantity_received` and explicit `requires_inspection`; optional lot/heat/serial/certificate/location/over-receipt details | Admin/Manager/Supervisor plus `receiving:view` + `receiving:create`; canonical atomic delivery/stock posting, with no automatic printing |
+| `report_production` | `operation_id`, nonnegative good/scrap deltas (at least one positive), scrap reason/code when reporting scrap; optional NCR details and reasoned hold | Admin/Manager/Supervisor/Operator/Quality plus `work_orders:view` + `work_orders:complete`; caller must have an open clock on the operation; no implicit job/operation completion |
+| `draft_shipment` | `work_order_id`, positive `quantity_shipped`, optional destination/carrier/package details; `cert_of_conformance` must be false | Admin/Manager/Supervisor/Shipping plus `shipping:view` + `shipping:create` + `work_orders:view`; reserves available completed units in a pending shipment, without dispatch/CoC/carrier purchase |
+
+Existing Superuser/Platform Admin bypass, active-company and token fences remain. A read-only
+company context cannot create or execute proposals. A task is scoped to company, actor,
+and credential (`user` session or the originating API token); another user or credential
+receives 404. Reads/lists retain the action's role fence and effective view permissions,
+but do not require create permission or a writable company context. Commands recheck full
+action authority. Losing source view access hides the saved task's prior source data.
+
+Responses contain `{ id, company_id, kind, title, status, version, input, preview, result,
+error_message, created_at, updated_at, completed_at, last_checked_at, snoozed_until }`; `preview` has `summary`, `changes[]`,
+`warnings[]`, and `references[]`. A completed `result` contains its summary, warnings and
+record references. Task timestamps serialize as UTC `Z`. Lists return
+`{ tasks[], has_more, next_before_id }` in descending id order. Initial action statuses are
+`awaiting_review`, `completed`, and `cancelled`; personal follow-ups also use `watching`,
+`snoozed`, and `needs_attention`.
+
+The persistent task inbox uses the same list API. `status` is an exact server-side filter:
+`awaiting_review`, `completed`, `cancelled`, `needs_attention`, `watching`, or `snoozed`;
+omit it for all visible tasks. Unknown status values return 422. Filtering occurs before
+pagination, alongside the unchanged company/actor/credential and current read-permission
+predicates. Use `next_before_id` with the same status for the next page; changing filters
+starts a fresh first page. Each task opens its saved preview or completion receipt. The
+history persists across panel closure/sign-in under the same identity; a different API
+token remains a different credential. This inbox increment adds no schema or worker change.
+
+Execute/cancel accepts `{ expected_company_id, expected_version }`. The server locks the
+task, rechecks authority and source fingerprints, and uses version compare-and-swap. Changed
+company, changed source, stale version, or a reused request key for different input/identity
+returns 409. Use a fresh reviewed proposal after source changes. Repeating the same creation
+request returns the saved task; repeating an already completed execute returns its receipt
+without creating another business record. Repeating cancellation of a cancelled task is also
+safe. When a response is lost, refresh the existing task or retry the same request key; do not
+substitute a new task to recover an uncertain execution.
+
+The command validates its receipt before the sole commit; required task and domain evidence
+shares the transaction with business changes. Required audit failure returns 503 and rolls
+back. Draft repeats keep existing duplication rules: production history/lot pins/dispatch
+ranks reset, process-sheet steps use current released revisions, laser quantities derive
+from copied runs, and skipped operations/material ties appear in the receipt. Existing
+work-order/revision-history document bindings cannot be reassigned. Schema migration108
+adds the task store; no new environment variable or LLM call is needed for direct tasks.
+
+**Personal follow-ups.** `POST /hank/watches` accepts
+`{ expected_company_id, request_key, work_order_id, condition, document_type? }`.
+The UUID request key is canonicalized and bound to the company, employee and exact input;
+an identical retry returns its saved task, while mismatched reuse returns 409. The returned
+task has `kind: "watch_work_order"`, `status: "watching"`, and an initially null
+`last_checked_at`. Creation records the baseline and required audit; it does not immediately
+evaluate the condition or execute a business action. Chat has no watch-creation tool.
+
+| Condition | Baseline and completion evidence |
+| --- | --- |
+| `blockers_cleared` | Requires at least one current open/acknowledged blocker; otherwise 409. Completes when a later check finds **no** open/acknowledged blockers, including blockers raised after creation. This is not a production-readiness or quality-release decision. |
+| `pdf_attached` | Records IDs of currently matching PDF attachments. Completes when a later check finds a matching attached document outside that baseline, including an earlier upload attached after creation. Optional `document_type` uses the existing `DocumentType` enum and is valid only for this condition. The receipt includes revision/status and links; it does not read or approve the contents. |
+
+There are at most 50 active (`watching`/`snoozed`) watches per owner/company and at most
+500 matching source records in a baseline; exceeding either returns 409. Watch ownership is
+interactive-only: API-token and kiosk credentials cannot create, control, or read watches.
+Effective `work_orders:view`, an active owner/company, and membership or existing elevated
+company access are required. Read-only company contexts may read saved watches but cannot
+control them. These gates are separate from the role fences for the six reviewed actions.
+
+Commands accept `{ expected_company_id, expected_version }`. `check` evaluates a watching
+task now. `snooze` pauses it for one hour; `resume` retains its original baseline and makes
+it eligible to check again. `cancel` stops it and preserves its evidence. Commands use a
+row lock and version compare-and-swap; stale/invalid transitions return 409. Replaying a
+completed check or cancelled stop returns the saved result. A snoozed watch must resume
+before a manual check. Unchanged successful checks update `last_checked_at` and clear any
+prior failed-check diagnostic, without a new command version, audit transition, or notification.
+
+The five-minute `check_hank_watches_job` processes at most 100 due watches per pass in
+independent transactions, using row locks with `SKIP LOCKED`. It rechecks current authority
+and the live work order before reading evidence. Lost access, inactive owner/company, or
+a removed work order moves the watch to `needs_attention` with a generic error and no alert.
+A matched condition atomically saves its terminal receipt, required audit and, if the owner's
+current `follow_up_alerts` preference is enabled, one `hank.follow_up` in-app notification
+linking to `/?hank_task={id}`. Muting retains the receipt and does not replay alerts after
+re-enabling. It does not send email/SMS
+or repeat after completion. Inspect `last_checked_at` for freshness; scheduled polling is
+not an immediate delivery guarantee. **Check now** works even when the worker is disabled.
+Failed scheduled transactions roll back their receipt/audit/notification together. A
+separately locked, snapshot-checked diagnostic records the failure and a 30-minute retry
+backoff without advancing `last_checked_at`, changing command version, or notifying; a
+manual check can retry sooner. Successful checks clear that diagnostic.
+This increment reuses migration108, with no new environment variable; deployments must
+explicitly enable the [Hank-only cron allowlist](DEPLOYMENT.md#hank-follow-up-worker).
+
+**Personal preference contract.** `GET /hank/preferences` returns
+`{ company_id, version, preferences, updated_at, can_edit }`. With no saved row it returns
+`version: 0`, `updated_at: null`, and the defaults below, without creating data. Storage is
+per company/user, shared across that employee's sessions; it is separate from credential-bound
+task ownership. A read-only context or API credential can read their own choices but cannot
+save/reset; the existing kiosk path fence still applies. Editing requires an active
+interactive owner/company and current company membership or existing elevated access.
+
+| Preference | Values | Default / effect |
+| --- | --- | --- |
+| `briefing_detail` | `concise`, `standard` | `standard`; cap three or five briefing items per section, respectively, preserving counts/source links and partial labels |
+| `focus_area` | `role_default`, `my_work`, `shop`, `quality`, `purchasing`, `inventory`, `shipping` | `role_default`; reorder only currently permitted sections, without widening access or hiding other sections |
+| `handoff_format` | `bullets`, `checklist` | `bullets`; chat presentation choice, subordinate to an explicit current request and never evidence of task completion |
+| `follow_up_alerts` | boolean | `true`; whether a matched follow-up creates a new in-app completion notice. Checking, receipts and required audits continue when false |
+
+`PUT` accepts `{ expected_company_id, expected_version, preferences }`; reset accepts
+`{ expected_company_id, expected_version }`. Version0 means an initial save. Inputs reject
+unknown fields and unsupported choice values; preferences contain no freeform instructions.
+A tenant/user advisory lock protects first creation, and row locking plus version CAS
+protects updates. Wrong company or stale version returns 409. Reload current choices after
+an uncertain response instead of blindly overwriting them. A successful change increments
+the saved version and commits its required audit atomically; audit failure returns 503 and
+rolls back. A current-version save of identical values is a no-op. Reset updates a saved row
+to defaults; with no row, it remains a no-op at version 0. It does not delete task/watch
+history or alter permissions, authoritative ERP records, or company automation policy.
+Migration 109 adds the preference table after 108, with no new environment variable or cron.
+
+**Shift briefing response:**
+`{ checked_at, role, headline, summary, sections[], coverage_notes[] }`.
+Each section is `{ key, title, description, total, truncated, items[] }`; an item is
+`{ key, source_kind, source_id, title, detail, severity, href, suggested_action, owner_name, is_mine }`.
+`checked_at` is UTC with a trailing `Z`. At most five items appear per section.
+`total` counts collected, unsnoozed matching signals; it is a lower bound when a source scan
+hits its cap. `truncated` also marks sections containing more items than are shown, and
+`coverage_notes` explicitly describes scope and omitted results. Refresh by calling GET again.
+
+Operators start with their own open-clock jobs, Quality with open NCRs, Shipping with due
+work, and other roles with shared shop priorities. Assigned operational issues sort first
+inside a section. Source access is the current company's effective role permissions,
+including overrides: `work_orders:view` for blockers/late and personal clocked jobs;
+`quality:view` for NCRs; `inventory:view` for low-stock/latest-MRP exceptions; and
+`purchasing:view` for supplier follow-ups/overdue PO lines. Shipping due-date review requires
+**both** `shipping:view` and `work_orders:view`. Existing Superuser/Platform Admin bypass and
+authenticated-token fences apply; the client cannot choose another tenant or actor.
+
+Personal jobs require a tenant-scoped open `TimeEntry` for the caller and a live, active
+work order. They are clocked work, not inferred next assignments. Shipping reviews live,
+active/complete orders with undispatched ordered quantity, due through the next two days in
+the company timezone (`must_ship_by` takes precedence over `due_date`), including overdue
+work. It does not assert manufacturing completion, quality release or readiness to ship.
+Tenant-scoped shipped/delivered, nondeleted shipments determine dispatched quantity. Shared
+snoozed issues remain omitted until expiry or a changed source occurrence. No write,
+background monitor, Anthropic key, new role, migration or environment setting is required.
+
+**Chat request body:** `{ "messages": [...], "context_hint": "..."? }`. `messages` is the
 **client-held** conversation history (the server is stateless between turns): 1–40 entries of
 `{ "role": "user" | "assistant", "content": string (1–8,000 chars) }`, oldest first, and the
 **last message must be from the user** (422 otherwise). Server-side shaping forwards only the
 trailing 30 messages at up to 4,000 chars each to the model. `context_hint` (optional,
-≤ 500 chars) tells the copilot what page/entity the user is viewing.
+≤ 500 chars) tells Hank what page/entity the user is viewing.
 
 **Streaming response (default).** `text/event-stream` of JSON frames (`data: {...}`):
 
 | Frame `type` | Payload fields | Meaning |
 |--------------|----------------|---------|
-| `tool_use` | `tool`, `summary` | A read-only lookup ran (one frame per tool call) |
+| `tool_use` | `tool`, `summary` | A lookup or proposal-preparation tool ran (one frame per tool call) |
 | `delta` | `text` | A chunk of the answer text |
 | `final` | full `CopilotChatResponse` payload | Terminal success frame — same shape as the `?stream=false` body |
 | `error` | `message` | Terminal error frame (failures after the stream starts arrive here, not as an HTTP status) |
@@ -8810,10 +9094,21 @@ already gathered.
   429 and the last-message 422 are still HTTP statuses (checked before the stream opens), but
   configuration/upstream failures surface as a terminal `error` frame on an HTTP 200 stream.
 
-**Read-only + tenant-injection contract:**
+**Reviewed proposals + tenant-injection contract:**
 
-- Every tool is a thin wrapper over an existing read path — the copilot **cannot create, update,
-  or delete anything**.
+- Thirteen tools read ERP data, including the deterministic `my_shift_briefing`. The fourteenth,
+  `prepare_hank_task`, can save an audited task **awaiting employee review**, with a link to
+  `/?hank_task=<id>`. It cannot execute, approve, release, or dispatch a business action.
+  It validates exact records and required fields through the same task service as the form.
+  A briefing remains an on-demand snapshot, not a background monitor or a complete ERP audit.
+- Chat commits each audited proposal in a short transaction before another model call, so
+  external model latency never holds its audit-chain lock. If later narration fails or is
+  stopped, the saved proposal remains recoverable through the task APIs; it remains unexecuted.
+  Terminal SSE success is emitted only after the final chat transaction commits.
+- Prompt `copilot_chat` is version **1.5.0**. Saved intake extraction can be read
+  through `hank_saved_work` with its page evidence; the general document-search
+  tool still returns metadata only. Chat does not create handoffs, approve
+  routines, advance steps or execute filing/actions.
 - The tenant is **never model-controlled**: `company_id` is injected server-side from the
   authenticated session into every tool call; tool input schemas carry no tenant identifier, and
   any undeclared input keys the model supplies (including a `company_id`) are dropped before
@@ -8822,8 +9117,13 @@ already gathered.
 
 **Per-tool access** (mirrors each tool's source endpoint):
 
-| Tool | Wraps (source read path) | Access |
+| Tool | Wraps (source path) | Access |
 |------|--------------------------|--------|
+| `my_shift_briefing` | Hank deterministic shift briefing | Any authenticated; per-source effective view permissions |
+| `prepare_hank_task` | Hank task preparation service | Action-specific roles and effective permissions above; saves review evidence only |
+| `hank_operational_report` | Readiness, knowledge, shipping packet, purchasing impact and lot/serial reports above | Current source-specific effective view gates |
+| `hank_action_context` | Own active clocks or exact receiving PO lines | Work-order view for own clocks; purchasing and receiving view for receiving context |
+| `hank_saved_work` | Own queue/task/intake/routine or participant handoff | Each saved record's current company/actor/credential/participant gates; no execution |
 | `lookup_work_order` | Work-order context (`GET /work-orders/{id}` + AI context service) | Any authenticated |
 | `search_erp` | `GET /search` (shared core `run_global_search`) | Any authenticated; **employee (`user`-type) results are excluded entirely** (data minimization — employee names/emails never enter model prompts). The Admin/Manager-gated user results remain available on `GET /search` only |
 | `list_blocked_work_orders` | `GET /work-order-blockers` (open + acknowledged) | Any authenticated |
@@ -8832,11 +9132,31 @@ already gathered.
 | `inventory_lookup` | `GET /inventory` (on-hand/available by location and lot) | Any authenticated |
 | `customer_open_orders` | `GET /work-orders` + `GET /quotes` (open WOs, active quotes) | Any authenticated |
 | `company_snapshot` | AI context service aggregate counts | Any authenticated |
+| `search_documents` | Document metadata (same access as `GET /documents`) | Any authenticated; no file bytes, storage paths, description text, or approval identities |
+
+`search_documents` accepts optional literal `query` text (at most 100 characters),
+`work_order_id`, and `part_id` (positive integers). It matches document number, title, or filename,
+applies any supplied record filters, and returns the ten newest matches with `has_more` and
+`metadata_only: true`. Each record includes its revision and status; newest does not imply
+approved or applicable. References open `/documents?document=<id>`. Invalid filters return an
+error instead of silently broadening the search. It does not read or interpret PDF contents.
+
+**PDF filing from the panel:** Admin/Manager/Quality users with write access can select
+**Upload PDF**, review title, type, revision, and optional notes, then submit
+**Upload and release PDF** to `POST /documents/upload`. This creates a new **released** document
+under the caller's identity with the existing required audit; it is not a draft or a model tool
+call. The form accepts PDFs up to 25,000,000 bytes and does not send file contents to the LLM.
+When opened on a work-order detail page, an initially unchecked checkbox can attach the upload
+to that verified current job. Other associations and replacement revisions use Documents.
+The panel shows a saved-record link only after the upload response succeeds. No new endpoint,
+permission, or automatic release policy is introduced.
 
 > **Telemetry, not audit data.** Every model call in the loop writes one `ai_usage_events` row
 > (task `copilot_chat`), and every turn records an `AIInteractionEvent`
-> (`source_module = "copilot"`, content redacted by the learning service). The copilot performs
-> zero domain writes, so nothing lands on the `audit_log` hash chain.
+> (`source_module = "copilot"`, content redacted by the learning service). Lookups do not land
+> on the `audit_log` hash chain. Saved task proposals do require audit evidence; explicit
+> execution records task completion and the business action in its transaction. The separate
+> PDF filing form follows the document endpoint's required audit contract.
 
 ### AI Recommendations (Action Inbox)
 

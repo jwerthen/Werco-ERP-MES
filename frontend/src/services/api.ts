@@ -107,6 +107,12 @@ import {
   CopilotStreamEvent,
   CopilotStreamHandlers,
 } from '../types/copilot';
+import type { HankBriefing } from '../types/hank';
+import type { HankCapabilities, HankTask, HankTaskCreate, HankTaskCommand, HankTaskList } from '../types/hankTasks';
+import type { HankWatchCreate } from '../types/hankWatches';
+import type { HankPreferencesCommand, HankPreferencesResponse, HankPreferencesUpdate } from '../types/hankPreferences';
+import type { HankEvidence, HankHandoff, HankHandoffCreate, HankHandoffList, HankRoutine, HankRoutineValues, HankRoutineRun, HankRoutineAdvance, HankWorkQueue, HankWorkState } from '../types/hankWork';
+import type { HankIntakeBatch, HankIntakeBatchList, HankIntakeFile, HankIntakePlan } from '../types/hankIntake';
 import {
   EntityImportResponse,
   ImportTemplateIndexResponse,
@@ -1154,9 +1160,10 @@ class ApiService {
     return (await this.api.get('/work-orders/browse', { params })).data;
   }
 
-  async getWorkOrder(id: number) {
+  async getWorkOrder(id: number, signal?: AbortSignal) {
     const response = await this.api.get(`/work-orders/${id}`, {
       params: { _ts: Date.now() },
+      ...(signal ? { signal } : {}),
     });
     return response.data;
   }
@@ -2037,7 +2044,158 @@ class ApiService {
     return response.data;
   }
 
-  /** Werco Copilot chat — non-streaming variant (single JSON response). */
+  async getHankBriefing(signal?: AbortSignal): Promise<HankBriefing> {
+    return (await this.api.get<HankBriefing>('/hank/briefing', { signal })).data;
+  }
+
+  async getHankCapabilities(signal?: AbortSignal): Promise<HankCapabilities> {
+    return (await this.api.get<HankCapabilities>('/hank/capabilities', { signal })).data;
+  }
+
+  async getHankTask(id: number, signal?: AbortSignal): Promise<HankTask> {
+    return (await this.api.get<HankTask>(`/hank/tasks/${id}`, { signal })).data;
+  }
+
+  async getHankTasks(params?: { before_id?: number; limit?: number; status?: HankTask['status'] }, signal?: AbortSignal): Promise<HankTaskList> {
+    return (await this.api.get<HankTaskList>('/hank/tasks', { params, signal })).data;
+  }
+
+  async createHankTask(body: HankTaskCreate, signal?: AbortSignal): Promise<HankTask> {
+    return (await this.api.post<HankTask>('/hank/tasks', body, { signal })).data;
+  }
+
+  async executeHankTask(id: number, body: HankTaskCommand, signal?: AbortSignal): Promise<HankTask> {
+    return (await this.api.post<HankTask>(`/hank/tasks/${id}/execute`, body, { signal })).data;
+  }
+
+  async cancelHankTask(id: number, body: HankTaskCommand, signal?: AbortSignal): Promise<HankTask> {
+    return (await this.api.post<HankTask>(`/hank/tasks/${id}/cancel`, body, { signal })).data;
+  }
+
+  async createHankWatch(body: HankWatchCreate, signal?: AbortSignal): Promise<HankTask> {
+    return (await this.api.post<HankTask>('/hank/watches', body, { signal })).data;
+  }
+
+  async checkHankWatch(id: number, body: HankTaskCommand, signal?: AbortSignal): Promise<HankTask> {
+    return (await this.api.post<HankTask>(`/hank/watches/${id}/check`, body, { signal })).data;
+  }
+
+  async snoozeHankWatch(id: number, body: HankTaskCommand, signal?: AbortSignal): Promise<HankTask> {
+    return (await this.api.post<HankTask>(`/hank/watches/${id}/snooze`, body, { signal })).data;
+  }
+
+  async resumeHankWatch(id: number, body: HankTaskCommand, signal?: AbortSignal): Promise<HankTask> {
+    return (await this.api.post<HankTask>(`/hank/watches/${id}/resume`, body, { signal })).data;
+  }
+
+  async cancelHankWatch(id: number, body: HankTaskCommand, signal?: AbortSignal): Promise<HankTask> {
+    return (await this.api.post<HankTask>(`/hank/watches/${id}/cancel`, body, { signal })).data;
+  }
+
+  async getHankPreferences(signal?: AbortSignal): Promise<HankPreferencesResponse> {
+    return (await this.api.get<HankPreferencesResponse>('/hank/preferences', { signal })).data;
+  }
+
+  async updateHankPreferences(body: HankPreferencesUpdate, signal?: AbortSignal): Promise<HankPreferencesResponse> {
+    return (await this.api.put<HankPreferencesResponse>('/hank/preferences', body, { signal })).data;
+  }
+
+  async resetHankPreferences(body: HankPreferencesCommand, signal?: AbortSignal): Promise<HankPreferencesResponse> {
+    return (await this.api.post<HankPreferencesResponse>('/hank/preferences/reset', body, { signal })).data;
+  }
+
+  async getHankReadiness(id: number, signal?: AbortSignal): Promise<HankEvidence> {
+    return (await this.api.get<HankEvidence>(`/hank/work-orders/${id}/readiness`, { signal })).data;
+  }
+  async getHankKnowledge(id: number, signal?: AbortSignal): Promise<HankEvidence> {
+    return (await this.api.get<HankEvidence>(`/hank/work-orders/${id}/knowledge`, { signal })).data;
+  }
+  async getHankPurchasingImpact(id: number, signal?: AbortSignal): Promise<HankEvidence> {
+    return (await this.api.get<HankEvidence>(`/hank/purchase-orders/${id}/impact`, { signal })).data;
+  }
+  async getHankShippingPacket(id: number, signal?: AbortSignal): Promise<HankEvidence> {
+    return (await this.api.get<HankEvidence>(`/hank/work-orders/${id}/shipping-packet`, { signal })).data;
+  }
+  async getHankTrace(kind: 'lot' | 'serial', value: string, signal?: AbortSignal): Promise<HankEvidence> {
+    return (await this.api.get<HankEvidence>(`/hank/trace/${kind}/${encodeURIComponent(value)}`, { signal })).data;
+  }
+  async getHankWorkQueue(state?: HankWorkState, signal?: AbortSignal): Promise<HankWorkQueue> {
+    return (await this.api.get<HankWorkQueue>('/hank/work-queue', { params: { state }, signal })).data;
+  }
+  async getHankHandoffs(params?: { direction?: 'all' | 'sent' | 'received'; status?: HankHandoff['status']; limit?: number; before_id?: number }, signal?: AbortSignal): Promise<HankHandoffList> {
+    return (await this.api.get<HankHandoffList>('/hank/handoffs', { params, signal })).data;
+  }
+  async getHankHandoff(id: number, signal?: AbortSignal): Promise<HankHandoff> {
+    return (await this.api.get<HankHandoff>(`/hank/handoffs/${id}`, { signal })).data;
+  }
+  async getHankHandoffPeople(q?: string, signal?: AbortSignal): Promise<{ people: Array<{ id: number; name: string; role: string }> }> {
+    return (await this.api.get('/hank/handoff-people', { params: { q }, signal })).data;
+  }
+  async createHankHandoff(body: HankHandoffCreate, signal?: AbortSignal): Promise<HankHandoff> {
+    return (await this.api.post<HankHandoff>('/hank/handoffs', body, { signal })).data;
+  }
+  async commandHankHandoff(id: number, action: 'acknowledge' | 'complete' | 'cancel', body: HankTaskCommand, signal?: AbortSignal): Promise<HankHandoff> {
+    return (await this.api.post<HankHandoff>(`/hank/handoffs/${id}/${action}`, body, { signal })).data;
+  }
+  async attachHankHandoffPhoto(id: number, body: FormData, signal?: AbortSignal): Promise<HankHandoff> {
+    return (await this.api.post<HankHandoff>(`/hank/handoffs/${id}/attachments`, body, { signal, headers: { 'Content-Type': 'multipart/form-data' } })).data;
+  }
+  async getHankHandoffPhoto(id: number, attachmentId: string, signal?: AbortSignal): Promise<Blob> {
+    return (await this.api.get<Blob>(`/hank/handoffs/${id}/attachments/${encodeURIComponent(attachmentId)}`, { signal, responseType: 'blob' })).data;
+  }
+  async getHankRoutines(signal?: AbortSignal): Promise<{ routines: HankRoutine[]; templates: HankRoutineValues[]; can_manage: boolean; can_approve: boolean; truncated?: boolean }> {
+    return (await this.api.get('/hank/routines', { signal })).data;
+  }
+  async getHankRoutine(id: number, signal?: AbortSignal): Promise<HankRoutine> {
+    return (await this.api.get<HankRoutine>(`/hank/routines/${id}`, { signal })).data;
+  }
+  async createHankRoutine(body: HankRoutineValues & { expected_company_id: number; request_key: string }, signal?: AbortSignal): Promise<HankRoutine> {
+    return (await this.api.post<HankRoutine>('/hank/routines', body, { signal })).data;
+  }
+  async updateHankRoutine(id: number, body: HankRoutineValues & HankTaskCommand, signal?: AbortSignal): Promise<HankRoutine> {
+    return (await this.api.put<HankRoutine>(`/hank/routines/${id}`, body, { signal })).data;
+  }
+  async commandHankRoutine(id: number, action: 'approve' | 'archive', body: HankTaskCommand, signal?: AbortSignal): Promise<HankRoutine> {
+    return (await this.api.post<HankRoutine>(`/hank/routines/${id}/${action}`, body, { signal })).data;
+  }
+  async getHankRoutineRuns(params?: { limit?: number; before_id?: number }, signal?: AbortSignal): Promise<{ runs: HankRoutineRun[]; has_more: boolean; next_before_id: number | null }> {
+    return (await this.api.get('/hank/routine-runs', { params, signal })).data;
+  }
+  async getHankRoutineRun(id: number, signal?: AbortSignal): Promise<HankRoutineRun> {
+    return (await this.api.get<HankRoutineRun>(`/hank/routine-runs/${id}`, { signal })).data;
+  }
+  async startHankRoutine(id: number, body: HankTaskCommand & { request_key: string; work_order_id?: number; purchase_order_id?: number }, signal?: AbortSignal): Promise<HankRoutineRun> {
+    return (await this.api.post<HankRoutineRun>(`/hank/routines/${id}/start`, body, { signal })).data;
+  }
+  async advanceHankRoutine(id: number, body: HankRoutineAdvance, signal?: AbortSignal): Promise<HankRoutineRun> {
+    return (await this.api.post<HankRoutineRun>(`/hank/routine-runs/${id}/advance`, body, { signal })).data;
+  }
+  async cancelHankRoutineRun(id: number, body: HankTaskCommand, signal?: AbortSignal): Promise<HankRoutineRun> {
+    return (await this.api.post<HankRoutineRun>(`/hank/routine-runs/${id}/cancel`, body, { signal })).data;
+  }
+  async createHankIntake(body: FormData, signal?: AbortSignal): Promise<HankIntakeBatch> {
+    return (await this.api.post<HankIntakeBatch>('/hank/intake', body, { signal, headers: { 'Content-Type': 'multipart/form-data' } })).data;
+  }
+  async getHankIntakes(params?: { limit?: number; before_id?: number }, signal?: AbortSignal): Promise<HankIntakeBatchList> {
+    return (await this.api.get<HankIntakeBatchList>('/hank/intake', { params, signal })).data;
+  }
+  async getHankIntake(id: number, signal?: AbortSignal): Promise<HankIntakeBatch> {
+    return (await this.api.get<HankIntakeBatch>(`/hank/intake/${id}`, { signal })).data;
+  }
+  async getHankIntakeFile(id: number, signal?: AbortSignal): Promise<HankIntakeFile> {
+    return (await this.api.get<HankIntakeFile>(`/hank/intake/files/${id}`, { signal })).data;
+  }
+  async getHankIntakeSource(id: number, signal?: AbortSignal): Promise<Blob> {
+    return (await this.api.get<Blob>(`/hank/intake/files/${id}/source`, { signal, responseType: 'blob' })).data;
+  }
+  async planHankIntake(id: number, body: HankTaskCommand & { plan: HankIntakePlan }, signal?: AbortSignal): Promise<HankIntakeFile> {
+    return (await this.api.post<HankIntakeFile>(`/hank/intake/files/${id}/plan`, body, { signal })).data;
+  }
+  async commandHankIntake(id: number, action: 'execute' | 'retry' | 'cancel', body: HankTaskCommand, signal?: AbortSignal): Promise<HankIntakeFile> {
+    return (await this.api.post<HankIntakeFile>(`/hank/intake/files/${id}/${action}`, body, { signal })).data;
+  }
+
+  /** Hank chat — non-streaming variant (single JSON response). */
   async copilotChat(request: CopilotChatRequest): Promise<CopilotChatResponse> {
     const response = await this.api.post<CopilotChatResponse>('/copilot/chat', request, {
       params: { stream: false },
@@ -2046,7 +2204,7 @@ class ApiService {
   }
 
   /**
-   * Werco Copilot chat — streaming variant (Server-Sent Events over fetch).
+   * Hank chat — streaming variant (Server-Sent Events over fetch).
    *
    * Axios cannot stream response bodies in the browser, so this uses fetch
    * against the same base URL with the same Authorization header the axios
@@ -2098,7 +2256,7 @@ class ApiService {
       response = await doFetch();
     }
     if (!response.ok || !response.body) {
-      throw new Error(`Copilot request failed (${response.status})`);
+      throw new Error(`Hank request failed (${response.status})`);
     }
 
     const reader = response.body.getReader();
@@ -2154,7 +2312,7 @@ class ApiService {
       throw new Error(state.error);
     }
     if (!state.final) {
-      throw new Error('Copilot stream ended without a final answer');
+      throw new Error('Hank stream ended without a final answer');
     }
     return state.final;
   }
@@ -2971,13 +3129,13 @@ class ApiService {
   // which is the ONLY way to see one — every other read hard-filters them out, so nothing
   // can be restored without it. Leave the key off for the normal list: axios omits
   // `undefined` params, so a no-argument call sends the exact query string it always has.
-  async getPurchaseOrders(params?: { status?: string; vendor_id?: number; deleted_only?: boolean }) {
-    const response = await this.api.get('/purchasing/purchase-orders', { params });
+  async getPurchaseOrders(params?: { status?: string; vendor_id?: number; deleted_only?: boolean }, signal?: AbortSignal) {
+    const response = await this.api.get('/purchasing/purchase-orders', { params, ...(signal ? { signal } : {}) });
     return response.data;
   }
 
-  async getPurchaseOrder(id: number) {
-    const response = await this.api.get(`/purchasing/purchase-orders/${id}`);
+  async getPurchaseOrder(id: number, signal?: AbortSignal) {
+    const response = await this.api.get(`/purchasing/purchase-orders/${id}`, { ...(signal ? { signal } : {}) });
     return response.data;
   }
 
@@ -3108,9 +3266,9 @@ class ApiService {
   }
 
   // Documents
-  async getDocuments(params?: { part_id?: number; work_order_id?: number; vendor_id?: number; document_type?: string; search?: string; skip?: number; limit?: number }) {
+  async getDocuments(params?: { part_id?: number; work_order_id?: number; vendor_id?: number; document_type?: string; search?: string; skip?: number; limit?: number }, signal?: AbortSignal) {
     if (params?.limit) {
-      const response = await this.api.get('/documents/', { params });
+      const response = await this.api.get('/documents/', { params, ...(signal ? { signal } : {}) });
       return response.data;
     }
 
@@ -3121,6 +3279,7 @@ class ApiService {
     while (true) {
       const response = await this.api.get('/documents/', {
         params: { ...params, skip, limit: pageSize },
+        ...(signal ? { signal } : {}),
       });
       allDocuments.push(...response.data);
       if (response.data.length < pageSize) break;
@@ -3139,9 +3298,10 @@ class ApiService {
     return response.data;
   }
 
-  async uploadDocument(formData: FormData) {
+  async uploadDocument(formData: FormData, signal?: AbortSignal) {
     const response = await this.api.post('/documents/upload', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
+      headers: { 'Content-Type': 'multipart/form-data' },
+      signal,
     });
     return response.data;
   }
@@ -3633,12 +3793,12 @@ class ApiService {
   // A0.4 QR traveler/badge scan plumbing. Resolves OP:{id} / WO:{number} /
   // badge codes into a typed union; unknown codes come back as a structured
   // miss (kind: 'unknown') with HTTP 200, so callers switch on `kind`.
-  async resolveScanAction(code: string, workCenterId?: number): Promise<ScanResolveResult> {
+  async resolveScanAction(code: string, workCenterId?: number, signal?: AbortSignal): Promise<ScanResolveResult> {
     const payload: ScanResolveRequest = { code };
     if (workCenterId !== undefined) {
       payload.work_center_id = workCenterId;
     }
-    const response = await this.api.post<ScanResolveResult>('/scanner/resolve-action', payload);
+    const response = await this.api.post<ScanResolveResult>('/scanner/resolve-action', payload, { signal });
     return response.data;
   }
 
@@ -3754,8 +3914,8 @@ class ApiService {
     return response.data;
   }
 
-  async getPOForReceiving(poId: number) {
-    const response = await this.api.get(`/receiving/po/${poId}`);
+  async getPOForReceiving(poId: number, signal?: AbortSignal) {
+    const response = await this.api.get(`/receiving/po/${poId}`, { ...(signal ? { signal } : {}) });
     return response.data;
   }
 
