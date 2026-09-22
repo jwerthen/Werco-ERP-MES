@@ -183,12 +183,14 @@ def start_routine(
 
 
 @router.get('/routine-runs', response_model=RoutineRunList)
-def runs(limit: int = Query(20, ge=1, le=100), before_id: int | None = Query(None, gt=0), svc=Depends(service)):
+def list_hank_routine_runs(
+    limit: int = Query(20, ge=1, le=100), before_id: int | None = Query(None, gt=0), svc=Depends(service)
+):
     return svc.list_runs(limit, before_id)
 
 
 @router.get('/routine-runs/{run_id}', response_model=RoutineRunResponse)
-def run(run_id: int, svc=Depends(service)):
+def get_hank_routine_run(run_id: int, svc=Depends(service)):
     return svc.run_response(svc.get_run(run_id))
 
 

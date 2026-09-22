@@ -43,7 +43,7 @@ def _command(db, service, operation):
 
 
 @router.get('/capabilities', response_model=HankCapabilities)
-def capabilities(
+def get_hank_capabilities(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
