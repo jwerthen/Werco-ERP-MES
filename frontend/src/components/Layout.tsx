@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useConnectionStatus } from '../hooks/useConnectionStatus';
@@ -14,6 +14,8 @@ import BottomNav from './ui/BottomNav';
 import SkipLink from './SkipLink';
 import AdaptivePromptPanel from './AdaptivePromptPanel';
 import { CopilotPanel } from './ai/CopilotPanel';
+import { HankAvatar } from './ai/HankAvatar';
+import { getHankSessionScope, subscribeHankSession } from './ai/hankSession';
 import api from '../services/api';
 import { useKeyboardShortcuts, GLOBAL_SHORTCUTS } from '../hooks/useKeyboardShortcuts';
 import { usePermissions } from '../hooks/usePermissions';
@@ -50,7 +52,6 @@ import {
   ChartBarIcon,
   PaperAirplaneIcon,
   CurrencyDollarIcon,
-  SparklesIcon,
   UsersIcon,
   BuildingOfficeIcon,
   WrenchScrewdriverIcon as WrenchIcon2,
@@ -448,6 +449,7 @@ const HudShift = React.memo(function HudShift() {
 
 export default function Layout({ children }: LayoutProps) {
   const { user, logout, logoutWithEmployeeId } = useAuth();
+  const hankSessionScope = useSyncExternalStore(subscribeHankSession, getHankSessionScope);
   // Drives `NavItem.permission` gating below. `can` is memoized on `user`, so it
   // is a stable dependency for the nav memo.
   const { can } = usePermissions();
@@ -510,6 +512,13 @@ export default function Layout({ children }: LayoutProps) {
   const keyboardShortcuts = useKeyboardShortcutsContext();
   const { startTour, isTourComplete } = useTour();
   const isKiosk = isKioskMode(location.pathname, location.search) && user?.role === 'operator';
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const taskId = Number(params.get('hank_task'));
+    const workId = Number(params.get('hank_id'));
+    const workLink = ['handoff', 'routine', 'intake'].includes(params.get('hank_work') || '') && Number.isSafeInteger(workId) && workId > 0;
+    if (!isKiosk && ((Number.isSafeInteger(taskId) && taskId > 0) || workLink)) setCopilotOpen(true);
+  }, [location.search, location.key, isKiosk]);
   const presenceUrl = useMemo(() => {
     if (!user) return null;
     const token = getAccessToken();
@@ -908,18 +917,19 @@ export default function Layout({ children }: LayoutProps) {
                   </kbd>
                 </button>
 
-                {/* Werco Copilot toggle */}
+                {/* Hank shop teammate toggle */}
                 {!isKiosk && (
                   <button
                     onClick={() => setCopilotOpen(open => !open)}
                     className="flex items-center gap-2 px-3 h-[34px] rounded-[3px] text-fd-mute hover:text-fd-body transition-all duration-150"
                     style={{ background: 'var(--fd-sunken)', border: '1px solid var(--fd-line)' }}
-                    title="Werco Copilot (Ctrl+.)"
-                    aria-label="Toggle Werco Copilot"
+                    title="Hank (Ctrl+.)"
+                    aria-label="Toggle Hank"
+                    aria-expanded={copilotOpen}
                     data-tour="copilot"
                   >
-                    <SparklesIcon className="h-4 w-4 text-fd-blue" />
-                    <span className="hidden md:inline font-mono text-xs">copilot</span>
+                    <HankAvatar className="h-6 w-6" />
+                    <span className="hidden md:inline font-mono text-xs">Hank</span>
                   </button>
                 )}
 
@@ -1028,9 +1038,9 @@ export default function Layout({ children }: LayoutProps) {
 
       {!isKiosk && <AdaptivePromptPanel />}
 
-      {/* Werco Copilot drawer — stays mounted so the conversation survives open/close.
+      {/* Hank drawer — stays mounted so the conversation survives open/close.
           Not rendered in kiosk mode (and kiosk/wallboard screens bypass Layout entirely). */}
-      {!isKiosk && <CopilotPanel isOpen={copilotOpen} onClose={() => setCopilotOpen(false)} />}
+      {!isKiosk && <CopilotPanel key={`${user?.id ?? 'anonymous'}:${hankSessionScope ?? 'none'}`} isOpen={copilotOpen} onClose={() => setCopilotOpen(false)} />}
 
       {/* Employee ID Logout Modal */}
       {logoutModalOpen && isShopFloorKiosk && (

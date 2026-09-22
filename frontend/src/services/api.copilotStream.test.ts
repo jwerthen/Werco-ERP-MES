@@ -140,7 +140,7 @@ describe('copilotChatStream auth refresh', () => {
     const fetchMock = jest.fn().mockResolvedValue({ ok: false, status: 401, body: null });
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    await expect(api.copilotChatStream(chatRequest)).rejects.toThrow('Copilot request failed (401)');
+    await expect(api.copilotChatStream(chatRequest)).rejects.toThrow('Hank request failed (401)');
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(mockAxiosPost).not.toHaveBeenCalled();
   });

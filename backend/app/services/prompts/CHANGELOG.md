@@ -1,8 +1,43 @@
 # Prompt Registry Changelog
 
+## 2026-09-22 — Hank operational workflows
+
+- `copilot_chat` **1.5.0**: six reviewed action schemas, live operational/evidence reports, own active-job and receiving context, saved-work status/extraction tools, and truthful handoff/routine/voice guidance. Cached tool schemas remain deterministic.
+- `hank_document_intake` **1.0.0**: bounded PDF classification and structured fields with source pages, uncertainty and record-matching hints; source content never supplies instructions or manufacturing approval.
+
 Bump a prompt's semver `version` and add an entry here whenever its text or
 request layout changes. The version string is recorded on `AIUsageEvent`
 (every API call) and on `AIInteractionEvent`/`AIRecommendation` learning rows.
+
+## 2026-09-22
+
+- `copilot_chat` 1.3.0 → 1.4.0 — apply explicitly saved, typed personal
+  preferences for briefing detail, work-area focus and handoff format from
+  the uncached context suffix. Current employee requests take precedence.
+  Preferences cannot change authority or production policy, and checklist
+  formatting cannot imply completion. Explain the Preferences editor and
+  alert muting while retaining task receipts. Stable prompt/tool ids unchanged.
+
+- `copilot_chat` 1.2.0 → 1.3.0 — explain the explicit New follow-up form,
+  periodic/manual checks and snooze/stop controls. Chat cannot start a watch.
+  Distinguish a cleared blocker list from production readiness and a new PDF
+  attachment from content verification or approval. No new chat tool or model route.
+
+- `copilot_chat` 1.1.0 → 1.2.0 — add permission-scoped shift briefing and
+  explicit-request-only task preparation. Hank can save a preview for a draft
+  repeat job, draft PO, or existing PDF attachment; the employee executes it
+  through the typed Tasks workflow. Require resolved identifiers and supplied
+  quantities/prices; distinguish saved previews from business completion.
+  Extend the deterministic tool prefix without changing routing/telemetry ids.
+
+- `copilot_chat` 1.0.0 → 1.1.0 — rename the assistant to Hank, inspired by the
+  shop's yellow Labrador, with practical shift briefings, handoffs, and next-step
+  guidance. Add metadata-only document lookup guidance and distinguish the
+  panel's user-submitted Upload PDF release workflow from read-only chat tools.
+  Explicitly prohibit invented completion receipts, PDF-content claims,
+  background monitoring promises, and instructions embedded in retrieved data.
+  Prompt id, model routing, telemetry keys, and cached-prefix layout stay stable;
+  append the deterministic `search_documents` tool schema to the cached prefix.
 
 ## 2026-08-10
 

@@ -524,10 +524,12 @@ def test_purchasing_create_po_header_flush_backstop_is_400_not_500(
 
     real_flush = db_session.flush
     calls = {"n": 0}
+    attempted_numbers = []
 
     def exploding_first_flush(*args, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
+            attempted_numbers.extend(row.po_number for row in db_session.new if isinstance(row, PurchaseOrder))
             raise _po_number_integrity_error()
         return real_flush(*args, **kwargs)
 
@@ -536,7 +538,8 @@ def test_purchasing_create_po_header_flush_backstop_is_400_not_500(
     resp = client.post("/api/v1/purchasing/purchase-orders", headers=headers_for(manager), json=payload)
     assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
     detail = resp.json()["detail"]
-    assert detail.startswith("PO number '") and detail.endswith("' already exists")
+    assert len(attempted_numbers) == 1
+    assert detail == f"PO number '{attempted_numbers[0]}' already exists"
     assert calls["n"] == 1  # the backstop fired at the header flush
 
     # Nothing committed (the retry below cannot prove this -- po_number is

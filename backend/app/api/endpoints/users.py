@@ -36,6 +36,7 @@ from app.schemas.notification import (
 from app.schemas.user import validate_password_strength
 from app.services import api_token_service
 from app.services.audit_service import AuditService
+from app.services.hank_preference_service import get_hank_preference_values
 from app.services.import_service import ImportFileError, parse_import_file
 from app.services.notification_catalog import (
     ALL_CHANNELS,
@@ -252,7 +253,11 @@ def _normalized_phone_or_400(raw: Optional[str]) -> Optional[str]:
 
 
 def _effective_preferences(
-    pref: Optional[NotificationPreference], user: User, *, email_overrides: Optional[Dict[str, set]] = None
+    pref: Optional[NotificationPreference],
+    user: User,
+    *,
+    email_overrides: Optional[Dict[str, set]] = None,
+    hank_follow_up_enabled: bool = True,
 ) -> Dict[str, Dict[str, bool]]:
     """Resolve every catalog event's channels exactly as the dispatcher would.
 
@@ -282,6 +287,10 @@ def _effective_preferences(
         if key in result:
             result[key]["email"] = user.id in ids
             result[key]["digest"] = False
+    # Hank follow-ups are direct, private in-app receipts, governed by the
+    # employee's typed Hank preference rather than the SMS-only editor below.
+    if 'hank.follow_up' in result:
+        result['hank.follow_up'] = {channel: channel == 'in_app' and hank_follow_up_enabled for channel in ALL_CHANNELS}
     return result
 
 
@@ -408,7 +417,10 @@ def get_my_notification_preferences(
     allow_sms = db.query(Company.allow_sms_egress).filter(Company.id == company_id).scalar()
     return NotificationPreferencesResponse(
         preferences=_effective_preferences(
-            pref, current_user, email_overrides=email_recipient_overrides(db, company_id)
+            pref,
+            current_user,
+            email_overrides=email_recipient_overrides(db, company_id),
+            hank_follow_up_enabled=get_hank_preference_values(db, company_id, current_user.id).follow_up_alerts,
         ),
         has_saved_preferences=pref is not None,
         phone=current_user.phone,
@@ -501,7 +513,10 @@ def update_my_notification_preferences(
     allow_sms = db.query(Company.allow_sms_egress).filter(Company.id == company_id).scalar()
     return NotificationPreferencesResponse(
         preferences=_effective_preferences(
-            pref, current_user, email_overrides=email_recipient_overrides(db, company_id)
+            pref,
+            current_user,
+            email_overrides=email_recipient_overrides(db, company_id),
+            hank_follow_up_enabled=get_hank_preference_values(db, company_id, current_user.id).follow_up_alerts,
         ),
         has_saved_preferences=True,
         phone=current_user.phone,

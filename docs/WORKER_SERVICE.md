@@ -12,6 +12,21 @@ CI/CD worker upload path is active (verified 2026-09-08). The original cutover a
 below is historical; it does not establish current cron settings or certify any new
 nesting runtime as deployed. Each nesting release requires the identity gate below.
 
+**Hank follow-up rollout:** the current worker declares **14** crons. Production
+previously selected `none` after quote-nesting retirement. Enable Hank with the exact
+allowlist **`WORKER_CRON_JOBS=check_hank_watches_job`**; it keeps all 13 unrelated
+schedules disabled. Deploy matching API/worker/frontend releases and verify the
+selected cron plus active release/heartbeat. See [the current rollout procedure](
+WORKER_DEPLOYMENT_RUNBOOK.md#current-hank-follow-up-release-procedure).
+
+**Smart intake is request-driven:** `process_hank_intake_file_job` is an additional
+queue function, not a fifteenth cron. It analyzes one durably submitted PDF through
+`asyncio.to_thread`, with separate claim/result transactions and no open session
+during storage/model I/O. It rechecks current employee/company authority before
+saving results and never files the PDF automatically. The job remains registered
+with cron set to `none`. API and worker must share schema110, release, Redis and
+durable storage; see [intake deployment](DEPLOYMENT.md#hank-workflows-and-document-intake).
+
 Read §1 before §5. The most important finding is not "there is no worker" — it is that the
 enqueue side was pointed at the wrong Redis, so **creating a worker without the code fix
 would have produced a worker that connects to a different, empty Redis than the API and
@@ -146,7 +161,7 @@ and destroys the parity guard outright. Named here, deliberately not fixed.
 ## 2. The blast radius — read before arming any cron
 
 **Every cron in `WorkerSettings.cron_jobs` fires the moment a worker process runs.** There
-is no separate enable step. Twelve are declared. Times are the container's local zone —
+is no separate enable step. Fourteen are declared. Times are the container's local zone —
 arq defaults to `datetime.now().astimezone().tzinfo`, which on Railway is **UTC unless `TZ`
 is set**, so "6 AM" means 06:00 UTC = **01:00 Central**.
 
@@ -165,6 +180,26 @@ is set**, so "6 AM" means 06:00 UTC = **01:00 Central**.
 | `archive_aged_audit_logs_job` | 1st of month 03:00 | Exports aged audit rows to NDJSON in `AUDIT_ARCHIVE_DIR`. **Never deletes.** Needs a durable volume — see §8. |
 | `poll_tracking_job` | every 30 min | Outbound carrier traffic, gated on `allow_carrier_egress` (default off). |
 | `relay_pending_notifications_job` | every 5 min | Re-enqueues events with `notified_at IS NULL`. **Safely bounded** — see below. |
+| `check_hank_watches_job` | every 5 min | Checks at most 100 due, explicitly saved personal watches in short independent transactions. A match records a terminal receipt and, when the owner's current Hank preference enables alerts, one private in-app notice; no email/SMS or business record execution. |
+
+Hank checks run through `asyncio.to_thread`; their database sessions are created and
+closed in that thread, keeping synchronous database work off ARQ's event loop.
+The task row lock and terminal state protect notification retries. Every check
+revalidates active company/owner and current permissions. Polling can be delayed by
+queue load or downtime; the UI shows the actual `last_checked_at`, and **Check now**
+uses the API independently of the worker. Creating a watch does not check its
+condition immediately or promise the next five-minute slot.
+Apply migration 109 before this worker release: it reads personal alert preferences
+without creating default rows. Muting preserves receipts and audits; it does not
+stop checks or replay completed notifications when re-enabled. Keep a compatible
+worker on rollback or suspend its watch schedule so an older release cannot ignore
+saved alert muting.
+Failed scheduled transactions roll back, then save a snapshot-checked diagnostic
+with a 30-minute retry backoff. This does not advance `last_checked_at` or command
+version; manual checks can retry sooner. Eligible watches are ordered by their last
+attempt (or creation if never checked), so failures and healthy watches both advance.
+Inspect failed counts/logs as well as
+heartbeat health when investigating stalled follow-ups.
 
 ### The notification sweeper is NOT the storm risk
 
@@ -213,7 +248,7 @@ case/whitespace rules: `docs/ENVIRONMENT_VARIABLES.md` → Background worker (AR
 > **The `SUPPRESSED` log line reads correctly for either shape.** It diffs the registered
 > crons against `ALL_CRON_JOBS` by object identity, and the denylist path filters that same
 > list rather than rebuilding it, so what it prints is exact:
-> `ARQ worker cron: 1 of 13 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_auto_draft_job': cron:run_mrp_auto_draft_job`
+> `ARQ worker cron: 1 of 14 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_auto_draft_job': cron:run_mrp_auto_draft_job`
 
 ---
 
@@ -405,9 +440,9 @@ With `WORKER_CRON_JOBS=none`, enable the deploy and watch the log. You should se
 ```
 ARQ worker starting up (environment=production, release=<sha>)
 ARQ worker Redis: redis://<host>:6379/0 [source=REDIS_URL, auth=password] | queue=arq:queue
-ARQ worker cron: 12 of 12 cron jobs SUPPRESSED by WORKER_CRON_JOBS='none': ...
+ARQ worker cron: 14 of 14 cron jobs SUPPRESSED by WORKER_CRON_JOBS='none': ...
 ARQ worker cron: none armed; draining enqueue-driven jobs only
-ARQ worker ready (23 job functions registered)
+ARQ worker ready (25 job functions registered)
 ```
 
 The Redis line is the whole point: it must name the **same host** the API reports. The

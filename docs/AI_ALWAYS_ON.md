@@ -5,7 +5,32 @@ sensors that mint Action Inbox recommendations without a human prompt, and
 automatic outcome capture that closes the learning loop.
 
 For RFQ quoting operations see [AI_QUOTING_AGENT_RUNBOOK.md](./AI_QUOTING_AGENT_RUNBOOK.md).
-For the interactive copilot see the Copilot section in [API.md](./API.md).
+For the interactive assistant see [Hank](HANK.md) and [API → Hank](API.md#hank-ai-shop-teammate).
+Hank's role-aware briefing is deterministic and on demand. Its reviewed task
+workflows use a separate `hank_tasks` store: chat may prepare an audited proposal,
+but only an explicit employee command executes it. These actions do not use the
+ambient recommendation auto-apply policy described below. Proposal/receipt audit
+evidence is required even though learning and sensor signals remain best effort.
+Hank also offers explicitly saved personal work-order follow-ups. These use deterministic
+five-minute or manual checks and finish once blockers clear or a new matching PDF is
+attached, with a receipt and owner-only in-app notification. They do not execute ambient
+recommendations, approve evidence, or use an LLM. Background checks require the separate
+[Hank-only cron rollout](DEPLOYMENT.md#hank-follow-up-worker).
+Hank's explicit personal preferences affect briefing presentation, chat handoff style and
+private follow-up alerts. They are tenant/user scoped with audited save/reset, not learned
+company policy. Muting alerts preserves completed receipts and required evidence; it does
+not disable ambient sensors or change their auto-apply rules.
+
+Smart PDF intake is another explicit, request-driven workflow: a saved upload
+queues bounded extraction through `hank_document_intake` prompt 1.0.0, the shared
+model router, company AI-egress gate and usage telemetry. Employees review source
+pages and a filing plan before a separate command creates the document/receipt
+linkage. The worker never approves or files extracted evidence automatically.
+Readiness, knowledge/genealogy, purchasing impact and shipping packets use
+deterministic source reads; receiving, production and shipment preparation use
+reviewed canonical commands. Explicit participant handoffs and approved routine
+runs retain their own audit/version controls and do not activate ambient
+automation. The combined work queue reports their actual saved states.
 
 ## Design posture
 

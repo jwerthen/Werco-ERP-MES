@@ -56,6 +56,10 @@ from .governance import (
     LegalHold,
     RetentionPolicy,
 )
+from .hank import HankTask
+from .hank_intake import HankIntakeBatch, HankIntakeFile
+from .hank_preferences import HankPreference
+from .hank_teamwork import HankHandoff, HankRoutine, HankRoutineRun
 from .import_batch import ImportBatch, ImportBatchRow
 from .inventory import (
     InventoryItem,
@@ -195,6 +199,13 @@ from .work_order_template import WorkOrderTemplate
 from .working_calendar import WorkingCalendar
 
 __all__ = [
+    "HankTask",
+    "HankIntakeBatch",
+    "HankIntakeFile",
+    "HankHandoff",
+    "HankRoutine",
+    "HankRoutineRun",
+    "HankPreference",
     "FabricationQuote",
     "FabricationQuoteActual",
     "FabricationQuoteFile",

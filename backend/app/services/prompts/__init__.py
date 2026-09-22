@@ -22,6 +22,7 @@ from app.services.prompts.extraction import (
     PO_EXTRACTION_PROMPT,
     PO_EXTRACTION_SCHEMA,
 )
+from app.services.prompts.hank_intake import HANK_INTAKE_PROMPT
 from app.services.prompts.laser_nest import (
     LASER_NEST_EXTRACTION_PROMPT,
     LASER_NEST_EXTRACTION_SCHEMA,
@@ -46,6 +47,7 @@ PROMPT_REGISTRY: Dict[str, Prompt] = {
         COPILOT_CHAT_PROMPT,
         NL_SEARCH_INTENT_PROMPT,
         AUTO_EXECUTE_PROMPT,
+        HANK_INTAKE_PROMPT,
     )
 }
 
@@ -66,4 +68,5 @@ __all__ = [
     "COPILOT_CHAT_PROMPT",
     "NL_SEARCH_INTENT_PROMPT",
     "AUTO_EXECUTE_PROMPT",
+    "HANK_INTAKE_PROMPT",
 ]

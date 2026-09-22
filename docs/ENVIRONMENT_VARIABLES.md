@@ -512,7 +512,7 @@ do not encode retention periods or source approval in deployment variables. See
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `WORKER_CRON_JOBS` | No | all | Which scheduled jobs the worker registers. Unset or `all` → every cron (12 of them). `none` → no crons; the worker still drains enqueue-driven jobs (notifications, webhooks, labels, completion signals). A comma-separated list of job names arms **exactly** those (allowlist). A `-` prefix **excludes** a job from the full set (denylist): `all,-run_mrp_auto_draft_job`. The two shapes may not be mixed. **An unrecognised name is a hard startup error, not a silent skip — a negated one included.** `none` is the correct value for a first-ever boot — several crons write or email in bulk on their first run. Full syntax below |
+| `WORKER_CRON_JOBS` | No | all | Which scheduled jobs the worker registers. Unset or `all` → every cron (14 of them). `none` → no crons; the worker still drains enqueue-driven jobs (notifications, webhooks, labels, completion signals, Hank PDF intake). A comma-separated list of job names arms **exactly** those (allowlist). A `-` prefix **excludes** a job from the full set (denylist): `all,-run_mrp_auto_draft_job`. The two shapes may not be mixed. **An unrecognised name is a hard startup error, not a silent skip — a negated one included.** `none` is the correct value for a first-ever boot — several crons write or email in bulk on their first run. Full syntax below |
 | `TZ` | No | UTC | Container timezone. ARQ resolves cron times in the container's local zone, so unset means `hour=6` fires at **06:00 UTC = 01:00 Central**. Set `TZ=America/Chicago` for shop-local schedules |
 
 #### `WORKER_CRON_JOBS` syntax
@@ -787,8 +787,8 @@ AWS_REGION=us-east-1
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | No | - | Anthropic API key for the AI features (PO/quote + BOM document extraction, AI routing generation, QMS clause extraction, Werco Copilot chat, `/search/nl` intent parsing). Every call goes through the shared client `app/services/llm_client.py`, which records per-call usage telemetry to the tenant-scoped `ai_usage_events` table (read via `GET /api/v1/ai-usage/summary` / the Admin Settings → AI Usage & Cost tab) |
-| `ANTHROPIC_COPILOT_MODEL` | No | (router auto) | Per-task model override for Werco Copilot chat (task `copilot_chat`). Unset: the router uses the Default tier (Sonnet), escalating to the Reasoning tier for long multi-tool conversations |
+| `ANTHROPIC_API_KEY` | No | - | Anthropic API key for the AI features (PO/quote + BOM document extraction, AI routing generation, QMS clause extraction, Hank chat and smart PDF intake, `/search/nl` intent parsing). Every call goes through the shared client `app/services/llm_client.py`, which records per-call usage telemetry to the tenant-scoped `ai_usage_events` table (read via `GET /api/v1/ai-usage/summary` / the Admin Settings → AI Usage & Cost tab) |
+| `ANTHROPIC_COPILOT_MODEL` | No | (router auto) | Per-task model override for Hank chat (task `copilot_chat`). Unset: the router uses the Default tier (Sonnet), escalating to the Reasoning tier for long multi-tool conversations |
 | `ANTHROPIC_NL_SEARCH_MODEL` | No | (router auto) | Per-task model override for the `/search/nl` natural-language intent parse (task `nl_search`). Unset: pinned to the Fast tier (Haiku) |
 | `ANTHROPIC_AUTO_EXECUTE_MODEL` | No | (router auto) | Per-task model override for the always-on auto-execute decision (task `auto_execute`, see [docs/AI_ALWAYS_ON.md](AI_ALWAYS_ON.md)). Unset: Fast tier (Haiku). Same Anthropic client as all other LLM features |
 | `AI_AUTO_EXECUTE_ENABLED` | No | `true` | Master switch for Claude always-on auto-execute of allowlisted Action Inbox actions after nightly aggregation |
@@ -811,10 +811,40 @@ AWS_REGION=us-east-1
 > `WEBHOOK_ENCRYPTION_KEY`; use a dedicated `INTEGRATION_ENCRYPTION_KEY` to rotate carrier
 > secrets independently of webhook secrets.
 
-### Werco Copilot (read-only AI chat)
+<a id="werco-copilot-read-only-ai-chat"></a>
 
-Tuning knobs for `POST /api/v1/copilot/chat` (see [docs/API.md](API.md) → Werco Copilot). All
-optional; the defaults are the shipped behavior.
+<a id="hank-read-only-ai-chat"></a>
+
+### Hank chat and tasks
+
+Tuning knobs for `POST /api/v1/copilot/chat` (see [API → Hank](API.md#hank-ai-shop-teammate)). All
+optional; the defaults are the shipped behavior. The Hank rename retains every `COPILOT_*`
+variable and adds no settings. Its separate PDF filing form uses the existing document route
+without an LLM call. Deterministic shift briefings and direct reviewed task forms also need
+no Anthropic key or additional setting; task persistence requires schema migration108.
+Preparing a task through chat still uses the configured chat model and company AI-egress gate.
+Opt-in work-order follow-ups also work without an LLM and reuse migration108. Scheduled
+checks use the existing worker selector: production rollout explicitly changes `none` to
+`WORKER_CRON_JOBS=check_hank_watches_job`, enabling only the new five-minute check and keeping
+all other schedules disabled. This is an existing variable, not a new setting. Deploy
+matching API/worker/frontend releases; see [Hank follow-up deployment](DEPLOYMENT.md#hank-follow-up-worker).
+Manual **Check now** remains available when scheduling is disabled.
+Personal preferences require additive migration 109 after 108 and matching API/worker/frontend
+releases, with no new variable or cron. They are saved per employee/company in the database;
+they are not environment configuration. The worker reads the current alert choice when
+finishing a follow-up. See [preference deployment](DEPLOYMENT.md#hank-personal-preferences).
+
+Smart document intake, handoffs and approved routine runs add migration110 with no
+new variable, secret or cron. Intake uses existing shared storage/Redis and
+`ANTHROPIC_API_KEY` through the model router and company `allow_ai_egress` gate.
+Its `process_hank_intake_file_job` is request-driven and remains available when
+`WORKER_CRON_JOBS=none`; disabling cron does not disable submitted extraction jobs.
+The model call has a 90-second timeout with no SDK retries; PDF parsing has a
+20-second wall deadline, 15-second CPU limit and a 512 MB Linux address-space cap.
+API and worker need the same release and access to the same durable source storage.
+Direct operational reports/forms, handoffs and routines do not require Anthropic.
+Optional voice input requires already-available local browser speech recognition;
+there is no backend speech service or automatic remote fallback.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|

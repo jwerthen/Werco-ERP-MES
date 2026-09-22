@@ -325,6 +325,20 @@ async def dispatch_notification_job(ctx, event_id: int):
     return await dispatch_notification_task(event_id)
 
 
+async def check_hank_watches_job(ctx):
+    """Check explicitly saved Hank follow-ups; emit only in-app outcome alerts."""
+    from app.jobs.hank_jobs import check_hank_watches_task
+
+    return await check_hank_watches_task()
+
+
+async def process_hank_intake_file_job(ctx, file_id: int):
+    """Analyze a saved PDF outside the API request, with live company/owner checks."""
+    from app.jobs.hank_intake_jobs import process_hank_intake_file_task
+
+    return await process_hank_intake_file_task(file_id)
+
+
 async def relay_pending_notifications_job(ctx):
     """5-min sweeper: re-enqueue catalog-mapped events whose notifications never dispatched
     (covers a Redis outage at after_commit-enqueue time)."""
@@ -389,6 +403,7 @@ ALL_CRON_JOBS: List[CronJob] = [
     # Notification relay sweeper: every 5 min re-enqueue catalog-mapped events whose
     # after_commit enqueue was lost (e.g. Redis outage). See notification_jobs.
     cron(relay_pending_notifications_job, minute=set(range(0, 60, 5))),
+    cron(check_hank_watches_job, minute=set(range(0, 60, 5))),
 ]
 
 
@@ -750,6 +765,8 @@ class WorkerSettings:
         run_oee_auto_calc_job,
         dispatch_notification_job,
         relay_pending_notifications_job,
+        check_hank_watches_job,
+        process_hank_intake_file_job,
         dispatch_notification_direct_job,
     ]
 

@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
-from app.db.locks import acquire_generator_lock
 from app.models.part import Part
 from app.models.purchasing import (
     POStatus,
@@ -33,6 +32,8 @@ from app.schemas.purchasing import (
     VendorUpdate,
 )
 from app.services.audit_service import AuditService
+from app.services.erp_draft_commands import PurchaseOrderNumberConflict, create_purchase_order_command
+from app.services.erp_draft_commands import generate_po_number as generate_po_number  # noqa: F401 - legacy service seam
 from app.services.import_service import ImportFileError, parse_import_file
 from app.services.migration_import_service import import_open_purchase_orders
 from app.services.operational_event_service import OperationalEventService
@@ -701,30 +702,6 @@ def restore_vendor(
 # ============ PURCHASE ORDERS ============
 
 
-def generate_po_number(db: Session, company_id: int = None) -> str:
-    """Generate next PO number (PO-YYYYMMDD-XXX).
-
-    Holds an advisory lock so concurrent creates can't collide.
-    """
-    acquire_generator_lock(db, "po_number", company_id)
-
-    today = datetime.now().strftime("%Y%m%d")
-    prefix = f"PO-{today}-"
-
-    query = db.query(PurchaseOrder).filter(PurchaseOrder.po_number.like(f"{prefix}%"))
-    if company_id is not None:
-        query = query.filter(PurchaseOrder.company_id == company_id)
-    last_po = query.order_by(PurchaseOrder.po_number.desc()).first()
-
-    if last_po:
-        last_num = int(last_po.po_number.split("-")[-1])
-        new_num = last_num + 1
-    else:
-        new_num = 1
-
-    return f"{prefix}{new_num:03d}"
-
-
 def _live_po_or_404(db: Session, po_id: int, company_id: int) -> PurchaseOrder:
     """Resolve a purchase order that is workable: this company's, and NOT soft-deleted.
 
@@ -909,100 +886,17 @@ def create_purchase_order(
 ):
     """Create a purchase order with its lines. Writes one tamper-evident audit_log CREATE
     row for the PO (line_count in extra_data; no per-line rows for document creation)."""
-    # Verify vendor -- must be a live, active vendor (can't open a PO against a
-    # deleted or deactivated supplier).
-    vendor = (
-        db.query(Vendor)
-        .filter(
-            Vendor.id == po_in.vendor_id,
-            Vendor.company_id == company_id,
-            Vendor.is_deleted == False,  # noqa: E712
-            Vendor.is_active == True,  # noqa: E712
-        )
-        .first()
-    )
-    if not vendor:
-        raise HTTPException(status_code=404, detail="Vendor not found")
-
-    po_number = generate_po_number(db, company_id)
-
-    po = PurchaseOrder(
-        po_number=po_number,
-        vendor_id=po_in.vendor_id,
-        required_date=po_in.required_date,
-        expected_date=po_in.expected_date,
-        ship_to=po_in.ship_to,
-        shipping_method=po_in.shipping_method,
-        notes=po_in.notes,
-        created_by=current_user.id,
-    )
-    po.company_id = company_id
-    db.add(po)
     try:
-        db.flush()
-    except IntegrityError as exc:
-        # Backstop for a duplicate po_number surfacing at the header flush. The
-        # advisory lock in generate_po_number already serializes same-company
-        # creates on Postgres — this is the SQLite/edge backstop (400, not 500).
+        po = create_purchase_order_command(db, po_in, current_user, company_id, audit)
+        db.commit()
+        db.refresh(po)
+        return po
+    except PurchaseOrderNumberConflict as exc:
         db.rollback()
-        raise HTTPException(status_code=400, detail=f"PO number '{po_number}' already exists") from exc
-
-    # Add lines
-    subtotal = 0.0
-    for idx, line_data in enumerate(po_in.lines, 1):
-        part = db.query(Part).filter(Part.id == line_data.part_id, Part.company_id == company_id).first()
-        if not part:
-            raise HTTPException(status_code=404, detail=f"Part {line_data.part_id} not found")
-
-        # quantity_ordered/unit_price parse as Decimal (Money schema types) but the
-        # PO money columns are Float — coerce so `subtotal += line_total` and the
-        # `subtotal + po.tax + po.shipping` total below don't mix Decimal with float.
-        line_total = float(line_data.quantity_ordered) * float(line_data.unit_price)
-        line = PurchaseOrderLine(
-            purchase_order_id=po.id,
-            line_number=idx,
-            part_id=line_data.part_id,
-            quantity_ordered=line_data.quantity_ordered,
-            unit_price=line_data.unit_price,
-            line_total=line_total,
-            required_date=line_data.required_date or po_in.required_date,
-            notes=line_data.notes,
-        )
-        line.company_id = company_id
-        db.add(line)
-        subtotal += line_total
-
-    po.subtotal = subtotal
-    po.total = subtotal + po.tax + po.shipping
-
-    db.flush()
-    audit.log_create(
-        "purchase_order",
-        po.id,
-        po.po_number,
-        new_values=po,
-        extra_data={"vendor_code": vendor.code, "line_count": len(po_in.lines)},
-    )
-    OperationalEventService(db).emit_best_effort(
-        company_id=company_id,
-        event_type="purchase_order_created",
-        source_module="purchasing",
-        entity_type="purchase_order",
-        entity_id=po.id,
-        user_id=current_user.id,
-        severity="info",
-        event_payload={
-            "po_number": po.po_number,
-            "vendor_id": po.vendor_id,
-            "vendor_name": vendor.name,
-            "line_count": len(po_in.lines),
-            "required_date": po.required_date.isoformat() if po.required_date else None,
-            "total": float(po.total or 0),
-        },
-    )
-    db.commit()
-    db.refresh(po)
-    return po
+        raise HTTPException(400, f"PO number '{exc.po_number}' already exists") from exc
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(400, "A generated PO record conflicts with an existing record") from exc
 
 
 @router.post(

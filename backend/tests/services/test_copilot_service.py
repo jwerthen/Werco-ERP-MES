@@ -17,6 +17,7 @@ import app.services.llm_client as llm_client
 from app.models.ai_learning import AIInteractionEvent
 from app.models.audit_log import AuditLog
 from app.models.company import Company
+from app.models.document import Document, DocumentType
 from app.models.part import Part
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderStatus
@@ -271,6 +272,95 @@ class TestLikeEscaping:
         assert execution.payload["parts"] == []
 
 
+class TestDocumentLookup:
+    @staticmethod
+    def _document(number, *, company_id=1, **kwargs):
+        return Document(
+            document_number=number,
+            title="Assembly drawing",
+            document_type=DocumentType.DRAWING,
+            company_id=company_id,
+            **kwargs,
+        )
+
+    def test_metadata_lookup_is_scoped_and_never_discloses_storage(
+        self, db_session: Session, service: CopilotService, other_company: Company
+    ):
+        own = self._document(
+            "HANK-OWN",
+            file_name="assembly.pdf",
+            file_path="s3://private-bucket/secret-key",
+            description="Unnecessary document body text",
+            revision="C",
+            status="obsolete",
+        )
+        foreign = self._document("HANK-FOREIGN", company_id=other_company.id, file_name="assembly.pdf")
+        db_session.add_all([own, foreign])
+        db_session.commit()
+
+        execution = service.execute_tool(
+            "search_documents", {"query": "assembly.pdf", "company_id": other_company.id, "tenant_id": other_company.id}
+        )
+
+        assert execution.is_error is False
+        assert [item["id"] for item in execution.payload["documents"]] == [own.id]
+        assert execution.payload["documents"][0]["status"] == "obsolete"
+        assert execution.payload["documents"][0]["revision"] == "C"
+        assert execution.payload["metadata_only"] is True
+        assert "file_path" not in json.dumps(execution.payload)
+        assert "Unnecessary document body text" not in json.dumps(execution.payload)
+        assert execution.references == [
+            {"type": "document", "id": own.id, "label": "HANK-OWN Rev C", "url": f"/documents?document={own.id}"}
+        ]
+
+    def test_filters_work_order_and_part_without_mutating_records(
+        self, db_session: Session, service: CopilotService, test_work_order: WorkOrder, test_part: Part
+    ):
+        linked = self._document("HANK-LINKED", part_id=test_part.id, work_order_id=test_work_order.id)
+        unrelated = self._document("HANK-UNRELATED", part_id=test_part.id)
+        db_session.add_all([linked, unrelated])
+        db_session.commit()
+        before = db_session.query(Document).count()
+
+        execution = service.execute_tool(
+            "search_documents", {"work_order_id": test_work_order.id, "part_id": test_part.id}
+        )
+
+        assert [item["id"] for item in execution.payload["documents"]] == [linked.id]
+        assert db_session.query(Document).count() == before
+        assert not db_session.new and not db_session.dirty and not db_session.deleted
+        assert db_session.query(AuditLog).count() == 0
+
+    def test_literal_wildcards_and_bounded_results(self, db_session: Session, service: CopilotService):
+        target = self._document("HANK_100%")
+        decoy = self._document("HANKX100P")
+        db_session.add_all([target, decoy] + [self._document(f"HANK-RECENT-{i}") for i in range(12)])
+        db_session.commit()
+
+        literal = service.execute_tool("search_documents", {"query": "HANK_100%"})
+        assert [item["id"] for item in literal.payload["documents"]] == [target.id]
+        recent = service.execute_tool("search_documents", {"query": "HANK-RECENT"})
+        assert len(recent.payload["documents"]) == 10
+        assert recent.payload["has_more"] is True
+
+    @pytest.mark.parametrize(
+        "tool_input", [{"work_order_id": 0}, {"part_id": True}, {"part_id": "1"}, {"query": "x" * 101}]
+    )
+    def test_invalid_filters_refused_instead_of_broadening(self, service: CopilotService, tool_input):
+        execution = service.execute_tool("search_documents", tool_input)
+        assert execution.is_error is True
+        assert "error" in execution.payload
+
+    def test_operator_can_find_documents_like_source_endpoint(self, db_session: Session, operator_user: User):
+        document = self._document("HANK-OPERATOR")
+        db_session.add(document)
+        db_session.commit()
+        service = CopilotService(db_session, company_id=1, user=operator_user)
+        assert "search_documents" in [spec.name for spec in service.tool_specs_for_user()]
+        result = service.execute_tool("search_documents", {"query": document.document_number})
+        assert [item["id"] for item in result.payload["documents"]] == [document.id]
+
+
 # ---------------------------------------------------------------------------
 # Tool registry — RBAC and robustness
 # ---------------------------------------------------------------------------
@@ -503,4 +593,4 @@ class TestHelpers:
         blocks = messages[-1]["content"]
         assert isinstance(blocks, list)
         assert blocks[0]["text"].startswith("<context_hint>")
-        assert blocks[1]["text"] == "what about this one?"
+        assert blocks[-1]["text"] == "what about this one?"

@@ -12,7 +12,57 @@ Railway project, this document says so and tells you how to get it — it never 
 > releases. A nesting update uses the existing worker and gated pipeline; it does
 > not repeat service provisioning or enable unrelated schedules.
 
-## Current saved-nesting release procedure
+## Current Hank follow-up release procedure
+
+1. Deploy migration **108_hank_tasks**, then **109_hank_preferences**, through normal
+   API startup before the matching API/worker/frontend release. Follow-ups use the
+   task table and read the employee's alert preference at completion. Preference
+   reads create no rows. There is no new variable, secret or separate service.
+2. On the worker, change the existing production selection from
+   `WORKER_CRON_JOBS=none` to **`WORKER_CRON_JOBS=check_hank_watches_job`**. This is an
+   intentional one-job allowlist: keep all 13 unrelated schedules disabled. Do not
+   enable `all`, MRP, or a retired quote-nesting relay.
+3. Verify the exact active release and fresh generic heartbeat, matching API/worker
+   Redis target, and startup logs showing only `cron:check_hank_watches_job` selected
+   with **13 of 14 cron jobs suppressed**. The schedule runs every five minutes and
+   processes at most 100 due watches per pass; a heartbeat is not evidence of a
+   successful watch check.
+4. Create an explicit personal follow-up through Hank. Verify its last-check time
+   advances and a matched condition saves one completed receipt plus an owner-only
+   in-app alert linking to that task when alerts are enabled. With **Follow-up
+   alerts** off, verify a saved completed receipt and no new notification. There is no email/SMS, role-wide fan-out, or
+   automatic business action. The API's **Check now** can run with scheduling off;
+   an unchecked watch says **Waiting for first check**.
+5. To suspend scheduled checks, restore `WORKER_CRON_JOBS=none` and redeploy the
+   worker. Retain task rows, audit evidence and existing notifications. This does
+   not disable manual checks or erase completed outcomes. Preserve preference and
+   task tables on application rollback; a pre-preferences worker ignores alert
+   muting, so keep a compatible release or suspend its scheduled checks.
+
+## Current Hank intake release procedure
+
+Apply **110_hank_workflows** after 109, then deploy matching API, worker and
+frontend through the normal release pipeline. Verify the request-driven
+`process_hank_intake_file_job` is registered and the worker shares durable source
+storage and Redis with the API. This adds no cron, secret or environment variable;
+the declared cron count remains **14** and the Hank-only schedule stays unchanged.
+The job continues to process requested uploads even when cron selection is `none`.
+
+Use a controlled PDF to verify queued analysis reaches employee review, saved
+source pages can be opened, and reviewed filing returns one durable receipt.
+Analysis obeys current document-role/company access and the company AI-egress
+gate; it never files automatically. Verify same-key upload recovery and Retry
+for queued/failed work. Stale analyzing work becomes retryable after 15 minutes.
+Preserve source/photo bytes and workflow tables on application rollback; see
+[the full rollout](DEPLOYMENT.md#hank-workflows-and-document-intake).
+
+<a id="current-saved-nesting-release-procedure"></a>
+
+## Historical saved-nesting release procedure
+
+The following procedure is retained as release history. Its quote-nesting runtime
+and relay have since been removed; use [the current deployment guide](DEPLOYMENT.md)
+and the Hank procedure above for current worker releases.
 
 1. Require all exact-head CI/CD, PR Check and relevant PostgreSQL/API E2E gates before
    normal merge. Build the repo-root worker image and run its non-root, network-disabled,
@@ -372,6 +422,7 @@ this deliberately (§8).
 | `cleanup_old_logs_job` | Sun 02:00 | **Physical DELETEs**: completed `Job` rows and `NotificationLog` rows older than 90 days; read `Notification` rows older than 90 days; unread notifications of deactivated users. **Audit logs are explicitly excluded** and are never touched. | No. |
 | `archive_aged_audit_logs_job` | 1st of month, 03:00 | Exports audit rows past their retention window to NDJSON in `AUDIT_ARCHIVE_DIR`. **Exports only — never deletes.** Needs durable storage or the export vanishes with the container (§8). | No. |
 | `aggregate_ai_learning_job` | 05:30 daily | Writes `AIRecommendation` rows and emits `work_order_blocker_escalated` events — **which re-enter the notification outbox and generate further notifications.** Guarded against duplicating an existing pending recommendation. | Indirectly, via the events it emits. |
+| `check_hank_watches_job` | every 5 min | Checks at most 100 due personal watches. Rechecks live owner/company/access and current alert preference, commits each task independently, and saves a terminal receipt with any enabled notification atomically. | Only the watch owner, in-app once on a matched condition when alerts are enabled; no email/SMS. |
 
 #### Group 3 — EMAILS REAL PEOPLE. These are the ones to stage carefully.
 
@@ -602,7 +653,7 @@ easy to miss.
 | `DATABASE_URL` + the `SUPABASE_*` / `POSTGRES_*` set | Every job opens its own DB session. |
 | `SECRET_KEY`, `REFRESH_TOKEN_SECRET_KEY` | Config validation requires them. |
 | `ENVIRONMENT=production` | Arms the fail-fast Redis guard. |
-| ★ **`WORKER_CRON_JOBS=none`** | **Set this now.** Without it, all 13 crons are live the moment the container boots. |
+| ★ **`WORKER_CRON_JOBS=none`** | **Set this now.** Without it, all 14 crons are live the moment the container boots. |
 | ★ `SENTRY_DSN` | Otherwise a crashing cron is a log line nobody reads. Events are tagged `component=worker`. |
 | ★ `FRONTEND_BASE_URL` | Every notification email builds its deep link from it. |
 | `SMTP_*` | Email delivery. |
@@ -632,9 +683,9 @@ Watch the deploy log. **You are looking for exactly this shape:**
 ```
 ARQ worker starting up (environment=production, release=<sha>)
 ARQ worker Redis: redis://<host>:6379/0 [source=REDIS_URL, auth=password] | queue=arq:queue
-ARQ worker cron: 13 of 13 cron jobs SUPPRESSED by WORKER_CRON_JOBS='none': cron:aggregate_ai_learning_job, …
+ARQ worker cron: 14 of 14 cron jobs SUPPRESSED by WORKER_CRON_JOBS='none': cron:aggregate_ai_learning_job, …
 ARQ worker cron: none armed; draining enqueue-driven jobs only
-ARQ worker ready (23 job functions registered)
+ARQ worker ready (25 job functions registered)
 ```
 
 | What you see | Verdict |
@@ -642,7 +693,7 @@ ARQ worker ready (23 job functions registered)
 | The Redis host **matches** what the API reports | **Correct.** This is the whole point of the line. |
 | The Redis host **differs** from the API's | **STOP.** Two different Redis instances — the exact silent failure this cutover exists to prevent. |
 | `RedisConfigurationError … Refusing to start` and a crash loop | `REDIS_URL` is missing or wrong on the worker. Fix and redeploy. Working as designed. |
-| Fewer than `13 of 13 … SUPPRESSED` | `WORKER_CRON_JOBS` is not `none`. **STOP** and set it before crons fire. |
+| Fewer than `14 of 14 … SUPPRESSED` | `WORKER_CRON_JOBS` is not `none`. **STOP** and set it before crons fire. |
 | A uvicorn banner / `Application startup complete` | You are running the API image. **STOP** — this is the second-API-replica trap. |
 | Nothing after "starting up" | The process died before `startup`. Check Sentry (`component:worker`). |
 
@@ -707,7 +758,7 @@ the others. §6.4.
 | Goal | Action | Effect |
 |---|---|---|
 | Stop scheduled work, keep request-driven jobs | Set `WORKER_CRON_JOBS=none`, redeploy | Crons stop. Notifications, webhooks, labels still process. |
-| Stop **one** cron, keep the other twelve | Set `WORKER_CRON_JOBS=all,-<job>`, redeploy | That cron stops. Everything else — **including crons added in future releases** — stays armed. §6.4. |
+| Stop **one** cron, keep the other thirteen | Set `WORKER_CRON_JOBS=all,-<job>`, redeploy | That cron stops. Everything else — **including crons added in future releases** — stays armed. §6.4. |
 | Stop everything | Railway → `werco-worker` → **Remove** / pause the service | No background work at all. **The API is unaffected** — it logs its queue target and serves normally without a worker. |
 | Undo the whole change | Revert the branch and redeploy `werco-api` | Back to enqueues failing against localhost. Nothing is corrupted by this. |
 
@@ -762,7 +813,7 @@ WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job
 Redeploy, then confirm on the startup log — this line is the receipt:
 
 ```
-ARQ worker cron: 1 of 13 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_auto_draft_job': cron:run_mrp_auto_draft_job
+ARQ worker cron: 1 of 14 cron jobs SUPPRESSED by WORKER_CRON_JOBS='all,-run_mrp_auto_draft_job': cron:run_mrp_auto_draft_job
 ARQ worker cron: 12 job(s) armed, times in UTC
 ```
 
@@ -770,8 +821,8 @@ ARQ worker cron: 12 job(s) armed, times in UTC
 
 | What you see | Verdict |
 |---|---|
-| `1 of 13 … SUPPRESSED`, naming `cron:run_mrp_auto_draft_job` | **Correct.** |
-| `0 of 13` / no SUPPRESSED line at all | The variable did not take. The cron is still armed. **STOP.** |
+| `1 of 14 … SUPPRESSED`, naming `cron:run_mrp_auto_draft_job` | **Correct.** |
+| `0 of 14` / no SUPPRESSED line at all | The variable did not take. The cron is still armed. **STOP.** |
 | `ValueError: WORKER_CRON_JOBS names unknown cron job(s): -…` and a crash loop | Typo in the excluded name. The refusal is working as designed — an exclusion that matches nothing would have left the job armed. **But while it crash-loops there is NO worker at all, not just that one cron off:** see below. Fix the spelling and redeploy. |
 | `ValueError: … uses all as a cron NAME …` and a crash loop | A stray comma, usually `all,` left behind after deleting the exclusion. Same blast radius as the row above. Delete the comma (or set the value to bare `all`). |
 | More than 1 suppressed | You excluded more than you meant to, or the variable still holds an older allowlist. |
@@ -789,7 +840,7 @@ enqueue-driven queue stops draining too**: emails, webhooks, receiving labels, W
 signals. If the correct spelling is not immediately to hand, set `WORKER_CRON_JOBS=none` to get a
 healthy worker back first, then re-apply the exclusion.
 
-**Do not use an allowlist of the other twelve.** An older explicit list omits the new daily performance-retention job and rots
+**Do not use an allowlist of the other thirteen.** An older explicit list omits the new daily performance-retention job and rots
 at the next release: a thirteenth cron added to `ALL_CRON_JOBS` would silently never register
 on this worker, and nothing in the log would say so — "I enabled the cron and nothing
 happened", one deploy late. The `-` form subtracts from whatever the release declares, so
@@ -866,7 +917,7 @@ startup log alone does not establish nesting readiness.
 6. **Whether `run_mrp_auto_draft_job` should run at all.** It is `AUTO_DRAFT`, not
    `AUTO_SUBMIT`, so nothing is sent to a supplier — but it creates records daily that someone
    must triage. If no one owns that triage, leave it off indefinitely: that is
-   `WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job`, **not** an allowlist of the other twelve.
+   `WORKER_CRON_JOBS=all,-run_mrp_auto_draft_job`, **not** an allowlist of the other thirteen.
    Leaving it off is a supported, permanent configuration — §6.4 has the procedure, the
    receipt to look for in the log, and what MRP does and does not still do without it.
 7. **Replicas.** `numReplicas = 1` is in the config and must stay there. The cron scheduler is
@@ -912,8 +963,8 @@ railway logs --service werco-worker --environment production
 |---|---|
 | Queue name | `arq:queue` (a Redis **sorted set** — `ZCARD`, not `LLEN`) |
 | Job body TTL | ~24 h (`arq:job:<id>`); expired jobs are logged `job … expired` and discarded |
-| Registered job functions | 23 |
-| Declared crons | 13 |
+| Registered job functions | 25 |
+| Declared crons | 14 |
 | Cron timezone | container-local; **UTC unless `TZ` is set** |
 | Sweeper bounds | 24 h max age, 2 min grace, 500 per 5-minute pass |
 | Cron selector | `WORKER_CRON_JOBS` — unset/`all` / `none` / comma-separated names (allowlist) / `-name` exclusions (`all,-run_mrp_auto_draft_job`). The two shapes cannot be mixed; an unknown name, **negated or not**, is a hard startup error |

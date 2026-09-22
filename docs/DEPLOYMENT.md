@@ -131,6 +131,90 @@ Callers authenticate with a normal 15-minute ERP access token; the proxy in fron
 
 ## Deployment Methods
 
+### Hank task storage
+
+Before exposing Hank task actions, apply additive migration **108_hank_tasks**
+after **107_fabrication_quote_profiles** through the normal API startup migration
+path, then promote the matching frontend. It creates task previews and receipts,
+not production jobs, orders, or seed tasks. PostgreSQL must have RLS enabled and
+table/sequence access revoked from `PUBLIC`, `anon`, and `authenticated`; the same
+guards run on model bootstrap. Existing server authentication and tenant/owner
+checks remain authoritative. This schema adds no secret or environment setting.
+
+For application rollback, retain the task table and its receipts. The tested
+schema downgrade drops Hank task history and is only appropriate for a deliberate
+schema removal with preservation of any required evidence. It does not reverse
+business records already created by a completed task.
+
+### Hank follow-up worker
+
+Hank's opt-in follow-ups reuse migration **108_hank_tasks**. Deploy matching API,
+worker and frontend releases through the existing combined-release path. No new
+environment variable, secret or service is required. The existing production cron
+selection was `none` after quote-nesting retirement; to enable scheduled Hank checks,
+set **`WORKER_CRON_JOBS=check_hank_watches_job`** on the worker and redeploy. This exact
+allowlist enables only the new five-minute check and preserves suppression of all
+13 unrelated schedules. Do not use `all` or restore a retired nesting relay.
+
+Verify the active worker release and fresh generic heartbeat, then verify its startup
+log lists `cron:check_hank_watches_job` and reports **13 of 14** crons suppressed.
+For an explicitly created test follow-up with alerts enabled, verify `last_checked_at`
+advances and a matched condition creates one owner-only in-app notification linked to its receipt.
+Each pass checks at most 100 due watches; it is periodic polling, not an immediate
+notification guarantee. A healthy heartbeat alone does not prove a watch was checked.
+With the cron disabled or delayed, **Check now** still works in the API and an
+unchecked watch displays **Waiting for first check**. To suspend scheduled checks,
+restore `WORKER_CRON_JOBS=none`; retain task history and completed notifications.
+
+### Hank personal preferences
+
+Apply additive **109_hank_preferences** after **108_hank_tasks** through the normal
+API migration path before deploying the matching worker and frontend. It creates
+an empty tenant/user preference table with a unique company/user key and version
+constraint. No employee defaults are seeded; reads return typed defaults without
+creating rows. PostgreSQL RLS and table/sequence revokes from `PUBLIC`, `anon`, and
+`authenticated` match model bootstrap. No environment variable, secret or cron
+is added; retain the [Hank-only follow-up selection](#hank-follow-up-worker).
+
+Verify save/reload/reset in the current company, a stale-version refusal, and that
+muted follow-ups still produce a receipt without a new in-app notification. Briefing
+detail/focus choices must retain the same permissions and evidence links. Keep the
+preference table on ordinary application rollback. A deliberate 109 downgrade drops
+only preferences, preserving task/watch receipts and their audit history. A worker
+from before this preference feature ignores saved alert muting: suspend its watch
+cron or use a compatible API/worker release when rolling back.
+
+### Hank workflows and document intake
+
+Apply additive **110_hank_workflows** after **109_hank_preferences** through the
+normal API migration path, then deploy matching API, worker and frontend builds.
+It creates empty intake-batch/file, handoff, routine and routine-run tables, with
+matching model/migration PostgreSQL RLS and table/sequence revokes. It creates no
+approved routine, business action or user work. Existing task/watch history stays.
+
+The worker registers request-driven **`process_hank_intake_file_job`**. Keep the
+existing Hank-only cron selection unchanged; this job needs no cron, and
+`WORKER_CRON_JOBS=none` still permits requested intake processing. API and worker
+must use the same durable storage and Redis. Existing Anthropic configuration and
+the company AI-egress gate control extraction; no new secret or environment
+variable is introduced. Worker timeout remains 600 seconds; each intake model
+call is limited to 90 seconds with no SDK retries, after bounded PDF parsing.
+
+Verify a controlled PDF upload appears in the private queue, analysis reaches
+review, source pages load, and explicit filing produces one recoverable receipt.
+Check a retry with the same request key and a conflicting version; do not treat
+`queued` or a healthy heartbeat as evidence that analysis completed. Queue/worker
+failure leaves durable files recoverable through Retry; stale analyzing work can
+be retried after 15 minutes. Also verify participant handoff access and approved
+routine/version behavior with their explicit controls. No shipment dispatch,
+automatic label printing, carrier purchase or supplier messaging is added.
+
+Retain these tables and stored source/photo bytes on application rollback. A
+deliberate schema downgrade removes Hank workflow evidence and is not an ordinary
+rollback step; it does not undo documents, receipts, production or shipments
+already created by completed actions. Intake-linked Documents cannot be deleted
+through the application because the saved source and receipt must remain valid.
+
 ### Existing ERP frontend: Fabrication Quoting
 
 The fabrication estimator lives at [wercomfg.app/fabrication-quotes](https://wercomfg.app/fabrication-quotes), under **Sales & Quoting → Fabrication Quoting**. It uses the existing ERP authentication, API, Railway services and Vercel project. Old estimator URLs redirect here. See [the implementation and operating guide](FABRICATION_QUOTING.md).
@@ -139,7 +223,7 @@ Use the existing GitHub Actions combined-release path. It validates the backend,
 
 Both API Dockerfiles install the hash-locked CAD/document interpreter at `/opt/werco-quote-worker` and set `WERCO_QUOTE_WORKER_PYTHON`. DXF, STEP, PDF and nesting processing run through bounded API subprocesses. CI exercises this interpreter without network access in a read-only container; the PostgreSQL verifier checks the new migrations and immutable history.
 
-The old quote-nesting Node runtime, relay job and quoting APIs have been removed. Production `WORKER_CRON_JOBS` is now `none`, preserving the prior suppression of unrelated schedules. Existing shared ARQ queue functions remain available. A generic heartbeat verifies the active worker deployment, exact release and fresh successful Redis publication; it does not depend on enabled cron jobs. Do not re-enable a retired relay name.
+The old quote-nesting Node runtime, relay job and quoting APIs have been removed. That release set production `WORKER_CRON_JOBS=none`, preserving the prior suppression of unrelated schedules. The [Hank follow-up rollout](#hank-follow-up-worker) explicitly enables only its new check. Existing shared ARQ queue functions remain available. A generic heartbeat verifies the active worker deployment, exact release and fresh successful Redis publication; it does not depend on enabled cron jobs. Do not re-enable a retired relay name.
 
 Keep the existing archive-root separation: API uploads from `backend/`, frontend from `frontend/`, worker from the repository root. Railway's ignore rules must retain frontend `public/` assets and the stamped `public/release.txt`. The existing SPA rewrite serves direct workspace URLs.
 
