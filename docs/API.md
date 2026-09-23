@@ -8798,11 +8798,13 @@ See [Hank](HANK.md) for the employee workflows and their boundaries. Route names
 | GET | `/hank/preferences` | Own saved choices or typed defaults; no write on read | Yes; current company/user |
 | PUT | `/hank/preferences` | Explicitly replace typed personal choices using the current version | Interactive user in writable company context |
 | POST | `/hank/preferences/reset` | Restore typed defaults while retaining task and audit history | Interactive user in writable company context |
-| POST | `/hank/intake` | Durably upload 1–5 PDFs and enqueue extraction; multipart `expected_company_id`, UUID `request_key`, `files` | Interactive Admin/Manager/Quality; writable company |
+| POST | `/hank/intake` | Durably upload 1–5 PDF/DOCX/XLSX/XLS files and enqueue extraction; multipart `expected_company_id`, UUID `request_key`, `files` | Interactive Admin/Manager/Quality; writable company |
 | GET | `/hank/intake` | Own batches, newest first; `limit` 1–50 (default 20), optional `before_id` | Same company/owner and current document role |
 | GET | `/hank/intake/{batch_id}` | Recover all files in an owned batch | Same company/owner and current document role |
 | GET | `/hank/intake/files/{file_id}` | Recover one file's analysis, plan or receipt | Same company/owner and current document role |
-| GET | `/hank/intake/files/{file_id}/source` | Size/hash-verified PDF bytes; authenticated, private/no-store | Same company/owner and current document role |
+| GET | `/hank/intake/files/{file_id}/source` | Size/hash-verified source bytes with native MIME; PDF inline, Office attachment; private/no-store | Same company/owner and current document role |
+| GET | `/hank/intake/files/{file_id}/source-preview` | Bounded native text `{format, units, labels, warnings}`; no model call; private/no-store | Same company/owner and current document role |
+| GET | `/hank/intake/files/{file_id}/purchase-order-draft` | Deterministic supplier-PO suggestions from saved extraction; no model call or writes | Same company/owner and current document role plus purchasing-task authority |
 | GET | `/hank/intake/files/{file_id}/receiving-draft` | Deterministic receiving suggestions from saved extraction; optional positive `purchase_order_id`; no model call or writes | Same company/owner and current document role plus receiving-task authority |
 | POST | `/hank/intake/files/{file_id}/plan` | Save reviewed filing choices and source fingerprints | Same authority plus selected-source view permissions |
 | POST | `/hank/intake/files/{file_id}/{action}` | `execute`, `retry`, or `cancel` with expected company/version | Current interactive write authority; receipt release additionally requires receiving view/create |
@@ -8825,39 +8827,70 @@ See [Hank](HANK.md) for the employee workflows and their boundaries. Route names
 | POST | `/hank/routine-runs/{id}/{action}` | `advance` one step with evidence or `cancel`; expected company/version | Own run in writable company; each business action retains its own authority |
 | GET | `/hank/work-queue` | Combined own tasks/intake/runs and participant handoffs; optional exact state filter | Interactive work-order access; each source retains its current read gates |
 
-**Smart PDF intake.** Each PDF is at most 10 MB and 25 pages; a batch is at most
-25 MB. Upload request keys are company-scoped and bound to actor plus exact
+**Document intake.** Each PDF, DOCX, XLSX or XLS file is at most 10 MB; a batch is
+at most 25 MB. PDFs allow 25 pages. Office files allow 25 evidence sections,
+120,000 text characters and 2,000 populated rows; workbooks allow 10,000 populated
+cells and 200 columns per sheet. Expansion and subprocess resource limits reject
+oversized or unsupported files without silently truncating them. Macros, encrypted
+files, embedded executable objects, unresolved Word tracked revisions, populated
+hidden spreadsheet content and external workbook links are unsupported.
+Formulas are never evaluated, and cached formula values remain uncertain.
+Upload request keys are company-scoped and bound to actor plus exact
 filename/hash inputs. Extraction uses the shared, company-egress-gated model
-client with `hank_document_intake` prompt 1.1.0. A request-driven ARQ job claims
+client with `hank_document_intake` prompt 1.2.0. A request-driven ARQ job claims
 and commits before parsing/model work, then reloads current authority and saves
 its result with required audit. Parsing runs in a resource-bounded subprocess;
 no database transaction stays open during file or model I/O.
 
 Extraction suggests one of `purchase_order`, `vendor_quote`, `packing_slip`,
 `material_certificate`, `drawing`, or `other`, with bounded header fields, up to
-50 lines, confidence, page/excerpt evidence, warnings and permission-filtered
+50 lines, confidence, source/excerpt evidence, warnings and permission-filtered
 exact identifier matches. Scanned-page evidence remains uncertain when native
 text cannot verify it. Drawings expose title-block metadata, not interpreted
 manufacturing requirements. Duplicate warnings cover same-company files
 submitted through intake; other employees' private file IDs are not returned.
 `analysis.has_duplicates` signals matching content even when both duplicate ID
 lists are empty because the matching intake is private. Clients use this flag to
-offer explicit duplicate acknowledgement before saving a plan.
+offer explicit duplicate acknowledgement before saving a filing plan. An extraction
+that hits the output limit or reports `has_more_lines` is rejected as incomplete.
 
 File states are `queued`, `analyzing`, `awaiting_review`, `planned`, `completed`,
 `failed`, and `cancelled`. File responses contain source identity, status/version,
-analysis, plan, result, safe error text and UTC timestamps. `analysis`/`plan`/`result`
+analysis, plan, result, safe error text and UTC timestamps. `source_format` is
+`pdf`, `docx`, `xlsx` or `xls`; `source_labels` names native evidence sections.
+Evidence `page` is the one-based PDF page or Office section; optional `locator`
+identifies a paragraph/table row or worksheet row. `analysis`/`plan`/`result`
 can be null. Batch responses contain `{id, company_id, request_key, created_at, files[]}`;
 lists contain `{batches[], has_more, next_before_id}`. The source route verifies
-saved size/hash before returning PDF bytes (409 on changed evidence). Clients
-must fetch with authentication and may use a blob URL with `#page=N` for review.
+saved size/hash before returning original bytes (409 on changed evidence). Clients
+must fetch with authentication and may use a PDF blob URL with `#page=N` for review.
+Office clients render escaped source-preview text and download the original separately.
+
+**Import an existing supplier PO.** The purchase-order draft supplies printed
+identifiers, dates, exact vendor/part candidates and all extracted lines. It creates
+no records. Submit reviewed values through the existing `draft_purchase_order`
+task with `source_intake_file_id`, `source_intake_version`, the original `po_number`,
+optional `order_date`, and `ready_for_receiving`. Each line must include its unique
+zero-based `source_line_index` and reviewed `unit_of_measure` matching the chosen
+part's stocking unit. Every source line must be represented exactly once; missing,
+ambiguous and unsupported units/prices require employee correction.
+
+Execution preserves the printed PO number, original file and reviewed dates.
+`ready_for_receiving=true` additionally requires Admin/Manager approval authority
+and records the existing PO as `sent`, so the current Receiving open-PO list includes
+its lines. This performs no supplier dispatch, receipt, inspection or inventory
+update. Otherwise the PO remains draft. An existing number (including case variants
+and deleted orders), previously imported identical bytes, changed source version or
+changed vendor/part snapshot blocks creation. Required audits, PO creation and task
+receipt commit atomically; task replay returns the existing result. Legacy tasks
+without source fields retain their draft-only behavior.
 
 Plan requests are `{expected_company_id, expected_version, plan}`. `plan` includes
 title, document type, revision, optional description and selected part/job/vendor/
 PO/receipt IDs, corrected `reviewed_fields`, `acknowledge_duplicate`, and
 `filing_mode` (`draft` or `release_receipt_certificate`). The first mode creates
 a draft with optional part/job/vendor links and retained PO/receipt provenance.
-The second explicitly releases a certificate for the selected receipt's exact
+The second requires a PDF and explicitly releases a certificate for the selected receipt's exact
 part/supplier and fills its empty certificate slot; it never replaces a prior
 certificate or changes inspection/accepted quantities. Execution rechecks source
 fingerprints and concurrent duplicate filing, then commits document, optional
@@ -8914,7 +8947,7 @@ authority as its eventual action:
 | Kind | Required input | Authority / result |
 | --- | --- | --- |
 | `repeat_job` | `source_work_order_id`, positive `quantity_ordered`, optional `due_date` | Admin/Manager/Supervisor plus effective `work_orders:view` and `work_orders:create`; creates a **draft** through the existing duplicate service |
-| `draft_purchase_order` | `vendor_id`, 1–50 `lines` with `part_id`, positive `quantity_ordered`, nonnegative `unit_price`; optional PO dates/address/method/notes and line date/notes | Admin/Manager/Supervisor plus effective `purchasing:view` and `purchasing:create`; creates a **draft**, never approves/sends/receives |
+| `draft_purchase_order` | `vendor_id`, 1–50 `lines` with `part_id`, positive `quantity_ordered`, nonnegative `unit_price`; optional PO dates/address/method/notes and line date/notes; source imports additionally require the source/version, printed number, line indices and stocking units described above | Admin/Manager/Supervisor plus effective `purchasing:view` and `purchasing:create`; normally creates a **draft**. A reviewed existing-document import can record **sent** for Receiving with Admin/Manager and `purchasing:approve`; never emails a vendor or receives material |
 | `attach_document` | `document_id`, `work_order_id` | Admin/Manager/Quality plus effective `work_orders:view`; links an existing PDF using the document workflow, without approving its contents |
 | `receive_delivery` | `purchase_order_id`, 1–50 receipt lines; each requires `po_line_id`, positive actual `quantity_received` and explicit `requires_inspection`; optional lot/heat/serial/certificate/location/over-receipt details | Admin/Manager/Supervisor plus `receiving:view` + `receiving:create`; canonical atomic delivery/stock posting, with no automatic printing |
 | `report_production` | `operation_id`, nonnegative good/scrap deltas (at least one positive), scrap reason/code when reporting scrap; optional NCR details and reasoned hold | Admin/Manager/Supervisor/Operator/Quality plus `work_orders:view` + `work_orders:complete`; caller must have an open clock on the operation; no implicit job/operation completion |
@@ -9098,7 +9131,7 @@ already gathered.
 
 **Reviewed proposals + tenant-injection contract:**
 
-- Fifteen tools read ERP data, including the deterministic `my_shift_briefing`. The remaining tool,
+- Sixteen tools read ERP data, including the deterministic `my_shift_briefing`. The remaining tool,
   `prepare_hank_task`, can save an audited task **awaiting employee review**, with a link to
   `/?hank_task=<id>`. It cannot execute, approve, release, or dispatch a business action.
   It validates exact records and required fields through the same task service as the form.
@@ -9107,17 +9140,19 @@ already gathered.
   external model latency never holds its audit-chain lock. If later narration fails or is
   stopped, the saved proposal remains recoverable through the task APIs; it remains unexecuted.
   Terminal SSE success is emitted only after the final chat transaction commits.
-- Prompt `copilot_chat` is version **1.6.0**. Saved intake extraction can be read
-  through `hank_saved_work` with its page evidence; the general document-search
+- Prompt `copilot_chat` is version **1.7.0**. Saved intake extraction can be read
+  through `hank_saved_work` with its source evidence; the general document-search
   tool still returns metadata only. Chat does not create handoffs, approve
   routines, advance steps or execute filing/actions.
-- Optional `intake_file_ids` attaches up to five positive, owned, analyzed PDF IDs
+- Optional `intake_file_ids` attaches up to five positive, owned, analyzed document IDs
   to a chat request. Ownership/company/role and ready-state checks happen before
   streaming or model calls. The model receives a compact manifest, then can read
-  `hank_document_evidence` (`section=fields|lines`, `offset`, `limit` 1–5) or
-  `hank_receiving_document` (optional PO, same pagination). Both expose `next_offset`.
-  PDF bytes are never resent through chat. Receiving proposals using read/attached
-  PDFs must include the exact `source_intake_file_id` and `source_intake_version`;
+  `hank_document_evidence` (`section=fields|lines`, `offset`, `limit` 1–5),
+  `hank_receiving_document` (optional PO, same
+  pagination) or `hank_purchase_order_document` for vendor/part/PO suggestions.
+  All three evidence tools expose `next_offset`. Original bytes are never resent
+  through chat. Receiving and PO-import proposals using read/attached documents
+  must include the exact `source_intake_file_id` and `source_intake_version`;
   the task rechecks source access/version and source/PO fingerprints at execution.
   Existing receipt/source matches require `acknowledge_duplicate_source=true` for
   an explicitly reviewed additional delivery. A source link is retained in the receipt.

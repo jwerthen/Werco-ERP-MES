@@ -73,7 +73,7 @@ describe('Hank task workspace integration', () => {
     expect(screen.getByRole('button', { name: 'Chat' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Tasks' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'My shift' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Upload PDFs' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Upload documents' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Finish preference save' }));
     expect(screen.getByRole('region', { name: 'Preferences test' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Chat' })).toBeEnabled();
@@ -135,9 +135,9 @@ describe('Hank task workspace integration', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Begin pending task action' }));
     expect(screen.getByRole('button', { name: 'Chat' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'My shift' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Upload PDFs' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Upload documents' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Finish pending task action' }));
     expect(screen.getByRole('button', { name: 'Chat' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Upload PDFs' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Upload documents' })).toBeEnabled();
   });
 });

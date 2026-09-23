@@ -267,13 +267,13 @@ describe('CopilotPanel', () => {
   it.each<UserRole>(['admin', 'manager', 'quality', 'platform_admin'])('offers PDF filing to %s', role => {
     mockRole = role;
     renderPanel();
-    expect(screen.getByRole('button', { name: 'Upload PDFs' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Upload documents' })).toBeInTheDocument();
   });
 
   it.each<UserRole>(['operator', 'supervisor', 'shipping', 'viewer'])('keeps PDF filing unavailable to %s', role => {
     mockRole = role;
     renderPanel();
-    expect(screen.queryByRole('button', { name: 'Upload PDFs' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Upload documents' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Ask Hank')).toBeEnabled();
   });
 
@@ -284,7 +284,7 @@ describe('CopilotPanel', () => {
       `header.${btoa(JSON.stringify({ sub: '1', cid: 4, ro: true, type: 'access' }))}.signature`
     );
     renderPanel();
-    expect(screen.queryByRole('button', { name: 'Upload PDFs' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Upload documents' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Ask Hank')).toBeEnabled();
   });
 
@@ -321,7 +321,7 @@ describe('CopilotPanel', () => {
         })
     );
     renderPanel({}, '/documents');
-    fireEvent.click(screen.getByRole('button', { name: 'Upload PDFs' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Upload documents' }));
     fireEvent.click(screen.getByRole('button', { name: 'File PDF without analysis' }));
     await screen.findByRole('option', { name: 'Drawing' });
     const file = new File(['%PDF-1.7'], 'inspection.pdf', { type: 'application/pdf' });
@@ -372,7 +372,7 @@ describe('CopilotPanel', () => {
     renderPanel();
     await sendMessage('where is WO-1001?');
     await screen.findByText(finalResponse.answer);
-    fireEvent.click(screen.getByRole('button', { name: 'Upload PDFs' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Upload documents' }));
     fireEvent.click(screen.getByRole('button', { name: 'File PDF without analysis' }));
     await screen.findByRole('option', { name: 'Drawing' });
     fireEvent.click(screen.getByRole('button', { name: 'Cancel upload' }));

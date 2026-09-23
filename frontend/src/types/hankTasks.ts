@@ -61,6 +61,11 @@ export type HankTaskCreate = HankTaskCreateBase &
         kind: 'draft_purchase_order';
         input: {
           vendor_id: number;
+          source_intake_file_id?: number;
+          source_intake_version?: number;
+          po_number?: string;
+          order_date?: string | null;
+          ready_for_receiving?: boolean;
           required_date?: string | null;
           expected_date?: string | null;
           ship_to?: string;
@@ -68,6 +73,8 @@ export type HankTaskCreate = HankTaskCreateBase &
           notes?: string;
           lines: Array<{
             part_id: number;
+            source_line_index?: number;
+            unit_of_measure?: string;
             quantity_ordered: number;
             unit_price: number;
             required_date?: string | null;

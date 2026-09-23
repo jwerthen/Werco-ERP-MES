@@ -1,7 +1,7 @@
-"""Small, owner-authorized views of saved PDF extraction for Hank chat.
+"""Small, owner-authorized views of saved document extraction for Hank chat.
 
-PDF bytes are analyzed once by intake. Chat receives a manifest and fetches
-bounded evidence pages only when needed; it never re-uploads the PDF to Claude.
+Source bytes are analyzed once by intake. Chat receives a manifest and fetches
+bounded evidence only when needed; it never re-uploads the source to Claude.
 """
 
 from fastapi import HTTPException
@@ -14,10 +14,10 @@ READY_STATUSES = frozenset({'awaiting_review', 'planned', 'completed'})
 
 def _source(db, company_id, user, file_id):
     if type(file_id) is not int or file_id <= 0:
-        raise HTTPException(422, 'Choose a saved PDF from document intake.')
+        raise HTTPException(422, 'Choose a saved document from document intake.')
     row = HankIntakeService(db, user, company_id).file(file_id)
     if row.status not in READY_STATUSES or not row.analysis_json:
-        raise HTTPException(409, 'Wait for this PDF to finish analysis before using it in chat.')
+        raise HTTPException(409, 'Wait for this document to finish analysis before using it in chat.')
     return row, IntakeExtraction.model_validate(row.analysis_json)
 
 
@@ -40,6 +40,7 @@ def attachment_manifest(db, company_id, user, file_ids):
                 'file_id': row.id,
                 'version': row.version,
                 'filename': row.filename,
+                'source_format': analysis.source_format,
                 'classification': analysis.classification,
                 'confidence': analysis.confidence,
                 'summary': analysis.summary,
@@ -64,14 +65,22 @@ def document_evidence(*, db, company_id, user, file_id, section='lines', offset=
         return {'data': {'error': exc.detail}, 'is_error': True}
     items = getattr(analysis, section)
     end = min(offset + limit, len(items))
+    source_units = sorted({proof.page for item in items[offset:end] for proof in item.evidence})
     return {
         'data': {
             'file_id': row.id,
             'version': row.version,
             'filename': row.filename,
+            'source_format': analysis.source_format,
+            'source_labels': {
+                index: analysis.source_labels[index - 1]
+                for index in source_units
+                if index <= len(analysis.source_labels)
+            },
             'section': section,
             'items': [
-                {'index': index, **item.model_dump(mode='json')} for index, item in enumerate(items[offset:end], offset)
+                {'index': index, **item.model_dump(mode='json', exclude_none=True)}
+                for index, item in enumerate(items[offset:end], offset)
             ],
             'total': len(items),
             'next_offset': end if end < len(items) else None,
@@ -94,7 +103,7 @@ def receiving_document(*, db, company_id, user, file_id, purchase_order_id=None,
         or file_id <= 0
         or (purchase_order_id is not None and (type(purchase_order_id) is not int or purchase_order_id <= 0))
     ):
-        return {'data': {'error': 'Choose a saved PDF and a valid purchase order.'}, 'is_error': True}
+        return {'data': {'error': 'Choose a saved document and a valid purchase order.'}, 'is_error': True}
     if type(offset) is not int or not 0 <= offset <= 50 or type(limit) is not int or not 1 <= limit <= 5:
         return {'data': {'error': 'Read between 1 and 5 lines with an offset between 0 and 50.'}, 'is_error': True}
     try:
@@ -118,6 +127,39 @@ def receiving_document(*, db, company_id, user, file_id, purchase_order_id=None,
     data['source_intake_version'] = row.version
     return {
         'data': data,
-        'summary': 'matched PDF delivery evidence to receiving records for review',
+        'summary': 'matched document delivery evidence to receiving records for review',
+        'references': [_reference(row)],
+    }
+
+
+def purchase_order_document(*, db, company_id, user, file_id, offset=0, limit=5):
+    """Resolve saved PO evidence without another model call or creating records."""
+    from app.services.hank_intake_purchase_order_service import HankIntakePurchaseOrderService
+
+    if type(file_id) is not int or file_id <= 0:
+        return {'data': {'error': 'Choose a saved purchase-order document.'}, 'is_error': True}
+    if type(offset) is not int or not 0 <= offset <= 50 or type(limit) is not int or not 1 <= limit <= 5:
+        return {'data': {'error': 'Read between 1 and 5 lines with an offset between 0 and 50.'}, 'is_error': True}
+    try:
+        draft = HankIntakePurchaseOrderService(db, user, company_id).draft(file_id)
+        row, _ = _source(db, company_id, user, file_id)
+    except HTTPException as exc:
+        return {'data': {'error': exc.detail}, 'is_error': True}
+    data = draft.model_dump(mode='json')
+    count = len(data['lines'])
+    data['lines'] = data['lines'][offset : offset + limit]
+    data['line_count'] = count
+    data['next_offset'] = offset + limit if offset + limit < count else None
+    data['vendor_count'] = len(data['vendors'])
+    data['vendors'] = data['vendors'][:10]
+    for line in data['lines']:
+        line['candidate_count'] = len(line['candidates'])
+        line['candidates'] = line['candidates'][:5]
+    data['source_intake_file_id'] = row.id
+    data['source_intake_version'] = row.version
+    data['requires_review'] = True
+    return {
+        'data': data,
+        'summary': 'matched purchase-order document to current vendors and parts for review',
         'references': [_reference(row)],
     }

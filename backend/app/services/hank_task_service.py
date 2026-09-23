@@ -325,6 +325,18 @@ class HankTaskService:
                 snapshot,
             )
         if kind == 'draft_purchase_order':
+            if locked:
+                # All Hank PO commands take the generator lock before row locks.
+                # Otherwise a manual draft holding a vendor could deadlock with
+                # a source import holding the number lock for the same vendor.
+                acquire_generator_lock(self.db, 'po_number', self.company_id)
+            source, source_snapshot = None, {}
+            if data.get("source_intake_file_id") is not None:
+                from app.services.hank_intake_purchase_order_service import HankIntakePurchaseOrderService
+
+                source, source_snapshot = HankIntakePurchaseOrderService(
+                    self.db, self.user, self.company_id
+                ).validate_import(data, locked=locked)
             vendors = self._rows(Vendor, Vendor.id == data['vendor_id'], locked=locked)
             if not vendors or vendors[0].is_deleted or not vendors[0].is_active:
                 raise HTTPException(404, 'Active vendor not found')
@@ -334,6 +346,12 @@ class HankTaskService:
             if len(parts) != len(ids) or any(row.is_deleted or not row.is_active for row in parts):
                 raise HTTPException(404, 'An active purchase-order part was not found')
             by_id = {row.id: row for row in parts}
+            if source:
+                from app.services.hank_intake_receiving_service import _unit
+
+                for line in data["lines"]:
+                    if _unit(line.get("unit_of_measure")) != _unit(by_id[line["part_id"]].unit_of_measure):
+                        raise HTTPException(409, "Review each imported quantity in the selected part’s stocking units.")
             total = sum(float(line['quantity_ordered']) * float(line['unit_price']) for line in data['lines'])
             changes = [
                 f'Create a draft PO for {vendor.name}; {len(data["lines"])} lines; subtotal {total:.2f}.',
@@ -347,15 +365,52 @@ class HankTaskService:
             )
             for key, label in (('ship_to', 'Ship to'), ('shipping_method', 'Shipping method'), ('notes', 'Notes')):
                 if data.get(key):
-                    changes.append(f'{label}: {data[key]}')
+                    changes.append(f"{label}: {data[key]}")
             snapshot = {
                 'vendor_sha256': _digest(_row_values(vendor)),
                 'parts_sha256': _digest([_row_values(row) for row in parts]),
             }
+            if source:
+                snapshot.update(source_snapshot)
+                ready = data.get("ready_for_receiving", False)
+                changes[0] = (
+                    f'Create PO {data["po_number"]} for {vendor.name}; {len(data["lines"])} lines; subtotal {total:.2f}.'
+                )
+                changes.append(f'Original order date: {data.get("order_date") or "not recorded"}.')
+                changes.append(
+                    "Record the existing PO as sent and add its open lines to Receiving."
+                    if ready
+                    else "Keep the imported PO as a draft; it will not appear in Receiving yet."
+                )
+                changes.extend(
+                    f'Source line {line["source_line_index"] + 1}: {line["quantity_ordered"]} '
+                    f'{line["unit_of_measure"]} of {by_id[line["part_id"]].part_number}.'
+                    for line in data["lines"]
+                )
+                return (
+                    f'Import PO {data["po_number"]}'[:300],
+                    HankTaskPreview(
+                        summary=f'Import purchase order {data["po_number"]} for {vendor.name}.',
+                        changes=changes,
+                        warnings=[
+                            "Review every line, supplier, number, date and price against the uploaded original.",
+                            "This does not send email, record received material, or change inventory.",
+                        ]
+                        + HankIntakePurchaseOrderService(self.db, self.user, self.company_id).review_warnings(
+                            source, data
+                        ),
+                        references=[
+                            _reference(
+                                "intake_file", source.id, source.filename, f"/?hank_work=intake&hank_id={source.id}"
+                            )
+                        ],
+                    ),
+                    snapshot,
+                )
             return (
-                f'Draft PO for {vendor.name}'[:300],
+                f"Draft PO for {vendor.name}"[:300],
                 HankTaskPreview(
-                    summary=f'Prepare a purchase order for {vendor.name}.',
+                    summary=f"Prepare a purchase order for {vendor.name}.",
                     changes=changes,
                     warnings=['The PO stays draft. It is not approved, sent to the vendor, or received.'],
                 ),
@@ -519,14 +574,48 @@ class HankTaskService:
                 ],
             )
         elif task.kind == 'draft_purchase_order':
+            imported = {}
+            source = None
+            if data.get("source_intake_file_id") is not None:
+                from app.services.hank_intake_purchase_order_service import HankIntakePurchaseOrderService
+
+                source = HankIntakePurchaseOrderService(self.db, self.user, self.company_id).source(
+                    data["source_intake_file_id"], version=data["source_intake_version"], locked=True
+                )
+                parsed = INPUT_SCHEMAS[task.kind].model_validate(data)
+                imported = {
+                    "imported_po_number": parsed.po_number,
+                    "imported_order_date": parsed.order_date,
+                    "source_document_path": source.storage_ref,
+                    "ready_for_receiving": parsed.ready_for_receiving,
+                }
             po = create_purchase_order_command(
-                self.db, POCreate.model_validate(data), self.user, self.company_id, _RequiredCreateAudit(audit)
+                self.db,
+                POCreate.model_validate(data),
+                self.user,
+                self.company_id,
+                _RequiredCreateAudit(audit),
+                **imported,
             )
+            ready = bool(data.get("ready_for_receiving"))
             receipt = HankTaskResult(
-                summary=f'Created {po.po_number} as a draft. Total: {po.total:.2f}.',
-                references=[
-                    _reference('purchase_order', po.id, po.po_number, notification_links.purchase_order(po.id))
-                ],
+                summary=(
+                    f"Imported {po.po_number} and added its open lines to Receiving. Total: {po.total:.2f}."
+                    if ready
+                    else f"Created {po.po_number} as a draft. Total: {po.total:.2f}."
+                ),
+                warnings=(["No email was sent and no material was received."] if source else []),
+                references=[_reference('purchase_order', po.id, po.po_number, notification_links.purchase_order(po.id))]
+                + (
+                    [_reference("receiving", po.id, f"Receive {po.po_number}", f"/receiving?po={po.id}")]
+                    if ready
+                    else []
+                )
+                + (
+                    [_reference("intake_file", source.id, source.filename, f"/?hank_work=intake&hank_id={source.id}")]
+                    if source
+                    else []
+                ),
             )
         else:
             document = attach_document_command(

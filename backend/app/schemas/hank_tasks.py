@@ -1,6 +1,6 @@
 """Explicit, bounded proposals and durable receipts for Hank's first three actions."""
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal, Optional
 from uuid import UUID
 
@@ -33,11 +33,42 @@ class RepeatJobInput(WorkOrderDuplicateRequest):
 
 class DraftPOLine(POLineCreate):
     model_config = ConfigDict(extra='forbid')
+    source_line_index: int | None = Field(default=None, ge=0, le=49)
+    unit_of_measure: str | None = Field(default=None, min_length=1, max_length=50)
 
 
 class DraftPurchaseOrderInput(POCreate):
     model_config = ConfigDict(extra='forbid')
     lines: list[DraftPOLine] = Field(min_length=1, max_length=50)
+    source_intake_file_id: int | None = Field(default=None, gt=0)
+    source_intake_version: int | None = Field(default=None, ge=1)
+    po_number: str | None = Field(default=None, min_length=1, max_length=50)
+    order_date: date | None = None
+    ready_for_receiving: bool = False
+
+    @field_validator("po_number")
+    @classmethod
+    def clean_po_number(cls, value):
+        if value is not None:
+            value = value.strip()
+            if not value or any(ord(character) < 32 for character in value):
+                raise ValueError("Enter a printable purchase order number")
+        return value
+
+    @model_validator(mode="after")
+    def source_import_contract(self):
+        if (self.source_intake_file_id is None) != (self.source_intake_version is None):
+            raise ValueError("The intake source ID and version must be supplied together")
+        if self.source_intake_file_id is None:
+            if self.po_number is not None or self.order_date is not None or self.ready_for_receiving:
+                raise ValueError("Imported order details require a reviewed intake source")
+            if any(line.source_line_index is not None or line.unit_of_measure is not None for line in self.lines):
+                raise ValueError('Imported line evidence requires a reviewed intake source')
+        elif not self.po_number:
+            raise ValueError("Review and enter the original purchase order number")
+        elif any(line.source_line_index is None or not line.unit_of_measure for line in self.lines):
+            raise ValueError("Each imported line requires its source index and reviewed stocking unit")
+        return self
 
 
 class AttachDocumentInput(BaseModel):
@@ -71,6 +102,10 @@ class HankTaskCreate(BaseModel):
     @model_validator(mode='after')
     def validate_action_input(self) -> 'HankTaskCreate':
         self.input = INPUT_SCHEMAS[self.kind].model_validate(self.input).model_dump(mode='json')
+        if self.kind == 'draft_purchase_order' and self.input.get('source_intake_file_id') is None:
+            # Existing retry keys hash the original POCreate shape. Newly optional
+            # import metadata must not change a legacy manual command's identity.
+            self.input = POCreate.model_validate(self.input).model_dump(mode='json')
         return self
 
 

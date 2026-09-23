@@ -1,5 +1,6 @@
-"""Private PDF batch analysis followed by explicit, audited document filing."""
+"""Private document analysis followed by explicit, audited employee actions."""
 
+import subprocess
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
@@ -17,8 +18,11 @@ from app.schemas.hank_intake import (
     IntakeFileResponse,
     IntakePlanCommand,
     IntakeReceivingDraft,
+    IntakeSourcePreview,
 )
+from app.schemas.hank_purchase_order import IntakePurchaseOrderDraft
 from app.services.audit_service import AuditService, AuditWriteError
+from app.services.hank_intake_purchase_order_service import HankIntakePurchaseOrderService
 from app.services.hank_intake_receiving_service import HankIntakeReceivingService
 from app.services.hank_intake_service import (
     MAX_BATCH_BYTES,
@@ -27,8 +31,10 @@ from app.services.hank_intake_service import (
     WRITE_ROLES,
     HankIntakeService,
     enqueue_intake,
+    read_intake_document,
     read_verified_source,
 )
+from app.services.hank_office_reader import MIME_BY_FORMAT, detect_intake_format
 
 router = APIRouter()
 
@@ -62,22 +68,22 @@ def upload_intake(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Save 1–5 PDFs durably, then enqueue bounded analysis; retry the same UUID to recover."""
+    """Save 1–5 documents durably, then enqueue bounded analysis; retry the UUID to recover."""
     service = HankIntakeService(db, user, company_id)
     service.authority(write=True)
     if expected_company_id != company_id:
         raise HTTPException(409, 'Active company changed. Reopen intake in the intended company.')
     if not 1 <= len(files) <= MAX_FILES:
-        raise HTTPException(413, 'Upload between 1 and 5 PDFs.')
+        raise HTTPException(413, 'Upload between 1 and 5 documents.')
     db.rollback()
     buffered = []
     for file in files:
         content = file.file.read(MAX_FILE_BYTES + 1)
         if len(content) > MAX_FILE_BYTES:
-            raise HTTPException(413, 'Each PDF must be no larger than 10 MB.')
+            raise HTTPException(413, 'Each document must be no larger than 10 MB.')
         buffered.append((file.filename, content))
         if sum(len(content) for _, content in buffered) > MAX_BATCH_BYTES:
-            raise HTTPException(413, 'The PDF batch must be no larger than 25 MB.')
+            raise HTTPException(413, 'The document batch must be no larger than 25 MB.')
     try:
         return service.upload(expected_company_id, request_key, buffered, audit)
     except AuditWriteError as exc:
@@ -146,19 +152,58 @@ def intake_source(
     user: User = Depends(require_role(list(WRITE_ROLES))),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Stream the owner's source PDF; authenticated clients can append #page=N to a blob URL."""
+    """Return verified source bytes; only PDFs can be displayed inline."""
     row = HankIntakeService(db, user, company_id).file(file_id)
     ref, filename, digest, size = row.storage_ref, row.filename, row.content_sha256, row.file_size
     db.rollback()
+    content = read_verified_source(ref, digest, size)
+    try:
+        source_format = detect_intake_format(content, filename)
+    except ValueError as exc:
+        raise HTTPException(409, 'The saved source format could not be verified.') from exc
+    disposition = 'inline' if source_format == 'pdf' else 'attachment'
     return Response(
-        read_verified_source(ref, digest, size),
-        media_type='application/pdf',
+        content,
+        media_type=MIME_BY_FORMAT[source_format],
         headers={
-            'Content-Disposition': f"inline; filename*=UTF-8''{quote(filename, safe='')}",
+            'Content-Disposition': f"{disposition}; filename*=UTF-8''{quote(filename, safe='')}",
             'Cache-Control': 'private, no-store',
             'X-Content-Type-Options': 'nosniff',
         },
     )
+
+
+@router.get('/intake/files/{file_id}/source-preview', response_model=IntakeSourcePreview)
+def intake_source_preview(
+    file_id: int,
+    response: Response,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(list(WRITE_ROLES))),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Read bounded native text without running Office content or another model call."""
+    row = HankIntakeService(db, user, company_id).file(file_id)
+    ref, filename, digest, size = row.storage_ref, row.filename, row.content_sha256, row.file_size
+    db.rollback()
+    content = read_verified_source(ref, digest, size)
+    try:
+        preview = read_intake_document(content, filename)
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        raise HTTPException(422, 'This document cannot be safely previewed. Download and review its source.') from exc
+    response.headers['Cache-Control'] = 'private, no-store'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    return IntakeSourcePreview.model_validate(preview)
+
+
+@router.get('/intake/files/{file_id}/purchase-order-draft', response_model=IntakePurchaseOrderDraft)
+def intake_purchase_order_draft(
+    file_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(list(WRITE_ROLES))),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Resolve uploaded PO evidence for a reviewed import; creates no ERP records."""
+    return HankIntakePurchaseOrderService(db, user, company_id).draft(file_id)
 
 
 @router.post('/intake/files/{file_id}/plan', response_model=IntakeFileResponse)

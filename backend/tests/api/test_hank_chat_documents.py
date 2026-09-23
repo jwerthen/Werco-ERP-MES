@@ -158,7 +158,7 @@ def test_chat_attaches_saved_manifest_and_returns_pdf_link_without_reextracting(
     assert len(calls) == 1 and calls[0]['cache_conversation'] is True
     contents = calls[0]['messages'][0]['content']
     assert all(block['type'] == 'text' for block in contents)
-    assert str(source.id) in contents[0]['text'] and 'attached_pdf_evidence' in contents[0]['text']
+    assert str(source.id) in contents[0]['text'] and 'attached_document_evidence' in contents[0]['text']
     assert 'storage_ref' not in json.dumps(contents)
     endpoint._rate_buckets.clear()
 
@@ -172,13 +172,14 @@ def test_evidence_tool_preserves_tenant_injection(db_session, test_user, source)
 
 
 @pytest.mark.parametrize('attach', [True, False])
-def test_receiving_from_pdf_cannot_omit_source_provenance(db_session, test_user, source, attach):
+@pytest.mark.parametrize('kind', ['receive_delivery', 'draft_purchase_order'])
+def test_document_tasks_cannot_omit_source_provenance(db_session, test_user, source, attach, kind):
     service = CopilotService(db_session, company_id=1, user=test_user)
     if attach:
         service.attach_documents([source.id])
     else:
         service.execute_tool('hank_document_evidence', {'file_id': source.id})
-    result = service.execute_tool('prepare_hank_task', {'kind': 'receive_delivery', 'input': {'purchase_order_id': 1}})
+    result = service.execute_tool('prepare_hank_task', {'kind': kind, 'input': {'purchase_order_id': 1}})
     assert result.is_error and 'source_intake_file_id' in result.payload['error']
 
 
@@ -200,6 +201,55 @@ def test_receiving_document_tool_limits_chat_payload_without_reextracting(db_ses
     assert result['data']['next_offset'] == 10
     assert result['data']['source_intake_file_id'] == source.id
     assert result['data']['source_intake_version'] == source.version
+
+
+@pytest.mark.parametrize('source_format', ['docx', 'xlsx', 'xls'])
+def test_office_evidence_preserves_native_locations(db_session, test_user, source, source_format):
+    source.filename = f'purchase-order.{source_format}'
+    analysis = IntakeExtraction.model_validate(source.analysis_json)
+    analysis.source_format = source_format
+    analysis.source_labels = ['Materials — section 1']
+    analysis.lines[0].evidence[0].locator = 'Materials!A4:F4'
+    source.analysis_json = analysis.model_dump()
+    db_session.commit()
+    manifest, _ = attachment_manifest(db_session, 1, test_user, [source.id])
+    assert manifest[0]['source_format'] == source_format
+    result = document_evidence(db=db_session, company_id=1, user=test_user, file_id=source.id, limit=1)
+    assert result['data']['source_labels'] == {1: 'Materials — section 1'}
+    assert result['data']['items'][0]['evidence'][0]['locator'] == 'Materials!A4:F4'
+    assert 'storage_ref' not in json.dumps(result)
+
+
+def test_purchase_order_document_tool_bounds_complete_evidence(db_session, test_user, source, monkeypatch):
+    from app.schemas.hank_purchase_order import IntakePurchaseOrderDraft, IntakePurchaseOrderLine
+    from app.services.hank_intake_purchase_order_service import HankIntakePurchaseOrderService
+
+    draft = IntakePurchaseOrderDraft(
+        file_id=source.id,
+        file_version=source.version,
+        company_id=1,
+        filename='purchase-order.docx',
+        lines=[IntakePurchaseOrderLine(source_line_index=i, part_number=f'P-{i}') for i in range(12)],
+    )
+    monkeypatch.setattr(HankIntakePurchaseOrderService, 'draft', lambda *args: draft)
+    service = CopilotService(db_session, company_id=1, user=test_user)
+    result = service.execute_tool('hank_purchase_order_document', {'file_id': source.id, 'offset': 5})
+    assert not result.is_error
+    assert result.payload['line_count'] == 12 and result.payload['next_offset'] == 10
+    assert [line['source_line_index'] for line in result.payload['lines']] == list(range(5, 10))
+    assert result.payload['source_intake_file_id'] == source.id
+    assert result.payload['source_intake_version'] == source.version
+    assert service.document_versions[source.id] == source.version
+    omitted_source = service.execute_tool('prepare_hank_task', {'kind': 'draft_purchase_order', 'input': {}})
+    assert omitted_source.is_error and 'source_intake_file_id' in omitted_source.payload['error']
+
+
+@pytest.mark.parametrize('changes', [{'offset': -1}, {'limit': 50}, {'file_id': True}])
+def test_purchase_order_document_rejects_invalid_tool_arguments(db_session, test_user, source, changes):
+    from app.services.hank_chat_documents import purchase_order_document
+
+    result = purchase_order_document(db=db_session, company_id=1, user=test_user, **{'file_id': source.id, **changes})
+    assert result['is_error']
 
 
 @pytest.mark.parametrize('ids', [[0], [-1], list(range(1, 7))])

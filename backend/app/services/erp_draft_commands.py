@@ -7,13 +7,14 @@ retains the existing tenant and business-state guards.
 from datetime import datetime
 
 from fastapi import HTTPException
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.locks import acquire_generator_lock
 from app.models.document import Document
 from app.models.part import Part
-from app.models.purchasing import PurchaseOrder, PurchaseOrderLine, Vendor
+from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine, Vendor
 from app.models.work_order import WorkOrder
 from app.services.operational_event_service import OperationalEventService
 
@@ -36,21 +37,59 @@ def generate_po_number(db: Session, company_id: int = None) -> str:
     today = datetime.now().strftime("%Y%m%d")
     prefix = f"PO-{today}-"
 
-    query = db.query(PurchaseOrder).filter(PurchaseOrder.po_number.like(f"{prefix}%"))
+    normalized = func.lower(func.trim(PurchaseOrder.po_number))
+    suffix = func.substr(normalized, len(prefix) + 1)
+    remainder = suffix
+    for digit in '0123456789':
+        remainder = func.replace(remainder, digit, '')
+    numeric_key = func.ltrim(suffix, '0')
+    query = db.query(PurchaseOrder).filter(normalized.like(f"{prefix.lower()}%"), suffix != '', remainder == '')
     if company_id is not None:
         query = query.filter(PurchaseOrder.company_id == company_id)
-    last_po = query.order_by(PurchaseOrder.po_number.desc()).first()
+    # An imported existing PO can share the date prefix with a nonnumeric suffix
+    # or leading zeroes. Sort only valid integers without casting unbounded
+    # printed identifiers to a database integer (which can overflow).
+    last_po = query.order_by(func.length(numeric_key).desc(), numeric_key.desc()).first()
 
     if last_po:
-        last_num = int(last_po.po_number.split("-")[-1])
+        last_num = int(last_po.po_number.strip().split("-")[-1])
         new_num = last_num + 1
     else:
         new_num = 1
 
-    return f"{prefix}{new_num:03d}"
+    candidate = f"{prefix}{new_num:03d}"
+    if len(candidate) > 50:
+        # A very long imported numeric identifier may occupy the upper bound of
+        # the column. Find an ordinary short gap rather than let it poison future
+        # auto-numbered orders. One bounded query; never fetch the whole tenant.
+        normal_numbers = (
+            query.with_entities(numeric_key.label('number'), func.length(numeric_key).label('digits'))
+            .filter(func.length(numeric_key) <= 5)
+            .distinct()
+            .order_by(func.length(numeric_key), numeric_key)
+            .limit(10001)
+            .all()
+        )
+        occupied = {int(row.number or '0') for row in normal_numbers}
+        gap_number = next((number for number in range(1, 10001) if number not in occupied), None)
+        if gap_number is None:
+            raise HTTPException(409, 'Automatic purchase order numbers for today require review in Purchasing.')
+        candidate = f"{prefix}{gap_number:03d}"
+    return candidate
 
 
-def create_purchase_order_command(db, po_in, current_user, company_id, audit):
+def create_purchase_order_command(
+    db,
+    po_in,
+    current_user,
+    company_id,
+    audit,
+    *,
+    imported_po_number=None,
+    imported_order_date=None,
+    source_document_path=None,
+    ready_for_receiving=False,
+):
     """Create the existing draft PO workflow without committing; caller owns atomicity."""
     # Verify vendor -- must be a live, active vendor (can't open a PO against a
     # deleted or deactivated supplier).
@@ -67,7 +106,7 @@ def create_purchase_order_command(db, po_in, current_user, company_id, audit):
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
-    po_number = generate_po_number(db, company_id)
+    po_number = imported_po_number or generate_po_number(db, company_id)
 
     po = PurchaseOrder(
         po_number=po_number,
@@ -78,6 +117,8 @@ def create_purchase_order_command(db, po_in, current_user, company_id, audit):
         shipping_method=po_in.shipping_method,
         notes=po_in.notes,
         created_by=current_user.id,
+        order_date=imported_order_date,
+        source_document_path=source_document_path,
     )
     po.company_id = company_id
     db.add(po)
@@ -124,6 +165,23 @@ def create_purchase_order_command(db, po_in, current_user, company_id, audit):
         new_values=po,
         extra_data={"vendor_code": vendor.code, "line_count": len(po_in.lines)},
     )
+    if ready_for_receiving:
+        # Employee attests that this uploaded existing PO belongs in Receiving.
+        # This records workflow state, without supplier dispatch or receipt rows.
+        po.status = POStatus.SENT
+        db.flush()
+        audit.log_status_change(
+            "purchase_order",
+            po.id,
+            po.po_number,
+            old_status=POStatus.DRAFT.value,
+            new_status=POStatus.SENT.value,
+            extra_data={
+                "action": "reviewed_document_import",
+                "order_date": po.order_date.isoformat() if po.order_date else None,
+                "delivery_status": "not_dispatched",
+            },
+        )
     OperationalEventService(db).emit_best_effort(
         company_id=company_id,
         event_type="purchase_order_created",

@@ -21,7 +21,9 @@ import { FormField } from '../ui/FormField';
 import { LoadingButton } from '../ui/LoadingButton';
 import { HankPurchaseOrderPicker } from './HankPurchaseOrderPicker';
 import { HankSourceFile } from './HankSourceFile';
+import { hankEvidenceLabel } from './hankDocumentEvidence';
 import { HankDocumentReceiving } from './HankDocumentReceiving';
+import { HankDocumentPurchaseOrder } from './HankDocumentPurchaseOrder';
 import { isHankReadOnlySession } from './hankSession';
 import { useHankSessionGuard } from './useHankSessionGuard';
 
@@ -48,7 +50,7 @@ type PlanValues = z.infer<typeof planSchema>;
 function planDefaults(file: HankIntakeFile, workOrderId?: number): PlanValues {
   const plan = file.plan?.input;
   return {
-    title: plan?.title || file.filename.replace(/\.pdf$/i, '').slice(0, 255),
+    title: plan?.title || file.filename.replace(/\.(pdf|docx|xlsx|xls)$/i, '').slice(0, 255),
     document_type:
       plan?.document_type ||
       (file.analysis?.classification === 'drawing'
@@ -268,12 +270,13 @@ function IntakeReview({
       <h3 className="text-sm font-semibold text-fd-ink break-words">{file.filename}</h3>
       <p className="text-xs text-fd-mute">
         {file.status.replace(/_/g, ' ')} · Updated {formatCentralDateTime(file.updated_at)}
-        {file.page_count ? ` · ${file.page_count} pages` : ''}
+        {file.page_count && /\.pdf$/i.test(file.filename) ? ` · ${file.page_count} pages` : ''}
       </p>
       <HankSourceFile
         filename={file.filename}
         pages={pages}
         load={signal => api.getHankIntakeSource(file.id, signal)}
+        loadPreview={signal => api.getHankIntakeSourcePreview(file.id, signal)}
       />
       {['queued', 'analyzing'].includes(file.status) && (
         <p role="status" className="text-xs text-fd-mute">
@@ -349,7 +352,7 @@ function IntakeReview({
                 Review {file.analysis.lines.length} extracted lines
               </summary>
               <p className="mt-2 text-xs text-fd-mute">
-                These are source suggestions. Filing this PDF does not create purchase-order or receipt lines.
+                These are source suggestions. Filing this document does not create purchase-order or receipt lines.
               </p>
               <div className="space-y-2 mt-2">
                 {file.analysis.lines.map((line, index) => (
@@ -363,7 +366,7 @@ function IntakeReview({
                     </p>
                     {line.evidence.map((evidence, item) => (
                       <p key={item} className="text-fd-mute">
-                        Page {evidence.page}: {evidence.excerpt}
+                        {hankEvidenceLabel(file, evidence)}: {evidence.excerpt}
                       </p>
                     ))}
                   </div>
@@ -428,7 +431,7 @@ function IntakeReview({
                 </FormField>
                 {item.evidence.map((evidence, evidenceIndex) => (
                   <p key={evidenceIndex} className="text-[11px] text-fd-mute">
-                    Page {evidence.page}: {evidence.excerpt}
+                    {hankEvidenceLabel(file, evidence)}: {evidence.excerpt}
                   </p>
                 ))}
               </div>
@@ -608,6 +611,7 @@ export function HankDocumentIntake({
   const [cursor, setCursor] = useState<number | null>(null);
   const [selectedId, setSelectedId] = useState(initialId);
   const [receiving, setReceiving] = useState(false);
+  const [creatingPO, setCreatingPO] = useState(false);
   const [file, setFile] = useState<HankIntakeFile | null>(null);
   const [files, setFiles] = useState<File[]>([]);
   const [pending, setPending] = useState<{ files: File[]; key: string } | null>(null);
@@ -728,6 +732,7 @@ export function HankDocumentIntake({
               setSelectedId(undefined);
               setFile(null);
               setReceiving(false);
+              setCreatingPO(false);
             }}
           >
             All batches
@@ -760,26 +765,35 @@ export function HankDocumentIntake({
           {canWrite && (
             <div className="space-y-3">
               <p className="text-xs text-fd-mute">
-                Upload up to 5 PDFs, then use their extracted information in chat, prepare material receipts, or file
-                the documents. Review the source before confirming any changes.
+                Upload up to 5 PDF, Word (.docx), or Excel (.xlsx, .xls) files, then use their extracted information in
+                chat, create purchase orders, prepare material receipts, or file the documents. Review the source before
+                confirming any changes.
               </p>
-              <FormField label="PDFs to review" help="10 MB per file, 25 MB per batch, and up to 25 pages per PDF.">
+              <FormField
+                label="Documents to review"
+                help="10 MB per file, 25 MB per batch, and up to 25 pages per PDF."
+              >
                 {field => (
                   <input
                     {...field}
                     type="file"
                     multiple
-                    accept="application/pdf,.pdf"
+                    accept="application/pdf,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,application/vnd.ms-excel,.xls"
                     className="input w-full"
                     disabled={busy || !!pending}
                     onChange={event => {
                       const items = Array.from(event.target.files || []);
                       if (
                         items.length > 5 ||
-                        items.some(item => item.size > 10 * 1024 * 1024 || !/\.pdf$/i.test(item.name)) ||
+                        items.some(
+                          item =>
+                            item.size > 10 * 1024 * 1024 || !item.size || !/\.(pdf|docx|xlsx|xls)$/i.test(item.name)
+                        ) ||
                         items.reduce((sum, item) => sum + item.size, 0) > 25 * 1024 * 1024
                       ) {
-                        setError('Choose up to 5 PDFs, at most 10 MB each and 25 MB total.');
+                        setError(
+                          'Choose up to 5 non-empty PDF, DOCX, XLSX, or XLS files, at most 10 MB each and 25 MB total.'
+                        );
                         setFiles([]);
                         return;
                       }
@@ -796,7 +810,7 @@ export function HankDocumentIntake({
                 disabled={!cap || (!files.length && !pending)}
                 onClick={() => void upload()}
               >
-                {pending ? 'Retry same PDF batch' : 'Upload for review'}
+                {pending ? 'Retry same document batch' : 'Upload for review'}
               </LoadingButton>
             </div>
           )}
@@ -824,7 +838,7 @@ export function HankDocumentIntake({
           )}
           {cursor && (
             <button type="button" className="btn text-xs" disabled={loading || busy} onClick={() => void loadMore()}>
-              Older PDF batches
+              Older document batches
             </button>
           )}
         </>
@@ -832,6 +846,7 @@ export function HankDocumentIntake({
       {selectedId &&
         file &&
         !receiving &&
+        !creatingPO &&
         file.analysis &&
         ['awaiting_review', 'planned', 'completed'].includes(file.status) && (
           <div className="flex flex-wrap gap-2">
@@ -845,6 +860,18 @@ export function HankDocumentIntake({
                 Use in chat
               </button>
             )}
+            {canWrite &&
+              cap?.allowed_kinds.includes('draft_purchase_order') &&
+              file.analysis.classification === 'purchase_order' && (
+                <button
+                  type="button"
+                  className="btn text-xs"
+                  disabled={busy || childBusy}
+                  onClick={() => setCreatingPO(true)}
+                >
+                  Create purchase order
+                </button>
+              )}
             {canWrite && cap?.allowed_kinds.includes('receive_delivery') && (
               <button
                 type="button"
@@ -870,7 +897,20 @@ export function HankDocumentIntake({
           <HankDocumentReceiving file={file} onNavigate={onNavigate} onBusyChange={setChildBusy} />
         </>
       )}
-      {selectedId && file && !receiving && (
+      {selectedId && file && creatingPO && (
+        <>
+          <button
+            type="button"
+            className="text-xs text-fd-blue underline"
+            disabled={childBusy}
+            onClick={() => setCreatingPO(false)}
+          >
+            Back to document review
+          </button>
+          <HankDocumentPurchaseOrder key={file.id} file={file} onNavigate={onNavigate} onBusyChange={setChildBusy} />
+        </>
+      )}
+      {selectedId && file && !receiving && !creatingPO && (
         <IntakeReview
           key={file.id}
           file={file}

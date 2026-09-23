@@ -24,8 +24,16 @@ export type HankIntakeFieldName =
   | 'currency'
   | 'date'
   | 'due_date';
+export type HankSourceFormat = 'pdf' | 'docx' | 'xlsx' | 'xls';
+export interface HankSourcePreview {
+  format: HankSourceFormat;
+  units: string[];
+  labels: string[];
+  warnings: string[];
+}
 export interface HankIntakeEvidence {
   page: number;
+  locator?: string | null;
   excerpt: string;
 }
 export interface HankIntakeMatch {
@@ -36,6 +44,8 @@ export interface HankIntakeMatch {
   reason: string;
 }
 export interface HankIntakeAnalysis {
+  source_format?: HankSourceFormat;
+  source_labels?: string[];
   classification: 'purchase_order' | 'vendor_quote' | 'packing_slip' | 'material_certificate' | 'drawing' | 'other';
   confidence: 'high' | 'low' | 'unknown';
   summary: string;
@@ -78,6 +88,8 @@ export interface HankIntakePlan {
   acknowledge_duplicate: boolean;
 }
 export interface HankIntakeFile {
+  source_format?: HankSourceFormat;
+  source_labels?: string[];
   id: number;
   batch_id: number;
   company_id: number;
@@ -151,4 +163,32 @@ export interface HankIntakeReceivingDraft {
   warnings: string[];
   has_duplicates: boolean;
   requires_duplicate_acknowledgement: boolean;
+}
+
+/** Verified source values and scoped matches; importing is a separate reviewed task. */
+export interface HankIntakePurchaseOrderDraft {
+  file_id: number;
+  file_version: number;
+  company_id: number;
+  filename: string;
+  po_number: string | null;
+  order_date: string | null;
+  required_date: string | null;
+  vendor_id: number | null;
+  vendors: Array<{ id: number; code: string; name: string; reason: string }>;
+  lines: Array<
+    HankIntakeAnalysis['lines'][number] & {
+      source_line_index: number;
+      part_id: number | null;
+      candidates: Array<{ id: number; part_number: string; name: string; unit_of_measure: string }>;
+      quantity_ordered: number | null;
+      unit_price_amount: number | null;
+      warnings: string[];
+    }
+  >;
+  warnings: string[];
+  has_duplicates: boolean;
+  blocked_reason: string | null;
+  can_ready_for_receiving: boolean;
+  existing_purchase_orders: Array<{ id: number; po_number: string; href: string }>;
 }

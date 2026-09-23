@@ -154,12 +154,18 @@ an indication when more match. A recent document can still be draft or obsolete;
 Hank must not treat upload recency as manufacturing approval. Search does not read
 PDF contents.
 
-**Document intake** analyzes a batch of 1–5 PDFs (10 MB per file, 25 MB per
-batch, at most 25 pages per file). It classifies purchase orders, vendor quotes,
+**Document intake** analyzes a batch of 1–5 PDF, Word (`.docx`) or Excel (`.xlsx`,
+`.xls`) files (10 MB per file, 25 MB per batch). PDFs allow at most 25 pages;
+Office files allow 25 text sections and 120,000 characters. It classifies purchase orders, vendor quotes,
 packing slips, material certificates, drawings or other documents and extracts
-printed fields and up to 50 lines with page/excerpt evidence and uncertainty.
-Scanned PDFs use visual reading; unverifiable native-text evidence stays uncertain.
-The employee can open the original PDF, correct reviewed fields and choose exact
+printed fields and up to 50 lines with source/excerpt evidence and uncertainty.
+Scanned PDFs use visual reading. Word paragraphs/tables and Excel sheet/cell values
+are read as text, without running macros, calculating formulas or following links.
+Cached formula results and unverifiable evidence remain uncertain. Image-only Word
+documents need a PDF export for visual analysis. Resolve tracked Word revisions
+before uploading, or export the final view as PDF. Legacy `.doc` files need saving as `.docx`.
+Excel files with populated hidden rows, columns or sheets need a reviewed visible copy.
+The employee can preview evidence, download the original, correct reviewed fields and choose exact
 part, job, supplier, PO or receipt references. Matches are suggestions, filtered
 by current source permissions. Identical files submitted through intake are
 flagged; creating another copy requires explicit acknowledgement.
@@ -182,22 +188,34 @@ same request key, and stored bytes survive an uncertain database commit. Intake
 requires an interactive Admin, Manager or Quality account and company AI egress
 for analysis; **File PDF without analysis** remains a separate non-AI path.
 
-**Upload PDFs** is available directly from Chat. After analysis, choose **Use in chat**
-to attach the saved extraction (up to five PDFs). Remove an attachment to exclude it
+**Upload documents** is available directly from Chat. After analysis, choose **Use in chat**
+to attach the saved extraction (up to five documents). Remove an attachment to exclude it
 from the next request. Attachments follow the current employee/company session and
-are cleared when the conversation is cleared. Hank reads saved, page-cited evidence
-in small batches; follow-up questions do not upload or extract the PDF again.
+are cleared when the conversation is cleared. Hank reads saved, source-cited evidence
+in small batches; follow-up questions do not upload or extract the document again.
+
+For an existing supplier PO, choose **Create purchase order**. Review the printed
+PO number, dates, supplier, every part, stocking unit, quantity and unit price.
+Select existing vendor/part records when there is no certain match. The separate
+task review shows all proposed changes before creation. **Add to receiving** records
+the imported order as sent, making its open lines available in Receiving; this
+requires purchasing approval authority and does not email the vendor or receive
+material. Leave it unchecked to create a draft. Tax, freight and currency conversion
+need review in Purchasing; a differing printed total is flagged. The original file remains attached
+as source evidence. An existing PO number or previously imported copy blocks another
+creation, and retrying a completed task returns the same PO. All extracted lines
+must be reviewed; an incomplete extraction cannot create a partial PO.
 
 For a packing slip or received-material list, choose **Receive materials**. Hank
 matches the printed PO and part numbers against open receiving lines and suggests
-the delivered quantity, packing slip, lot and heat. Review the PDF, select or confirm
+the delivered quantity, packing slip, lot and heat. Review the source, select or confirm
 the PO, resolve unmatched lines and units, and explicitly choose inspection for each
 received line. **Review receiving task** creates the existing reviewed proposal;
 only submitting that proposal posts receipts and updates receiving/inventory under
 the usual permissions. Unknown or ambiguous quantities and unit conversions are not
-invented. Repeated part/lot rows need manual review. A duplicate PDF or packing slip
+invented. Repeated part/lot rows need manual review. A duplicate document or packing slip
 with earlier receipts requires explicit acknowledgement of additional material.
-The task retains its source PDF and version; changed source/PO data requires a new
+The task retains its source document and version; changed source/PO data requires a new
 review, and retrying the same completed task returns its original receipt.
 
 **Operational evidence** provides readiness gaps, released document links and
@@ -263,7 +281,7 @@ Chat conversation history remains client-held; task proposals and receipts are
 durable. Personal preferences are explicitly saved; chat conversation memory remains
 client-held and is not inferred into saved employee instructions.
 Background monitoring covers the two explicit follow-up conditions above, and
-request-driven intake jobs analyze submitted PDFs. Explicit handoffs are the
+request-driven intake jobs analyze submitted documents. Explicit handoffs are the
 employee messaging path. Hank does not set arbitrary reminders or operate every
 ERP function; routine approval and certificate release have the narrow meanings
 described above.
@@ -274,7 +292,7 @@ The next eight capabilities are delivered in the accepted order:
 
 | Order | Capability | Concrete behavior |
 | --- | --- | --- |
-| 1 | Smart PDF intake | Bounded batch analysis, evidence and uncertainty, exact record suggestions, reviewed filing and certificate-to-receipt linkage. |
+| 1 | Document intake | PDF/Word/Excel analysis, source evidence and uncertainty, exact record suggestions, reviewed PO import/receiving/filing and PDF certificate-to-receipt linkage. |
 | 2 | Readiness | Live gaps and source coverage before work; no automatic production authorization. |
 | 3 | Guided receiving | Reviewed actual quantities, trace details and inspection choices, with atomic delivery receipts and stock effects. |
 | 4 | Fast production reporting | Reviewed good/scrap, optional NCR/hold, job/operation scan, and local-only browser dictation where supported. |
@@ -315,7 +333,7 @@ confirms it.
   foundations. Hank's own stores record reviewed actions, explicit personal
   follow-ups and typed employee preferences. See
   [Always-On AI](AI_ALWAYS_ON.md).
-- Hank has fifteen read tools and one proposal-preparation tool. Tenant scope is
+- Hank has sixteen read tools and one proposal-preparation tool. Tenant scope is
   injected by the server and cannot be chosen by model arguments. Chat can save
   audited `awaiting_review` proposals but cannot execute business actions. The
   document upload form calls the existing write route after user submission.
@@ -327,7 +345,7 @@ confirms it.
   deployment procedure.
 - `/api/v1/copilot/chat`, `Copilot*` contracts, the OpenAPI tag, `COPILOT_*` tuning
   variables, and `copilot_chat`/`copilot_panel` telemetry keys retain their names.
-  Prompt `copilot_chat` is version 1.6.0. Task workflows require additive migration
+  Prompt `copilot_chat` is version 1.7.0. Task workflows require additive migration
   108 for `hank_tasks`, with matching PostgreSQL RLS/grant guards in migration
   and model bootstrap. No new role or environment setting is introduced; see
   [deployment ordering](DEPLOYMENT.md#hank-task-storage).
@@ -345,16 +363,17 @@ confirms it.
 - The expansion adds migration **110_hank_workflows** for intake batches/files,
   handoffs, routines and runs. It seeds no approved procedures or work. The
   request-driven `process_hank_intake_file_job` needs a matching worker and shared
-  storage but no new cron/environment variable. PDF analysis uses versioned
-  `hank_document_intake` prompt 1.1.0 through the shared model router, company
+  storage but no new cron/environment variable. Document analysis uses versioned
+  `hank_document_intake` prompt 1.2.0 through the shared model router, company
   AI-egress gate and usage telemetry. Direct reports, forms, handoffs, routines
   and queue reads do not require an LLM. See [deployment](DEPLOYMENT.md#hank-workflows-and-document-intake).
-- PDF-to-chat and receiving reuse those tables without a new migration. Deploy the
+- Document chat, receiving and PO import reuse those tables without a new migration. Deploy the
   matching API, worker and frontend so new extraction preserves printed units and
-  delivered quantities. The default Sonnet tier handles chat and PDF extraction;
+  delivered quantities. The default Sonnet tier handles chat and document extraction;
   existing explicit model overrides remain available. Stable tool/system prefixes
-  and growing chat context use five-minute prompt caching. Receiving matching needs
-  no LLM call, and database read transactions close before model calls. Actual cache
+  and growing chat context use five-minute prompt caching. Office extraction sends
+  bounded native text in one model request. Source previews and receiving/PO matching
+  need no LLM call, and database read transactions close before model calls. Actual cache
   reads, writes, tokens and estimated costs remain visible in AI Usage & Cost.
 
 See [API](API.md#hank-ai-shop-teammate),
