@@ -20,6 +20,7 @@ import {
   formatOperationLabel,
   hasOperationNumber,
   operationNumberText,
+  sortOperationsForDisplay,
 } from './operationLabel';
 
 /** Every stored spelling of operation 10 this system has actually produced. */
@@ -72,6 +73,31 @@ describe('operation numbers take precedence over shared routing sequences', () =
     expect(formatOperationLabel('Nest 3', 10)).toBe('Nest 3');
     expect(operationNumberText('Nest 3', 10)).toBe('Nest 3');
     expect(formatOperationLabel(0, 10)).toBe('Op 0');
+  });
+});
+
+describe('sortOperationsForDisplay', () => {
+  it('sorts shared sequences numerically without mutating the source or dropping repeated labels', () => {
+    const operations = Object.freeze([
+      Object.freeze({ id: 1, sequence: 10, operation_number: '10' }),
+      Object.freeze({ id: 3, sequence: 10, operation_number: 'OP30' }),
+      Object.freeze({ id: 4, sequence: 10, operation_number: '20' }),
+      Object.freeze({ id: 2, sequence: 10, operation_number: 'Op 20' }),
+      Object.freeze({ id: 5, sequence: 10, operation_number: '100' }),
+    ]);
+    const sorted = sortOperationsForDisplay(operations);
+    expect(sorted.map(op => op.id)).toEqual([1, 2, 4, 3, 5]);
+    expect(operations.map(op => op.id)).toEqual([1, 3, 4, 2, 5]);
+    expect(sorted[1]).toBe(operations[3]);
+  });
+
+  it('preserves dependency rank before operation number and uses ID for unnumbered ties', () => {
+    expect(sortOperationsForDisplay([
+      { id: 4, sequence: 20, operation_number: '10' },
+      { id: 3, sequence: 10, operation_number: '90' },
+      { id: 2, sequence: 5 },
+      { id: 1, sequence: 5 },
+    ]).map(op => op.id)).toEqual([1, 2, 3, 4]);
   });
 });
 

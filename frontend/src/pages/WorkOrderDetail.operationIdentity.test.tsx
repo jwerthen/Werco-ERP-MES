@@ -116,16 +116,18 @@ beforeEach(() => {
 
 describe('WorkOrderDetail operation identity', () => {
   it('shows progressive operation numbers instead of a shared dependency sequence', async () => {
-    mockedApi.getWorkOrder.mockResolvedValue(workOrder([
+    const sourceOperations = [
       operation({ id: 601, operation_number: '10', name: 'Inlets out' }),
-      operation({ id: 602, operation_number: 'Op 20', name: 'Inlets in' }),
       operation({ id: 603, operation_number: 'OP30', name: 'Side panels' }),
-    ]));
+      operation({ id: 602, operation_number: 'Op 20', name: 'Inlets in' }),
+    ];
+    mockedApi.getWorkOrder.mockResolvedValue(workOrder(sourceOperations));
     const { container } = renderDetail();
 
     await screen.findByRole('columnheader', { name: 'Op #' });
-    expect([601, 602, 603].map(id => container.querySelector(`#operation-${id} td`)?.textContent))
+    expect(Array.from(container.querySelectorAll('tr[id^="operation-"] td:first-child'), cell => cell.textContent))
       .toEqual(['10', '20', '30']);
+    expect(sourceOperations.map(op => op.id)).toEqual([601, 603, 602]);
     expect(screen.getByRole('option', { name: 'Op 20 - Inlets in' })).toHaveValue('602');
     expect(screen.getByRole('option', { name: 'Op 30 - Side panels' })).toHaveValue('603');
   });

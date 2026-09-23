@@ -137,6 +137,24 @@ it('opens the same operations popup from a mobile card', async () => {
   expect(screen.getByRole('dialog', { name: 'Operations for WO-0042' })).toBeInTheDocument();
 });
 
+it('sorts shuffled operations by number in the mobile popup without merging repeated labels', async () => {
+  window.innerWidth = 390;
+  job.operations = [
+    { ...firstOp },
+    { ...secondOp, id: 73, sequence: 10, operation_number: '30' },
+    { ...secondOp, sequence: 10 },
+    { ...secondOp, id: 74, sequence: 10 },
+  ];
+  renderList();
+  fireEvent.click(await screen.findByRole('button', { name: 'Operations' }));
+  const popup = await screen.findByRole('dialog', { name: 'Operations for WO-0042' });
+  await within(popup).findByText('Op 30 · Bend');
+  const list = within(popup).getByRole('list', { name: 'Work order operations' });
+  expect(within(list).getAllByRole('heading').map(heading => heading.textContent))
+    .toEqual(['Op 10 · Cut', 'Op 20 · Bend', 'Op 20 · Bend', 'Op 30 · Bend']);
+  expect(job.operations.map((op: { id: number }) => op.id)).toEqual([71, 73, 72, 74]);
+});
+
 it('uses progressive operation numbers for mobile labels and completion when sequence is shared', async () => {
   window.innerWidth = 390;
   job.operations[1].sequence = 10;

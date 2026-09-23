@@ -46,7 +46,7 @@ import {
 } from '../components/ui';
 import { useUnsavedChanges } from '../hooks/useUnsavedChanges';
 import { formatCentralDate, formatCentralDateTime, getCentralDateStamp } from '../utils/centralTime';
-import { formatOperationLabel, operationNumberText } from '../utils/operationLabel';
+import { formatOperationLabel, operationNumberText, sortOperationsForDisplay } from '../utils/operationLabel';
 // The held-operation vocabulary the two kiosks already speak. Imported rather
 // than re-derived so the office page and the floor name one hold the same way:
 // same category labels, same "Held by Dana R. · <Central time>" attribution line,
@@ -711,7 +711,10 @@ export default function WorkOrderDetail() {
       if (requestId !== loadRequestRef.current) return;
       const hydratedWorkOrder = await hydrateOperationsFromShopFloor(response);
       if (requestId !== loadRequestRef.current) return;
-      setWorkOrder(hydratedWorkOrder);
+      setWorkOrder({
+        ...hydratedWorkOrder,
+        operations: sortOperationsForDisplay(hydratedWorkOrder.operations || []),
+      });
       setLoading(false);
       setSecondaryLoading({ materials: true, blockers: true, documents: true, documentChoices: true });
 

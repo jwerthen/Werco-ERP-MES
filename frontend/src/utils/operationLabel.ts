@@ -167,3 +167,21 @@ export function operationNumberText(
   if (label === OPERATION_LABEL_FALLBACK) return '';
   return label.startsWith(OPERATION_LABEL_PREFIX) ? label.slice(OPERATION_LABEL_PREFIX.length) : label;
 }
+
+const operationNumberCollator = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
+
+/** Keep dependency ranks in order, then show their independent operations by number. */
+export function sortOperationsForDisplay<T extends {
+  id: number;
+  sequence: number;
+  operation_number?: string | number | null;
+}>(operations: readonly T[]): T[] {
+  return [...operations].sort((left, right) =>
+    left.sequence - right.sequence ||
+    operationNumberCollator.compare(
+      operationNumberText(left.operation_number, left.sequence),
+      operationNumberText(right.operation_number, right.sequence)
+    ) ||
+    left.id - right.id
+  );
+}

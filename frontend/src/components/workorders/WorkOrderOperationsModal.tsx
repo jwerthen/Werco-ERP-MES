@@ -5,7 +5,7 @@ import api from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import type { WorkOrder, WorkOrderOperation } from '../../types';
 import { hasPermission } from '../../utils/permissions';
-import { formatOperationLabel, operationNumberText } from '../../utils/operationLabel';
+import { formatOperationLabel, operationNumberText, sortOperationsForDisplay } from '../../utils/operationLabel';
 import {
   extractApiErrorDetail,
   extractStepsBypassed,
@@ -144,7 +144,7 @@ export default function WorkOrderOperationsModal({
     setSubmitting(false);
   };
 
-  const operations = [...(workOrder?.operations || [])].sort((a, b) => a.sequence - b.sequence);
+  const operations = sortOperationsForDisplay(workOrder?.operations || []);
   const completeCount = operations.filter(operation => operation.status === 'complete').length;
   const active = workOrder && ['released', 'in_progress', 'on_hold'].includes(workOrder.status);
   const disabled = loading || loadError || submitting;
