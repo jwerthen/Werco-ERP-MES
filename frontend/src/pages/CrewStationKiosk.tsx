@@ -38,6 +38,7 @@ import { usePageTitle } from '../hooks/usePageTitle';
 import { useWakeLock } from '../hooks/useWakeLock';
 import { UnitBadge } from '../components/ui';
 import KioskKeypad from '../components/kiosk/KioskKeypad';
+import KioskWorkstationPicker, { KioskWorkstationOption } from '../components/kiosk/KioskWorkstationPicker';
 import KioskCrewJobCard from '../components/kiosk/KioskCrewJobCard';
 import KioskHeldCard from '../components/kiosk/KioskHeldCard';
 import KioskResumeConfirmModal from '../components/kiosk/KioskResumeConfirmModal';
@@ -228,8 +229,19 @@ export default function CrewStationKiosk() {
   const stationId = getKioskStationId(location.search);
 
   // --- Station session --------------------------------------------------------
-  const [hasToken, setHasToken] = useState<boolean>(() => kioskClient.getStationToken() != null);
-  const [station, setStation] = useState<KioskStationSummary | null>(() => kioskClient.getStoredStation());
+  const [hasToken, setHasToken] = useState<boolean>(() =>
+    kioskClient.getStationToken() != null && kioskClient.getStoredStation()?.id === stationId);
+  const [station, setStation] = useState<KioskStationSummary | null>(() => {
+    const stored = kioskClient.getStoredStation();
+    return stored?.id === stationId ? stored : null;
+  });
+  const [choosingWorkstation, setChoosingWorkstation] = useState(false);
+  const [workstations, setWorkstations] = useState<KioskWorkstationOption[]>([]);
+  const [workstationsLoading, setWorkstationsLoading] = useState(false);
+  const [workstationError, setWorkstationError] = useState<string | null>(null);
+  const [workstationSaving, setWorkstationSaving] = useState(false);
+  const workstationRequestRef = useRef(0);
+  const generationRef = useRef(0);
 
   // PIN keypad state.
   const [pin, setPin] = useState('');
@@ -275,6 +287,8 @@ export default function CrewStationKiosk() {
   }, []);
 
   const lockStation = useCallback((reason?: string) => {
+    generationRef.current += 1;
+    workstationRequestRef.current += 1;
     kioskClient.clearStationToken();
     setHasToken(false);
     setStation(null);
@@ -286,13 +300,15 @@ export default function CrewStationKiosk() {
     setView({ name: 'board' });
     setPin('');
     setPinError(reason ?? null);
+    setChoosingWorkstation(false);
+    setWorkstations([]);
+    setWorkstationError(null);
   }, []);
 
   // --- Queue refresh (10s poll + refetch-after-mutate, stale polls discarded) --
   // The generation counter guards against a stale in-flight poll overwriting the
   // fresher state a mutation just refetched: every mutation bumps the counter,
   // and any response minted under an older generation is discarded.
-  const generationRef = useRef(0);
   const workCenterId = station?.work_center_id ?? null;
 
   const refreshQueue = useCallback(async () => {
@@ -332,11 +348,47 @@ export default function CrewStationKiosk() {
   }, [refreshQueue]);
 
   useEffect(() => {
-    if (!hasToken || workCenterId == null) return undefined;
+    if (!hasToken || workCenterId == null || choosingWorkstation) return undefined;
     void refreshQueue();
     const interval = window.setInterval(() => void refreshQueue(), POLL_INTERVAL_MS);
-    return () => window.clearInterval(interval);
-  }, [hasToken, workCenterId, refreshQueue]);
+    return () => {
+      window.clearInterval(interval);
+      generationRef.current += 1;
+    };
+  }, [hasToken, workCenterId, choosingWorkstation, refreshQueue]);
+
+  const loadWorkstations = useCallback(async () => {
+    const request = ++workstationRequestRef.current;
+    setWorkstationsLoading(true);
+    setWorkstationError(null);
+    try {
+      const response = await kioskClient.getWorkCenters();
+      if (request === workstationRequestRef.current) {
+        setWorkstations(response.work_centers);
+        // Another terminal using this station, or a lost selection response,
+        // may have changed its assignment since the cached login identity.
+        if (response.station) {
+          kioskClient.setStoredStation(response.station);
+          setStation(response.station);
+        }
+      }
+    } catch (error) {
+      if (request !== workstationRequestRef.current) return;
+      if (error instanceof KioskApiError && error.status === 401) {
+        lockStation('Station session expired or revoked. Enter the PIN to unlock.');
+      } else {
+        setWorkstationError(kioskErrorMessage(error, 'Could not load workstations. Check the connection and try again.'));
+      }
+    } finally {
+      if (request === workstationRequestRef.current) setWorkstationsLoading(false);
+    }
+  }, [lockStation]);
+
+  useEffect(() => {
+    if (!choosingWorkstation || !hasToken) return undefined;
+    void loadWorkstations();
+    return () => { workstationRequestRef.current += 1; };
+  }, [choosingWorkstation, hasToken, loadWorkstations]);
 
   // Single 1s ticker drives every visible timer.
   useEffect(() => {
@@ -513,6 +565,53 @@ export default function CrewStationKiosk() {
     clearStranded('crew', id);
     setStranded(readStranded('crew'));
   }, []);
+
+  const workstationChangeBlocked = busy ||
+    oneTapUnbanked > 0 || reportRequest.unconfirmed != null || recoveryBadge != null;
+
+  const selectWorkstation = async (id: number) => {
+    if (workstationSaving || workstationChangeBlocked) return;
+    setWorkstationSaving(true);
+    setWorkstationError(null);
+    generationRef.current += 1;
+    try {
+      const updated = await kioskClient.selectWorkCenter(id);
+      setQueue([]);
+      setHeld([]);
+      setHeldTruncated(false);
+      setScrapCodes([]);
+      setInitialLoadDone(false);
+      setBoardBadgeBuffer('');
+      setBadgeError(null);
+      setStation(updated);
+      setChoosingWorkstation(false);
+      resetToBoard();
+      releaseOneTapCredential();
+      showToast('success', `Workstation changed to ${updated.work_center_code || updated.work_center_name}.`);
+    } catch (error) {
+      if (error instanceof KioskApiError && error.status === 401) {
+        lockStation('Station session expired or revoked. Enter the PIN to unlock.');
+      } else {
+        setWorkstationError(kioskErrorMessage(error, 'Could not change workstation. Try again.'));
+        // A dropped response can follow a committed assignment. Refresh the
+        // remembered identity before the operator retries or cancels.
+        try {
+          const current = await kioskClient.getWorkCenters();
+          setWorkstations(current.work_centers);
+          if (current.station) {
+            kioskClient.setStoredStation(current.station);
+            setStation(current.station);
+          }
+        } catch (refreshError) {
+          if (refreshError instanceof KioskApiError && refreshError.status === 401) {
+            lockStation('Station session expired or revoked. Enter the PIN to unlock.');
+          }
+        }
+      }
+    } finally {
+      setWorkstationSaving(false);
+    }
+  };
 
   /**
    * Pending confirmation for writing pieces off. Losing production is allowed to
@@ -699,7 +798,7 @@ export default function CrewStationKiosk() {
   // sheet directly. Exactly one enabled capture exists at a time — this one is
   // only live on the board (sub-views and the complete modal own it otherwise).
   useBadgeCapture({
-    enabled: hasToken && view.name === 'board' && !busy && !recoveryBadge,
+    enabled: hasToken && view.name === 'board' && !busy && !recoveryBadge && !choosingWorkstation,
     value: boardBadgeBuffer,
     onValueChange: setBoardBadgeBuffer,
     onSubmit: (raw) => {
@@ -1206,17 +1305,50 @@ export default function CrewStationKiosk() {
     );
   }
 
+  if (choosingWorkstation) {
+    return (
+      <main className="fd-scope-kiosk min-h-screen bg-fd-canvas">
+        <KioskWorkstationPicker
+          workCenters={workstations}
+          selectedId={workCenterId}
+          loading={workstationsLoading}
+          error={workstationError}
+          saving={workstationSaving}
+          onSelect={(id) => void selectWorkstation(id)}
+          onRetry={() => void loadWorkstations()}
+          onCancel={() => { if (!workstationSaving) setChoosingWorkstation(false); }}
+        />
+      </main>
+    );
+  }
+
   // --- Unlocked crew station ------------------------------------------------------
   return (
     <div className="fd-scope-kiosk flex min-h-screen flex-col bg-fd-canvas">
       {/* Station header — always visible */}
       <header className="sticky top-0 z-30 border-b border-fd-line bg-fd-panel px-5 py-3">
-        <div className="mx-auto flex max-w-5xl items-center justify-between gap-4">
+        <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-4">
           <div className="min-w-0">
             <p className="truncate font-mono text-xl font-bold tracking-tight text-fd-ink">{stationLabel}</p>
             <p className="truncate text-sm text-fd-mute">Crew station — scan your badge to join or leave a job</p>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            {view.name === 'board' && (
+              <button type="button" disabled={workstationChangeBlocked}
+                title={oneTapUnbanked > 0 || reportRequest.unconfirmed ? 'Resolve pending production before changing workstation.' : undefined}
+                onClick={() => {
+                  generationRef.current += 1;
+                  setQueue([]);
+                  setHeld([]);
+                  setHeldTruncated(false);
+                  setInitialLoadDone(false);
+                  setBoardBadgeBuffer('');
+                  setChoosingWorkstation(true);
+                }}
+                className="min-h-16 rounded border border-fd-line bg-fd-sunken px-4 text-lg font-bold text-fd-body hover:border-fd-blue disabled:cursor-not-allowed disabled:opacity-40">
+                Change workstation
+              </button>
+            )}
             <span
               data-testid="kiosk-connection"
               className={`flex items-center gap-2 rounded border px-3 py-2 font-mono text-sm font-bold uppercase tracking-widest ${

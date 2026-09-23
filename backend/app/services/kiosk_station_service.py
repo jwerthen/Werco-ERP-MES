@@ -8,9 +8,9 @@ atomically (AuditService only flushes). The PIN is bcrypt-hashed at rest and
 never returned; the minted JWT is returned exactly once at
 ``authenticate_station``.
 
-The one structural difference from the signin twin: a kiosk station is bound to
-a work center (non-null ``work_center_id``), validated tenant-scoped at create
-time. The station may only read its own work center's queue.
+The kiosk's current work center (non-null ``work_center_id``) is tenant-scoped.
+An unlocked station may choose another active work center in its own company;
+queue reads always enforce the current selection from the station row.
 """
 
 from datetime import datetime
@@ -79,6 +79,51 @@ def list_stations(db: Session, *, company_id: int) -> list[KioskStation]:
         .order_by(KioskStation.created_at.desc())
         .all()
     )
+
+
+def list_work_centers(db: Session, *, company_id: int) -> list[WorkCenter]:
+    """Return only active workstation choices within the station's company."""
+    return (
+        tenant_query(db, WorkCenter, company_id)
+        .filter(WorkCenter.is_active.is_(True))
+        .order_by(WorkCenter.code, WorkCenter.id)
+        .all()
+    )
+
+
+def select_work_center(
+    db: Session,
+    *,
+    station: KioskStation,
+    work_center_id: int,
+    audit: AuditService,
+) -> KioskStation:
+    """Persist an authenticated station's own workstation choice with its audit."""
+    work_center = (
+        tenant_query(db, WorkCenter, station.company_id)
+        .filter(WorkCenter.id == work_center_id, WorkCenter.is_active.is_(True))
+        .first()
+    )
+    if work_center is None:
+        raise HTTPException(status_code=404, detail="Active work center not found")
+
+    old_work_center_id = station.work_center_id
+    if old_work_center_id == work_center.id:
+        return station
+
+    station.work_center_id = work_center.id
+    station.work_center = work_center
+    audit.log_update(
+        resource_type="kiosk_station",
+        resource_id=station.id,
+        resource_identifier=station.label,
+        old_values={"work_center_id": old_work_center_id},
+        new_values={"work_center_id": work_center.id},
+        description=f"Crew-station kiosk '{station.label}' selected work center '{work_center.code}'",
+    )
+    db.commit()
+    db.refresh(station)
+    return station
 
 
 def revoke_station(

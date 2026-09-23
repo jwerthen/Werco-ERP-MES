@@ -13,7 +13,7 @@ from app.api.deps import (
     get_audit_service,
     get_current_company_id,
     get_current_user,
-    oauth2_scheme,
+    get_kiosk_station,
     require_platform_admin,
     require_role,
 )
@@ -23,7 +23,6 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     get_password_hash,
-    verify_kiosk_token,
     verify_password,
     verify_refresh_token,
 )
@@ -1159,7 +1158,7 @@ def kiosk_badge_token(
     request: Request,
     payload: KioskBadgeTokenRequest,
     db: Session = Depends(get_db),
-    token: str = Depends(oauth2_scheme),
+    station: KioskStation = Depends(get_kiosk_station),
 ):
     """Exchange (station token + badge scan) for a 5-minute kiosk-scoped operator token.
 
@@ -1173,22 +1172,6 @@ def kiosk_badge_token(
     access token (path-fenced to ``/api/v1/shop-floor`` + employee-logout) and
     the operator's display identity. **Never** returns a refresh token.
     """
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-
-    claims = verify_kiosk_token(token)
-    if claims is None or not claims.get("station_id"):
-        raise credentials_exception
-
-    station = db.query(KioskStation).filter(KioskStation.id == claims["station_id"]).first()
-    if station is None or station.revoked:
-        raise credentials_exception
-    if claims.get("company_id") != station.company_id:
-        raise credentials_exception
-
     try:
         user = _find_user_by_employee_id_in_company(db, payload.employee_id, station.company_id)
     except HTTPException as exc:

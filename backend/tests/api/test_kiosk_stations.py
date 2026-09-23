@@ -9,8 +9,8 @@ Feature surface under test:
   JWT + the station identity payload the tablet renders.
 
 Headline invariants (mirrors tests/test_visitor_logs.py):
-1. **Scoped-token auth matrix** — a station kiosk token is honored ONLY by
-   ``get_kiosk_or_user`` (the roster queue read) and the badge mint; every
+1. **Scoped-token auth matrix** — a station kiosk token is honored by the
+   roster queue read, station workstation selection, and the badge mint; every
    normal ``get_current_user`` endpoint rejects it (the ``verify_token``
    ``type=="access"`` fence). Revoked stations and forged ``cid`` claims are
    401 on their next request — the DB row is the revocation + tenant authority.

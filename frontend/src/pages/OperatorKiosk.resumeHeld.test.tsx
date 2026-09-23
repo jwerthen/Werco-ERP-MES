@@ -27,6 +27,8 @@ import {
   heldRowWith,
 } from '../components/kiosk/heldOperationFixtures';
 
+jest.mock('../context/CompanyContext', () => ({ useCompany: () => ({ currentCompany: null }) }));
+
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {

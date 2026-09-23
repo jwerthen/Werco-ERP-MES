@@ -4,8 +4,8 @@
  * DELIBERATELY ISOLATED from services/api.ts (a signinClient.ts twin) — this is
  * the ONLY module that touches station or operator tokens:
  *  - The STATION token is a scoped `type="kiosk"` credential (24h, PIN-minted
- *    via /shop-floor/kiosk-stations/station-login) that ONLY the roster queue
- *    read and the badge-token mint accept. It must NEVER enter the global axios
+ *    via /shop-floor/kiosk-stations/station-login) accepted by the roster queue,
+ *    workstation selection and badge-token mint. It must NEVER enter the global axios
  *    instance — that client's 401 interceptor force-redirects to /login, which
  *    is fatal on an unattended shop terminal. It lives in sessionStorage under
  *    its own key.
@@ -28,6 +28,7 @@ import type {
   KioskCrewQueueResponse,
   KioskStationLoginResponse,
   KioskStationSummary,
+  KioskWorkCenterListResponse,
 } from '../types/kioskStation';
 import type {
   OperationStepRecord,
@@ -104,7 +105,7 @@ export function getStoredStation(): KioskStationSummary | null {
   }
 }
 
-function setStoredStation(station: KioskStationSummary): void {
+export function setStoredStation(station: KioskStationSummary): void {
   try {
     sessionStorage.setItem(STATION_INFO_KEY, JSON.stringify(station));
   } catch {
@@ -180,6 +181,34 @@ export async function stationLogin(stationId: number, pin: string): Promise<Kios
   return data;
 }
 
+/** Station-only configuration calls stay isolated from the global user session. */
+async function stationFetch<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
+  const token = getStationToken();
+  const response = await fetch(`${API_BASE_URL}/shop-floor/kiosk-stations/${path}`, {
+    method,
+    headers: bearerHeaders(token),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  if (!response.ok) {
+    if (response.status === 401 && getStationToken() === token) clearStationToken();
+    await throwOnError(response);
+  }
+  return (await response.json()) as T;
+}
+
+export async function getWorkCenters(): Promise<KioskWorkCenterListResponse> {
+  // The caller caches station identity only after accepting this response's
+  // request generation; a delayed read must never undo a newer selection.
+  return stationFetch<KioskWorkCenterListResponse>('work-centers');
+}
+
+/** Persist only the server-confirmed assignment so reloads use the same queue. */
+export async function selectWorkCenter(workCenterId: number): Promise<KioskStationSummary> {
+  const station = await stationFetch<KioskStationSummary>('work-center', 'PUT', { work_center_id: workCenterId });
+  setStoredStation(station);
+  return station;
+}
+
 /**
  * GET /shop-floor/work-center-queue/{id} — auth: station token. Returns the
  * queue enriched with per-item rosters + `server_time` + station identity +
@@ -188,12 +217,14 @@ export async function stationLogin(stationId: number, pin: string): Promise<Kios
  * A 401 clears the stored token (revoked/expired station → PIN screen).
  */
 export async function getQueue(workCenterId: number): Promise<KioskCrewQueueResponse> {
+  const token = getStationToken();
   const response = await fetch(`${API_BASE_URL}/shop-floor/work-center-queue/${workCenterId}`, {
     method: 'GET',
-    headers: bearerHeaders(getStationToken()),
+    headers: bearerHeaders(token),
   });
   if (!response.ok) {
-    if (response.status === 401) clearStationToken();
+    // An old poll finishing after a fresh PIN unlock cannot clear that session.
+    if (response.status === 401 && getStationToken() === token) clearStationToken();
     await throwOnError(response);
   }
   return (await response.json()) as KioskCrewQueueResponse;

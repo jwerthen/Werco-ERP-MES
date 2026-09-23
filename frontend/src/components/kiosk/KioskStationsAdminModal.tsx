@@ -15,7 +15,7 @@ interface KioskStationsAdminModalProps {
 }
 
 /**
- * Crew-station kiosk management: list stations, create (work-center-bound),
+ * Crew-station kiosk management: list stations, create with an initial workstation,
  * reset PIN, revoke, and copy the terminal URL (/kiosk?kiosk=1&station=<id>).
  * A VisitorLog StationManagementModal twin — stations are revoked (flag flip),
  * never deleted, so a lost tablet dies on its next poll.
@@ -155,8 +155,8 @@ export default function KioskStationsAdminModal({ workCenters, onClose }: KioskS
         Kiosk stations
       </h2>
       <p className="mt-1 text-sm text-fd-mute">
-        Each station is a shared crew terminal bound to one work center. Open its URL on the shop tablet and unlock
-        once with the PIN — operators then join and leave jobs by badge scan.
+        Open a station’s URL on the shop tablet and unlock it with the PIN. Staff can use Change workstation
+        on the kiosk whenever it moves. Operators join and leave jobs by badge scan.
       </p>
 
       {/* Create */}
@@ -175,7 +175,7 @@ export default function KioskStationsAdminModal({ workCenters, onClose }: KioskS
               />
             )}
           </FormField>
-          <FormField label="Work center" required error={formError.workCenter} className="sm:col-span-1">
+          <FormField label="Starting work center" required error={formError.workCenter} className="sm:col-span-1">
             {field => (
               <select
                 {...field}

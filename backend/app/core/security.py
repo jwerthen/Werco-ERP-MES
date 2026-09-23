@@ -234,9 +234,9 @@ def create_kiosk_token(station_id: int, company_id: int, label: str, ttl_hours: 
     Twin of ``create_signin_token``: the ``type`` claim is ``"kiosk"`` — NOT
     ``"access"`` — so ``verify_token`` (and therefore ``get_current_user`` and
     every dependency built on it) rejects it. Kiosk tokens only authenticate
-    via the dedicated ``get_kiosk_or_user`` dependency on the roster-enriched
-    work-center-queue read, and gate the badge-token mint
-    (``POST /auth/kiosk-badge-token``). ``sid`` ties the JWT to a
+    via ``get_kiosk_station`` for workstation selection and badge minting,
+    and via ``get_kiosk_or_user`` for the roster-enriched queue read.
+    ``sid`` ties the JWT to a
     ``kiosk_stations`` row so admins can revoke it; ``cid`` is cross-checked
     against that row (the DB row is authoritative).
     """

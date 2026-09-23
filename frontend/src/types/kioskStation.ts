@@ -33,8 +33,14 @@ export interface KioskStationSummary {
 
 /** Response from POST /shop-floor/kiosk-stations/station-login. */
 export interface KioskStationLoginResponse {
-  /** Scoped `type="kiosk"` JWT (24h) — honored ONLY by the roster queue read and the badge mint. */
+  /** Scoped `type="kiosk"` JWT (24h) — queue reads, workstation selection and badge minting. */
   access_token: string;
+  station: KioskStationSummary;
+}
+
+/** Active workstations available to this kiosk's company. */
+export interface KioskWorkCenterListResponse {
+  work_centers: Array<{ id: number; code: string; name: string }>;
   station: KioskStationSummary;
 }
 

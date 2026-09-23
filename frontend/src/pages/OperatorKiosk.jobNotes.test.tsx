@@ -18,6 +18,8 @@ import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import type { KioskJobInstructions } from '../types';
 
+jest.mock('../context/CompanyContext', () => ({ useCompany: () => ({ currentCompany: null }) }));
+
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {

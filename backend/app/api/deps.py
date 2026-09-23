@@ -46,8 +46,8 @@ KIOSK_TOKEN_EXACT_PATHS = (
 # these, and a badge-minted 5-minute token for a MANAGER/ADMIN must not be able
 # to persist access (station PIN reset/revoke), approve labor (G5-A is a
 # desktop supervisor workflow) or drive the manager dispatch board from the
-# shared terminal. The public kiosk-stations/station-login route never reaches
-# get_current_user, so excluding the whole prefix is safe. The dispatch board is
+# shared terminal. Station-login and workstation selection use station auth,
+# never get_current_user, so excluding the whole prefix is safe. The dispatch board is
 # an exact route rather than a subtree, but the same prefix test covers it.
 KIOSK_TOKEN_DENIED_PREFIXES = (
     "/api/v1/shop-floor/kiosk-stations",
@@ -463,29 +463,18 @@ class KioskReadPrincipal:
     user: Optional[User] = None
 
 
-def get_kiosk_or_user(
-    request: Request,
+def get_kiosk_station(
     db: Session = Depends(get_db),
     token: str = Depends(oauth2_scheme),
-) -> KioskReadPrincipal:
-    """Accept EITHER a normal user access token OR a crew-station kiosk token.
-
-    SECURITY (crew-station kiosk): this dependency — alongside
-    ``get_display_or_user`` and ``get_signin_principal`` — is one of the only
-    three that honor a non-``"access"`` JWT type, and it must only ever guard
-    the read-only work-center-queue endpoint. Everywhere else auth flows
-    through ``get_current_user``, which accepts only ``type == "access"`` JWTs
-    and (via the ``api_tokens`` row check) ``type == "api"`` API tokens — so a
-    kiosk station token presented to any other endpoint gets a 401. (The badge-token mint validates the station
-    token itself against the same DB-row checks; it does not use this
-    dependency's user branch.)
+) -> KioskStation:
+    """Accept ONLY a crew-station token, for station selection and badge minting.
 
     Station-token path checks, in order (the wallboard/signin two-layer pattern):
       1. signature + JWT expiry + ``type == "kiosk"`` (``verify_kiosk_token``)
       2. the ``kiosk_stations`` row exists for the JWT's ``sid``
       3. the row is not revoked
       4. the JWT's ``cid`` claim matches the row's ``company_id``
-    The active company AND the bound work center come from the DB row
+    The active company AND the selected work center come from the DB row
     (authoritative), so a forged or stale claim can never widen tenant scope or
     point the station at another work center.
     """
@@ -494,14 +483,6 @@ def get_kiosk_or_user(
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-
-    # Normal user token first — get_current_user applies the full user checks
-    # (active flag, platform-admin company context, read-only context, the
-    # kiosk-scope path fence for badge-minted operator tokens, and for an API
-    # token the row checks and the /auth + /api-tokens fence).
-    if is_user_bearer(token):
-        user = get_current_user(request=request, db=db, token=token)
-        return KioskReadPrincipal(company_id=user._active_company_id, kind="user", user=user)
 
     claims = verify_kiosk_token(token)
     if claims is None or not claims.get("station_id"):
@@ -513,6 +494,27 @@ def get_kiosk_or_user(
     if claims.get("company_id") != station.company_id:
         raise credentials_exception
 
+    return station
+
+
+def get_kiosk_or_user(
+    request: Request,
+    db: Session = Depends(get_db),
+    token: str = Depends(oauth2_scheme),
+) -> KioskReadPrincipal:
+    """Accept a user or station token for the read-only work-center queue.
+
+    A station may only read its currently selected work center's queue. Its
+    station token also gates workstation selection and badge minting through
+    ``get_kiosk_station``; normal user endpoints still reject kiosk JWTs.
+    """
+    # Normal user token first — get_current_user applies all user checks,
+    # including the kiosk-scope path fence for badge-minted operator tokens.
+    if is_user_bearer(token):
+        user = get_current_user(request=request, db=db, token=token)
+        return KioskReadPrincipal(company_id=user._active_company_id, kind="user", user=user)
+
+    station = get_kiosk_station(db=db, token=token)
     return KioskReadPrincipal(
         company_id=station.company_id,
         kind="station",

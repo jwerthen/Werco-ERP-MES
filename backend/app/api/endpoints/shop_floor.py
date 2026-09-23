@@ -22,6 +22,7 @@ from app.api.deps import (
     get_current_user,
     get_display_or_user,
     get_kiosk_or_user,
+    get_kiosk_station,
     require_role,
 )
 from app.core.cache import invalidate_work_centers_cache
@@ -38,6 +39,7 @@ from app.db.database import get_db
 from app.db.tenant_filter import tenant_query
 from app.models.audit_log import AuditLog
 from app.models.document import Document, DocumentType
+from app.models.kiosk_station import KioskStation
 from app.models.laser_nest import LaserNest
 from app.models.scrap_reason import ScrapReasonCode
 from app.models.spc import SPCCharacteristic
@@ -62,6 +64,8 @@ from app.schemas.kiosk_station import (
     KioskStationLoginResponse,
     KioskStationResetPinRequest,
     KioskStationResponse,
+    KioskWorkCenterListResponse,
+    KioskWorkCenterSelection,
 )
 from app.schemas.process_sheet import (
     OperationStepRecordCreate,
@@ -2554,7 +2558,7 @@ def get_work_center_queue(
 
     # Lean Phase 1 (issue #88): active scrap reason codes ride the queue payload
     # so the crew station's scrap picker works WITHOUT widening any token scope —
-    # the station token is honored only by this read + badge mint, and the 5-min
+    # the station token allows queue reads, workstation selection, and badge minting; the 5-min
     # badge tokens are path-fenced to /shop-floor, so the kiosk cannot call
     # GET /quality/scrap-reason-codes. This is tenant config data on an
     # already-authorized, already-tenant-scoped read (the station's company from
@@ -5325,11 +5329,21 @@ def raise_step_quality_hold(
 # lifecycle is ADMIN/MANAGER-gated and mirrors visitor_logs.py; station-login
 # is PUBLIC + rate-limited (see /api/v1/shop-floor/kiosk-stations/station-login
 # in main.py AUTH_RATE_LIMITS) and mints the scoped type="kiosk" JWT honored
-# ONLY by get_kiosk_or_user (queue read) and POST /auth/kiosk-badge-token.
+# by the queue read, station-only workstation selection, and badge-token mint.
 # ============================================================================
 
 # Staff roles allowed to manage kiosk stations (same set as visitor stations).
 _KIOSK_STATION_MANAGE_ROLES = [UserRole.ADMIN, UserRole.MANAGER]
+
+
+def _kiosk_station_info(station: KioskStation) -> KioskStationInfo:
+    return KioskStationInfo(
+        id=station.id,
+        label=station.label,
+        work_center_id=station.work_center_id,
+        work_center_code=station.work_center.code if station.work_center else None,
+        work_center_name=station.work_center.name if station.work_center else None,
+    )
 
 
 def _kiosk_station_response(station) -> KioskStationResponse:
@@ -5372,8 +5386,6 @@ def kiosk_station_login(
         # exists (so the trail stays tenant-attributed); swallow lookup issues so
         # we never leak whether the station id or the PIN was wrong.
         try:
-            from app.models.kiosk_station import KioskStation
-
             existing = db.query(KioskStation).filter(KioskStation.id == payload.station_id).first()
             if existing is not None:
                 audit = AuditService(db, user=None, request=request, company_id=existing.company_id)
@@ -5394,14 +5406,39 @@ def kiosk_station_login(
         access_token=token,
         token_type="bearer",
         expires_in=expires_in,
-        station=KioskStationInfo(
-            id=station.id,
-            label=station.label,
-            work_center_id=station.work_center_id,
-            work_center_code=station.work_center.code if station.work_center else None,
-            work_center_name=station.work_center.name if station.work_center else None,
-        ),
+        station=_kiosk_station_info(station),
     )
+
+
+@router.get("/kiosk-stations/work-centers", response_model=KioskWorkCenterListResponse)
+def list_kiosk_work_centers(
+    db: Session = Depends(get_db),
+    station: KioskStation = Depends(get_kiosk_station),
+):
+    """List active workstation choices for this PIN-unlocked kiosk's company."""
+    return KioskWorkCenterListResponse(
+        work_centers=kiosk_station_service.list_work_centers(db, company_id=station.company_id),
+        station=_kiosk_station_info(station),
+    )
+
+
+@router.put("/kiosk-stations/work-center", response_model=KioskStationInfo)
+def select_kiosk_work_center(
+    payload: KioskWorkCenterSelection,
+    request: Request,
+    db: Session = Depends(get_db),
+    station: KioskStation = Depends(get_kiosk_station),
+):
+    """Change this authenticated kiosk's own workstation without an admin login.
+
+    Only active work centers in the station's company are selectable. Existing
+    station tokens immediately follow the saved selection for queue reads.
+    """
+    audit = AuditService(db, user=None, request=request, company_id=station.company_id)
+    station = kiosk_station_service.select_work_center(
+        db, station=station, work_center_id=payload.work_center_id, audit=audit
+    )
+    return _kiosk_station_info(station)
 
 
 @router.post("/kiosk-stations", response_model=KioskStationResponse, status_code=201)

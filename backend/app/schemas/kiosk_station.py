@@ -29,13 +29,33 @@ class KioskStationLoginRequest(BaseModel):
 
 
 class KioskStationInfo(BaseModel):
-    """The station identity the tablet needs to render its header + queue calls."""
+    """Station identity and currently selected workstation for the tablet."""
 
     id: int
     label: str
     work_center_id: int
     work_center_code: Optional[str] = None
     work_center_name: Optional[str] = None
+
+
+class KioskWorkCenterOption(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    code: str
+    name: str
+    work_center_type: str
+
+
+class KioskWorkCenterListResponse(BaseModel):
+    work_centers: list[KioskWorkCenterOption]
+    station: KioskStationInfo
+
+
+class KioskWorkCenterSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    work_center_id: int = Field(..., gt=0, description="Active workstation this kiosk will use")
 
 
 class KioskStationLoginResponse(BaseModel):
@@ -47,7 +67,7 @@ class KioskStationLoginResponse(BaseModel):
 
 class KioskStationCreate(BaseModel):
     label: str = Field(..., min_length=1, max_length=100, description="Tablet label, e.g. 'Weld Bay Kiosk'")
-    work_center_id: int = Field(..., gt=0, description="Work center this station is bound to")
+    work_center_id: int = Field(..., gt=0, description="Initial work center; the unlocked kiosk can change it")
     pin: str = Field(..., pattern=_PIN_PATTERN, description="Shared station PIN (4–8 digits)")
 
 

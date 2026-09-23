@@ -48,12 +48,51 @@ export function getKioskWorkCenterId(search: string): number | null {
   const raw = params.get('work_center_id');
   if (!raw) return null;
   const value = Number(raw);
-  return Number.isFinite(value) ? value : null;
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 export function getKioskWorkCenterCode(search: string): string | null {
   const params = new URLSearchParams(search);
   return params.get('work_center_code');
+}
+
+// A kiosk belongs to the browser, rather than to the badge currently using it.
+// Tenant keys keep a shared tablet from reusing another company's workstation.
+function kioskWorkstationKey(companyId: number | null | undefined): string | null {
+  return Number.isSafeInteger(companyId) && Number(companyId) > 0
+    ? `kiosk_workstation:company:${companyId}`
+    : null;
+}
+
+export function readKioskWorkstation(companyId: number | null | undefined): number | null {
+  const key = kioskWorkstationKey(companyId);
+  if (!key) return null;
+  try {
+    const value = Number(localStorage.getItem(key));
+    return Number.isSafeInteger(value) && value > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveKioskWorkstation(companyId: number | null | undefined, workCenterId: number): void {
+  const key = kioskWorkstationKey(companyId);
+  if (!key || !Number.isSafeInteger(workCenterId) || workCenterId <= 0) return;
+  try {
+    localStorage.setItem(key, String(workCenterId));
+  } catch {
+    // Selection still works for this visit when browser storage is unavailable.
+  }
+}
+
+export function clearKioskWorkstation(companyId: number | null | undefined): void {
+  const key = kioskWorkstationKey(companyId);
+  if (!key) return;
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // A saved id is always rechecked against the authenticated active list.
+  }
 }
 
 /**

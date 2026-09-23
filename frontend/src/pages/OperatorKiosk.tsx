@@ -1,17 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   ArrowLeftIcon,
-  ExclamationTriangleIcon,
   PlusIcon,
 } from '@heroicons/react/24/outline';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
-import { ActiveJob, KioskQueueWorkCenter, LaserNestInfo, MyActiveJobResponse, ResumeOpenBlocker } from '../types';
+import { useCompany } from '../context/CompanyContext';
+import { ActiveJob, KioskQueueWorkCenter, LaserNestInfo, MyActiveJobResponse, ResumeOpenBlocker, WorkCenter } from '../types';
 import {
+  clearKioskWorkstation,
   getKioskIdleLogoutSeconds,
   getKioskWorkCenterCode,
   getKioskWorkCenterId,
+  readKioskWorkstation,
+  saveKioskWorkstation,
 } from '../utils/kiosk';
 import { formatCentralDateTime, formatCentralTime } from '../utils/centralTime';
 import { useKioskIdleLogout } from '../hooks/useKioskIdleLogout';
@@ -19,6 +22,7 @@ import { usePageTitle } from '../hooks/usePageTitle';
 import { useWakeLock } from '../hooks/useWakeLock';
 import { UnitBadge } from '../components/ui';
 import KioskBadgeLogin from '../components/kiosk/KioskBadgeLogin';
+import KioskWorkstationPicker from '../components/kiosk/KioskWorkstationPicker';
 import KioskNcrFiledScreen from '../components/kiosk/KioskNcrFiledScreen';
 import KioskQueueCard from '../components/kiosk/KioskQueueCard';
 import KioskHeldCard from '../components/kiosk/KioskHeldCard';
@@ -202,10 +206,33 @@ export default function OperatorKiosk() {
   useWakeLock();
 
   const location = useLocation();
+  const navigate = useNavigate();
   const { user, isAuthenticated, isLoading, loginWithEmployeeId, logout } = useAuth();
+  const { currentCompany } = useCompany();
 
-  const workCenterId = getKioskWorkCenterId(location.search);
-  const workCenterCode = getKioskWorkCenterCode(location.search);
+  const isPlatformAdmin = user?.role === 'platform_admin' || user?.is_superuser === true;
+  const companyReady = !isPlatformAdmin || currentCompany != null;
+  const companyId = isPlatformAdmin ? currentCompany?.id : user?.company_id;
+  const sessionKey = isAuthenticated ? `${companyId ?? 'unknown'}:${user?.id}` : 'signed-out';
+  const sessionKeyRef = useRef(sessionKey);
+  sessionKeyRef.current = sessionKey;
+  const urlWorkCenterId = getKioskWorkCenterId(location.search);
+  const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
+  const [workCentersSession, setWorkCentersSession] = useState<string | null>(null);
+  const [workCentersLoading, setWorkCentersLoading] = useState(false);
+  const [workCentersError, setWorkCentersError] = useState<string | null>(null);
+  const [choosingWorkstation, setChoosingWorkstation] = useState(false);
+  const workstationListRequest = useRef(0);
+  // Restore only after the authenticated active list confirms that the saved
+  // workstation still exists. Explicit kiosk links continue to open directly.
+  const rememberedId = useMemo(
+    () => isAuthenticated ? readKioskWorkstation(companyId) : null,
+    [isAuthenticated, companyId, sessionKey]
+  );
+  const availableWorkCenters = workCentersSession === sessionKey ? workCenters : [];
+  const workCenterId = urlWorkCenterId ?? availableWorkCenters.find((center) => center.id === rememberedId)?.id ?? null;
+  const selectedWorkCenter = availableWorkCenters.find((center) => center.id === workCenterId);
+  const workCenterCode = selectedWorkCenter?.code || getKioskWorkCenterCode(location.search);
   const idleLogoutSeconds = getKioskIdleLogoutSeconds(location.search);
 
   const [queue, setQueue] = useState<KioskQueueItem[]>([]);
@@ -216,7 +243,6 @@ export default function OperatorKiosk() {
   const [heldTruncated, setHeldTruncated] = useState(false);
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null);
   const [workCenter, setWorkCenter] = useState<KioskQueueWorkCenter | null>(null);
-  const [workCenterName, setWorkCenterName] = useState<string | null>(null);
   const [online, setOnline] = useState(true);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [view, setView] = useState<KioskView>({ name: 'queue' });
@@ -250,9 +276,72 @@ export default function OperatorKiosk() {
     window.setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), type === 'error' ? 12_000 : 3_000);
   }, []);
 
+  const loadWorkCenters = useCallback(async () => {
+    if (!isAuthenticated || !companyReady) return;
+    const request = ++workstationListRequest.current;
+    setWorkCentersLoading(true);
+    setWorkCentersError(null);
+    try {
+      const centers = await api.getWorkCenters(true);
+      if (sessionKeyRef.current !== sessionKey || workstationListRequest.current !== request) return;
+      const activeCenters = (centers || []).filter((center) => center.is_active !== false);
+      setWorkCenters(activeCenters);
+      setWorkCentersSession(sessionKey);
+      const savedId = readKioskWorkstation(companyId);
+      if (savedId != null && !activeCenters.some((center) => center.id === savedId)) {
+        clearKioskWorkstation(companyId);
+      }
+    } catch (error) {
+      if (sessionKeyRef.current !== sessionKey || workstationListRequest.current !== request) return;
+      setWorkCentersError(kioskErrorMessage(error, 'Could not load workstations. Try again.'));
+    } finally {
+      if (sessionKeyRef.current === sessionKey && workstationListRequest.current === request) {
+        setWorkCentersLoading(false);
+      }
+    }
+  }, [isAuthenticated, companyReady, companyId, sessionKey]);
+
+  useEffect(() => {
+    if (isAuthenticated && companyReady) {
+      void loadWorkCenters();
+    } else {
+      setWorkCenters([]);
+      setWorkCentersSession(null);
+      setWorkCentersError(null);
+      setWorkCentersLoading(false);
+    }
+    return () => { workstationListRequest.current += 1; };
+  }, [isAuthenticated, companyReady, loadWorkCenters]);
+
+  useEffect(() => {
+    if (isAuthenticated && selectedWorkCenter) saveKioskWorkstation(companyId, selectedWorkCenter.id);
+  }, [companyId, isAuthenticated, selectedWorkCenter]);
+
+  // A late response from the previous workstation or badge must not replace
+  // the new workstation's queue or restore the signed-out operator's job.
+  const refreshIdentity = useMemo(() => ({ sessionKey, workCenterId }), [sessionKey, workCenterId]);
+  const refreshIdentityRef = useRef(refreshIdentity);
+  refreshIdentityRef.current = refreshIdentity;
+  const previousSession = useRef(sessionKey);
+  useEffect(() => {
+    setQueue([]);
+    setHeld([]);
+    setHeldTruncated(false);
+    setWorkCenter(null);
+    setInitialLoadDone(false);
+    setView({ name: 'queue' });
+    setChoosingWorkstation(false);
+    setCorrectError(null);
+    if (previousSession.current !== sessionKey) {
+      setActiveJob(null);
+      setSessionNcr(null);
+      previousSession.current = sessionKey;
+    }
+  }, [sessionKey, workCenterId]);
+
   // --- Data refresh (15s poll; WebSocket can come later) -------------------
   const refresh = useCallback(async () => {
-    if (!isAuthenticated || workCenterId == null) return;
+    if (!isAuthenticated || !companyReady || workCenterId == null) return;
     try {
       // Explicit envelope types — the api client returns `any` here, and this
       // is the seam the backend B1–B8 payload blocks ride in on.
@@ -260,6 +349,7 @@ export default function OperatorKiosk() {
         api.getWorkCenterQueue(workCenterId),
         api.getMyActiveJob(),
       ]);
+      if (refreshIdentityRef.current !== refreshIdentity) return;
       setQueue(queueRes.queue || []);
       setHeld(queueRes.held || []);
       setHeldTruncated(Boolean(queueRes.held_truncated));
@@ -271,37 +361,20 @@ export default function OperatorKiosk() {
       if (Number.isFinite(serverMs)) setServerSkewMs(serverMs - Date.now());
       setOnline(true);
     } catch {
+      if (refreshIdentityRef.current !== refreshIdentity) return;
       // Transient failure: keep last-known data and all form state; show OFFLINE.
       setOnline(false);
     } finally {
-      setInitialLoadDone(true);
+      if (refreshIdentityRef.current === refreshIdentity) setInitialLoadDone(true);
     }
-  }, [isAuthenticated, workCenterId]);
+  }, [isAuthenticated, companyReady, workCenterId, refreshIdentity]);
 
   useEffect(() => {
-    if (!isAuthenticated || workCenterId == null) return undefined;
+    if (!isAuthenticated || !companyReady || workCenterId == null) return undefined;
     void refresh();
     const interval = window.setInterval(() => void refresh(), POLL_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [isAuthenticated, workCenterId, refresh]);
-
-  // Resolve the station's display name once per login (best effort, fallback
-  // when the queue payload predates the work_center block).
-  useEffect(() => {
-    if (!isAuthenticated || workCenterId == null) return;
-    let cancelled = false;
-    api
-      .getWorkCenters()
-      .then((centers) => {
-        if (cancelled) return;
-        const match = (centers || []).find((wc) => wc.id === workCenterId);
-        if (match) setWorkCenterName(`${match.code} · ${match.name}`);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [isAuthenticated, workCenterId]);
+  }, [isAuthenticated, companyReady, workCenterId, refresh]);
 
   // 1s ticker — drives the top-bar clock and the cycle timer.
   useEffect(() => {
@@ -579,7 +652,7 @@ export default function OperatorKiosk() {
   // a dead connection silently drops the record, so we hard-disable the buttons
   // rather than letting the tap no-op. The offline banner (id below) carries the
   // human-readable reason and is referenced via aria-describedby.
-  const mutationsBlocked = busy || !online;
+  const mutationsBlocked = busy || !online || !initialLoadDone;
   const OFFLINE_HINT_ID = 'kiosk-offline-hint';
 
   // --- Mutations (all send source:"kiosk") ----------------------------------
@@ -872,11 +945,6 @@ export default function OperatorKiosk() {
   );
 
   // --- Station identity guards ----------------------------------------------
-  const stationLabel = useMemo(
-    () => workCenterName || workCenterCode || (workCenterId != null ? `Work center #${workCenterId}` : 'Station'),
-    [workCenterName, workCenterCode, workCenterId]
-  );
-
   const machineCode = workCenter?.code || workCenterCode || (workCenterId != null ? `WC ${workCenterId}` : 'Station');
   const machineDetail = [workCenter?.name, workCenter?.description].filter(Boolean).join(' · ');
 
@@ -895,22 +963,23 @@ export default function OperatorKiosk() {
     .trim()
     .toUpperCase();
 
-  if (workCenterId == null) {
-    return (
-      <div className="fd-scope-kiosk flex min-h-screen flex-col items-center justify-center bg-fd-canvas px-6 text-center">
-        <ExclamationTriangleIcon className="h-16 w-16 text-fd-amber" />
-        <h1 className="mt-4 text-3xl font-bold text-fd-ink">Station not configured</h1>
-        <p className="mt-3 max-w-xl text-lg text-fd-body">
-          Open this kiosk with a station URL, e.g.{' '}
-          <code className="rounded bg-fd-sunken px-2 py-1 font-mono text-fd-cyan">
-            /kiosk?kiosk=1&amp;work_center_id=12&amp;work_center_code=LASER1
-          </code>
-        </p>
-      </div>
-    );
-  }
+  const canChangeWorkstation = view.name === 'queue' && !busy && initialLoadDone &&
+    oneTap.unbanked === 0 && !reportRequest.unconfirmed && !writeOff && !dismissing;
 
-  if (isLoading) {
+  const selectWorkstation = (id: number) => {
+    if (workCenterId != null && !canChangeWorkstation) return;
+    const center = availableWorkCenters.find((option) => option.id === id);
+    if (!center) return;
+    saveKioskWorkstation(companyId, center.id);
+    setChoosingWorkstation(false);
+    if (center.id === workCenterId) return;
+    const search = new URLSearchParams(location.search);
+    search.set('work_center_id', String(center.id));
+    search.set('work_center_code', center.code);
+    navigate({ pathname: location.pathname, search: `?${search.toString()}`, hash: location.hash }, { replace: true });
+  };
+
+  if (isLoading || (isAuthenticated && !companyReady)) {
     return (
       <div className="fd-scope-kiosk flex min-h-screen items-center justify-center bg-fd-canvas">
         <p className="font-mono text-xl uppercase tracking-[0.14em] text-fd-mute">Starting kiosk…</p>
@@ -919,7 +988,23 @@ export default function OperatorKiosk() {
   }
 
   if (!isAuthenticated) {
-    return <KioskBadgeLogin stationLabel={workCenterCode || stationLabel} onLogin={loginWithEmployeeId} />;
+    return <KioskBadgeLogin stationLabel={urlWorkCenterId != null ? getKioskWorkCenterCode(location.search) || `Work center #${urlWorkCenterId}` : 'Operator kiosk'} onLogin={loginWithEmployeeId} />;
+  }
+
+  if (workCenterId == null || choosingWorkstation) {
+    return (
+      <div className="fd-scope-kiosk min-h-screen bg-fd-canvas">
+        <KioskWorkstationPicker
+          workCenters={availableWorkCenters}
+          selectedId={workCenterId}
+          loading={workCentersLoading}
+          error={workCentersError}
+          onSelect={selectWorkstation}
+          onRetry={() => void loadWorkCenters()}
+          onCancel={workCenterId != null ? () => setChoosingWorkstation(false) : undefined}
+        />
+      </div>
+    );
   }
 
   const overlayOpen =
@@ -971,7 +1056,7 @@ export default function OperatorKiosk() {
       {/* Top bar — all signed-in views except the doc viewer (which brings its own) */}
       {showChrome && (
         <header
-          className={`sticky top-0 z-30 flex h-14 shrink-0 items-center gap-3 border-b border-fd-line bg-fd-panel px-4 transition-opacity duration-150 min-[1100px]:h-[60px] min-[1100px]:px-6 ${
+          className={`sticky top-0 z-30 flex min-h-14 shrink-0 flex-wrap items-center gap-3 border-b border-fd-line bg-fd-panel px-4 py-2 transition-opacity duration-150 min-[1100px]:min-h-[60px] min-[1100px]:flex-nowrap min-[1100px]:px-6 min-[1100px]:py-0 ${
             overlayOpen ? 'opacity-35' : ''
           }`}
         >
@@ -982,6 +1067,17 @@ export default function OperatorKiosk() {
             <span className="hidden max-w-56 truncate font-mono text-[11px] uppercase tracking-[0.08em] text-fd-mute sm:block">
               {machineDetail}
             </span>
+          )}
+          {view.name === 'queue' && (
+            <button
+              type="button"
+              onClick={() => { if (canChangeWorkstation) { setChoosingWorkstation(true); void loadWorkCenters(); } }}
+              disabled={!canChangeWorkstation}
+              title={!canChangeWorkstation ? 'Finish or confirm pending production before changing workstations.' : undefined}
+              className="inline-flex min-h-11 items-center rounded-[3px] border border-fd-line px-3 font-mono text-xs font-semibold text-fd-body disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Change workstation
+            </button>
           )}
           <span
             data-testid="kiosk-connection"

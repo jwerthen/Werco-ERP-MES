@@ -247,8 +247,8 @@ function KioskGuard({ children }: { children: React.ReactNode }) {
 
 /**
  * /kiosk mode dispatcher: ?station=<id> selects the crew-station kiosk
- * (shared-PIN station auth, multi-operator roster); ?work_center_id=N keeps
- * the existing single-operator badge-login kiosk unchanged.
+ * (shared-PIN station auth, multi-operator roster). Otherwise the operator
+ * signs in and chooses a workstation; existing work-center links still work.
  */
 function KioskRouteDispatcher() {
   const location = useLocation();
