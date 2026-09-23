@@ -171,7 +171,7 @@ function renderIntake(props: Partial<React.ComponentProps<typeof HankDocumentInt
   };
 }
 function choosePDFs(files = [new File(['%PDF-1.7'], 'source.pdf', { type: 'application/pdf' })]) {
-  fireEvent.change(screen.getByLabelText('PDFs to review'), { target: { files } });
+  fireEvent.change(screen.getByLabelText('Documents to review'), { target: { files } });
   return files;
 }
 async function openReview(file = reviewedFile) {
@@ -228,7 +228,7 @@ describe('Hank document intake', () => {
     const files = choosePDFs();
     fireEvent.click(screen.getByRole('button', { name: 'Upload for review' }));
     await screen.findByText(/Upload was not confirmed/);
-    expect(screen.getByLabelText('PDFs to review')).toBeDisabled();
+    expect(screen.getByLabelText('Documents to review')).toBeDisabled();
     expect(onBusyChange).toHaveBeenLastCalledWith(true);
     expect(mockedApi.createHankIntake).toHaveBeenCalledTimes(1);
     const first = mockedApi.createHankIntake.mock.calls[0][0];
@@ -237,7 +237,7 @@ describe('Hank document intake', () => {
       ['request_key', UUID],
       ['files', files[0]],
     ]);
-    fireEvent.click(screen.getByRole('button', { name: 'Retry same PDF batch' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry same document batch' }));
     await screen.findByRole('button', { name: /material-cert.pdf/ });
     expect(Array.from(mockedApi.createHankIntake.mock.calls[1][0].entries())).toEqual(Array.from(first.entries()));
     expect(crypto.randomUUID).toHaveBeenCalledTimes(1);
@@ -256,7 +256,7 @@ describe('Hank document intake', () => {
     choosePDFs();
     fireEvent.click(screen.getByRole('button', { name: 'Upload for review' }));
     await screen.findByText(/The PDF is encrypted/);
-    expect(screen.getByLabelText('PDFs to review')).toBeEnabled();
+    expect(screen.getByLabelText('Documents to review')).toBeEnabled();
     const replacement = new File(['%PDF-new'], 'corrected.pdf', { type: 'application/pdf' });
     choosePDFs([replacement]);
     fireEvent.click(screen.getByRole('button', { name: 'Upload for review' }));
@@ -280,7 +280,7 @@ describe('Hank document intake', () => {
         return file;
       });
       choosePDFs(files);
-      expect(screen.getByRole('alert')).toHaveTextContent('Choose up to 5 PDFs');
+      expect(screen.getByRole('alert')).toHaveTextContent('Choose up to 5 non-empty PDF, DOCX, XLSX, or XLS files');
       expect(screen.getByRole('button', { name: 'Upload for review' })).toBeDisabled();
       expect(mockedApi.createHankIntake).not.toHaveBeenCalled();
     }
@@ -481,7 +481,7 @@ describe('Hank document intake', () => {
     else setSession(4, true);
     const list = renderIntake();
     await screen.findByText('No saved intake batches yet.');
-    expect(screen.queryByLabelText('PDFs to review')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Documents to review')).not.toBeInTheDocument();
     list.unmount();
     await openReview(plannedFile);
     expect(screen.getByRole('button', { name: 'File draft document' })).toBeDisabled();
@@ -507,4 +507,29 @@ it.each(['queued', 'analyzing', 'failed', 'cancelled'] as const)('does not attac
   renderIntake({ initialId: reviewedFile.id, onUseInChat: jest.fn() });
   await screen.findByRole('button', { name: 'Refresh file' });
   expect(screen.queryByRole('button', { name: 'Use in chat' })).not.toBeInTheDocument();
+});
+
+it.each(['docx', 'xlsx', 'xls'])(
+  'uploads a %s document through the same analyzed intake with the exact source bytes',
+  async extension => {
+    renderIntake();
+    await screen.findByText('No saved intake batches yet.');
+    const source = new File(['Office source bytes'], `purchase-order.${extension}`, {
+      type: 'application/octet-stream',
+    });
+    fireEvent.change(screen.getByLabelText('Documents to review'), { target: { files: [source] } });
+    fireEvent.click(screen.getByRole('button', { name: 'Upload for review' }));
+    await waitFor(() => expect(mockedApi.createHankIntake).toHaveBeenCalledTimes(1));
+    expect(mockedApi.createHankIntake.mock.calls[0][0].getAll('files')).toEqual([source]);
+  }
+);
+it('rejects a legacy .doc file and an empty Office file before uploading', async () => {
+  renderIntake();
+  await screen.findByText('No saved intake batches yet.');
+  for (const source of [new File(['legacy word'], 'old.doc'), new File([], 'empty.xlsx')]) {
+    fireEvent.change(screen.getByLabelText('Documents to review'), { target: { files: [source] } });
+    expect(screen.getByRole('button', { name: 'Upload for review' })).toBeDisabled();
+    expect(screen.getByRole('alert')).toHaveTextContent('non-empty PDF, DOCX, XLSX, or XLS');
+  }
+  expect(mockedApi.createHankIntake).not.toHaveBeenCalled();
 });

@@ -198,7 +198,12 @@ existing Hank-only cron selection unchanged; this job needs no cron, and
 must use the same durable storage and Redis. Existing Anthropic configuration and
 the company AI-egress gate control extraction; no new secret or environment
 variable is introduced. Worker timeout remains 600 seconds; each intake model
-call is limited to 90 seconds with no SDK retries, after bounded PDF parsing.
+call is limited to 90 seconds with no SDK retries, after bounded source parsing.
+Word/Excel intake and reviewed PO import reuse these tables and the existing
+document libraries; no migration, secret or cron change is needed. Deploy matching
+API, worker and frontend versions for PDF/DOCX/XLSX/XLS format metadata, native
+source previews and source-bound purchase-order tasks. Native Office parsing has
+a 20-second subprocess timeout; macros and encrypted files are unsupported.
 
 Verify a controlled PDF upload appears in the private queue, analysis reaches
 review, source pages load, and explicit filing produces one recoverable receipt.

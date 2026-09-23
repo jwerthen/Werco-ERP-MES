@@ -594,7 +594,9 @@ export function HankTaskWorkflow({
                   disabled={busy || uncertain || stale}
                   onClick={() => void run('execute')}
                 >
-                  {task.kind !== 'watch_work_order' && ACTIONS[task.kind].execute}
+                  {task.kind === 'draft_purchase_order' && task.input.ready_for_receiving
+                    ? 'Create purchase order and add to Receiving'
+                    : task.kind !== 'watch_work_order' && ACTIONS[task.kind].execute}
                 </LoadingButton>
                 <LoadingButton
                   type="button"

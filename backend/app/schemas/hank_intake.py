@@ -1,7 +1,7 @@
 """Bounded extraction suggestions and explicit employee-reviewed filing contracts."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -10,6 +10,8 @@ from app.schemas.base import UTCModel
 
 IntakeKind = Literal['purchase_order', 'vendor_quote', 'packing_slip', 'material_certificate', 'drawing', 'other']
 IntakeStatus = Literal['queued', 'analyzing', 'awaiting_review', 'planned', 'completed', 'failed', 'cancelled']
+IntakeSourceFormat = Literal['pdf', 'docx', 'xlsx', 'xls']
+IntakeSourceLabel = Annotated[str, Field(min_length=1, max_length=200)]
 FieldName = Literal[
     'document_number',
     'vendor_name',
@@ -38,6 +40,7 @@ class StrictModel(BaseModel):
 class IntakeEvidence(StrictModel):
     page: int = Field(ge=1, le=25)
     excerpt: str = Field(min_length=1, max_length=400)
+    locator: str | None = Field(default=None, max_length=200)
 
 
 class IntakeField(StrictModel):
@@ -67,6 +70,12 @@ class IntakeExtraction(StrictModel):
     fields: list[IntakeField] = Field(default_factory=list, max_length=30)
     lines: list[IntakeLine] = Field(default_factory=list, max_length=50)
     warnings: list[str] = Field(default_factory=list, max_length=10)
+    source_format: IntakeSourceFormat = 'pdf'
+    source_labels: list[IntakeSourceLabel] = Field(default_factory=list, max_length=25)
+    has_more_lines: bool = Field(
+        default=False,
+        description='True if the source has more than 50 relevant lines or any relevant line could not be represented.',
+    )
 
 
 class IntakeMatch(StrictModel):
@@ -139,6 +148,8 @@ class IntakeFileResponse(UTCModel):
     file_size: int
     content_sha256: str
     page_count: int | None
+    source_format: IntakeSourceFormat = 'pdf'
+    source_labels: list[IntakeSourceLabel] = Field(default_factory=list, max_length=25)
     status: IntakeStatus
     version: int
     source_url: str
@@ -163,6 +174,13 @@ class IntakeBatchList(StrictModel):
     batches: list[IntakeBatchResponse]
     has_more: bool
     next_before_id: int | None
+
+
+class IntakeSourcePreview(StrictModel):
+    format: IntakeSourceFormat
+    units: list[Annotated[str, Field(max_length=16000)]] = Field(min_length=1, max_length=25)
+    labels: list[IntakeSourceLabel] = Field(min_length=1, max_length=25)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class IntakeReceivingPurchaseOrder(StrictModel):

@@ -50,7 +50,7 @@ function panel() {
   );
 }
 function attach(id = 1) {
-  fireEvent.click(screen.getByRole('button', { name: 'Upload PDFs' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Upload documents' }));
   fireEvent.click(screen.getByRole('button', { name: `Use delivery ${id}` }));
 }
 async function send() {
@@ -68,7 +68,7 @@ beforeEach(() => {
 it('attaches explicit source IDs, retains them across turns, and removes them from later requests', async () => {
   panel();
   attach();
-  expect(screen.getByLabelText('PDFs attached to chat')).toHaveTextContent('delivery-1.pdf');
+  expect(screen.getByLabelText('Documents attached to chat')).toHaveTextContent('delivery-1.pdf');
   await send();
   expect(mocked.copilotChatStream.mock.calls[0][0]).toEqual({
     messages: [{ role: 'user', content: 'Check the materials received.' }],
@@ -99,11 +99,11 @@ it('deduplicates attachments, enforces the five-PDF limit, and clears them with 
   attach();
   for (const id of [2, 3, 4, 5]) attach(id);
   attach(6);
-  expect(screen.getByRole('alert')).toHaveTextContent('up to 5 PDFs');
+  expect(screen.getByRole('alert')).toHaveTextContent('up to 5 documents');
   fireEvent.click(screen.getByRole('button', { name: 'Back to chat' }));
   expect(screen.getAllByRole('button', { name: /Remove delivery/ })).toHaveLength(5);
   fireEvent.click(screen.getByRole('button', { name: 'Clear conversation' }));
-  expect(screen.queryByLabelText('PDFs attached to chat')).not.toBeInTheDocument();
+  expect(screen.queryByLabelText('Documents attached to chat')).not.toBeInTheDocument();
   await send();
   expect(mocked.copilotChatStream.mock.calls[0][0].intake_file_ids).toBeUndefined();
 });

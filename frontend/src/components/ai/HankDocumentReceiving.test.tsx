@@ -104,13 +104,13 @@ it('shows source evidence and uncertain matches, then loads suggestions for the 
   expect(await screen.findByText('Source 51 version 3 for PO 11')).toBeInTheDocument();
   expect(mocked.getHankIntakeReceivingDraft).toHaveBeenLastCalledWith(51, 11, expect.any(AbortSignal));
   fireEvent.click(screen.getByRole('button', { name: 'Start proposal' }));
-  expect(screen.getByLabelText(/Purchase order for this PDF/)).toBeDisabled();
+  expect(screen.getByLabelText(/Purchase order for this document/)).toBeDisabled();
   expect(onBusyChange).toHaveBeenLastCalledWith(true);
 });
 it('does not show evidence returned for another company', async () => {
   mocked.getHankIntakeReceivingDraft.mockResolvedValue({ ...draft, company_id: 9 });
   render(<HankDocumentReceiving file={file} onNavigate={jest.fn()} />);
-  await waitFor(() => expect(screen.queryByText('Matching the PDF to receiving lines…')).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByText('Matching the document to receiving lines…')).not.toBeInTheDocument());
   expect(screen.queryByText('Page 2: BAR 12 EA')).not.toBeInTheDocument();
 });
 it('aborts and ignores a late document response after the company changes', async () => {

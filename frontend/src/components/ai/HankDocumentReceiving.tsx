@@ -6,6 +6,7 @@ import { FormField } from '../ui/FormField';
 import { HankPurchaseOrderPicker } from './HankPurchaseOrderPicker';
 import { HankOperationalTask } from './HankOperationalTask';
 import { HankSourceFile } from './HankSourceFile';
+import { hankEvidenceLabel } from './hankDocumentEvidence';
 import { useHankSessionGuard } from './useHankSessionGuard';
 
 /** ERP writes remain in the reviewed task workflow. */
@@ -59,7 +60,7 @@ export function HankDocumentReceiving({
       </p>
     );
   return (
-    <section aria-label="Receive materials from PDF" className="space-y-4">
+    <section aria-label="Receive materials from document" className="space-y-4">
       <h3 className="text-sm font-semibold text-fd-ink">Receive materials from {file.filename}</h3>
       <p className="text-xs text-fd-mute">
         Check the source, purchase order, units, quantities, and lot or heat numbers. Only confirmed receipt lines will
@@ -69,8 +70,9 @@ export function HankDocumentReceiving({
         filename={file.filename}
         pages={draft?.lines.flatMap(line => line.evidence.map(item => item.page)) || []}
         load={signal => api.getHankIntakeSource(file.id, signal)}
+        loadPreview={signal => api.getHankIntakeSourcePreview(file.id, signal)}
       />
-      <FormField label="Purchase order for this PDF" required>
+      <FormField label="Purchase order for this document" required>
         {field => (
           <HankPurchaseOrderPicker
             {...field}
@@ -105,7 +107,7 @@ export function HankDocumentReceiving({
       </button>
       {loading && (
         <p role="status" className="text-xs text-fd-mute">
-          Matching the PDF to receiving lines…
+          Matching the document to receiving lines…
         </p>
       )}
       {error && (
@@ -125,7 +127,7 @@ export function HankDocumentReceiving({
           ))}
           {draft.has_duplicates && (
             <p className="text-xs text-fd-amber">
-              This PDF matches a previous upload. Check prior receipts before proceeding.
+              This document matches a previous upload. Check prior receipts before proceeding.
             </p>
           )}
           <details open>
@@ -165,7 +167,7 @@ export function HankDocumentReceiving({
                   ))}
                   {line.evidence.map((item, index) => (
                     <p key={index} className="text-fd-mute">
-                      Page {item.page}: {item.excerpt}
+                      {hankEvidenceLabel(file, item)}: {item.excerpt}
                     </p>
                   ))}
                 </div>

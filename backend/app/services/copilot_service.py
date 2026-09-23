@@ -48,7 +48,12 @@ from app.models.work_order_blocker import WorkOrderBlockerStatus
 from app.schemas.ai_learning import AIEventType, AIInteractionEventCreate
 from app.services.ai_context_service import AIContextService
 from app.services.ai_learning_service import AILearningService
-from app.services.hank_chat_documents import attachment_manifest, document_evidence, receiving_document
+from app.services.hank_chat_documents import (
+    attachment_manifest,
+    document_evidence,
+    purchase_order_document,
+    receiving_document,
+)
 from app.services.hank_copilot_tools import (
     TASK_INPUT_SCHEMA,
     action_context,
@@ -555,7 +560,9 @@ TOOL_REGISTRY: List[CopilotToolSpec] = [
             'Only when explicitly asked, save a task for employee review. NEVER executes it. '
             'repeat_job requires source_work_order_id, quantity_ordered, optional due_date; '
             'draft_purchase_order requires vendor_id and lines with part_id, quantity_ordered, unit_price, '
-            'optional required_date; attach_document requires document_id and work_order_id. '
+            'optional required_date. For an uploaded PO, preserve source_intake_file_id/version, printed po_number '
+            'and all lines; ready_for_receiving adds the reviewed PO to Receiving without posting a receipt. '
+            'attach_document requires document_id and work_order_id. '
             'receive_delivery requires exact PO lines, received quantities and explicit per-line inspection choice. '
             'report_production requires active operation, explicit good/scrap deltas and optional reviewed hold; '
             'draft_shipment requires work order, quantity and shipping details, never purchases postage or issues a CoC. '
@@ -588,7 +595,7 @@ TOOL_REGISTRY: List[CopilotToolSpec] = [
     ),
     CopilotToolSpec(
         name='hank_document_evidence',
-        description='Read saved extraction from an owned Hank PDF, including source page evidence and uncertainty. Read fields for header identifiers or lines for material items. Follow next_offset to read more; never infer missing lines or approvals.',
+        description='Read saved extraction from an owned Hank PDF, Word or Excel document, including source evidence and uncertainty. Read fields for header identifiers or lines for material items. Follow next_offset to read more; never infer missing lines or approvals.',
         input_schema={
             'type': 'object',
             'properties': {
@@ -604,7 +611,7 @@ TOOL_REGISTRY: List[CopilotToolSpec] = [
     ),
     CopilotToolSpec(
         name='hank_receiving_document',
-        description='Match an owned, analyzed delivery PDF to current receiving PO lines, quantities and units. Follow next_offset to read more lines. Returns unresolved matches, source identity and warnings for employee review; does not post receipts. Never guess inspection choices. Use the PDF review link to review and receive materials.',
+        description='Match an owned, analyzed delivery document to current receiving PO lines, quantities and units. Follow next_offset to read more lines. Returns unresolved matches, source identity and warnings for employee review; does not post receipts. Never guess inspection choices. Use the document review link to review and receive materials.',
         input_schema={
             'type': 'object',
             'properties': {
@@ -617,6 +624,21 @@ TOOL_REGISTRY: List[CopilotToolSpec] = [
             'additionalProperties': False,
         },
         handler=receiving_document,
+    ),
+    CopilotToolSpec(
+        name='hank_purchase_order_document',
+        description='Match an owned, analyzed purchase-order document to current vendors and parts for a reviewed PO import. Returns printed PO number, quantities, prices, source identity and unresolved or duplicate warnings. Follow next_offset for every line; never omit unread lines. Creates no PO or receipt. The document review link offers Create purchase order and Add to receiving.',
+        input_schema={
+            'type': 'object',
+            'properties': {
+                'file_id': {'type': 'integer', 'minimum': 1},
+                'offset': {'type': 'integer', 'minimum': 0, 'maximum': 50},
+                'limit': {'type': 'integer', 'minimum': 1, 'maximum': 5},
+            },
+            'required': ['file_id'],
+            'additionalProperties': False,
+        },
+        handler=purchase_order_document,
     ),
     CopilotToolSpec(
         name='hank_action_context',
@@ -862,7 +884,11 @@ class CopilotService:
 
         declared = set((spec.input_schema.get("properties") or {}).keys())
         safe_input = {k: v for k, v in (tool_input or {}).items() if k in declared}
-        if name == 'prepare_hank_task' and safe_input.get('kind') == 'receive_delivery' and self.document_versions:
+        if (
+            name == 'prepare_hank_task'
+            and safe_input.get('kind') in ('receive_delivery', 'draft_purchase_order')
+            and self.document_versions
+        ):
             payload = safe_input.get('input')
             file_id = payload.get('source_intake_file_id') if isinstance(payload, dict) else None
             version = payload.get('source_intake_version') if isinstance(payload, dict) else None
@@ -870,9 +896,9 @@ class CopilotService:
                 return ToolExecution(
                     tool=name,
                     payload={
-                        'error': 'Include the exact source_intake_file_id and source_intake_version from the reviewed PDF evidence before preparing this receipt.'
+                        'error': 'Include the exact source_intake_file_id and source_intake_version from the reviewed document evidence before preparing this task.'
                     },
-                    summary='receipt proposal needs its PDF source',
+                    summary='proposal needs its document source',
                     is_error=True,
                 )
         try:
@@ -885,7 +911,11 @@ class CopilotService:
                 summary=f"{name} failed",
                 is_error=True,
             )
-        if name in ('hank_document_evidence', 'hank_receiving_document') and not result.get('is_error'):
+        if name in (
+            'hank_document_evidence',
+            'hank_receiving_document',
+            'hank_purchase_order_document',
+        ) and not result.get('is_error'):
             data = result['data']
             self.document_versions[data['file_id']] = data.get('version', data.get('file_version'))
         return ToolExecution(
@@ -922,9 +952,9 @@ class CopilotService:
             blocks.append(
                 {
                     'type': 'text',
-                    'text': '<attached_pdf_evidence>'
+                    'text': '<attached_document_evidence>'
                     + json.dumps(self.document_manifest, sort_keys=True)
-                    + '</attached_pdf_evidence>',
+                    + '</attached_document_evidence>',
                 }
             )
         if context_hint:
@@ -1040,7 +1070,11 @@ class CopilotService:
                         references.append(ref)
                 yield {"type": "tool_use", "tool": execution.tool, "summary": execution.summary}
                 content = json.dumps(execution.payload, default=str)
-                if execution.tool in ('hank_document_evidence', 'hank_receiving_document'):
+                if execution.tool in (
+                    'hank_document_evidence',
+                    'hank_receiving_document',
+                    'hank_purchase_order_document',
+                ):
                     # These tools already bound their structured evidence. Keep complete
                     # JSON and source IDs; truncating a receipt line can change its meaning.
                     pass

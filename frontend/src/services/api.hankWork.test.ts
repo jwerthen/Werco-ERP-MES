@@ -67,6 +67,16 @@ describe('operational evidence and saved-work reads', () => {
     expect(mockPost).not.toHaveBeenCalled();
   });
 
+  it('reads Office source text and PO import suggestions through the authenticated cancellable client', async () => {
+    await api.getHankIntakeSourcePreview(42, signal);
+    await api.getHankIntakePurchaseOrderDraft(42, signal);
+    expect(mockGet.mock.calls).toEqual([
+      ['/hank/intake/files/42/source-preview', { signal }],
+      ['/hank/intake/files/42/purchase-order-draft', { signal }],
+    ]);
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
   it('encodes lot/serial values instead of treating their punctuation as a URL', async () => {
     await api.getHankTrace('lot', 'LOT/26 #A?heat=7', signal);
     expect(mockGet).toHaveBeenCalledWith('/hank/trace/lot/LOT%2F26%20%23A%3Fheat%3D7', { signal });

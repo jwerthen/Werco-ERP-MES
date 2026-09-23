@@ -377,7 +377,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
     )
       return;
     if (!intakeFiles.some(item => item.id === file.id) && intakeFiles.length >= 5) {
-      setAttachmentError('Remove a PDF from chat before adding another. You can use up to 5 PDFs at a time.');
+      setAttachmentError('Remove a document from chat before adding another. You can use up to 5 documents at a time.');
       return;
     }
     setIntakeFiles(previous =>
@@ -488,7 +488,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
           <p className="text-xs text-fd-mute">
             Check your shift, manage tasks, and prepare work.
             {canUpload
-              ? ' Upload PDFs to ask questions or prepare receiving.'
+              ? ' Upload PDF, Word, or Excel files to ask questions, create purchase orders, or prepare receiving.'
               : ' Ask Hank for the records behind each answer.'}
           </p>
           {canUpload && (
@@ -504,7 +504,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
               style={{ border: '1px solid var(--fd-line-bright)' }}
             >
               <ArrowUpTrayIcon className="h-4 w-4 text-fd-amber" />
-              Upload PDFs
+              Upload documents
             </button>
           )}
         </div>
@@ -607,7 +607,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
                 I’m Hank, named after the shop’s yellow Lab. I can help you find a job, check blockers, or look up
                 stock.
                 {canUpload &&
-                  ' Upload a PDF, review the extracted information, then use it in chat or receive materials.'}
+                  ' Upload a PDF, Word, or Excel file, review the extracted information, then use it in chat, create a purchase order, or receive materials.'}
               </p>
               <div className="space-y-1.5">
                 {suggestions.map(suggestion => (
@@ -645,7 +645,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
                       {entry.content}
                       {!!entry.intakeFiles?.length && (
                         <p className="mt-1 text-[11px] text-fd-mute">
-                          PDFs: {entry.intakeFiles.map(file => file.filename).join(', ')}
+                          Documents: {entry.intakeFiles.map(file => file.filename).join(', ')}
                         </p>
                       )}
                     </div>
@@ -729,8 +729,8 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
         {!uploadOpen && view === 'chat' && (
           <div className="flex-shrink-0 p-3" style={{ borderTop: '1px solid var(--fd-line)' }}>
             {!!intakeFiles.length && (
-              <div aria-label="PDFs attached to chat" className="mb-2 space-y-1">
-                <p className="text-[11px] text-fd-mute">Hank will use these PDFs until you remove them.</p>
+              <div aria-label="Documents attached to chat" className="mb-2 space-y-1">
+                <p className="text-[11px] text-fd-mute">Hank will use these documents until you remove them.</p>
                 <div className="flex flex-wrap gap-2">
                   {intakeFiles.map(file => (
                     <span

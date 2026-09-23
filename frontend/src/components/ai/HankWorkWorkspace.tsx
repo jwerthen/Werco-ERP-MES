@@ -28,7 +28,7 @@ export type HankWorkArea =
   | 'handoff'
   | 'routine';
 const AREAS: Array<{ id: HankWorkArea; title: string; description: string }> = [
-  { id: 'intake', title: 'Review PDFs', description: 'Extract, verify, and file documents.' },
+  { id: 'intake', title: 'Review documents', description: 'Extract, verify, and file documents.' },
   { id: 'readiness', title: 'Check job readiness', description: 'Find blockers and the records behind them.' },
   { id: 'receiving', title: 'Receive a delivery', description: 'Review quantities, lots, and inspection holds.' },
   { id: 'production', title: 'Report work', description: 'Report quantities and add a hold if needed.' },

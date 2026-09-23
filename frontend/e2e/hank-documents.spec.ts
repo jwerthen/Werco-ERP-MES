@@ -192,15 +192,15 @@ for (const viewport of [
           updated_at: file.updated_at,
           completed_at: null,
         };
-      } else if (/\/(parts|vendors|work-orders)$/.test(endpoint)) json = [];
+      } else if (/\/(parts|vendors|work-orders)\/?$/.test(endpoint)) json = [];
       return route.fulfill({ json });
     });
     await page.goto('/settings');
     await page.getByRole('button', { name: 'Toggle Hank' }).click();
     const panel = page.getByRole('dialog', { name: 'Hank', exact: true });
-    await panel.getByRole('button', { name: 'Upload PDFs' }).click();
+    await panel.getByRole('button', { name: 'Upload documents' }).click();
     await panel
-      .getByLabel('PDFs to review')
+      .getByLabel('Documents to review')
       .setInputFiles({ name: file.filename, mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4\n%%EOF') });
     await panel.getByRole('button', { name: 'Upload for review' }).click();
     await panel.getByRole('button', { name: /material-delivery.pdf · awaiting review/ }).click();
@@ -210,7 +210,7 @@ for (const viewport of [
     await expect(panel.getByRole('link', { name: 'Open material-delivery.pdf' })).toHaveAttribute('href', /^blob:/);
     await expect(panel.getByRole('link', { name: 'Page 1', exact: true })).toHaveAttribute('href', /#page=1$/);
     await panel.getByRole('button', { name: 'Use in chat' }).click();
-    await expect(panel.getByLabel('PDFs attached to chat')).toContainText(file.filename);
+    await expect(panel.getByLabel('Documents attached to chat')).toContainText(file.filename);
     const outDir = path.resolve('.browser-harness/hank');
     await mkdir(outDir, { recursive: true });
     await panel.screenshot({ path: path.join(outDir, `chat-${viewport.name}.png`) });
@@ -220,7 +220,7 @@ for (const viewport of [
     expect(requests.find(request => request.url === '/copilot/chat')?.data).toMatchObject({
       intake_file_ids: [51],
     });
-    await panel.getByRole('button', { name: 'Upload PDFs' }).click();
+    await panel.getByRole('button', { name: 'Upload documents' }).click();
     await panel.getByRole('button', { name: /material-delivery.pdf · awaiting review/ }).click();
     await panel.getByRole('button', { name: 'Receive materials' }).click();
     await expect(panel.getByRole('heading', { name: 'Receive materials from material-delivery.pdf' })).toBeVisible();
