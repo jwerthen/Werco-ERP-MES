@@ -1,6 +1,8 @@
 """Unit tests for the shared Anthropic client wrapper (no live API calls)."""
 
+import json
 import logging
+from copy import deepcopy
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -195,6 +197,67 @@ class TestRunLLMTask:
         run_llm_task(ctx, messages=[{"role": "user", "content": "q"}], system=system_blocks, company_id=1)
         sent = fake_client.messages.calls[0]
         assert sent["system"] == system_blocks
+
+    def test_automatic_conversation_cache_is_opt_in(self, ctx, fake_client, recording_session):
+        run_llm_task(ctx, messages=[{"role": "user", "content": "q"}], company_id=1)
+        assert "extra_body" not in fake_client.messages.calls[0]
+
+    def test_conversation_cache_reaches_pinned_sdk_wire_without_changing_blocks(
+        self, ctx, recording_session, monkeypatch
+    ):
+        """Exercise real SDK serialization so an SDK-incompatible flag cannot break Hank."""
+        import anthropic
+        import httpx
+
+        sent = []
+
+        def respond(request):
+            sent.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_cache_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-6",
+                    "content": [{"type": "text", "text": "Ready to review."}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 4,
+                        "cache_creation_input_tokens": 100,
+                        "cache_read_input_tokens": 2000,
+                    },
+                },
+            )
+
+        messages = [
+            {"role": "user", "content": "Read the delivery."},
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "tool_1", "name": "lookup", "input": {}}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "tool_1", "content": "Received 4 units."}],
+            },
+        ]
+        system = [{"type": "text", "text": "Stable rules", "cache_control": {"type": "ephemeral"}}]
+        before = deepcopy((messages, system))
+        with anthropic.Anthropic(
+            api_key="test-key-no-network", http_client=httpx.Client(transport=httpx.MockTransport(respond))
+        ) as client:
+            monkeypatch.setattr(llm_client, "get_anthropic_client", lambda: client)
+            result = run_llm_task(ctx, messages=messages, system=system, cache_conversation=True, company_id=1)
+
+        assert sent[0]["cache_control"] == {"type": "ephemeral"}
+        assert sent[0]["messages"] == messages
+        assert sent[0]["system"] == system
+        assert (messages, system) == before
+        assert result.cache_creation_tokens == 100
+        assert result.cache_read_tokens == 2000
+        assert recording_session.added[0].cache_read_tokens == 2000
 
     def test_timeout_applied_via_with_options(self, ctx, fake_client, recording_session):
         run_llm_task(ctx, messages=[{"role": "user", "content": "q"}], company_id=1, timeout=60.0)

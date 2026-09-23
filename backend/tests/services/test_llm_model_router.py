@@ -1,3 +1,5 @@
+import pytest
+
 from app.services.llm_model_router import (
     LLMModelTier,
     LLMTaskContext,
@@ -118,3 +120,36 @@ def test_text_path_laser_nest_without_pdf_document_uses_fast_tier(monkeypatch):
 
     assert decision.tier == LLMModelTier.FAST
     assert decision.model == "claude-haiku-4-5-20251001"
+
+
+@pytest.mark.parametrize('input_chars,is_ocr', [(0, True), (1000, False), (12000, False), (60000, True)])
+def test_hank_document_intake_uses_default_tier_even_for_long_pdfs(monkeypatch, input_chars, is_ocr):
+    monkeypatch.delenv('ANTHROPIC_MODEL_SELECTION', raising=False)
+    monkeypatch.delenv('ANTHROPIC_HANK_INTAKE_MODEL', raising=False)
+    decision = select_anthropic_model(
+        LLMTaskContext(
+            task='hank_document_intake',
+            input_chars=input_chars,
+            is_ocr=is_ocr,
+            has_pdf_document=True,
+            max_output_tokens=6000,
+        )
+    )
+    assert decision.tier == LLMModelTier.DEFAULT
+    assert decision.model == 'claude-sonnet-4-6'
+
+
+def test_hank_document_intake_respects_task_override_before_global_tier(monkeypatch):
+    monkeypatch.setenv('ANTHROPIC_MODEL_SELECTION', 'fast')
+    monkeypatch.setenv('ANTHROPIC_HANK_INTAKE_MODEL', 'claude-opus-4-8')
+    decision = select_anthropic_model(LLMTaskContext(task='hank_document_intake', input_chars=1000))
+    assert decision.tier == LLMModelTier.REASONING
+    assert decision.model == 'claude-opus-4-8'
+    assert decision.reason == 'hank_document_intake override'
+
+
+def test_hank_document_intake_respects_global_override_when_task_is_auto(monkeypatch):
+    monkeypatch.setenv('ANTHROPIC_MODEL_SELECTION', 'reasoning')
+    monkeypatch.setenv('ANTHROPIC_HANK_INTAKE_MODEL', 'auto')
+    decision = select_anthropic_model(LLMTaskContext(task='hank_document_intake', input_chars=1000))
+    assert decision.tier == LLMModelTier.REASONING

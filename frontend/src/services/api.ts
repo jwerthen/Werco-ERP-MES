@@ -112,7 +112,7 @@ import type { HankCapabilities, HankTask, HankTaskCreate, HankTaskCommand, HankT
 import type { HankWatchCreate } from '../types/hankWatches';
 import type { HankPreferencesCommand, HankPreferencesResponse, HankPreferencesUpdate } from '../types/hankPreferences';
 import type { HankEvidence, HankHandoff, HankHandoffCreate, HankHandoffList, HankRoutine, HankRoutineValues, HankRoutineRun, HankRoutineAdvance, HankWorkQueue, HankWorkState } from '../types/hankWork';
-import type { HankIntakeBatch, HankIntakeBatchList, HankIntakeFile, HankIntakePlan } from '../types/hankIntake';
+import type { HankIntakeBatch, HankIntakeBatchList, HankIntakeFile, HankIntakePlan, HankIntakeReceivingDraft } from '../types/hankIntake';
 import {
   EntityImportResponse,
   ImportTemplateIndexResponse,
@@ -2184,6 +2184,9 @@ class ApiService {
   }
   async getHankIntakeFile(id: number, signal?: AbortSignal): Promise<HankIntakeFile> {
     return (await this.api.get<HankIntakeFile>(`/hank/intake/files/${id}`, { signal })).data;
+  }
+  async getHankIntakeReceivingDraft(id: number, purchaseOrderId?: number, signal?: AbortSignal): Promise<HankIntakeReceivingDraft> {
+    return (await this.api.get<HankIntakeReceivingDraft>(`/hank/intake/files/${id}/receiving-draft`, { params: { purchase_order_id: purchaseOrderId }, signal })).data;
   }
   async getHankIntakeSource(id: number, signal?: AbortSignal): Promise<Blob> {
     return (await this.api.get<Blob>(`/hank/intake/files/${id}/source`, { signal, responseType: 'blob' })).data;

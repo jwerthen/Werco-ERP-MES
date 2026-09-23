@@ -6,7 +6,7 @@ history and the server is stateless between turns.
 
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PositiveInt
 
 
 class CopilotMessage(BaseModel):
@@ -34,6 +34,11 @@ class CopilotChatRequest(BaseModel):
         None,
         max_length=500,
         description="Optional UI context (e.g. the page or entity the user is currently viewing).",
+    )
+    intake_file_ids: List[PositiveInt] = Field(
+        default_factory=list,
+        max_length=5,
+        description="Owned, analyzed Hank PDF uploads attached to this conversation. IDs are authorized server-side.",
     )
 
 

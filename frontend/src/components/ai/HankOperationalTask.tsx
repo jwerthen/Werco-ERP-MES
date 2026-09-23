@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { isAxiosError } from 'axios';
 import api from '../../services/api';
 import type { HankCapabilities, HankOperationalActionKind, HankTask, HankTaskCreate } from '../../types/hankTasks';
+import type { HankIntakeReceivingDraft } from '../../types/hankIntake';
 import type { WorkOrderBlockerCategory, WorkOrderBlockerSeverity } from '../../types/aiForward';
 import EntityPicker from '../operations/EntityPicker';
 import { FormField } from '../ui/FormField';
@@ -87,13 +88,22 @@ interface ReceivingPO {
 interface JobChoice {
   id: number;
   work_order_number: string;
-  operations: Array<{ id: number; sequence: number; operation_number?: string; name: string; status: string; quantity_complete: number }>;
+  operations: Array<{
+    id: number;
+    sequence: number;
+    operation_number?: string;
+    name: string;
+    status: string;
+    quantity_complete: number;
+  }>;
 }
 
 export function HankOperationalTask({
   kind,
   workOrderId,
   purchaseOrderId,
+  receivingDraft,
+  onRefreshReceiving,
   operationId,
   onNavigate,
   onBusyChange,
@@ -101,6 +111,8 @@ export function HankOperationalTask({
   kind: HankOperationalActionKind;
   workOrderId?: number;
   purchaseOrderId?: number;
+  receivingDraft?: HankIntakeReceivingDraft;
+  onRefreshReceiving?: () => void;
   operationId?: number;
   onNavigate: () => void;
   onBusyChange?: (busy: boolean) => void;
@@ -117,6 +129,7 @@ export function HankOperationalTask({
   const [pending, setPending] = useState<HankTaskCreate | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [duplicateAcknowledged, setDuplicateAcknowledged] = useState(false);
   const { current, controller, release, changed } = useHankSessionGuard();
   const inFlight = useRef(false);
   const busyCallback = useRef(onBusyChange);
@@ -189,15 +202,23 @@ export function HankOperationalTask({
         replace(
           value.lines
             .filter(line => !line.is_closed)
-            .map(line => ({
-              po_line_id: line.line_id,
-              quantity: '',
-              inspection: '',
-              lot: '',
-              heat: '',
-              cert: '',
-              packing_slip: '',
-            }))
+            .map(line => {
+              const matches =
+                receivingDraft?.purchase_order_id === Number(selectedPO)
+                  ? receivingDraft.lines.filter(item => item.po_line_id === line.line_id)
+                  : [];
+              // Multiple source rows may have different lots/heats. Never collapse them silently.
+              const source = matches.length === 1 ? matches[0] : undefined;
+              return {
+                po_line_id: line.line_id,
+                quantity: source?.quantity_received != null ? String(source.quantity_received) : '',
+                inspection: '' as const,
+                lot: source?.lot_number || '',
+                heat: source?.heat_number || '',
+                cert: '',
+                packing_slip: source ? receivingDraft?.packing_slip_number || '' : '',
+              };
+            })
         );
       })
       .catch(() => {
@@ -208,7 +229,7 @@ export function HankOperationalTask({
         if (current() && !request.signal.aborted) setChoicesLoading(false);
       });
     return () => request.abort();
-  }, [kind, selectedPO, choiceAttempt, current, controller, release, replace]);
+  }, [kind, selectedPO, choiceAttempt, current, controller, release, replace, receivingDraft]);
   useEffect(() => {
     if (kind !== 'report_production' || !selectedJob) return;
     const request = controller();
@@ -271,6 +292,10 @@ export function HankOperationalTask({
     const base = { expected_company_id: capabilities.company_id, request_key: crypto.randomUUID() };
     let body: HankTaskCreate;
     if (kind === 'receive_delivery') {
+      if (receivingDraft?.requires_duplicate_acknowledgement && !duplicateAcknowledged) {
+        setError('Review the prior receipt and confirm this is an additional delivery before proceeding.');
+        return;
+      }
       const selected = values.lines.filter(line => Number(line.quantity) > 0);
       if (!selectedPO || !selected.length) {
         setError('Enter the delivered quantity on at least one line.');
@@ -294,6 +319,13 @@ export function HankOperationalTask({
         kind,
         input: {
           purchase_order_id: Number(selectedPO),
+          ...(receivingDraft
+            ? {
+                source_intake_file_id: receivingDraft.file_id,
+                source_intake_version: receivingDraft.file_version,
+                acknowledge_duplicate_source: duplicateAcknowledged,
+              }
+            : {}),
           lines: selected.map(line => ({
             po_line_id: line.po_line_id,
             quantity_received: Number(line.quantity),
@@ -407,6 +439,7 @@ export function HankOperationalTask({
         onStartAnother={() => {
           setTask(null);
           setPending(null);
+          if (receivingDraft) onRefreshReceiving?.();
         }}
       />
     );
@@ -424,6 +457,17 @@ export function HankOperationalTask({
           {error}
         </p>
       )}
+      {receivingDraft?.requires_duplicate_acknowledgement && (
+        <label className="flex items-start gap-2 text-xs text-fd-amber">
+          <input
+            type="checkbox"
+            checked={duplicateAcknowledged}
+            disabled={disabled}
+            onChange={event => setDuplicateAcknowledged(event.target.checked)}
+          />
+          I reviewed the prior receipt for this PDF and confirm these quantities are an additional delivery.
+        </label>
+      )}
       <form onSubmit={prepare} className="space-y-4">
         <fieldset disabled={disabled} className="space-y-3">
           <FormField label={kind === 'receive_delivery' ? 'Purchase order' : 'Work order'} required>
@@ -437,7 +481,7 @@ export function HankOperationalTask({
                       {...field}
                       value={input.value}
                       onChange={input.onChange}
-                      disabled={disabled}
+                      disabled={disabled || !!receivingDraft}
                     />
                   ) : (
                     <EntityPicker
@@ -521,8 +565,8 @@ export function HankOperationalTask({
                     <option value="">Select operation…</option>
                     {job?.operations.map(operation => (
                       <option key={operation.id} value={operation.id}>
-                        {formatOperationLabel(operation.operation_number, operation.sequence)} · {operation.name} · {operation.status} · complete{' '}
-                        {operation.quantity_complete}
+                        {formatOperationLabel(operation.operation_number, operation.sequence)} · {operation.name} ·{' '}
+                        {operation.status} · complete {operation.quantity_complete}
                       </option>
                     ))}
                   </select>

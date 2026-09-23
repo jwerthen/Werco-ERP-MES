@@ -60,6 +60,10 @@ LINKS = {
 }
 
 
+class IntakeExtractionIncompleteError(ValueError):
+    """The provider reached its output budget before returning all extraction data."""
+
+
 def enqueue_intake(file_id, version):
     return enqueue_job_best_effort(
         'process_hank_intake_file_job', file_id, _job_id=f'hank-intake:{file_id}:{version}', fast_fail=True
@@ -163,6 +167,10 @@ def analyze_pdf(content, company_id):
         timeout=90,
         max_retries=0,
     )
+    if getattr(result.raw_response, 'stop_reason', None) == 'max_tokens':
+        raise IntakeExtractionIncompleteError(
+            'The PDF extraction was incomplete. Split the PDF into smaller documents and upload them again.'
+        )
     blocks = [
         block
         for block in result.raw_response.content
@@ -198,6 +206,18 @@ def analyze_pdf(content, company_id):
         ):
             item.confidence = 'low'
             uncertain = True
+        if item in extraction.lines and valid:
+            # A real excerpt alone does not substantiate a model-invented
+            # quantity or heat. Require every populated receipt identifier/value
+            # to occur as a whole token in its cited evidence before trusting it.
+            excerpt = ' '.join(' '.join(proof.excerpt.split()).casefold() for proof in valid)
+            for name in ('part_number', 'quantity', 'lot_number', 'heat_number', 'unit_of_measure'):
+                value = getattr(item, name, None)
+                if value and not re.search(
+                    r'(?<!\w)' + re.escape(' '.join(value.split()).casefold()) + r'(?!\w)', excerpt
+                ):
+                    item.confidence = 'low'
+                    uncertain = True
     extraction.warnings = [str(value)[:500] for value in extraction.warnings[:7]]
     if uncertain:
         extraction.warnings.append(
@@ -835,6 +855,9 @@ def process_intake_file(file_id):
                 )
                 if isinstance(exc, LLMNotConfiguredError):
                     row.error_message = 'AI extraction is not configured. Contact an administrator before retrying.'
+                if isinstance(exc, IntakeExtractionIncompleteError):
+                    row.error_code = 'EXTRACTION_INCOMPLETE'
+                    row.error_message = str(exc)
                 service = HankIntakeService(db, None, company_id)
                 service._transition(
                     row, 'failed', AuditService(db, company_id=company_id), extra={'error_code': row.error_code}

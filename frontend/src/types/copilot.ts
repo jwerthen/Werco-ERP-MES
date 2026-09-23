@@ -13,6 +13,7 @@ export interface CopilotMessage {
 export interface CopilotChatRequest {
   messages: CopilotMessage[];
   context_hint?: string | null;
+  intake_file_ids?: number[];
 }
 
 export interface CopilotReference {

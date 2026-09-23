@@ -789,6 +789,7 @@ AWS_REGION=us-east-1
 |----------|----------|---------|-------------|
 | `ANTHROPIC_API_KEY` | No | - | Anthropic API key for the AI features (PO/quote + BOM document extraction, AI routing generation, QMS clause extraction, Hank chat and smart PDF intake, `/search/nl` intent parsing). Every call goes through the shared client `app/services/llm_client.py`, which records per-call usage telemetry to the tenant-scoped `ai_usage_events` table (read via `GET /api/v1/ai-usage/summary` / the Admin Settings → AI Usage & Cost tab) |
 | `ANTHROPIC_COPILOT_MODEL` | No | (router auto) | Per-task model override for Hank chat (task `copilot_chat`). Unset: the router uses the Default tier (Sonnet), escalating to the Reasoning tier for long multi-tool conversations |
+| `ANTHROPIC_HANK_INTAKE_MODEL` | No | (Default tier) | Per-task model override for saved Hank PDF extraction (`hank_document_intake`). Defaults to Sonnet for layout-aware extraction; document length or a larger structured-output budget alone does not select Opus. Set consistently on API and worker |
 | `ANTHROPIC_NL_SEARCH_MODEL` | No | (router auto) | Per-task model override for the `/search/nl` natural-language intent parse (task `nl_search`). Unset: pinned to the Fast tier (Haiku) |
 | `ANTHROPIC_AUTO_EXECUTE_MODEL` | No | (router auto) | Per-task model override for the always-on auto-execute decision (task `auto_execute`, see [docs/AI_ALWAYS_ON.md](AI_ALWAYS_ON.md)). Unset: Fast tier (Haiku). Same Anthropic client as all other LLM features |
 | `AI_AUTO_EXECUTE_ENABLED` | No | `true` | Master switch for Claude always-on auto-execute of allowlisted Action Inbox actions after nightly aggregation |
@@ -819,7 +820,7 @@ AWS_REGION=us-east-1
 
 Tuning knobs for `POST /api/v1/copilot/chat` (see [API → Hank](API.md#hank-ai-shop-teammate)). All
 optional; the defaults are the shipped behavior. The Hank rename retains every `COPILOT_*`
-variable and adds no settings. Its separate PDF filing form uses the existing document route
+variable. Its separate PDF filing form uses the existing document route
 without an LLM call. Deterministic shift briefings and direct reviewed task forms also need
 no Anthropic key or additional setting; task persistence requires schema migration108.
 Preparing a task through chat still uses the configured chat model and company AI-egress gate.
@@ -843,6 +844,14 @@ The model call has a 90-second timeout with no SDK retries; PDF parsing has a
 20-second wall deadline, 15-second CPU limit and a 512 MB Linux address-space cap.
 API and worker need the same release and access to the same durable source storage.
 Direct operational reports/forms, handoffs and routines do not require Anthropic.
+Chat can attach up to five analyzed intake PDFs by ID. Their owner/company access is
+checked before the model call; bounded evidence lookups reuse saved extraction and
+receiving matches use deterministic database queries. No PDF bytes are resent for chat.
+Chat uses automatic five-minute conversation caching alongside its explicit stable
+tool/system cache breakpoint. The forced-final call retains the stable prefix cache
+but does not write a new conversation cache. Usage telemetry records actual cache
+creation/read tokens; savings depend on repeated-prefix traffic, not merely enabling
+the setting. Other LLM features retain their existing cache policy.
 Optional voice input requires already-available local browser speech recognition;
 there is no backend speech service or automatic remote fallback.
 
@@ -850,7 +859,8 @@ there is no backend speech service or automatic remote fallback.
 |----------|----------|---------|-------------|
 | `COPILOT_RATE_LIMIT_PER_MINUTE` | No | `20` | Per-user request budget per minute (in-process sliding window, on top of the app-wide per-IP limits). Excess returns 429 |
 | `COPILOT_MAX_TOOL_ROUNDS` | No | `8` | Tool-use rounds per chat turn before the model is forced to answer from gathered data (`truncated: true` in the response) |
-| `COPILOT_MAX_OUTPUT_TOKENS` | No | `1024` | Output-token cap per model call in the tool loop |
+| `COPILOT_MAX_OUTPUT_TOKENS` | No | `1024` | Output-token cap for the forced-final answer. An explicitly set legacy value also supplies the tool-call cap unless `COPILOT_MAX_TOOL_OUTPUT_TOKENS` is set |
+| `COPILOT_MAX_TOOL_OUTPUT_TOKENS` | No | `8192` | Output-token cap while tools are available, providing room for structured receiving proposals. Actual generated tokens are billed, not this ceiling. Does not itself escalate the model tier. A truncated tool response is never executed |
 | `COPILOT_LLM_TIMEOUT_SECONDS` | No | `45` | Upstream Anthropic timeout per model call (seconds) |
 
 ### ProxyBox Thermal-Label Printing

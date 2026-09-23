@@ -8803,6 +8803,7 @@ See [Hank](HANK.md) for the employee workflows and their boundaries. Route names
 | GET | `/hank/intake/{batch_id}` | Recover all files in an owned batch | Same company/owner and current document role |
 | GET | `/hank/intake/files/{file_id}` | Recover one file's analysis, plan or receipt | Same company/owner and current document role |
 | GET | `/hank/intake/files/{file_id}/source` | Size/hash-verified PDF bytes; authenticated, private/no-store | Same company/owner and current document role |
+| GET | `/hank/intake/files/{file_id}/receiving-draft` | Deterministic receiving suggestions from saved extraction; optional positive `purchase_order_id`; no model call or writes | Same company/owner and current document role plus receiving-task authority |
 | POST | `/hank/intake/files/{file_id}/plan` | Save reviewed filing choices and source fingerprints | Same authority plus selected-source view permissions |
 | POST | `/hank/intake/files/{file_id}/{action}` | `execute`, `retry`, or `cancel` with expected company/version | Current interactive write authority; receipt release additionally requires receiving view/create |
 | GET | `/hank/work-orders/{id}/readiness` | Recorded material, blocker, instruction, traveler and quality gaps; never production authorization | `work_orders:view`; additional sources separately gated |
@@ -8827,7 +8828,7 @@ See [Hank](HANK.md) for the employee workflows and their boundaries. Route names
 **Smart PDF intake.** Each PDF is at most 10 MB and 25 pages; a batch is at most
 25 MB. Upload request keys are company-scoped and bound to actor plus exact
 filename/hash inputs. Extraction uses the shared, company-egress-gated model
-client with `hank_document_intake` prompt 1.0.0. A request-driven ARQ job claims
+client with `hank_document_intake` prompt 1.1.0. A request-driven ARQ job claims
 and commits before parsing/model work, then reloads current authority and saves
 its result with required audit. Parsing runs in a resource-bounded subprocess;
 no database transaction stays open during file or model I/O.
@@ -9087,7 +9088,8 @@ already gathered.
 - Per-user rate limit: **20 requests/minute** default (`COPILOT_RATE_LIMIT_PER_MINUTE`) → **429**.
   This is in addition to the app-wide per-IP slowapi limits.
 - At most **8 tool rounds** per turn (`COPILOT_MAX_TOOL_ROUNDS`) plus one forced final answer
-  call; per-call output cap `COPILOT_MAX_OUTPUT_TOKENS` (default 1024); per-call upstream timeout
+  call; tool output cap `COPILOT_MAX_TOOL_OUTPUT_TOKENS` (default 8192) and forced-final
+  answer cap `COPILOT_MAX_OUTPUT_TOKENS` (default 1024); per-call upstream timeout
   `COPILOT_LLM_TIMEOUT_SECONDS` (default 45s).
 - **503** — AI not configured (no `ANTHROPIC_API_KEY`); **502** — upstream AI-service failure;
   **422** — invalid history (e.g. last message not from the user). With streaming (the default),
@@ -9096,7 +9098,7 @@ already gathered.
 
 **Reviewed proposals + tenant-injection contract:**
 
-- Thirteen tools read ERP data, including the deterministic `my_shift_briefing`. The fourteenth,
+- Fifteen tools read ERP data, including the deterministic `my_shift_briefing`. The remaining tool,
   `prepare_hank_task`, can save an audited task **awaiting employee review**, with a link to
   `/?hank_task=<id>`. It cannot execute, approve, release, or dispatch a business action.
   It validates exact records and required fields through the same task service as the form.
@@ -9105,10 +9107,23 @@ already gathered.
   external model latency never holds its audit-chain lock. If later narration fails or is
   stopped, the saved proposal remains recoverable through the task APIs; it remains unexecuted.
   Terminal SSE success is emitted only after the final chat transaction commits.
-- Prompt `copilot_chat` is version **1.5.0**. Saved intake extraction can be read
+- Prompt `copilot_chat` is version **1.6.0**. Saved intake extraction can be read
   through `hank_saved_work` with its page evidence; the general document-search
   tool still returns metadata only. Chat does not create handoffs, approve
   routines, advance steps or execute filing/actions.
+- Optional `intake_file_ids` attaches up to five positive, owned, analyzed PDF IDs
+  to a chat request. Ownership/company/role and ready-state checks happen before
+  streaming or model calls. The model receives a compact manifest, then can read
+  `hank_document_evidence` (`section=fields|lines`, `offset`, `limit` 1–5) or
+  `hank_receiving_document` (optional PO, same pagination). Both expose `next_offset`.
+  PDF bytes are never resent through chat. Receiving proposals using read/attached
+  PDFs must include the exact `source_intake_file_id` and `source_intake_version`;
+  the task rechecks source access/version and source/PO fingerprints at execution.
+  Existing receipt/source matches require `acknowledge_duplicate_source=true` for
+  an explicitly reviewed additional delivery. A source link is retained in the receipt.
+- Chat caches the stable tool/system prefix and growing conversation, releases read
+  transactions before external model calls, and refuses to dispatch incomplete
+  tool arguments when the provider reaches its token limit.
 - The tenant is **never model-controlled**: `company_id` is injected server-side from the
   authenticated session into every tool call; tool input schemas carry no tenant identifier, and
   any undeclared input keys the model supplies (including a `company_id`) are dropped before
@@ -9124,6 +9139,8 @@ already gathered.
 | `hank_operational_report` | Readiness, knowledge, shipping packet, purchasing impact and lot/serial reports above | Current source-specific effective view gates |
 | `hank_action_context` | Own active clocks or exact receiving PO lines | Work-order view for own clocks; purchasing and receiving view for receiving context |
 | `hank_saved_work` | Own queue/task/intake/routine or participant handoff | Each saved record's current company/actor/credential/participant gates; no execution |
+| `hank_document_evidence` | Paginated saved extraction fields/lines with page citations | Owned intake file, current document-intake role, ready analysis |
+| `hank_receiving_document` | Deterministic PDF-to-receiving draft | Same source gates plus current receiving-task authority |
 | `lookup_work_order` | Work-order context (`GET /work-orders/{id}` + AI context service) | Any authenticated |
 | `search_erp` | `GET /search` (shared core `run_global_search`) | Any authenticated; **employee (`user`-type) results are excluded entirely** (data minimization — employee names/emails never enter model prompts). The Admin/Manager-gated user results remain available on `GET /search` only |
 | `list_blocked_work_orders` | `GET /work-order-blockers` (open + acknowledged) | Any authenticated |
@@ -9142,7 +9159,7 @@ approved or applicable. References open `/documents?document=<id>`. Invalid filt
 error instead of silently broadening the search. It does not read or interpret PDF contents.
 
 **PDF filing from the panel:** Admin/Manager/Quality users with write access can select
-**Upload PDF**, review title, type, revision, and optional notes, then submit
+**Upload PDFs → File PDF without analysis**, review title, type, revision, and optional notes, then submit
 **Upload and release PDF** to `POST /documents/upload`. This creates a new **released** document
 under the caller's identity with the existing required audit; it is not a draft or a model tool
 call. The form accepts PDFs up to 25,000,000 bytes and does not send file contents to the LLM.

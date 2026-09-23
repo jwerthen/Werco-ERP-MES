@@ -53,6 +53,7 @@ TASK_MODEL_ENV = {
     "laser_nest_extraction": "ANTHROPIC_LASER_NEST_MODEL",
     "sheet_stock_disambiguation": "ANTHROPIC_SHEET_STOCK_MODEL",
     "copilot_chat": "ANTHROPIC_COPILOT_MODEL",
+    "hank_document_intake": "ANTHROPIC_HANK_INTAKE_MODEL",
     "nl_search": "ANTHROPIC_NL_SEARCH_MODEL",
     # Reuses the same Anthropic client; optional override only.
     "auto_execute": "ANTHROPIC_AUTO_EXECUTE_MODEL",
@@ -126,6 +127,13 @@ def select_anthropic_model(context: LLMTaskContext) -> LLMModelDecision:
         if complexity_score >= 5:
             return model_decision_for_tier(LLMModelTier.REASONING, "long multi-tool copilot conversation")
         return model_decision_for_tier(LLMModelTier.DEFAULT, "copilot chat needs reliable multi-step tool use")
+
+    if task == "hank_document_intake":
+        # Bounded extraction of a PDF's fields and line items, with page
+        # evidence and employee review. A long packing slip is not inherently
+        # a reasoning task; retain Sonnet's layout reading without automatic
+        # Opus escalation just because the document has many rows.
+        return model_decision_for_tier(LLMModelTier.DEFAULT, "Hank intake needs reliable PDF evidence extraction")
 
     if task == "qms_clause_extraction":
         if context.input_chars >= 85_000 or (context.input_chars >= 50_000 and context.max_output_tokens >= 16_000):

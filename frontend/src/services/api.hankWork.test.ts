@@ -292,3 +292,12 @@ describe('source bytes and multipart transport', () => {
     expect(mockPost).not.toHaveBeenCalled();
   });
 });
+
+it('loads receiving suggestions with the selected purchase order and cancellation signal', async () => {
+  expect(await api.getHankIntakeReceivingDraft(51, 12, signal)).toBe(serverResult);
+  expect(mockGet).toHaveBeenCalledWith('/hank/intake/files/51/receiving-draft', {
+    params: { purchase_order_id: 12 },
+    signal,
+  });
+  expect(mockPost).not.toHaveBeenCalled();
+});

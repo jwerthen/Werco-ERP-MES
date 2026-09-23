@@ -106,7 +106,8 @@ it('defers task navigation as well as work navigation until the current write se
 
 it('opens a saved work link when legacy PDF filing is open but idle', async () => {
   panel();
-  fireEvent.click(screen.getByRole('button', { name: 'Upload PDF' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Upload PDFs' }));
+  fireEvent.click(screen.getByRole('button', { name: 'File PDF without analysis' }));
   expect(screen.getByRole('region', { name: 'Legacy PDF filing test' })).toBeInTheDocument();
   fireEvent.click(screen.getByRole('link', { name: 'Saved routine notification' }));
   expect(await screen.findByText('Routine run 31')).toBeInTheDocument();
@@ -115,7 +116,8 @@ it('opens a saved work link when legacy PDF filing is open but idle', async () =
 
 it('waits for a pending PDF save before accepting a saved work link', async () => {
   panel();
-  fireEvent.click(screen.getByRole('button', { name: 'Upload PDF' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Upload PDFs' }));
+  fireEvent.click(screen.getByRole('button', { name: 'File PDF without analysis' }));
   fireEvent.click(screen.getByRole('button', { name: 'Begin PDF save' }));
   fireEvent.click(screen.getByRole('link', { name: 'Saved handoff notification' }));
   expect(screen.queryByText('Handoff 24')).not.toBeInTheDocument();

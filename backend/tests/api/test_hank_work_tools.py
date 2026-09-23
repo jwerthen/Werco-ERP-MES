@@ -28,7 +28,7 @@ def test_all_six_reviewed_schemas_are_deterministic_and_no_execute_tool_exists(d
         'report_production',
         'draft_shipment',
     }
-    assert len(TASK_INPUT_SCHEMA['oneOf']) == 6
+    assert len(TASK_INPUT_SCHEMA['properties']['input']['anyOf']) == 6
     assert 'expected_company_id' not in json.dumps(TASK_INPUT_SCHEMA)
     assert 'request_key' not in json.dumps(TASK_INPUT_SCHEMA)
     assert {tool.name for tool in service.tool_specs_for_user()} >= {
@@ -38,7 +38,7 @@ def test_all_six_reviewed_schemas_are_deterministic_and_no_execute_tool_exists(d
         'prepare_hank_task',
     }
     assert not any(tool.name.startswith('execute') for tool in service.tool_specs_for_user())
-    assert COPILOT_CHAT_PROMPT.version == '1.5.0'
+    assert COPILOT_CHAT_PROMPT.version == '1.6.0'
     assert PROMPT_REGISTRY[HANK_INTAKE_PROMPT.id] is HANK_INTAKE_PROMPT
 
 

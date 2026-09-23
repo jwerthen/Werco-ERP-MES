@@ -18,12 +18,14 @@ from app.models.ai_learning import AIInteractionEvent
 from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.document import Document, DocumentType
+from app.models.hank import HankTask
 from app.models.part import Part
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.services.ai_context_service import AIContextService
 from app.services.copilot_service import (
     COPILOT_MAX_OUTPUT_TOKENS,
+    COPILOT_MAX_TOOL_OUTPUT_TOKENS,
     COPILOT_MAX_TOOL_ROUNDS,
     TOOL_REGISTRY,
     CopilotService,
@@ -447,13 +449,22 @@ class TestChatLoop:
         assert len(scripted.calls) == COPILOT_MAX_TOOL_ROUNDS + 1  # 8 tool rounds + 1 forced answer
         assert scripted.calls[-1]["tool_choice"] == {"type": "none"}
         assert all(call["tool_choice"] is None for call in scripted.calls[:-1])
+        assert scripted.calls[-1]['max_tokens'] == COPILOT_MAX_OUTPUT_TOKENS
+        assert all(call['max_tokens'] == COPILOT_MAX_TOOL_OUTPUT_TOKENS for call in scripted.calls[:-1])
+        assert scripted.calls[-1]['cache_conversation'] is False
+        assert all(call['cache_conversation'] is True for call in scripted.calls[:-1])
+        assert all(call['tools'] == scripted.calls[0]['tools'] for call in scripted.calls)
+        assert all(call['system'] == scripted.calls[0]['system'] for call in scripted.calls)
         assert final["answer"]  # fallback summary text, never empty
 
-    def test_output_token_cap_on_every_call(self, monkeypatch, service: CopilotService):
+    def test_tool_output_budget_does_not_change_routing_complexity(self, monkeypatch, service: CopilotService):
+        monkeypatch.setattr(copilot_service, 'COPILOT_MAX_TOOL_OUTPUT_TOKENS', 8192)
+        monkeypatch.setattr(copilot_service, 'COPILOT_MAX_OUTPUT_TOKENS', 1024)
         scripted = ScriptedLLM([FakeLLMResult([_text_block("done")])])
         monkeypatch.setattr(copilot_service, "run_llm_task", scripted)
         service.run_chat(messages=[{"role": "user", "content": "hi"}])
-        assert all(call["max_tokens"] == COPILOT_MAX_OUTPUT_TOKENS for call in scripted.calls)
+        assert scripted.calls[0]['max_tokens'] == 8192
+        assert scripted.calls[0]['ctx'].max_output_tokens == 1024
 
     def test_bounded_retries_on_every_call(self, monkeypatch, service: CopilotService):
         """Each loop iteration allows exactly one SDK retry (transient overload)."""
@@ -470,6 +481,74 @@ class TestChatLoop:
         final = service.run_chat(messages=[{"role": "user", "content": "hi"}])
         assert final["truncated"] is True
         assert final["answer"].startswith("partial answer")
+
+    def test_truncated_tool_use_never_dispatches_a_partial_proposal(self, monkeypatch, service: CopilotService):
+        result = FakeLLMResult(
+            [
+                _tool_use_block(
+                    'prepare_hank_task',
+                    {
+                        'kind': 'receive_delivery',
+                        'input': {
+                            'purchase_order_id': 1,
+                            'lines': [
+                                {'po_line_id': 1, 'quantity_received': 2, 'requires_inspection': True},
+                            ],
+                        },
+                    },
+                ),
+            ]
+        )
+        result.raw_response.stop_reason = 'max_tokens'
+        scripted = ScriptedLLM([result])
+        monkeypatch.setattr(copilot_service, 'run_llm_task', scripted)
+
+        def never_dispatch(*args, **kwargs):
+            pytest.fail('A truncated tool response must not save a partial proposal')
+
+        monkeypatch.setattr(service, 'execute_tool', never_dispatch)
+        final = service.run_chat(messages=[{'role': 'user', 'content': 'Prepare all received lines'}])
+        assert final['truncated'] is True
+        assert final['rounds'] == 0
+        assert final['tool_trace'] == []
+        assert 'too large' in final['answer']
+        assert len(scripted.calls) == 1
+
+    def test_external_calls_release_reads_without_losing_saved_proposals(
+        self, monkeypatch, db_session: Session, service: CopilotService, test_work_order: WorkOrder
+    ):
+        work_order_id = test_work_order.id
+        scripted = ScriptedLLM(
+            [
+                FakeLLMResult(
+                    [
+                        _tool_use_block(
+                            'prepare_hank_task',
+                            {
+                                'kind': 'repeat_job',
+                                'input': {'source_work_order_id': work_order_id, 'quantity_ordered': 2},
+                            },
+                        )
+                    ]
+                ),
+                FakeLLMResult([_tool_use_block('company_snapshot', {})]),
+                FakeLLMResult([_text_block('The repeat job proposal is ready for review.')]),
+            ]
+        )
+
+        def model(ctx, **kwargs):
+            assert not db_session.in_transaction(), 'Do not hold a DB connection or audit lock during Claude I/O'
+            return scripted(ctx, **kwargs)
+
+        monkeypatch.setattr(copilot_service, 'run_llm_task', model)
+        final = service.run_chat(messages=[{'role': 'user', 'content': 'Prepare a repeat job for two'}])
+        assert len(scripted.calls) == 3
+        db_session.rollback()  # a later interaction failure cannot erase the proposal
+        task = db_session.query(HankTask).one()
+        assert task.status == 'awaiting_review'
+        assert task.input_json['source_work_order_id'] == work_order_id
+        assert float(task.input_json['quantity_ordered']) == 2
+        assert any(reference['type'] == 'hank_task' for reference in final['references'])
 
     def test_chat_turn_is_read_only(
         self, monkeypatch, db_session: Session, service: CopilotService, test_work_order: WorkOrder
@@ -565,7 +644,8 @@ class TestUsageTelemetry:
         for call in fake_client.calls:
             assert call["tools"][0]["name"] == TOOL_REGISTRY[0].name
             assert call["system"][-1]["cache_control"] == {"type": "ephemeral"}
-            assert call["max_tokens"] == COPILOT_MAX_OUTPUT_TOKENS
+            assert call["max_tokens"] == COPILOT_MAX_TOOL_OUTPUT_TOKENS
+            assert call['extra_body']['cache_control'] == {'type': 'ephemeral'}
 
 
 # ---------------------------------------------------------------------------

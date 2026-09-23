@@ -345,6 +345,7 @@ def run_llm_task(
     prompt_version: Optional[str] = None,
     timeout: Optional[float] = None,
     max_retries: Optional[int] = None,
+    cache_conversation: bool = False,
 ) -> LLMTaskResult:
     """Run one Anthropic Messages API call with model routing and telemetry.
 
@@ -377,6 +378,10 @@ def run_llm_task(
             Pass 0 for latency-budgeted callers whose timeout must be
             wall-clock honest; small values bound retry amplification in
             multi-call loops.
+        cache_conversation: Opt in to Anthropic's automatic 5-minute cache for
+            a growing conversation, including documents and tool results. Keep
+            an explicit system breakpoint for reuse across different requests.
+            Leave off for one-shot work, where a cache write would not be reused.
 
     Raises:
         LLMNotConfiguredError: SDK missing or API key unset (no telemetry row).
@@ -415,6 +420,11 @@ def run_llm_task(
         create_kwargs["tools"] = tools
     if tool_choice is not None:
         create_kwargs["tool_choice"] = tool_choice
+    if cache_conversation:
+        # SDK 0.79 predates the typed top-level cache_control parameter. Its
+        # supported extra_body escape hatch sends the same documented API field
+        # without an unrelated dependency upgrade or mutating message blocks.
+        create_kwargs["extra_body"] = {"cache_control": {"type": "ephemeral"}}
 
     started = time.monotonic()
     try:

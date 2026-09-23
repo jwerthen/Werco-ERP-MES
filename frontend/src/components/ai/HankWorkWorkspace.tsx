@@ -4,6 +4,7 @@ import api from '../../services/api';
 import type { HankRoutineRun, HankRoutineStepKind, HankWorkQueue, HankWorkState } from '../../types/hankWork';
 import { formatCentralDateTime } from '../../utils/centralTime';
 import { FormField } from '../ui/FormField';
+import type { HankIntakeFile } from '../../types/hankIntake';
 import type { HankRecordContext } from './hankContext';
 import { HankDocumentIntake } from './HankDocumentIntake';
 import { HankEvidencePanel } from './HankEvidencePanel';
@@ -63,12 +64,14 @@ export function HankWorkWorkspace({
   initialId,
   onNavigate,
   onBusyChange,
+  onUseInChat,
 }: {
   context: HankRecordContext;
   initialArea?: HankWorkArea;
   initialId?: number;
   onNavigate: () => void;
   onBusyChange: (busy: boolean) => void;
+  onUseInChat?: (file: HankIntakeFile) => void;
 }) {
   const [area, setArea] = useState<HankWorkArea>(initialArea);
   const [detailId, setDetailId] = useState(initialId);
@@ -328,7 +331,12 @@ export function HankWorkWorkspace({
         </>
       )}
       {area === 'intake' && (
-        <HankDocumentIntake {...shared} initialId={detailId} workOrderId={activeContext.workOrderId} />
+        <HankDocumentIntake
+          {...shared}
+          initialId={detailId}
+          workOrderId={activeContext.workOrderId}
+          onUseInChat={onUseInChat}
+        />
       )}
       {(['readiness', 'knowledge', 'purchasing', 'shipping', 'trace'] as HankWorkArea[]).includes(area) && (
         <>

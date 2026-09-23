@@ -21,6 +21,7 @@ import { FormField } from '../ui/FormField';
 import { LoadingButton } from '../ui/LoadingButton';
 import { HankPurchaseOrderPicker } from './HankPurchaseOrderPicker';
 import { HankSourceFile } from './HankSourceFile';
+import { HankDocumentReceiving } from './HankDocumentReceiving';
 import { isHankReadOnlySession } from './hankSession';
 import { useHankSessionGuard } from './useHankSessionGuard';
 
@@ -592,9 +593,11 @@ export function HankDocumentIntake({
   workOrderId,
   onNavigate,
   onBusyChange,
+  onUseInChat,
 }: {
   initialId?: number;
   workOrderId?: number;
+  onUseInChat?: (file: HankIntakeFile) => void;
   onNavigate: () => void;
   onBusyChange?: (busy: boolean) => void;
 }) {
@@ -604,6 +607,7 @@ export function HankDocumentIntake({
   const [batches, setBatches] = useState<HankIntakeBatch[]>([]);
   const [cursor, setCursor] = useState<number | null>(null);
   const [selectedId, setSelectedId] = useState(initialId);
+  const [receiving, setReceiving] = useState(false);
   const [file, setFile] = useState<HankIntakeFile | null>(null);
   const [files, setFiles] = useState<File[]>([]);
   const [pending, setPending] = useState<{ files: File[]; key: string } | null>(null);
@@ -723,6 +727,7 @@ export function HankDocumentIntake({
             onClick={() => {
               setSelectedId(undefined);
               setFile(null);
+              setReceiving(false);
             }}
           >
             All batches
@@ -755,8 +760,8 @@ export function HankDocumentIntake({
           {canWrite && (
             <div className="space-y-3">
               <p className="text-xs text-fd-mute">
-                Upload up to 5 PDFs for extraction. Review source pages, suggested matches, and a filing plan before
-                saving documents.
+                Upload up to 5 PDFs, then use their extracted information in chat, prepare material receipts, or file
+                the documents. Review the source before confirming any changes.
               </p>
               <FormField label="PDFs to review" help="10 MB per file, 25 MB per batch, and up to 25 pages per PDF.">
                 {field => (
@@ -824,7 +829,48 @@ export function HankDocumentIntake({
           )}
         </>
       )}
-      {selectedId && file && (
+      {selectedId &&
+        file &&
+        !receiving &&
+        file.analysis &&
+        ['awaiting_review', 'planned', 'completed'].includes(file.status) && (
+          <div className="flex flex-wrap gap-2">
+            {onUseInChat && (
+              <button
+                type="button"
+                className="btn text-xs"
+                disabled={busy || childBusy}
+                onClick={() => onUseInChat(file)}
+              >
+                Use in chat
+              </button>
+            )}
+            {canWrite && cap?.allowed_kinds.includes('receive_delivery') && (
+              <button
+                type="button"
+                className="btn text-xs"
+                disabled={busy || childBusy}
+                onClick={() => setReceiving(true)}
+              >
+                Receive materials
+              </button>
+            )}
+          </div>
+        )}
+      {selectedId && file && receiving && (
+        <>
+          <button
+            type="button"
+            className="text-xs text-fd-blue underline"
+            disabled={childBusy}
+            onClick={() => setReceiving(false)}
+          >
+            Back to document review
+          </button>
+          <HankDocumentReceiving file={file} onNavigate={onNavigate} onBusyChange={setChildBusy} />
+        </>
+      )}
+      {selectedId && file && !receiving && (
         <IntakeReview
           key={file.id}
           file={file}

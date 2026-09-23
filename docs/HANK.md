@@ -180,7 +180,25 @@ can requeue queued/failed work or reclaim analysis after 15 minutes; cancelling
 prevents a late result from replacing the decision. Retrying an upload uses the
 same request key, and stored bytes survive an uncertain database commit. Intake
 requires an interactive Admin, Manager or Quality account and company AI egress
-for analysis; the direct **Upload PDF** below remains a separate non-AI path.
+for analysis; **File PDF without analysis** remains a separate non-AI path.
+
+**Upload PDFs** is available directly from Chat. After analysis, choose **Use in chat**
+to attach the saved extraction (up to five PDFs). Remove an attachment to exclude it
+from the next request. Attachments follow the current employee/company session and
+are cleared when the conversation is cleared. Hank reads saved, page-cited evidence
+in small batches; follow-up questions do not upload or extract the PDF again.
+
+For a packing slip or received-material list, choose **Receive materials**. Hank
+matches the printed PO and part numbers against open receiving lines and suggests
+the delivered quantity, packing slip, lot and heat. Review the PDF, select or confirm
+the PO, resolve unmatched lines and units, and explicitly choose inspection for each
+received line. **Review receiving task** creates the existing reviewed proposal;
+only submitting that proposal posts receipts and updates receiving/inventory under
+the usual permissions. Unknown or ambiguous quantities and unit conversions are not
+invented. Repeated part/lot rows need manual review. A duplicate PDF or packing slip
+with earlier receipts requires explicit acknowledgement of additional material.
+The task retains its source PDF and version; changed source/PO data requires a new
+review, and retrying the same completed task returns its original receipt.
 
 **Operational evidence** provides readiness gaps, released document links and
 prior-run notes, purchasing impact and same-part alternatives, shipping packet
@@ -223,7 +241,7 @@ scanner or typed traveler code through the existing scanner resolver. A scan
 selects context; it does not start labor or execute a task. Session/company changes
 stop dictation and discard stale asynchronous results.
 
-**Upload PDF** provides one concrete task Hank can help employees finish:
+**File PDF without analysis** preserves the direct document-filing workflow:
 
 1. An Admin, Manager, or Quality user with write access selects a PDF up to 25 MB.
 2. The employee reviews the title, document type, revision, and optional notes.
@@ -297,7 +315,7 @@ confirms it.
   foundations. Hank's own stores record reviewed actions, explicit personal
   follow-ups and typed employee preferences. See
   [Always-On AI](AI_ALWAYS_ON.md).
-- Hank has thirteen read tools and one proposal-preparation tool. Tenant scope is
+- Hank has fifteen read tools and one proposal-preparation tool. Tenant scope is
   injected by the server and cannot be chosen by model arguments. Chat can save
   audited `awaiting_review` proposals but cannot execute business actions. The
   document upload form calls the existing write route after user submission.
@@ -309,7 +327,7 @@ confirms it.
   deployment procedure.
 - `/api/v1/copilot/chat`, `Copilot*` contracts, the OpenAPI tag, `COPILOT_*` tuning
   variables, and `copilot_chat`/`copilot_panel` telemetry keys retain their names.
-  Prompt `copilot_chat` is version 1.5.0. Task workflows require additive migration
+  Prompt `copilot_chat` is version 1.6.0. Task workflows require additive migration
   108 for `hank_tasks`, with matching PostgreSQL RLS/grant guards in migration
   and model bootstrap. No new role or environment setting is introduced; see
   [deployment ordering](DEPLOYMENT.md#hank-task-storage).
@@ -328,9 +346,16 @@ confirms it.
   handoffs, routines and runs. It seeds no approved procedures or work. The
   request-driven `process_hank_intake_file_job` needs a matching worker and shared
   storage but no new cron/environment variable. PDF analysis uses versioned
-  `hank_document_intake` prompt 1.0.0 through the shared model router, company
+  `hank_document_intake` prompt 1.1.0 through the shared model router, company
   AI-egress gate and usage telemetry. Direct reports, forms, handoffs, routines
   and queue reads do not require an LLM. See [deployment](DEPLOYMENT.md#hank-workflows-and-document-intake).
+- PDF-to-chat and receiving reuse those tables without a new migration. Deploy the
+  matching API, worker and frontend so new extraction preserves printed units and
+  delivered quantities. The default Sonnet tier handles chat and PDF extraction;
+  existing explicit model overrides remain available. Stable tool/system prefixes
+  and growing chat context use five-minute prompt caching. Receiving matching needs
+  no LLM call, and database read transactions close before model calls. Actual cache
+  reads, writes, tokens and estimated costs remain visible in AI Usage & Cost.
 
 See [API](API.md#hank-ai-shop-teammate),
 [permissions](RBAC_PERMISSIONS.md#hank-ai-chat-and-pdf-filing),
