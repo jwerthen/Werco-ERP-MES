@@ -134,6 +134,20 @@ it('requires an explicit inspection decision for actual received lines and omits
   );
 });
 
+it('labels production choices by their operation number when sequence repeats', async () => {
+  mocked.getWorkOrder.mockResolvedValue({
+    id: 7,
+    work_order_number: 'WO-7',
+    operations: [
+      { id: 71, sequence: 10, operation_number: '10', name: 'Inlets out', status: 'ready', quantity_complete: 0 },
+      { id: 72, sequence: 10, operation_number: '20', name: 'Inlets in', status: 'ready', quantity_complete: 0 },
+    ],
+  });
+  render(<HankOperationalTask kind="report_production" workOrderId={7} onNavigate={jest.fn()} />);
+  expect(await screen.findByRole('option', { name: 'Op 10 · Inlets out · ready · complete 0' })).toHaveValue('71');
+  expect(screen.getByRole('option', { name: 'Op 20 · Inlets in · ready · complete 0' })).toHaveValue('72');
+});
+
 it('requires scrap and hold reasons and saves exactly the reviewed production deltas', async () => {
   render(<HankOperationalTask kind="report_production" workOrderId={7} operationId={71} onNavigate={jest.fn()} />);
   await screen.findByRole('option', { name: /Mill/ });

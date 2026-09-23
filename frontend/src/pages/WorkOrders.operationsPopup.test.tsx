@@ -137,6 +137,23 @@ it('opens the same operations popup from a mobile card', async () => {
   expect(screen.getByRole('dialog', { name: 'Operations for WO-0042' })).toBeInTheDocument();
 });
 
+it('uses progressive operation numbers for mobile labels and completion when sequence is shared', async () => {
+  window.innerWidth = 390;
+  job.operations[1].sequence = 10;
+  renderList();
+  fireEvent.click(await screen.findByRole('button', { name: 'Operations' }));
+  const popup = await screen.findByRole('dialog', { name: 'Operations for WO-0042' });
+  await within(popup).findByText('Op 20 · Bend');
+  fireEvent.click(within(popup).getByRole('button', { name: 'Complete operation 20: Bend' }));
+  const form = await screen.findByRole('dialog', { name: 'Complete operation "Bend"' });
+  fireEvent.click(within(form).getByRole('button', { name: 'Complete' }));
+
+  expect(await within(popup).findByText('Operation 20 (Bend) completed.')).toBeInTheDocument();
+  expect(mockedApi.completeWOOperation).toHaveBeenCalledWith(72, 10, 0, undefined);
+  expect(mockedApi.completeWOOperation).toHaveBeenCalledTimes(1);
+  expect(mockedApi.completeWorkOrder).not.toHaveBeenCalled();
+});
+
 it('completes an operation once, keeps the popup open, and refreshes progress and the list', async () => {
   let resolve!: (value: unknown) => void;
   mockedApi.completeWOOperation.mockReturnValueOnce(

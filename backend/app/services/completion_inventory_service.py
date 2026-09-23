@@ -26,6 +26,9 @@ Design rules (these functions are I/O-light but DB-mutating):
     - FG receipt: EXISTENCE-keyed. ANY ``RECEIVE`` txn with
       ``reference_type='work_order', reference_id=work_order.id, company_id`` -> already
       received, no-op. Backed by ``uq_wo_inventory_receipt`` (migration 041/076).
+      An explicitly reversed erroneous completion is the sole exception: its
+      dedicated correction ledger restores the missing receipt on real completion
+      without changing or duplicating the original RECEIVE.
     - Component consumption: ARITHMETIC. Each demand source reconciles to target against
       the signed ledger net of its OWN history
       (``delta = target - net``; post only when ``delta > 0``, never a reversal), under
@@ -390,8 +393,9 @@ def receive_finished_goods_for_work_order(
     re-completion can't double-receive. Does NOT commit -- the caller owns the
     transaction so the receipt is atomic with the completion.
 
-    Returns the created transaction, or ``None`` when it was a no-op (already
-    received, laser nest-dispatch WO, or nothing to receive).
+    Returns the created transaction (or the compensating ADJUST for an explicitly
+    corrected receipt), or ``None`` when it was a no-op (already received, laser
+    nest-dispatch WO, or nothing to receive).
     """
     if is_laser_dispatch_work_order(work_order):
         # A laser nest-dispatch WO is a DISPATCH POOL, not a unit of product: its
@@ -410,7 +414,14 @@ def receive_finished_goods_for_work_order(
         return None
 
     if _existing_work_order_receipt(db, work_order.id, company_id):
-        return None
+        # An explicitly reversed erroneous completion keeps the original RECEIVE
+        # immutable. Only that dedicated correction trail permits a later genuine
+        # completion to restore its receipt; ordinary stock movements never do.
+        from app.services.completion_receipt_correction_service import restore_corrected_finished_goods_receipt
+
+        return restore_corrected_finished_goods_receipt(
+            db, work_order, user_id=user_id, company_id=company_id, audit=audit
+        )
 
     quantity = float(work_order.quantity_complete or 0)
     if quantity <= 0:

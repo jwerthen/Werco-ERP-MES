@@ -1297,9 +1297,9 @@ def work_order_operation_progress(work_order: WorkOrder) -> dict:
     Those completions should move the progress bar, but they should not be
     counted as finished work-order quantity for shipping or closeout.
 
-    Operation rows can also be regenerated while preserving the same human job
-    identity. In that case, count one progress slot per natural operation and
-    let an older completed row satisfy the matching current row.
+    Each operation row is a separate production obligation. Sequence numbers
+    describe routing order, and names/numbers can repeat; none identify shared
+    completion evidence, including rows that look like regenerated operations.
     """
     operations = list(work_order.operations or [])
     if not operations:
@@ -1314,10 +1314,9 @@ def work_order_operation_progress(work_order: WorkOrder) -> dict:
             "operation_progress_percent": round(progress_percent, 1),
         }
 
-    progress_by_key: dict[tuple, float] = {}
-    completed_by_key: dict[tuple, bool] = {}
+    progress_total = 0.0
+    operations_complete = 0
     for operation in operations:
-        key = _operation_progress_key(operation)
         target_qty = operation_target_quantity(operation, work_order)
         complete_qty = float(operation.quantity_complete or 0)
         has_completion_evidence = _operation_has_completion_evidence(operation)
@@ -1329,12 +1328,10 @@ def work_order_operation_progress(work_order: WorkOrder) -> dict:
         else:
             ratio = 0.0
 
-        progress_by_key[key] = max(progress_by_key.get(key, 0.0), ratio)
-        completed_by_key[key] = completed_by_key.get(key, False) or has_completion_evidence
+        progress_total += ratio
+        operations_complete += int(has_completion_evidence)
 
-    total_operations = len(progress_by_key)
-    operations_complete = sum(1 for is_complete in completed_by_key.values() if is_complete)
-    progress_total = sum(progress_by_key.values())
+    total_operations = len(operations)
     return {
         "operation_count": total_operations,
         "operations_complete": operations_complete,
@@ -1549,18 +1546,10 @@ def reconcile_work_orders_from_completion_evidence(
             )
         changed = op_changed or changed
 
-    for work_order in work_orders:
-        # G6-A: a terminal WO is done -- never copy slot completion evidence onto its
-        # operations (which would flip ops to COMPLETE / bump quantity_complete) nor
-        # re-derive its WO status. _sync_work_order_status_from_operations already
-        # self-guards for terminal WOs; _copy_slot_completion_evidence did NOT, so
-        # skipping the whole pair here closes that op-level hole. Read-safe.
-        if work_order.status in TERMINAL_WO_STATUSES:
-            continue
-        changed = (
-            _copy_slot_completion_evidence(work_order, transitions, entry_ids_by_operation, step_gated_operation_ids)
-            or changed
-        )
+    for work_order in non_terminal_work_orders:
+        # Evidence is scoped to the operation_id on each TimeEntry above. Never
+        # infer completion for another row from matching sequence, labels, or parts:
+        # independent parallel jobs legitimately share all of those fields.
         changed = _sync_work_order_status_from_operations(work_order, transitions, entry_ids_by_operation) or changed
 
     # LAST: re-run the READY promotion over the same non-terminal work orders (minus
@@ -1601,32 +1590,10 @@ def _record_transition(
     )
 
 
-def _operation_progress_key(operation: WorkOrderOperation) -> tuple:
-    if operation.sequence is not None:
-        return ("sequence", int(operation.sequence))
-    operation_number = _normalized_operation_number(operation.operation_number)
-    if operation_number:
-        return ("operation_number", operation_number)
-    name = " ".join((operation.name or "").strip().lower().split())
-    return (
-        operation.work_center_id,
-        operation.component_part_id,
-        operation.operation_group,
-        name or operation.operation_number or operation.sequence or operation.id,
-    )
-
-
 def _operation_has_completion_evidence(operation: WorkOrderOperation) -> bool:
     return operation.status == OperationStatus.COMPLETE or (
         operation.actual_end is not None and operation.completed_by is not None
     )
-
-
-def _normalized_operation_number(operation_number: Optional[str]) -> Optional[str]:
-    if not operation_number:
-        return None
-    digits = "".join(ch for ch in str(operation_number) if ch.isdigit())
-    return digits or " ".join(str(operation_number).strip().lower().split()) or None
 
 
 def _sync_operation_status_from_quantity(
@@ -1676,95 +1643,6 @@ def _sync_operation_status_from_quantity(
         operation.actual_start = operation.actual_start or (latest_entry.clock_in if latest_entry else None)
         operation.started_by = operation.started_by or (latest_entry.user_id if latest_entry else None)
         changed = True
-
-    return changed
-
-
-def _copy_slot_completion_evidence(
-    work_order: WorkOrder,
-    transitions: Optional[list[StatusTransition]] = None,
-    entry_ids_by_operation: Optional[dict[int, list[int]]] = None,
-    step_gated_operation_ids: Optional[set] = None,
-) -> bool:
-    """Copy completion evidence across regenerated operation rows sharing a progress key.
-
-    PR 4 (re-audit note a): a TARGET operation whose required process-sheet steps lack
-    conforming records (``step_gated_operation_ids``) is SKIPPED entirely -- copying a
-    sibling row's completion onto it would flip it COMPLETE (or stamp
-    ``actual_end``/``completed_by``, which reads as completion evidence on the next
-    pass) around the same gate every /complete path enforces. The gated row keeps its
-    own quantities; only the evidence copy is withheld.
-    """
-    changed = False
-    gated_ids = step_gated_operation_ids or set()
-    operations_by_key: dict[tuple, list[WorkOrderOperation]] = {}
-    for operation in work_order.operations or []:
-        operations_by_key.setdefault(_operation_progress_key(operation), []).append(operation)
-
-    for slot_operations in operations_by_key.values():
-        completed_source = next((op for op in slot_operations if _operation_has_completion_evidence(op)), None)
-        if not completed_source:
-            continue
-
-        for operation in slot_operations:
-            if operation.id in gated_ids:
-                continue
-            # Fill the quantity ONLY on a row that has no completion evidence of its
-            # own. This function copies a completed row's evidence ACROSS to the
-            # regenerated siblings sharing its progress key; it must not write back
-            # over the row the evidence came from, nor over any other sibling that
-            # carries its own.
-            #
-            # Without this guard the fill reverts an AUDITED CORRECTION to the plan.
-            # A supervisor lowers a COMPLETE operation 5 -> 3 through the reasoned
-            # office reduce verb; the next GET finds that row is its own
-            # ``completed_source``, sees 3 < target 5, and silently writes 5 back. The
-            # surviving TimeEntry evidence still reads 3, so this is not restoring
-            # from evidence -- it is overwriting a deliberate correction with the plan.
-            #
-            # With a material tie it stops being only a records defect: restoring the
-            # count re-opens a positive ``target - qty_consumed`` delta, so the
-            # consumption engine RE-ISSUES the returned material from inside a
-            # reconcile-on-read GET -- no actor, no reason, and FIFO re-selected, so
-            # the second draw can name a different lot than the material came back to.
-            # That is exactly the hazard the bounded-return design exists to make
-            # unreachable, so the two cannot both stand.
-            if not _operation_has_completion_evidence(operation):
-                target_qty = operation_target_quantity(operation, work_order)
-                if target_qty > 0 and float(operation.quantity_complete or 0) < target_qty:
-                    operation.quantity_complete = target_qty
-                    changed = True
-            if operation.quantity_scrapped is None and completed_source.quantity_scrapped is not None:
-                operation.quantity_scrapped = completed_source.quantity_scrapped
-                changed = True
-            if operation.status != OperationStatus.COMPLETE:
-                old_op_status = operation.status.value if operation.status else None
-                operation.status = OperationStatus.COMPLETE
-                release_operation_schedule_reservation(operation)  # MS-5
-                changed = True
-                _record_transition(
-                    transitions,
-                    resource_type="work_order_operation",
-                    resource_id=operation.id,
-                    resource_identifier=operation.operation_number,
-                    old_status=old_op_status,
-                    new_status=OperationStatus.COMPLETE.value,
-                    work_order_number=work_order.work_order_number,
-                    work_order_id=work_order.id,
-                    time_entry_ids=(entry_ids_by_operation or {}).get(operation.id, []),
-                )
-            if not operation.actual_end and completed_source.actual_end:
-                operation.actual_end = completed_source.actual_end
-                changed = True
-            if not operation.completed_by and completed_source.completed_by:
-                operation.completed_by = completed_source.completed_by
-                changed = True
-            if not operation.actual_start and completed_source.actual_start:
-                operation.actual_start = completed_source.actual_start
-                changed = True
-            if not operation.started_by and completed_source.started_by:
-                operation.started_by = completed_source.started_by
-                changed = True
 
     return changed
 

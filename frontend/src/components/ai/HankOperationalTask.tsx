@@ -13,6 +13,7 @@ import { HankPurchaseOrderPicker } from './HankPurchaseOrderPicker';
 import { HankJobScan } from './HankJobScan';
 import { HankTaskWorkflow } from './HankTaskWorkflow';
 import { useHankSessionGuard } from './useHankSessionGuard';
+import { formatOperationLabel } from '../../utils/operationLabel';
 
 const TITLES = {
   receive_delivery: 'Receive a delivery',
@@ -86,7 +87,7 @@ interface ReceivingPO {
 interface JobChoice {
   id: number;
   work_order_number: string;
-  operations: Array<{ id: number; sequence: number; name: string; status: string; quantity_complete: number }>;
+  operations: Array<{ id: number; sequence: number; operation_number?: string; name: string; status: string; quantity_complete: number }>;
 }
 
 export function HankOperationalTask({
@@ -520,7 +521,7 @@ export function HankOperationalTask({
                     <option value="">Select operation…</option>
                     {job?.operations.map(operation => (
                       <option key={operation.id} value={operation.id}>
-                        {operation.sequence} · {operation.name} · {operation.status} · complete{' '}
+                        {formatOperationLabel(operation.operation_number, operation.sequence)} · {operation.name} · {operation.status} · complete{' '}
                         {operation.quantity_complete}
                       </option>
                     ))}

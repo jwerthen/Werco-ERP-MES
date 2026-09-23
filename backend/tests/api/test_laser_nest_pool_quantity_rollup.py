@@ -355,10 +355,7 @@ class TestReconcileHealsPoolHeader:
         assert float(resp.json()["quantity_complete"]) == 8.0  # never lowered
 
     def test_all_complete_reconcile_does_not_snap_to_ordered(self):
-        """Unit-level pin of the no-snap rule inside the reconcile's WO sync
-        (the API read path layers _copy_slot_completion_evidence on top, which
-        raises a COMPLETE-short op to its own target -- pre-existing op-level
-        behavior outside this rule)."""
+        """Completing every nest must preserve each nest's actual production."""
         wo, _ops = _pool_wo(
             planned=[2, 3, 4],
             done=[2, 3, 3],

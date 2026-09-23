@@ -10,7 +10,7 @@ ambiguity refusals, unmatched report), and serialized WO creation (validation + 
 reachability end-to-end).
 
 Plus every PR 4 ledger item: single-resolve completion gating (TOCTOU closure), the
-step-gated skip in ``_copy_slot_completion_evidence``, the office-complete 404 on a
+isolation of same-sequence operations with and without step gates, the office-complete 404 on a
 soft-deleted parent WO, the TimeEntry-mirrored ``source`` trust model, the measurement
 ``decimals`` authoring guard, the shared document-number generator, and the shared
 serial parser behind ``coc_service``.
@@ -1163,10 +1163,10 @@ class TestCompletionResolveOnce:
         assert response.json()["detail"]["code"] == "STEPS_INCOMPLETE"
 
 
-class TestCopySlotSkipsGatedOps:
-    def test_step_gated_target_op_is_not_flipped_by_slot_copy(self, client: TestClient, db_session: Session):
-        # Item 8: two rows share a progress key (regenerated ops); the source has
-        # completion evidence, the TARGET is step-gated -> the copy must skip it.
+class TestSameSequenceCompletionIsolation:
+    def test_step_gated_target_op_cannot_borrow_completion(self, client: TestClient, db_session: Session):
+        # Matching plan fields do not establish shared production evidence.
+        # A step-gated sibling must retain its own incomplete state.
         work_center = make_work_center(db_session)
         work_order, source_op = make_wo_with_operation(
             db_session, work_center=work_center, op_status=OperationStatus.COMPLETE
@@ -1178,7 +1178,7 @@ class TestCopySlotSkipsGatedOps:
         target_op = WorkOrderOperation(
             work_order_id=work_order.id,
             work_center_id=work_center.id,
-            sequence=source_op.sequence,  # same progress key
+            sequence=source_op.sequence,  # same routing order, different operation ID
             operation_number=source_op.operation_number,
             name=source_op.name,
             status=OperationStatus.IN_PROGRESS,
@@ -1195,7 +1195,7 @@ class TestCopySlotSkipsGatedOps:
         assert target_op.status != OperationStatus.COMPLETE  # gate held
         assert target_op.actual_end is None and target_op.completed_by is None  # no evidence stamped either
 
-    def test_ungated_target_op_still_receives_the_copy(self, client: TestClient, db_session: Session):
+    def test_ungated_target_op_cannot_borrow_completion(self, client: TestClient, db_session: Session):
         work_center = make_work_center(db_session)
         work_order, source_op = make_wo_with_operation(
             db_session, work_center=work_center, op_status=OperationStatus.COMPLETE
@@ -1217,7 +1217,10 @@ class TestCopySlotSkipsGatedOps:
 
         db_session.refresh(work_order)
         reconcile_work_orders_from_completion_evidence(db_session, [work_order])
-        assert target_op.status == OperationStatus.COMPLETE  # the pre-PR-4 behavior, preserved
+        assert target_op.status == OperationStatus.IN_PROGRESS
+        assert target_op.quantity_complete == 0
+        assert target_op.actual_start is None and target_op.started_by is None
+        assert target_op.actual_end is None and target_op.completed_by is None
 
 
 class TestOfficeCompleteSoftDeletedWO:

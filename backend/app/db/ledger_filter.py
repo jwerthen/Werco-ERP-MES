@@ -12,9 +12,9 @@ engine. It lives here for two reasons:
   consumption engine -- and transitively ``completion_inventory_service`` and
   ``operational_event_service`` -- just to get a WHERE clause.
 
-The three reference shapes
+The four reference shapes
 --------------------------
-A work order's material movement lands under THREE ``reference_type`` values, and any
+A work order's material movement lands under FOUR ``reference_type`` values, and any
 reader that sees only some of them under-reports what the job consumed:
 
   * ``work_order``           -- the finished-good RECEIVE, plus every LEGACY (pre-PR-4.4)
@@ -27,8 +27,11 @@ reader that sees only some of them under-reports what the job consumed:
     (``completion_inventory_service``). ``reference_id`` is the WORK ORDER.
   * ``work_order_operation`` -- per-run consumption of material tied to an operation
     (``material_consumption_service``); ``reference_id`` is the OPERATION.
+  * ``work_order_receipt_correction`` -- compensating ADJUST rows reversing an
+    erroneous finished-goods receipt and restoring it on real completion. The
+    original RECEIVE remains immutable; ``reference_id`` is the WORK ORDER.
 
-The last two sit deliberately OUTSIDE the ``uq_wo_inventory_receipt`` /
+The two consumption shapes sit deliberately OUTSIDE the ``uq_wo_inventory_receipt`` /
 ``uq_wo_inventory_issue`` partial predicates (which key on
 ``reference_type = 'work_order'``), and for two DIFFERENT reasons:
 
@@ -44,7 +47,7 @@ The last two sit deliberately OUTSIDE the ``uq_wo_inventory_receipt`` /
 Whatever the reason, the consequence is the same and is why this module exists: the
 split has to be re-joined by every reader.
 
-All three are company-scoped here, outer predicate and operation subquery alike
+All four are company-scoped here, outer predicate and operation subquery alike
 (invariant #1).
 """
 
@@ -81,9 +84,16 @@ BACKFLUSH_REFERENCE_TYPE = "work_order_backflush"
 # why it is deliberately outside the ``uq_wo_inventory_*`` predicates.
 OPERATION_REFERENCE_TYPE = "work_order_operation"
 
+# Explicit finished-goods compensation, outside the original RECEIVE unique key.
+RECEIPT_CORRECTION_REFERENCE = "work_order_receipt_correction"
+
 # The reference shapes whose ``reference_id`` IS the work order id -- i.e. the ones
 # ``work_order_ledger_filter`` can match without resolving through the operation table.
-WORK_ORDER_ID_KEYED_REFERENCE_TYPES = (WORK_ORDER_REFERENCE_TYPE, BACKFLUSH_REFERENCE_TYPE)
+WORK_ORDER_ID_KEYED_REFERENCE_TYPES = (
+    WORK_ORDER_REFERENCE_TYPE,
+    BACKFLUSH_REFERENCE_TYPE,
+    RECEIPT_CORRECTION_REFERENCE,
+)
 
 # Every reference_type meaning "this movement belongs to a work order". Readers that
 # only need a membership test (e.g. "which WO numbers touched this lot?") use this;
@@ -127,8 +137,8 @@ def work_order_ledger_filter(
     An EMPTY collection yields a predicate that matches nothing (rather than one that
     matches everything, which is the dangerous failure mode).
 
-    TWO arms, THREE shapes: the first matches every work-order-id-keyed shape
-    (``work_order`` and ``work_order_backflush``) directly, the second resolves
+    TWO arms, FOUR shapes: the first matches every work-order-id-keyed shape
+    (``work_order``, ``work_order_backflush``, and receipt corrections) directly, the second resolves
     ``work_order_operation`` rows through this work order's operations. Widening the
     first arm is the ONLY downstream reader edit PR 4.4 needed -- job costing, analytics,
     lot genealogy and ``GET /inventory/transactions?work_order_id=`` all come through

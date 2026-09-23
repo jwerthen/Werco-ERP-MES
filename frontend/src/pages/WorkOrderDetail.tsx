@@ -46,7 +46,7 @@ import {
 } from '../components/ui';
 import { useUnsavedChanges } from '../hooks/useUnsavedChanges';
 import { formatCentralDate, formatCentralDateTime, getCentralDateStamp } from '../utils/centralTime';
-import { formatOperationLabel, hasOperationNumber } from '../utils/operationLabel';
+import { formatOperationLabel, operationNumberText } from '../utils/operationLabel';
 // The held-operation vocabulary the two kiosks already speak. Imported rather
 // than re-derived so the office page and the floor name one hold the same way:
 // same category labels, same "Held by Dana R. · <Central time>" attribution line,
@@ -221,7 +221,7 @@ const formatDateTimeCT = (value?: string) =>
  * so the Clear Hold copy and that picker cannot drift apart.
  */
 const operationLabel = (op: WorkOrderOperation): string =>
-  hasOperationNumber(op.operation_number) ? formatOperationLabel(op.operation_number) : `Op ${op.sequence}`;
+  formatOperationLabel(op.operation_number, op.sequence);
 
 /**
  * The lines that answer "why is this held?", in reading order.
@@ -357,23 +357,6 @@ const formatFileSize = (bytes?: number | null) => {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 };
 
-const operationProgressKey = (op: WorkOrderOperation) => {
-  if (op.sequence !== undefined && op.sequence !== null) {
-    return `sequence|${Number(op.sequence)}`;
-  }
-  const operationNumber = String(op.operation_number || '').replace(/\D/g, '');
-  if (operationNumber) {
-    return `operation_number|${operationNumber}`;
-  }
-  const name = (op.name || '').trim().toLowerCase().replace(/\s+/g, ' ');
-  return [
-    op.work_center_id || '',
-    op.component_part_id || '',
-    op.operation_group || '',
-    name || op.operation_number || op.sequence || op.id,
-  ].join('|');
-};
-
 const getOperationProgressMetrics = (workOrder: WorkOrder) => {
   const operations = workOrder.operations || [];
   if (operations.length === 0) {
@@ -387,8 +370,10 @@ const getOperationProgressMetrics = (workOrder: WorkOrder) => {
     };
   }
 
-  const progressByKey = new Map<string, number>();
-  const completeByKey = new Map<string, boolean>();
+  // Sequence and labels can repeat across independent component operations.
+  // Only the persisted operation ID identifies whose progress this is.
+  const progressByKey = new Map<number, number>();
+  const completeByKey = new Map<number, boolean>();
   operations.forEach((op) => {
     const target = Number(op.component_quantity || workOrder.quantity_ordered || 0);
     const complete = Number(op.quantity_complete || 0);
@@ -398,7 +383,7 @@ const getOperationProgressMetrics = (workOrder: WorkOrder) => {
       : target > 0
         ? Math.min(1, Math.max(0, complete / target))
         : 0;
-    const key = operationProgressKey(op);
+    const key = op.id;
     progressByKey.set(key, Math.max(progressByKey.get(key) || 0, ratio));
     completeByKey.set(key, Boolean(completeByKey.get(key)) || hasCompletionEvidence);
   });
@@ -1083,7 +1068,7 @@ export default function WorkOrderDetail() {
         reason,
         source: 'desktop',
       });
-      showToast('success', `Removed ${quantity} from operation ${correctTarget.sequence} ${correctTarget.name}`);
+      showToast('success', `Removed ${quantity} from operation ${operationNumberText(correctTarget.operation_number, correctTarget.sequence)} ${correctTarget.name}`);
       closeCorrectModal();
       loadWorkOrder();
     } catch (err: any) {
@@ -1484,7 +1469,7 @@ export default function WorkOrderDetail() {
       const target = workCenters.find((wc) => wc.id === nextWorkCenterId);
       showToast(
         'success',
-        `Op ${operation.sequence} moved to ${target ? target.name || target.code : `work center #${nextWorkCenterId}`}`
+        `${operationLabel(operation)} moved to ${target ? target.name || target.code : `work center #${nextWorkCenterId}`}`
       );
       await loadWorkOrder();
     } catch (err: any) {
@@ -2262,7 +2247,7 @@ export default function WorkOrderDetail() {
             <table className="min-w-full divide-y divide-slate-700">
               <thead className="bg-slate-800/50">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Seq</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Op #</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Group</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Operation</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase">Part</th>
@@ -2296,7 +2281,7 @@ export default function WorkOrderDetail() {
                     // operation never blocks itself.
                     const sequenceBlockReason =
                       lowestIncompleteOperation && op.sequence > lowestIncompleteOperation.sequence
-                        ? `Previous operations must be completed first — this work order runs its operations in sequence, and operation ${lowestIncompleteOperation.sequence} (${lowestIncompleteOperation.name}) is not complete.`
+                        ? `Previous operations must be completed first — this work order runs its operations in sequence, and operation ${operationNumberText(lowestIncompleteOperation.operation_number, lowestIncompleteOperation.sequence)} (${lowestIncompleteOperation.name}) is not complete.`
                         : null;
 
                     // WHY this row is held, for the compact in-row disclosure below.
@@ -2322,7 +2307,7 @@ export default function WorkOrderDetail() {
                       <tr id={`operation-${op.id}`}
                         className={`scroll-mt-20 hover:bg-slate-800/50 ${isNewGroup ? 'border-t-2 border-slate-600' : ''}`}
                       >
-                        <td className="px-4 py-3 font-medium text-sm">{op.sequence}</td>
+                        <td className="px-4 py-3 font-medium text-sm">{operationNumberText(op.operation_number, op.sequence)}</td>
                         <td className="px-4 py-3">
                           {op.operation_group && (
                             <span className={`inline-flex px-2 py-1 rounded text-xs font-bold ${groupColors[op.operation_group] || 'bg-slate-800 text-slate-100'}`}>
@@ -2964,7 +2949,7 @@ export default function WorkOrderDetail() {
                               <span>{[nest.material, nest.thickness].filter(Boolean).join(' • ')}</span>
                             )}
                             {nest.sheet_size && <span>Sheet: {nest.sheet_size}</span>}
-                            <span>Op {operation.sequence}</span>
+                            <span>{operationLabel(operation)}</span>
                             <span>
                               WC:{' '}
                               <span className="font-semibold text-fd-body">
@@ -3246,11 +3231,7 @@ export default function WorkOrderDetail() {
                 <option value="">Whole work order</option>
                 {workOrder.operations.map((op) => (
                   <option key={op.id} value={op.id}>
-                    {`${
-                      hasOperationNumber(op.operation_number)
-                        ? formatOperationLabel(op.operation_number)
-                        : `Op ${op.sequence}`
-                    } - ${op.name}`}
+                    {`${operationLabel(op)} - ${op.name}`}
                   </option>
                 ))}
               </select>
@@ -3498,7 +3479,7 @@ export default function WorkOrderDetail() {
         {correctTarget && (
           <>
             <div className="modal-header">
-              <h3 className="text-lg font-semibold">Correct Count — Op {correctTarget.sequence} {correctTarget.name}</h3>
+              <h3 className="text-lg font-semibold">Correct Count — {operationLabel(correctTarget)} {correctTarget.name}</h3>
               <button
                 onClick={closeCorrectModal}
                 disabled={correctingOpId !== null}

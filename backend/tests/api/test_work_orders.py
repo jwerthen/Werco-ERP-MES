@@ -136,7 +136,7 @@ class TestWorkOrdersAPI:
         assert item["operations_complete"] == 1
         assert item["operation_progress_percent"] == 50.0
 
-    def test_work_order_progress_uses_historical_matching_completion(
+    def test_work_order_progress_does_not_reuse_historical_matching_completion(
         self, client: TestClient, auth_headers: dict, operator_user: User, db_session
     ):
         part = Part(
@@ -217,9 +217,12 @@ class TestWorkOrdersAPI:
 
         assert response.status_code == status.HTTP_200_OK
         item = next(row for row in response.json() if row["work_order_number"] == "WO-PROG-HIST-001")
-        assert item["operation_count"] == 2
+        assert item["operation_count"] == 3
         assert item["operations_complete"] == 1
-        assert item["operation_progress_percent"] == 50.0
+        assert item["operation_progress_percent"] == 33.3
+        db_session.refresh(work_order)
+        assert [op.status for op in work_order.operations].count(OperationStatus.COMPLETE) == 1
+        assert [op.quantity_complete for op in work_order.operations] == [2, 0, 0]
 
     def test_preview_laser_nest_package_from_folder(self, client: TestClient, auth_headers: dict, db_session, tmp_path):
         part = Part(
@@ -389,7 +392,7 @@ class TestWorkOrdersAPI:
         assert refreshed_nest.completed_runs == 1
         assert refreshed_nest.remaining_runs == 2
 
-    def test_work_order_progress_matches_regenerated_slot_when_name_changes(
+    def test_work_order_progress_counts_separate_rows_even_when_they_resemble_regenerated_slots(
         self, client: TestClient, auth_headers: dict, operator_user: User, db_session
     ):
         part = Part(
@@ -470,9 +473,12 @@ class TestWorkOrdersAPI:
 
         assert response.status_code == status.HTTP_200_OK
         item = next(row for row in response.json() if row["work_order_number"] == "WO-PROG-SLOT-001")
-        assert item["operation_count"] == 2
+        assert item["operation_count"] == 3
         assert item["operations_complete"] == 1
-        assert item["operation_progress_percent"] == 50.0
+        assert item["operation_progress_percent"] == 33.3
+        db_session.refresh(work_order)
+        assert [op.status for op in work_order.operations].count(OperationStatus.COMPLETE) == 1
+        assert [op.quantity_complete for op in work_order.operations] == [1, 0, 0]
 
     def test_work_order_progress_reconciles_time_entry_production(
         self, client: TestClient, auth_headers: dict, operator_user: User, db_session

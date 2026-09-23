@@ -55,6 +55,26 @@ const PASSES_THROUGH: Array<[string, string]> = [
   ['10.5', '10.5'],
 ];
 
+describe('operation numbers take precedence over shared routing sequences', () => {
+  it('keeps progressive numbers when every operation has the same dependency rank', () => {
+    expect(['10', 'Op 20', 'OP30'].map(number => formatOperationLabel(number, 10)))
+      .toEqual(['Op 10', 'Op 20', 'Op 30']);
+    expect(['10', 'Op 20', 'OP30'].map(number => operationNumberText(number, 10)))
+      .toEqual(['10', '20', '30']);
+  });
+
+  it.each([...NAMES_NOTHING, '—'])('uses the sequence only when %s names no operation', stored => {
+    expect(formatOperationLabel(stored, 30)).toBe('Op 30');
+    expect(operationNumberText(stored, 30)).toBe('30');
+  });
+
+  it('preserves nest identifiers and an explicit zero operation number', () => {
+    expect(formatOperationLabel('Nest 3', 10)).toBe('Nest 3');
+    expect(operationNumberText('Nest 3', 10)).toBe('Nest 3');
+    expect(formatOperationLabel(0, 10)).toBe('Op 0');
+  });
+});
+
 describe('operationNumberText', () => {
   it.each(SPELLINGS_OF_TEN)('renders every stored spelling of operation 10 as a bare "10" (%s)', (stored) => {
     expect(operationNumberText(stored)).toBe('10');

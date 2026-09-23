@@ -5,7 +5,7 @@ import api from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import type { WorkOrder, WorkOrderOperation } from '../../types';
 import { hasPermission } from '../../utils/permissions';
-import { formatOperationLabel } from '../../utils/operationLabel';
+import { formatOperationLabel, operationNumberText } from '../../utils/operationLabel';
 import {
   extractApiErrorDetail,
   extractStepsBypassed,
@@ -37,7 +37,7 @@ function completionBlockReason(operation: WorkOrderOperation, workOrder: WorkOrd
     const previous = workOrder.operations
       .filter(candidate => candidate.sequence < operation.sequence && candidate.status !== 'complete')
       .sort((a, b) => a.sequence - b.sequence)[0];
-    if (previous) return `Complete operation ${previous.sequence} (${previous.name}) first.`;
+    if (previous) return `Complete operation ${operationNumberText(previous.operation_number, previous.sequence)} (${previous.name}) first.`;
   }
   if (operation.status === 'pending') return 'This operation must be ready or in progress before completing.';
   return null;
@@ -105,8 +105,8 @@ export default function WorkOrderOperationsModal({
         );
         message =
           result?.message === 'Operation completed'
-            ? `Operation ${target.operation.sequence} (${target.operation.name}) completed.`
-            : `Progress saved for operation ${target.operation.sequence} (${target.operation.name}).`;
+            ? `Operation ${operationNumberText(target.operation.operation_number, target.operation.sequence)} (${target.operation.name}) completed.`
+            : `Progress saved for operation ${operationNumberText(target.operation.operation_number, target.operation.sequence)} (${target.operation.name}).`;
       } else {
         const result: unknown = await api.completeWorkOrder(
           workOrder.id,
@@ -248,9 +248,7 @@ export default function WorkOrderOperationsModal({
                       >
                         <div className="min-w-0 space-y-1">
                           <h3 className="font-semibold text-fd-ink">
-                            {operation.operation_number
-                              ? formatOperationLabel(operation.operation_number)
-                              : `Op ${operation.sequence}`}{' '}
+                            {formatOperationLabel(operation.operation_number, operation.sequence)}{' '}
                             · {operation.name}
                           </h3>
                           <p className="text-sm text-fd-mute">
@@ -273,7 +271,7 @@ export default function WorkOrderOperationsModal({
                               size="sm"
                               disabled={disabled || !!blockReason}
                               title={blockReason || undefined}
-                              aria-label={`Complete operation ${operation.sequence}: ${operation.name}`}
+                              aria-label={`Complete operation ${operationNumberText(operation.operation_number, operation.sequence)}: ${operation.name}`}
                               onClick={() => openCompletion({ kind: 'operation', operation })}
                             >
                               <CheckCircleIcon className="mr-1 h-4 w-4" aria-hidden="true" /> Complete

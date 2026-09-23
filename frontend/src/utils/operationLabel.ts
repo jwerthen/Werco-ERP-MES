@@ -25,9 +25,9 @@
  * `Nest 3`, and prefixing that read `Op Nest 3` — the same doubled-noun defect
  * one noun over. See `SELF_LABELED`.
  *
- * NOT for a numeric `sequence`/counter. `WorkOrderDetail`'s `Op {sequence}` and
- * `Scheduling`'s `Op {n}/{total}` progress counter render an integer this
- * function has no business touching — they are correct as they stand.
+ * A routing `sequence` is a dependency rank, not the operation's identifier:
+ * multiple independent operations can share it. Pass it as the optional fallback
+ * only when a stored operation number is absent. Progress counters are separate.
  */
 
 /**
@@ -87,8 +87,14 @@ function bareIdentifier(operationNumber: string | number | null | undefined): st
   return raw.replace(/^op(?:eration)?(?:[\s._\-#:]+(?=\S)|(?=\d))/i, '').trim();
 }
 
-export function formatOperationLabel(operationNumber: string | number | null | undefined): string {
-  const identifier = bareIdentifier(operationNumber);
+export function formatOperationLabel(
+  operationNumber: string | number | null | undefined,
+  fallbackSequence?: number | null
+): string {
+  const storedIdentifier = bareIdentifier(operationNumber);
+  const identifier = storedIdentifier && storedIdentifier !== '—'
+    ? storedIdentifier
+    : bareIdentifier(fallbackSequence);
   // Falls back to the em-dash shown for a missing number, because a value that
   // parses to nothing amounts to exactly that.
   if (!identifier) return OPERATION_LABEL_FALLBACK;
@@ -151,10 +157,13 @@ export function hasOperationNumber(operationNumber: string | number | null | und
  * two are equal. Hence the conditional peel below: a blind `.slice(3)` would
  * turn `Nest 3` into `t 3`.
  *
- * NOT for a numeric `sequence`/counter — same caveat as `formatOperationLabel`.
+ * `fallbackSequence` is used only when the stored identifier is absent.
  */
-export function operationNumberText(operationNumber: string | number | null | undefined): string {
-  const label = formatOperationLabel(operationNumber);
+export function operationNumberText(
+  operationNumber: string | number | null | undefined,
+  fallbackSequence?: number | null
+): string {
+  const label = formatOperationLabel(operationNumber, fallbackSequence);
   if (label === OPERATION_LABEL_FALLBACK) return '';
   return label.startsWith(OPERATION_LABEL_PREFIX) ? label.slice(OPERATION_LABEL_PREFIX.length) : label;
 }
