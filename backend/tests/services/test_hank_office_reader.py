@@ -148,26 +148,32 @@ def test_excel_formulas_are_not_evaluated_and_caches_are_untrusted(factory, exte
 
 
 @pytest.mark.parametrize(
-    'content,filename',
+    'content_factory,filename',
     [
-        (b'not office', 'po.docx'),
-        (b'%PDF-pretend', 'po.xlsx'),
-        (word_document(), 'po.xlsx'),
-        (excel_document(), 'po.docx'),
+        pytest.param(lambda: b'not office', 'po.docx', id='invalid-word'),
+        pytest.param(lambda: b'%PDF-pretend', 'po.xlsx', id='pdf-as-excel'),
+        pytest.param(word_document, 'po.xlsx', id='word-as-excel'),
+        pytest.param(excel_document, 'po.docx', id='excel-as-word'),
     ],
 )
-def test_disguised_files_are_rejected(content, filename):
+def test_disguised_files_are_rejected(content_factory, filename):
+    # Office ZIP metadata contains timestamps. Build bytes during execution so
+    # independently collecting xdist workers always agree on the test node IDs.
     with pytest.raises(OfficeReadError):
-        detect_intake_format(content, filename)
+        detect_intake_format(content_factory(), filename)
 
 
 @pytest.mark.parametrize(
     'name,payload',
     [
-        ('word/vbaProject.bin', b'macro'),
-        ('word/embeddings/oleObject1.bin', b'object'),
-        ('word/document.xml', b'<!DOCTYPE x [<!ENTITY x SYSTEM "file:///etc/passwd">]><x>&x;</x>'),
-        ('huge.txt', b'a' * (2 * 1024 * 1024)),
+        pytest.param('word/vbaProject.bin', b'macro', id='macro'),
+        pytest.param('word/embeddings/oleObject1.bin', b'object', id='embedded-object'),
+        pytest.param(
+            'word/document.xml',
+            b'<!DOCTYPE x [<!ENTITY x SYSTEM "file:///etc/passwd">]><x>&x;</x>',
+            id='external-entity',
+        ),
+        pytest.param('huge.txt', b'a' * (2 * 1024 * 1024), id='excessive-compression'),
     ],
 )
 def test_unsafe_office_packages_are_rejected(name, payload):
