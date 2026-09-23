@@ -491,3 +491,20 @@ describe('Hank document intake', () => {
     expect(mockedApi.commandHankIntake).not.toHaveBeenCalled();
   });
 });
+
+it('lets employees explicitly attach analyzed PDFs to chat without filing them', async () => {
+  const onUseInChat = jest.fn();
+  mockedApi.getHankIntakeFile.mockResolvedValue(reviewedFile);
+  renderIntake({ initialId: reviewedFile.id, onUseInChat });
+  fireEvent.click(await screen.findByRole('button', { name: 'Use in chat' }));
+  expect(onUseInChat).toHaveBeenCalledWith(reviewedFile);
+  expect(mockedApi.planHankIntake).not.toHaveBeenCalled();
+  expect(mockedApi.commandHankIntake).not.toHaveBeenCalled();
+});
+
+it.each(['queued', 'analyzing', 'failed', 'cancelled'] as const)('does not attach %s files to chat', async status => {
+  mockedApi.getHankIntakeFile.mockResolvedValue({ ...reviewedFile, status });
+  renderIntake({ initialId: reviewedFile.id, onUseInChat: jest.fn() });
+  await screen.findByRole('button', { name: 'Refresh file' });
+  expect(screen.queryByRole('button', { name: 'Use in chat' })).not.toBeInTheDocument();
+});

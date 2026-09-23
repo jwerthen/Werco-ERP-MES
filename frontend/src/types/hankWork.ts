@@ -19,6 +19,9 @@ export interface HankEvidence {
 }
 export interface HankReceiveInput {
   purchase_order_id: number;
+  source_intake_file_id?: number;
+  source_intake_version?: number;
+  acknowledge_duplicate_source?: boolean;
   lines: Array<{
     po_line_id: number;
     quantity_received: number;

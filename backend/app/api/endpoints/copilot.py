@@ -116,6 +116,7 @@ def copilot_chat(
     _check_rate_limit(current_user.id)
 
     service = CopilotService(db, company_id=company_id, user=current_user)
+    service.attach_documents(request.intake_file_ids)
     plain_messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
     if not stream:

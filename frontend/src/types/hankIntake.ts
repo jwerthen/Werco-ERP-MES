@@ -51,6 +51,7 @@ export interface HankIntakeAnalysis {
     part_number: string | null;
     quantity: string | null;
     unit_price: string | null;
+    unit_of_measure?: string | null;
     lot_number: string | null;
     heat_number: string | null;
     confidence: 'high' | 'low' | 'unknown';
@@ -113,4 +114,41 @@ export interface HankIntakeBatchList {
   batches: HankIntakeBatch[];
   has_more: boolean;
   next_before_id: number | null;
+}
+
+/** Source evidence and deterministic PO matches; this read does not receive inventory. */
+export interface HankIntakeReceivingDraft {
+  file_id: number;
+  file_version: number;
+  company_id: number;
+  filename: string;
+  purchase_order_id: number | null;
+  purchase_orders: Array<{ id: number; po_number: string; vendor_name: string; reason: string }>;
+  packing_slip_number: string | null;
+  lines: Array<{
+    source_line_index: number;
+    description: string;
+    part_number: string | null;
+    quantity: string | null;
+    unit_of_measure: string | null;
+    lot_number: string | null;
+    heat_number: string | null;
+    confidence: 'high' | 'low' | 'unknown';
+    evidence: HankIntakeEvidence[];
+    po_line_id: number | null;
+    candidates: Array<{
+      po_line_id: number;
+      line_number: number;
+      part_id: number;
+      part_number: string;
+      description: string;
+      quantity_remaining: number;
+      unit_of_measure: string;
+    }>;
+    quantity_received: number | null;
+    warnings: string[];
+  }>;
+  warnings: string[];
+  has_duplicates: boolean;
+  requires_duplicate_acknowledgement: boolean;
 }

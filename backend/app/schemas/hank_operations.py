@@ -45,9 +45,16 @@ class ReceiveDeliveryInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
     purchase_order_id: int = Field(gt=0)
     lines: list[HankReceiptLine] = Field(min_length=1, max_length=50)
+    source_intake_file_id: int | None = Field(default=None, gt=0)
+    source_intake_version: int | None = Field(default=None, ge=1)
+    acknowledge_duplicate_source: bool = False
 
     @model_validator(mode='after')
     def no_duplicate_lines(self):
+        if (self.source_intake_file_id is None) != (self.source_intake_version is None):
+            raise ValueError('Provide both the intake source file and its reviewed version')
+        if self.acknowledge_duplicate_source and self.source_intake_file_id is None:
+            raise ValueError('Duplicate source acknowledgement requires an intake source')
         ids = [line.po_line_id for line in self.lines]
         if len(ids) != len(set(ids)):
             raise ValueError('Enter each purchase order line once per delivery')

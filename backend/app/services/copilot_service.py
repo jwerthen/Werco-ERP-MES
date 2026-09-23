@@ -48,6 +48,7 @@ from app.models.work_order_blocker import WorkOrderBlockerStatus
 from app.schemas.ai_learning import AIEventType, AIInteractionEventCreate
 from app.services.ai_context_service import AIContextService
 from app.services.ai_learning_service import AILearningService
+from app.services.hank_chat_documents import attachment_manifest, document_evidence, receiving_document
 from app.services.hank_copilot_tools import (
     TASK_INPUT_SCHEMA,
     action_context,
@@ -68,6 +69,9 @@ logger = logging.getLogger(__name__)
 
 COPILOT_MAX_TOOL_ROUNDS = int(os.getenv("COPILOT_MAX_TOOL_ROUNDS", "8"))
 COPILOT_MAX_OUTPUT_TOKENS = int(os.getenv("COPILOT_MAX_OUTPUT_TOKENS", "1024"))
+COPILOT_MAX_TOOL_OUTPUT_TOKENS = int(
+    os.getenv("COPILOT_MAX_TOOL_OUTPUT_TOKENS", os.getenv("COPILOT_MAX_OUTPUT_TOKENS", "8192"))
+)
 COPILOT_LLM_TIMEOUT_SECONDS = float(os.getenv("COPILOT_LLM_TIMEOUT_SECONDS", "45"))
 _MAX_HISTORY_MESSAGES = 30
 _MAX_MESSAGE_CHARS = 4000
@@ -583,6 +587,38 @@ TOOL_REGISTRY: List[CopilotToolSpec] = [
         handler=operational_report,
     ),
     CopilotToolSpec(
+        name='hank_document_evidence',
+        description='Read saved extraction from an owned Hank PDF, including source page evidence and uncertainty. Read fields for header identifiers or lines for material items. Follow next_offset to read more; never infer missing lines or approvals.',
+        input_schema={
+            'type': 'object',
+            'properties': {
+                'file_id': {'type': 'integer', 'minimum': 1},
+                'section': {'type': 'string', 'enum': ['fields', 'lines']},
+                'offset': {'type': 'integer', 'minimum': 0, 'maximum': 50},
+                'limit': {'type': 'integer', 'minimum': 1, 'maximum': 5},
+            },
+            'required': ['file_id'],
+            'additionalProperties': False,
+        },
+        handler=document_evidence,
+    ),
+    CopilotToolSpec(
+        name='hank_receiving_document',
+        description='Match an owned, analyzed delivery PDF to current receiving PO lines, quantities and units. Follow next_offset to read more lines. Returns unresolved matches, source identity and warnings for employee review; does not post receipts. Never guess inspection choices. Use the PDF review link to review and receive materials.',
+        input_schema={
+            'type': 'object',
+            'properties': {
+                'file_id': {'type': 'integer', 'minimum': 1},
+                'purchase_order_id': {'type': 'integer', 'minimum': 1},
+                'offset': {'type': 'integer', 'minimum': 0, 'maximum': 50},
+                'limit': {'type': 'integer', 'minimum': 1, 'maximum': 5},
+            },
+            'required': ['file_id'],
+            'additionalProperties': False,
+        },
+        handler=receiving_document,
+    ),
+    CopilotToolSpec(
         name='hank_action_context',
         description='Read your own active job clocks before a production report, or exact PO line ids before preparing a delivery. Recorded expected quantities are not reported actual quantities.',
         input_schema={
@@ -786,6 +822,15 @@ class CopilotService:
         self.db = db
         self.company_id = company_id
         self.user = user
+        self.document_manifest: List[Dict[str, Any]] = []
+        self.document_references: List[Dict[str, Any]] = []
+        self.document_versions: Dict[int, int] = {}
+
+    def attach_documents(self, file_ids: List[int]) -> None:
+        self.document_manifest, self.document_references = attachment_manifest(
+            self.db, self.company_id, self.user, file_ids
+        )
+        self.document_versions = {item['file_id']: item['version'] for item in self.document_manifest}
 
     # -- registry ------------------------------------------------------------
     def tool_specs_for_user(self) -> List[CopilotToolSpec]:
@@ -817,6 +862,19 @@ class CopilotService:
 
         declared = set((spec.input_schema.get("properties") or {}).keys())
         safe_input = {k: v for k, v in (tool_input or {}).items() if k in declared}
+        if name == 'prepare_hank_task' and safe_input.get('kind') == 'receive_delivery' and self.document_versions:
+            payload = safe_input.get('input')
+            file_id = payload.get('source_intake_file_id') if isinstance(payload, dict) else None
+            version = payload.get('source_intake_version') if isinstance(payload, dict) else None
+            if type(file_id) is not int or self.document_versions.get(file_id) != version:
+                return ToolExecution(
+                    tool=name,
+                    payload={
+                        'error': 'Include the exact source_intake_file_id and source_intake_version from the reviewed PDF evidence before preparing this receipt.'
+                    },
+                    summary='receipt proposal needs its PDF source',
+                    is_error=True,
+                )
         try:
             result = spec.handler(db=self.db, company_id=self.company_id, user=self.user, **safe_input)
         except Exception as exc:
@@ -827,6 +885,9 @@ class CopilotService:
                 summary=f"{name} failed",
                 is_error=True,
             )
+        if name in ('hank_document_evidence', 'hank_receiving_document') and not result.get('is_error'):
+            data = result['data']
+            self.document_versions[data['file_id']] = data.get('version', data.get('file_version'))
         return ToolExecution(
             tool=name,
             payload=result.get("data", {}),
@@ -857,6 +918,15 @@ class CopilotService:
         preferences = get_hank_preference_values(self.db, self.company_id, self.user.id)
         presentation = preferences.model_dump(exclude={"follow_up_alerts"})
         blocks = []
+        if self.document_manifest:
+            blocks.append(
+                {
+                    'type': 'text',
+                    'text': '<attached_pdf_evidence>'
+                    + json.dumps(self.document_manifest, sort_keys=True)
+                    + '</attached_pdf_evidence>',
+                }
+            )
         if context_hint:
             blocks.append({"type": "text", "text": f"<context_hint>{str(context_hint)[:500]}</context_hint>"})
         blocks.append(
@@ -900,8 +970,8 @@ class CopilotService:
 
         input_chars = sum(len(str(m.get("content") or "")) for m in messages)
         tool_trace: List[Dict[str, str]] = []
-        references: List[Dict[str, Any]] = []
-        seen_refs = set()
+        references: List[Dict[str, Any]] = list(self.document_references)
+        seen_refs = {(ref['type'], ref['id']) for ref in references}
         rounds = 0
         truncated = False
         answer = ""
@@ -911,26 +981,44 @@ class CopilotService:
         # answer call (tool_choice "none" keeps the cached tool prefix intact).
         for call_index in range(COPILOT_MAX_TOOL_ROUNDS + 1):
             force_final = call_index == COPILOT_MAX_TOOL_ROUNDS
+            output_budget = COPILOT_MAX_OUTPUT_TOKENS if force_final else COPILOT_MAX_TOOL_OUTPUT_TOKENS
+            # Tool results and attachment manifests are already materialized;
+            # proposals commit before returning. Release the read connection
+            # while waiting on Claude instead of holding it across every round.
+            if self.db.in_transaction():
+                self.db.rollback()
             result = run_llm_task(
                 LLMTaskContext(
-                    task="copilot_chat", input_chars=input_chars, max_output_tokens=COPILOT_MAX_OUTPUT_TOKENS
+                    # Structured receipt JSON needs space, not a more expensive
+                    # reasoning tier. Route on conversation complexity as before.
+                    task="copilot_chat",
+                    input_chars=input_chars,
+                    max_output_tokens=COPILOT_MAX_OUTPUT_TOKENS,
                 ),
                 messages=api_messages,
                 system=system_blocks,
                 tools=tool_defs,
                 tool_choice={"type": "none"} if force_final else None,
-                max_tokens=COPILOT_MAX_OUTPUT_TOKENS,
+                max_tokens=output_budget,
                 company_id=self.company_id,
                 feature="copilot_panel",
                 prompt_version=COPILOT_CHAT_PROMPT.version,
                 timeout=COPILOT_LLM_TIMEOUT_SECONDS,
                 max_retries=1,  # one retry for transient overload (529s), bounded so a turn can't stall
+                cache_conversation=not force_final,
             )
             model_used = result.model
             response = result.raw_response
             blocks = getattr(response, "content", None) or []
             text_parts = [_block_attr(b, "text") or "" for b in blocks if _block_attr(b, "type") == "text"]
             tool_uses = [b for b in blocks if _block_attr(b, "type") == "tool_use"]
+
+            if tool_uses and getattr(response, 'stop_reason', None) == 'max_tokens':
+                # Do not dispatch a partially generated receipt or other proposal.
+                # The employee can use the PDF review form for a larger batch.
+                answer = 'The task details were too large to finish safely. Open the PDF review or Tasks to review the full action.'
+                truncated = True
+                break
 
             if not tool_uses or force_final:
                 answer = "\n".join(part for part in text_parts if part).strip()
@@ -952,7 +1040,11 @@ class CopilotService:
                         references.append(ref)
                 yield {"type": "tool_use", "tool": execution.tool, "summary": execution.summary}
                 content = json.dumps(execution.payload, default=str)
-                if len(content) > _MAX_TOOL_RESULT_CHARS:
+                if execution.tool in ('hank_document_evidence', 'hank_receiving_document'):
+                    # These tools already bound their structured evidence. Keep complete
+                    # JSON and source IDs; truncating a receipt line can change its meaning.
+                    pass
+                elif len(content) > _MAX_TOOL_RESULT_CHARS:
                     content = content[:_MAX_TOOL_RESULT_CHARS] + " ...[truncated]"
                 result_blocks.append(
                     {

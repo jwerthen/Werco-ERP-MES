@@ -25,6 +25,8 @@ import { usePermissions } from '../../hooks/usePermissions';
 import { canPublishDocuments } from '../../utils/recordWriteAccess';
 import { HankAvatar } from './HankAvatar';
 import { HankDocumentUpload } from './HankDocumentUpload';
+import { HankDocumentIntake } from './HankDocumentIntake';
+import type { HankIntakeFile } from '../../types/hankIntake';
 import { HankBriefing } from './HankBriefing';
 import { HankTaskWorkspace } from './HankTaskWorkspace';
 import { HankPreferences } from './HankPreferences';
@@ -45,6 +47,7 @@ interface ChatEntry {
   toolTrace?: CopilotToolTraceEntry[];
   truncated?: boolean;
   error?: boolean;
+  intakeFiles?: Array<Pick<HankIntakeFile, 'id' | 'filename'>>;
 }
 
 const MAX_HISTORY_SENT = 40; // matches the backend request schema cap
@@ -82,6 +85,9 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
   const [activity, setActivity] = useState<string | null>(null);
   const [streamText, setStreamText] = useState('');
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [filingOpen, setFilingOpen] = useState(false);
+  const [intakeFiles, setIntakeFiles] = useState<Array<Pick<HankIntakeFile, 'id' | 'filename'>>>([]);
+  const [attachmentError, setAttachmentError] = useState('');
   const [uploadBusy, setUploadBusy] = useState(false);
   const [view, setView] = useState<'chat' | 'briefing' | 'tasks' | 'work' | 'preferences'>('chat');
   const [taskBusy, setTaskBusy] = useState(false);
@@ -268,7 +274,13 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
         getHankSessionScope() === sessionScopeRef.current;
       try {
         const final = await api.copilotChatStream(
-          { messages: toApiMessages(history), context_hint: contextHint },
+          {
+            messages: toApiMessages(history),
+            context_hint: contextHint,
+            ...(history[history.length - 1]?.intakeFiles?.length
+              ? { intake_file_ids: history[history.length - 1].intakeFiles!.map(file => file.id) }
+              : {}),
+          },
           {
             onToolUse: (_tool, summary) => {
               if (isCurrentTurn()) setActivity(summary);
@@ -320,11 +332,14 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
       const trimmed = text.trim();
       if (!trimmed || abortRef.current || uploadOpen || getHankSessionScope() !== sessionScopeRef.current) return;
       setInput('');
-      const next: ChatEntry[] = [...entriesRef.current, { role: 'user', content: trimmed }];
+      const next: ChatEntry[] = [
+        ...entriesRef.current,
+        { role: 'user', content: trimmed, intakeFiles: [...intakeFiles] },
+      ];
       replaceEntries(next);
       void runTurn(next);
     },
-    [uploadOpen, runTurn, replaceEntries]
+    [uploadOpen, runTurn, replaceEntries, intakeFiles]
   );
 
   const retry = useCallback(() => {
@@ -350,7 +365,28 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
     stop();
     replaceEntries([]);
     setInput('');
+    setIntakeFiles([]);
+    setAttachmentError('');
   }, [stop, replaceEntries, uploadBusy]);
+
+  const useInChat = (file: HankIntakeFile) => {
+    if (
+      getHankSessionScope() !== sessionScopeRef.current ||
+      !file.analysis ||
+      !['awaiting_review', 'planned', 'completed'].includes(file.status)
+    )
+      return;
+    if (!intakeFiles.some(item => item.id === file.id) && intakeFiles.length >= 5) {
+      setAttachmentError('Remove a PDF from chat before adding another. You can use up to 5 PDFs at a time.');
+      return;
+    }
+    setIntakeFiles(previous =>
+      previous.some(item => item.id === file.id) ? previous : [...previous, { id: file.id, filename: file.filename }]
+    );
+    setAttachmentError('');
+    setUploadOpen(false);
+    setView('chat');
+  };
 
   const handleUploaded = (document: { id: number; document_number: string; title: string; revision: string }) => {
     if (getHankSessionScope() !== sessionScopeRef.current) return;
@@ -425,7 +461,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
             </div>
           </div>
           <div className="flex items-center gap-1">
-            {entries.length > 0 && (
+            {(entries.length > 0 || intakeFiles.length > 0) && (
               <button
                 type="button"
                 onClick={clear}
@@ -451,13 +487,16 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
         <div className="px-4 py-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--fd-line)' }}>
           <p className="text-xs text-fd-mute">
             Check your shift, manage tasks, and prepare work.
-            {canUpload ? ' File PDFs here, too.' : ' Ask Hank for the records behind each answer.'}
+            {canUpload
+              ? ' Upload PDFs to ask questions or prepare receiving.'
+              : ' Ask Hank for the records behind each answer.'}
           </p>
           {canUpload && (
             <button
               type="button"
               onClick={() => {
                 setView('chat');
+                setFilingOpen(false);
                 setUploadOpen(true);
               }}
               disabled={busy || uploadOpen || taskBusy || workBusy || preferencesBusy}
@@ -465,7 +504,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
               style={{ border: '1px solid var(--fd-line-bright)' }}
             >
               <ArrowUpTrayIcon className="h-4 w-4 text-fd-amber" />
-              Upload PDF
+              Upload PDFs
             </button>
           )}
         </div>
@@ -509,25 +548,66 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
               initialId={workSelection.id}
               onNavigate={onClose}
               onBusyChange={setWorkBusy}
+              onUseInChat={useInChat}
             />
           )}
           {!uploadOpen && view === 'preferences' && <HankPreferences onBusyChange={setPreferencesBusy} />}
+          {attachmentError && (
+            <p role="alert" className="text-xs text-fd-amber">
+              {attachmentError}
+            </p>
+          )}
           {uploadOpen && canUpload && (
-            <HankDocumentUpload
-              workOrderId={workOrderId}
-              onUploaded={handleUploaded}
-              onBusyChange={setUploadBusy}
-              onCancel={() => {
-                if (!uploadBusy) setUploadOpen(false);
-              }}
-            />
+            <>
+              {!filingOpen && (
+                <div className="flex flex-wrap gap-3">
+                  <button
+                    type="button"
+                    className="text-xs text-fd-blue underline"
+                    disabled={uploadBusy}
+                    onClick={() => {
+                      setUploadOpen(false);
+                      setView('chat');
+                    }}
+                  >
+                    Back to chat
+                  </button>
+                  <button
+                    type="button"
+                    className="text-xs text-fd-blue underline"
+                    disabled={uploadBusy}
+                    onClick={() => setFilingOpen(true)}
+                  >
+                    File PDF without analysis
+                  </button>
+                </div>
+              )}
+              {filingOpen ? (
+                <HankDocumentUpload
+                  workOrderId={workOrderId}
+                  onUploaded={handleUploaded}
+                  onBusyChange={setUploadBusy}
+                  onCancel={() => {
+                    if (!uploadBusy) setUploadOpen(false);
+                  }}
+                />
+              ) : (
+                <HankDocumentIntake
+                  workOrderId={workOrderId}
+                  onNavigate={onClose}
+                  onBusyChange={setUploadBusy}
+                  onUseInChat={useInChat}
+                />
+              )}
+            </>
           )}
           {entries.length === 0 && !busy && !uploadOpen && view === 'chat' && (
             <div className="space-y-3">
               <p className="text-sm text-fd-body">
                 I’m Hank, named after the shop’s yellow Lab. I can help you find a job, check blockers, or look up
                 stock.
-                {canUpload && ' Have a PDF to file? Use Upload PDF and review its details before saving.'}
+                {canUpload &&
+                  ' Upload a PDF, review the extracted information, then use it in chat or receive materials.'}
               </p>
               <div className="space-y-1.5">
                 {suggestions.map(suggestion => (
@@ -563,6 +643,11 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
                       style={{ background: 'rgba(47,129,247,0.12)', border: '1px solid rgba(47,129,247,0.35)' }}
                     >
                       {entry.content}
+                      {!!entry.intakeFiles?.length && (
+                        <p className="mt-1 text-[11px] text-fd-mute">
+                          PDFs: {entry.intakeFiles.map(file => file.filename).join(', ')}
+                        </p>
+                      )}
                     </div>
                   </div>
                 ) : (
@@ -643,6 +728,29 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
         {/* Composer */}
         {!uploadOpen && view === 'chat' && (
           <div className="flex-shrink-0 p-3" style={{ borderTop: '1px solid var(--fd-line)' }}>
+            {!!intakeFiles.length && (
+              <div aria-label="PDFs attached to chat" className="mb-2 space-y-1">
+                <p className="text-[11px] text-fd-mute">Hank will use these PDFs until you remove them.</p>
+                <div className="flex flex-wrap gap-2">
+                  {intakeFiles.map(file => (
+                    <span
+                      key={file.id}
+                      className="inline-flex max-w-full items-center gap-1 rounded border border-slate-700 px-2 py-1 text-xs text-fd-body"
+                    >
+                      <span className="truncate">{file.filename}</span>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        aria-label={`Remove ${file.filename} from chat`}
+                        onClick={() => setIntakeFiles(previous => previous.filter(item => item.id !== file.id))}
+                      >
+                        <XMarkIcon className="h-3.5 w-3.5" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
             <div
               className="flex items-end gap-2 px-3 py-2 rounded-[3px]"
               style={{ background: 'var(--fd-sunken)', border: '1px solid var(--fd-line)' }}
@@ -690,8 +798,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
               <p className="mt-1.5 font-mono text-[10px] text-red-300">Last request failed — retry or rephrase.</p>
             ) : (
               <p className="mt-1.5 text-[10px] text-fd-mute">
-                Tasks require your review and submission. {canUpload && 'PDF filing releases on submission. '}
-                Conversation clears on reload.
+                Tasks require your review and submission. Conversation clears on reload.
               </p>
             )}
           </div>

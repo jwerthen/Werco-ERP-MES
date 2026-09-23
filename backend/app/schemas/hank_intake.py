@@ -51,6 +51,7 @@ class IntakeLine(StrictModel):
     description: str = Field(default='', max_length=500)
     part_number: str | None = Field(default=None, max_length=100)
     quantity: str | None = Field(default=None, max_length=100)
+    unit_of_measure: str | None = Field(default=None, max_length=50)
     unit_price: str | None = Field(default=None, max_length=100)
     lot_number: str | None = Field(default=None, max_length=100)
     heat_number: str | None = Field(default=None, max_length=100)
@@ -162,3 +163,42 @@ class IntakeBatchList(StrictModel):
     batches: list[IntakeBatchResponse]
     has_more: bool
     next_before_id: int | None
+
+
+class IntakeReceivingPurchaseOrder(StrictModel):
+    id: int
+    po_number: str
+    vendor_name: str
+    reason: str
+
+
+class IntakeReceivingCandidate(StrictModel):
+    po_line_id: int
+    line_number: int
+    part_id: int
+    part_number: str
+    description: str
+    quantity_remaining: float
+    unit_of_measure: str
+
+
+class IntakeReceivingLine(IntakeLine):
+    source_line_index: int
+    po_line_id: int | None = None
+    candidates: list[IntakeReceivingCandidate] = Field(default_factory=list)
+    quantity_received: float | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class IntakeReceivingDraft(StrictModel):
+    file_id: int
+    file_version: int
+    company_id: int
+    filename: str
+    purchase_order_id: int | None = None
+    purchase_orders: list[IntakeReceivingPurchaseOrder] = Field(default_factory=list)
+    packing_slip_number: str | None = None
+    lines: list[IntakeReceivingLine] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    has_duplicates: bool = False
+    requires_duplicate_acknowledgement: bool = False

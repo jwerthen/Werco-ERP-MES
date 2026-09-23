@@ -1,6 +1,7 @@
 import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import api from '../../services/api';
+import type { HankIntakeReceivingDraft } from '../../types/hankIntake';
 import type { HankTask } from '../../types/hankTasks';
 import type EntityPicker from '../operations/EntityPicker';
 import type { HankPurchaseOrderPicker } from './HankPurchaseOrderPicker';
@@ -238,4 +239,109 @@ it('aborts an in-flight proposal on session change and suppresses a late review'
   await act(async () => resolve(task));
   expect(screen.queryByText(task.preview.summary)).not.toBeInTheDocument();
   expect(screen.getByRole('alert')).toHaveTextContent('session changed');
+});
+
+const receivingDraft: HankIntakeReceivingDraft = {
+  file_id: 51,
+  file_version: 3,
+  company_id: 4,
+  filename: 'delivery.pdf',
+  purchase_order_id: 11,
+  purchase_orders: [],
+  packing_slip_number: 'PS-12',
+  warnings: [],
+  has_duplicates: false,
+  requires_duplicate_acknowledgement: false,
+  lines: [
+    {
+      source_line_index: 0,
+      description: 'Bracket',
+      part_number: 'P1',
+      quantity: '3',
+      unit_of_measure: 'EA',
+      lot_number: 'LOT-8',
+      heat_number: 'H-10',
+      confidence: 'high',
+      evidence: [{ page: 1, excerpt: 'P1 qty 3' }],
+      po_line_id: 31,
+      candidates: [],
+      quantity_received: 3,
+      warnings: [],
+    },
+  ],
+};
+
+it('prefills matched PDF quantities and traceability but requires the employee inspection decision', async () => {
+  render(
+    <HankOperationalTask
+      kind="receive_delivery"
+      purchaseOrderId={11}
+      receivingDraft={receivingDraft}
+      onNavigate={jest.fn()}
+    />
+  );
+  expect(await screen.findByLabelText('Delivered quantity, line 1')).toHaveValue(3);
+  expect(screen.getByLabelText('Delivered quantity, line 2')).toHaveValue(null);
+  expect(screen.getByLabelText('Inspection required, line 1')).toHaveValue('');
+  expect(screen.getByLabelText('lot number, line 1')).toHaveValue('LOT-8');
+  expect(screen.getByLabelText('heat number, line 1')).toHaveValue('H-10');
+  expect(screen.getByLabelText('packing slip number, line 1')).toHaveValue('PS-12');
+  expect(screen.getByLabelText(/Purchase order/)).toBeDisabled();
+  prepare();
+  await screen.findByText('Enter a valid quantity and choose whether inspection is required.');
+  expect(mocked.createHankTask).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText('Inspection required, line 1'), { target: { value: 'yes' } });
+  prepare();
+  await screen.findByText(task.preview.summary);
+  expect(mocked.createHankTask).toHaveBeenCalledWith(
+    expect.objectContaining({
+      input: expect.objectContaining({
+        source_intake_file_id: 51,
+        source_intake_version: 3,
+        acknowledge_duplicate_source: false,
+        lines: [
+          expect.objectContaining({
+            po_line_id: 31,
+            quantity_received: 3,
+            requires_inspection: true,
+            lot_number: 'LOT-8',
+            heat_number: 'H-10',
+            packing_slip_number: 'PS-12',
+          }),
+        ],
+      }),
+    }),
+    expect.any(AbortSignal)
+  );
+});
+
+it('does not combine distinct document lots on the same PO line', async () => {
+  const draft = {
+    ...receivingDraft,
+    lines: [...receivingDraft.lines, { ...receivingDraft.lines[0], source_line_index: 1, lot_number: 'OTHER' }],
+  };
+  render(
+    <HankOperationalTask kind="receive_delivery" purchaseOrderId={11} receivingDraft={draft} onNavigate={jest.fn()} />
+  );
+  expect(await screen.findByLabelText('Delivered quantity, line 1')).toHaveValue(null);
+  expect(screen.getByLabelText('lot number, line 1')).toHaveValue('');
+});
+
+it('requires duplicate receipt acknowledgement for a previously received PDF', async () => {
+  render(
+    <HankOperationalTask
+      kind="receive_delivery"
+      purchaseOrderId={11}
+      receivingDraft={{ ...receivingDraft, requires_duplicate_acknowledgement: true }}
+      onNavigate={jest.fn()}
+    />
+  );
+  fireEvent.change(await screen.findByLabelText('Inspection required, line 1'), { target: { value: 'yes' } });
+  prepare();
+  await screen.findByText('Review the prior receipt and confirm this is an additional delivery before proceeding.');
+  expect(mocked.createHankTask).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('checkbox', { name: /I reviewed the prior receipt/ }));
+  prepare();
+  await screen.findByText(task.preview.summary);
+  expect(mocked.createHankTask.mock.calls[0][0].input).toMatchObject({ acknowledge_duplicate_source: true });
 });

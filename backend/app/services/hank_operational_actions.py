@@ -5,7 +5,7 @@ from fastapi import HTTPException
 from app.db.locks import acquire_generator_lock
 from app.models.document import Document
 from app.models.inventory import InventoryLocation
-from app.models.part import Part
+from app.models.part import Part, uom_label
 from app.models.purchasing import POStatus, PurchaseOrder, PurchaseOrderLine
 from app.models.scrap_reason import ScrapReasonCode
 from app.models.shipping import Shipment
@@ -15,7 +15,7 @@ from app.schemas.hank_operations import DraftShipmentInput, ReceiveDeliveryInput
 from app.schemas.hank_tasks import HankTaskPreview, HankTaskResult
 from app.schemas.purchasing import DeliveryReceiptCreate
 from app.schemas.shop_floor_commands import ProductionReportRequest
-from app.services.hank_task_service import _digest, _reference, _row_values
+from app.services.hank_task_service import PLAN_ROW_LIMIT, _digest, _reference, _row_values
 from app.services.receiving_delivery_service import post_delivery_command
 from app.services.shipment_commands import _allocated_quantity, create_shipment_command
 from app.services.shop_floor_commands import hold_operation_command, report_production_command
@@ -51,6 +51,48 @@ class HankOperationalActions:
     def receiving_preview(self, payload, locked):
         if locked:
             acquire_generator_lock(self.db, 'receipt_number', self.company_id)
+        source_rows, prior_source_tasks, prior_receipts = [], [], []
+        source_groups = {}
+        source_warnings, source_references = [], []
+        if payload.source_intake_file_id is not None:
+            from app.services.hank_intake_receiving_service import HankIntakeReceivingService
+
+            intake = HankIntakeReceivingService(self.db, self.user, self.company_id)
+            source = intake.source(payload.source_intake_file_id, version=payload.source_intake_version, locked=locked)
+            source_rows = [source]
+            prior_source_tasks = intake.prior_tasks(source, completed_only=True).limit(PLAN_ROW_LIMIT + 1).all()
+            if len(prior_source_tasks) > PLAN_ROW_LIMIT:
+                raise HTTPException(
+                    409, 'This source has too many prior receiving tasks for a bounded Hank review. Use Receiving.'
+                )
+            receipt_ids = set()
+            for slip in {line.packing_slip_number for line in payload.lines if line.packing_slip_number}:
+                for receipt in intake.matching_receipts(payload.purchase_order_id, slip):
+                    if receipt.id not in receipt_ids:
+                        prior_receipts.append(receipt)
+                        receipt_ids.add(receipt.id)
+            prior_receipts.sort(key=lambda receipt: receipt.id)
+            if (prior_source_tasks or prior_receipts) and not payload.acknowledge_duplicate_source:
+                raise HTTPException(
+                    409,
+                    'This PDF or packing slip already has receiving records. Review prior receipts and explicitly '
+                    'acknowledge additional material before preparing another receiving task.',
+                )
+            source_warnings.append(
+                'PDF extraction is evidence only. Verify quantities and traceability against delivered material.'
+            )
+            if payload.acknowledge_duplicate_source:
+                source_warnings.append(
+                    'Employee acknowledged this source may already have receipts and confirmed additional material.'
+                )
+            source_references.append(
+                _reference('intake_file', source.id, source.filename, f'/?hank_work=intake&hank_id={source.id}')
+            )
+            source_groups = {
+                'intake_source': source_rows,
+                'prior_source_tasks': prior_source_tasks,
+                'prior_receipts': prior_receipts,
+            }
         orders = self.rows(PurchaseOrder, PurchaseOrder.id == payload.purchase_order_id, locked)
         if not orders or orders[0].is_deleted:
             raise HTTPException(404, 'Purchase order not found')
@@ -92,8 +134,9 @@ class HankOperationalActions:
             if proposed.certificate_document_id and proposed.certificate_document_id not in {row.id for row in docs}:
                 raise HTTPException(404, 'Certificate not found')
             changes.append(
-                f'Line {line.line_number}, {part.part_number}: receive {proposed.quantity_received}; '
-                f'{remaining:g} outstanding. '
+                f'Line {line.line_number}, {part.part_number}: receive {proposed.quantity_received} '
+                f'{uom_label(part.unit_of_measure) or "(stocking unit unknown)"}; '
+                f'{remaining:g} outstanding in that stocking unit. '
                 + (
                     'Hold in incoming inspection; stock is not accepted.'
                     if proposed.requires_inspection
@@ -108,17 +151,28 @@ class HankOperationalActions:
         preview = HankTaskPreview(
             summary=f'Record {len(payload.lines)} delivery line(s) against {po.po_number}.',
             changes=changes,
-            warnings=[
+            warnings=source_warnings
+            + [
                 'Lot numbers left blank are assigned from receipt numbers.',
                 'Certificate attachment metadata is not certificate approval.',
                 'No physical labels are printed by this Hank action. Use the saved receipt in Receiving to print.',
             ],
-            references=[_reference('purchase_order', po.id, po.po_number, f'/purchasing?po={po.id}')],
+            references=source_references
+            + [_reference('purchase_order', po.id, po.po_number, f'/purchasing?po={po.id}')],
         )
         return (
             f'Receive delivery for {po.po_number}',
             preview,
-            self.fingerprint(po=orders, lines=all_lines, parts=parts, locations=locations, documents=docs),
+            self.fingerprint(
+                po=orders,
+                lines=all_lines,
+                parts=parts,
+                locations=locations,
+                documents=docs,
+                # Preserve fingerprints of manual receipt previews saved before
+                # PDF sources were supported; their ERP sources remain sufficient.
+                **source_groups,
+            ),
         )
 
     def production_preview(self, payload, locked):
@@ -206,7 +260,13 @@ class HankOperationalActions:
 
     def execute(self, task, data, audit):
         if task.kind == 'receive_delivery':
-            payload = DeliveryReceiptCreate(idempotency_key=f'hank_{task.request_key}', **data)
+            parsed = ReceiveDeliveryInput.model_validate(data)
+            payload = DeliveryReceiptCreate(
+                idempotency_key=f'hank_{task.request_key}',
+                **parsed.model_dump(
+                    exclude={'source_intake_file_id', 'source_intake_version', 'acknowledge_duplicate_source'}
+                ),
+            )
             result = post_delivery_command(self.db, self.user, self.company_id, payload, audit)
             return HankTaskResult(
                 summary=f'Recorded {len(result["receipts"])} delivery receipt(s).',
@@ -214,7 +274,19 @@ class HankOperationalActions:
                     'Labels were not printed. Open Receiving to review the receipts and print labels.',
                     'Inspection and stock status follow each reviewed line’s inspection choice.',
                 ],
-                references=[
+                references=(
+                    [
+                        _reference(
+                            'intake_file',
+                            parsed.source_intake_file_id,
+                            'Source PDF',
+                            f'/?hank_work=intake&hank_id={parsed.source_intake_file_id}',
+                        )
+                    ]
+                    if parsed.source_intake_file_id
+                    else []
+                )
+                + [
                     _reference('receipt', row['id'], row['receipt_number'], '/receiving?tab=history')
                     for row in result['receipts']
                 ],

@@ -16,8 +16,10 @@ from app.schemas.hank_intake import (
     IntakeCommand,
     IntakeFileResponse,
     IntakePlanCommand,
+    IntakeReceivingDraft,
 )
 from app.services.audit_service import AuditService, AuditWriteError
+from app.services.hank_intake_receiving_service import HankIntakeReceivingService
 from app.services.hank_intake_service import (
     MAX_BATCH_BYTES,
     MAX_FILE_BYTES,
@@ -123,6 +125,18 @@ def get_intake(
 ):
     service = HankIntakeService(db, user, company_id)
     return service.response_batch(service.batch(batch_id))
+
+
+@router.get('/intake/files/{file_id}/receiving-draft', response_model=IntakeReceivingDraft)
+def intake_receiving_draft(
+    file_id: int,
+    purchase_order_id: int | None = Query(None, gt=0),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(list(WRITE_ROLES))),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Match saved document evidence to open order lines without creating receipts."""
+    return HankIntakeReceivingService(db, user, company_id).draft(file_id, purchase_order_id)
 
 
 @router.get('/intake/files/{file_id}/source')

@@ -61,22 +61,28 @@ def prepare_task(*, db, company_id, user, kind, input):
 
 
 def _proposal_schema():
+    # Anthropic requires an object at the tool schema root and rejects root
+    # oneOf/anyOf/allOf. Keep the alternatives on the input property; the
+    # kind-specific binding is enforced by HankTaskCreate before saving a task.
     definitions = {}
     variants = []
     for kind, model in INPUT_SCHEMAS.items():
         schema = model.model_json_schema(ref_template='#/$defs/{model}')
         definitions.update(schema.pop('$defs', {}))
         definitions[model.__name__] = schema
-        variants.append({'properties': {'kind': {'const': kind}, 'input': {'$ref': f'#/$defs/{model.__name__}'}}})
+        variants.append({'$ref': f'#/$defs/{model.__name__}', 'description': f'Fields for kind={kind}.'})
     return {
         'type': 'object',
         'properties': {
             'kind': {'type': 'string', 'enum': list(INPUT_SCHEMAS)},
-            'input': {'type': 'object', 'description': 'Exact fields for the selected action. Ask for missing facts.'},
+            'input': {
+                'type': 'object',
+                'description': 'Use the variant for the selected kind. Ask for missing facts.',
+                'anyOf': variants,
+            },
         },
         'required': ['kind', 'input'],
         'additionalProperties': False,
-        'oneOf': variants,
         '$defs': definitions,
     }
 
