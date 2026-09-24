@@ -201,7 +201,8 @@ class WallboardJob(BaseModel):
     # change rather than a disclosure-category change.
     status: str
     # Order totals. A conventional routing reports the WO header; a POOL work
-    # order (laser nests, or a batch WO with one op per line item) reports the
+    # order (laser nests, a batch WO with one op per line item, or a parallel
+    # component-only fabrication batch) reports the
     # SUM of its per-item operation targets/progress, because its header rollup
     # caps at the header quantity and hides the other items -- see
     # ``per_item_operation_totals``.

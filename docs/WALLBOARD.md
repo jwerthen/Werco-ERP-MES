@@ -472,12 +472,20 @@ crowd actionable work off the top of the board.
   queries of its own (guard 2 below reads the operation's nest, which the wallboard eager-loads).
   The `OP n/total` row and the ship panel's `N LEFT` (which counts shippable units, not line
   pieces) are unaffected, so a pool card can read `8/79` beside a rail reading `8 LEFT`.
+  - **Parallel component fabrication:** a component-only batch also sums piece targets and
+    good quantities when sequencing is disabled, all operations share one sequence, each
+    operation has a positive target, and each names a distinct component part. A parent BOM
+    is allowed for this explicit shape. This fixes WO-20260923-003 showing `0/8` finished
+    assemblies despite recorded bending/forming progress. Repeated stages for the same
+    component, mixed assembly/component operations, and sequenced routes keep the header
+    totals. Scrap is not good production, and each operation is capped at its target.
+    The stored assembly count and inventory are unchanged.
   - **Telling a pool from a routing is the hard part**, because `component_quantity` with a NULL
     `component_part_id` is **overloaded**: `GET /work-orders/preview-operations` emits the
     *assembly's own* routing operations with exactly that shape, carrying the **whole order
     quantity restated once per operation**, and the New Work Order wizard posts it verbatim.
     Summing those would render a 10-piece job as `0/50` then `50/50`. Four guards, in order:
-    **(1)** the WO's part has an active **BOM** → never sum (that impostor is emitted only for
+    For these anonymous line items, **(1)** the WO's part has an active **BOM** → never sum (that impostor is emitted only for
     BOM'd parts, and conversely a pool WO's hand-set targets only survive on a part with no BOM,
     since `_reconcile_operation_component_quantities` overwrites them on every WO GET);
     **(2)** operations backing a **soft-deleted laser nest** are dropped (the tombstone keeps its
