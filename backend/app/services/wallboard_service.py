@@ -316,8 +316,9 @@ def _build_job_wall(
                 elapsed_minutes=elapsed,
             )
 
-        # PIECE TOTALS: a pool WO (laser nests, or a batch WO with one op per
-        # line item) carries its real total in the OPERATIONS, not the header --
+        # PIECE TOTALS: a pool WO (laser nests, a batch WO with one op per
+        # line item, or a parallel component-only fabrication batch) carries its
+        # display total in the OPERATIONS, not the finished-assembly header --
         # the header's non-pool rollup takes MAX over ops capped at
         # quantity_ordered, so an 18-item brake batch read "8/8, 100%" on the TV
         # while sitting on item 2. ``per_item_operation_totals`` sums the per-item
@@ -827,8 +828,8 @@ def build_wallboard_payload(
         .all()
     )
     ops_by_wo: dict[int, list[WorkOrderOperation]] = defaultdict(list)
-    # Guard 1 of the pool-vs-routing rule (``per_item_operation_totals``): the parts
-    # whose operations are a ROUTING because the part builds from a BOM. ONE query for
+    # BOM guard for anonymous line items (``per_item_operation_totals``). Explicit
+    # parallel component-only batches can still report piece totals. ONE query for
     # the whole wall — the helper itself stays DB-free. Same predicate as
     # ``_get_active_bom``: active, not soft-deleted, this company.
     bom_part_ids: set[int] = set()

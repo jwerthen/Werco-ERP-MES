@@ -766,12 +766,20 @@ def per_item_operation_totals(
     """(ordered, complete) summed across a POOL WO's per-item operations -- or None.
 
     A pool work order's operations are independent LINE ITEMS, each declaring its own
-    quantity target in ``component_quantity`` with ``component_part_id`` NULL:
+    quantity target in ``component_quantity``:
 
       * laser dispatch pools -- one op per nest, target = that nest's planned_runs;
       * batch/pool work orders -- one op per fabricated line item (the Miratech brake
         and weld-subassembly WOs), target = that item's piece count.
 
+    A component-only fabrication batch is positively identifiable when sequencing is
+    disabled, every operation shares one sequence, and every operation has a positive
+    target and a DISTINCT component part. Sum those pieces even when the parent has
+    a BOM: its header counts finished assemblies and can remain 0/8 throughout forming
+    (WO-20260923-003). Mixed assembly/component work, repeated component stages, and
+    sequenced routes are excluded. This changes display totals only, never inventory.
+
+    The remaining pool shapes have ``component_part_id`` NULL and use the guards below.
     ``None`` means "do not sum -- the WORK-ORDER header is the truth here". Callers
     fall back to the header on None; they must not treat it as zero.
 
@@ -785,7 +793,7 @@ def per_item_operation_totals(
     count -- the same trap ``completion_inventory_service`` documents having fallen
     into ("tripled the demand"). Four guards separate the two, in order:
 
-      1. PART HAS A BOM -> never sum. The impostor shape above is emitted only under
+      1. PART HAS A BOM -> never sum anonymous line items. The impostor shape above is emitted only under
          the preview endpoint's ``if has_bom:`` branch, so a BOM'd part's operations
          are a routing by construction. It cuts the other way too: a pool WO's
          hand-set per-item targets only SURVIVE on a part with no BOM, because
@@ -848,11 +856,26 @@ def per_item_operation_totals(
     that eager-loads that relationship (the wallboard does). A new adopter reading
     operations off a plain query gets one SELECT per operation.
     """
-    if part_has_bom:
-        return None
-
     live_ops = [op for op in (operations or []) if not _operation_nest_is_deleted(op)]
     if not live_ops:
+        return None
+
+    component_ids = {op.component_part_id for op in live_ops}
+    sequences = {op.sequence for op in live_ops}
+    component_batch = (
+        work_order is not None
+        and getattr(work_order, "sequential_operations", True) is False
+        and None not in component_ids
+        and len(component_ids) == len(live_ops)
+        and None not in sequences
+        and len(sequences) == 1
+        and all(float(op.component_quantity or 0) > 0 for op in live_ops)
+    )
+    if component_batch:
+        targets = [operation_target_quantity(op, work_order) for op in live_ops]
+        return sum(targets), sum(min(float(op.quantity_complete or 0), target) for op, target in zip(live_ops, targets))
+
+    if part_has_bom:
         return None
 
     line_ops = [op for op in live_ops if not op.component_part_id and float(op.component_quantity or 0) > 0]

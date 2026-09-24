@@ -898,6 +898,92 @@ def test_pool_wo_tile_caps_each_line_at_its_own_target(client: TestClient, db_se
     assert tile["qty_complete"] <= tile["qty_ordered"]  # the bar can never exceed 100%
 
 
+def test_parallel_component_batch_reports_piece_progress(client: TestClient, db_session: Session):
+    """WO-20260923-003: component fabrication is progressing while assemblies stay at 0/8."""
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    db_session.add(BOM(part_id=part.id, revision="A", is_active=True, company_id=1))
+    brake = make_work_center(db_session, work_center_type="forming")
+    roll = make_work_center(db_session, work_center_type="forming")
+    wo = make_wo(
+        db_session,
+        part,
+        status_=WorkOrderStatus.IN_PROGRESS,
+        quantity_ordered=8,
+        sequential_operations=False,
+    )
+    targets = [8, 64, 64, 8, 16, 16, 32, 32, 128, 144, 32, 16, 8, 8, 16, 8, 16, 24, 8, 8, 8]
+    completed = {3, 11, 13, 14, 15, 17, 18, 19, 20}
+    for index, target in enumerate(targets):
+        component = make_part(db_session)
+        op = make_op(
+            db_session,
+            wo,
+            brake if index < 18 else roll,
+            sequence=10,
+            status_=(
+                OperationStatus.COMPLETE
+                if index in completed
+                else OperationStatus.IN_PROGRESS if index in {12, 16} else OperationStatus.READY
+            ),
+            quantity_complete=target if index in completed else 7 if index == 12 else 0,
+            quantity_scrapped=1 if index in {12, 13} else 0,
+        )
+        _set_line_target(op, target, component_part_id=component.id)
+    db_session.commit()
+
+    tile = _job(_payload(client, headers_for(viewer), dept="forming"), wo)
+    assert tile["qty_complete"] == 111.0
+    assert tile["qty_ordered"] == 664.0
+    assert tile["ops_completed"] == 9
+    assert tile["ops_total"] == 21
+    db_session.refresh(wo)
+    assert wo.quantity_complete == 0  # The TV must not book finished assemblies.
+    assert wo.quantity_ordered == 8
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "same_targets",
+        "overreported",
+        "repeated_component",
+        "mixed_assembly",
+        "different_sequence",
+        "sequential",
+        "missing_target",
+    ],
+)
+def test_component_batch_progress_guards(client: TestClient, db_session: Session, shape: str):
+    viewer = make_user(db_session)
+    part = make_part(db_session)
+    db_session.add(BOM(part_id=part.id, revision="A", is_active=True, company_id=1))
+    wc = make_work_center(db_session)
+    components = [make_part(db_session), make_part(db_session)]
+    wo = make_wo(db_session, part, quantity_ordered=8, sequential_operations=shape == "sequential")
+    first = make_op(db_session, wo, wc, sequence=10, quantity_complete=12 if shape == "overreported" else 8)
+    _set_line_target(first, 8, component_part_id=components[0].id)
+    second = make_op(db_session, wo, wc, sequence=20 if shape == "different_sequence" else 10)
+    _set_line_target(
+        second,
+        0 if shape == "missing_target" else 8 if shape == "same_targets" else 16,
+        component_part_id=(
+            None
+            if shape == "mixed_assembly"
+            else components[0].id if shape == "repeated_component" else components[1].id
+        ),
+    )
+    db_session.commit()
+
+    tile = _job(_payload(client, headers_for(viewer)), wo)
+    if shape in {"same_targets", "overreported"}:
+        assert tile["qty_complete"] == 8.0
+        assert tile["qty_ordered"] == (16.0 if shape == "same_targets" else 24.0)
+    else:
+        assert tile["qty_complete"] == 0.0
+        assert tile["qty_ordered"] == 8.0
+
+
 def test_conventional_routing_tile_keeps_header_totals(client: TestClient, db_session: Session):
     """The fence: a normal routing's ops each process the WHOLE order, so summing
     them would multiply the order by its op count. Header stays the truth."""
