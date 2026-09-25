@@ -33,6 +33,14 @@ jest.mock('../hooks/usePermissions', () => ({
   usePermissions: () => ({ can: () => false }),
 }));
 
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({ user: { id: 1, company_id: 1, role: 'operator' } }),
+}));
+
+jest.mock('../context/CompanyContext', () => ({
+  useCompany: () => ({ currentCompany: { id: 1 } }),
+}));
+
 const mockedApi = api as jest.Mocked<typeof api>;
 
 const IN_PROGRESS_OP = {
@@ -90,7 +98,7 @@ async function openCorrectMode() {
   renderShopFloor();
   await screen.findByTestId('shop-floor-op-101');
   const row = screen.getByTestId('shop-floor-op-101');
-  fireEvent.click(within(row).getByRole('button', { name: /^more$/i }));
+  fireEvent.click(within(row).getByRole('button', { name: /^report quantity$/i }));
   await screen.findByRole('heading', { name: /add completed quantity/i });
   fireEvent.click(screen.getByRole('button', { name: /correct over-count/i }));
   return screen.getByRole('heading', { name: /correct over-count/i });
@@ -103,6 +111,7 @@ beforeAll(() => {
 beforeEach(() => {
   jest.clearAllMocks();
   localStorage.clear();
+  sessionStorage.clear();
   mockedApi.getWorkCenters.mockResolvedValue([
     {
       id: 1,
@@ -166,7 +175,7 @@ describe('ShopFloorSimple over-count correction', () => {
     const refusal =
       'You can only remove up to the 2 piece(s) you recorded on this clock-in; ask a supervisor to correct more.';
     mockedApi.reduceOperationProduction.mockRejectedValue({
-      response: { data: { detail: refusal } },
+      response: { status: 400, data: { detail: refusal } },
     });
     await openCorrectMode();
 
@@ -190,7 +199,7 @@ describe('ShopFloorSimple over-count correction', () => {
 
   it('clears the inline refusal when switching back to Add mode', async () => {
     mockedApi.reduceOperationProduction.mockRejectedValue({
-      response: { data: { detail: 'You must be clocked in to this operation to correct its count' } },
+      response: { status: 400, data: { detail: 'You must be clocked in to this operation to correct its count' } },
     });
     await openCorrectMode();
 
@@ -205,12 +214,12 @@ describe('ShopFloorSimple over-count correction', () => {
 
   it('renders an Add-mode failure inline in the modal too', async () => {
     mockedApi.reportOperationProduction.mockRejectedValue({
-      response: { data: { detail: 'Operation is on hold' } },
+      response: { status: 400, data: { detail: 'Operation is on hold' } },
     });
     renderShopFloor();
     await screen.findByTestId('shop-floor-op-101');
     const row = screen.getByTestId('shop-floor-op-101');
-    fireEvent.click(within(row).getByRole('button', { name: /^more$/i }));
+    fireEvent.click(within(row).getByRole('button', { name: /^report quantity$/i }));
     await screen.findByRole('heading', { name: /add completed quantity/i });
 
     // Default 1 good / 0 scrap; submit the additive report and let it fail.

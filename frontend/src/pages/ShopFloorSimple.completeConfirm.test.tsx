@@ -35,6 +35,14 @@ jest.mock('../hooks/usePermissions', () => ({
   usePermissions: () => ({ can: () => false }),
 }));
 
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({ user: { id: 1, company_id: 1, role: 'operator' } }),
+}));
+
+jest.mock('../context/CompanyContext', () => ({
+  useCompany: () => ({ currentCompany: { id: 1 } }),
+}));
+
 const mockedApi = api as jest.Mocked<typeof api>;
 
 // The work center the op runs on. Typed as the real `WorkCenter` so the fixture
@@ -116,6 +124,7 @@ describe('ShopFloorSimple full-quantity complete confirm', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     localStorage.clear();
+    sessionStorage.clear();
     mockedApi.getWorkCenters.mockResolvedValue([LASER_1]);
     mockedApi.getDashboard.mockResolvedValue({ work_centers: [] });
     mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [ACTIVE_JOB], active_job: ACTIVE_JOB });

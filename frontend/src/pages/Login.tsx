@@ -39,12 +39,14 @@ export default function Login() {
   const location = useLocation();
   const kioskParam = useMemo(() => new URLSearchParams(location.search).get('kiosk'), [location.search]);
   const forceEmployeeMode = kioskParam === '1';
+  const idleReturn = new URLSearchParams(location.search).get('reason') === 'idle';
+  const resumeEmployeeMode = idleReturn && new URLSearchParams(location.search).get('mode') === 'employee';
 
   useEffect(() => {
-    if (forceEmployeeMode) {
+    if (forceEmployeeMode || resumeEmployeeMode) {
       setLoginMode('employee');
     }
-  }, [forceEmployeeMode]);
+  }, [forceEmployeeMode, resumeEmployeeMode]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -205,6 +207,15 @@ export default function Login() {
             <div className="font-mono text-[11px] text-fd-mute tracking-[0.18em]">AUTHENTICATE</div>
             <h2 className="text-2xl font-bold text-fd-ink mt-2.5 mb-1">Sign in</h2>
             <p className="text-[13.5px] text-fd-mute mb-6">Access your production dashboard.</p>
+            {idleReturn && (
+              <p
+                role="status"
+                className="mb-5 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-fd-body"
+              >
+                Signed out after inactivity. Sign in with your own badge or account to return to your work. This did not
+                check you out of your job.
+              </p>
+            )}
 
             <form onSubmit={handleSubmit} className="flex flex-col gap-[18px]">
               {/* Mode toggle */}

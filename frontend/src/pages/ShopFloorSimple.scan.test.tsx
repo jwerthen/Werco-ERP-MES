@@ -35,6 +35,14 @@ jest.mock('../hooks/usePermissions', () => ({
   usePermissions: () => ({ can: () => false }),
 }));
 
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({ user: { id: 1, company_id: 1, role: 'operator' } }),
+}));
+
+jest.mock('../context/CompanyContext', () => ({
+  useCompany: () => ({ currentCompany: { id: 1 } }),
+}));
+
 const mockedApi = api as jest.Mocked<typeof api>;
 
 const WORK_CENTER: WorkCenter = {
@@ -163,6 +171,7 @@ describe('ShopFloorSimple scan resolution', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     localStorage.clear();
+    sessionStorage.clear();
     mockedApi.getWorkCenters.mockResolvedValue([WORK_CENTER]);
     mockedApi.getDashboard.mockResolvedValue({ work_centers: [] });
     mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [], active_job: null });

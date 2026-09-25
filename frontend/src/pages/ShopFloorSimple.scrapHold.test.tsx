@@ -52,10 +52,18 @@ jest.mock('../hooks/usePermissions', () => ({
   usePermissions: () => ({ can: () => false }),
 }));
 
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({ user: { id: 1, company_id: 1, role: 'operator' } }),
+}));
+
+jest.mock('../context/CompanyContext', () => ({
+  useCompany: () => ({ currentCompany: { id: 1 } }),
+}));
+
 const mockedApi = api as jest.Mocked<typeof api>;
 
 // An in-progress op with remaining quantity (complete < ordered) so the queue
-// card surfaces the +1 Complete / More / Check Out / Hold action row.
+// card surfaces the +1 Complete / Report quantity / Check Out / Hold action row.
 const IN_PROGRESS_OP = {
   id: 101,
   work_order_id: 42,
@@ -82,7 +90,7 @@ const IN_PROGRESS_OP = {
 };
 
 // Matching active job (op.id === operation_id) so getActiveJobForOperation()
-// resolves and the in-progress action row + Check Out / More open.
+// resolves and the in-progress action row + Check Out / Report quantity open.
 const ACTIVE_JOB = {
   time_entry_id: 501,
   clock_in: new Date(Date.now() - 60_000).toISOString(),
@@ -152,6 +160,7 @@ beforeAll(() => {
 beforeEach(() => {
   jest.clearAllMocks();
   localStorage.clear();
+  sessionStorage.clear();
   mockedApi.getWorkCenters.mockResolvedValue([LASER_1]);
   mockedApi.getDashboard.mockResolvedValue({ work_centers: [] });
   mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [ACTIVE_JOB], active_job: ACTIVE_JOB });
@@ -245,7 +254,7 @@ describe('ShopFloorSimple production-report scrap reason', () => {
     renderShopFloor();
     await screen.findByTestId('shop-floor-op-101');
     const row = screen.getByTestId('shop-floor-op-101');
-    fireEvent.click(within(row).getByRole('button', { name: /^more$/i }));
+    fireEvent.click(within(row).getByRole('button', { name: /^report quantity$/i }));
     return screen.getByRole('heading', { name: /add completed quantity/i });
   }
 
@@ -276,6 +285,7 @@ describe('ShopFloorSimple production-report scrap reason', () => {
 
     await waitFor(() => expect(mockedApi.reportOperationProduction).toHaveBeenCalledTimes(1));
     expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(101, {
+      request_id: expect.any(String),
       quantity_complete_delta: 1,
       quantity_scrapped_delta: 4,
       notes: undefined,
@@ -292,10 +302,10 @@ describe('ShopFloorSimple production-report scrap reason', () => {
 
     await waitFor(() => expect(mockedApi.reportOperationProduction).toHaveBeenCalledTimes(1));
     expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(101, {
+      request_id: expect.any(String),
       quantity_complete_delta: 1,
       quantity_scrapped_delta: 0,
       notes: undefined,
-      scrap_reason: undefined,
     });
   });
 
@@ -307,10 +317,10 @@ describe('ShopFloorSimple production-report scrap reason', () => {
 
     await waitFor(() => expect(mockedApi.reportOperationProduction).toHaveBeenCalledTimes(1));
     expect(mockedApi.reportOperationProduction).toHaveBeenCalledWith(101, {
+      request_id: expect.any(String),
       quantity_complete_delta: 1,
       quantity_scrapped_delta: 0,
       notes: undefined,
-      scrap_reason: undefined,
     });
   });
 });

@@ -41,6 +41,7 @@ const createMockAuth = (user: User | null): AuthContextValue => ({
   isAuthenticated: user !== null,
   isLoading: false,
   sessionWarning: false,
+  sessionWarningExpiresAt: null,
   login: jest.fn(),
   loginWithEmployeeId: jest.fn(),
   logout: jest.fn(),

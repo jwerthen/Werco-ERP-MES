@@ -2426,7 +2426,10 @@ class ApiService {
   }
 
   async reportOperationProduction(operationId: number, data: { request_id?: string; quantity_complete_delta?: number; quantity_scrapped_delta?: number; notes?: string; scrap_reason?: string; scrap_reason_code_id?: number; source?: string }) {
-    const response = await this.api.post(`/shop-floor/operations/${operationId}/production`, data);
+    // A connection that stops responding must leave Saving. The caller keeps
+    // this exact request_id/body and treats timeout as unconfirmed, so an
+    // explicit receipt retry can safely discover whether the save committed.
+    const response = await this.api.post(`/shop-floor/operations/${operationId}/production`, data, { timeout: 20000 });
     this.invalidateDashboardCache();
     return response.data;
   }
@@ -2437,7 +2440,7 @@ class ApiService {
   // The server enforces every safety rule (must be clocked in, delta ≤ own recorded
   // qty, op/WO not complete); the UI stays non-optimistic and surfaces `detail` verbatim.
   async reduceOperationProduction(operationId: number, data: { quantity_delta: number; reason: string; notes?: string; source?: string }) {
-    const response = await this.api.post(`/shop-floor/operations/${operationId}/reduce-production`, data);
+    const response = await this.api.post(`/shop-floor/operations/${operationId}/reduce-production`, data, { timeout: 20000 });
     this.invalidateDashboardCache();
     return response.data;
   }
@@ -3797,7 +3800,7 @@ class ApiService {
 
   // Scanner / Supplier Mappings
   async scannerLookup(code: string) {
-    const response = await this.api.post('/scanner/lookup', null, { params: { code } });
+    const response = await this.api.post('/scanner/lookup', null, { params: { code }, timeout: 20000 });
     return response.data;
   }
 
@@ -3809,7 +3812,7 @@ class ApiService {
     if (workCenterId !== undefined) {
       payload.work_center_id = workCenterId;
     }
-    const response = await this.api.post<ScanResolveResult>('/scanner/resolve-action', payload, { signal });
+    const response = await this.api.post<ScanResolveResult>('/scanner/resolve-action', payload, { signal, timeout: 20000 });
     return response.data;
   }
 

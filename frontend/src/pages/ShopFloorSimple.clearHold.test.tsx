@@ -48,6 +48,14 @@ jest.mock('../hooks/usePermissions', () => ({
   usePermissions: () => ({ can: () => false }),
 }));
 
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({ user: { id: 1, company_id: 1, role: 'operator' } }),
+}));
+
+jest.mock('../context/CompanyContext', () => ({
+  useCompany: () => ({ currentCompany: { id: 1 } }),
+}));
+
 const mockedApi = api as jest.Mocked<typeof api>;
 
 /** An ON_HOLD operation carrying the hold block the server now sends. */
@@ -131,6 +139,7 @@ beforeAll(() => {
 beforeEach(() => {
   jest.clearAllMocks();
   localStorage.clear();
+  sessionStorage.clear();
   mockedApi.getWorkCenters.mockResolvedValue([LASER_1]);
   mockedApi.getDashboard.mockResolvedValue({ work_centers: [] });
   mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [] });

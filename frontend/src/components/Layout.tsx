@@ -1028,7 +1028,7 @@ export default function Layout({ children }: LayoutProps) {
       </div>
 
       {/* Bottom Navigation - Mobile only */}
-      {!isKiosk && <BottomNav onMenuClick={() => setSidebarOpen(true)} />}
+      {!isKiosk && <div className={location.pathname === '/shop-floor/operations' ? 'hidden md:block' : undefined}><BottomNav onMenuClick={() => setSidebarOpen(true)} /></div>}
 
       {/* Global Search Modal */}
       <GlobalSearch isOpen={globalSearch.isOpen} onClose={globalSearch.close} />

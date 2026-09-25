@@ -627,6 +627,8 @@ def build_login_card():
     section(story, "Timeouts you will meet")
     bullets(story, [
         "<b>Office app: 15 minutes idle</b> logs you out (a 60-second warning appears first). "
+        "On the phone Shop Floor screen, explicitly choosing <b>This is my personal phone</b> allows "
+        "<b>30 minutes idle</b>; leave it off on shared devices. Tap the warning to continue. "
         "<b>Kiosk screens: about 4 minutes idle</b> returns to the badge prompt — just scan back in.",
         "<b>No fixed daily re-login.</b> While you keep using the app it renews your session for you. "
         "A session only dies of old age after <b>7 days unused</b> — then you sign in fresh.",

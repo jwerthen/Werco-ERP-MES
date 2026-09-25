@@ -75,6 +75,7 @@ const setupMocks = ({
     isAuthenticated,
     isLoading,
     sessionWarning: false,
+    sessionWarningExpiresAt: null,
     login: jest.fn(),
     loginWithEmployeeId: jest.fn(),
     logout: jest.fn(),

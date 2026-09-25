@@ -3,7 +3,7 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { usePermissions } from '../hooks/usePermissions';
-import { ActiveJob, LaserNestInfo, OperationHold } from '../types';
+import { ActiveJob, LaserNestInfo, OperationHold, User } from '../types';
 import {
   formatCentralDate,
   formatCentralDateTime,
@@ -43,6 +43,18 @@ import { useScrapReasonCodes } from '../hooks/useScrapReasonCodes';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId } from '../utils/kiosk';
 import { formatOperationLabel } from '../utils/operationLabel';
 import { ScanResolveResult } from '../types/scan';
+import { useAuth } from '../context/AuthContext';
+import { useCompany } from '../context/CompanyContext';
+import { usePhoneLayout } from '../hooks/usePhoneLayout';
+import { useShopFloorWorkspace, ShopFloorView } from '../hooks/useShopFloorWorkspace';
+import { usePersonalShopFloorSession } from '../hooks/usePersonalShopFloorSession';
+import { useShopFloorProduction } from '../hooks/useShopFloorProduction';
+import ProductionSaveNotice from '../components/shopfloor/ProductionSaveNotice';
+import { isDefinitiveHttpRefusal } from '../components/kiosk/useOneTapPieces';
+import MobileCurrentWork from '../components/shopfloor/MobileCurrentWork';
+import ShopFloorCameraScanner from '../components/shopfloor/ShopFloorCameraScanner';
+import KioskDocViewer, { KioskDocTab, KioskDocTransport } from '../components/kiosk/KioskDocViewer';
+import KioskJobNotes from '../components/kiosk/KioskJobNotes';
 
 interface Operation {
   id: number;
@@ -147,7 +159,32 @@ const INITIAL_PRODUCTION_DATA = {
 
 const formatScanActions = (actions: string[]) => actions.map((action) => action.replace(/_/g, ' ')).join(', ');
 
+const isActiveJobOperation = (job: ActiveJob, operation: Operation) =>
+  job.operation_id != null
+    ? job.operation_id === operation.id
+    : Boolean(job.work_order_id && job.operation_number) &&
+      job.work_order_id === operation.work_order_id &&
+      String(job.operation_number) === String(operation.operation_number);
+
+const SHOP_FLOOR_DOCS: KioskDocTransport = {
+  fetchOperationDocuments: id => api.getOperationDocuments(id),
+  fetchDocumentBlob: id => api.fetchShopFloorDocumentBlob(id),
+};
+
 export default function ShopFloorSimple() {
+  const { user } = useAuth();
+  const { currentCompany } = useCompany();
+  const platformAdmin = user?.role === 'platform_admin' || user?.is_superuser === true;
+  if (platformAdmin && !currentCompany) return <p role="status">Loading your company workspace…</p>;
+  const scopedUser = user && platformAdmin ? { ...user, company_id: currentCompany!.id } : user;
+  return <ShopFloorWorkspace key={`${scopedUser?.company_id}:${scopedUser?.id}`} user={scopedUser} />;
+}
+
+function ShopFloorWorkspace({ user }: { user: User | null }) {
+  const phone = usePhoneLayout();
+  const { workspace, updateWorkspace } = useShopFloorWorkspace(user);
+  const phoneSession = usePersonalShopFloorSession(user);
+  const productionSave = useShopFloorProduction<{ timeEntryId: number; data: typeof INITIAL_PRODUCTION_DATA }>({ companyId: user?.company_id, operatorId: user?.id });
   const { can } = usePermissions();
   const navigate = useNavigate();
   const location = useLocation();
@@ -165,28 +202,41 @@ export default function ShopFloorSimple() {
   const [activeJobsStale, setActiveJobsStale] = useState(false);
 
   // Filters
-  const [workCenterId, _setWorkCenterId] = useState<number | ''>('');
-  const workCenterIdRef = useRef<number | ''>('');
+  const [workCenterId, _setWorkCenterId] = useState<number | ''>(() => workspace.workCenterId || '');
+  const workCenterIdRef = useRef<number | ''>(workspace.workCenterId || '');
+  const hadSavedWorkspaceRef = useRef(workspace.savedAt !== null);
+  const appliedWorkCenterRouteRef = useRef<string | null>(null);
   const setWorkCenterId = useCallback((id: number | '') => {
     _setWorkCenterId(id);
     workCenterIdRef.current = id;
+    updateWorkspace({ workCenterId: id || null });
     if (id) {
       localStorage.setItem(WORK_CENTER_STORAGE_KEY, String(id));
     }
-  }, []);
+  }, [updateWorkspace]);
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [dueTodayOnly, setDueTodayOnly] = useState(false);
   const [actionableOnly, setActionableOnly] = useState(false);
+  const operationsQueryKey = JSON.stringify([workCenterId, statusFilter, debouncedSearch, dueTodayOnly]);
+  const loadedOperationsQueryRef = useRef<string | null>(null);
   
   // Modal states
   const [checkOutModal, setCheckOutModal] = useState<{ operation: Operation; job: ActiveJob } | null>(null);
   const [completeConfirm, setCompleteConfirm] = useState<Operation | null>(null);
   const [productionModal, setProductionModal] = useState<{ operation: Operation; job: ActiveJob } | null>(null);
   const [detailsModal, setDetailsModal] = useState<any | null>(null);
+  const [correctionReview, setCorrectionReview] = useState<{ loading: boolean; details: any | null; error: string | null } | null>(null);
+  const [correctionReviewed, setCorrectionReviewed] = useState(false);
+  const [documentView, setDocumentView] = useState<{ operationId: number; tab: KioskDocTab } | null>(null);
+  const [expandedOperationId, setExpandedOperationId] = useState<number | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [checkOutData, setCheckOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
   const [productionData, setProductionData] = useState(INITIAL_PRODUCTION_DATA);
+  useEffect(() => {
+    if (productionModal) productionSave.saveDraft(productionModal.operation.id, { timeEntryId: productionModal.job.time_entry_id, data: productionData });
+  }, [productionModal, productionData, productionSave.saveDraft]);
   // Server refusal for the production modal (add AND remove modes), rendered
   // INLINE inside the modal. Toasts alone proved unreadable here: the page-local
   // toast container sat at z-50 while the shared Modal overlays at z-[60], so a
@@ -209,6 +259,11 @@ export default function ShopFloorSimple() {
   const [scannerCode, setScannerCode] = useState('');
   // A0.4: row to spotlight after an OP:{id} scan (box or ?scan= deep link).
   const [highlightedOperationId, setHighlightedOperationId] = useState<number | null>(null);
+  const [operationToFocus, setOperationToFocus] = useState<number | null>(null);
+  const [activeJobNavigationRequest, setActiveJobNavigationRequest] = useState(0);
+  const pendingActiveJobRef = useRef<ActiveJob | null>(null);
+  const operationCardsRef = useRef(new Map<number, HTMLDivElement>());
+  const operationsRequestRef = useRef(0);
   const [nowMs, setNowMs] = useState(() => Date.now());
   
   // Toast notifications
@@ -269,6 +324,8 @@ export default function ShopFloorSimple() {
 
   // Load data
   const loadOperations = useCallback(async () => {
+    const requestId = ++operationsRequestRef.current;
+    const jobToReveal = pendingActiveJobRef.current;
     try {
       const params: any = {};
       if (workCenterId) params.work_center_id = workCenterId;
@@ -313,17 +370,32 @@ export default function ShopFloorSimple() {
         }));
       }
 
+      // A response for the old station/search must not replace the queue we
+      // just requested by tapping a checked-in job.
+      if (requestId !== operationsRequestRef.current) return;
+      loadedOperationsQueryRef.current = operationsQueryKey;
       setOperations(nextOperations);
+      setLastUpdated(Date.now());
       setOperationsError(false);
       lastLoadFailedRef.current.operations = false;
+      if (jobToReveal && pendingActiveJobRef.current === jobToReveal) {
+        pendingActiveJobRef.current = null;
+        const target = nextOperations.find((op: Operation) => isActiveJobOperation(jobToReveal, op));
+        if (target) {
+          setOperationToFocus(target.id);
+        } else {
+          showToast('info', 'This operation is no longer in the queue. Refresh your checked-in operations and try again.');
+        }
+      }
     } catch (err) {
+      if (requestId !== operationsRequestRef.current) return;
       console.error('Failed to load operations:', err);
       // Swap the grid for an inline ErrorState instead of silently showing a
       // stale list; toast only on the ok→failed transition.
       setOperationsError(true);
       notifyLoadFailure('operations', 'Failed to load operations');
     }
-  }, [workCenterId, statusFilter, debouncedSearch, dueTodayOnly, workCenters, notifyLoadFailure]);
+  }, [workCenterId, statusFilter, debouncedSearch, dueTodayOnly, workCenters, notifyLoadFailure, showToast, operationsQueryKey]);
 
   const loadDashboardCounts = useCallback(async () => {
     try {
@@ -350,6 +422,7 @@ export default function ShopFloorSimple() {
       setActiveJobs(response.active_jobs || (response.active_job ? [response.active_job] : []));
       setActiveJobsStale(false);
       lastLoadFailedRef.current.activeJobs = false;
+      return response.active_jobs || (response.active_job ? [response.active_job] : []);
     } catch (err) {
       // Safety-critical: a failed poll must NOT clear the operator's
       // clocked-in job. Wiping activeJobs here made the strip vanish — the
@@ -364,32 +437,34 @@ export default function ShopFloorSimple() {
   const loadWorkCenters = useCallback(async () => {
     try {
       const response = await api.getWorkCenters();
-      setWorkCenters(response || []);
-      if (response && response.length > 0 && !workCenterIdRef.current) {
-        const deptMatch = kioskParams.dept?.toLowerCase() || null;
-        const matched = response.find((wc: WorkCenter) => {
-          if (kioskParams.workCenterId && wc.id === kioskParams.workCenterId) return true;
-          if (kioskParams.workCenterCode && wc.code.toLowerCase() === kioskParams.workCenterCode.toLowerCase()) return true;
-          if (deptMatch) {
-            return (
-              wc.name.toLowerCase().includes(deptMatch) ||
-              wc.code.toLowerCase().includes(deptMatch)
-            );
-          }
-          return false;
-        });
-        if (matched) {
-          setWorkCenterId(matched.id);
-          setActionableOnly(true);
-        } else {
-          // Fall back to localStorage-saved work center
-          const storedId = Number(localStorage.getItem(WORK_CENTER_STORAGE_KEY));
-          const storedMatch = storedId ? response.find((wc: WorkCenter) => wc.id === storedId) : null;
-          if (storedMatch) {
-            setWorkCenterId(storedMatch.id);
-            setActionableOnly(true);
-          }
-        }
+      const centers: WorkCenter[] = response || [];
+      setWorkCenters(centers);
+      const routeKey = JSON.stringify([kioskParams.workCenterId, kioskParams.workCenterCode, kioskParams.dept]);
+      const firstLoad = appliedWorkCenterRouteRef.current === null;
+      const routeChanged = appliedWorkCenterRouteRef.current !== routeKey;
+      const hasRouteSelection = Boolean(kioskParams.workCenterId || kioskParams.workCenterCode || kioskParams.dept);
+      let nextId: number | '' = centers.some(wc => wc.id === workCenterIdRef.current) ? workCenterIdRef.current : '';
+
+      if (routeChanged && hasRouteSelection) {
+        // Explicit station links win over a remembered workspace. Apply once
+        // per route selection so Refresh cannot undo a later manual choice.
+        const matched = kioskParams.workCenterId
+          ? centers.find(wc => wc.id === kioskParams.workCenterId)
+          : kioskParams.workCenterCode
+            ? centers.find(wc => wc.code.toLowerCase() === kioskParams.workCenterCode!.toLowerCase())
+            : centers.find(wc => wc.name.toLowerCase().includes(kioskParams.dept!.toLowerCase()) ||
+              wc.code.toLowerCase().includes(kioskParams.dept!.toLowerCase()));
+        nextId = matched?.id ?? '';
+      } else if (firstLoad && !hasRouteSelection && !hadSavedWorkspaceRef.current && !nextId) {
+        // Legacy workstation preference is only a first-visit fallback. An
+        // operator's saved All selection and manual changes remain authoritative.
+        const storedId = Number(localStorage.getItem(WORK_CENTER_STORAGE_KEY));
+        nextId = centers.find(wc => wc.id === storedId)?.id ?? '';
+      }
+      appliedWorkCenterRouteRef.current = routeKey;
+      if (nextId !== workCenterIdRef.current) {
+        setWorkCenterId(nextId);
+        setActionableOnly(nextId !== '');
       }
       lastLoadFailedRef.current.workCenters = false;
     } catch (err) {
@@ -427,7 +502,7 @@ export default function ShopFloorSimple() {
     if (!loading) {
       loadOperations();
     }
-  }, [workCenterId, statusFilter, debouncedSearch, dueTodayOnly, loadOperations, loading]);
+  }, [workCenterId, statusFilter, debouncedSearch, dueTodayOnly, loadOperations, loading, activeJobNavigationRequest]);
 
   // Auto-refresh every 30 seconds
   useEffect(() => {
@@ -575,19 +650,76 @@ export default function ShopFloorSimple() {
     return { active, queue, dueToday, overdue };
   }, [visibleOperations]);
 
-  const primaryActiveJob = useMemo(() => activeJobs[0] || null, [activeJobs]);
-
   const getActiveJobForOperation = useCallback(
     (operation: Operation) =>
-      activeJobs.find((job) => {
-        if (job.operation_id && job.operation_id === operation.id) return true;
-        return (
-          job.work_order_id === operation.work_order_id &&
-          String(job.operation_number || '') === String(operation.operation_number || '')
-        );
-      }) || null,
+      activeJobs.find((job) => isActiveJobOperation(job, operation)) || null,
     [activeJobs]
   );
+
+  const selectCurrentJob = (job: ActiveJob) => {
+    updateWorkspace({ selectedOperationId: job.operation_id || null, activeTimeEntryId: job.time_entry_id, view: 'my-work' });
+  };
+  // Revalidate the saved identity against fresh check-ins. A completed job or
+  // a different operator can never be resurrected from browser storage.
+  const selectedActiveJob = activeJobs.find(job => job.time_entry_id === workspace.activeTimeEntryId &&
+    (workspace.selectedOperationId === null || job.operation_id === workspace.selectedOperationId)) || activeJobs[0] || null;
+  const mobileView = workspace.view;
+  const selectMobileView = (view: ShopFloorView) => {
+    updateWorkspace({ view });
+    if (view !== 'my-work') {
+      setStatusFilter('');
+      setDueTodayOnly(false);
+      setActionableOnly(false);
+      setSearch('');
+      setDebouncedSearch('');
+    }
+  };
+  const queueOperations = phone && mobileView === 'ready'
+    ? visibleOperations.filter(op => op.can_check_in !== false && ['ready', 'pending', 'in_progress'].includes(op.status) && !getActiveJobForOperation(op))
+    : visibleOperations;
+
+  const handleGoToActiveJob = (job: ActiveJob) => {
+    selectCurrentJob(job);
+    if (phone) return;
+    const visibleOperation = visibleOperations.find((op) => isActiveJobOperation(job, op));
+    if (
+      !operationsError && !pendingActiveJobRef.current &&
+      loadedOperationsQueryRef.current === operationsQueryKey && search === debouncedSearch &&
+      visibleOperation && operationCardsRef.current.has(visibleOperation.id)
+    ) {
+      pendingActiveJobRef.current = null;
+      setOperationToFocus(visibleOperation.id);
+      return;
+    }
+    if (job.operation_id == null && !(job.work_order_id && job.operation_number)) {
+      showToast('info', 'This check-in is not linked to an operation.');
+      return;
+    }
+
+    // Active jobs can be outside the current filters or the first queue page.
+    // Narrow to this work order and wait for its actual card to render.
+    pendingActiveJobRef.current = job;
+    setWorkCenterId(job.work_center_id || '');
+    setStatusFilter('');
+    setDueTodayOnly(false);
+    setActionableOnly(false);
+    setSearch(job.work_order_number || '');
+    setDebouncedSearch(job.work_order_number || '');
+    setShowMobileFilters(false);
+    setShowMobileCenters(false);
+    setActiveJobNavigationRequest((request) => request + 1);
+  };
+
+  useEffect(() => {
+    if (operationToFocus === null || operationsError) return;
+    const card = operationCardsRef.current.get(operationToFocus);
+    if (!card) return;
+    card.focus({ preventScroll: true });
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    card.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
+    setHighlightedOperationId(operationToFocus);
+    setOperationToFocus(null);
+  }, [operationToFocus, operationsError, visibleOperations]);
 
   const getElapsedTime = useCallback((clockIn?: string) => {
     if (!clockIn) return '0m';
@@ -623,7 +755,7 @@ export default function ShopFloorSimple() {
    * shortfalls into ONE warning; only a clean lift is `success`.
    */
   const handleClearHold = async (operation: Operation) => {
-    if (actionLoading !== null) return;
+    if (actionLoading !== null || productionSave.mutationsBlocked) return;
 
     setActionLoading(operation.id);
     try {
@@ -643,6 +775,7 @@ export default function ShopFloorSimple() {
 
   // Action handlers
   const handleCheckIn = async (operation: Operation) => {
+    if (actionLoading !== null || productionSave.mutationsBlocked) return;
     // A held operation is never checked in from here — Clear Hold is its own
     // button now (see handleClearHold). Guarded rather than assumed: this
     // handler is reachable from the mobile "Next Job" strip and the grid card,
@@ -653,7 +786,7 @@ export default function ShopFloorSimple() {
     }
 
     if (operation.can_check_in === false) {
-      showToast('info', 'Previous work-center operations must be completed first');
+      showToast('info', 'Earlier operations on this work order must be completed first');
       return;
     }
 
@@ -673,7 +806,11 @@ export default function ShopFloorSimple() {
         await api.startOperation(operation.id);
       }
       showToast('success', `Checked in to ${operation.work_order_number}`);
-      await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
+      const [, jobs] = await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
+      if (phone) {
+        const checkedIn = jobs?.find((job: ActiveJob) => isActiveJobOperation(job, operation));
+        if (checkedIn) selectCurrentJob(checkedIn);
+      }
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || err.message || 'Failed to check in');
     } finally {
@@ -682,19 +819,30 @@ export default function ShopFloorSimple() {
   };
 
   const handleOpenCheckOut = (operation: Operation, job: ActiveJob) => {
+    selectCurrentJob(job);
     setCheckOutModal({ operation, job });
     setCheckOutData({ quantity_produced: 0, quantity_scrapped: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
   };
 
   const handleOpenProductionModal = (operation: Operation, job: ActiveJob) => {
+    selectCurrentJob(job);
     setProductionModal({ operation, job });
-    setProductionData(INITIAL_PRODUCTION_DATA);
+    const draft = productionSave.readDraft(operation.id);
+    setProductionData(draft?.timeEntryId === job.time_entry_id ? { ...INITIAL_PRODUCTION_DATA, ...draft.data } : INITIAL_PRODUCTION_DATA);
     setProductionError(null);
   };
 
   const getOperationForActiveJob = (job: ActiveJob): Operation => {
     const matchingOperation = operations.find((op) => getActiveJobForOperation(op)?.time_entry_id === job.time_entry_id);
-    if (matchingOperation) return matchingOperation;
+    if (matchingOperation) return {
+      ...matchingOperation,
+      // My Work and its forms must use the same fresh check-in totals, even
+      // when a separate queue poll failed and left old metadata in memory.
+      quantity_ordered: job.quantity_ordered ?? matchingOperation.quantity_ordered,
+      quantity_complete: job.quantity_complete ?? matchingOperation.quantity_complete,
+      quantity_scrapped: job.operation_quantity_scrapped ?? matchingOperation.quantity_scrapped,
+      laser_nest: job.laser_nest ?? matchingOperation.laser_nest,
+    };
 
     return {
       id: job.operation_id || job.time_entry_id,
@@ -712,24 +860,29 @@ export default function ShopFloorSimple() {
       work_order_quantity_ordered: job.work_order_quantity_ordered,
       component_quantity: job.component_quantity,
       quantity_complete: job.quantity_complete || 0,
-      quantity_scrapped: 0,
+      quantity_scrapped: job.operation_quantity_scrapped || 0,
       priority: 5,
       due_date: null,
       customer_name: null,
       customer_po: null,
       actual_start: job.clock_in,
-      setup_instructions: null,
-      run_instructions: null,
+      setup_instructions: job.operation_setup_instructions || null,
+      run_instructions: job.operation_run_instructions || null,
       requires_inspection: false,
       can_check_in: true,
       blocked_by_previous_operations: false,
       run_order: null,
+      laser_nest: job.laser_nest,
     };
   };
 
   const handleOpenActiveJobCheckOut = (job: ActiveJob) => {
     handleOpenCheckOut(getOperationForActiveJob(job), job);
   };
+
+  const currentOperation = selectedActiveJob ? getOperationForActiveJob(selectedActiveJob) : null;
+  const currentOperationAvailable = Boolean(selectedActiveJob?.operation_id ||
+    (selectedActiveJob && operations.some(op => isActiveJobOperation(selectedActiveJob, op))));
 
   const closeCheckOutModal = () => {
     setCheckOutModal(null);
@@ -771,10 +924,11 @@ export default function ShopFloorSimple() {
     closeModal = false,
     scrapFields?: { scrap_reason?: string; scrap_reason_code_id?: number }
   ) => {
+    if (actionLoading !== null || productionSave.mutationsBlocked) return;
     setActionLoading(operation.id);
     setProductionError(null);
     try {
-      await api.reportOperationProduction(operation.id, {
+      await productionSave.submit(operation.id, {
         quantity_complete_delta: quantityCompleteDelta,
         quantity_scrapped_delta: quantityScrappedDelta,
         notes: notes || undefined,
@@ -790,13 +944,14 @@ export default function ShopFloorSimple() {
       if (closeModal) closeProductionModal();
       await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
     } catch (err: any) {
-      const detail = err.response?.data?.detail;
-      const message = typeof detail === 'string' && detail ? detail : 'Failed to add completed quantity';
-      // Modal submit path: the refusal renders INLINE inside the open modal
-      // (primary). The quick "+1 Complete" row path has no modal, so the toast
-      // carries it there; it stays as a secondary signal for the modal too.
-      if (closeModal) setProductionError(message);
-      showToast('error', message);
+      // The persistent receipt notice distinguishes refusal from uncertainty.
+      // Never tell the operator a lost response means the report failed.
+      if (isDefinitiveHttpRefusal(err.response?.status ?? err.status)) {
+        const detail = err.response?.data?.detail;
+        const message = typeof detail === 'string' && detail ? detail : 'Production was not saved';
+        if (closeModal) setProductionError(message);
+        showToast('error', message);
+      }
     } finally {
       setActionLoading(null);
     }
@@ -818,7 +973,7 @@ export default function ShopFloorSimple() {
   // do NOT touch the on-screen count; on success we refetch and reflect only what
   // the server returns, and on refusal we surface the server's `detail` verbatim.
   const handleReduceProduction = async () => {
-    if (!productionModal) return;
+    if (!productionModal || actionLoading !== null || productionSave.mutationsBlocked) return;
     const operation = productionModal.operation;
     const delta = Number(productionData.remove_delta || 0);
     const reason = productionData.remove_reason.trim();
@@ -826,28 +981,32 @@ export default function ShopFloorSimple() {
     setActionLoading(operation.id);
     setProductionError(null);
     try {
-      await api.reduceOperationProduction(operation.id, {
+      await productionSave.submitCorrection(operation.id, {
         quantity_delta: delta,
         reason,
         notes: productionData.notes.trim() || undefined,
         source: 'desktop',
       });
       showToast('success', `Removed ${delta} over-counted part${delta === 1 ? '' : 's'}`);
+      productionSave.clearDraft(operation.id);
       closeProductionModal();
       await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
     } catch (err: any) {
       // The refusal is the WHOLE point of a server-gated correction — render it
       // INLINE next to the confirm button (the toast is secondary), verbatim.
-      const detail = err.response?.data?.detail;
-      const message = typeof detail === 'string' && detail ? detail : 'Failed to correct completed quantity';
-      setProductionError(message);
-      showToast('error', message);
+      if (isDefinitiveHttpRefusal(err.response?.status ?? err.status)) {
+        const detail = err.response?.data?.detail;
+        const message = typeof detail === 'string' && detail ? detail : 'Correction was not saved';
+        setProductionError(message);
+        showToast('error', message);
+      }
     } finally {
       setActionLoading(null);
     }
   };
 
   const handleCompleteOperation = async (operation: Operation) => {
+    if (actionLoading !== null || productionSave.mutationsBlocked) return;
     setCompleteConfirm(null);
     setActionLoading(operation.id);
     try {
@@ -864,7 +1023,7 @@ export default function ShopFloorSimple() {
   };
 
   const handleClockOut = async () => {
-    if (!checkOutModal) return;
+    if (!checkOutModal || actionLoading !== null || productionSave.mutationsBlocked) return;
 
     setActionLoading(checkOutModal.operation.id);
     try {
@@ -921,11 +1080,21 @@ export default function ShopFloorSimple() {
         resolved = null; // resolver unavailable — legacy lookup below
       }
 
-      setShowScanner(false);
+      if (!phone) setShowScanner(false);
       setScannerCode('');
 
       if (resolved?.kind === 'operation') {
         const op = resolved.operation;
+        if (phone) {
+          updateWorkspace({ view: 'all' });
+          setWorkCenterId(op.work_center_id || '');
+          setStatusFilter('');
+          setDueTodayOnly(false);
+          setActionableOnly(false);
+          setDebouncedSearch(op.work_order_number);
+          setExpandedOperationId(op.id);
+          setOperationToFocus(op.id);
+        }
         setSearch(op.work_order_number);
         setHighlightedOperationId(op.id);
         const actions = resolved.legal_actions.length > 0
@@ -938,6 +1107,14 @@ export default function ShopFloorSimple() {
       }
 
       if (resolved?.kind === 'work_order') {
+        if (phone) {
+          updateWorkspace({ view: 'all' });
+          setWorkCenterId('');
+          setStatusFilter('');
+          setDueTodayOnly(false);
+          setActionableOnly(false);
+          setDebouncedSearch(resolved.work_order.work_order_number);
+        }
         setSearch(resolved.work_order.work_order_number);
         showToast('success', `Found ${resolved.work_order.work_order_number}`);
         scrollToOperations();
@@ -945,6 +1122,13 @@ export default function ShopFloorSimple() {
       }
 
       // kind 'employee' / 'unknown' (or resolver error): legacy behavior.
+      if (phone) {
+        updateWorkspace({ view: 'all' });
+        setWorkCenterId('');
+        setStatusFilter('');
+        setDueTodayOnly(false);
+        setActionableOnly(false);
+      }
       const result = await api.scannerLookup(code);
       const nextSearch =
         result?.work_order?.work_order_number ||
@@ -953,15 +1137,17 @@ export default function ShopFloorSimple() {
         result?.part_number ||
         code;
       setSearch(nextSearch);
+      if (phone) setDebouncedSearch(nextSearch);
       showToast('success', `Found ${nextSearch}`);
       scrollToOperations();
     } catch {
+      if (phone) throw new Error('Could not find this traveler. Check the connection and try again.');
       setSearch(code);
       showToast('info', 'Showing scanned code in search');
     } finally {
       setActionLoading(null);
     }
-  }, [openOperationDetails, scrollToOperations, showToast]);
+  }, [openOperationDetails, scrollToOperations, showToast, phone, updateWorkspace, setWorkCenterId]);
 
   const handleScannerSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -969,9 +1155,11 @@ export default function ShopFloorSimple() {
   };
 
   // Phone-scanned traveler op QRs open /shop-floor/operations?scan=OP:{id}
-  // (kiosk mode included) — run the resolve flow once, then strip the param
-  // via history replace so reloads don't re-scan.
-  const scanParamHandledRef = useRef(false);
+  // (kiosk mode included). Strip successful scans; keep a failed code in the
+  // link so a reconnect/reload can retry without finding the traveler again.
+  const scanParamHandledRef = useRef<string | null>(null);
+  const scanLocationRef = useRef(location);
+  scanLocationRef.current = location;
   useEffect(() => {
     const params = new URLSearchParams(location.search);
     const scanCode = params.get('scan');
@@ -979,15 +1167,22 @@ export default function ShopFloorSimple() {
       // Param gone (we stripped it, or plain navigation): re-arm so a LATER
       // client-side navigation to ?scan=... is handled. The ref still
       // suppresses strict-mode's double-invoke within one scan handling.
-      scanParamHandledRef.current = false;
+      scanParamHandledRef.current = null;
       return;
     }
-    if (loading || scanParamHandledRef.current) return;
-    scanParamHandledRef.current = true;
-    params.delete('scan');
-    navigate({ pathname: location.pathname, search: params.toString() }, { replace: true });
-    resolveScan(scanCode);
-  }, [loading, location.pathname, location.search, navigate, resolveScan]);
+    if (loading || scanParamHandledRef.current === scanCode) return;
+    scanParamHandledRef.current = scanCode;
+    const locationKey = location.key;
+    void resolveScan(scanCode).then(() => {
+      // A slow response must not replace a newer navigation or scanned link.
+      if (scanLocationRef.current.key !== locationKey) return;
+      params.delete('scan');
+      navigate({ pathname: location.pathname, search: params.toString() }, { replace: true });
+    }).catch(() => {
+      if (scanLocationRef.current.key !== locationKey) return;
+      showToast('error', 'Could not open the scanned traveler. Your code is kept in this link. Reconnect and reload to retry.');
+    });
+  }, [loading, location.key, location.pathname, location.search, navigate, resolveScan, showToast]);
 
   // Let the operator take in the spotlighted row, then fade it.
   useEffect(() => {
@@ -1011,7 +1206,7 @@ export default function ShopFloorSimple() {
   };
 
   const handleConfirmHold = async () => {
-    if (!holdModal || !holdData.category) return;
+    if (!holdModal || !holdData.category || actionLoading !== null || productionSave.mutationsBlocked) return;
     const operationId = holdModal.id;
     const category = holdData.category;
     const note = holdData.note.trim();
@@ -1061,6 +1256,45 @@ export default function ShopFloorSimple() {
     }
   };
 
+  const retryOriginalProduction = async () => {
+    const operationId = productionSave.unconfirmed?.operationId;
+    try {
+      await productionSave.retry();
+      if (productionModal?.operation.id === operationId) closeProductionModal();
+      showToast('success', 'Original production report confirmed');
+      await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
+    } catch {
+      // Persistent notice keeps the original immutable report available.
+    }
+  };
+
+  const openCorrectionReview = async () => {
+    const pending = productionSave.unconfirmedCorrection;
+    if (!pending) return;
+    closeProductionModal();
+    setCorrectionReviewed(false);
+    setCorrectionReview({ loading: true, details: null, error: null });
+    try {
+      const details = await api.getOperationDetails(pending.operationId);
+      setCorrectionReview(current => current ? { loading: false, details, error: null } : null);
+    } catch {
+      setCorrectionReview(current => current ? { loading: false, details: null, error: 'Could not load correction history. Reconnect and try again.' } : null);
+    }
+  };
+
+  const finishCorrectionReview = async () => {
+    if (!correctionReviewed || !correctionReview?.details) return;
+    try {
+      productionSave.acknowledgeCorrectionReview();
+      setCorrectionReview(null);
+      setCorrectionReviewed(false);
+      showToast('info', 'Review finished. The original removal was not resent.');
+      await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
+    } catch (err: any) {
+      showToast('error', err.message || 'Could not finish correction review');
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-96">
@@ -1100,6 +1334,70 @@ export default function ShopFloorSimple() {
         ))}
       </div>
 
+      <ProductionSaveNotice phase={productionSave.phase} message={productionSave.message} online={productionSave.online}
+        unconfirmed={productionSave.unconfirmed} onRetry={() => void retryOriginalProduction()}
+        unconfirmedCorrection={productionSave.unconfirmedCorrection} onReviewCorrection={() => void openCorrectionReview()} />
+
+      {phone && (
+        <div className={`space-y-4 ${mobileView === 'my-work' && selectedActiveJob ? 'pb-28' : ''}`}>
+          <div className="flex items-center justify-between gap-2">
+            <h1 className="text-xl font-bold text-white">My shop floor</h1>
+            <div className="flex gap-2">
+              <button type="button" className="btn-secondary min-h-11 px-3" onClick={() => setShowScanner(true)} aria-label="Scan traveler">
+                <QrCodeIcon className="mr-1 h-5 w-5" /> Scan
+              </button>
+              <button type="button" className="btn-secondary min-h-11 min-w-11" onClick={handleRefresh} disabled={refreshing} aria-label="Refresh jobs">
+                <ArrowPathIcon className={`h-5 w-5 ${refreshing ? 'animate-spin' : ''}`} />
+              </button>
+            </div>
+          </div>
+          <nav aria-label="Shop floor views" className="grid grid-cols-3 gap-2">
+            {([['my-work', `My work (${activeJobs.length})`], ['ready', 'Ready here'], ['all', 'All operations']] as const).map(([view, label]) => (
+              <button key={view} type="button" aria-pressed={mobileView === view} onClick={() => selectMobileView(view)}
+                className={`min-h-12 rounded-sm border px-2 text-sm font-semibold ${mobileView === view ? 'border-emerald-500 bg-emerald-500/15 text-emerald-200' : 'border-slate-700 text-slate-300'}`}>{label}</button>
+            ))}
+          </nav>
+          {lastUpdated && <p className="text-xs text-slate-400">Last refreshed {formatCentralTime(new Date(lastUpdated).toISOString())}</p>}
+          {activeJobsStale && <ErrorState title="Couldn't refresh your clocked-in job" message="Showing your last known check-ins. Refresh before recording work." onRetry={loadActiveJobs} />}
+          {mobileView === 'my-work' ? (
+            <MobileCurrentWork jobs={activeJobs} selected={selectedActiveJob} onSelect={selectCurrentJob}
+              onQueue={() => selectMobileView('ready')}
+              elapsed={getElapsedTime(selectedActiveJob?.clock_in)}
+              disabled={actionLoading !== null || activeJobsStale || productionSave.mutationsBlocked}
+              operationAvailable={currentOperationAvailable}
+              onReport={() => { if (currentOperation && selectedActiveJob) handleOpenProductionModal(currentOperation, selectedActiveJob); }}
+              onAddOne={() => { if (currentOperation) void reportProduction(currentOperation, 1); }}
+              onDrawing={() => { if (currentOperation) setDocumentView({ operationId: currentOperation.id, tab: 'drawing' }); }}
+              onNest={() => { if (currentOperation) setDocumentView({ operationId: currentOperation.id, tab: 'nest' }); }}
+              onInstructions={() => { if (currentOperation) void handleViewDetails(currentOperation); }}
+              onHold={() => { if (currentOperation) openHoldModal(currentOperation); }}
+              onCheckOut={() => { if (currentOperation && selectedActiveJob) handleOpenCheckOut(currentOperation, selectedActiveJob); }}
+              onComplete={() => setCompleteConfirm(currentOperation)}
+            />
+          ) : (
+            <div className="space-y-3">
+              <label className="block text-sm text-slate-300" htmlFor="mobile-queue-station">Work center</label>
+              <select id="mobile-queue-station" value={workCenterId} onChange={event => setWorkCenterId(event.target.value ? Number(event.target.value) : '')} className="input min-h-12 w-full">
+                <option value="">All work centers</option>
+                {workCenters.map(center => <option key={center.id} value={center.id}>{center.name}</option>)}
+              </select>
+              <input type="search" value={search} onChange={event => setSearch(event.target.value)} aria-label="Search work orders or parts" placeholder="Search WO or part..." className="input min-h-12 w-full" />
+              <p className="text-sm text-slate-400">{queueOperations.length} operations · dispatch order</p>
+            </div>
+          )}
+          {mobileView === 'my-work' && phoneSession.available && user?.role !== 'platform_admin' && !user?.is_superuser && (
+            <details className="rounded-sm border border-slate-700 p-3 text-sm">
+              <summary className="min-h-11 cursor-pointer py-3 font-semibold text-slate-300">Phone settings</summary>
+              <label className="flex min-h-12 items-center gap-3 text-white">
+                <input type="checkbox" checked={phoneSession.personalPhone} onChange={event => phoneSession.setPersonalPhone(event.target.checked)} className="h-6 w-6" />
+                This is my personal phone
+              </label>
+              <p className="mt-1 text-sm text-slate-400">Sign out after {phoneSession.timeoutMinutes} minutes without activity. Keep this off on shared devices. Your current job resumes after sign-in.</p>
+            </details>
+          )}
+        </div>
+      )}
+      {!phone && <>
       {/* Mobile Header */}
       <div className="md:hidden space-y-3">
         <div className="flex items-center justify-between gap-3">
@@ -1132,29 +1430,6 @@ export default function ShopFloorSimple() {
             </button>
           </div>
         </div>
-        {primaryActiveJob && (
-          <div className="rounded-sm border border-emerald-500/40 bg-emerald-500/10 p-4 shadow-lg shadow-emerald-950/20">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-[11px] font-semibold uppercase tracking-wider text-emerald-300">Checked in</p>
-                <p className="mt-1 truncate text-base font-bold text-white">
-                  {primaryActiveJob.work_order_number || 'Current job'} - {primaryActiveJob.operation_name || 'Operation'}
-                </p>
-                <p className="mt-1 text-xs text-emerald-100/80">
-                  {primaryActiveJob.work_center_name || selectedWorkCenter?.name || 'Shop floor'} &middot; {getElapsedTime(primaryActiveJob.clock_in)}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => handleOpenActiveJobCheckOut(primaryActiveJob)}
-                disabled={actionLoading !== null}
-                className="btn-success min-h-11 shrink-0 px-4 text-sm"
-              >
-                Check Out
-              </button>
-            </div>
-          </div>
-        )}
         {showScanner && (
           <form onSubmit={handleScannerSubmit} className="card-compact space-y-3">
             <label htmlFor="shopfloor-scan-traveler" className="text-xs font-semibold uppercase tracking-wider text-slate-400">
@@ -1325,25 +1600,44 @@ export default function ShopFloorSimple() {
         />
       </MiniStatStrip>
 
-      {primaryActiveJob && (
-        <div className="hidden md:flex items-center justify-between gap-4 rounded-sm border border-emerald-500/40 bg-emerald-500/10 px-5 py-4">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-wider text-emerald-300">You are checked into</p>
-            <p className="mt-1 text-lg font-bold text-white">
-              {primaryActiveJob.work_order_number || 'Current job'} - {primaryActiveJob.operation_name || 'Operation'}
-            </p>
-            <p className="mt-1 text-sm text-emerald-100/80">
-              {primaryActiveJob.work_center_name || selectedWorkCenter?.name || 'Shop floor'} &middot; {getElapsedTime(primaryActiveJob.clock_in)}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => handleOpenActiveJobCheckOut(primaryActiveJob)}
-            className="btn-success min-h-11 px-5"
-          >
-            Check Out
-          </button>
-        </div>
+      {activeJobs.length > 0 && (
+        <section aria-labelledby="checked-in-operations-title" className="rounded-sm border border-emerald-500/40 bg-emerald-500/10">
+          <h2 id="checked-in-operations-title" className="px-4 py-3 text-sm font-semibold text-emerald-300">
+            You are checked into {activeJobs.length} {activeJobs.length === 1 ? 'operation' : 'operations'}
+          </h2>
+          <ul aria-label="Checked-in operations" className="max-h-80 overflow-y-auto divide-y divide-emerald-500/20 px-4">
+            {activeJobs.map((job) => (
+              <li key={job.time_entry_id} className="flex flex-wrap items-center justify-between gap-3 py-3">
+                <button
+                  type="button"
+                  onClick={() => handleGoToActiveJob(job)}
+                  aria-label={`Go to ${job.work_order_number || 'current job'}, ${formatOperationLabel(job.operation_number)} - ${job.operation_name || 'operation'}`}
+                  className="min-h-11 min-w-0 flex-1 rounded-sm p-2 text-left hover:bg-emerald-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300"
+                >
+                  <span className="block font-semibold text-white break-words">
+                    {job.work_order_number || 'Current job'} &middot; {formatOperationLabel(job.operation_number)} - {job.operation_name || 'Operation'}
+                  </span>
+                  <UnitBadge unitNumber={job.unit_number} size="sm" className="mt-1" />
+                  <span className="mt-1 block text-sm text-emerald-100/80">
+                    {job.work_center_name || 'Shop floor'} &middot; {getElapsedTime(job.clock_in)}
+                    {job.quantity_ordered != null && (
+                      <> &middot; {job.quantity_complete || 0}/{job.quantity_ordered} complete</>
+                    )}
+                  </span>
+                  <span className="mt-1 block text-xs font-semibold text-emerald-300">Go to operation &rarr;</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleOpenActiveJobCheckOut(job)}
+                  disabled={actionLoading !== null}
+                  className="btn-success min-h-11 shrink-0 px-5 disabled:opacity-50"
+                >
+                  Check Out
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
 
       {/* Stale active-job poll: keep the last-known strip above and say so —
@@ -1680,10 +1974,12 @@ export default function ShopFloorSimple() {
         grid is far down). priorityFocusQueue still backs that strip.
       */}
 
+      </>}
+
       {/* Operations Grid */}
-      {operationsError ? (
+      {(!phone || mobileView !== 'my-work') && (operationsError ? (
         <ErrorState message="Could not load operations" onRetry={loadOperations} />
-      ) : visibleOperations.length === 0 ? (
+      ) : queueOperations.length === 0 ? (
         <EmptyState
           icon={CubeIcon}
           title={selectedWorkCenter ? `No operations found for ${selectedWorkCenter.name}` : 'No operations found'}
@@ -1704,7 +2000,7 @@ export default function ShopFloorSimple() {
         <div ref={operationsRef} className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4" data-tour="sf-operations">
           {/* Cards render in server order — the same canonical run-order sort
               the kiosks show. Do not re-sort client-side. */}
-          {visibleOperations.map(op => {
+          {queueOperations.map(op => {
             const progress = op.quantity_ordered > 0
               ? (op.quantity_complete / op.quantity_ordered) * 100 
               : 0;
@@ -1718,11 +2014,30 @@ export default function ShopFloorSimple() {
             return (
               <div
                 key={op.id}
+                ref={(card) => {
+                  if (card) operationCardsRef.current.set(op.id, card);
+                  else operationCardsRef.current.delete(op.id);
+                }}
+                tabIndex={-1}
                 data-testid={`shop-floor-op-${op.id}`}
-                className={`card hover:shadow-lg transition-shadow ${overdue ? 'border-red-500/30 bg-red-500/10' : ''} ${
+                className={`card ${phone ? '!p-0' : ''} scroll-mt-24 hover:shadow-lg transition-shadow ${overdue ? 'border-red-500/30 bg-red-500/10' : ''} ${
                   highlightedOperationId === op.id ? 'border-werco-500 ring-1 ring-werco-500/60' : ''
                 }`}
               >
+                {phone && (
+                  <button type="button" className="flex min-h-20 w-full items-center justify-between gap-3 p-4 text-left"
+                    aria-expanded={expandedOperationId === op.id} aria-controls={`operation-content-${op.id}`}
+                    onClick={() => setExpandedOperationId(current => current === op.id ? null : op.id)}>
+                    <span className="min-w-0 space-y-1">
+                      <span className="block break-words font-bold text-white">{op.work_order_number}</span>
+                      <span className="block text-sm text-slate-300">{formatOperationLabel(op.operation_number)} — {op.operation_name}</span>
+                      <span className="block text-xs text-slate-400">{op.part_number} · {op.quantity_complete}/{op.quantity_ordered} complete</span>
+                      <span className="block text-xs capitalize text-slate-300">{op.status.replace('_', ' ')}</span>
+                    </span>
+                    <span className="shrink-0 text-sm font-semibold text-blue-300">{expandedOperationId === op.id ? 'Close' : 'Open'}</span>
+                  </button>
+                )}
+                {(!phone || expandedOperationId === op.id) && <div id={`operation-content-${op.id}`} className={phone ? 'border-t border-slate-700 p-4' : undefined}>
                 {/* Header */}
                 <div className="flex items-start justify-between mb-3">
                   <div>
@@ -1856,13 +2171,19 @@ export default function ShopFloorSimple() {
                   </div>
                 </div>
                 
+                {showCheckIn && !canCheckIn && (
+                  <p className="mb-3 text-sm text-amber-300">
+                    Waiting for earlier operations on this work order to be completed. Open Details to review the routing.
+                  </p>
+                )}
+
                 {/* Action Buttons */}
-                <div className="flex flex-col sm:flex-row gap-2" data-tour="sf-complete">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2" data-tour="sf-complete">
                   {op.status === 'in_progress' && activeJob && !targetReached && (
                     <>
                       <button
                         onClick={() => reportProduction(op, 1)}
-                        disabled={actionLoading === op.id || remainingQuantity <= 0}
+                        disabled={actionLoading === op.id || productionSave.mutationsBlocked || remainingQuantity <= 0}
                         className="flex-1 btn-success text-base sm:text-sm py-3 sm:py-2.5 w-full disabled:opacity-50 disabled:cursor-not-allowed"
                         title={remainingQuantity <= 0 ? 'Target quantity reached' : 'Add one completed part'}
                       >
@@ -1880,7 +2201,7 @@ export default function ShopFloorSimple() {
                         disabled={actionLoading === op.id}
                         className="btn-secondary text-sm py-2.5 px-3 w-full sm:w-auto"
                       >
-                        More
+                        Report quantity
                       </button>
                     </>
                   )}
@@ -1889,9 +2210,9 @@ export default function ShopFloorSimple() {
                   {showCheckIn && (
                     <button
                       onClick={() => handleCheckIn(op)}
-                      disabled={actionLoading === op.id || !canCheckIn}
+                      disabled={actionLoading === op.id || productionSave.mutationsBlocked || !canCheckIn}
                       className="flex-1 btn-primary text-base sm:text-sm py-3 sm:py-2.5 w-full disabled:opacity-50 disabled:cursor-not-allowed"
-                      title={canCheckIn ? 'Check in' : 'Waiting on a previous work center'}
+                      title={canCheckIn ? 'Check in' : 'Waiting for earlier operations on this work order'}
                     >
                       {actionLoading === op.id ? (
                         <ArrowPathIcon className="h-4 w-4 animate-spin mx-auto" />
@@ -1949,7 +2270,7 @@ export default function ShopFloorSimple() {
                   {op.status === 'on_hold' && (
                     <button
                       onClick={() => handleClearHold(op)}
-                      disabled={actionLoading !== null}
+                      disabled={actionLoading !== null || productionSave.mutationsBlocked}
                       data-testid={`shop-floor-clear-hold-${op.id}`}
                       className="flex-1 btn-primary text-base sm:text-sm py-3 sm:py-2.5 w-full disabled:opacity-50 disabled:cursor-not-allowed"
                       title="Lifts the hold only — any blocker stays open for a supervisor to resolve"
@@ -1975,11 +2296,18 @@ export default function ShopFloorSimple() {
                     <span className="ml-1.5">Details</span>
                   </button>
                 </div>
+                </div>}
               </div>
             );
           })}
         </div>
-      )}
+      ))}
+
+      {phone && <ShopFloorCameraScanner open={showScanner} onClose={() => setShowScanner(false)} onScan={resolveScan} />}
+      <Modal open={documentView !== null} onClose={() => setDocumentView(null)} size="7xl" padded={false} scroll={false}
+        ariaLabel="Operation drawings" className="flex h-[90dvh] flex-col overflow-auto">
+        {documentView && <KioskDocViewer operationId={documentView.operationId} initialTab={documentView.tab} transport={SHOP_FLOOR_DOCS} onBack={() => setDocumentView(null)} />}
+      </Modal>
 
       {/* Confirm full-quantity completion (closes the operation, no undo) */}
       <ConfirmDialog
@@ -2015,6 +2343,9 @@ export default function ShopFloorSimple() {
             </div>
 
             <div className="modal-body space-y-4">
+              <ProductionSaveNotice phase={productionSave.phase} message={productionSave.message} online={productionSave.online}
+                unconfirmed={productionSave.unconfirmed} onRetry={() => void retryOriginalProduction()}
+                unconfirmedCorrection={productionSave.unconfirmedCorrection} onReviewCorrection={() => void openCorrectionReview()} />
               <div className="bg-slate-800/50 rounded-lg p-4">
                 <p className="text-sm text-slate-400">Operation</p>
                 <p className="font-semibold text-white">
@@ -2228,7 +2559,7 @@ export default function ShopFloorSimple() {
                 <button
                   onClick={handleReduceProduction}
                   disabled={
-                    actionLoading === productionModal.operation.id ||
+                    actionLoading === productionModal.operation.id || productionSave.mutationsBlocked ||
                     Number(productionData.remove_delta || 0) <= 0 ||
                     productionData.remove_reason.trim().length === 0
                   }
@@ -2247,7 +2578,7 @@ export default function ShopFloorSimple() {
                 <button
                   onClick={handleSaveProduction}
                   disabled={
-                    actionLoading === productionModal.operation.id ||
+                    actionLoading === productionModal.operation.id || productionSave.mutationsBlocked ||
                     (Number(productionData.quantity_complete_delta || 0) <= 0 &&
                       Number(productionData.quantity_scrapped_delta || 0) <= 0) ||
                     (Number(productionData.quantity_scrapped_delta || 0) > 0 &&
@@ -2389,7 +2720,7 @@ export default function ShopFloorSimple() {
               <button
                 onClick={handleClockOut}
                 disabled={
-                  actionLoading === checkOutModal.operation.id ||
+                  actionLoading === checkOutModal.operation.id || productionSave.mutationsBlocked ||
                   checkOutData.quantity_produced < 0 ||
                   checkOutData.quantity_scrapped < 0 ||
                   (Number(checkOutData.quantity_scrapped || 0) > 0 &&
@@ -2425,7 +2756,7 @@ export default function ShopFloorSimple() {
           <>
             <div className="modal-header">
               <h3 className="text-lg font-semibold">Place on Hold</h3>
-              <button onClick={closeHoldModal} className="p-2 rounded-lg hover:bg-slate-800">
+              <button onClick={closeHoldModal} className="min-h-11 min-w-11 p-2 rounded-lg hover:bg-slate-800" aria-label="Close hold form">
                 <XMarkIcon className="h-5 w-5" />
               </button>
             </div>
@@ -2445,13 +2776,19 @@ export default function ShopFloorSimple() {
                 <span className="label">
                   Hold reason <span className="text-red-400">*</span>
                 </span>
-                <SelectField
+                {phone ? <div className="grid grid-cols-2 gap-2" role="group" aria-label="Hold reason">
+                  {HOLD_REASONS.map(reason => <button key={reason.value} type="button" aria-pressed={holdData.category === reason.value}
+                    onClick={() => setHoldData({ ...holdData, category: reason.value })}
+                    className={`min-h-12 rounded-sm border px-2 py-2 text-sm font-semibold ${holdData.category === reason.value ? 'border-amber-400 bg-amber-500/15 text-amber-200' : 'border-slate-600 text-slate-200'}`}>
+                    {reason.label}
+                  </button>)}
+                </div> : <SelectField
                   value={holdData.category}
                   onChange={(value) => setHoldData({ ...holdData, category: String(value) })}
                   options={HOLD_REASONS.map((r) => ({ value: r.value, label: r.label }))}
                   placeholder="Select a hold reason"
                   ariaLabel="Hold reason"
-                />
+                />}
                 {!holdData.category && (
                   <p className="mt-1 text-xs text-red-400">A reason is required to place a hold.</p>
                 )}
@@ -2477,7 +2814,7 @@ export default function ShopFloorSimple() {
               </Button>
               <button
                 onClick={handleConfirmHold}
-                disabled={actionLoading === holdModal.id || !holdData.category}
+                disabled={actionLoading === holdModal.id || productionSave.mutationsBlocked || !holdData.category}
                 className="btn-warning disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {actionLoading === holdModal.id ? (
@@ -2556,25 +2893,14 @@ export default function ShopFloorSimple() {
                 </div>
               </div>
               
-              {/* Instructions */}
-              {(detailsModal.operation.setup_instructions || detailsModal.operation.run_instructions) && (
-                <div>
-                  <h4 className="font-semibold text-white mb-3">Work Instructions</h4>
-                  {detailsModal.operation.setup_instructions && (
-                    <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 mb-2">
-                      <p className="text-sm font-medium text-amber-300">Setup Instructions</p>
-                      <p className="text-sm text-amber-400 whitespace-pre-wrap">{detailsModal.operation.setup_instructions}</p>
-                    </div>
-                  )}
-                  {detailsModal.operation.run_instructions && (
-                    <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3">
-                      <p className="text-sm font-medium text-blue-300">Run Instructions</p>
-                      <p className="text-sm text-blue-400 whitespace-pre-wrap">{detailsModal.operation.run_instructions}</p>
-                    </div>
-                  )}
-                </div>
-              )}
-              
+              <KioskJobNotes job={{
+                work_order_notes: detailsModal.work_order.notes,
+                work_order_special_instructions: detailsModal.work_order.special_instructions,
+                operation_description: detailsModal.operation.description,
+                operation_setup_instructions: detailsModal.operation.setup_instructions,
+                operation_run_instructions: detailsModal.operation.run_instructions,
+              }} size="sm" />
+
               {/* All Operations */}
               <div>
                 <h4 className="font-semibold text-white mb-3">All Operations</h4>
@@ -2643,6 +2969,37 @@ export default function ShopFloorSimple() {
             </div>
           </>
         )}
+      </Modal>
+
+      <Modal open={correctionReview !== null} onClose={() => setCorrectionReview(null)} size="lg" ariaLabel="Review quantity correction">
+        <h2 className="text-lg font-semibold text-white">Review quantity correction</h2>
+        <p className="mt-3 text-sm text-slate-300">The connection ended before we could confirm this removal. Review the history with your supervisor to establish whether it was recorded before entering another correction.</p>
+        {productionSave.unconfirmedCorrection && <div className="my-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+          <p>Remove {productionSave.unconfirmedCorrection.body.quantity_delta} complete</p>
+          <p>Reason: {productionSave.unconfirmedCorrection.body.reason}</p>
+          <p>Submitted {formatCentralDateTime(productionSave.unconfirmedCorrection.submittedAt)}</p>
+        </div>}
+        {correctionReview?.loading && <p role="status" className="my-4">Loading correction history…</p>}
+        {correctionReview?.error && <ErrorState title="History unavailable" message={correctionReview.error} onRetry={() => void openCorrectionReview()} />}
+        {correctionReview?.details && <div className="space-y-4">
+          <p className="font-semibold">{correctionReview.details.work_order?.work_order_number} · {correctionReview.details.operation?.name}</p>
+          <div className="space-y-3 rounded-lg bg-slate-800/50 p-3">
+            <h3 className="font-semibold">Recent operation history</h3>
+            {correctionReview.details.history?.length ? correctionReview.details.history.map((entry: any, index: number) => <div key={index} className="text-sm">
+              <p className="text-xs text-slate-400">{entry.created_at ? formatCentralDateTime(entry.created_at) : 'Time unavailable'}</p>
+              <p className="text-slate-200">{entry.details}</p>
+            </div>) : <p className="text-sm text-slate-300">No recent history returned. Your supervisor must verify the outcome before continuing.</p>}
+          </div>
+          <p className="text-sm text-slate-300">Only recent events are shown. The current total alone does not confirm this correction. Finishing this review clears the held entry; it does not resend or undo the removal.</p>
+          <label className="flex min-h-12 cursor-pointer items-start gap-3 text-sm text-slate-200">
+            <input type="checkbox" className="mt-1 h-5 w-5 shrink-0" checked={correctionReviewed} onChange={event => setCorrectionReviewed(event.target.checked)} />
+            I reviewed this correction with my supervisor and confirmed whether it was recorded.
+          </label>
+        </div>}
+        <div className="mt-5 flex justify-end gap-3">
+          <Button variant="secondary" onClick={() => setCorrectionReview(null)}>Keep on hold</Button>
+          <Button disabled={!correctionReviewed || !correctionReview?.details || !productionSave.online} onClick={() => void finishCorrectionReview()}>Finish review</Button>
+        </div>
       </Modal>
 
       <style>{`

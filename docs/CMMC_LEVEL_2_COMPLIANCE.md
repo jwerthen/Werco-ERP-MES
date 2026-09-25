@@ -196,6 +196,7 @@
 **GAPS:**
 - [ ] **AC-3.1.10 - Session Inactivity Timeout** ⚠️ HIGH
   - Need: 15-30 minute inactivity lockout
+  - Frontend behavior (2026-09-25): 15-minute default; explicit personal-phone preference permits 30 minutes only on phone-size Shop Floor routes, scoped to the signed-in user/company. Dedicated kiosks and crew stations keep their separate shorter timers. The one-minute warning resumes on a tap/key; phone wake checks the original wall-clock deadline. This does not close the server-side inactivity-validation gap below.
   - Effort: 3-5 days
 - [ ] **AC-3.1.1 - Multi-Factor Authentication** 🔴 CRITICAL
   - Need: TOTP/SMS/Hardware token support

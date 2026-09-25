@@ -41,6 +41,14 @@ jest.mock('../hooks/usePermissions', () => ({
   usePermissions: () => ({ can: () => false }),
 }));
 
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({ user: { id: 1, company_id: 1, role: 'operator' } }),
+}));
+
+jest.mock('../context/CompanyContext', () => ({
+  useCompany: () => ({ currentCompany: { id: 1 } }),
+}));
+
 const mockedApi = api as jest.Mocked<typeof api>;
 
 const OPERATION = {
@@ -120,6 +128,7 @@ describe('ShopFloorSimple load-failure surfacing', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     localStorage.clear();
+    sessionStorage.clear();
     // Every failure path also console.error()s; keep test output clean.
     consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
     mockedApi.getWorkCenters.mockResolvedValue([LASER_1]);

@@ -96,6 +96,19 @@ To open a screen: click it in the sidebar. Some entries (like Shop Floor or Engi
 
 ---
 
+## Shop Floor on your phone
+
+Open **Operations** to see **My work**, with your current job, completed quantity, and large action buttons. If you are checked into several jobs, use **Switch active job**. **Ready here** and **All operations** show a compact queue in dispatch order; choose a work center or search by work order or part.
+
+- **Report quantity** opens batch entry and count correction. **+1 Complete** records one completed part. **Check Out** ends your clock-in; it does not complete the operation.
+- **Drawing**, **Nest PDF** (when available), and **Instructions** open the selected job's documents and guidance.
+- **Scan** reads a traveler QR code with your phone camera. Manual entry is available if camera access is unavailable.
+- **Hold** offers reason buttons and an optional note for the supervisor.
+
+Wait for **Saved** before treating a quantity as recorded. If the connection drops, **Not confirmed** keeps the original entry in this browser tab. Reconnect and choose **Check original report**; it checks the same report without adding it twice. An uncertain over-count removal requires a supervisor to review the operation history before continuing, because resending a removal could subtract twice. Your report drafts belong to your account and company; return using the same account and browser tab to recover them.
+
+---
+
 ## Search anything fast
 
 You don't have to hunt through menus. There's a search box that finds work orders, parts, customers, and more across the whole system.
@@ -153,10 +166,10 @@ The system keeps you signed in while you're working and refreshes your session q
 
 For security, though, your session won't last forever:
 
-- If you leave the app sitting untouched for about **15 minutes**, the system signs you out automatically and asks you to sign in again. This is the one you'll actually notice during a shift.
+- If you leave the app sitting untouched for about **15 minutes**, the system signs you out automatically and asks you to sign in again. On the phone-size Shop Floor screen, you can explicitly choose **This is my personal phone** to allow **30 minutes** between touches. Keep that option off on shared devices; dedicated kiosk stations retain their shorter timeout.
 - If you don't use the app at all for **7 days**, your sign-in goes stale and you'll have to sign in fresh next time.
 - As long as you keep using the app, it keeps your session going for you — there is no fixed daily re-login.
-- You may get a brief warning before you're signed out, so you can save your work.
+- A warning appears during the last minute. Tap or press a key to continue. Signing out does not check you out of your job. After you sign in with the same account in the same browser tab, Shop Floor restores your last active job if it is still checked in.
 
 > Heads up: Never share your account or let someone else work under your sign-in. The system records who did what for audit and traceability — work done under your account is recorded as done by you. At a shared station, always sign out when you step away.
 
@@ -171,7 +184,7 @@ For security, though, your session won't last forever:
 | Forgot your password | Ask your administrator to reset it for you — that's the only way to get a new password today. |
 | Don't have an account yet | Your administrator creates accounts. Ask your supervisor or administrator to set you up. |
 | A screen you expected isn't in the menu | Your role may not include it. Check with your supervisor — this is usually normal. |
-| Suddenly asked to sign in again | Your session timed out — normally because the app sat untouched for about 15 minutes. This is normal. Just sign in again. |
+| Suddenly asked to sign in again | Your session timed out after inactivity: normally 15 minutes, or 30 minutes with the personal-phone option on Shop Floor. Sign in with your own badge/account to return to your work. |
 | Dashboard numbers look stale | Click the refresh button at the top of the Dashboard, or press **Ctrl + Shift + R**. |
 | Someone else's name is on your work | The previous person didn't sign out of the shared station. Sign them out (or sign in fresh) and tell your supervisor. |
 
