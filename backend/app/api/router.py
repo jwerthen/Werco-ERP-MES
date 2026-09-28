@@ -12,6 +12,7 @@ from app.api.endpoints import (
     calibration,
     carrier_webhooks,
     companies,
+    continuous_improvement,
     copilot,
     custom_fields,
     customer_complaints,
@@ -171,3 +172,6 @@ api_router.include_router(visitor_logs.router, prefix="/visitor-logs", tags=["Vi
 api_router.include_router(errors.router, tags=["Error Logging"])
 
 api_router.include_router(runtime_metrics.router, prefix="/runtime-metrics", tags=["Browser Performance"])
+api_router.include_router(
+    continuous_improvement.router, prefix="/continuous-improvement", tags=["Continuous Improvement"]
+)

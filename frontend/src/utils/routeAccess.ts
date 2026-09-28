@@ -65,6 +65,8 @@ const routeAccessRequirements: RouteAccessRequirement[] = [
   { prefix: '/documents', permission: 'work_orders:view' },
   { prefix: '/downtime', permission: 'work_orders:view' },
   { prefix: '/maintenance', permission: 'work_orders:view' },
+  // Continuous Improvement reads are open to every authenticated role. The API
+  // separately restricts submissions, updates and comments to managers and above.
   { prefix: '/oee', permission: 'analytics:view' },
   { prefix: '/tool-management', permission: 'inventory:view' },
   // Operator Certifications View is open to ALL authenticated roles (RBAC doc); the

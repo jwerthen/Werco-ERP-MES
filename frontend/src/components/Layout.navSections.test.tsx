@@ -221,6 +221,7 @@ describe('Layout sectioned sidebar (operator / streamlined RBAC)', () => {
     expect(hasNavEntry('Dashboard')).toBe(true);
     expect(hasNavEntry('Shop Floor')).toBe(true);
     expect(hasNavEntry('Maintenance')).toBe(true);
+    expect(hasNavEntry('Continuous Improvement')).toBe(true);
     // Quality group label collides with the Quality section header; assert the
     // interactive group entry exists.
     expect(hasNavEntry('Quality')).toBe(true);

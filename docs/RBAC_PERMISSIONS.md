@@ -117,6 +117,20 @@ and `/api-tokens` so it can never mint another credential.
 
 ## Permission Matrix
 
+### Continuous Improvement
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View suggestions and activity | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Submit, edit, assign, change status, and comment | ✓ | ✓ | | | | | |
+
+The `/continuous-improvement` page and API are company-scoped. Platform Admin and
+superuser privileges follow the shared role gate; a switched read-only company
+context still refuses writes. Owners must be active managers or above in the same
+company. Shared kiosk credentials cannot access this section. Every submission,
+edit, status change, and comment records its actor and a server-generated timestamp.
+See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
+
 ### Work Orders
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
