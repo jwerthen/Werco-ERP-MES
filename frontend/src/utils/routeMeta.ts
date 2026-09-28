@@ -38,6 +38,7 @@ export const routeTitles: Record<string, string> = {
   '/work-orders': 'Work Orders',
   '/work-orders/new': 'New Work Order',
   '/maintenance': 'Maintenance',
+  '/continuous-improvement': 'Continuous Improvement',
   '/tool-management': 'Tool Management',
   '/oee': 'OEE',
 

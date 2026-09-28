@@ -209,6 +209,7 @@ class AuditService:
         "signin_station": "signin_station",
         "authentication": "authentication",
         "system": "system",
+        "improvement_suggestion": "improvement_suggestion",
     }
 
     # ``extra_data`` key under which every row written on a request that was

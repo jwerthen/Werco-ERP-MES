@@ -68,6 +68,7 @@ import {
   UserGroupIcon,
   QueueListIcon,
   ScaleIcon,
+  LightBulbIcon,
 } from '@heroicons/react/24/outline';
 import NotificationBell from './NotificationBell';
 
@@ -132,6 +133,7 @@ const navSections: NavSection[] = [
       { name: 'Dispatch Board', href: '/dispatch', icon: QueueListIcon },
       { name: 'Work Orders', href: '/work-orders', icon: ClipboardDocumentListIcon },
       { name: 'Maintenance', href: '/maintenance', icon: WrenchIcon2 },
+      { name: 'Continuous Improvement', href: '/continuous-improvement', icon: LightBulbIcon },
       { name: 'Tool Management', href: '/tool-management', icon: WrenchScrewdriverIcon },
       { name: 'OEE', href: '/oee', icon: ChartBarIcon },
     ],
@@ -641,8 +643,8 @@ export default function Layout({ children }: LayoutProps) {
     if (isKiosk) {
       allowed = item => item.name === 'Shop Floor';
     } else if (isOperator) {
-      // Operators see a streamlined nav: Dashboard, Shop Floor, Quality, Maintenance.
-      const operatorAllowed = new Set(['Dashboard', 'Shop Floor', 'Quality', 'Maintenance']);
+      // Operators can follow shop improvements alongside their production tools.
+      const operatorAllowed = new Set(['Dashboard', 'Shop Floor', 'Quality', 'Maintenance', 'Continuous Improvement']);
       allowed = item => operatorAllowed.has(item.name);
     }
 

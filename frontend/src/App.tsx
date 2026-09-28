@@ -76,6 +76,7 @@ const Analytics = lazyWithRetry(() => import('./pages/Analytics'));
 const JobCosting = lazyWithRetry(() => import('./pages/JobCosting'));
 const DowntimeTracking = lazyWithRetry(() => import('./pages/DowntimeTracking'));
 const Maintenance = lazyWithRetry(() => import('./pages/Maintenance'));
+const ContinuousImprovement = lazyWithRetry(() => import('./pages/ContinuousImprovement'));
 const OEEDashboard = lazyWithRetry(() => import('./pages/OEE'));
 const OperatorCertifications = lazyWithRetry(() => import('./pages/OperatorCertifications'));
 const EngineeringChanges = lazyWithRetry(() => import('./pages/EngineeringChanges'));
@@ -1194,6 +1195,19 @@ function AppRoutes() {
               <Layout>
                 <LazyRoute>
                   <DowntimeTracking />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+
+        <Route
+          path="/continuous-improvement"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <ContinuousImprovement />
                 </LazyRoute>
               </Layout>
             </PrivateRoute>

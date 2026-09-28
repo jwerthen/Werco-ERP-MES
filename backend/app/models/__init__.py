@@ -7,6 +7,7 @@ from .bom import BOM, BOMItem, BOMItemType
 from .calibration import CalibrationRecord, CalibrationStatus, Equipment
 from .carrier_account import CarrierAccount, CompanyShippingProfile
 from .company import Company
+from .continuous_improvement import ImprovementActivity, ImprovementSuggestion
 from .custom_field import CustomFieldDefinition, CustomFieldValue, EntityType, FieldType
 from .customer import Customer
 from .customer_complaint import (
@@ -199,6 +200,8 @@ from .work_order_template import WorkOrderTemplate
 from .working_calendar import WorkingCalendar
 
 __all__ = [
+    "ImprovementActivity",
+    "ImprovementSuggestion",
     "HankTask",
     "HankIntakeBatch",
     "HankIntakeFile",

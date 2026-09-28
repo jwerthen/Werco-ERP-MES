@@ -32,6 +32,7 @@ import {
   PlusCircleIcon,
   RocketLaunchIcon,
   BellAlertIcon,
+  LightBulbIcon,
 } from '@heroicons/react/24/outline';
 import api from '../services/api';
 import { usePermissions } from '../hooks/usePermissions';
@@ -91,9 +92,18 @@ const quickActions = [
   { name: 'Customers', url: '/customers', icon: BuildingOfficeIcon },
   { name: 'Fabrication Quoting', url: '/fabrication-quotes', icon: CurrencyDollarIcon },
   { name: 'Customer Quotes', url: '/quotes', icon: CurrencyDollarIcon },
+  { name: 'Continuous Improvement', url: '/continuous-improvement', icon: LightBulbIcon },
 ];
 
 const commandActions: SearchResult[] = [
+  {
+    id: -8,
+    type: 'action',
+    title: 'Open Continuous Improvement',
+    subtitle: 'Track lean manufacturing suggestions, reviews, and implemented improvements',
+    url: '/continuous-improvement',
+    icon: 'list',
+  },
   {
     id: -7,
     type: 'action',
