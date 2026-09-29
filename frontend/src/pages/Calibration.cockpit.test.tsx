@@ -112,6 +112,13 @@ describe('Calibration cockpit: clickable-filter MiniStat strip', () => {
     });
   });
 
+  it('does not offer CSV export when the equipment list is empty', async () => {
+    mockedApi.getEquipment.mockResolvedValue([]);
+    renderPage();
+    await screen.findAllByText('No equipment found');
+    expect(screen.queryByRole('button', { name: /Export CSV/i })).not.toBeInTheDocument();
+  });
+
   it('clicking the Overdue tile re-fetches the list scoped to overdue and marks the tile active', async () => {
     renderPage();
     const overdue = await screen.findByRole('button', { name: /Overdue/ });

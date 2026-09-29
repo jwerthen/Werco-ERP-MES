@@ -80,7 +80,7 @@ const renderPage = () => render(<MemoryRouter><InventoryPage /></MemoryRouter>);
 
 /** Switch to the "Detail by Location" tab, where the row action lives. */
 const openDetailTab = async () => {
-  fireEvent.click(await screen.findByRole('button', { name: 'Detail by Location' }));
+  fireEvent.change(await screen.findByRole('combobox', { name: 'Inventory view' }), { target: { value: 'details' } });
 };
 
 beforeEach(() => {

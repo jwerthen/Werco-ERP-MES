@@ -71,6 +71,11 @@ type InventoryGroup = 'all' | 'parts' | 'materials';
 
 const MATERIAL_TYPES = new Set(['raw_material', 'purchased', 'hardware', 'consumable']);
 const PART_TYPES = new Set(['manufactured', 'assembly']);
+const formatStockQuantity = (quantity: number) => quantity.toLocaleString(undefined, { maximumFractionDigits: 20 });
+
+const stockQuantity = (quantity: number) => quantity < 0 ? (
+  <span className="text-red-300 font-semibold">{formatStockQuantity(quantity)} <span className="text-xs">Negative stock</span></span>
+) : formatStockQuantity(quantity);
 
 export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   const { showToast } = useToast();
@@ -91,6 +96,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   // Transfer keeps the named key: `inventory:transfer` means exactly this verb and
   // resolves to the same role set the server's transfer endpoint allows.
   const canTransfer = hasPermission(user?.role, 'inventory:transfer') || !!user?.is_superuser;
+  const canAdjust = hasPermission(user?.role, 'inventory:adjust') || !!user?.is_superuser;
   // Combining two SKUs carries its own key, deliberately NARROWER than the two
   // above: adjusting or moving a lot corrects where material is, while folding
   // two numbers together changes which article it IS — an AS9100D 8.5.2
@@ -123,6 +129,8 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [showCombineModal, setShowCombineModal] = useState(false);
   const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
+  const [adjustmentItems, setAdjustmentItems] = useState<InventoryItem[]>([]);
+  const [adjustmentForm, setAdjustmentForm] = useState({ inventory_item_id: 0, new_quantity: '', reason_code: '', notes: '' });
 
   const [receiveForm, setReceiveForm] = useState({
     part_id: 0,
@@ -321,6 +329,48 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
     setShowTransferModal(true);
   };
 
+  const openAdjustment = useCallback((items: InventoryItem[]) => {
+    setAdjustmentItems(items);
+    setAdjustmentForm({ inventory_item_id: items.length === 1 ? items[0].id : 0, new_quantity: '', reason_code: '', notes: '' });
+    setActionError('');
+  }, []);
+
+  const handleAdjustment = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const newQuantity = Number(adjustmentForm.new_quantity);
+    if (!canAdjust || actionBusy) return;
+    if (!adjustmentForm.inventory_item_id || !adjustmentForm.new_quantity.trim() || !Number.isFinite(newQuantity) || newQuantity < 0 || !adjustmentForm.reason_code.trim()) {
+      setActionError('Select the stock record, enter a verified nonnegative on-hand quantity, and provide an adjustment reason.');
+      return;
+    }
+    setActionBusy(true);
+    setActionError('');
+    try {
+      await api.adjustInventory({ ...adjustmentForm, new_quantity: newQuantity, reason_code: adjustmentForm.reason_code.trim() });
+      setAdjustmentItems([]);
+      showToast('success', 'Inventory adjustment saved.');
+      await loadData();
+    } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      setActionError(typeof detail === 'string' ? detail : 'Unable to save the adjustment. Check your entries and try again.');
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const renderLocations = useCallback((item: InventorySummary) => item.locations.map((loc, index) => {
+    const negative = loc.quantity < 0;
+    const matchingItems = negative ? inventory.filter(stock => stock.part_id === item.part_id && stock.location === loc.location && (stock.lot_number || '') === (loc.lot_number || '') && stock.quantity_on_hand < 0) : [];
+    return (
+      <div key={index} className="text-sm">
+        <span className="font-mono bg-slate-800/50 px-1 rounded">{loc.location}</span>
+        <span className={negative ? 'text-red-300 font-semibold ml-2' : 'text-slate-400 ml-2'}>({formatStockQuantity(loc.quantity)}){negative && ' Negative stock'}</span>
+        {loc.lot_number && <span className="text-slate-400 ml-1">Lot: {loc.lot_number}</span>}
+        {negative && canAdjust && matchingItems.length > 0 && <button type="button" className="text-red-300 underline ml-2" onClick={() => openAdjustment(matchingItems)}>Resolve adjustment</button>}
+      </div>
+    );
+  }), [inventory, canAdjust, openAdjustment]);
+
   const getPartTypeLabel = (type?: string) => {
     switch (type) {
       case 'manufactured':
@@ -404,6 +454,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         align: 'right',
         className: 'font-medium',
         accessor: item => item.total_on_hand,
+        render: item => stockQuantity(item.total_on_hand),
       },
       {
         key: 'allocated',
@@ -411,6 +462,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         sortable: true,
         align: 'right',
         accessor: item => item.total_allocated,
+        render: item => formatStockQuantity(item.total_allocated),
       },
       {
         key: 'available',
@@ -419,6 +471,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         align: 'right',
         className: 'text-green-600 font-medium',
         accessor: item => item.available,
+        render: item => stockQuantity(item.available),
       },
       {
         key: 'locations',
@@ -427,20 +480,10 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
           item.locations
             .map(loc => `${loc.location} (${loc.quantity})${loc.lot_number ? ` Lot:${loc.lot_number}` : ''}`)
             .join('; '),
-        render: item => (
-          <>
-            {item.locations.map((loc, idx) => (
-              <div key={idx} className="text-sm">
-                <span className="font-mono bg-slate-800/50 px-1 rounded">{loc.location}</span>
-                <span className="text-slate-400 ml-2">({loc.quantity})</span>
-                {loc.lot_number && <span className="text-slate-400 ml-1">Lot: {loc.lot_number}</span>}
-              </div>
-            ))}
-          </>
-        ),
+        render: renderLocations,
       },
     ],
-    [lowStockPartIds, getPartType]
+    [lowStockPartIds, getPartType, renderLocations]
   );
 
   // ---- Detail tab (by location) columns ----
@@ -488,6 +531,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         align: 'right',
         className: 'font-medium',
         accessor: item => item.quantity_on_hand,
+        render: item => stockQuantity(item.quantity_on_hand),
       },
       {
         key: 'available',
@@ -496,6 +540,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         align: 'right',
         className: 'text-green-600',
         accessor: item => item.quantity_available,
+        render: item => stockQuantity(item.quantity_available),
       },
       {
         key: 'status',
@@ -516,16 +561,16 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
           </span>
         ),
       },
-      // Transfer is the only row action; without the permission the whole column is
-      // dropped so no empty "Actions" header is left behind.
-      ...(canTransfer
+      // Stock-moving actions retain their individual permission gates.
+      ...(canTransfer || canAdjust
         ? [
             {
               key: 'actions',
               header: 'Actions',
               align: 'center' as const,
               render: (item: InventoryItem) => (
-                <button
+                <div className="flex items-center justify-center gap-2">
+                {canTransfer && <button
                   onClick={e => {
                     e.stopPropagation();
                     openTransfer(item);
@@ -534,13 +579,15 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
                   aria-label="Transfer inventory"
                 >
                   <ArrowsRightLeftIcon className="h-5 w-5" aria-hidden="true" />
-                </button>
+                </button>}
+                {canAdjust && item.quantity_on_hand < 0 && <button type="button" className="text-red-300 underline" onClick={() => openAdjustment([item])}>Resolve adjustment</button>}
+                </div>
               ),
             },
           ]
         : []),
     ],
-    [canTransfer]
+    [canTransfer, canAdjust, openAdjustment]
   );
 
   // ---- Mobile cards (below md) ----
@@ -556,13 +603,13 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         fields={[
           {
             label: 'On Hand',
-            value: item.total_on_hand,
+            value: stockQuantity(item.total_on_hand),
             className: 'font-medium',
           },
-          { label: 'Allocated', value: item.total_allocated },
+          { label: 'Allocated', value: formatStockQuantity(item.total_allocated) },
           {
             label: 'Available',
-            value: <span className="text-green-600 font-medium">{item.available}</span>,
+            value: <span className="text-green-600 font-medium">{stockQuantity(item.available)}</span>,
           },
           {
             label: 'Status',
@@ -577,13 +624,7 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
             fullWidth: true,
             value: item.locations.length ? (
               <div className="space-y-0.5">
-                {item.locations.map((loc, idx) => (
-                  <div key={idx} className="text-sm">
-                    <span className="font-mono bg-slate-800/50 px-1 rounded">{loc.location}</span>
-                    <span className="text-slate-400 ml-2">({loc.quantity})</span>
-                    {loc.lot_number && <span className="text-slate-400 ml-1">Lot: {loc.lot_number}</span>}
-                  </div>
-                ))}
+                {renderLocations(item)}
               </div>
             ) : (
               <span className="text-slate-400">—</span>
@@ -611,12 +652,12 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         },
         {
           label: 'Qty',
-          value: item.quantity_on_hand,
+          value: stockQuantity(item.quantity_on_hand),
           className: 'font-medium',
         },
         {
           label: 'Available',
-          value: <span className="text-green-600">{item.quantity_available}</span>,
+          value: <span className="text-green-600">{stockQuantity(item.quantity_available)}</span>,
         },
         {
           label: 'Status',
@@ -636,8 +677,9 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         },
       ]}
       actions={
-        canTransfer ? (
-          <button
+        canTransfer || (canAdjust && item.quantity_on_hand < 0) ? (
+          <>
+          {canTransfer && <button
             onClick={e => {
               e.stopPropagation();
               openTransfer(item);
@@ -647,18 +689,32 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
           >
             <ArrowsRightLeftIcon className="h-4 w-4" />
             Transfer
-          </button>
+          </button>}
+          {canAdjust && item.quantity_on_hand < 0 && <button type="button" className="text-red-300 underline" onClick={() => openAdjustment([item])}>Resolve adjustment</button>}
+          </>
         ) : undefined
       }
     />
   );
 
-  const pageHeader = (
-    <PageHeader
-      title="Inventory"
-      level={embedded ? 2 : 1}
-      description="Engineering parts, materials, and supplies in one place"
-      actions={
+  const inventoryActions = (
+        <>
+        <label className="flex items-center gap-2 text-sm text-slate-300">
+          View
+          <select className="input w-auto" aria-label="Inventory view" value={activeTab} onChange={event => {
+            const next = new URLSearchParams(searchParams);
+            next.set('inventory_tab', event.target.value);
+            if (event.target.value !== 'counts') next.delete('cycle_count');
+            setSearchParams(next);
+          }}>
+            <option value="summary">Summary by Part</option>
+            <option value="details">Detail by Location</option>
+            <option value="movements">Stock Movements</option>
+            <option value="counts">Cycle Counts</option>
+            <option value="observations">Piece observations</option>
+          </select>
+        </label>
+        {
         activeTab !== 'observations' &&
         !loading &&
         !loadError && (
@@ -674,9 +730,13 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
               </Button>
             )}
           </>
-        )
-      }
-    />
+        )}
+        </>
+  );
+  const pageHeader = embedded ? (
+    <div className="flex flex-wrap items-center justify-end gap-2">{inventoryActions}</div>
+  ) : (
+    <PageHeader title="Inventory" description="Engineering parts, materials, and supplies in one place" actions={inventoryActions} />
   );
   const pageContext = (
     <>
@@ -748,14 +808,14 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
           iconBg="bg-fd-blue/15"
           iconColor="text-fd-blue"
           label="Total On Hand"
-          value={summaryTotals.totalOnHand.toFixed(0)}
+          value={summaryTotals.totalOnHand.toLocaleString(undefined, { maximumFractionDigits: 0 })}
         />
         <MiniStat
           icon={ArrowsRightLeftIcon}
           iconBg="bg-fd-green/15"
           iconColor="text-fd-green"
           label="Total Available"
-          value={summaryTotals.totalAvailable.toFixed(0)}
+          value={summaryTotals.totalAvailable.toLocaleString(undefined, { maximumFractionDigits: 0 })}
         />
         <MiniStat
           icon={ExclamationTriangleIcon}
@@ -870,37 +930,6 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
           </div>
         </div>
       )}
-
-      {/* Tabs */}
-      <div className="border-b border-slate-700">
-        <nav className="-mb-px flex gap-6 overflow-x-auto" aria-label="Inventory views">
-          {[
-            { id: 'summary', label: 'Summary by Part' },
-            { id: 'details', label: 'Detail by Location' },
-            { id: 'movements', label: 'Stock Movements' },
-            { id: 'counts', label: 'Cycle Counts' },
-            { id: 'observations', label: 'Piece observations' },
-          ].map(tab => (
-            <button
-              key={tab.id}
-              onClick={() => {
-                const next = new URLSearchParams(searchParams);
-                next.set('inventory_tab', tab.id);
-                if (tab.id !== 'counts') next.delete('cycle_count');
-                setSearchParams(next);
-              }}
-              aria-current={activeTab === tab.id ? 'page' : undefined}
-              className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
-                activeTab === tab.id
-                  ? 'border-werco-primary text-werco-primary'
-                  : 'border-transparent text-slate-400 hover:text-slate-300'
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </nav>
-      </div>
 
       {activeTab === 'summary' && <TableWorkspaceControls workspace={summaryWorkspace} />}
       {activeTab === 'details' && <TableWorkspaceControls workspace={detailWorkspace} />}
@@ -1107,6 +1136,30 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
             <button disabled={actionBusy} type="submit" className="btn-primary">
               Receive
             </button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal open={adjustmentItems.length > 0 && canAdjust} onClose={() => { if (!actionBusy) setAdjustmentItems([]); }} size="md" closeOnBackdrop={false} closeOnEscape={!actionBusy} ariaLabel="Resolve negative inventory">
+        <h3 className="text-lg font-semibold mb-3">Resolve negative inventory</h3>
+        <p className="text-sm text-slate-300 mb-4">Verify physical stock before entering the new on-hand quantity. Saving posts an audited inventory adjustment.</p>
+        <form onSubmit={handleAdjustment} className="space-y-4">
+          {adjustmentItems.length > 1 && <FormField label="Stock record">{field => <select {...field} className="input" value={adjustmentForm.inventory_item_id || ''} onChange={event => setAdjustmentForm({ ...adjustmentForm, inventory_item_id: Number(event.target.value), new_quantity: '' })} required disabled={actionBusy}>
+            <option value="">Select the stock record to adjust</option>
+            {adjustmentItems.map(item => <option key={item.id} value={item.id}>Record #{item.id} · {item.warehouse} / {item.location} · Lot {item.lot_number || '—'} · Serial {item.serial_number || '—'} · On hand {item.quantity_on_hand}</option>)}
+          </select>}</FormField>}
+          {adjustmentItems.filter(item => item.id === adjustmentForm.inventory_item_id).map(item => <div key={item.id} className="bg-slate-800 p-3 rounded text-sm">
+            <p className="font-medium">{item.part?.part_number} · Record #{item.id}</p>
+            <p>{item.warehouse} / {item.location} · Lot: {item.lot_number || '—'}{item.serial_number && ` · Serial: ${item.serial_number}`}</p>
+            <p className="text-red-300">Current on hand: {item.quantity_on_hand} · Negative stock</p>
+          </div>)}
+          <FormField label="Verified on-hand quantity">{field => <input {...field} className="input" type="number" min={0} step="any" required disabled={actionBusy} value={adjustmentForm.new_quantity} onChange={event => setAdjustmentForm({ ...adjustmentForm, new_quantity: event.target.value })} />}</FormField>
+          <FormField label="Adjustment reason">{field => <input {...field} className="input" required disabled={actionBusy} value={adjustmentForm.reason_code} onChange={event => setAdjustmentForm({ ...adjustmentForm, reason_code: event.target.value })} />}</FormField>
+          <FormField label="Notes">{field => <textarea {...field} className="input" disabled={actionBusy} value={adjustmentForm.notes} onChange={event => setAdjustmentForm({ ...adjustmentForm, notes: event.target.value })} />}</FormField>
+          {actionError && <p role="alert" className="text-red-300">{actionError}</p>}
+          <div className="flex justify-end gap-3">
+            <button type="button" className="btn-secondary" disabled={actionBusy} onClick={() => setAdjustmentItems([])}>Cancel</button>
+            <button type="submit" className="btn-primary" disabled={actionBusy || !adjustmentForm.inventory_item_id || !adjustmentForm.new_quantity.trim() || !adjustmentForm.reason_code.trim()}>{actionBusy ? 'Saving…' : 'Save adjustment'}</button>
           </div>
         </form>
       </Modal>

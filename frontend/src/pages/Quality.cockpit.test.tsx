@@ -132,10 +132,12 @@ describe('Quality cockpit MiniStat strip', () => {
     // the row assertions to the desktop table to keep the filter intent intact.
     const desktopTable = () =>
       within(screen.getByTestId('data-table'));
-    // No filter applied yet: both NCR rows are visible.
+    // The first visit is the open-work queue; all statuses remain reachable.
     expect(desktopTable().getByText('NCR-0001')).toBeInTheDocument();
+    expect(desktopTable().queryByText('NCR-0002')).not.toBeInTheDocument();
+    expect(ncrTile).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.change(screen.getByRole('combobox', { name: 'NCR status' }), { target: { value: '' } });
     expect(desktopTable().getByText('NCR-0002')).toBeInTheDocument();
-    // Tile starts inactive (default filter is empty on /quality).
     expect(ncrTile).toHaveAttribute('aria-pressed', 'false');
 
     fireEvent.click(ncrTile);

@@ -461,11 +461,12 @@ export default function Calibration() {
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Calibration Tracking</h1>
         <Button
+          variant={!loading && !loadError && equipment.length === 0 ? 'secondary' : 'primary'}
           onClick={() => {
             resetForm();
             setShowModal(true);
           }}
-          className="flex items-center"
+          className={!loading && !loadError && equipment.length === 0 ? 'btn-outline flex items-center' : 'flex items-center'}
         >
           <PlusIcon className="h-5 w-5 mr-2" />
           Add Equipment
@@ -553,7 +554,7 @@ export default function Calibration() {
         onRetry={loadEquipment}
         defaultSort={{ key: 'next_calibration_date', dir: 'asc' }}
         pageSize={25}
-        csvExport={{ filename: 'calibration-equipment' }}
+        csvExport={!loading && !loadError && equipment.length > 0 ? { filename: 'calibration-equipment' } : undefined}
         mobileCards={renderMobileCard}
         empty={{
           icon: WrenchIcon,

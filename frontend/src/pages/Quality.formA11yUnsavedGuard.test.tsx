@@ -115,6 +115,7 @@ describe('Quality — New NCR unsaved-changes guard', () => {
 
     fireEvent.change(titleInput, { target: { value: 'Surface scratch' } });
     fireEvent.change(screen.getByLabelText(/^Description/), { target: { value: 'Deep scratch on face' } });
+    fireEvent.change(screen.getByLabelText(/^Part$/), { target: { value: '5' } });
     fireEvent.submit(form);
 
     await waitFor(() => expect(mockedApi.createNCR).toHaveBeenCalledTimes(1));
@@ -180,5 +181,42 @@ describe('Quality — CAR and FAI modals share the guard wiring', () => {
       expect(screen.queryByRole('heading', { name: /New First Article Inspection/i })).not.toBeInTheDocument()
     );
     expect(mockedApi.createFAI).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('NCR part identification', () => {
+  it('blocks an unidentified part without a reason and preserves an explicit reason in the existing description', async () => {
+    mockedApi.createNCR.mockResolvedValue({ id: 1 } as any);
+    const { titleInput, form } = await openNCRModal();
+    fireEvent.change(titleInput, { target: { value: 'Unmarked stock damage' } });
+    fireEvent.change(screen.getByLabelText(/^Description/), { target: { value: 'Damaged stock found during count.' } });
+    fireEvent.change(screen.getByLabelText(/^Unknown part reason/), { target: { value: '   ' } });
+    fireEvent.submit(form);
+    expect(mockedApi.createNCR).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent('Select a part or explain why the part is unknown');
+    fireEvent.change(screen.getByLabelText(/^Unknown part reason/), { target: { value: '  Identification label is missing.  ' } });
+    fireEvent.submit(form);
+    await waitFor(() => expect(mockedApi.createNCR).toHaveBeenCalledTimes(1));
+    const payload = mockedApi.createNCR.mock.calls[0][0];
+    expect(payload).toMatchObject({ part_id: null, description: 'Damaged stock found during count.\n\nUnknown part reason: Identification label is missing.' });
+    expect(payload).not.toHaveProperty('unknown_part_reason');
+  });
+
+  it('keeps an identified part description unchanged and retains the draft when creation fails', async () => {
+    mockedApi.createNCR.mockRejectedValue(new Error('offline'));
+    const { titleInput, form } = await openNCRModal();
+    fireEvent.change(titleInput, { target: { value: 'Surface scratch' } });
+    fireEvent.change(screen.getByLabelText(/^Description/), { target: { value: 'Deep scratch on face' } });
+    fireEvent.change(screen.getByLabelText(/^Unknown part reason/), { target: { value: 'Temporary reason before identifying part' } });
+    fireEvent.change(screen.getByLabelText(/^Part$/), { target: { value: '5' } });
+    expect(screen.queryByLabelText(/^Unknown part reason/)).not.toBeInTheDocument();
+    fireEvent.submit(form);
+    await waitFor(() => expect(mockedApi.createNCR).toHaveBeenCalledTimes(1));
+    expect(mockedApi.createNCR.mock.calls[0][0]).toMatchObject({ part_id: 5, description: 'Deep scratch on face' });
+    expect(await screen.findByRole('alert')).toHaveTextContent('Failed to create NCR');
+    expect(titleInput).toHaveValue('Surface scratch');
+    fireEvent.change(screen.getByLabelText(/^Part$/), { target: { value: '0' } });
+    expect(screen.getByLabelText(/^Unknown part reason/)).toHaveValue('Temporary reason before identifying part');
   });
 });

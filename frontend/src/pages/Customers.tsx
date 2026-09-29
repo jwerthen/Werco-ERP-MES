@@ -342,7 +342,7 @@ export default function Customers() {
         csv: c => [c.contact_name, c.email].filter(Boolean).join(' '),
         render: c => (
           <div>
-            <div className="text-sm">{c.contact_name || '-'}</div>
+            <div className="text-sm">{c.contact_name || <span className="text-slate-400">No contact yet</span>}</div>
             {c.email && <div className="text-xs text-slate-400">{c.email}</div>}
           </div>
         ),
@@ -351,8 +351,8 @@ export default function Customers() {
         key: 'location',
         header: 'Location',
         sortable: true,
-        accessor: c => (c.city && c.state ? `${c.city}, ${c.state}` : ''),
-        render: c => (c.city && c.state ? `${c.city}, ${c.state}` : '-'),
+        accessor: c => [c.city, c.state].filter(Boolean).join(', '),
+        render: c => [c.city, c.state].filter(Boolean).join(', ') || <span className="text-slate-400">No location yet</span>,
       },
       {
         key: 'terms',
@@ -403,11 +403,11 @@ export default function Customers() {
       onClick={() => viewCustomerDetails(customer)}
       className={!customer.is_active ? 'opacity-60' : ''}
       fields={[
-        { label: 'Contact', value: customer.contact_name || '-' },
+        { label: 'Contact', value: customer.contact_name || <span className="text-slate-400">No contact yet</span> },
         { label: 'Email', value: customer.email || '-' },
         {
           label: 'Location',
-          value: customer.city && customer.state ? `${customer.city}, ${customer.state}` : '-',
+          value: [customer.city, customer.state].filter(Boolean).join(', ') || <span className="text-slate-400">No location yet</span>,
         },
         { label: 'Terms', value: customer.payment_terms || '-' },
         { label: 'Requirements', value: renderRequirements(customer), fullWidth: true },
@@ -443,9 +443,10 @@ export default function Customers() {
         </Button>
       </div>
 
-      {/* Filters */}
-      <div className="flex flex-col sm:flex-row gap-4">
-        <div className="relative flex-1">
+      {/* Customers Table */}
+      <DataTable
+        toolbarStart={<>
+        <div className="relative min-w-48 flex-1">
           <MagnifyingGlassIcon className="h-5 w-5 absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-500" />
           <input
             type="text"
@@ -456,7 +457,7 @@ export default function Customers() {
             className="input pl-10"
           />
         </div>
-        <label className="flex items-center">
+        <label className="flex items-center whitespace-nowrap px-2">
           <input
             type="checkbox"
             checked={showInactive}
@@ -466,10 +467,7 @@ export default function Customers() {
           />
           <span className="text-sm text-slate-300">Show inactive</span>
         </label>
-      </div>
-
-      {/* Customers Table */}
-      <DataTable
+        </>}
         columns={columns}
         data={filteredCustomers}
         rowKey={customer => customer.id}
@@ -815,7 +813,7 @@ export default function Customers() {
                     <div>
                       <h3 className="text-sm font-medium text-slate-300 mb-2">Contact</h3>
                       <div className="text-sm space-y-1">
-                        <p>{selectedCustomer.contact_name || '-'}</p>
+                        <p>{selectedCustomer.contact_name || <span className="text-slate-400">No contact yet</span>}</p>
                         <p className="text-slate-400">{selectedCustomer.email || '-'}</p>
                         <p className="text-slate-400">{selectedCustomer.phone || '-'}</p>
                       </div>
