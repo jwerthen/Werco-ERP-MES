@@ -24,7 +24,7 @@
  */
 
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 // --- Heavy child components reduced to inert stand-ins. -------------------
@@ -45,6 +45,7 @@ jest.mock('./GlobalSearch', () => ({
 
 // --- Hooks / services with side effects stubbed out. ---------------------
 jest.mock('../hooks/useWebSocket', () => ({ __esModule: true, useWebSocket: () => ({}) }));
+jest.mock('../hooks/useScrollRestoration', () => ({ useScrollRestoration: () => undefined }));
 jest.mock('../hooks/useKeyboardShortcuts', () => ({
   __esModule: true,
   useKeyboardShortcuts: () => undefined,
@@ -189,6 +190,22 @@ describe('Layout sectioned sidebar (admin / full access)', () => {
     const missing = ENGINEERING_GROUP_CHILDREN.filter(label => !hasNavEntry(label));
     expect(missing).toEqual([]);
   });
+
+  it.each(['/routing', '/routing/42'])('opens Engineering and highlights Routing at %s', path => {
+    renderLayout(path);
+    const navigation = within(sidebar());
+    expect(navigation.getByRole('link', { name: 'Routing' })).toHaveAttribute('href', '/routing');
+    expect(navigation.getByRole('link', { name: 'Routing' })).toHaveClass('text-fd-ink');
+    for (const [name, href] of [
+      ['Parts', '/parts'],
+      ['Bill of Materials', '/bom'],
+      ['BOM Unit Mismatches', '/bom/uom-mismatches'],
+    ]) {
+      const link = navigation.getByRole('link', { name });
+      expect(link).toHaveAttribute('href', href);
+      expect(link).not.toHaveClass('text-fd-ink');
+    }
+  });
 });
 
 describe('Layout sectioned sidebar (operator / streamlined RBAC)', () => {
@@ -214,8 +231,9 @@ describe('Layout sectioned sidebar (operator / streamlined RBAC)', () => {
     expect(hasSectionHeader('Admin')).toBe(false);
   });
 
-  it('shows the streamlined operator items and hides the rest', () => {
-    renderLayout();
+  it.each(['/dashboard', '/shop-floor', '/shop-floor/operations'])(
+    'shows the streamlined operator items at %s and hides the full office program list', path => {
+    renderLayout(path);
 
     // Visible to operators.
     expect(hasNavEntry('Dashboard')).toBe(true);
@@ -232,6 +250,31 @@ describe('Layout sectioned sidebar (operator / streamlined RBAC)', () => {
     expect(hasNavEntry('Administration')).toBe(false);
     expect(hasNavEntry('Engineering Changes')).toBe(false);
     expect(hasNavEntry('Parts')).toBe(false);
+    expect(hasNavEntry('Scheduling')).toBe(false);
+    expect(hasNavEntry('Purchasing')).toBe(false);
+    expect(hasSectionHeader('Admin')).toBe(false);
+    if (path.startsWith('/shop-floor')) {
+      expect(within(sidebar()).getByRole('link', { name: 'Operations' })).toHaveAttribute('href', '/shop-floor/operations');
+      expect(within(sidebar()).getByRole('link', { name: 'Time Clock' })).toHaveAttribute('href', '/shop-floor');
+    }
+  });
+
+  it.each(['/shop-floor?kiosk=1', '/shop-floor/operations?kiosk=1'])(
+    'keeps the existing focused kiosk navigation at %s', path => {
+      renderLayout(path);
+      expect(hasNavEntry('Shop Floor')).toBe(true);
+      expect(within(sidebar()).getByRole('link', { name: 'Operations' })).toBeInTheDocument();
+      expect(hasNavEntry('Administration')).toBe(false);
+      expect(hasNavEntry('Scheduling')).toBe(false);
+      expect(hasNavEntry('Purchasing')).toBe(false);
+      expect(screen.queryByRole('button', { name: 'Toggle Hank' })).not.toBeInTheDocument();
+    }
+  );
+
+  it('keeps operator Quality and Maintenance destinations available', () => {
+    renderLayout('/quality');
+    expect(within(sidebar()).getByRole('link', { name: 'NCR / CAR / FAI' })).toHaveAttribute('href', '/quality');
+    expect(within(sidebar()).getByRole('link', { name: 'Maintenance' })).toHaveAttribute('href', '/maintenance');
   });
 
   it('renders no empty section header (every header has at least one nav link below it)', () => {
@@ -245,5 +288,19 @@ describe('Layout sectioned sidebar (operator / streamlined RBAC)', () => {
       const links = section.querySelectorAll('a, button');
       expect(links.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('Layout office navigation remains available by role', () => {
+  it.each([
+    ['admin', '/work-orders'], ['manager', '/work-orders'],
+    ['admin', '/scheduling'], ['manager', '/scheduling'],
+  ])('retains full permitted office navigation for %s at %s', (role, path) => {
+    mockUser.value = { id: 3, role, is_superuser: false, first_name: 'Office', last_name: 'User', email: 'office@x.y' };
+    renderLayout(path);
+    for (const label of ['Dashboard', 'Action Inbox', 'Scheduling', 'Work Orders', 'Engineering', 'Purchasing', 'Reports']) {
+      expect(hasNavEntry(label)).toBe(true);
+    }
+    expect(screen.getByRole('button', { name: 'Toggle Hank' })).toBeInTheDocument();
   });
 });

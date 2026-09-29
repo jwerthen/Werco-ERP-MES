@@ -8,7 +8,7 @@
  * the initial load.
  */
 import React from 'react';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import Purchasing from './Purchasing';
@@ -127,4 +127,19 @@ test('tab badges carry the orders and vendors counts', async () => {
 
   const vendorsTab = screen.getByRole('tab', { name: /^Vendors/i });
   expect(within(vendorsTab).getByText('2')).toBeInTheDocument();
+});
+
+test('starts with open purchase orders and the Open POs tile returns from all statuses to that queue', async () => {
+  mockedApi.getPurchaseOrders.mockResolvedValue([...purchaseOrders, { ...purchaseOrders[0], id: 12, po_number: 'PO-RECEIVED', status: 'received' }] as any);
+  renderPurchasing();
+  await screen.findByRole('heading', { name: 'Purchasing' });
+  const status = screen.getByRole('combobox', { name: 'Purchase order status' });
+  expect(status).toHaveValue('open');
+  expect(screen.queryByText('PO-RECEIVED')).not.toBeInTheDocument();
+  fireEvent.change(status, { target: { value: '' } });
+  expect(screen.getAllByText('PO-RECEIVED')).toHaveLength(2);
+  fireEvent.click(screen.getByRole('button', { name: /Open POs/ }));
+  expect(status).toHaveValue('open');
+  expect(screen.queryByText('PO-RECEIVED')).not.toBeInTheDocument();
+  expect(mockedApi.getPurchaseOrders).not.toHaveBeenCalledWith({ status: 'open' });
 });

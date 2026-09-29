@@ -257,6 +257,15 @@ export default function BOMPage() {
     });
   }, [selectedId]);
 
+  useEffect(() => {
+    if (selectedId || boms.length === 0) return;
+    setSearchParams(previous => {
+      const next = new URLSearchParams(previous);
+      if (!next.has('id')) next.set('id', String(boms[0].id));
+      return next;
+    }, { replace: true });
+  }, [boms, selectedId, setSearchParams]);
+
   const loadData = async () => {
     setLoading(true);
     setLoadError(false);
@@ -763,7 +772,7 @@ export default function BOMPage() {
                   </span>
                 </div>
                 <div className="text-xs text-slate-500 mt-1">
-                  Rev {bom.revision} | {bom.items.length} items
+                  Rev {bom.revision} | {bom.items.length} {bom.items.length === 1 ? 'item' : 'items'}
                 </div>
               </button>
             ))}

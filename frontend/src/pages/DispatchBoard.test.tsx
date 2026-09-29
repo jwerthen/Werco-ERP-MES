@@ -1337,3 +1337,38 @@ describe('Dispatch freshness', () => {
     await waitFor(() => expect(mockApi.getDispatchBoard).toHaveBeenCalledTimes(2));
   });
 });
+
+
+test('explains unranked queued work and points to manual ordering without fabricating ranks', async () => {
+  jest.clearAllMocks();
+  const unranked = board();
+  unranked.work_centers.forEach(center => center.queue.forEach(row => { row.run_order = null; }));
+  mockApi.getDispatchBoard.mockResolvedValue(unranked);
+  window.HTMLElement.prototype.scrollIntoView = jest.fn();
+  renderBoard();
+  expect(await screen.findByRole('heading', { name: 'No advisory run order set' })).toBeInTheDocument();
+  expect(screen.getByText(/Set the run order manually/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Review queued jobs' }));
+  expect(screen.getByTestId('dispatch-card-11')).toHaveFocus();
+  expect(screen.getByTestId('dispatch-rank-11')).toHaveTextContent('–');
+  expect(mockApi.setWorkCenterRunOrder).not.toHaveBeenCalled();
+  expect(screen.getByRole('button', { name: /Move WO-20260720-001.*down/ })).toBeEnabled();
+});
+
+test('TV glance preserves identity, ranks and urgency while removing edit controls', async () => {
+  jest.clearAllMocks();
+  mockApi.getDispatchBoard.mockResolvedValue(board());
+  renderBoard();
+  await findColumn('Ermaksan Fiber Laser');
+  fireEvent.click(screen.getByRole('button', { name: 'TV glance' }));
+  const card = screen.getByTestId('dispatch-card-11');
+  expect(screen.getByTestId('dispatch-rank-11')).toHaveTextContent('1');
+  expect(within(card).getByRole('link', { name: `Open work order ${LASER_ROWS[0].work_order_number}` })).toBeInTheDocument();
+  expect(within(card).getByText(/Past due/)).toBeInTheDocument();
+  expect(within(card).queryByRole('button', { name: /Move/ })).not.toBeInTheDocument();
+  expect(within(card).queryByRole('combobox')).not.toBeInTheDocument();
+  expect(card).not.toHaveAttribute('draggable', 'true');
+  expect(mockApi.setWorkCenterRunOrder).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Planner view' }));
+  expect(screen.getByRole('button', { name: /Move WO-20260720-001.*down/ })).toBeEnabled();
+});

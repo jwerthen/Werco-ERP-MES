@@ -71,6 +71,13 @@ interface Routing {
   created_at: string;
 }
 
+// List responses carry operation_count; only detail responses include operations.
+type RoutingSummary = Omit<Routing, 'operations' | 'total_labor_cost'> & {
+  operation_count?: number;
+  operations?: RoutingOperation[];
+};
+const routingOperationCount = (routing: RoutingSummary): number => routing.operation_count ?? routing.operations?.length ?? 0;
+
 interface Part {
   id: number;
   part_number: string;
@@ -150,7 +157,7 @@ export default function RoutingPage() {
   const [savingRouting, setSavingRouting] = useState(false);
   const routingSaveRef = useRef(false);
   const routingRequestRef = useRef(0);
-  const [routings, setRoutings] = useState<Routing[]>([]);
+  const [routings, setRoutings] = useState<RoutingSummary[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
   const [workCenters, setWorkCenters] = useState<WorkCenter[]>([]);
   const [loading, setLoading] = useState(true);
@@ -161,7 +168,7 @@ export default function RoutingPage() {
   // Confirm targets + in-flight guards for the destructive actions.
   const [deleteOperationTarget, setDeleteOperationTarget] = useState<number | null>(null);
   const [deleteOperationPending, setDeleteOperationPending] = useState(false);
-  const [deleteRoutingTarget, setDeleteRoutingTarget] = useState<Routing | null>(null);
+  const [deleteRoutingTarget, setDeleteRoutingTarget] = useState<RoutingSummary | null>(null);
   const [deleteRoutingPending, setDeleteRoutingPending] = useState(false);
   const [showAddOperationModal, setShowAddOperationModal] = useState(false);
   const [editingOperation, setEditingOperation] = useState<RoutingOperation | null>(null);
@@ -311,6 +318,17 @@ export default function RoutingPage() {
     loadRouting(routingId);
   }, [routingIdParam]);
 
+  useEffect(() => {
+    if (routingIdParam) return;
+    const firstRouting = routings.find(routing => routing.status === 'released' && routingOperationCount(routing) === 0) ?? routings[0];
+    if (!firstRouting) return;
+    setSearchParams(previous => {
+      const next = new URLSearchParams(previous);
+      if (!next.has('id')) next.set('id', String(firstRouting.id));
+      return next;
+    }, { replace: true });
+  }, [routings, routingIdParam, setSearchParams]);
+
   const handleCreateRouting = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newRouting.part_id) {
@@ -412,6 +430,10 @@ export default function RoutingPage() {
 
   const handleReleaseRouting = async () => {
     if (!selectedRouting) return;
+    if (!selectedRouting.operations?.length) {
+      showToast('error', 'Add at least one operation before releasing this routing.');
+      return;
+    }
 
     try {
       await api.releaseRouting(selectedRouting.id);
@@ -422,7 +444,7 @@ export default function RoutingPage() {
     }
   };
 
-  const handleDeleteRouting = (routing: Routing) => {
+  const handleDeleteRouting = (routing: RoutingSummary) => {
     setDeleteRoutingTarget(routing);
   };
 
@@ -803,11 +825,11 @@ export default function RoutingPage() {
                   </div>
                   <div className="flex items-center gap-2">
                     <span className={`text-xs px-2 py-1 rounded ${
-                      routing.status === 'released' ? 'bg-green-500/20 text-green-300' :
+                      routing.status === 'released' ? (routingOperationCount(routing) > 0 ? 'bg-green-500/20 text-green-300' : 'bg-red-500/20 text-red-200') :
                       routing.status === 'draft' ? 'bg-yellow-500/20 text-yellow-300' :
                       'bg-slate-800 text-slate-100'
                     }`}>
-                      {routing.status}
+                      {routing.status === 'released' && routingOperationCount(routing) === 0 ? 'Released · 0 operations' : routing.status}
                     </span>
                     <button
                       onClick={(e) => { e.stopPropagation(); handleDeleteRouting(routing); }}
@@ -819,7 +841,7 @@ export default function RoutingPage() {
                   </div>
                 </div>
                 <div className="text-xs text-slate-500 mt-1">
-                  Rev {routing.revision} | {routing.operations?.length || 0} operations
+                  Rev {routing.revision} | {routingOperationCount(routing)} operations
                 </div>
               </div>
             ))}
@@ -858,13 +880,19 @@ export default function RoutingPage() {
                         <PlusIcon className="h-4 w-4 mr-1" />
                         Add Operation
                       </button>
-                      <button onClick={handleReleaseRouting} className="btn-success">
+                      <button onClick={handleReleaseRouting} className="btn-success" disabled={!selectedRouting.operations?.length} title={!selectedRouting.operations?.length ? 'Add an operation before release' : 'Release routing'}>
                         Release
                       </button>
                     </>
                   )}
                 </div>
               </div>
+
+              {!selectedRouting.operations?.length && (
+                <p role="alert" className="mb-4 rounded border border-red-400/60 bg-red-500/10 p-3 text-sm text-red-200">
+                  {selectedRouting.status === 'released' ? 'Released with no operations. This routing is not ready for shop-floor use; create a new revision and add the required operations.' : 'Add at least one operation before release.'}
+                </p>
+              )}
 
               {/* Released routings: hairline policy note. Structural edits are
                   blocked; only time standards can be adjusted as actuals come in. */}

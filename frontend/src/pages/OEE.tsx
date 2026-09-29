@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import api from '../services/api';
 import { Modal } from '../components/ui/Modal';
 import {
@@ -325,6 +326,22 @@ export default function OEE() {
     }
   };
 
+  const openAddRecord = () => {
+    setAddForm({
+      work_center_id: 0,
+      record_date: getCentralTodayISODate(),
+      shift: '',
+      planned_production_time: 480,
+      actual_run_time: 0,
+      ideal_cycle_time: 0,
+      total_pieces: 0,
+      good_pieces: 0,
+      rejected_pieces: 0,
+      notes: '',
+    });
+    setShowAddModal(true);
+  };
+
   const selectedWcData = selectedWorkCenter
     ? dashboard?.work_centers?.find(wc => wc.work_center_id === parseInt(selectedWorkCenter))
     : null;
@@ -361,6 +378,7 @@ export default function OEE() {
   // The API returns only plant_oee_pct (no plant A/P/Q). Derive all four plant metrics
   // the same way the backend derives OEE — average across the work centers that actually
   // have data — so a plant with no records yet shows `--` instead of a fabricated 0%.
+  const noSamples = wcList.every(wc => wc.record_date == null && wc.current_oee_pct == null);
   const plantOEE = meanOrNull(wcList.map(wc => wc.current_oee_pct));
   const plantA = meanOrNull(wcList.map(wc => wc.availability_pct));
   const plantP = meanOrNull(wcList.map(wc => wc.performance_pct));
@@ -392,27 +410,12 @@ export default function OEE() {
           <button onClick={() => loadData()} className="btn btn-ghost btn-sm" title="Refresh">
             <ArrowPathIcon className="h-5 w-5" />
           </button>
-          <button
-            onClick={() => {
-              setAddForm({
-                work_center_id: 0,
-                record_date: getCentralTodayISODate(),
-                shift: '',
-                planned_production_time: 480,
-                actual_run_time: 0,
-                ideal_cycle_time: 0,
-                total_pieces: 0,
-                good_pieces: 0,
-                rejected_pieces: 0,
-                notes: '',
-              });
-              setShowAddModal(true);
-            }}
-            className="btn btn-primary btn-sm"
-          >
-            <PlusIcon className="h-5 w-5 mr-1" />
-            Add Record
-          </button>
+          {!noSamples && (
+            <button onClick={openAddRecord} className="btn btn-primary btn-sm">
+              <PlusIcon className="h-5 w-5 mr-1" />
+              Add Record
+            </button>
+          )}
         </div>
       </div>
 
@@ -478,6 +481,35 @@ export default function OEE() {
         </div>
       </div>
 
+      {noSamples && (
+        <section aria-labelledby="oee-empty-title" className="card card-compact !p-4 border-fd-blue/40 space-y-2">
+          <h2 id="oee-empty-title" className="text-base font-semibold text-fd-ink">
+            No OEE samples in this date range
+          </h2>
+          <p className="text-sm text-slate-300">
+            OEE needs recorded production time, counts, and downtime. Active or queued jobs alone do not provide an OEE
+            sample. Automatic calculation runs nightly for the previous day; work centers without recorded activity are
+            skipped.
+          </p>
+          <p className="text-sm text-slate-300">
+            Check the selected dates and the work center links on completed time-clock and downtime entries. If those
+            entries exist but samples remain missing, ask an administrator to check the nightly OEE job.
+          </p>
+          <div className="flex flex-wrap gap-2 pt-1">
+            <Link className="btn btn-primary btn-sm" to="/shop-floor">
+              Review time clock
+            </Link>
+            <Link className="btn btn-outline btn-sm" to="/downtime">
+              Review downtime
+            </Link>
+            <button type="button" className="btn btn-ghost btn-sm text-slate-300" onClick={openAddRecord}>
+              <PlusIcon className="h-4 w-4 mr-1" />
+              Add manual record
+            </button>
+          </div>
+        </section>
+      )}
+
       {/* Plant-wide OEE — single MiniStat strip (de-duped A/P/Q) */}
       <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-4 gap-2">
         <MiniStat
@@ -487,7 +519,7 @@ export default function OEE() {
           label="Plant-wide OEE"
           value={fmtPct(plantOEE)}
           valueColor={oeeColor(plantOEE)}
-          subtitle="Target: 85%"
+          subtitle={<span className="text-slate-300">Target: 85%</span>}
         />
         <MiniStat
           icon={ClockIcon}
@@ -519,7 +551,7 @@ export default function OEE() {
       <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-12 gap-4 items-start">
         <CockpitPanel
           title="Work Center OEE"
-          subtitle="Tap a work center to filter and inspect its detail"
+          subtitle="Select a work center to filter and inspect its detail"
           className={selectedWcData ? 'xl:col-span-7' : 'xl:col-span-12'}
           footer={`${(dashboard?.work_centers || []).length} work centers`}
         >
@@ -559,7 +591,7 @@ export default function OEE() {
                 <EmptyState
                   icon={ChartBarIcon}
                   title="No OEE data"
-                  description="No OEE data available for the selected period. Add a record or adjust the filters."
+                  description="No OEE samples are available for the selected dates. Check the date range and work center links on time-clock and downtime entries."
                 />
               </div>
             )}
@@ -606,7 +638,7 @@ export default function OEE() {
                     </text>
                   </svg>
                   <div className="text-sm font-medium text-fd-body mt-1">{metric.label}</div>
-                  <div className="text-[10px] text-fd-mute">Target: {metric.target}%</div>
+                  <div className="text-[10px] text-slate-300">Target: {metric.target}%</div>
                   <div
                     className={`text-[10px] mt-1 font-medium ${
                       metric.value == null
@@ -727,7 +759,7 @@ export default function OEE() {
                       icon={ClockIcon}
                       title="No OEE records"
                       description="No OEE records found for the selected period."
-                      action={{ label: 'Add Record', onClick: () => setShowAddModal(true) }}
+                      action={noSamples ? undefined : { label: 'Add Record', onClick: openAddRecord }}
                     />
                   </td>
                 </tr>

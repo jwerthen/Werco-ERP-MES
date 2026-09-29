@@ -112,3 +112,13 @@ describe('BOM Create double-submit guard', () => {
     await waitFor(() => expect(mockedApi.getBOM).toHaveBeenCalledWith(99));
   });
 });
+
+it('opens the first BOM on a fresh visit without a selection click', async () => {
+  const bom = { id: 19, part_id: 7, revision: 'A', bom_type: 'standard', description: 'First assembly', items: [], part: ASSEMBLY_PART };
+  mockedApi.getBOMs.mockResolvedValue([bom]);
+  mockedApi.getParts.mockResolvedValue([ASSEMBLY_PART]);
+  mockedApi.getBOM.mockResolvedValue(bom);
+  renderBOM();
+  await waitFor(() => expect(mockedApi.getBOM).toHaveBeenCalledWith(19));
+  expect(await screen.findByRole('button', { name: 'Single Level' })).toBeInTheDocument();
+});

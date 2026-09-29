@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import Documents from './Documents';
 import api from '../services/api';
@@ -49,7 +49,7 @@ it.each<UserRole>(['admin', 'manager', 'platform_admin', 'quality', 'supervisor'
       </MemoryRouter>
     );
     expect((await screen.findAllByText('Controlled drawing')).length).toBeGreaterThan(0);
-    expect(screen.getByRole('button', { name: 'Preview / History' })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Preview / History' })).toHaveLength(2);
     expect(screen.getByRole('button', { name: 'Download document' })).toBeInTheDocument();
     expect(!!screen.queryByRole('button', { name: 'Upload Document' })).toBe(
       ['admin', 'manager', 'platform_admin', 'quality'].includes(role)
@@ -71,4 +71,37 @@ it('a viewer empty state does not offer document publishing', async () => {
   );
   expect((await screen.findAllByText('No documents')).length).toBeGreaterThan(0);
   expect(screen.queryByRole('button', { name: 'Upload Document' })).not.toBeInTheDocument();
+});
+
+it('requires an explicit valid part before uploading and sends that existing association', async () => {
+  mockRole = 'quality';
+  mockedApi.getParts.mockResolvedValue([{ id: 7, part_number: 'PN-700', name: 'Bracket' }] as any);
+  mockedApi.uploadDocument.mockResolvedValue({});
+  render(<MemoryRouter><Documents /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole('button', { name: 'Upload Document' }));
+  const dialog = screen.getByRole('dialog');
+  fireEvent.change(within(dialog).getByLabelText(/File/), { target: { files: [new File(['drawing'], 'PN-700-drawing.pdf', { type: 'application/pdf' })] } });
+  fireEvent.change(within(dialog).getByRole('textbox', { name: /Title/ }), { target: { value: 'Bracket drawing' } });
+  fireEvent.submit(dialog.querySelector('form')!);
+  expect(mockedApi.uploadDocument).not.toHaveBeenCalled();
+  expect(within(dialog).getByRole('alert')).toHaveTextContent('Select the associated part');
+  const associatedPart = within(dialog).getByRole('combobox', { name: /Associated Part/ });
+  expect(associatedPart).toBeRequired();
+  expect(associatedPart).toHaveValue('');
+  fireEvent.change(associatedPart, { target: { value: '7' } });
+  fireEvent.submit(dialog.querySelector('form')!);
+  await waitFor(() => expect(mockedApi.uploadDocument).toHaveBeenCalledTimes(1));
+  expect(mockedApi.uploadDocument.mock.calls[0][0].get('part_id')).toBe('7');
+});
+
+it('finds documents by their linked part number and exposes the full long title', async () => {
+  const title = 'Controlled manufacturing drawing with detailed revision notes for the fixture mounting assembly and inspection requirements';
+  mockedApi.getParts.mockResolvedValue([{ id: 7, part_number: 'PN-700', name: 'Bracket' }] as any);
+  mockedApi.getDocuments.mockResolvedValue([{ id: 7, document_number: 'DOC-007', revision: 'A', title, document_type: 'drawing', part_id: 7, created_at: '2026-09-13' }] as any);
+  render(<MemoryRouter><Documents /></MemoryRouter>);
+  await screen.findAllByText('PN-700');
+  const search = screen.getByRole('textbox', { name: /Search documents/i });
+  fireEvent.change(search, { target: { value: 'PN-700' } });
+  await waitFor(() => expect(screen.getByTitle(title)).toBeInTheDocument());
+  expect(within(screen.getByRole('table')).getByText('PN-700')).toBeInTheDocument();
 });

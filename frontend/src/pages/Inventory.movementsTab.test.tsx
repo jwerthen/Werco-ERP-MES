@@ -93,11 +93,11 @@ beforeEach(() => {
 describe('Inventory — Stock Movements tab', () => {
   it('loads the ledger when the tab is selected', async () => {
     renderPage();
-    await screen.findByText('Stock Movements');
+    await screen.findByLabelText('Filter by part number or name');
 
     expect(mockedApi.getInventoryTransactions).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByText('Stock Movements'));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Inventory view' }), { target: { value: 'movements' } });
 
     await waitFor(() => expect(mockedApi.getInventoryTransactions).toHaveBeenCalledTimes(1));
     expect(mockedApi.getInventoryTransactions.mock.calls[0][0]).toMatchObject({ offset: 0 });
@@ -105,13 +105,13 @@ describe('Inventory — Stock Movements tab', () => {
 
   it('hides the snapshot quick-filter bar on the movements tab', async () => {
     renderPage();
-    await screen.findByText('Stock Movements');
+    await screen.findByLabelText('Filter by part number or name');
 
     // Present on the snapshot tabs...
     expect(screen.getByLabelText('Filter by part number or name')).toBeInTheDocument();
     expect(screen.getByText('All Inventory')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText('Stock Movements'));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Inventory view' }), { target: { value: 'movements' } });
 
     // ...and gone on the ledger tab, where it would filter nothing on screen.
     await waitFor(() =>
@@ -124,8 +124,8 @@ describe('Inventory — Stock Movements tab', () => {
 
   it('passes the loaded parts to the ledger part filter', async () => {
     renderPage();
-    await screen.findByText('Stock Movements');
-    fireEvent.click(screen.getByText('Stock Movements'));
+    await screen.findByLabelText('Filter by part number or name');
+    fireEvent.change(screen.getByRole('combobox', { name: 'Inventory view' }), { target: { value: 'movements' } });
 
     // The part filter only renders when the page actually handed a parts list
     // down — a regression that dropped the prop would silently lose the filter.

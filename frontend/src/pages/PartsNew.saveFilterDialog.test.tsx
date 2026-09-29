@@ -72,6 +72,16 @@ beforeEach(() => {
   mockedApi.getCustomerNames.mockResolvedValue([]);
 });
 
+it('shows the hidden nested-component count beside the catalog count in the header', async () => {
+  mockedApi.getParts.mockResolvedValue([{ id: 1, part_number: 'ASM-1', name: 'Assembly', part_type: 'assembly', status: 'active' }] as Part[]);
+  mockedApi.getBOMs.mockResolvedValue([{ part_id: 1, items: [{ component_part_id: 2 }, { component_part_id: 3 }] }] as any);
+  renderParts();
+  const heading = await screen.findByRole('heading', { name: 'Parts', level: 1 });
+  expect(heading.parentElement).toHaveTextContent('1 listed part · 2 nested components hidden');
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Show BOM components as top-level parts' }));
+  await waitFor(() => expect(heading.parentElement).not.toHaveTextContent('nested components hidden'));
+});
+
 describe('PartsNew save-filter InputDialog', () => {
   it('opens the naming dialog without persisting anything', async () => {
     await openSaveFilterDialog();

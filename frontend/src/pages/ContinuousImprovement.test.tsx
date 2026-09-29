@@ -305,3 +305,18 @@ it('does not display a previous company detail response after switching company 
   await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   expect(screen.queryByText(suggestion.title)).not.toBeInTheDocument();
 });
+
+it('hides advanced filters on first-run while retaining a way to clear an empty filtered result', async () => {
+  const emptyCounts = { new: 0, under_review: 0, approved: 0, in_progress: 0, implemented: 0, on_hold: 0, declined: 0 };
+  mocked.list.mockResolvedValue({ items: [], total: 0, status_counts: emptyCounts });
+  render(<ContinuousImprovement />);
+  await screen.findByText('Start with one improvement');
+  expect(screen.queryByLabelText('Filter by category')).not.toBeInTheDocument();
+  expect(screen.getByLabelText('Search suggestions')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: /Under review/ }));
+  expect(await screen.findByLabelText('Filter by status')).toHaveValue('under_review');
+  await screen.findByText('No matching suggestions');
+  fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+  await screen.findByText('Start with one improvement');
+  expect(screen.queryByLabelText('Filter by category')).not.toBeInTheDocument();
+});

@@ -114,9 +114,9 @@ const draftRouting = {
   operations: [{ ...releasedOperation, id: 200, routing_id: 2 }],
 };
 
-function renderPage() {
+function renderPage(initialPath = '/routing') {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[initialPath]}>
       <ToastProvider>
         <RoutingPage />
       </ToastProvider>
@@ -127,9 +127,7 @@ function renderPage() {
 /** Render, then click a routing in the list to load it as the selected routing. */
 async function selectRouting(routing: typeof releasedRouting) {
   mockedApi.getRouting.mockResolvedValue(routing);
-  renderPage();
-  const listEntry = await screen.findByText(routing.part!.part_number);
-  fireEvent.click(listEntry);
+  renderPage(`/routing?id=${routing.id}`);
   // The detail header repeats the part number — wait for the operation row.
   await screen.findByText(routing.operations[0].name);
 }
@@ -149,6 +147,37 @@ describe('Routing — released time-standard editing', () => {
 
   afterEach(() => {
     jest.restoreAllMocks();
+  });
+
+  it('reads operation_count from list responses without flagging a healthy released routing', async () => {
+    mockedApi.getRoutings.mockResolvedValue([{ ...releasedRouting, operations: undefined, operation_count: 3 }]);
+    mockedApi.getRouting.mockResolvedValue(releasedRouting);
+    renderPage();
+    await screen.findByText('Rev A | 3 operations');
+    expect(screen.queryByText('Released · 0 operations')).not.toBeInTheDocument();
+    await waitFor(() => expect(mockedApi.getRouting).toHaveBeenCalledWith(1));
+  });
+
+  it('blocks release of an empty draft and leaves the detail open', async () => {
+    const empty = { ...draftRouting, operations: [] };
+    mockedApi.getRouting.mockResolvedValue(empty);
+    renderPage();
+    fireEvent.click((await screen.findAllByText('PN-DRAFT'))[0]);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Add at least one operation');
+    const release = screen.getByRole('button', { name: 'Release' });
+    expect(release).toBeDisabled();
+    fireEvent.click(release);
+    expect(mockedApi.releaseRouting).not.toHaveBeenCalled();
+  });
+
+  it('selects a released zero-operation routing and displays its danger warning', async () => {
+    const empty = { ...releasedRouting, operations: [] };
+    mockedApi.getRoutings.mockResolvedValue([{ ...empty, operations: undefined, operation_count: 0 }]);
+    mockedApi.getRouting.mockResolvedValue(empty);
+    renderPage();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Released with no operations');
+    expect(screen.getByText('Released · 0 operations')).toBeInTheDocument();
+    expect(mockedApi.getRouting).toHaveBeenCalledWith(1);
   });
 
   it('shows the Edit times action on a released routing for an Admin', async () => {

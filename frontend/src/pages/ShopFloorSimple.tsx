@@ -40,7 +40,7 @@ import {
   scrapSelectionPayload,
 } from '../components/quality/ScrapReasonFields';
 import { useScrapReasonCodes } from '../hooks/useScrapReasonCodes';
-import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId } from '../utils/kiosk';
+import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId, isKioskMode } from '../utils/kiosk';
 import { formatOperationLabel } from '../utils/operationLabel';
 import { ScanResolveResult } from '../types/scan';
 import { useAuth } from '../context/AuthContext';
@@ -205,13 +205,20 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
   const [workCenterId, _setWorkCenterId] = useState<number | ''>(() => workspace.workCenterId || '');
   const workCenterIdRef = useRef<number | ''>(workspace.workCenterId || '');
   const hadSavedWorkspaceRef = useRef(workspace.savedAt !== null);
+  const hasWorkCenterPreferenceRef = useRef(workspace.savedAt !== null);
+  const defaultWorkCenterResolvedRef = useRef(false);
   const appliedWorkCenterRouteRef = useRef<string | null>(null);
-  const setWorkCenterId = useCallback((id: number | '') => {
+  const setWorkCenterId = useCallback((id: number | '', automatic = false) => {
     _setWorkCenterId(id);
     workCenterIdRef.current = id;
-    updateWorkspace({ workCenterId: id || null });
-    if (id) {
-      localStorage.setItem(WORK_CENTER_STORAGE_KEY, String(id));
+    // Live defaults are recalculated on return; only deliberate choices become
+    // remembered preferences that can keep an idle station selected.
+    if (!automatic) {
+      hasWorkCenterPreferenceRef.current = true;
+      updateWorkspace({ workCenterId: id || null });
+      if (id) {
+        localStorage.setItem(WORK_CENTER_STORAGE_KEY, String(id));
+      }
     }
   }, [updateWorkspace]);
   const [statusFilter, setStatusFilter] = useState<string>('');
@@ -275,8 +282,9 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       dept: getKioskDept(location.search),
       workCenterId: getKioskWorkCenterId(location.search),
       workCenterCode: getKioskWorkCenterCode(location.search),
+      fixedStation: isKioskMode(location.pathname, location.search),
     };
-  }, [location.search]);
+  }, [location.pathname, location.search]);
 
   // Debounce search
   useEffect(() => {
@@ -410,6 +418,7 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       });
       setDashboardCounts(nextCounts);
       lastLoadFailedRef.current.dashboardCounts = false;
+      return nextCounts;
     } catch (err) {
       console.error('Failed to load dashboard counts:', err);
       notifyLoadFailure('dashboardCounts', 'Failed to refresh work center counts');
@@ -463,10 +472,11 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       }
       appliedWorkCenterRouteRef.current = routeKey;
       if (nextId !== workCenterIdRef.current) {
-        setWorkCenterId(nextId);
+        setWorkCenterId(nextId, !hasRouteSelection && !hadSavedWorkspaceRef.current);
         setActionableOnly(nextId !== '');
       }
       lastLoadFailedRef.current.workCenters = false;
+      return centers;
     } catch (err) {
       console.error('Failed to load work centers:', err);
       notifyLoadFailure('workCenters', 'Failed to load work centers');
@@ -479,11 +489,31 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
     const init = async () => {
       setLoading(true);
       try {
-        await Promise.all([
+        const [centers, counts, currentJobs] = await Promise.all([
           loadWorkCenters(),
           loadDashboardCounts(),
           loadActiveJobs(),
         ]);
+        if (!cancelled && centers && counts && !defaultWorkCenterResolvedRef.current) {
+          defaultWorkCenterResolvedRef.current = true;
+          const explicitStation = kioskParams.fixedStation || kioskParams.workCenterId || kioskParams.workCenterCode || kioskParams.dept;
+          if (!explicitStation && !hasWorkCenterPreferenceRef.current) {
+            const activeCenterIds = new Set((currentJobs || []).map((job: ActiveJob) => job.work_center_id));
+            const hasWork = (id: number) => counts[id]?.queued > 0 || counts[id]?.active > 0 || activeCenterIds.has(id);
+            const currentId = workCenterIdRef.current;
+            if (!currentId || !hasWork(currentId)) {
+              // Automatic defaults use live work: most queued, then station code
+              // alphabetically. Never move a chosen station during refresh.
+              const preferred = centers.filter(center => hasWork(center.id)).sort((a, b) =>
+                (counts[b.id]?.queued || 0) - (counts[a.id]?.queued || 0) || a.code.localeCompare(b.code)
+              )[0];
+              if (preferred) {
+                setWorkCenterId(preferred.id, true);
+                setActionableOnly(true);
+              }
+            }
+          }
+        }
       } finally {
         if (!cancelled) {
           setLoading(false);
@@ -496,7 +526,7 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
     return () => {
       cancelled = true;
     };
-  }, [loadActiveJobs, loadDashboardCounts, loadWorkCenters]);
+  }, [loadActiveJobs, loadDashboardCounts, loadWorkCenters, kioskParams.fixedStation, kioskParams.dept, kioskParams.workCenterCode, kioskParams.workCenterId, setWorkCenterId]);
 
   useEffect(() => {
     if (!loading) {
@@ -1672,6 +1702,7 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
             <select
               value={workCenterId}
               onChange={(e) => setWorkCenterId(e.target.value ? Number(e.target.value) : '')}
+              aria-label="Work center"
               className="input w-48"
             >
               <option value="">All Work Centers</option>
@@ -1680,17 +1711,7 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
               ))}
             </select>
             
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="input w-40"
-            >
-              <option value="">All Status</option>
-              <option value="pending">Pending</option>
-              <option value="ready">Ready</option>
-              <option value="in_progress">In Progress</option>
-              <option value="on_hold">On Hold</option>
-            </select>
+
           </div>
           
           <div className="text-sm text-slate-400">
@@ -1722,7 +1743,7 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Station</p>
-              <p className="mt-1 truncate text-lg font-bold text-white">
+              <p className="mt-1 critical-text text-lg font-bold text-white">
                 {selectedWorkCenter?.name || 'All Work Centers'}
               </p>
               <p className="mt-1 text-xs text-slate-400">
@@ -1753,13 +1774,7 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
             >
               {showMobileCenters ? 'Hide station status' : 'Show station status'}
             </button>
-            <button
-              type="button"
-              onClick={() => focusOperations('')}
-              className="hidden md:inline text-sm font-semibold text-fd-link hover:text-sky-200"
-            >
-              View All
-            </button>
+
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">

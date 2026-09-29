@@ -2,18 +2,20 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { ArrowRight, Calculator, CheckCircle2, Download, FilePlus2, FolderOpen, Layers3, RefreshCw, Save, ShieldCheck } from 'lucide-react';
 import api from '../services/api';
+import { useAuth } from '../context/AuthContext';
+import { useCompany } from '../context/CompanyContext';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import { PageHeader } from '../components/ui/PageHeader';
 import { Button } from '../components/ui/Button';
 import type { CustomerNameOption } from '../types/api';
 import { fabricationQuoteApi } from '../features/fabrication-quote/api';
-import { DecimalField, Empty, Field, SelectField, TextField } from '../features/fabrication-quote/components';
+import { Empty, Field, SelectField, TextField } from '../features/fabrication-quote/components';
 import { AssemblyEditor, HardwareEditor, MaterialsEditor, OperationsEditor } from '../features/fabrication-quote/PlanEditors';
 import { CostSummary, ReviewPanel } from '../features/fabrication-quote/ReviewPanel';
 import { downloadBlob, downloadJson, SourcesPanel } from '../features/fabrication-quote/SourcesPanel';
 import { NestingPanel } from '../features/fabrication-quote/NestingPanel';
 import { HistoryActualsPanel } from '../features/fabrication-quote/HistoryActualsPanel';
-import { inputErrors, isEditable, mayApprove, readableError, snapshot, writeFromRecord } from '../features/fabrication-quote/model';
+import { calculationInputErrors, inputErrors, isEditable, mayApprove, readableError, snapshot, writeFromRecord } from '../features/fabrication-quote/model';
 import { currencies, emptyPlan, newId } from '../features/fabrication-quote/types';
 import type { CalculationResult, QuoteFile, QuotePlan, QuoteRecord, QuoteSummary, QuoteWrite } from '../features/fabrication-quote/types';
 import '../features/fabrication-quote/fabrication-quote.css';
@@ -21,9 +23,37 @@ import '../features/fabrication-quote/fabrication-quote.css';
 type Tab = 'assembly' | 'processes' | 'material' | 'hardware' | 'sources' | 'review' | 'history';
 const tabs: { id: Tab; label: string; short: string }[] = [{ id: 'assembly', label: 'Assembly & demand', short: 'Assembly' }, { id: 'processes', label: 'Process route', short: 'Processes' }, { id: 'material', label: 'Material & nesting', short: 'Material' }, { id: 'hardware', label: 'Hardware & offers', short: 'Hardware' }, { id: 'sources', label: 'Source package', short: 'Sources' }, { id: 'review', label: 'Cost & review', short: 'Review' }, { id: 'history', label: 'History & actuals', short: 'History' }];
 const libraryPageSize = 30;
+const libraryRetryDelays = [500, 1000];
 const freshWrite = (): QuoteWrite => ({ title: '', customer_id: null, plan: emptyPlan() });
 
+// Claims partition local state only; API capabilities still authorize editing.
+function quoteSessionScope(): string | null {
+  try {
+    const token = sessionStorage.getItem('token');
+    if (!token) return null;
+    const claims = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+    return /^\d+$/.test(String(claims.sub)) && /^\d+$/.test(String(claims.cid)) ? `${claims.sub}:${claims.cid}` : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function FabricationQuoting() {
+  const { user } = useAuth();
+  const { currentCompany } = useCompany();
+  const [sessionScope, setSessionScope] = useState(quoteSessionScope);
+  useEffect(() => {
+    const changed = () => setSessionScope(quoteSessionScope());
+    window.addEventListener('werco:auth-token-changed', changed);
+    return () => window.removeEventListener('werco:auth-token-changed', changed);
+  }, []);
+  // Last-known quotes and drafts must never carry into another account/company.
+  // The token changes before CompanyContext finishes loading company metadata.
+  const scope = sessionScope ?? `context:${user?.id ?? 'anonymous'}:${currentCompany?.id ?? user?.company_id ?? 'none'}`;
+  return <FabricationQuoteWorkspace key={scope} />;
+}
+
+function FabricationQuoteWorkspace() {
   const [params, setParams] = useSearchParams(); const initialId = useRef(Number(params.get('id')) || null);
   const [quotes, setQuotes] = useState<QuoteSummary[]>([]); const [customers, setCustomers] = useState<CustomerNameOption[]>([]);
   const [record, setRecord] = useState<QuoteRecord | null>(null); const [write, setWrite] = useState<QuoteWrite>(freshWrite);
@@ -32,26 +62,41 @@ export default function FabricationQuoting() {
   const [canWrite, setCanWrite] = useState(false); const [loading, setLoading] = useState(true); const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [search, setSearch] = useState('');
   const [libraryQuery, setLibraryQuery] = useState({ page: 1, search: '' });
   const [libraryTotal, setLibraryTotal] = useState(0); const [libraryLoading, setLibraryLoading] = useState(true); const [libraryError, setLibraryError] = useState('');
+  const [loadedLibraryQuery, setLoadedLibraryQuery] = useState<typeof libraryQuery | null>(null);
+  const [libraryRetrying, setLibraryRetrying] = useState(false);
   const libraryQueryRef = useRef(libraryQuery); libraryQueryRef.current = libraryQuery;
   const libraryRequest = useRef(0); const debouncedSearch = useDebouncedValue(search, 250);
   const [pending, setPending] = useState<number | 'new' | null>(null); const [reviewNote, setReviewNote] = useState(''); const [conflict, setConflict] = useState(false);
   const createKey = useRef(newId('create')); const mounted = useRef(true);
   const dirty = snapshot(write) !== saved; const draft = !record || isEditable(record.status); const editable = canWrite && draft; const current = !!result && resultPlan === JSON.stringify(write.plan);
   const blockers = result?.issues.filter(i => i.severity === 'blocking').length ?? 0;
+  const calculationErrors = calculationInputErrors(write);
   const applyRecord = useCallback((value: QuoteRecord) => { const next = writeFromRecord(value); setRecord(value); setWrite(next); setSaved(snapshot(next)); setResult(value.calculation); setResultPlan(JSON.stringify(next.plan)); setReviewNote(''); setConflict(false); }, []);
   const refreshList = useCallback(async () => {
     const request = ++libraryRequest.current; const query = libraryQueryRef.current;
-    setLibraryLoading(true); setLibraryError('');
-    try {
-      const response = await fabricationQuoteApi.list({ ...query, per_page: libraryPageSize });
-      if (!mounted.current || request !== libraryRequest.current) return;
-      const lastPage = Math.max(1, Math.ceil(response.total / libraryPageSize));
-      if (query.page > lastPage) { setLibraryQuery(value => ({ ...value, page: lastPage })); return; }
-      setQuotes(response.items); setLibraryTotal(response.total);
-    } catch (e) {
-      if (mounted.current && request === libraryRequest.current) setLibraryError(readableError(e));
-    } finally {
-      if (mounted.current && request === libraryRequest.current) setLibraryLoading(false);
+    setLibraryLoading(true); setLibraryError(''); setLibraryRetrying(false);
+    for (let attempt = 0; attempt <= libraryRetryDelays.length; attempt += 1) {
+      try {
+        const response = await fabricationQuoteApi.list({ ...query, per_page: libraryPageSize });
+        if (!mounted.current || request !== libraryRequest.current) return;
+        const lastPage = Math.max(1, Math.ceil(response.total / libraryPageSize));
+        if (query.page > lastPage) { setLibraryQuery(value => ({ ...value, page: lastPage })); }
+        else { setQuotes(response.items); setLibraryTotal(response.total); setLoadedLibraryQuery(query); }
+        setLibraryLoading(false); setLibraryRetrying(false);
+        return;
+      } catch (e) {
+        if (!mounted.current || request !== libraryRequest.current) return;
+        const status = (e as { response?: { status?: number } }).response?.status;
+        const transient = !status || status === 408 || status === 429 || status >= 500;
+        if (transient && attempt < libraryRetryDelays.length) {
+          setLibraryRetrying(true);
+          await new Promise(resolve => window.setTimeout(resolve, libraryRetryDelays[attempt]));
+          if (!mounted.current || request !== libraryRequest.current) return;
+        } else {
+          setLibraryError(readableError(e)); setLibraryLoading(false); setLibraryRetrying(false);
+          return;
+        }
+      }
     }
   }, []);
   useEffect(() => {
@@ -94,7 +139,7 @@ export default function FabricationQuoting() {
   const updatePlan = (plan: QuotePlan) => { setWrite(value => ({ ...value, plan })); setNotice(''); };
   const validInput = () => { const errors = inputErrors(write); if (errors.length) { setError(errors.join('\n')); return false; } return true; };
   const save = () => { if (!validInput() || !editable || conflict) return; void run(async () => { const value = record ? await fabricationQuoteApi.save(record.id, record.revision, write) : await fabricationQuoteApi.create(write, createKey.current); applyRecord(value); setParams({ id: String(value.id) }, { replace: true }); setNotice(`Saved revision ${value.revision}.`); await refreshList(); }); };
-  const calculate = () => { if (!validInput()) return; void run(async () => { const plan = write.plan; const calculated = await fabricationQuoteApi.calculate(plan, record?.id); setResult(calculated); setResultPlan(JSON.stringify(plan)); setTab('review'); setNotice('Calculated the current inputs. Save changes before approval.'); }); };
+  const calculate = () => { if (calculationErrors.length) { setError(calculationErrors.join('\n')); return; } void run(async () => { const plan = write.plan; const calculated = await fabricationQuoteApi.calculate(plan, record?.id); setResult(calculated); setResultPlan(JSON.stringify(plan)); setTab('review'); setNotice('Calculated the current inputs. Save changes before approval.'); }); };
   const upload = async (file: File, units?: string) => { if (!record || dirty || !editable) return; await run(async () => { const value = await fabricationQuoteApi.upload(record.id, record.revision, file, units); applyRecord(value); setNotice('Source saved. Review extracted findings and the original file.'); await refreshList(); }); };
   const download = async (file: QuoteFile) => { if (!record) return; await run(async () => downloadBlob(await fabricationQuoteApi.download(record.id, file.id), file.file_name)); };
   const saveNest = async (input: unknown) => { if (!record || dirty || !editable) return; await run(async () => { const value = await fabricationQuoteApi.saveNest(record.id, record.revision, input); applyRecord(value); setNotice('Nest evidence saved. Apply its material allocation and review its source.'); await refreshList(); }); };
@@ -112,10 +157,13 @@ export default function FabricationQuoting() {
         <div className="fq-library-heading"><h2>Quote library</h2><button type="button" className="fq-icon-btn" aria-label="Refresh quote library" disabled={busy || libraryPending} onClick={() => void refreshList()}><RefreshCw size={15} /></button></div>
         <TextField label="Find a quote" value={search} onChange={setSearch} placeholder="Search quote titles…" />
         <div className="fq-quote-list" aria-busy={libraryPending}>
-          {libraryPending ? <p role="status">Loading quotes…</p> : libraryError ? <div className="fq-library-error" role="alert"><p>{libraryError}</p><button type="button" className="fq-text-button" onClick={() => void refreshList()}>Retry quote library</button></div> : !quotes.length ? <div className="fq-library-empty"><FolderOpen size={24} /><p>{libraryQuery.search ? 'No matching quotes.' : 'Your saved quotes will appear here.'}</p></div> : quotes.map(q => <button type="button" key={q.id} className={`fq-quote-item ${record?.id === q.id ? 'fq-selected' : ''}`} disabled={busy || loading} onClick={() => navigate(q.id)} aria-current={record?.id === q.id ? 'page' : undefined}><strong>{q.title}</strong><span>FQ-{q.id} · R{q.revision}</span><small className={`fq-status-${q.status}`}>{q.status.replace(/_/g, ' ')}</small></button>)}
+          {libraryPending && <p role="status">{libraryRetrying ? 'Connection interrupted. Retrying quote library automatically…' : 'Loading quotes…'}</p>}
+          {libraryError && <div className="fq-library-error" role="alert"><p>Quote library could not refresh: {libraryError}</p><p>You can keep editing your draft and retry when the connection returns.</p><button type="button" className="fq-text-button" onClick={() => void refreshList()}>Retry quote library</button></div>}
+          {loadedLibraryQuery && (libraryPending || libraryError) && <p className="fq-hint">Showing last loaded {loadedLibraryQuery.search ? `results for “${loadedLibraryQuery.search}”` : 'quotes'} · Page {loadedLibraryQuery.page}. Results may be out of date.</p>}
+          {!quotes.length ? !libraryPending && <div className="fq-library-empty"><FolderOpen size={24} /><p>{libraryError ? 'Saved quotes will be available when the library reconnects. Your current draft stays open.' : libraryQuery.search ? 'No matching quotes.' : 'Your saved quotes will appear here.'}</p></div> : quotes.map(q => <button type="button" key={q.id} className={`fq-quote-item ${record?.id === q.id ? 'fq-selected' : ''}`} disabled={busy || loading} onClick={() => navigate(q.id)} aria-current={record?.id === q.id ? 'page' : undefined}><strong>{q.title}</strong><span>FQ-{q.id} · R{q.revision}</span><small className={`fq-status-${q.status}`}>{q.status.replace(/_/g, ' ')}</small></button>)}
         </div>
         <nav className="fq-library-pagination" aria-label="Quote library pages">
-          <p aria-live="polite">{libraryPending ? 'Loading quote count…' : libraryError ? 'Quote count unavailable' : `${libraryTotal} ${libraryQuery.search ? 'matching ' : ''}${libraryTotal === 1 ? 'quote' : 'quotes'} · Page ${libraryQuery.page} of ${libraryPages}`}</p>
+          <p aria-live="polite">{!loadedLibraryQuery ? libraryPending ? 'Loading quote count…' : 'Quote count unavailable' : `${libraryTotal} ${loadedLibraryQuery.search ? 'matching ' : ''}${libraryTotal === 1 ? 'quote' : 'quotes'} · Page ${loadedLibraryQuery.page} of ${libraryPages}${libraryPending || libraryError ? ' · Last loaded' : ''}`}</p>
           <div><button type="button" className="fq-btn fq-btn-secondary" disabled={busy || libraryPending || libraryQuery.page === 1} onClick={() => setLibraryQuery(value => ({ ...value, page: value.page - 1 }))}>Previous</button><button type="button" className="fq-btn fq-btn-secondary" disabled={busy || libraryPending || !!libraryError || libraryQuery.page >= libraryPages} onClick={() => setLibraryQuery(value => ({ ...value, page: value.page + 1 }))}>Next</button></div>
         </nav>
         <div className="fq-library-footer"><ShieldCheck size={17} /><span>Estimator approval required for every released quote.</span></div>
@@ -125,8 +173,9 @@ export default function FabricationQuoting() {
         {error && <div className="fq-alert" role="alert">{error}{conflict && record && <button type="button" className="fq-text-button" onClick={() => navigate(record.id)}>Reload saved revision</button>}</div>}
         {!loading && !canWrite && <div className="fq-alert">Read-only access. You can inspect files and calculate scenarios; editing and release actions are unavailable.</div>}
         {notice && <div className="fq-notice" role="status"><CheckCircle2 size={17} />{notice}</div>}
-        <section className="fq-document-heading"><div className="fq-document-meta"><span className="fq-document-icon"><Layers3 size={22} /></span><div><span className={`fq-pill ${record?.status === 'approved' || record?.status === 'handed_off' ? 'fq-pill-green' : 'fq-pill-neutral'}`}>{record ? record.status.replace(/_/g, ' ') : 'Unsaved draft'}</span><span className="fq-muted">{record ? `FQ-${record.id} · Revision ${record.revision}` : 'Create a fabrication package'}</span></div>{dirty && <span className="fq-unsaved">Unsaved changes</span>}</div><div className="fq-actions"><button type="button" className="fq-btn fq-btn-secondary" disabled={busy || loading} onClick={calculate}><Calculator size={16} />Calculate</button>{draft ? <button type="button" className="fq-btn fq-btn-primary" disabled={!canWrite || busy || loading || conflict || (!dirty && !!record)} onClick={save}><Save size={16} />{busy ? 'Working…' : 'Save draft'}</button> : <button type="button" className="fq-btn fq-btn-secondary" disabled={busy || !canWrite} onClick={revise}>Create revision</button>}</div></section>
-        <fieldset className="fq-title-fields" disabled={!editable || busy || loading}><div className="fq-grid fq-grid-title"><TextField label="Quote title" value={write.title} onChange={title => setWrite({ ...write, title })} placeholder="Assembly or customer RFQ name" /><Field label="Customer"><select value={write.customer_id ?? ''} onChange={e => setWrite({ ...write, customer_id: e.target.value ? Number(e.target.value) : null })}><option value="">Assign a customer</option>{write.customer_id && !customers.some(c => c.id === write.customer_id) && <option value={write.customer_id}>Customer #{write.customer_id}</option>}{customers.map(c => <option value={c.id} key={c.id}>{c.name}</option>)}</select></Field><SelectField label="Quote currency" value={write.plan.currency} onChange={currency => updatePlan({ ...write.plan, currency })} options={currencies} /><DecimalField label="Target gross margin" value={write.plan.target_margin} onChange={target_margin => updatePlan({ ...write.plan, target_margin })} hint="Fraction: 0.25 = 25%" /></div></fieldset>
+        <section className="fq-document-heading"><div className="fq-document-meta"><span className="fq-document-icon"><Layers3 size={22} /></span><div><span className={`fq-pill ${record?.status === 'approved' || record?.status === 'handed_off' ? 'fq-pill-green' : 'fq-pill-neutral'}`}>{record ? record.status.replace(/_/g, ' ') : 'Unsaved draft'}</span><span className="fq-muted">{record ? `FQ-${record.id} · Revision ${record.revision}` : 'Create a fabrication package'}</span></div>{dirty && <span className="fq-unsaved">Unsaved changes</span>}</div><div className="fq-actions"><button type="button" className="fq-btn fq-btn-secondary" disabled={busy || loading || calculationErrors.length > 0} title={calculationErrors[0]} aria-describedby={calculationErrors.length ? 'calculation-requirements' : undefined} onClick={calculate}><Calculator size={16} />Calculate</button>{draft ? <button type="button" className="fq-btn fq-btn-primary" disabled={!canWrite || busy || loading || conflict || (!dirty && !!record)} onClick={save}><Save size={16} />{busy ? 'Working…' : 'Save draft'}</button> : <button type="button" className="fq-btn fq-btn-secondary" disabled={busy || !canWrite} onClick={revise}>Create revision</button>}</div></section>
+        {!loading && calculationErrors.length > 0 && <p id="calculation-requirements" className="fq-hint px-5 py-2">To calculate: {calculationErrors[0]}</p>}
+        <fieldset className="fq-title-fields" disabled={!editable || busy || loading}><div className="fq-grid fq-grid-title"><TextField label="Quote title" value={write.title} onChange={title => setWrite({ ...write, title })} placeholder="RFQ name" /><Field label="Customer"><select value={write.customer_id ?? ''} onChange={e => setWrite({ ...write, customer_id: e.target.value ? Number(e.target.value) : null })}><option value="">Select customer</option>{write.customer_id && !customers.some(c => c.id === write.customer_id) && <option value={write.customer_id}>Customer #{write.customer_id}</option>}{customers.map(c => <option value={c.id} key={c.id}>{c.name}</option>)}</select></Field><SelectField label="Quote currency" value={write.plan.currency} onChange={currency => updatePlan({ ...write.plan, currency })} options={currencies.includes(write.plan.currency) ? currencies : [{ value: write.plan.currency, label: `${write.plan.currency} · invalid` }, ...currencies]} /><Field label="Target gross margin (%)" hint="Percent of selling price"><input type="number" min="0" max="99.999" step="any" value={write.plan.target_margin === null ? '' : Number((Number(write.plan.target_margin) * 100).toFixed(7))} onChange={event => updatePlan({ ...write.plan, target_margin: event.target.value === '' ? null : Number((Number(event.target.value) / 100).toFixed(9)).toString() })} /></Field></div></fieldset>
         <nav className="fq-tabs" aria-label="Quote sections">{tabs.map(t => <button type="button" key={t.id} className={tab === t.id ? 'fq-tab-active' : ''} onClick={() => setTab(t.id)} aria-current={tab === t.id ? 'page' : undefined} title={t.label}>{t.short}{t.id === 'review' && blockers > 0 && <span className="fq-count">{blockers}</span>}{t.id === 'sources' && (record?.files.length ?? 0) > 0 && <span className="fq-count">{record?.files.length}</span>}</button>)}</nav>
         <div className="fq-content-layout"><div className="fq-editor">
           {loading ? <Empty>Loading estimator workspace…</Empty> : <>

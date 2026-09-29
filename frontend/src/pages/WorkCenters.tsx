@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
+import { Link } from 'react-router-dom';
 import { Modal } from '../components/ui/Modal';
 import {
   Button,
@@ -268,16 +269,11 @@ export default function WorkCenters() {
   const renderStatusCell = (wc: WorkCenter) =>
     canChangeStatus ? (
       <div className="flex items-center gap-2" role="presentation" onClick={(e) => e.stopPropagation()}>
-        <span
-          className={`h-2 w-2 flex-shrink-0 rounded-full ${statusDotColor[statusVariant(wc.current_status)]}`}
-          aria-hidden="true"
-        />
-        <StatusBadge status={wc.current_status} className="hidden xl:inline-flex" />
         <select
           value={wc.current_status}
           onChange={(e) => handleStatusChange(wc.id, e.target.value)}
           aria-label={`Status for ${wc.code}`}
-          className="input !py-0.5 !px-1.5 !text-xs !min-h-0 h-7"
+          className={`input !py-0.5 !px-1.5 !text-xs !min-h-0 h-7 ${wc.current_status === 'available' ? '!text-emerald-300' : wc.current_status === 'in_use' ? '!text-blue-300' : wc.current_status === 'maintenance' ? '!text-amber-300' : '!text-red-300'}`}
         >
           <option value="available">Available</option>
           <option value="in_use">In Use</option>
@@ -428,7 +424,6 @@ export default function WorkCenters() {
       className={wc.is_active === false ? 'opacity-60' : ''}
       title={wc.code}
       subtitle={wc.name}
-      badge={<StatusBadge status={wc.current_status} />}
       fields={[
         { label: 'Rate/hr', value: `$${wc.hourly_rate}` },
         { label: 'Capacity', value: `${wc.capacity_hours_per_day}h` },
@@ -484,6 +479,7 @@ export default function WorkCenters() {
         </div>
       </div>
 
+      <p className="text-sm text-slate-300">These are manually configured statuses. <Link to="/dispatch" className="text-blue-300 underline">View live work in Dispatch</Link>.</p>
       {/* Status KPI strip */}
       <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-5 gap-2">
         <MiniStat
@@ -497,7 +493,7 @@ export default function WorkCenters() {
           icon={CheckCircleIcon}
           iconBg="bg-fd-green/15"
           iconColor="text-fd-green"
-          label="Available"
+          label="Configured available"
           value={statusCounts.available || 0}
           valueColor="text-fd-green"
         />
@@ -505,7 +501,7 @@ export default function WorkCenters() {
           icon={BoltIcon}
           iconBg="bg-fd-blue/15"
           iconColor="text-fd-blue"
-          label="In Use"
+          label="Marked in use"
           value={statusCounts.in_use || 0}
           valueColor="text-fd-blue"
         />

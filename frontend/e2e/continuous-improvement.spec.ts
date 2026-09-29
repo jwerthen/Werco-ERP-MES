@@ -262,3 +262,30 @@ test('viewer can inspect the board and timestamps on a phone without write contr
   expect(state.mutations).toEqual([]);
   expect(state.unexpectedFeatureRequests).toEqual([]);
 });
+
+for (const width of [1280, 1440]) {
+  test(`${width}px: suggestion filters show complete search and selected category text`, async ({ page, baseURL }) => {
+    const state = await mockWorkspace(page, baseURL!, 'manager', true);
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto('/continuous-improvement');
+    const register = page.getByRole('region', { name: 'Suggestion register' });
+    await expect(register.getByLabel('Search suggestions', { exact: true })).toBeVisible();
+    await register.getByLabel('Filter by category', { exact: true }).selectOption('poka_yoke');
+    const textFits = await register.locator('input, select').evaluateAll(controls => controls.map(control => {
+      const element = control as HTMLInputElement | HTMLSelectElement;
+      const style = getComputedStyle(element);
+      const context = document.createElement('canvas').getContext('2d')!;
+      context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+      const text = element instanceof HTMLSelectElement
+        ? element.selectedOptions[0].textContent || ''
+        : element.placeholder;
+      return {
+        text,
+        needed: context.measureText(text).width,
+        available: element.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+      };
+    }));
+    for (const fit of textFits) expect(fit.needed, JSON.stringify(fit)).toBeLessThanOrEqual(fit.available);
+    expect(state.mutations).toEqual([]);
+  });
+}

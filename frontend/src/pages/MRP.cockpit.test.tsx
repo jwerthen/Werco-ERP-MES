@@ -216,5 +216,10 @@ describe('MRP request scope and review semantics', () => {
     renderMRP();
     expect(await screen.findByText('No shortage analysis yet')).toBeInTheDocument();
     expect(screen.queryByText('No shortages in this run')).not.toBeInTheDocument();
+    expect(screen.queryByText('Recent MRP Runs')).not.toBeInTheDocument();
+    expect(screen.queryByText('Run Details')).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Run MRP' })).toHaveLength(1);
+    expect(screen.getByRole('spinbutton', { name: 'Horizon (days)' })).toBeVisible();
+    expect(document.body).not.toHaveTextContent('undefined');
   });
 });

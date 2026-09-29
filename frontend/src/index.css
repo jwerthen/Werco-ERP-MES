@@ -1239,6 +1239,13 @@
 /* Legacy identifier utilities resolve to the shared dark-surface link token.
    Background/nav brand colors remain unchanged. */
 @layer utilities {
+  /* Decision-critical IDs, KPI labels and quantities must remain readable.
+     Use wrapping instead of ellipsis on the primary content of compact cells. */
+  .critical-text {
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
   .text-fd-link, .text-werco-navy-600, .text-werco-navy-700 {
     color: var(--fd-link);
   }

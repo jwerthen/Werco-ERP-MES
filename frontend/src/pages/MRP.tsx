@@ -344,6 +344,8 @@ export default function MRPPage() {
   }
 
   const latestRun = runs[0];
+  const firstRun = !loadError && runs.length === 0 && !shortages?.mrp_run_id;
+  const shortageRunLabel = shortages?.mrp_run_number || (shortages?.mrp_run_id ? `#${shortages.mrp_run_id}` : 'not yet available');
   const totalShortages = shortages?.total_shortages ?? 0;
   const expediteCount = shortages?.expedite_count ?? 0;
   // Stable cross-link: action_ids surfaced in the Shortages panel, so a selected
@@ -355,15 +357,18 @@ export default function MRPPage() {
       {/* Header + Run MRP toolbar */}
       <div className="flex flex-wrap items-end justify-between gap-3">
         <h1 className="text-2xl font-bold text-white">Material Requirements Planning</h1>
+        <div className={firstRun ? 'card w-full space-y-4 p-5' : ''}>
+        {firstRun && <div><h2 className="text-lg font-semibold">No shortage analysis yet</h2><p className="mt-1 text-sm text-slate-300">Choose a planning horizon and whether to include safety stock, then run MRP to calculate material shortages. Review the resulting recommendations before creating purchase or work order drafts.</p></div>}
         <div className="flex flex-wrap items-end gap-3">
-          <div>
-            <label htmlFor="mrp-horizon-days" className="label !text-[10px] uppercase tracking-wide">
+          <div className="flex items-center gap-2">
+            <label htmlFor="mrp-horizon-days" className="text-sm text-slate-300 whitespace-nowrap">
               Horizon (days)
             </label>
             <input
               id="mrp-horizon-days"
               type="number"
               aria-label="Horizon (days)"
+              placeholder="7–365"
               value={horizonDays}
               onChange={e => setHorizonDays(parseInt(e.target.value))}
               className="input w-24 tabular-nums"
@@ -399,6 +404,7 @@ export default function MRPPage() {
             )}
           </button>
         </div>
+        </div>
       </div>
 
       {!canPlan && (
@@ -407,7 +413,7 @@ export default function MRPPage() {
         </p>
       )}
       {/* KPI strip */}
-      <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-5 gap-2">
+      {!firstRun && <MiniStatStrip className="grid grid-cols-2 lg:grid-cols-5 gap-2">
         <MiniStat
           icon={ExclamationTriangleIcon}
           iconBg={totalShortages > 0 ? 'bg-amber-500/20' : 'bg-fd-green/15'}
@@ -415,7 +421,7 @@ export default function MRPPage() {
           label="Total Shortages"
           value={shortages?.total_shortages ?? '—'}
           valueColor={totalShortages > 0 ? 'text-fd-amber' : undefined}
-          subtitle={shortages ? `Run ${shortages.mrp_run_number}` : undefined}
+          subtitle={shortages?.mrp_run_id ? `Run ${shortageRunLabel}` : 'No run yet'}
         />
         <MiniStat
           icon={BoltIcon}
@@ -431,7 +437,7 @@ export default function MRPPage() {
           iconColor="text-blue-600"
           label="Parts Analyzed"
           value={latestRun?.total_parts_analyzed ?? 0}
-          subtitle={latestRun ? `Run ${latestRun.run_number}` : 'No runs yet'}
+          subtitle={latestRun ? `Run ${latestRun.run_number || `#${latestRun.id}`}` : 'No runs yet'}
         />
         <MiniStat
           icon={ClipboardDocumentListIcon}
@@ -447,9 +453,9 @@ export default function MRPPage() {
           label="Actions"
           value={latestRun?.total_actions ?? 0}
         />
-      </MiniStatStrip>
+      </MiniStatStrip>}
 
-      <div className="card p-3 text-sm text-slate-300">
+      {!firstRun && <div className="card p-3 text-sm text-slate-300">
         Use Review supply draft to check the current shortage and create a linked PO or WO draft. Mark reviewed only
         records your review; it does not create supply. Counts and row quantities are snapshots from the selected MRP
         run.
@@ -458,17 +464,17 @@ export default function MRPPage() {
             {reviewNotice}
           </p>
         )}
-      </div>
+      </div>}
       {/* Page-level load failure: surface an error + retry instead of a blank cockpit. */}
       {loadError && <ErrorState message="Could not load MRP runs and shortages." onRetry={loadData} />}
 
       {/* Cockpit grid: Shortages (wide) + Recent Runs (narrow), Run Details (wide) */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-12 gap-4 items-start">
+      {!firstRun && <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-12 gap-4 items-start">
         {/* Shortages */}
         {shortages && shortages.total_shortages > 0 && (
           <CockpitPanel
             title="Material Shortages"
-            subtitle={`From run ${shortages.mrp_run_number}`}
+            subtitle={`From run ${shortageRunLabel}`}
             className="xl:col-span-7"
             footer={`${shortages.shortages.length} shortages`}
             headerExtra={
@@ -533,11 +539,11 @@ export default function MRPPage() {
           </CockpitPanel>
         )}
 
-        {!loadError && shortages?.total_shortages === 0 && (
+        {!loadError && !!shortages?.mrp_run_id && shortages.total_shortages === 0 && (
           <div className="card p-4 xl:col-span-7">
             <h2 className="font-semibold">No shortages in this run</h2>
             <p className="text-sm text-slate-400">
-              Run {shortages.mrp_run_number} has no material shortage recommendations. Review its planning horizon
+              Run {shortageRunLabel} has no material shortage recommendations. Review its planning horizon
               before placing new orders.
             </p>
           </div>
@@ -549,7 +555,7 @@ export default function MRPPage() {
           </div>
         )}
         {/* Recent Runs */}
-        <CockpitPanel
+        {runs.length > 0 && <CockpitPanel
           title="Recent MRP Runs"
           className="xl:col-span-5"
           footer={runs.length ? `${runs.length} runs` : undefined}
@@ -608,10 +614,10 @@ export default function MRPPage() {
               />
             )}
           </div>
-        </CockpitPanel>
+        </CockpitPanel>}
 
         {/* Run Details */}
-        <CockpitPanel
+        {runs.length > 0 && <CockpitPanel
           title={selectedRun ? `Actions — ${selectedRun.run_number}` : 'Run Details'}
           subtitle={selectedRun ? undefined : 'Select a run to view its actions'}
           className="xl:col-span-12"
@@ -661,8 +667,8 @@ export default function MRPPage() {
               )}
             </div>
           )}
-        </CockpitPanel>
-      </div>
+        </CockpitPanel>}
+      </div>}
       {openBatchIds && (
         <MRPPurchaseBatchReview
           actionIds={openBatchIds}

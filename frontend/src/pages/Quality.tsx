@@ -1,6 +1,6 @@
 import { useTableWorkspace } from '../hooks/useTableWorkspace';
 import { TableWorkspaceControls } from '../components/ui/TableWorkspaceControls';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { tabKeyboard } from '../components/operations/tabKeyboard';
 import { useSearchParams } from 'react-router-dom';
 import api from '../services/api';
@@ -140,6 +140,7 @@ const ncrStatusColors: Record<string, string> = {
 // pristine shape.
 const BLANK_NCR_FORM = {
   part_id: 0,
+  unknown_part_reason: '',
   title: '',
   description: '',
   source: 'in_process',
@@ -174,11 +175,11 @@ export default function QualityPage() {
   const [parts, setParts] = useState<any[]>([]);
   const [ncrStatusFilter, setNcrStatusFilter] = useState<string>(() => {
     const filter = searchParams.get('filter');
-    return filter === 'open' ? 'open' : '';
+    return filter ?? 'open';
   });
 
   useEffect(() => {
-    setNcrStatusFilter(searchParams.get('filter') === 'open' ? 'open' : '');
+    setNcrStatusFilter(searchParams.get('filter') ?? 'open');
   }, [searchParams]);
 
   // ── Deep links ────────────────────────────────────────────────────────────
@@ -229,14 +230,14 @@ export default function QualityPage() {
 
   const recordKind = searchParams.get('car') ? 'car' : 'ncr';
   const recordId = Number(searchParams.get('car') || searchParams.get('ncr') || 0);
-  const openQualityRecord = (kind: 'ncr' | 'car', id: number) => {
+  const openQualityRecord = useCallback((kind: 'ncr' | 'car', id: number) => {
     const next = new URLSearchParams(searchParams);
     next.delete('ncr');
     next.delete('car');
     next.set('tab', kind);
     next.set(kind, String(id));
     setSearchParams(next);
-  };
+  }, [searchParams, setSearchParams]);
   const closeQualityRecord = () => {
     const next = new URLSearchParams(searchParams);
     next.delete('ncr');
@@ -354,12 +355,24 @@ export default function QualityPage() {
   const handleCreateNCR = async (e: React.FormEvent) => {
     e.preventDefault();
     if (creating) return;
+    if (ncrForm.part_id && !parts.some(part => part.id === ncrForm.part_id)) {
+      setCreateError('Select an existing part, or choose Unknown part and enter a reason.');
+      return;
+    }
+    if (!ncrForm.part_id && !ncrForm.unknown_part_reason.trim()) {
+      setCreateError('Select a part or explain why the part is unknown.');
+      return;
+    }
     setCreating(true);
     setCreateError('');
     try {
+      const { unknown_part_reason, ...formFields } = ncrForm;
       const payload = {
-        ...ncrForm,
-        part_id: ncrForm.part_id || null, // Send null instead of 0
+        ...formFields,
+        part_id: ncrForm.part_id || null,
+        description: ncrForm.part_id
+          ? ncrForm.description
+          : `${ncrForm.description}\n\nUnknown part reason: ${unknown_part_reason.trim()}`,
       };
       await api.createNCR(payload);
       setShowNCRModal(false);
@@ -602,8 +615,10 @@ export default function QualityPage() {
     [ncrs, ncrStatusFilter]
   );
 
-  const renderNCRVoidAction = (ncr: NCR) =>
-    canVoidNCR ? (
+  const renderNCRVoidAction = useCallback((ncr: NCR) =>
+    ncr.status === 'void' ? (
+      <button type="button" className="btn-secondary btn-sm" aria-label={`View NCR ${ncr.ncr_number}`} onClick={event => { event.stopPropagation(); openQualityRecord('ncr', ncr.id); }}>View</button>
+    ) : canVoidNCR ? (
       <button
         type="button"
         onClick={e => {
@@ -618,7 +633,7 @@ export default function QualityPage() {
         <XCircleIcon className="h-4 w-4" aria-hidden="true" />
         Void
       </button>
-    ) : null;
+    ) : null, [canVoidNCR, openQualityRecord]);
 
   const ncrColumns = useMemo<Array<DataTableColumn<NCR>>>(
     () => [
@@ -673,7 +688,7 @@ export default function QualityPage() {
         csv: ncr => formatCentralDate(ncr.created_at),
         render: ncr => <span className="text-sm">{formatCentralDate(ncr.created_at)}</span>,
       },
-      ...(canVoidNCR
+      ...(canVoidNCR || ncrs.some(ncr => ncr.status === 'void')
         ? [
             {
               key: 'actions',
@@ -686,7 +701,7 @@ export default function QualityPage() {
           ]
         : []),
     ],
-    [canVoidNCR]
+    [canVoidNCR, ncrs, renderNCRVoidAction]
   );
 
   const carColumns = useMemo<Array<DataTableColumn<CAR>>>(
@@ -911,6 +926,7 @@ export default function QualityPage() {
       const value = filters[key];
       if (typeof value === 'string' && value) next.set(key, value); else next.delete(key);
     }
+    next.set('filter', typeof filters.filter === 'string' ? filters.filter : '');
     setNcrStatusFilter(typeof filters.filter === 'string' ? filters.filter : '');
     setSearchParams(next);
   };
@@ -1037,6 +1053,7 @@ export default function QualityPage() {
               <div className="flex min-w-0 flex-wrap items-center gap-3">
                 <h2 className="text-lg font-semibold">Non-Conformance Reports</h2>
                 <select
+                  aria-label="NCR status"
                   value={ncrStatusFilter}
                   onChange={e => {
                     setNcrStatusFilter(e.target.value);
@@ -1046,7 +1063,7 @@ export default function QualityPage() {
                       setSearchParams(next);
                     } else {
                       const next = new URLSearchParams(searchParams);
-                      next.delete('filter');
+                      next.set('filter', '');
                       setSearchParams(next);
                     }
                   }}
@@ -1057,13 +1074,14 @@ export default function QualityPage() {
                   <option value="under_review">Under Review</option>
                   <option value="pending_disposition">Pending Disposition</option>
                   <option value="closed">Closed</option>
+                  <option value="void">Void</option>
                 </select>
                 {ncrStatusFilter && (
                   <button
                     onClick={() => {
                       setNcrStatusFilter('');
                       const next = new URLSearchParams(searchParams);
-                      next.delete('filter');
+                      next.set('filter', '');
                       setSearchParams(next);
                     }}
                     className="flex items-center gap-1 px-3 py-1.5 text-sm bg-werco-100 text-werco-700 rounded-full hover:bg-werco-200"
@@ -1583,7 +1601,7 @@ export default function QualityPage() {
               />
             )}
           </FormField>
-          <FormField label="Part (optional)">
+          <FormField label="Part">
             {field => (
               <select
                 {...field}
@@ -1591,7 +1609,7 @@ export default function QualityPage() {
                 onChange={e => setNcrForm({ ...ncrForm, part_id: parseInt(e.target.value) })}
                 className="input"
               >
-                <option value={0}>Select part...</option>
+                <option value={0}>Unknown part — enter a reason below</option>
                 {parts.map(p => (
                   <option key={p.id} value={p.id}>
                     {p.part_number} - {p.name}
@@ -1600,6 +1618,17 @@ export default function QualityPage() {
               </select>
             )}
           </FormField>
+          {!ncrForm.part_id && (
+            <FormField label="Unknown part reason" required help="This reason will be saved with the NCR description.">
+              {field => (
+                  <textarea {...field} required className="input" rows={2}
+                    value={ncrForm.unknown_part_reason}
+                    onChange={event => setNcrForm({ ...ncrForm, unknown_part_reason: event.target.value })}
+                    placeholder="Explain why the affected part cannot be identified"
+                  />
+              )}
+            </FormField>
+          )}
           <div className="grid grid-cols-2 gap-4">
             <FormField label="Source">
               {field => (

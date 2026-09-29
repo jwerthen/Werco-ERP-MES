@@ -407,7 +407,7 @@ export default function ToolManagement() {
       {/* Header */}
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-white">Tool & Fixture Management</h1>
-        <Button onClick={() => setShowCreateModal(true)} className="inline-flex items-center">
+        <Button variant={!loading && !tabError && filteredTools.length === 0 ? 'secondary' : 'primary'} onClick={() => setShowCreateModal(true)} className="inline-flex items-center">
           <PlusIcon className="w-5 h-5 mr-2" />
           New Tool
         </Button>
@@ -495,11 +495,15 @@ export default function ToolManagement() {
         onRetry={() => loadTabData(activeTab)}
         empty={{
           icon: WrenchScrewdriverIcon,
-          title: 'No tools found',
+          title: search.trim() || statusFilter || typeFilter
+            ? 'No tools found'
+            : activeTab === 'all' ? 'No tools yet' : 'No tools in this view',
           description:
-            search || statusFilter || typeFilter
+            search.trim() || statusFilter || typeFilter
               ? 'No tools match the current filters.'
-              : 'Tools and fixtures you add will appear here.',
+              : activeTab === 'all'
+                ? 'Add the first tool or fixture to start tracking your crib.'
+                : 'No tools currently need attention in this view.',
           action: { label: 'New Tool', onClick: () => setShowCreateModal(true) },
         }}
         mobileCards={renderToolCard}

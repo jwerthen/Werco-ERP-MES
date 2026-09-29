@@ -89,6 +89,17 @@ const openVoidModal = async () => {
 };
 
 describe('Quality — NCR void', () => {
+  it('keeps voided records out of the default queue and offers View when explicitly included', async () => {
+    mockedApi.getNCRs.mockResolvedValue([openNcr, { ...openNcr, id: 2, ncr_number: 'NCR-VOID', status: 'void' }] as any);
+    renderQuality();
+    await screen.findAllByText('NCR-0001');
+    expect(screen.queryByText('NCR-VOID')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole('combobox', { name: 'NCR status' }), { target: { value: 'void' } });
+    expect(screen.getAllByText('NCR-VOID')).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: 'View NCR NCR-VOID' })).toHaveLength(2);
+    expect(screen.queryByRole('button', { name: /Void NCR NCR-VOID/ })).not.toBeInTheDocument();
+    expect(mockedApi.voidNCR).not.toHaveBeenCalled();
+  });
   it('requires a reason before calling api.voidNCR', async () => {
     renderQuality();
     await openVoidModal();

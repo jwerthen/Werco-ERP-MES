@@ -7,7 +7,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { BellIcon, CheckIcon, Cog6ToothIcon } from '@heroicons/react/24/outline';
 import api from '../services/api';
 import BackgroundEmailActivity from '../components/BackgroundEmailActivity';
@@ -46,6 +46,7 @@ const formatTimestamp = (ts: string) =>
 
 export default function Notifications() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { showToast } = useToast();
   const notificationState = useNotificationState();
   const request = useRef(0);
@@ -55,10 +56,25 @@ export default function Notifications() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
 
-  const [page, setPage] = useState(1);
-  const [unreadFilter, setUnreadFilter] = useState<UnreadFilter>('all');
-  const [categoryFilter, setCategoryFilter] = useState('');
-  const [severityFilter, setSeverityFilter] = useState('');
+  const requestedShow = searchParams.get('show');
+  const requestedUnread = searchParams.get('unread');
+  const requestedFilter: UnreadFilter | null = requestedShow === 'all' || requestedShow === 'read' || requestedShow === 'unread'
+    ? requestedShow : requestedUnread === 'true' ? 'unread' : requestedUnread === 'false' ? 'read' : null;
+  const defaultFilterSettled = useRef(requestedFilter !== null);
+  const [page, setPage] = useState(() => {
+    const requestedPage = Number(searchParams.get('page'));
+    return Number.isInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1;
+  });
+  const [unreadFilter, setUnreadFilter] = useState<UnreadFilter>(requestedFilter ?? 'unread');
+  const [categoryFilter, setCategoryFilter] = useState(searchParams.get('category') ?? '');
+  const [severityFilter, setSeverityFilter] = useState(searchParams.get('severity') ?? '');
+
+  useEffect(() => {
+    if (!defaultFilterSettled.current && notificationState.unreadCount !== null) {
+      defaultFilterSettled.current = true;
+      setUnreadFilter(notificationState.unreadCount > 0 ? 'unread' : 'all');
+    }
+  }, [notificationState.unreadCount]);
 
   // Catalog drives the category filter options and the per-row Category column.
   const [catalog, setCatalog] = useState<NotificationCatalogEntry[]>([]);
@@ -122,6 +138,7 @@ export default function Notifications() {
 
   // Changing a filter always returns to the first (newest) page.
   const changeUnread = (value: UnreadFilter) => {
+    defaultFilterSettled.current = true;
     setUnreadFilter(value);
     setPage(1);
   };
@@ -188,9 +205,9 @@ export default function Notifications() {
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               {!n.is_read && <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-fd-blue" aria-hidden="true" />}
-              <span className={`truncate ${n.is_read ? 'text-fd-body' : 'font-semibold text-fd-ink'}`}>{n.title}</span>
+              <span className={`critical-text ${n.is_read ? 'text-fd-body' : 'font-semibold text-fd-ink'}`}>{n.title}</span>
             </div>
-            {n.body && <div className="mt-0.5 text-xs text-fd-mute truncate max-w-md">{n.body}</div>}
+            {n.body && <div className="mt-0.5 text-xs text-fd-mute critical-text max-w-md">{n.body}</div>}
           </div>
         ),
       },
@@ -296,7 +313,7 @@ export default function Notifications() {
           icon={BellIcon}
           iconBg="bg-fd-blue/15"
           iconColor="text-fd-blue"
-          label="Total notifications"
+          label={unreadFilter === 'all' && !categoryFilter && !severityFilter ? 'Total notifications' : 'Matching notifications'}
           value={meta?.total_count ?? 0}
         />
       </MiniStatStrip>
@@ -357,8 +374,6 @@ export default function Notifications() {
         </div>
       </div>
 
-      <BackgroundEmailActivity />
-
       {/* Server-paged inbox (offset/limit), desc(created_at). */}
       <DataTable<NotificationItem>
         columns={columns}
@@ -368,19 +383,30 @@ export default function Notifications() {
         loading={loading}
         error={loadError ? 'Could not load notifications.' : false}
         onRetry={load}
-        serverPagination={{
-          page,
-          pageSize: PAGE_SIZE,
-          hasNext: meta?.has_next ?? false,
-          onPageChange: setPage,
-        }}
-        csvExport={{ filename: 'notifications' }}
+        manualSorting
+        csvExport={{ filename: 'notifications', label: 'Export page' }}
         empty={{
           icon: BellIcon,
           title: 'No notifications',
           description: 'Notifications about holds, completions, receipts, quality events, and more will appear here.',
         }}
       />
+      {meta && meta.total_count > 0 && (
+        <nav aria-label="Notification inbox pagination" className="flex flex-wrap items-center justify-between gap-3 text-sm text-slate-300">
+          <p aria-live="polite">
+            Page {page} of {Math.max(1, meta.total_pages)} · {meta.total_count} {unreadFilter === 'unread' ? 'unread' : 'matching'} {meta.total_count === 1 ? 'notification' : 'notifications'}
+            {' · '}{Math.max(0, meta.total_count - ((page - 1) * PAGE_SIZE + items.length))} remaining after this page
+          </p>
+          <div className="flex gap-2">
+            <button className="btn btn-outline btn-sm" disabled={loading || page <= 1} onClick={() => setPage(value => value - 1)}>Previous page</button>
+            <button className="btn btn-primary btn-sm" disabled={loading || !meta.has_next} onClick={() => setPage(value => value + 1)}>Next page</button>
+          </div>
+        </nav>
+      )}
+      <details className="rounded-sm border border-fd-line bg-fd-panel p-3" open={searchParams.has('delivery') || undefined}>
+        <summary className="cursor-pointer text-sm font-medium text-slate-300">Background email activity</summary>
+        <BackgroundEmailActivity />
+      </details>
     </div>
   );
 }

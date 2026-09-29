@@ -249,14 +249,16 @@ export default function Purchasing() {
   const [vendorDocsError, setVendorDocsError] = useState(false);
   const [poSearch, setPoSearch] = useState(searchParams.get('search') || '');
   const debouncedPoSearch = useDebouncedValue(poSearch, 250);
-  const poStatusFilter = searchParams.get('poStatus') || '';
+  // An explicit empty filter retains the all-status view (including saved views).
+  const poStatusFilter = searchParams.get('poStatus') ?? (searchParams.has('po') ? '' : 'open');
+  const hasSpecificPOStatus = !!poStatusFilter && poStatusFilter !== 'open';
   const [statusPOs, setStatusPOs] = useState<PurchaseOrder[]>([]);
   const [statusPOLoading, setStatusPOLoading] = useState(false);
   const [statusPOError, setStatusPOError] = useState(false);
   const [statusRetry, setStatusRetry] = useState(0);
   useEffect(() => {
     let active = true;
-    if (!poStatusFilter) return;
+    if (!hasSpecificPOStatus) { setStatusPOLoading(false); setStatusPOError(false); return; }
     setStatusPOLoading(true);
     setStatusPOError(false);
     api
@@ -273,7 +275,7 @@ export default function Purchasing() {
     return () => {
       active = false;
     };
-  }, [poStatusFilter, statusRetry]);
+  }, [poStatusFilter, hasSpecificPOStatus, statusRetry]);
 
   // The deleted-PO book. Kept in its OWN state rather than merged into
   // `purchaseOrders`, and fetched LAZILY the first time the user switches into the
@@ -1139,7 +1141,8 @@ export default function Purchasing() {
     return po.po_number.toLowerCase().includes(term) || (po.vendor_name || '').toLowerCase().includes(term);
   };
 
-  const filteredPOs = (poStatusFilter ? statusPOs : purchaseOrders).filter(matchesPoSearch);
+  const openPOs = purchaseOrders.filter(po => ['draft', 'sent', 'acknowledged', 'partial'].includes(po.status));
+  const filteredPOs = (poStatusFilter === 'open' ? openPOs : hasSpecificPOStatus ? statusPOs : purchaseOrders).filter(matchesPoSearch);
   const filteredDeletedPOs = deletedPOs.filter(matchesPoSearch);
 
   // Columns shared by both books. The two views then append DIFFERENT tails: the active
@@ -1210,17 +1213,17 @@ export default function Purchasing() {
       align: 'center',
       render: po => (
         <div className="flex items-center justify-center gap-3" role="presentation" onClick={e => e.stopPropagation()}>
-          <button onClick={() => handlePrintPO(po.id)} className="text-surface-600 hover:text-werco-primary text-sm">
+          <button onClick={() => handlePrintPO(po.id)} className="btn-secondary btn-sm">
             Print
           </button>
-          {canViewEmail && <button onClick={() => setEmailPOId(po.id)} className="text-fd-link hover:underline text-sm" aria-label={`Email ${po.po_number}`}>Email</button>}
+          {canViewEmail && <button onClick={() => setEmailPOId(po.id)} className="btn-secondary btn-sm" aria-label={`Email ${po.po_number}`}>Email</button>}
           {canSendPO && po.status === 'draft' && (
             <button onClick={() => handleSendPO(po)} className="text-werco-primary hover:underline text-sm">
               Mark as sent
             </button>
           )}
           {canDeletePurchasing && (
-            <button onClick={() => setDeletePOTarget(po)} className="text-red-400 hover:text-red-300 text-sm">
+            <button onClick={() => setDeletePOTarget(po)} className="ml-2 border-l border-slate-600 pl-3 text-red-300 hover:text-red-200 text-xs" title="Review and confirm deletion">
               Delete
             </button>
           )}
@@ -1295,17 +1298,17 @@ export default function Purchasing() {
       ]}
       actions={
         <div className="flex flex-wrap gap-3 justify-end" role="presentation" onClick={e => e.stopPropagation()}>
-          <button onClick={() => handlePrintPO(po.id)} className="text-surface-600 hover:text-werco-primary text-sm">
+          <button onClick={() => handlePrintPO(po.id)} className="btn-secondary btn-sm">
             Print
           </button>
-          {canViewEmail && <button onClick={() => setEmailPOId(po.id)} className="text-fd-link hover:underline text-sm" aria-label={`Email ${po.po_number}`}>Email</button>}
+          {canViewEmail && <button onClick={() => setEmailPOId(po.id)} className="btn-secondary btn-sm" aria-label={`Email ${po.po_number}`}>Email</button>}
           {canSendPO && po.status === 'draft' && (
             <button onClick={() => handleSendPO(po)} className="text-werco-primary hover:underline text-sm">
               Mark as sent
             </button>
           )}
           {canDeletePurchasing && (
-            <button onClick={() => setDeletePOTarget(po)} className="text-red-400 hover:text-red-300 text-sm">
+            <button onClick={() => setDeletePOTarget(po)} className="ml-2 border-l border-slate-600 pl-3 text-red-300 hover:text-red-200 text-xs" title="Review and confirm deletion">
               Delete
             </button>
           )}
@@ -1582,6 +1585,7 @@ export default function Purchasing() {
         const value = filters[key];
         if (typeof value === 'string' && value) next.set(key, value); else next.delete(key);
       }
+      next.set('poStatus', typeof filters.poStatus === 'string' ? filters.poStatus : '');
       setSearchParams(next);
     }, { key: 'po_number', dir: 'asc' });
 
@@ -1698,7 +1702,14 @@ export default function Purchasing() {
           iconBg="bg-werco-navy-500/15"
           iconColor="text-werco-navy-400"
           label="Open POs"
-          value={purchaseOrders.filter(po => ['draft', 'sent', 'acknowledged', 'partial'].includes(po.status)).length}
+          value={openPOs.length}
+          active={activeTab === 'orders' && poView === 'active' && poStatusFilter === 'open'}
+          onClick={() => {
+            setActiveTab('orders'); setPoView('active'); setPoSearch('');
+            const next = new URLSearchParams(searchParams);
+            next.set('poStatus', 'open'); next.delete('search'); next.delete('po');
+            setSearchParams(next);
+          }}
         />
         <MiniStat
           icon={CheckCircleIcon}
@@ -1796,12 +1807,12 @@ export default function Purchasing() {
                 disabled={poView === 'deleted'}
                 onChange={e => {
                   const next = new URLSearchParams(searchParams);
-                  if (e.target.value) next.set('poStatus', e.target.value);
-                  else next.delete('poStatus');
+                  next.set('poStatus', e.target.value);
                   setSearchParams(next);
                 }}
               >
                 <option value="">Active book · all statuses</option>
+                <option value="open">Open · awaiting receipt</option>
                 {['draft', 'sent', 'acknowledged', 'partial', 'received', 'closed', 'cancelled'].map(status => (
                   <option key={status} value={status}>
                     {status.replace(/_/g, ' ')}

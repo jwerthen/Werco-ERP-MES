@@ -75,6 +75,31 @@ it('uses live issue identities independently of old category dismissals, with Mi
   expect(screen.queryByRole('button', { name: 'Dismiss' })).not.toBeInTheDocument();
 });
 
+it('prioritizes unassigned issues and severity before pagination, preserving source order for ties', async () => {
+  const issues = [
+    item({ key: 'blocker:1', title: 'Assigned high', owner_id: 1, owner_name: 'Alex Operator' }),
+    ...Array.from({ length: 20 }, (_, index) =>
+      item({ key: `blocker:${index + 10}`, title: `Unassigned low ${index}`, severity: 'low' })
+    ),
+    item({ key: 'quality_ncr:9', title: 'Unassigned high first' }),
+    item({ key: 'blocker:9', title: 'Unassigned high second' }),
+    item({ key: 'blocker:8', title: 'Unassigned medium', severity: 'medium' }),
+  ];
+  mockApi.getOperationalInbox.mockResolvedValue(result(issues));
+  mount();
+  await screen.findByRole('article', { name: 'Unassigned high first' });
+  const titles = () => screen.getAllByRole('article').map(row => row.getAttribute('aria-label'));
+  expect(titles().slice(0, 4)).toEqual([
+    'Unassigned high first', 'Unassigned high second', 'Unassigned medium', 'Unassigned low 0',
+  ]);
+  expect(titles()).not.toContain('Assigned high');
+  expect(issues[0].title).toBe('Assigned high');
+  fireEvent.click(screen.getByRole('button', { name: 'Next issues' }));
+  expect(titles().at(-1)).toBe('Assigned high');
+  fireEvent.click(screen.getByRole('button', { name: 'Mine' }));
+  expect(titles()).toEqual(['Assigned high']);
+});
+
 it('retains acknowledged issues and moves snoozed issues into a recoverable view only after success', async () => {
   mount();
   await screen.findByRole('article');

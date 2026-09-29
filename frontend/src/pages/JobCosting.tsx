@@ -259,6 +259,8 @@ export default function JobCosting() {
     }
     return true;
   });
+  const firstRunEmpty = !loading && !loadError && summary?.total_jobs === 0
+    && jobCosts.length === 0 && !statusFilter && !searchTerm;
 
   // ── Variance chart data ────────────────────────────────────────
 
@@ -408,7 +410,7 @@ export default function JobCosting() {
         {canWrite && (
           <button
             onClick={openCreateModal}
-            className="du-btn du-btn-primary du-btn-sm gap-1 flex-shrink-0"
+            className={`du-btn ${firstRunEmpty ? 'du-btn-outline' : 'du-btn-primary'} du-btn-sm gap-1 flex-shrink-0`}
           >
             <PlusIcon className="h-4 w-4" />
             New Job Cost
@@ -448,6 +450,7 @@ export default function JobCosting() {
                 iconBg="bg-fd-cyan/15"
                 iconColor="text-fd-cyan"
                 label="Completed This Month"
+                wrapLabel
                 value={summary.jobs_completed_this_month}
               />
             </MiniStatStrip>
@@ -560,7 +563,7 @@ export default function JobCosting() {
                     icon={CurrencyDollarIcon}
                     title="No job costs found"
                     description="Track estimated vs. actual costs by creating a job cost for a work order."
-                    action={canWrite ? { label: 'New Job Cost', onClick: openCreateModal } : undefined}
+                    action={canWrite ? { label: 'Create from work order', onClick: openCreateModal } : undefined}
                   />
                 </td>
               </tr>

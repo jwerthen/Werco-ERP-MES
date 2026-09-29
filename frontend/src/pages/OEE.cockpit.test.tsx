@@ -212,6 +212,37 @@ test('renders the 4-up plant MiniStat strip (plant A/P/Q derived from work cente
   expect(screen.getByText('80.0%')).toBeInTheDocument(); // (89.0 + 71.0) / 2
   expect(screen.getByText('90.0%')).toBeInTheDocument(); // (92.0 + 88.0) / 2
   expect(screen.getByText('98.0%')).toBeInTheDocument(); // (99.0 + 97.0) / 2
+  expect(screen.queryByRole('heading', { name: 'No OEE samples in this date range' })).not.toBeInTheDocument();
+});
+
+test('an empty range explains sample inputs and offers review before secondary manual entry', async () => {
+  mockApiGet({ dashboard: nullMetricDashboard, trends: { time_series: [] }, records: [] });
+  renderOEE();
+
+  const guidance = await screen.findByRole('region', { name: 'No OEE samples in this date range' });
+  expect(within(guidance).getByText(/Automatic calculation runs nightly/)).toBeInTheDocument();
+  expect(within(guidance).getByRole('link', { name: 'Review time clock' })).toHaveAttribute('href', '/shop-floor');
+  expect(within(guidance).getByRole('link', { name: 'Review downtime' })).toHaveAttribute('href', '/downtime');
+  const manualAdd = within(guidance).getByRole('button', { name: 'Add manual record' });
+  expect(manualAdd).not.toHaveClass('btn-primary');
+  expect(screen.queryByRole('button', { name: /^Add Record$/i })).not.toBeInTheDocument();
+  expect(mockedApi.post).not.toHaveBeenCalled();
+
+  fireEvent.click(manualAdd);
+  expect(await screen.findByRole('dialog', { name: 'Add OEE record' })).toBeInTheDocument();
+});
+
+test('a measured zero OEE is retained as a sample rather than shown as an empty range', async () => {
+  mockApiGet({
+    dashboard: {
+      ...nullMetricDashboard,
+      work_centers: [{ ...nullMetricDashboard.work_centers[0], current_oee_pct: 0, record_date: '2026-07-01' }],
+    },
+  });
+  renderOEE();
+  await screen.findByText('Plant-wide OEE');
+  expect(screen.getAllByText('0.0%').length).toBeGreaterThan(0);
+  expect(screen.queryByRole('heading', { name: 'No OEE samples in this date range' })).not.toBeInTheDocument();
 });
 
 test('renders a Work Center OEE tile per work center', async () => {

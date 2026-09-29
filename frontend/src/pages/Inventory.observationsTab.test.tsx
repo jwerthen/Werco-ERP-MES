@@ -83,7 +83,7 @@ function renderPage() {
   );
 }
 function expectOnlyObservationContent() {
-  expect(screen.getByRole('button', { name: 'Piece observations' })).toHaveAttribute('aria-current', 'page');
+  expect(screen.getByRole('combobox', { name: 'Inventory view' })).toHaveValue('observations');
   expect(screen.getByRole('region', { name: 'Piece observations' })).toBeInTheDocument();
   expect(screen.queryByText('Unique Items')).not.toBeInTheDocument();
   expect(screen.queryByText('Total On Hand')).not.toBeInTheDocument();
@@ -130,13 +130,13 @@ it('keeps observations usable after aggregate fetching fails and preserves the e
   expect(await screen.findByRole('button', { name: observation.label })).toBeInTheDocument();
   expectOnlyObservationContent();
   expect(screen.queryByText('Could not load inventory data.')).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button', { name: 'Summary by Part' }));
+  fireEvent.change(screen.getByRole('combobox', { name: 'Inventory view' }), { target: { value: 'summary' } });
   const alert = await screen.findByRole('alert');
   expect(alert).toHaveTextContent('Could not load inventory data.');
   expect(screen.queryByRole('region', { name: 'Piece observations' })).not.toBeInTheDocument();
   fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
   expect(await screen.findByText('Unique Items')).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Summary by Part' })).toHaveAttribute('aria-current', 'page');
+  expect(screen.getByRole('combobox', { name: 'Inventory view' })).toHaveValue('summary');
   expect(screen.getByRole('button', { name: /Receive Inventory/ })).toBeInTheDocument();
   expect(screen.getByLabelText('Filter by part number or name')).toBeInTheDocument();
   expect(screen.getAllByText('SYNTHETIC-LEGACY-PART').length).toBeGreaterThan(0);
@@ -149,7 +149,7 @@ it('shows the existing aggregate summary and write actions when switching back a
   renderPage();
   await screen.findByRole('button', { name: observation.label });
   expectOnlyObservationContent();
-  fireEvent.click(screen.getByRole('button', { name: 'Summary by Part' }));
+  fireEvent.change(screen.getByRole('combobox', { name: 'Inventory view' }), { target: { value: 'summary' } });
   expect(await screen.findByText('Total On Hand')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: /Receive Inventory/ })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: /Combine SKUs/ })).toBeInTheDocument();

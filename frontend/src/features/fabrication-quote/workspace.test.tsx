@@ -8,6 +8,8 @@ import type { QuoteRecord } from './types';
 
 jest.mock('./api', () => ({ fabricationQuoteApi: { list: jest.fn(), get: jest.fn(), capabilities: jest.fn(), save: jest.fn(), create: jest.fn(), calculate: jest.fn(), approve: jest.fn(), profiles: jest.fn() } }));
 jest.mock('../../services/api', () => ({ __esModule: true, default: { getCustomerNames: jest.fn().mockResolvedValue([]) } }));
+jest.mock('../../context/AuthContext', () => ({ useAuth: () => ({ user: { id: 1, company_id: 1 } }) }));
+jest.mock('../../context/CompanyContext', () => ({ useCompany: () => ({ currentCompany: { id: 1 } }) }));
 jest.mock('../../components/ui/PdfPreview', () => ({ __esModule: true, default: () => <div>PDF preview</div> }));
 jest.mock('./StepViewer', () => ({ __esModule: true, default: () => <div>STEP preview</div> }));
 const mocked = fabricationQuoteApi as jest.Mocked<typeof fabricationQuoteApi>;
@@ -33,4 +35,46 @@ test('effective read-only capability disables creation, edits, save and approval
   mocked.capabilities.mockResolvedValue({ can_write: false }); mount(); await screen.findByText(/Read-only access/);
   expect(screen.getByRole('button', { name: 'New quote' })).toBeDisabled(); expect(screen.getByRole('button', { name: 'Save draft' })).toBeDisabled(); expect(screen.getByLabelText('Customer quantity')).toBeDisabled();
   fireEvent.click(screen.getByRole('button', { name: 'Review' })); expect(screen.getByLabelText('Estimator release note')).toBeDisabled(); expect(screen.getByRole('button', { name: 'Approve revision' })).toBeDisabled();
+});
+
+test('fresh quotes show USD and 25 percent, while calculate keeps the decimal fraction', async () => {
+  mocked.calculate.mockResolvedValue(record().calculation!);
+  mount();
+  await waitFor(() => expect(screen.getByLabelText('Quote title')).toHaveValue('Assembly A'));
+  expect(screen.getByLabelText('Quote currency')).toHaveValue('USD');
+  expect(screen.getByLabelText('Target gross margin (%)')).toHaveValue(25);
+  fireEvent.change(screen.getByLabelText('Target gross margin (%)'), { target: { value: '30' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Calculate' }));
+  await waitFor(() => expect(mocked.calculate).toHaveBeenCalledWith(expect.objectContaining({ target_margin: '0.3' }), 42));
+});
+
+test('a saved unknown currency is shown honestly and cannot be saved again', async () => {
+  const invalid = record(); invalid.plan.currency = 'USI';
+  mocked.get.mockResolvedValue(invalid);
+  mount();
+  await waitFor(() => expect(screen.getByLabelText('Quote title')).toHaveValue('Assembly A'));
+  expect(screen.getByLabelText('Quote currency')).toHaveValue('USI');
+  fireEvent.change(screen.getByLabelText('Quote title'), { target: { value: 'Reviewed assembly' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('select a supported currency code');
+  expect(mocked.save).not.toHaveBeenCalled();
+});
+
+test('calculate requires positive demand while an incomplete draft can still be saved', async () => {
+  const incomplete = record(); incomplete.plan.roots = [];
+  mocked.get.mockResolvedValue(incomplete);
+  mount();
+  await waitFor(() => expect(screen.getByLabelText('Quote title')).toHaveValue('Assembly A'));
+  const calculate = screen.getByRole('button', { name: 'Calculate' });
+  expect(calculate).toBeDisabled();
+  fireEvent.click(calculate);
+  expect(mocked.calculate).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText('Quote title'), { target: { value: 'Incomplete but saved' } });
+  expect(screen.getByRole('button', { name: 'Save draft' })).toBeEnabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Add demand' }));
+  const quantity = screen.getByLabelText('Customer quantity');
+  fireEvent.change(quantity, { target: { value: '0' } });
+  expect(calculate).toBeDisabled();
+  fireEvent.change(quantity, { target: { value: '2.5' } });
+  expect(calculate).toBeEnabled();
 });

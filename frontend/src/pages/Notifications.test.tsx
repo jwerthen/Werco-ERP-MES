@@ -8,9 +8,10 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import Notifications from './Notifications';
+import NotificationBell from '../components/NotificationBell';
 import api from '../services/api';
 import { NotificationItem, PaginationMeta } from '../types/notification';
 
@@ -19,6 +20,7 @@ jest.mock('../components/BackgroundEmailActivity', () => ({ __esModule: true, de
 jest.mock('../services/api', () => ({
   __esModule: true,
   default: {
+    getUnreadCount: jest.fn(),
     getNotificationCatalog: jest.fn(),
     getNotifications: jest.fn(),
     markNotificationRead: jest.fn(),
@@ -53,9 +55,9 @@ const makeItem = (over: Partial<NotificationItem>): NotificationItem => ({
   ...over,
 });
 
-const renderPage = () =>
+const renderPage = (initialEntry = '/notifications') =>
   render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <Notifications />
     </MemoryRouter>
   );
@@ -63,6 +65,7 @@ const renderPage = () =>
 describe('Notifications page', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockApi.getUnreadCount.mockResolvedValue(1);
     mockApi.getNotificationCatalog.mockResolvedValue([
       {
         event_key: 'wo.blocker_created',
@@ -86,7 +89,8 @@ describe('Notifications page', () => {
     renderPage();
 
     expect(await screen.findByText('Receipt recorded')).toBeInTheDocument();
-    expect(mockApi.getNotifications).toHaveBeenCalledWith({ page: 1, pageSize: 25 });
+    expect(mockApi.getNotifications).toHaveBeenCalledWith({ page: 1, pageSize: 25, unread: true });
+    expect(screen.getByLabelText('Show')).toHaveValue('unread');
   });
 
   it('renders the empty state when there are no notifications', async () => {
@@ -131,5 +135,69 @@ describe('Notifications page', () => {
     fireEvent.click(screen.getByRole('button', { name: /Mark all read/i }));
 
     await waitFor(() => expect(mockApi.markAllNotificationsRead).toHaveBeenCalled());
+  });
+
+  it.each([
+    ['/notifications?show=all', 'all', undefined],
+    ['/notifications?unread=false', 'read', false],
+    ['/notifications?show=unread', 'unread', true],
+  ])('respects explicit notification filters in %s', async (url, show, unread) => {
+    mockApi.getNotifications.mockResolvedValue({ items: [makeItem({})], pagination: meta() });
+    renderPage(url as string);
+    await screen.findByText('Work order on hold');
+    expect(screen.getByLabelText('Show')).toHaveValue(show);
+    expect(mockApi.getNotifications).toHaveBeenLastCalledWith(unread === undefined ? { page: 1, pageSize: 25 } : { page: 1, pageSize: 25, unread });
+  });
+
+  it('shows all on a fresh visit with no unread notifications and leaves email activity collapsed', async () => {
+    mockApi.getUnreadCount.mockResolvedValue(0);
+    mockApi.getNotifications.mockResolvedValue({ items: [makeItem({ is_read: true })], pagination: meta() });
+    renderPage();
+    await screen.findByText('Work order on hold');
+    await waitFor(() => expect(screen.getByLabelText('Show')).toHaveValue('all'));
+    expect(screen.getByText('Background email activity').closest('details')).not.toHaveAttribute('open');
+  });
+
+  it('reaches the remaining unread notifications through visible pagination', async () => {
+    mockApi.getUnreadCount.mockResolvedValue(42);
+    mockApi.getNotifications.mockImplementation(async params => ({
+      items: Array.from({ length: params?.page === 2 ? 17 : 25 }, (_, i) => makeItem({ id: i + (params?.page === 2 ? 26 : 1), title: `Unread notice ${i + (params?.page === 2 ? 26 : 1)}` })),
+      pagination: meta({ page: params?.page ?? 1, total_count: 42, total_pages: 2, has_next: params?.page !== 2, has_previous: params?.page === 2 }),
+    }));
+    renderPage();
+    expect(await screen.findByText(/17 remaining after this page/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    expect(await screen.findByText('Unread notice 42')).toBeInTheDocument();
+    expect(screen.getByText(/0 remaining after this page/)).toBeInTheDocument();
+    expect(mockApi.getNotifications).toHaveBeenLastCalledWith({ page: 2, pageSize: 25, unread: true });
+    expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Previous page' })).toBeEnabled();
+  });
+
+  it('shows the shared unread count rather than total notifications and clears the bell when the inbox marks the last unread row', async () => {
+    let unread = makeItem({ id: 8, title: 'Last unread notification' });
+    const read = makeItem({ id: 9, title: 'Already read notification', is_read: true });
+    mockApi.getNotifications.mockImplementation(async () => ({
+      items: [unread, read],
+      pagination: meta({ total_count: 42, total_pages: 2, has_next: true }),
+    }));
+    mockApi.markNotificationRead.mockImplementation(async () => {
+      unread = { ...unread, is_read: true };
+      return unread;
+    });
+    render(<MemoryRouter><NotificationBell /><Notifications /></MemoryRouter>);
+
+    expect(await screen.findByRole('button', { name: 'Notifications, 1 unread' })).toBeInTheDocument();
+    await screen.findByText('Last unread notification');
+    expect(screen.getByText('42')).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole('table')).getByRole('button', { name: 'Mark read' }));
+
+    await waitFor(() => expect(mockApi.markNotificationRead).toHaveBeenCalledWith(8));
+    const bell = await screen.findByRole('button', { name: 'Notifications' });
+    expect(within(bell).queryByText('1')).not.toBeInTheDocument();
+    expect(within(bell).queryByText('0')).not.toBeInTheDocument();
+    await waitFor(() => expect(within(screen.getByRole('table')).queryByRole('button', { name: 'Mark read' })).not.toBeInTheDocument());
+    expect(mockApi.getUnreadCount).toHaveBeenCalledTimes(1);
+    expect(mockApi.getNotificationCatalog).toHaveBeenCalledTimes(1);
   });
 });

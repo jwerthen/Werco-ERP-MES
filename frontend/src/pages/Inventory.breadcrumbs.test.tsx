@@ -86,6 +86,7 @@ test('the bare /inventory hub renders no breadcrumb nav', async () => {
   expect((await screen.findAllByText('PN-700')).length).toBeGreaterThan(0);
 
   expect(screen.queryByRole('navigation', { name: /breadcrumb/i })).toBeNull();
+  expect(screen.getByRole('heading', { name: 'Inventory', level: 1 })).toBeInTheDocument();
 });
 
 test('/inventory/parts renders one breadcrumb linking back to Inventory', async () => {
@@ -99,9 +100,12 @@ test('/inventory/parts renders one breadcrumb linking back to Inventory', async 
   expect(nav).toHaveTextContent('Part Inventory');
 });
 
-test('the embedded Warehouse-tab variant never renders a breadcrumb', async () => {
+test('the embedded Warehouse-tab variant omits duplicate headings but keeps Inventory controls', async () => {
   renderAt('/inventory/parts', true);
   expect((await screen.findAllByText('PN-700')).length).toBeGreaterThan(0);
 
   expect(screen.queryByRole('navigation', { name: /breadcrumb/i })).toBeNull();
+  expect(screen.queryByRole('heading', { name: 'Inventory' })).not.toBeInTheDocument();
+  expect(screen.getByRole('combobox', { name: 'Inventory view' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Receive Inventory' })).toBeInTheDocument();
 });

@@ -11,7 +11,7 @@
  * ResponsiveContainer needs one, so we stub it at the top of the file.
  */
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import Analytics from './Analytics';
@@ -139,4 +139,65 @@ test('the redundant Quick Links row is gone', async () => {
   await screen.findByText('Analytics Dashboard');
 
   expect(screen.queryByText(/quick links/i)).toBeNull();
+});
+
+test('promotes a severe OTD target miss above the KPI strip', async () => {
+  mockedApi.getKPIDashboard.mockResolvedValue({ ...kpiDashboard, on_time_delivery: kpi(44.4, 95), oee: kpi(null) } as any);
+  renderAnalytics();
+  const attention = await screen.findByRole('region', { name: 'Critical KPI target misses' });
+  expect(within(attention).getByText('On-Time Delivery: 44.4%')).toBeInTheDocument();
+  expect(within(attention).queryByText(/OEE/)).not.toBeInTheDocument();
+});
+
+test('shows turnover as an unverified annualized estimate with the known denominator issue', async () => {
+  mockedApi.getKPIDashboard.mockResolvedValue({ ...kpiDashboard, inventory_turnover: kpi(913.59, 4) } as any);
+  renderAnalytics();
+  const value = await screen.findByText('913.59');
+  const tile = value.closest('.card') as HTMLElement;
+  expect(within(tile).getByText('Unverified')).toBeInTheDocument();
+  expect(within(tile).getByText(/Uses average inventory-row value, not average total inventory/)).toBeInTheDocument();
+  expect(within(tile).getByText(/Not comparable to the 4.00×\/year turnover target/)).toBeInTheDocument();
+  expect(within(tile).getByText(/vs prior/)).toHaveClass('text-slate-400');
+  expect(tile.querySelector('.text-emerald-400')).toBeNull();
+});
+
+test('warns about a discontinuous production spike with its unchanged date and quantity', async () => {
+  mockedApi.getProductionTrends.mockResolvedValue({ time_series: [{ date: '2026-09-01', units_produced: 0 }, { date: '2026-09-02', units_produced: 800 }], totals: {} } as any);
+  renderAnalytics();
+  const warning = await screen.findByRole('note', { name: 'Production data review' });
+  expect(within(warning).getByText(/0 → 800 units/)).toBeInTheDocument();
+  expect(within(warning).getByText(/original values are shown/)).toBeInTheDocument();
+});
+
+test.each([
+  { metric: 'scrap_rate', title: 'Scrap Rate', value: 3.59, prior: 1.3, change: 176.3, apiTrend: 'down', movement: 'increased', color: 'text-red-500' },
+  { metric: 'scrap_rate', title: 'Scrap Rate', value: 1.3, prior: 3.59, change: -63.8, apiTrend: 'up', movement: 'decreased', color: 'text-green-500' },
+  { metric: 'open_ncrs', title: 'Open NCRs', value: 4, prior: 2, change: 100, apiTrend: 'down', movement: 'increased', color: 'text-red-500' },
+  { metric: 'open_ncrs', title: 'Open NCRs', value: 2, prior: 4, change: -50, apiTrend: 'up', movement: 'decreased', color: 'text-green-500' },
+  { metric: 'first_pass_yield', title: 'First Pass Yield', value: 98, prior: 90, change: 8.9, apiTrend: 'up', movement: 'increased', color: 'text-green-500' },
+  { metric: 'on_time_delivery', title: 'On-Time Delivery', value: 90, prior: 95, change: -5.3, apiTrend: 'down', movement: 'decreased', color: 'text-red-500' },
+])('$title $movement uses metric polarity even when the API trend is already flipped', async ({ metric, title, value, prior, change, apiTrend, movement, color }) => {
+  mockedApi.getKPIDashboard.mockResolvedValue({
+    ...kpiDashboard,
+    [metric]: { ...kpi(value), prior_value: prior, change_pct: change, trend: apiTrend },
+  } as any);
+  renderAnalytics();
+  await screen.findByText('Analytics Dashboard');
+  const trend = screen.getByLabelText(`${title} ${movement} from prior period`);
+  expect(within(trend).getByText(/vs prior/)).toHaveClass(color);
+  expect(trend.querySelector('svg')).toHaveClass(color);
+});
+
+test.each([
+  { value: 2, prior: 0 },
+  { value: 0, prior: 2 },
+  { value: 0, prior: 0 },
+  { value: null, prior: 2 },
+])('hides percentage comparison when current $value or prior $prior is zero or unavailable', async ({ value, prior }) => {
+  mockedApi.getKPIDashboard.mockResolvedValue({ ...kpiDashboard, open_ncrs: { ...kpi(value, 0), prior_value: prior, change_pct: 100, trend: 'down' } } as any);
+  renderAnalytics();
+  const title = await screen.findByText('Open NCRs');
+  const tile = title.closest('.card') as HTMLElement;
+  expect(within(tile).queryByText(/vs prior/)).not.toBeInTheDocument();
+  expect(within(tile).getByText(value === null ? 'n/a' : String(value))).toBeInTheDocument();
 });

@@ -8,7 +8,7 @@
  */
 
 import React from 'react';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, within, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import ToolManagement from './ToolManagement';
@@ -81,4 +81,21 @@ describe('ToolManagement cockpit: KPI counts live in tab badges', () => {
     // Sanity: the All Tools tab matched is the same node and shows its count.
     expect(within(allToolsTab).getByText('42')).toBeInTheDocument();
   });
+});
+
+
+test('distinguishes a first tool from a search miss and an empty attention tab', async () => {
+  jest.clearAllMocks();
+  mockedApi.getToolDashboard.mockResolvedValue({ ...dashboard, total_tools: 0 });
+  mockedApi.getTools.mockResolvedValue([]);
+  mockedApi.getToolsCheckedOut.mockResolvedValue([]);
+  renderPage();
+  expect((await screen.findAllByText('No tools yet'))[0]).toBeInTheDocument();
+  expect(screen.getAllByText('Add the first tool or fixture to start tracking your crib.')[0]).toBeInTheDocument();
+  fireEvent.change(screen.getByPlaceholderText(/Search/), { target: { value: 'missing drill' } });
+  expect(screen.getAllByText('No tools found')[0]).toBeInTheDocument();
+  expect(screen.getAllByText('No tools match the current filters.')[0]).toBeInTheDocument();
+  fireEvent.change(screen.getByPlaceholderText(/Search/), { target: { value: '' } });
+  fireEvent.click(screen.getByRole('button', { name: /Checked Out/ }));
+  expect((await screen.findAllByText('No tools in this view'))[0]).toBeInTheDocument();
 });

@@ -622,7 +622,7 @@ export default function PartsPage() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-white">Parts</h1>
-          <p className="text-sm text-slate-400 mt-0.5 tabular-nums">{stats.total} parts · {stats.active} active · {stats.manufactured} mfg/assembly · {stats.critical} critical</p>
+          <p className="text-sm text-slate-300 mt-0.5 tabular-nums">{stats.total} listed part{stats.total === 1 ? '' : 's'}{!search && !showBOMComponents && componentPartIds.size > 0 && ` · ${componentPartIds.size} nested components hidden`} · {stats.active} active · {stats.manufactured} mfg/assembly · {stats.critical} critical</p>
         </div>
         <div className="flex gap-2">
           <button onClick={() => setShowImport(true)} className="btn-secondary flex items-center gap-2">
@@ -858,7 +858,7 @@ export default function PartsPage() {
                           </span>
                         </td>
                         <td className="px-4 py-3 text-center text-sm font-medium tabular-nums">{part.revision}</td>
-                        <td className="px-4 py-3 text-right text-sm tabular-nums">${Number(part.standard_cost || 0).toFixed(2)}</td>
+                        <td className="px-4 py-3 text-right text-sm tabular-nums">{Number(part.standard_cost || 0) === 0 ? <span className="text-slate-400">Not costed</span> : `$${Number(part.standard_cost).toFixed(2)}`}</td>
                         <td className="px-4 py-3 text-center">
                           <div className="flex items-center justify-center gap-1.5">
                             <StatusBadge status={part.status} />
@@ -918,7 +918,7 @@ export default function PartsPage() {
                             )}
                           </td>
                           <td className="px-4 py-2 text-center text-sm tabular-nums">{componentPart?.revision || '-'}</td>
-                            <td className="px-4 py-2 text-right text-sm tabular-nums">${Number(componentCost || 0).toFixed(2)}</td>
+                            <td className="px-4 py-2 text-right text-sm tabular-nums">{Number(componentCost) === 0 ? <span className="text-slate-400">Not costed</span> : `$${Number(componentCost).toFixed(2)}`}</td>
                             <td className="px-4 py-2 text-center text-xs text-slate-500">BOM item</td>
                             <td className="px-4 py-2 text-right">
                               {componentPart && <ChevronRightIcon className="h-4 w-4 text-slate-600" />}

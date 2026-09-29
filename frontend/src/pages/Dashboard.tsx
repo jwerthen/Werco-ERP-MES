@@ -573,6 +573,25 @@ export default function Dashboard() {
       {/* KPI strip — one dense row of compact tiles */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2" data-tour="dashboard-stats">
         <MiniStat
+          icon={ExclamationTriangleIcon}
+          iconBg={data?.summary.overdue ? 'bg-red-500/20' : 'bg-fd-green/15'}
+          iconColor={data?.summary.overdue ? 'text-red-600' : 'text-fd-green'}
+          label="Overdue"
+          value={data?.summary.overdue || 0}
+          valueColor={data?.summary.overdue ? 'text-red-300' : undefined}
+          href="/work-orders?scope=overdue&cots=1"
+        />
+        <MiniStat
+          icon={UsersIcon}
+          iconBg={(data?.summary.idle_signed_in_users || 0) > 0 ? 'bg-amber-500/20' : 'bg-slate-800/50'}
+          iconColor={(data?.summary.idle_signed_in_users || 0) > 0 ? 'text-amber-600' : 'text-slate-400'}
+          label="Signed In, Idle"
+          value={data?.summary.idle_signed_in_users || 0}
+          subtitle="Not clocked into work"
+          valueColor={(data?.summary.idle_signed_in_users || 0) > 0 ? 'text-amber-300' : undefined}
+          onClick={() => { const panel = document.getElementById('idle-operators'); panel?.scrollIntoView({ behavior: 'smooth', block: 'center' }); panel?.focus(); }}
+        />
+        <MiniStat
           icon={ClipboardDocumentListIcon}
           iconBg="bg-blue-500/20"
           iconColor="text-blue-600"
@@ -605,23 +624,6 @@ export default function Dashboard() {
           label="Due Today"
           value={data?.summary.due_today || 0}
           href="/work-orders?scope=due_today&cots=1"
-        />
-        <MiniStat
-          icon={ExclamationTriangleIcon}
-          iconBg={data?.summary.overdue ? 'bg-red-500/20' : 'bg-fd-green/15'}
-          iconColor={data?.summary.overdue ? 'text-red-600' : 'text-fd-green'}
-          label="Overdue"
-          value={data?.summary.overdue || 0}
-          valueColor={data?.summary.overdue ? 'text-red-300' : undefined}
-          href="/work-orders?scope=overdue&cots=1"
-        />
-        <MiniStat
-          icon={UsersIcon}
-          iconBg={(data?.summary.idle_signed_in_users || 0) > 0 ? 'bg-amber-500/20' : 'bg-slate-800/50'}
-          iconColor={(data?.summary.idle_signed_in_users || 0) > 0 ? 'text-amber-600' : 'text-slate-400'}
-          label="Signed In, Idle"
-          value={data?.summary.idle_signed_in_users || 0}
-          subtitle="Not clocked into work"
         />
         <MiniStat
           icon={WrenchScrewdriverIcon}
@@ -758,7 +760,8 @@ export default function Dashboard() {
             <EmptyState
               icon={UserGroupIcon}
               title="No one is clocked into a job right now"
-              description="Signed-in users still appear in the presence panel."
+              description={idleSignedInUsers.length > 0 ? `${idleSignedInUsers.length} signed-in ${idleSignedInUsers.length === 1 ? 'operator is' : 'operators are'} idle and available to start work.` : 'Signed-in users still appear in the presence panel.'}
+              action={idleSignedInUsers.length > 0 ? { label: 'View idle operators', onClick: () => { const panel = document.getElementById('idle-operators'); panel?.scrollIntoView({ behavior: 'smooth', block: 'center' }); panel?.focus(); } } : undefined}
             />
           )}
         </CockpitPanel>
@@ -847,7 +850,7 @@ export default function Dashboard() {
               )}
 
               {idleSignedInUsers.length > 0 && (
-                <div className="divide-y divide-fd-line border-t border-fd-line">
+                <div id="idle-operators" tabIndex={-1} aria-label="Idle operators" className="divide-y divide-fd-line border-t border-fd-line scroll-mt-4">
                   {idleSignedInUsers.map(user => (
                     <IdleUserRow key={user.id} user={user} />
                   ))}

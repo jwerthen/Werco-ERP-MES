@@ -152,6 +152,10 @@ export default function Documents() {
       showToast('error', 'Please select a file');
       return;
     }
+    if (!partsById.has(uploadForm.part_id)) {
+      setActionError('Select the associated part before uploading so this document can be found by part number.');
+      return;
+    }
 
     const formData = new FormData();
     formData.append('file', uploadForm.file);
@@ -232,9 +236,11 @@ export default function Documents() {
       doc =>
         doc.document_number.toLowerCase().includes(searchLower) ||
         doc.title.toLowerCase().includes(searchLower) ||
-        doc.file_name?.toLowerCase().includes(searchLower)
+        doc.file_name?.toLowerCase().includes(searchLower) ||
+        doc.part?.part_number.toLowerCase().includes(searchLower) ||
+        (doc.part_id ? partsById.get(doc.part_id)?.part_number.toLowerCase().includes(searchLower) : false)
     );
-  }, [documents, debouncedSearch]);
+  }, [documents, debouncedSearch, partsById]);
   const filteredCount = filteredDocs.length;
 
   const partNumberFor = useCallback(
@@ -253,8 +259,8 @@ export default function Documents() {
         render: doc => (
           <div className="flex items-center">
             <span className="text-2xl mr-3">{typeIcons[doc.document_type] || '📄'}</span>
-            <div>
-              <div className="font-medium">{doc.title}</div>
+            <div className="min-w-0 max-w-xs">
+              <button type="button" className="text-left font-medium line-clamp-2 break-words hover:line-clamp-none focus:line-clamp-none" title={doc.title} onClick={event => { event.stopPropagation(); selectDocument(doc.id); }}>{doc.title}</button>
               <div className="text-sm text-slate-400">
                 {doc.document_number} Rev {doc.revision}
               </div>
@@ -288,7 +294,7 @@ export default function Documents() {
         header: 'Part',
         sortable: true,
         accessor: doc => partNumberFor(doc),
-        render: doc => <span className="text-sm">{partNumberFor(doc)}</span>,
+        render: doc => <span className="text-sm font-mono font-semibold">{partNumberFor(doc)}</span>,
       },
       {
         key: 'uploaded',
@@ -303,13 +309,13 @@ export default function Documents() {
         header: 'Actions',
         align: 'center',
         render: doc => (
-          <div className="flex justify-center gap-2">
+          <div className="flex items-center justify-center gap-2">
             <button
               onClick={e => {
                 e.stopPropagation();
                 selectDocument(doc.id);
               }}
-              className="text-werco-primary underline"
+              className="btn-primary btn-sm whitespace-nowrap"
             >
               Preview / History
             </button>
@@ -318,7 +324,7 @@ export default function Documents() {
                 e.stopPropagation();
                 handleDownload(doc);
               }}
-              className="text-werco-primary hover:text-blue-400"
+              className="btn-secondary btn-sm"
               title="Download"
               aria-label="Download document"
             >
@@ -330,8 +336,8 @@ export default function Documents() {
                   e.stopPropagation();
                   handleDelete(doc.id);
                 }}
-                className="text-red-500 hover:text-red-400"
-                title="Delete"
+                className="ml-2 border-l border-slate-600 pl-3 text-red-300 hover:text-red-200"
+                title="Review and confirm deletion"
                 aria-label="Delete document"
               >
                 <TrashIcon className="h-5 w-5" aria-hidden="true" />
@@ -360,16 +366,18 @@ export default function Documents() {
         ]}
         actions={
           <>
+            <button type="button" className="btn-primary btn-sm" onClick={event => { event.stopPropagation(); selectDocument(doc.id); }}>Preview / History</button>
             <button
-              onClick={() => handleDownload(doc)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-werco-primary border border-fd-line rounded-sm hover:bg-slate-700/40"
+              onClick={event => { event.stopPropagation(); handleDownload(doc); }}
+              className="btn-secondary btn-sm"
             >
               <ArrowDownTrayIcon className="h-4 w-4" /> Download
             </button>
             {canDelete && (
               <button
-                onClick={() => handleDelete(doc.id)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-500 border border-fd-line rounded-sm hover:bg-slate-700/40"
+                onClick={event => { event.stopPropagation(); handleDelete(doc.id); }}
+                className="ml-2 inline-flex items-center gap-1 border-l border-slate-600 pl-3 text-xs text-red-300 hover:text-red-200"
+                title="Review and confirm deletion"
               >
                 <TrashIcon className="h-4 w-4" /> Delete
               </button>
@@ -516,15 +524,16 @@ export default function Documents() {
               )}
             </FormField>
           </div>
-          <FormField label="Associated Part">
+          <FormField label="Associated Part" required>
             {field => (
               <select
                 {...field}
-                value={uploadForm.part_id}
-                onChange={e => setUploadForm({ ...uploadForm, part_id: parseInt(e.target.value) })}
+                value={uploadForm.part_id || ''}
+                onChange={e => setUploadForm({ ...uploadForm, part_id: Number(e.target.value) })}
                 className="input"
+                required
               >
-                <option value={0}>None</option>
+                <option value="">Select the associated part</option>
                 {parts.map(p => (
                   <option key={p.id} value={p.id}>
                     {p.part_number} - {p.name}
@@ -533,6 +542,7 @@ export default function Documents() {
               </select>
             )}
           </FormField>
+          <p className="text-xs text-slate-300">Required for part-number lookup. Choose the part explicitly; filenames are not used to infer a link.</p>
           <FormField label="Description">
             {field => (
               <textarea
