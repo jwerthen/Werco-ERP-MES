@@ -358,6 +358,7 @@ function buildWorkOrderColumns({
       key: 'work_order_number',
       header: 'Work Order',
       sortable: true,
+      className: 'min-w-[12rem] whitespace-normal',
       accessor: (wo) => wo.work_order_number,
       render: (wo) => (
         <div className="min-w-0">
@@ -371,8 +372,8 @@ function buildWorkOrderColumns({
               }
             }}
             aria-haspopup="dialog"
-            title="View operations"
-            className="font-semibold text-fd-link hover:text-sky-200 hover:underline"
+            title={`${wo.work_order_number} — View operations`}
+            className="font-mono font-semibold whitespace-normal break-words text-fd-link hover:text-sky-200 hover:underline"
           >
             {wo.work_order_number}
           </Link>
@@ -1566,7 +1567,7 @@ export default function WorkOrders() {
   }
 
   return (
-    <div className="space-y-5 sm:space-y-6">
+    <div className="space-y-3">
       {pageHeader}
       {tabStrip}
 
@@ -1664,7 +1665,7 @@ export default function WorkOrders() {
         </div>
 
         {/* Toggle + count row */}
-        <div className="flex flex-col xs:flex-row xs:items-center xs:justify-between gap-2 mt-2.5 pt-2.5 border-t border-fd-line">
+        <div className="flex flex-col xs:flex-row xs:items-center xs:justify-between gap-2 mt-2 pt-2 border-t border-fd-line">
           <label className="flex items-center gap-2 cursor-pointer group">
             <input
               type="checkbox"
@@ -1691,7 +1692,7 @@ export default function WorkOrders() {
         <select id="work-order-sort" aria-label="Sort work orders" className="input w-auto max-w-full" value={`${workspace.layout.sort?.key || 'priority'}:${workspace.layout.sort?.dir || 'asc'}`}
           onChange={event => { const [key, dir] = event.target.value.split(':'); workspace.change({ ...workspace.layout, sort: { key, dir: dir as 'asc' | 'desc' } }); }}>
           {[['priority','Priority'], ['due_date','Due date'], ['work_order_number','Work order'], ['part','Part'], ['customer','Customer'], ['status','Status']].flatMap(([key, label]) =>
-            [<option key={`${key}:asc`} value={`${key}:asc`}>{label} · ascending</option>, <option key={`${key}:desc`} value={`${key}:desc`}>{label} · descending</option>])}
+            [<option key={`${key}:asc`} value={`${key}:asc`}>{label} · {key === 'priority' ? 'highest urgency first' : 'ascending'}</option>, <option key={`${key}:desc`} value={`${key}:desc`}>{label} · {key === 'priority' ? 'lowest urgency first' : 'descending'}</option>])}
         </select>
       </div>
       <TableWorkspaceControls workspace={workspace} />
@@ -2004,7 +2005,7 @@ const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder:
             }}
             aria-haspopup="dialog"
             title="View operations"
-            className="block font-semibold text-werco-400 hover:text-werco-300 truncate"
+            className="block font-mono font-semibold text-werco-400 hover:text-werco-300 whitespace-normal break-words"
           >
             {wo.work_order_number}
           </Link>

@@ -15,6 +15,7 @@ import { Modal } from '../components/ui/Modal';
 import { useUnsavedChanges } from '../hooks/useUnsavedChanges';
 import { FormField } from '../components/ui/FormField';
 import {
+  ConfirmDialog,
   LoadingButton,
   useToast,
   DataTable,
@@ -130,6 +131,7 @@ export default function Quotes() {
   const [formError, setFormError] = useState('');
   const [sendingIds, setSendingIds] = useState<Set<number>>(new Set());
   const sendingRef = useRef(new Set<number>());
+  const [missingExpiryTarget, setMissingExpiryTarget] = useState<Quote | null>(null);
   const [conversionLines, setConversionLines] = useState<ConversionLine[]>([]);
   const [conversionIds, setConversionIds] = useState<number[]>([]);
   const [conversionLoading, setConversionLoading] = useState(false);
@@ -253,7 +255,7 @@ export default function Quotes() {
     setLoadError(false);
     try {
       const rows = await api.getQuotes({ status: status === 'open' ? undefined : status, search: query || undefined });
-      if (request === listRequest.current) setQuotes(rows);
+      if (request === listRequest.current) setQuotes(status === 'open' ? rows.filter(quote => ['draft', 'sent', 'pending'].includes(quote.status)) : rows);
     } catch {
       if (request === listRequest.current) setLoadError(true);
     } finally {
@@ -321,12 +323,18 @@ export default function Quotes() {
     }
   };
 
-  const handleSend = async (quoteId: number) => {
+  const handleSend = async (quoteId: number, confirmedMissingExpiry = false) => {
     if (sendingRef.current.has(quoteId)) return;
+    const quote = quotes.find(item => item.id === quoteId) ?? (selectedQuote?.id === quoteId ? selectedQuote : null);
+    if (quote && !quote.valid_until && !confirmedMissingExpiry) {
+      setMissingExpiryTarget(quote);
+      return;
+    }
     sendingRef.current.add(quoteId);
     setSendingIds(new Set(sendingRef.current));
     try {
       await api.sendQuote(quoteId);
+      setMissingExpiryTarget(null);
       showToast('success', 'Quote marked as sent. No customer message was sent by this action.');
       void loadData();
     } catch (err: any) {
@@ -510,7 +518,7 @@ export default function Quotes() {
       sortable: true,
       accessor: q => q.valid_until ?? '',
       csv: q => (q.valid_until ? formatCentralDate(q.valid_until) : ''),
-      render: q => (q.valid_until ? formatCentralDate(q.valid_until) : '-'),
+      render: q => (q.valid_until ? formatCentralDate(q.valid_until) : q.status === 'draft' ? 'Not set' : '—'),
     },
     {
       key: 'total',
@@ -520,7 +528,7 @@ export default function Quotes() {
       accessor: q => q.total,
       csv: q => q.total,
       render: q => (
-        <span className="font-medium">${q.total.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+        <span className="font-medium">${q.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
       ),
     },
     {
@@ -548,10 +556,10 @@ export default function Quotes() {
       onClick={() => selectQuote(q)}
       fields={[
         { label: 'Date', value: formatCentralDate(q.quote_date) },
-        { label: 'Valid Until', value: q.valid_until ? formatCentralDate(q.valid_until) : '-' },
+        { label: 'Valid Until', value: q.valid_until ? formatCentralDate(q.valid_until) : q.status === 'draft' ? 'Not set' : '—' },
         {
           label: 'Total',
-          value: `$${q.total.toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
+          value: `$${q.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
         },
         { label: 'Lines', value: q.lines.length },
       ]}
@@ -616,7 +624,7 @@ export default function Quotes() {
               </div>
               <div className="text-left sm:text-right">
                 <p className="text-xl font-bold text-slate-100">
-                  ${selectedQuote.total.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                  ${selectedQuote.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </p>
                 <button onClick={clearSelectedQuote} className="mt-2 text-sm text-werco-300 hover:text-werco-200">
                   Clear selection
@@ -860,7 +868,7 @@ export default function Quotes() {
                   </tr>
                 ))}</tbody>
               </table>
-              <p className="text-right font-semibold mt-3">Total: ${calculateTotal().toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+              <p className="text-right font-semibold mt-3">Total: ${calculateTotal().toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
             </div>
 
             <FormField label="Payment terms">
@@ -996,6 +1004,17 @@ export default function Quotes() {
           </LoadingButton>
         </div>
       </Modal>
+      <ConfirmDialog
+        open={missingExpiryTarget !== null}
+        title="Quote validity date is not set"
+        message={`${missingExpiryTarget?.quote_number || 'This quote'} has no valid-until date. Edit the draft to set an expiry, or continue to mark it as sent without one. This action does not email the customer.`}
+        variant="warning"
+        confirmLabel="Mark as sent without expiry"
+        cancelLabel="Return to quote"
+        pending={missingExpiryTarget !== null && sendingIds.has(missingExpiryTarget.id)}
+        onConfirm={() => { if (missingExpiryTarget) void handleSend(missingExpiryTarget.id, true); }}
+        onCancel={() => { if (!missingExpiryTarget || !sendingIds.has(missingExpiryTarget.id)) setMissingExpiryTarget(null); }}
+      />
     </div>
   );
 }

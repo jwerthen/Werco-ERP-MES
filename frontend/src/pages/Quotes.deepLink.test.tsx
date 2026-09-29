@@ -15,7 +15,7 @@ jest.mock('../context/AuthContext', () => ({ useAuth: () => ({ user: { id: 1, co
  * writes `selectedQuote` off the back of it), and that a rejection is surfaced.
  */
 import React from 'react';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor, within, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import api from '../services/api';
 import Quotes from './Quotes';
@@ -131,4 +131,33 @@ describe('no ?id= param', () => {
     expect(screen.queryByText('Selected quote')).not.toBeInTheDocument();
     expect(mockedApi.getQuote).not.toHaveBeenCalled();
   });
+});
+
+test('fresh Open list excludes rejected quotes and rounds standard totals to cents', async () => {
+  mockedApi.getQuotes.mockResolvedValue([
+    { ...listedQuote, total: 1112.598 },
+    { ...listedQuote, id: 8, quote_number: 'REJECTED-8', status: 'rejected' },
+  ] as any);
+  renderAt('/quotes');
+  await screen.findAllByText('QUO-0007');
+  expect(screen.queryByText('REJECTED-8')).not.toBeInTheDocument();
+  expect(screen.getAllByText('$1,112.60').length).toBeGreaterThan(0);
+  fireEvent.change(screen.getByLabelText('Quote status'), { target: { value: 'all' } });
+  expect((await screen.findAllByText('REJECTED-8')).length).toBeGreaterThan(0);
+});
+
+test('missing expiry prompts before marking a draft sent and cancel writes nothing', async () => {
+  mockedApi.getQuotes.mockResolvedValue([{ ...listedQuote, status: 'draft' }] as any);
+  mockedApi.sendQuote.mockResolvedValue({});
+  renderAt('/quotes');
+  await screen.findAllByText('Not set');
+  fireEvent.click(screen.getAllByTitle('Mark as sent (no email is sent)')[0]);
+  const dialog = await screen.findByRole('dialog');
+  expect(within(dialog).getByText(/has no valid-until date/)).toBeInTheDocument();
+  expect(mockedApi.sendQuote).not.toHaveBeenCalled();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Return to quote' }));
+  expect(mockedApi.sendQuote).not.toHaveBeenCalled();
+  fireEvent.click(screen.getAllByTitle('Mark as sent (no email is sent)')[0]);
+  fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Mark as sent without expiry' }));
+  await waitFor(() => expect(mockedApi.sendQuote).toHaveBeenCalledTimes(1));
 });

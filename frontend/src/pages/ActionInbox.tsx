@@ -118,6 +118,8 @@ const operationalLabels: Record<OperationalSource, string> = {
   mrp_shortage: 'Projected material shortage',
 };
 
+const operationalSeverityOrder = { high: 0, medium: 1, low: 2 } as const;
+
 /** Live source records are separate from optional local setup/recommendation dismissals. */
 export function OperationalQueue({ scope }: { scope: string }) {
   const [params, setParams] = useSearchParams();
@@ -192,6 +194,11 @@ export function OperationalQueue({ scope }: { scope: string }) {
     return `${item.title} ${item.detail} ${item.owner_name ?? ''} ${item.next_action}`
       .toLowerCase()
       .includes(search.trim().toLowerCase());
+  }).sort((left, right) => {
+    const assignmentOrder = Number(left.owner_id !== null) - Number(right.owner_id !== null);
+    // The API has no per-issue timestamp. Keep its source ordering for ties
+    // rather than treating IDs from unrelated source tables as global recency.
+    return assignmentOrder || operationalSeverityOrder[left.severity] - operationalSeverityOrder[right.severity];
   });
   const lastPage = Math.max(0, Math.ceil(filtered.length / 20) - 1);
   const currentPage = Math.min(page, lastPage);
@@ -298,6 +305,7 @@ export function OperationalQueue({ scope }: { scope: string }) {
           Snoozed
         </button>
       </div>
+      <p className="text-xs text-fd-body">Unassigned first, then highest priority.</p>
       <input
         aria-label="Search operational issues"
         placeholder="Search operational issues…"
@@ -321,7 +329,7 @@ export function OperationalQueue({ scope }: { scope: string }) {
           {visible.map(item => (
             <article key={item.key} aria-label={item.title} className="rounded border border-fd-line p-3 min-w-0">
               <div className="flex flex-wrap items-center gap-2 text-xs text-fd-body">
-                <span>{operationalLabels[item.source_kind]}</span>
+                <span className={item.source_kind === 'late_work_order' ? 'rounded border border-red-400/60 bg-red-500/15 px-2 py-1 font-semibold text-red-200' : undefined}>{item.source_kind === 'late_work_order' ? 'Past due · still late' : operationalLabels[item.source_kind]}</span>
                 <span className={item.severity === 'high' ? 'text-red-200' : 'text-amber-200'}>
                   {item.severity === 'high' ? 'High priority' : 'Needs review'}
                 </span>
@@ -345,13 +353,13 @@ export function OperationalQueue({ scope }: { scope: string }) {
                 </p>
               )}
               <div className="flex flex-wrap gap-2 mt-3">
-                <Link to={item.href} className="btn-secondary">
+                <Link to={item.href} className={item.can_manage && item.owner_id == null ? 'btn-secondary' : 'btn-primary'}>
                   Open workflow
                 </Link>
                 {item.can_manage && (
                   <>
                     <button
-                      className="btn-secondary"
+                      className={item.owner_id == null ? 'btn-primary' : 'btn-secondary'}
                       disabled={stale || !!pending}
                       onClick={() => {
                         setEditing(item);

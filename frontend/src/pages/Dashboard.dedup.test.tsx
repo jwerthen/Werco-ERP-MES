@@ -578,3 +578,15 @@ it('retains displayed shop data and marks a cache fallback stale after a failed 
   expect(screen.getByRole('heading', { name: 'Live Shop Activity' })).toBeInTheDocument();
   expect(screen.getByRole('link', { name: /Overdue/ })).toHaveAttribute('href', '/work-orders?scope=overdue&cots=1');
 });
+
+it('connects empty activity to idle operators in one click', async () => {
+  mockedApi.getDashboardWithCache.mockResolvedValue({ data: { ...dashboardData, active_assignments: [] } as any, fromCache: false, changed: true });
+  renderDashboard();
+  const action = await screen.findByRole('button', { name: 'View idle operators' });
+  expect(screen.getByText('1 signed-in operator is idle and available to start work.')).toBeInTheDocument();
+  fireEvent.click(action);
+  expect(document.getElementById('idle-operators')).toHaveFocus();
+  const strip = document.querySelector('[data-tour="dashboard-stats"]')!;
+  expect(strip.children[0]).toHaveTextContent('Overdue');
+  expect(strip.children[1]).toHaveTextContent('Signed In, Idle');
+});

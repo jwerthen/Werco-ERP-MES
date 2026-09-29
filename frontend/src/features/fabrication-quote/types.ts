@@ -31,7 +31,7 @@ export interface ProcessProfile extends Omit<ProcessProfileWrite, 'expected_revi
 export const currencies = ['USD', 'CAD', 'EUR', 'GBP', 'MXN', 'JPY', 'CNY', 'CHF', 'AUD', 'NZD', 'SEK', 'NOK', 'DKK', 'INR', 'KRW', 'SGD'];
 
 export const newEvidence = (): Evidence => ({ reviewed: false, source: null, status: 'assumption', note: null });
-export const emptyPlan = (): QuotePlan => ({ schema_version: '1', currency: 'USD', parts: [], roots: [], bom: [], materials: [], operations: [], hardware: [], assumptions: [], source_reviews: [], target_margin: null });
+export const emptyPlan = (): QuotePlan => ({ schema_version: '1', currency: 'USD', parts: [], roots: [], bom: [], materials: [], operations: [], hardware: [], assumptions: [], source_reviews: [], target_margin: '0.25' });
 export function newId(prefix: string): string { return `${prefix}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`; }
 export function newRecipe(kind: Recipe['kind']): Recipe {
   switch (kind) {

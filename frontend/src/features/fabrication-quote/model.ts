@@ -1,4 +1,4 @@
-import { CalculationResult, QuotePlan, QuoteRecord, QuoteWrite } from './types';
+import { CalculationResult, QuotePlan, QuoteRecord, QuoteWrite, currencies } from './types';
 
 const decimalKeys = new Set(['quantity', 'purchase_unit_cost', 'batch_size', 'consumed_quantity', 'unit_cost', 'labor_seconds', 'machine_seconds', 'cut_length_mm', 'speed_mm_per_second', 'pierce_seconds', 'noncut_machine_seconds', 'dynamics_allowance_seconds', 'seconds_per_hit', 'handling_seconds', 'inspection_seconds', 'weld_length_mm', 'weld_size_mm', 'travel_speed_mm_per_second', 'nonweld_labor_seconds', 'nonweld_machine_seconds', 'setup_labor_seconds', 'setup_machine_seconds', 'labor_rate_per_hour', 'machine_rate_per_hour', 'consumables_cost_per_run', 'outside_cost_per_run', 'minimum_quantity', 'price', 'price_unit_quantity', 'freight', 'quantity_per_part', 'stock_unit_value', 'target_margin']);
 const integerKeys = new Set(['pierces', 'hits', 'crew_size', 'pack_quantity', 'minimum_order_quantity', 'order_multiple', 'max_age_days', 'stock_available']);
@@ -12,6 +12,7 @@ export function inputErrors(write: QuoteWrite): string[] {
     if (!value || typeof value !== 'object') return;
     Object.entries(value).forEach(([key, child]) => {
       const next = `${path}.${key}`;
+      if (key === 'currency' && (typeof child !== 'string' || !currencies.includes(child))) errors.push(`${next}: select a supported currency code, such as USD.`);
       if (decimalKeys.has(key) && child !== null && (typeof child !== 'string' || !/^\d+(?:\.\d{1,9})?$/.test(child) || child.length > 24)) errors.push(`${next}: enter a nonnegative decimal with up to 9 decimal places, or leave unknown values blank.`);
       if (integerKeys.has(key) && (typeof child !== 'number' || !Number.isInteger(child) || child < 0)) errors.push(`${next}: enter a whole number.`);
       if (typeof child === 'object') walk(child, next);
@@ -23,6 +24,15 @@ export function inputErrors(write: QuoteWrite): string[] {
     if (line.offer && (!line.offer.supplier.trim() || !line.offer.manufacturer.trim() || !line.offer.mpn.trim())) errors.push(`Hardware ${i + 1}: complete the supplier offer identity.`);
   });
   write.plan.assumptions.forEach((a, i) => { if (!a.description.trim()) errors.push(`Assumption ${i + 1}: add a description.`); });
+  return errors;
+}
+/** Minimum request shape for calculation; incomplete drafts can still be saved. */
+export function calculationInputErrors(write: QuoteWrite): string[] {
+  const errors = inputErrors(write);
+  if (write.plan.parts.length === 0) errors.push('Add at least one part before calculating.');
+  if (write.plan.roots.length === 0 || write.plan.roots.some(root => !write.plan.parts.some(part => part.id === root.part_id) || !Number.isFinite(Number(root.quantity)) || Number(root.quantity) <= 0)) {
+    errors.push('Add quoted demand for an existing part with a positive quantity.');
+  }
   return errors;
 }
 export function snapshot(write: QuoteWrite): string { return JSON.stringify(write); }

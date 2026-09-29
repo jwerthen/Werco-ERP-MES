@@ -268,7 +268,7 @@ export default function AdminSettings() {
         <div>
           <h1 className="page-title flex items-center gap-3">
             <Cog6ToothIcon className="h-8 w-8 text-werco-600" />
-            Admin Settings
+            {tabs.find(tab => tab.key === activeTab)?.label || 'Admin Settings'}
           </h1>
           <p className="page-subtitle">Manage work centers, people and system configuration</p>
         </div>
@@ -276,7 +276,7 @@ export default function AdminSettings() {
 
       {/* Tabs */}
       <div className="border-b border-surface-200">
-        <nav ref={tabNavigationRef} aria-label="Settings sections" className="flex gap-1 overflow-x-auto pb-px">
+        <nav ref={tabNavigationRef} aria-label="Settings sections" className="flex flex-wrap gap-1 pb-px">
           {tabs.map(tab => (
             <button
               key={tab.key}
@@ -416,8 +416,8 @@ function WorkCenterRatesTable({ data, onEdit }: { data: any[]; onEdit: (item: an
               <td className="tabular-nums text-lg font-semibold text-werco-600">${wc.hourly_rate?.toFixed(2)}</td>
               <td><StatusBadge active={wc.is_active} /></td>
               <td>
-                <button onClick={() => onEdit(wc)} className="p-2 rounded-lg text-surface-500 hover:text-werco-600 hover:bg-werco-500/10">
-                  <PencilIcon className="h-4 w-4" />
+                <button onClick={() => onEdit(wc)} aria-label={`Edit rate for ${wc.code}`} className="btn-secondary inline-flex items-center gap-2 whitespace-nowrap">
+                  <PencilIcon className="h-4 w-4" /> Edit rate
                 </button>
               </td>
             </tr>

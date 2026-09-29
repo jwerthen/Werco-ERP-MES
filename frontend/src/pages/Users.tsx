@@ -71,14 +71,14 @@ interface UserCsvImportResult {
 }
 
 const roleColors: Record<UserRole, string> = {
-  platform_admin: 'bg-amber-500/20 text-amber-300',
-  admin: 'bg-red-500/20 text-red-300',
-  manager: 'bg-purple-500/20 text-purple-800',
-  supervisor: 'bg-blue-500/20 text-blue-300',
-  operator: 'bg-green-500/20 text-emerald-300',
-  quality: 'bg-yellow-500/20 text-yellow-300',
-  shipping: 'bg-blue-500/20 text-blue-300',
-  viewer: 'bg-slate-800/50 text-slate-100',
+  platform_admin: 'bg-slate-800/50 text-slate-200',
+  admin: 'bg-slate-800/50 text-slate-200',
+  manager: 'bg-slate-800/50 text-slate-200',
+  supervisor: 'bg-slate-800/50 text-slate-200',
+  operator: 'bg-slate-800/50 text-slate-200',
+  quality: 'bg-slate-800/50 text-slate-200',
+  shipping: 'bg-slate-800/50 text-slate-200',
+  viewer: 'bg-slate-800/50 text-slate-200',
 };
 
 const roleLabels: Record<UserRole, string> = {
@@ -251,7 +251,7 @@ export default function Users() {
           >
             <button
               onClick={() => handleEdit(u)}
-              className="text-slate-400 hover:text-slate-400"
+              className="text-slate-200 hover:text-white"
               title="Edit"
               aria-label="Edit user"
             >
@@ -259,7 +259,7 @@ export default function Users() {
             </button>
             <button
               onClick={() => openPasswordReset(u.id)}
-              className="text-slate-400 hover:text-blue-600"
+              className="text-slate-200 hover:text-blue-300"
               title="Reset Password"
               aria-label="Reset Password"
             >
@@ -268,7 +268,7 @@ export default function Users() {
             {isLockedOut(u) && (
               <button
                 onClick={() => handleUnlock(u)}
-                className="text-slate-400 hover:text-amber-400"
+                className="text-slate-200 hover:text-amber-300"
                 title="Unlock"
                 aria-label="Unlock user"
               >
@@ -277,7 +277,7 @@ export default function Users() {
             )}
             <button
               onClick={() => handleToggleActive(u)}
-              className={u.is_active ? 'text-slate-400 hover:text-red-600' : 'text-slate-400 hover:text-green-600'}
+              className={u.is_active ? 'text-slate-200 hover:text-red-300' : 'text-slate-200 hover:text-green-300'}
               title={u.is_active ? 'Deactivate' : 'Activate'}
               aria-label={u.is_active ? 'Deactivate user' : 'Activate user'}
             >
@@ -530,15 +530,18 @@ export default function Users() {
             </button>
           )}
           {canManageUsers && (
+            <div className="flex flex-col items-start gap-1">
             <button
               onClick={handlePrintBadges}
-              className="btn-secondary flex items-center"
+              className="btn-secondary flex items-center !text-slate-100 !border-slate-400 disabled:!text-slate-400"
               disabled={selectedUserIds.length === 0}
               title={selectedUserIds.length === 0 ? 'Select users below to print badges' : 'Print badges for selected users'}
             >
               <IdentificationIcon className="h-5 w-5 mr-2" />
               Print Badges{selectedUserIds.length > 0 ? ` (${selectedUserIds.length})` : ''}
             </button>
+            {selectedUserIds.length === 0 && <span className="text-xs text-slate-400">Select users to print badges</span>}
+            </div>
           )}
           {canManageUsers && (
             <button
@@ -732,7 +735,7 @@ export default function Users() {
                   <>
                     <button
                       onClick={() => handleEdit(user)}
-                      className="text-slate-400 hover:text-slate-200"
+                      className="text-slate-200 hover:text-white"
                       title="Edit"
                       aria-label="Edit user"
                     >
@@ -740,7 +743,7 @@ export default function Users() {
                     </button>
                     <button
                       onClick={() => openPasswordReset(user.id)}
-                      className="text-slate-400 hover:text-blue-600"
+                      className="text-slate-200 hover:text-blue-300"
                       title="Reset Password"
                       aria-label="Reset Password"
                     >
@@ -749,7 +752,7 @@ export default function Users() {
                     {isLockedOut(user) && (
                       <button
                         onClick={() => handleUnlock(user)}
-                        className="text-slate-400 hover:text-amber-400"
+                        className="text-slate-200 hover:text-amber-300"
                         title="Unlock"
                         aria-label="Unlock user"
                       >
@@ -758,7 +761,7 @@ export default function Users() {
                     )}
                     <button
                       onClick={() => handleToggleActive(user)}
-                      className={user.is_active ? 'text-slate-400 hover:text-red-600' : 'text-slate-400 hover:text-green-600'}
+                      className={user.is_active ? 'text-slate-200 hover:text-red-300' : 'text-slate-200 hover:text-green-300'}
                       title={user.is_active ? 'Deactivate' : 'Activate'}
                       aria-label={user.is_active ? 'Deactivate user' : 'Activate user'}
                     >

@@ -119,9 +119,9 @@ const draftRoutingWithAttachedSheet = {
   operations: [{ ...baseOperation, process_sheet_id: 55 }],
 };
 
-function renderPage() {
+function renderPage(initialPath = '/routing') {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[initialPath]}>
       <ToastProvider>
         <RoutingPage />
       </ToastProvider>
@@ -131,8 +131,7 @@ function renderPage() {
 
 async function openEditOperationModal(routing: typeof draftRouting) {
   mockedApi.getRouting.mockResolvedValue(routing);
-  renderPage();
-  fireEvent.click(await screen.findByText(routing.part!.part_number));
+  renderPage(`/routing?id=${routing.id}`);
   await screen.findByText(routing.operations[0].name);
   fireEvent.click(screen.getByTitle('Edit operation'));
   return screen.findByRole('dialog');
@@ -211,7 +210,7 @@ describe('Routing — process-sheet attach control', () => {
   it('adding a new operation without a sheet sends process_sheet_id: null', async () => {
     mockedApi.getRouting.mockResolvedValue(draftRouting);
     renderPage();
-    fireEvent.click(await screen.findByText('PN-DRAFT'));
+    fireEvent.click((await screen.findAllByText('PN-DRAFT'))[0]);
     await screen.findByText('Laser Cut');
     fireEvent.click(screen.getByText('Add Operation'));
 
@@ -235,7 +234,7 @@ describe('Routing — process-sheet attach control', () => {
     mockedApi.getRoutings.mockResolvedValue([releasedRouting]);
     mockedApi.getRouting.mockResolvedValue(releasedRouting);
     renderPage();
-    fireEvent.click(await screen.findByText('PN-REL'));
+    fireEvent.click((await screen.findAllByText('PN-REL'))[0]);
     await screen.findByText('Laser Cut');
     fireEvent.click(screen.getByTitle('Edit time standards'));
 

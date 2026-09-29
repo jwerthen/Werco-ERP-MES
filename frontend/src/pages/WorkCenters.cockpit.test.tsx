@@ -105,8 +105,8 @@ describe('WorkCenters cockpit overhaul', () => {
     };
 
     expectStat('Total', '5');
-    expectStat('Available', '2');
-    expectStat('In Use', '1');
+    expectStat('Configured available', '2');
+    expectStat('Marked in use', '1');
     expectStat('Maintenance', '1');
     expectStat('Offline', '1');
   });
