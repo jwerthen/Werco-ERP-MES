@@ -108,6 +108,8 @@ export interface DataTableProps<T> {
   groupBy?: DataTableGroupBy<T>;
   selection?: DataTableSelection;
   bulkActions?: React.ReactNode;
+  /** Optional page filters beside the existing export control. */
+  toolbarStart?: React.ReactNode;
   csvExport?: { filename: string; label?: string };
   stickyHeader?: boolean;
   dense?: boolean;
@@ -227,6 +229,7 @@ export function DataTable<T>({
   groupBy,
   selection,
   bulkActions,
+  toolbarStart,
   csvExport,
   stickyHeader = false,
   dense = false,
@@ -374,11 +377,12 @@ export function DataTable<T>({
 
   // ---- Toolbar (export + bulk actions) ----
   const hasSelection = !!selection && selection.selectedKeys.size > 0;
-  const showToolbar = !!csvExport || (hasSelection && !!bulkActions);
+  const showToolbar = !!toolbarStart || !!csvExport || (hasSelection && !!bulkActions);
 
   const toolbar = showToolbar ? (
-    <div className="flex items-center justify-between gap-3 mb-2">
-      <div className="flex items-center gap-2 min-w-0">
+    <div className={`flex items-center justify-between gap-3 mb-2 ${toolbarStart ? 'flex-wrap' : ''}`}>
+      <div className={`flex items-center gap-2 min-w-0 ${toolbarStart ? 'flex-1 flex-wrap' : ''}`}>
+        {toolbarStart}
         {hasSelection && bulkActions ? (
           <div className="flex items-center gap-2 min-w-0">
             <span className="text-xs font-mono uppercase tracking-wider text-fd-mute tabular-nums whitespace-nowrap">

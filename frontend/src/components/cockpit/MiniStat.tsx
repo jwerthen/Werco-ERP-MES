@@ -8,10 +8,12 @@ export interface MiniStatProps {
   /** Tailwind text-color class for the icon, e.g. "text-fd-green". */
   iconColor: string;
   label: string;
+  /** Let decision-critical labels remain fully visible in compact grids. */
+  wrapLabel?: boolean;
   /** Usually a number/string; ReactNode allows inline affordances (e.g. an edit pencil). */
   value: React.ReactNode;
   valueColor?: string;
-  subtitle?: string;
+  subtitle?: React.ReactNode;
   /** Navigate on click. Takes precedence over onClick. */
   href?: string;
   /** Act as a filter/toggle button (used when there's no href). */
@@ -35,6 +37,7 @@ export function MiniStat({
   iconBg,
   iconColor,
   label,
+  wrapLabel = true,
   value,
   valueColor,
   subtitle,
@@ -52,10 +55,14 @@ export function MiniStat({
         <span className={`flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-sm ${iconBg}`}>
           <Icon className={`h-3.5 w-3.5 ${iconColor}`} />
         </span>
-        <p className="stat-label !text-[10px] uppercase tracking-wide truncate">{label}</p>
+        <p
+          className={`stat-label !text-[10px] uppercase tracking-wide ${wrapLabel ? 'critical-text leading-tight' : 'truncate'}`}
+        >
+          {label}
+        </p>
       </div>
-      <p className={`stat-value !text-xl ${valueColor || ''}`}>{value}</p>
-      {subtitle && <p className="text-[10px] text-slate-500 leading-tight truncate">{subtitle}</p>}
+      <p className={`stat-value !text-xl critical-text ${valueColor || ''}`}>{value}</p>
+      {subtitle && <p className="text-[10px] text-slate-400 leading-tight critical-text">{subtitle}</p>}
     </div>
   );
 
