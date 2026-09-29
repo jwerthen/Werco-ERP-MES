@@ -15,7 +15,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import ShopFloor from './ShopFloor';
@@ -159,7 +159,10 @@ describe('ShopFloor back-entry toggle: clock-in source payload', () => {
 
     const toggle = await screen.findByRole('checkbox', backEntryQuery);
     fireEvent.click(toggle);
-    expect((toggle as HTMLInputElement).checked).toBe(true);
+    expect(toggle).not.toBeChecked();
+    const confirmation = await screen.findByRole('dialog', { name: 'Enter offline catch-up mode?' });
+    fireEvent.click(within(confirmation).getByRole('button', { name: 'Enable back-entry' }));
+    expect(toggle).toBeChecked();
 
     fireEvent.click(await findStartButton());
 
@@ -193,4 +196,23 @@ describe('ShopFloor back-entry toggle: clock-in source payload', () => {
       })
     );
   });
+});
+
+
+test('back-entry is separate from Refresh and cancellation keeps live entry mode', async () => {
+  jest.clearAllMocks();
+  mockUser = { id: 1, role: 'supervisor', is_superuser: false };
+  mockedApi.getWorkCenters.mockResolvedValue([workCenter]);
+  mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [] });
+  mockedApi.getWorkCenterQueue.mockResolvedValue({ queue: [readyQueueItem] });
+  renderShopFloor();
+  const toggle = await screen.findByRole('checkbox', backEntryQuery);
+  const offlineSection = screen.getByRole('region', { name: 'Offline catch-up' });
+  expect(within(offlineSection).getByRole('checkbox', backEntryQuery)).toBe(toggle);
+  expect(within(offlineSection).queryByRole('button', { name: 'Refresh' })).not.toBeInTheDocument();
+  fireEvent.click(toggle);
+  const confirmation = await screen.findByRole('dialog', { name: 'Enter offline catch-up mode?' });
+  fireEvent.click(within(confirmation).getByRole('button', { name: 'Cancel' }));
+  expect(toggle).not.toBeChecked();
+  expect(mockedApi.clockIn).not.toHaveBeenCalled();
 });

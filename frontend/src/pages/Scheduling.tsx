@@ -230,6 +230,7 @@ export default function Scheduling() {
   const [bulkActionRunning, setBulkActionRunning] = useState<string | null>(null);
   const realtimeRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const scheduleBoardRef = useRef<HTMLDivElement | null>(null);
+  const scheduleQueueRef = useRef<HTMLDivElement | null>(null);
   const realtimeUrl = useMemo(() => {
     const token = getAccessToken();
     return buildWsUrl('/ws/updates', token ? { token } : undefined);
@@ -273,6 +274,7 @@ export default function Scheduling() {
 
   // Collapsible Machine Capacity section
   const [showMachineCapacity, setShowMachineCapacity] = useState(false);
+  const initialCapacityReviewedRef = useRef(false);
 
   // Generate days for display: Monday-Saturday only (skip Sundays)
   const days = useMemo(
@@ -385,6 +387,13 @@ export default function Scheduling() {
         scheduled_end: job.scheduled_end?.split('T')[0],
       })));
       setCapacityHeatmap(heatmapRes);
+      if (!initialCapacityReviewedRef.current) {
+        initialCapacityReviewedRef.current = true;
+        setShowMachineCapacity(Boolean(
+          heatmapRes.overloaded_work_centers?.length || heatmapRes.overload_cells ||
+          heatmapRes.work_centers?.some((center: CapacityHeatmapRow) => center.days.some(day => day.overloaded || day.scheduled_hours > day.capacity_hours))
+        ));
+      }
     } catch (err) {
       console.error('Failed to load scheduling data:', err);
       setLoadError(true);
@@ -1063,6 +1072,26 @@ export default function Scheduling() {
         />
       </MiniStatStrip>
 
+      {stats.unscheduledCount > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4">
+          <div>
+            <h2 className="font-semibold text-amber-200">
+              {stats.unscheduledCount} {stats.unscheduledCount === 1 ? 'job awaits' : 'jobs await'} scheduling
+            </h2>
+            <p className="mt-1 text-sm text-slate-200">These jobs have no start date yet. Open the queue to review and schedule them.</p>
+          </div>
+          <Button onClick={() => {
+            setShowScheduledRows(false);
+            setSearchQuery('');
+            setFilterWorkCenter('');
+            scheduleQueueRef.current?.focus({ preventScroll: true });
+            scheduleQueueRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }}>
+            View unscheduled jobs ({stats.unscheduledCount})
+          </Button>
+        </div>
+      )}
+
       {/* Machine Capacity Overview */}
       <div className="card">
         <div className="card-header items-start gap-3">
@@ -1108,7 +1137,7 @@ export default function Scheduling() {
               <div key={machine.work_center_id} className="rounded-sm border border-fd-line bg-fd-sunken p-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-semibold text-white">{machine.work_center_code}</p>
+                    <p className="critical-text text-sm font-semibold text-white">{machine.work_center_code}</p>
                     <p className="truncate text-xs text-slate-400">{machine.work_center_name}</p>
                   </div>
                   <span className={`text-sm font-bold ${utilization > 100 ? 'text-red-500' : utilization >= 90 ? 'text-amber-400' : 'text-emerald-400'}`}>
@@ -1312,7 +1341,7 @@ export default function Scheduling() {
                                   }}
                                   title={`${job.work_order_number} - ${job.part_number}\nOp ${job.operations_complete + 1}/${job.total_operations}: ${job.current_operation_name}\n${span > 1 ? `${span} days` : '1 day'}\nDrag to reschedule or move to another work center`}
                                 >
-                                  <div className="font-medium truncate">{job.work_order_number}</div>
+                                  <div className="font-medium critical-text">{job.work_order_number}</div>
                                   <div className="truncate opacity-90">Op {job.operations_complete + 1}/{job.total_operations}</div>
                                   {span > 1 && (
                                     <div className="text-[10px] opacity-75 mt-0.5">
@@ -1344,7 +1373,7 @@ export default function Scheduling() {
       {bulkResults.length > 0 && <div className="card p-3" role="status"><h2 className="font-semibold">Bulk action results</h2><ul>{bulkResults.map(row => <li key={row.number}>{row.number}: {row.result}</li>)}</ul>{retryBulkRef.current && <button className="btn-secondary mt-2" disabled={!!bulkActionRunning} onClick={() => retryBulkRef.current?.()}>Retry failed jobs</button>}</div>}
       {pendingJobIds.size > 0 && <p role="status" className="text-sm text-slate-300">Saving changes for {Array.from(pendingJobIds).map(id => jobs.find(job => job.work_order_id === id)?.work_order_number || `work order ${id}`).join(', ')}…</p>}
       {/* Dispatch Queue */}
-      <div id="schedule-queue" className="card">
+      <div id="schedule-queue" ref={scheduleQueueRef} role="region" tabIndex={-1} aria-label="Dispatch Queue" className="card scroll-mt-4">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
           <div className="flex items-center gap-3">
             <h2 className="text-lg font-semibold">Dispatch Queue</h2>

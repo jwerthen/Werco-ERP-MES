@@ -15,7 +15,7 @@ import { KioskRunOrderChip } from '../components/kiosk/KioskQueueCard';
 import { clearHoldToast } from '../components/kiosk/heldOperations';
 import OperationHoldReason from '../components/shopfloor/OperationHoldReason';
 import { useToast } from '../components/ui/Toast';
-import { Button, EmptyState, ErrorState, FormField, InputDialog, StatusBadge, UnitBadge, statusColor, statusVariant } from '../components/ui';
+import { Button, ConfirmDialog, EmptyState, ErrorState, FormField, InputDialog, StatusBadge, UnitBadge, statusColor, statusVariant } from '../components/ui';
 import {
   PlayIcon,
   StopIcon,
@@ -119,6 +119,7 @@ export default function ShopFloor() {
   // source='backfill' so the rows are excluded from live shop metrics + audited.
   // Ephemeral state on purpose (clears on reload) so it can't be silently left on.
   const [backEntry, setBackEntry] = useState(false);
+  const [confirmBackEntry, setConfirmBackEntry] = useState(false);
   const [priorityReason, setPriorityReason] = useState('');
   // 'warning' = the call SUCCEEDED but did not do everything asked (a hold
   // cleared that left the job off the board, or left a blocker open). Not
@@ -552,37 +553,6 @@ export default function ShopFloor() {
           <p className="page-subtitle">Clock in/out and manage work center queues</p>
         </div>
         <div className="page-actions">
-          {canBackEntry && (
-            <label
-              className={`flex items-center gap-2.5 rounded-sm border px-3 py-1.5 cursor-pointer transition-colors ${
-                backEntry
-                  ? 'border-amber-500/60 bg-amber-500/15 text-amber-200'
-                  : 'border-fd-line bg-fd-panel text-surface-400 hover:border-amber-400/40 hover:text-surface-200'
-              }`}
-              title="Marks this entry as offline paper catch-up — excluded from live shop metrics."
-            >
-              <input
-                type="checkbox"
-                checked={backEntry}
-                onChange={(e) => setBackEntry(e.target.checked)}
-                className="checkbox"
-                aria-label="Back-entry mode (offline paper catch-up — excluded from live shop metrics)"
-              />
-              <span className="flex flex-col leading-tight">
-                <span className="text-sm font-semibold flex items-center gap-1.5">
-                  Back-entry (offline catch-up)
-                  {backEntry && (
-                    <span className="rounded-sm bg-amber-500/30 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-100">
-                      On
-                    </span>
-                  )}
-                </span>
-                <span className="text-[11px] font-normal opacity-80">
-                  Excluded from live shop metrics
-                </span>
-              </span>
-            </label>
-          )}
           <Button
             variant="secondary"
             onClick={handleRefresh}
@@ -658,6 +628,49 @@ export default function ShopFloor() {
         <span className="text-xs text-slate-400">{workCenters.length} stations · {queue.length} queued operations</span>
       </div>
 
+      {canBackEntry && (
+        <section aria-label="Offline catch-up" className="flex justify-end">
+            <label
+              className={`flex items-center gap-2.5 rounded-sm border px-3 py-1.5 cursor-pointer transition-colors ${
+                backEntry
+                  ? 'border-amber-500/60 bg-amber-500/15 text-amber-200'
+                  : 'border-amber-500/30 bg-amber-500/5 text-amber-200 hover:border-amber-400/60'
+              }`}
+              title="Marks this entry as offline paper catch-up — excluded from live shop metrics."
+            >
+              <input
+                type="checkbox"
+                checked={backEntry}
+                onChange={(e) => e.target.checked ? setConfirmBackEntry(true) : setBackEntry(false)}
+                className="checkbox"
+                aria-label="Back-entry mode (offline paper catch-up — excluded from live shop metrics)"
+              />
+              <span className="flex flex-col leading-tight">
+                <span className="text-sm font-semibold flex items-center gap-1.5">
+                  Back-entry (offline catch-up)
+                  {backEntry && (
+                    <span className="rounded-sm bg-amber-500/30 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-100">
+                      On
+                    </span>
+                  )}
+                </span>
+                <span className="text-[11px] font-normal opacity-80">
+                  Excluded from live shop metrics
+                </span>
+              </span>
+            </label>
+        </section>
+      )}
+      <ConfirmDialog
+        open={confirmBackEntry}
+        title="Enter offline catch-up mode?"
+        message="Use this only to enter work recorded on paper while offline. Clock-ins and clock-outs will be marked as back-entry and excluded from live shop metrics until you turn this mode off."
+        confirmLabel="Enable back-entry"
+        variant="warning"
+        onConfirm={() => { setBackEntry(true); setConfirmBackEntry(false); }}
+        onCancel={() => setConfirmBackEntry(false)}
+      />
+
       {/* Up Next — slim cross-linked strip into the table below. The first 5 of
           the server's queue order (the Dispatch Board's run order), NOT a score
           ranking. */}
@@ -707,7 +720,7 @@ export default function ShopFloor() {
               {workCenters.find(wc => wc.id === selectedWorkCenter)?.name} &bull; <span className="tabular-nums">{queue.length}</span> job{queue.length !== 1 ? 's' : ''}
             </p>
           </div>
-          {canEditPriority && (
+          {canEditPriority && queue.length > 0 && (
             <FormField
               label="Optional Priority Reason"
               className="w-80 hidden lg:block"
@@ -742,6 +755,15 @@ export default function ShopFloor() {
             icon={QueueListIcon}
             title="No jobs in queue"
             description="Select a different work center or check back later."
+            action={workCenters.length > 1 ? (
+              <div className="space-y-2 text-left">
+                <label htmlFor="empty-queue-station" className="block text-sm font-semibold text-white">Switch work center</label>
+                <select id="empty-queue-station" className="input w-full sm:w-80" value={selectedWorkCenter || ''}
+                  onChange={event => setSelectedWorkCenter(Number(event.target.value))}>
+                  {workCenters.map(center => <option key={center.id} value={center.id}>{center.code} · {center.name}</option>)}
+                </select>
+              </div>
+            ) : undefined}
           />
         ) : (
           <div className="overflow-x-auto">

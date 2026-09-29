@@ -307,6 +307,10 @@ export default function DispatchBoard() {
   // Idle machines are collapsed by DEFAULT and deliberately not persisted: the
   // board's job on open is to show the work.
   const [showIdle, setShowIdle] = useState(false);
+  const [glanceMode, setGlanceMode] = useState(false);
+  const idleHelp = glanceMode
+    ? 'Idle machines have no queued work. Switch to Planner view to move or reorder jobs.'
+    : IDLE_HELP;
   // Whether the board is scrolled to each end — drives the scroll buttons and the
   // "there is more over here" edge fade.
   const [scrollEdges, setScrollEdges] = useState({ atStart: true, atEnd: true });
@@ -831,7 +835,7 @@ export default function DispatchBoard() {
       <section
         key={column.id}
         aria-label={`${column.name} run order`}
-        className={`flex w-80 shrink-0 flex-col rounded-sm border ${
+        className={`flex ${glanceMode ? 'w-96' : 'w-80'} shrink-0 flex-col rounded-sm border ${
           deactivated
             ? 'border-red-500/60 bg-fd-panel'
             : empty
@@ -846,7 +850,7 @@ export default function DispatchBoard() {
         >
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
-              <p className={`truncate text-sm font-semibold ${empty ? 'text-slate-400' : 'text-slate-100'}`}>
+              <p className={`${glanceMode ? 'critical-text text-xl' : 'truncate text-sm'} font-semibold ${empty ? 'text-slate-400' : 'text-slate-100'}`}>
                 {column.name}
               </p>
               {/* NOT aria-hidden: the section keeps its "{name} run order"
@@ -917,9 +921,9 @@ export default function DispatchBoard() {
           role="presentation"
           data-testid={`dispatch-column-${column.id}`}
           className="flex min-h-[7rem] flex-1 flex-col gap-2 p-2"
-          onDragOver={deactivated ? undefined : (e) => handleColumnDragOver(e, column.id)}
-          onDragLeave={deactivated ? undefined : handleDragLeave}
-          onDrop={deactivated ? undefined : (e) => handleColumnDrop(e, column.id)}
+          onDragOver={deactivated || glanceMode ? undefined : (e) => handleColumnDragOver(e, column.id)}
+          onDragLeave={deactivated || glanceMode ? undefined : handleDragLeave}
+          onDrop={deactivated || glanceMode ? undefined : (e) => handleColumnDrop(e, column.id)}
         >
           {empty ? (
             <p className="px-1 py-6 text-center text-xs text-slate-500">
@@ -940,6 +944,7 @@ export default function DispatchBoard() {
                     kind={index === 0 ? null : nestChangeover(column.queue[index - 1].laser_nest, row.laser_nest)}
                   />
                   <DispatchCard
+                    glanceMode={glanceMode}
                     row={row}
                     index={index}
                     column={column}
@@ -984,6 +989,11 @@ export default function DispatchBoard() {
         refreshing={refreshing}
         canEdit={canEdit}
         staleNotice={staleNotice}
+        viewControl={<Button variant="secondary" size="sm" aria-pressed={glanceMode} onClick={() => {
+          setGlanceMode(value => !value);
+          setDragSource(null);
+          setDropSlot(null);
+        }}>{glanceMode ? 'Planner view' : 'TV glance'}</Button>}
         scroll={
           boardColumns.length === 0
             ? null
@@ -995,6 +1005,26 @@ export default function DispatchBoard() {
               }
         }
       />
+
+      {totals.jobs > 0 && totals.ranked === 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-sm border border-amber-500/40 bg-amber-500/10 p-4">
+          <div>
+            <h2 className="font-semibold text-amber-200">No advisory run order set</h2>
+            <p className="mt-1 max-w-3xl text-sm text-slate-200">
+              {glanceMode && canEdit
+                ? 'These queued jobs have no ranks yet. Switch to Planner view to set the manual run order. Operators can still start available work.'
+                : canEdit
+                ? 'These queued jobs have no ranks yet. Set the run order manually with each card’s Move up / Move down controls or drag jobs within a machine. Operators can still start available work.'
+                : 'These queued jobs have no ranks yet. Ask a planner to set the manual run order; operators can still start available work.'}
+            </p>
+          </div>
+          <Button onClick={() => {
+            const card = boardRef.current?.querySelector<HTMLElement>('[data-dispatch-card]');
+            card?.focus({ preventScroll: true });
+            card?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+          }}>Review queued jobs</Button>
+        </div>
+      )}
 
       {boardColumns.length === 0 ? (
         <EmptyState
@@ -1012,14 +1042,14 @@ export default function DispatchBoard() {
                 data-testid="dispatch-idle-toggle"
                 aria-expanded={showIdle}
                 aria-controls={IDLE_REGION_ID}
-                title={IDLE_HELP}
+                title={idleHelp}
                 onClick={() => setShowIdle((shown) => !shown)}
               >
                 {showIdle
                   ? 'Hide idle machines'
                   : `Show ${idleColumns.length} idle machine${idleColumns.length === 1 ? '' : 's'}`}
               </Button>
-              <span className="text-xs text-slate-500">{IDLE_HELP}</span>
+              <span className="text-xs text-slate-500">{idleHelp}</span>
             </div>
           )}
 
@@ -1122,6 +1152,7 @@ interface BoardHeaderProps {
   /** Set when a re-read failed: what's on screen may not be what the server has. */
   staleNotice: string | null;
   scroll: BoardScroll | null;
+  viewControl?: React.ReactNode;
 }
 
 function BoardHeader({
@@ -1132,6 +1163,7 @@ function BoardHeader({
   canEdit,
   staleNotice,
   scroll,
+  viewControl,
 }: BoardHeaderProps) {
   return (
     <div className="space-y-2">
@@ -1166,6 +1198,7 @@ function BoardHeader({
           </p>
         </div>
         <div className="flex items-center gap-1">
+          {viewControl}
           {scroll && (
             // End-of-travel gating is `aria-disabled` + an inert click, not
             // `disabled`: a keyboard user panning to the end must not have the
@@ -1240,6 +1273,7 @@ function BoardHeader({
 }
 
 interface DispatchCardProps {
+  glanceMode?: boolean;
   row: DispatchBoardRow;
   index: number;
   column: DispatchBoardColumn;
@@ -1260,6 +1294,7 @@ interface DispatchCardProps {
 }
 
 function DispatchCard({
+  glanceMode,
   row,
   index,
   column,
@@ -1310,6 +1345,32 @@ function DispatchCard({
   // "not tied" nag): an untied work order stays byte-identical to its
   // pre-feature self.
   const tieChip = materialTieChip(row);
+
+  if (glanceMode) {
+    return (
+      <div data-testid={`dispatch-card-${row.operation_id}`} data-dispatch-card={row.operation_id} tabIndex={-1}
+        className={`rounded-sm border p-4 outline-none focus-visible:ring-1 focus-visible:ring-blue-400 ${running ? 'border-blue-400/60 bg-blue-500/5' : 'border-fd-line bg-fd-sunken'}`}>
+        <div className="flex items-start gap-3">
+          <span data-testid={`dispatch-rank-${row.operation_id}`} className="w-9 shrink-0 text-center font-mono text-3xl font-bold text-white"
+            title={row.run_order == null ? 'Unranked' : `Run order ${row.run_order}`}>{row.run_order ?? '–'}</span>
+          <div className="min-w-0 flex-1 space-y-2">
+            <a href={`/work-orders/${row.work_order_id}`} className="critical-text font-mono text-xl font-bold text-white" aria-label={`Open work order ${row.work_order_number}`}>{row.work_order_number}</a>
+            <p className="critical-text text-lg text-slate-200">{hasOperationNumber(row.operation_number) ? `${formatOperationLabel(row.operation_number)} · ` : ''}{row.operation_name || 'Operation'}</p>
+            <p className="critical-text font-mono text-sm text-slate-300">{row.component_part_number || row.part_number}</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <StatusBadge status={row.status} />
+              <UnitBadge unitNumber={row.unit_number} size="sm" />
+              <span className="font-mono text-base text-slate-200">{row.quantity_complete}/{row.quantity_ordered} pcs</span>
+            </div>
+            {row.due_date && <p className={`text-base font-semibold ${pastDue ? 'text-red-300' : dueToday ? 'text-amber-300' : 'text-slate-300'}`}>
+              {pastDue ? 'Past due ' : dueToday ? 'Due today' : 'Due '}{dueToday ? '' : formatCentralDate(row.due_date)}
+            </p>}
+            {tieChip && tieChip.tone !== 'ok' && <p className={`critical-text text-sm ${TIE_TONE_CLASS[tieChip.tone]}`} title={tieChip.title}>{tieChip.text}</p>}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div

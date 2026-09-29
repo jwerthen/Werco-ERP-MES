@@ -526,7 +526,7 @@ export default function DowntimeTracking() {
             iconBg="bg-purple-500/20"
             iconColor="text-purple-400"
             label="Top Reason"
-            value={summary.top_reasons?.[0]?.reason || 'N/A'}
+            value={summary.top_reasons?.[0]?.reason || 'None yet'}
             subtitle={summary.top_reasons?.[0]?.hours ? `${summary.top_reasons[0].hours}h` : undefined}
           />
         </MiniStatStrip>
@@ -562,7 +562,7 @@ export default function DowntimeTracking() {
                       {wcStatusLabel(st)}
                     </span>
                   </div>
-                  <div className="font-bold text-sm text-white tabular-nums truncate">{wc.code}</div>
+                  <div className="critical-text font-bold text-sm text-white tabular-nums">{wc.code}</div>
                   <div className="text-[10px] text-slate-400 truncate">{wc.name}</div>
                 </div>
               );
@@ -585,6 +585,7 @@ export default function DowntimeTracking() {
               icon={CheckCircleIcon}
               title="No active downtime"
               description="All work centers are running. Open events will appear here."
+              action={<a href="#downtime-log" className="btn-primary">View downtime log</a>}
             />
           ) : (
             <div className="divide-y divide-fd-line">
@@ -599,7 +600,7 @@ export default function DowntimeTracking() {
                     />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5 min-w-0">
-                        <span className="font-bold text-sm text-white tabular-nums truncate">
+                        <span className="critical-text font-bold text-sm text-white tabular-nums">
                           {evt.work_center?.code || `WC-${evt.work_center_id}`}
                         </span>
                         <span
@@ -684,7 +685,7 @@ export default function DowntimeTracking() {
       {/* Filters */}
       <div className="card card-compact">
         <div className="card-header !pb-2 !mb-3">
-          <h2 className="card-title">Downtime Log</h2>
+          <h2 id="downtime-log" tabIndex={-1} className="card-title scroll-mt-20">Downtime Log</h2>
         </div>
         <div className="flex flex-wrap gap-2 mb-4">
           <select

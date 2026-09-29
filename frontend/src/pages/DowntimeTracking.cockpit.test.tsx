@@ -130,3 +130,20 @@ test('renders the active-downtime event once as a dense row in the Active Downti
   // (CockpitPanel renders the footer as "<count> total").
   expect(within(panel).getByText('1 active total')).toBeInTheDocument();
 });
+
+
+test('offers a direct log path when there are no active events', async () => {
+  mockedApi.getActiveDowntime.mockResolvedValue([]);
+  renderPage();
+  const empty = (await screen.findByText('No active downtime')).closest('[data-testid="empty-state"]') as HTMLElement;
+  const jump = within(empty).getByRole('link', { name: 'View downtime log' });
+  expect(jump).toHaveAttribute('href', '#downtime-log');
+  expect(document.getElementById('downtime-log')).toHaveTextContent('Downtime Log');
+});
+
+test('uses an honest empty top-reason label before any event exists', async () => {
+  mockedApi.getDowntimeSummary.mockResolvedValue({ ...summary, top_reasons: [], total_downtime_hours: 0, event_count: 0 });
+  renderPage();
+  expect(await screen.findByText('None yet')).toBeInTheDocument();
+  expect(screen.queryByText('N/A')).not.toBeInTheDocument();
+});

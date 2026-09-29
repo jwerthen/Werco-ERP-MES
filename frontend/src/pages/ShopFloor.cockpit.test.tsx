@@ -12,7 +12,7 @@
  */
 
 import React from 'react';
-import { render, screen, within, waitFor } from '@testing-library/react';
+import { render, screen, within, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import ShopFloor from './ShopFloor';
@@ -173,4 +173,20 @@ describe('ShopFloor cockpit: station header + operations grid render', () => {
     expect(within(table).getByRole('button', { name: /Start/i })).toBeInTheDocument();
     expect(within(table).getByText(/Active/i)).toBeInTheDocument();
   });
+});
+
+
+test('switches directly from an empty queue to another station', async () => {
+  jest.clearAllMocks();
+  localStorage.clear();
+  mockedApi.getWorkCenters.mockResolvedValue([workCenter, { ...workCenter, id: 8, code: 'LAS-01', name: 'Laser' }]);
+  mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [] });
+  mockedApi.getWorkCenterQueue.mockImplementation(async id => ({ queue: id === 8 ? queueItems : [] }));
+  renderShopFloor();
+  const empty = (await screen.findByText('No jobs in queue')).closest('[data-testid="empty-state"]') as HTMLElement;
+  expect(screen.queryByLabelText('Optional Priority Reason')).not.toBeInTheDocument();
+  fireEvent.change(within(empty).getByRole('combobox', { name: 'Switch work center' }), { target: { value: '8' } });
+  await waitFor(() => expect(mockedApi.getWorkCenterQueue).toHaveBeenLastCalledWith(8));
+  expect(await getQueueTable()).toBeInTheDocument();
+  expect(screen.getByLabelText('Optional Priority Reason')).toBeInTheDocument();
 });

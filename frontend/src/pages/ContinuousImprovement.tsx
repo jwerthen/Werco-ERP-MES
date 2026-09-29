@@ -748,8 +748,8 @@ function ImprovementWorkspace({ readOnly }: { readOnly: boolean }) {
             </h2>
             <p className="text-xs text-slate-400">Summary counts cover all suggestions</p>
           </div>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
-            <FormField label="Search suggestions" className="lg:col-span-2">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <FormField label="Search suggestions" className="sm:col-span-2">
               {field => (
                 <input
                   {...field}
@@ -762,6 +762,7 @@ function ImprovementWorkspace({ readOnly }: { readOnly: boolean }) {
                 />
               )}
             </FormField>
+            {(total > 0 || filtersActive) && <>
             <FormField label="Filter by status">
               {field => (
                 <select
@@ -831,6 +832,7 @@ function ImprovementWorkspace({ readOnly }: { readOnly: boolean }) {
                 </select>
               )}
             </FormField>
+            </>}
           </div>
           {filtersActive && (
             <button

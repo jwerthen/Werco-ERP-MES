@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import api from '../services/api';
 import EntityPicker from '../components/operations/EntityPicker';
 import { Modal } from '../components/ui/Modal';
@@ -95,6 +95,7 @@ export default function Maintenance() {
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState('');
   const [activeTab, setActiveTab] = useState<Tab>('dashboard');
+  const initialTabChosen = useRef(false);
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [schedules, setSchedules] = useState<MaintenanceSchedule[]>([]);
   const [workOrders, setWorkOrders] = useState<MaintenanceWorkOrder[]>([]);
@@ -139,6 +140,10 @@ export default function Maintenance() {
       setDashboard(dashData);
       setSchedules(schedData || []);
       setWorkOrders(woData || []);
+      if (!initialTabChosen.current) {
+        initialTabChosen.current = true;
+        if (Array.isArray(dashData?.upcoming) && dashData.upcoming.length === 0) setActiveTab('schedules');
+      }
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to load data');
     } finally {
@@ -598,7 +603,7 @@ export default function Maintenance() {
           {(['dashboard', 'schedules', 'work_orders'] as Tab[]).map(tab => (
             <button
               key={tab}
-              onClick={() => setActiveTab(tab)}
+              onClick={() => { initialTabChosen.current = true; setActiveTab(tab); }}
               className={`py-3 px-1 border-b-2 text-sm font-medium capitalize ${activeTab === tab ? 'border-blue-500 text-blue-600' : 'border-transparent text-slate-400 hover:text-slate-300'}`}
             >
               {tab.replace(/_/g, ' ')}
@@ -640,6 +645,12 @@ export default function Maintenance() {
               icon={CalendarDaysIcon}
               title="No upcoming maintenance"
               description="Scheduled and upcoming maintenance will appear here."
+              action={
+                <div className="flex flex-wrap justify-center gap-2">
+                  <Button variant="secondary" onClick={() => setShowCreateScheduleModal(true)}>New Schedule</Button>
+                  <Button onClick={() => setShowCreateWOModal(true)}>New Work Order</Button>
+                </div>
+              }
             />
           )}
 

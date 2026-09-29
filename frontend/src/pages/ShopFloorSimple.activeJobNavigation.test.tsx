@@ -184,7 +184,7 @@ describe('checked-in operation shortcuts', () => {
     });
     renderPage();
     await screen.findByTestId('shop-floor-op-300');
-    fireEvent.change(screen.getByDisplayValue('All Status'), { target: { value: 'ready' } });
+    fireEvent.click(screen.getByRole('button', { name: /^Ready$/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Filter jobs' }));
     fireEvent.click(screen.getAllByRole('button', { name: 'Due Today' })[0]);
     fireEvent.change(screen.getByPlaceholderText('Search WO or part...'), { target: { value: 'OTHER-WO' } });
