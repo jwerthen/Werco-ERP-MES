@@ -278,8 +278,9 @@ export default function Reports() {
                 onRetry={loadData}
               />
             )}
-            <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-2">
+            <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
               <MiniStat
+                wrapLabel
                 icon={CheckCircleIcon}
                 iconBg="bg-fd-blue/15"
                 iconColor="text-fd-blue"
@@ -292,6 +293,7 @@ export default function Reports() {
                 }
               />
               <MiniStat
+                wrapLabel
                 icon={ClockIcon}
                 iconBg="bg-fd-green/15"
                 iconColor="text-fd-green"
@@ -300,6 +302,7 @@ export default function Reports() {
                 subtitle={errors.production ? 'Unavailable' : `Last ${period} days`}
               />
               <MiniStat
+                wrapLabel
                 icon={ExclamationTriangleIcon}
                 iconBg="bg-fd-amber/15"
                 iconColor="text-fd-amber"
@@ -308,6 +311,7 @@ export default function Reports() {
                 subtitle={errors.production ? 'Unavailable' : 'see Daily Output'}
               />
               <MiniStat
+                wrapLabel
                 icon={CurrencyDollarIcon}
                 iconBg="bg-fd-cyan/15"
                 iconColor="text-fd-cyan"
@@ -320,6 +324,7 @@ export default function Reports() {
                 subtitle={errors.inventory ? 'Unavailable' : `${inventory?.unique_parts ?? 0} parts`}
               />
               <MiniStat
+                wrapLabel
                 icon={ExclamationTriangleIcon}
                 iconBg="bg-fd-red/15"
                 iconColor="text-fd-red"
@@ -329,6 +334,7 @@ export default function Reports() {
                 subtitle={errors.quality ? 'Unavailable' : `${quality?.open_ncrs ?? 0} open`}
               />
               <MiniStat
+                wrapLabel
                 icon={InboxArrowDownIcon}
                 iconBg="bg-fd-blue/15"
                 iconColor="text-fd-blue"
@@ -337,6 +343,7 @@ export default function Reports() {
                 subtitle={errors.quality ? 'Unavailable' : `${quality?.receiving_rejected_qty ?? 0} rejected`}
               />
               <MiniStat
+                wrapLabel
                 icon={ScaleIcon}
                 iconBg="bg-fd-cyan/15"
                 iconColor="text-fd-cyan"
@@ -401,17 +408,18 @@ export default function Reports() {
               {/* Work Center Utilization */}
               <CockpitPanel
                 title="Work Center Utilization"
-                subtitle="Top 8 by hours · logged hours ÷ (period days × 8 hours)"
+                subtitle="Top 8 by hours"
                 className="xl:col-span-5"
               >
                 {errors.utilization ? (
                   <ErrorState title="Couldn't load utilization" onRetry={loadData} />
                 ) : (
                   <div className="space-y-3">
+                    <p className="text-xs text-slate-300 critical-text">Utilization = logged hours ÷ (period days × 8 hours).</p>
                     {utilization.slice(0, 8).map(wc => (
                       <div key={wc.work_center_id} className="min-w-0">
                         <div className="flex justify-between text-sm mb-1 gap-2">
-                          <span className="font-medium truncate">{wc.work_center_code}</span>
+                          <span className="font-medium critical-text">{wc.work_center_code}</span>
                           <span
                             className="text-slate-400 tabular-nums flex-shrink-0"
                             title={`${wc.hours_worked} logged hours / ${wc.available_hours} available hours`}
@@ -422,7 +430,9 @@ export default function Reports() {
                         <div className="h-4 bg-fd-sunken rounded-sm overflow-hidden">
                           <div
                             className={`h-full rounded-sm ${
-                              wc.utilization_pct > 80
+                              wc.utilization_pct > 100
+                                ? 'bg-fd-red'
+                                : wc.utilization_pct > 80
                                 ? 'bg-fd-green'
                                 : wc.utilization_pct > 50
                                   ? 'bg-fd-blue'

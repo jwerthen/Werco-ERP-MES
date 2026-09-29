@@ -206,14 +206,14 @@ export default function NotificationBell() {
                           </span>
                         </span>
                         <span
-                          className={`mt-1 block truncate text-[13px] ${
+                          className={`mt-1 block critical-text text-[13px] ${
                             item.is_read ? 'text-fd-body' : 'font-semibold text-fd-ink'
                           }`}
                         >
                           {item.title}
                         </span>
                         {item.body && (
-                          <span className="mt-0.5 block truncate text-[11px] text-fd-mute">{item.body}</span>
+                          <span className="mt-0.5 block critical-text text-[11px] text-fd-mute">{item.body}</span>
                         )}
                       </span>
                     </>

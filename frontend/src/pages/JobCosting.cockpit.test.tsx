@@ -145,6 +145,32 @@ describe('JobCosting cockpit', () => {
       screen.getByRole('heading', { name: /Job Costing & Financial Integration/i })
     ).toBeInTheDocument();
   });
+
+  it('bridges an empty list to the existing work-order picker without posting costs', async () => {
+    mockedApi.get.mockImplementation(async (url: string) => ({ data: url === '/job-costs/summary' ? summary : url === '/work-orders/' ? [{ id: 131, work_order_number: 'WO-20260921-00131' }] : [] }));
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Create from work order' }));
+    const option = await screen.findByRole('option', { name: 'WO-20260921-00131' });
+    expect(option).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Work Order' })).toBeEnabled();
+    expect(mockedApi.post).not.toHaveBeenCalled();
+  });
+
+  it('demotes only the duplicate header action when the unfiltered dataset is genuinely empty', async () => {
+    mockedApi.get.mockImplementation(async (url: string) => ({ data: url === '/job-costs/summary' ? { ...summary, total_jobs: 0 } : [] }));
+    renderPage();
+    expect(await screen.findByRole('button', { name: 'Create from work order' })).toHaveClass('btn-primary');
+    expect(screen.getByRole('button', { name: 'New Job Cost' })).toHaveClass('du-btn-outline');
+    expect(screen.getByRole('button', { name: 'New Job Cost' })).not.toHaveClass('du-btn-primary');
+  });
+
+  it('keeps the header action primary when a search hides existing job costs', async () => {
+    renderPage();
+    await screen.findByText('WO-1001');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search job costs by WO number, part, or customer' }), { target: { value: 'no-match' } });
+    expect(screen.getByText('No job costs found')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'New Job Cost' })).toHaveClass('du-btn-primary');
+  });
 });
 
 jest.mock('../hooks/usePermissions', () => ({

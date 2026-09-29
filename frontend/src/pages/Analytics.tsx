@@ -24,6 +24,8 @@ import {
 import { formatCentralDate } from '../utils/centralTime';
 import { MiniStatStrip, CockpitPanel } from '../components/cockpit';
 import FlowAnalytics from '../components/analytics/FlowAnalytics';
+import { getMetricTrend, METRIC_POLARITY, MetricKey } from '../components/analytics/metricPolarity';
+import { findProductionSpikes, isSevereTargetMiss } from '../components/analytics/analyticsSignals';
 import { usePermissions } from '../hooks/usePermissions';
 import { Breadcrumbs, ErrorState } from '../components/ui';
 import { getBreadcrumbParent, getRouteTitle } from '../utils/routeMeta';
@@ -398,19 +400,6 @@ export default function Analytics() {
     };
   }, []);
 
-  const getTrendIcon = (trend: 'up' | 'down' | 'flat', isGoodUp: boolean = true) => {
-    if (trend === 'up') {
-      return isGoodUp 
-        ? <ArrowTrendingUpIcon className="h-4 w-4 text-green-500" />
-        : <ArrowTrendingUpIcon className="h-4 w-4 text-red-500" />;
-    } else if (trend === 'down') {
-      return isGoodUp 
-        ? <ArrowTrendingDownIcon className="h-4 w-4 text-red-500" />
-        : <ArrowTrendingDownIcon className="h-4 w-4 text-green-500" />;
-    }
-    return <MinusIcon className="h-4 w-4 text-slate-400" />;
-  };
-
   const formatKPIValue = (value: number | null | undefined, type: string) => {
     // Backend (Batch 8 / OEE-4/OEE-6) returns null for a genuinely-uncomputable KPI
     // (no staffed time for OEE, empty denominator for OTD); show "n/a", never a
@@ -458,16 +447,25 @@ export default function Analytics() {
     kpi,
     type,
     icon: Icon,
-    isGoodUp = true,
+    metric,
     onClick,
   }: {
     title: string;
     kpi: KPIValue;
     type: string;
     icon: React.ElementType;
-    isGoodUp?: boolean;
+    metric: MetricKey;
     onClick?: () => void;
   }) => {
+    const isGoodUp = METRIC_POLARITY[metric] === 'higher';
+    const { direction, color: trendColor } = getMetricTrend(metric, kpi);
+    // The backend divides annualized net issues by mean stock-row value, not
+    // average total inventory. The estimate must not imply validated turnover.
+    const unverifiedTurnover = metric === 'inventory_turnover';
+    const color = unverifiedTurnover ? 'text-slate-400' : trendColor;
+    const hasComparableValues = kpi.value != null && kpi.prior_value != null
+      && kpi.value !== 0 && kpi.prior_value !== 0;
+    const TrendIcon = direction === 'up' ? ArrowTrendingUpIcon : direction === 'down' ? ArrowTrendingDownIcon : MinusIcon;
     const isOnTarget = kpi.target !== null && kpi.value !== null && (
       isGoodUp ? kpi.value >= kpi.target : kpi.value <= kpi.target
     );
@@ -483,9 +481,9 @@ export default function Analytics() {
             <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-sm bg-werco-primary/15">
               <Icon className="h-3.5 w-3.5 text-werco-primary" />
             </span>
-            <p className="stat-label !text-[10px] uppercase tracking-wide truncate">{title}</p>
+            <p className="stat-label !text-[10px] uppercase tracking-wide critical-text">{title}</p>
           </div>
-          {kpi.target !== null && (
+          {unverifiedTurnover ? <span className="text-[10px] text-slate-300">Unverified</span> : kpi.target !== null && (
             <span
               className={`text-[10px] px-1.5 py-0.5 rounded-sm tabular-nums flex-shrink-0 ${
                 isOnTarget ? 'bg-green-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'
@@ -499,18 +497,13 @@ export default function Analytics() {
         <div className="flex items-end justify-between gap-2">
           <div className="min-w-0">
             <p className="stat-value !text-xl">{formatKPIValue(kpi.value, type)}</p>
-            {kpi.change_pct !== null && (
-              <div className="flex items-center gap-1 mt-0.5">
-                {getTrendIcon(kpi.trend, isGoodUp)}
-                <span
-                  className={`text-[10px] tabular-nums ${
-                    (isGoodUp && kpi.trend === 'up') || (!isGoodUp && kpi.trend === 'down')
-                      ? 'text-green-600'
-                      : kpi.trend === 'flat'
-                        ? 'text-slate-400'
-                        : 'text-red-600'
-                  }`}
-                >
+            {hasComparableValues && kpi.change_pct !== null && (
+              <div
+                className="flex items-center gap-1 mt-0.5"
+                aria-label={`${title} ${direction === 'flat' ? 'unchanged' : direction === 'up' ? 'increased' : 'decreased'} from prior period`}
+              >
+                <TrendIcon className={`h-4 w-4 ${color}`} />
+                <span className={`text-[10px] tabular-nums ${color}`}>
                   {Math.abs(kpi.change_pct).toFixed(1)}% vs prior
                 </span>
               </div>
@@ -518,6 +511,12 @@ export default function Analytics() {
           </div>
           <div className="w-16 flex-shrink-0">{renderSparkline(kpi.sparkline)}</div>
         </div>
+        {unverifiedTurnover && (
+          <p className="text-[10px] text-slate-300 critical-text">
+            Annualized estimate (×/year). Uses average inventory-row value, not average total inventory.
+            Not comparable to the {formatKPIValue(kpi.target, type)}×/year turnover target; verify before use.
+          </p>
+        )}
       </div>
     );
 
@@ -557,6 +556,15 @@ export default function Analytics() {
   // Breadcrumb parent — non-null only on the /analytics/* sub-views, so the
   // bare hub renders no crumb. One mount covers all seven sub-routes.
   const crumbParent = getBreadcrumbParent(location.pathname);
+
+  const criticalTargetMisses = ([
+    ['On-Time Delivery', kpis?.on_time_delivery],
+    ['OTD (shipped)', kpis?.on_time_delivery_ship],
+    ['OTIF', kpis?.otif],
+    ['First Pass Yield', kpis?.first_pass_yield],
+    ['OEE', kpis?.oee],
+  ] as Array<[string, KPIValue | null | undefined]>).filter(([, metric]) => metric && isSevereTargetMiss(metric.value, metric.target));
+  const productionSpikes = findProductionSpikes(productionTrends);
 
   if (loading) {
     return (
@@ -633,10 +641,20 @@ export default function Analytics() {
 
       {view === 'overview' && kpis && (
         <>
+          {criticalTargetMisses.length > 0 && (
+            <section aria-label="Critical KPI target misses" className="rounded-sm border border-red-500/60 bg-red-500/10 p-3">
+              <h2 className="font-semibold text-red-300">Production metrics need attention</h2>
+              <p className="text-xs text-slate-300">These measured KPIs are below 75% of their target.</p>
+              <ul className="mt-2 flex flex-wrap gap-x-6 gap-y-2 text-sm text-red-200">
+                {criticalTargetMisses.map(([title, metric]) => <li key={title}><strong>{title}: {formatKPIValue(metric!.value, 'percent')}</strong> · target {formatKPIValue(metric!.target, 'percent')}</li>)}
+              </ul>
+            </section>
+          )}
           {/* KPI strip */}
           <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
             <KPICard
               title="OEE"
+              metric="oee"
               kpi={kpis.oee}
               type="percent"
               icon={ChartBarIcon}
@@ -644,6 +662,7 @@ export default function Analytics() {
             />
             <KPICard
               title="On-Time Delivery"
+              metric="on_time_delivery"
               kpi={kpis.on_time_delivery}
               type="percent"
               icon={CalendarDaysIcon}
@@ -654,6 +673,7 @@ export default function Analytics() {
             {kpis.on_time_delivery_ship && (
               <KPICard
                 title="OTD (shipped)"
+                metric="on_time_delivery_ship"
                 kpi={kpis.on_time_delivery_ship}
                 type="percent"
                 icon={CalendarDaysIcon}
@@ -663,6 +683,7 @@ export default function Analytics() {
             {kpis.otif && (
               <KPICard
                 title="OTIF"
+                metric="otif"
                 kpi={kpis.otif}
                 type="percent"
                 icon={CalendarDaysIcon}
@@ -671,6 +692,7 @@ export default function Analytics() {
             )}
             <KPICard
               title="First Pass Yield"
+              metric="first_pass_yield"
               kpi={kpis.first_pass_yield}
               type="percent"
               icon={CheckCircleIcon}
@@ -678,34 +700,37 @@ export default function Analytics() {
             />
             <KPICard
               title="Scrap Rate"
+              metric="scrap_rate"
               kpi={kpis.scrap_rate}
               type="percent"
               icon={BeakerIcon}
-              isGoodUp={false}
               onClick={() => navigate('/analytics/quality')}
             />
             <KPICard
               title="Open NCRs"
+              metric="open_ncrs"
               kpi={kpis.open_ncrs}
               type="count"
               icon={ExclamationTriangleIcon}
-              isGoodUp={false}
               onClick={() => navigate('/quality?filter=open')}
             />
             <KPICard
               title="Quote Win Rate"
+              metric="quote_win_rate"
               kpi={kpis.quote_win_rate}
               type="percent"
               icon={CurrencyDollarIcon}
             />
             <KPICard
               title="Backlog Hours"
+              metric="backlog_hours"
               kpi={kpis.backlog_hours}
               type="hours"
               icon={ClockIcon}
             />
             <KPICard
               title="Inventory Turnover"
+              metric="inventory_turnover"
               kpi={kpis.inventory_turnover}
               type="ratio"
               icon={CubeIcon}
@@ -728,6 +753,13 @@ export default function Analytics() {
                 </button>
               }
             >
+              {productionSpikes.length > 0 && (
+                <div role="note" aria-label="Production data review" className="mb-3 rounded-sm border border-amber-500/50 bg-amber-500/10 p-2 text-xs text-amber-200">
+                  <p className="font-semibold">Large production jumps — verify the recorded quantities</p>
+                  <p>Flagged when output rises by at least 100 units and 5× the prior reported day; original values are shown.</p>
+                  {productionSpikes.map(point => <p key={point.date}>{formatCentralDate(point.date)}: {point.previous.toLocaleString()} → {point.value.toLocaleString()} units</p>)}
+                </div>
+              )}
               <div className="h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={productionTrends}>

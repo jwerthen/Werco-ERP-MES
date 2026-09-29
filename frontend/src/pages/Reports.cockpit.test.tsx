@@ -145,6 +145,15 @@ test('renders the CockpitPanel report sections', async () => {
   expect(screen.getByText('Acme Metals')).toBeInTheDocument();
 });
 
+test('flags over-capacity utilization and exposes the full formula', async () => {
+  mockedApi.getWorkCenterUtilization.mockResolvedValue([{ ...utilization[0], utilization_pct: 141.1 }] as any);
+  renderReports();
+  const capacity = await screen.findByText('141.1% · above capacity');
+  const row = capacity.parentElement!.parentElement!;
+  expect(row.querySelector('.h-full')).toHaveClass('bg-fd-red');
+  expect(screen.getByText('Utilization = logged hours ÷ (period days × 8 hours).')).toBeInTheDocument();
+});
+
 // Resilience regression (go-live blocker FIX 3): the loader was changed from
 // Promise.all to Promise.allSettled with per-section error state. ONE failing
 // report endpoint must scope its error to that section (an ErrorState with a
@@ -245,5 +254,11 @@ test('employee time exposes the eleventh entry and preserves tab and period thro
   expect(screen.getByRole('combobox', { name: 'Report period' })).toHaveValue('90');
   fireEvent.change(screen.getByRole('combobox', { name: 'Report period' }), { target: { value: '7' } });
   await waitFor(() => expect(mockedApi.getProductionSummary).toHaveBeenLastCalledWith(7));
+  expect(mockedApi.getQualityMetrics).toHaveBeenLastCalledWith(7);
+  expect(mockedApi.getWorkCenterUtilization).toHaveBeenLastCalledWith(7);
+  expect(mockedApi.getDailyOutput).toHaveBeenLastCalledWith(14);
+  expect(mockedApi.getVendorPerformance).toHaveBeenLastCalledWith(90);
+  expect(mockedApi.getEmployeeTimeReport).toHaveBeenLastCalledWith();
+  expect(await screen.findByText(/The selected period applies to production, quality, utilization and costing/)).toHaveTextContent('Daily Output uses 14 days, Vendor Performance 90 days, and Employee Time 7 days.');
   expect(screen.getByLabelText('Current query')).toHaveTextContent('tab=timesheets&period=7');
 });
