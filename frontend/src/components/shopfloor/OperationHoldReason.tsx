@@ -5,6 +5,8 @@ import {
   hasHoldReason,
   holdFreeTextWithheld,
   holdIsUnexplained,
+  holdNoteText,
+  holdReasonFields,
   holdReasonLabel,
   holdSeverityLabel,
   holdTitleText,
@@ -68,10 +70,10 @@ export default function OperationHoldReason({
 }: OperationHoldReasonProps) {
   if (!hold) return null;
 
-  const blocker = hold.blocker;
-  const reason = holdReasonLabel(blocker?.category);
-  const severity = holdSeverityLabel(blocker?.severity);
-  const note = (blocker?.note || '').trim();
+  const fields = holdReasonFields(hold);
+  const reason = holdReasonLabel(fields?.category);
+  const severity = holdSeverityLabel(fields?.severity);
+  const note = holdNoteText(hold);
   // The blocker's own title, echo-suppressed. An office-created blocker routinely
   // carries its free text HERE with an empty note (see `holdTitleText`), so dropping
   // it would render a bare category on the desk screens for exactly the holds an

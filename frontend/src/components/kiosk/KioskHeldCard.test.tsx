@@ -22,6 +22,25 @@ import {
 } from './heldOperationFixtures';
 
 describe('KioskHeldCard', () => {
+  it('reads the reason from an ordinary hold event with no blocker', () => {
+    render(<KioskHeldCard item={heldRowWith({
+      ...BARE_HOLD, category: 'material_shortage', severity: 'medium', note: 'Waiting for next sheet',
+    })} onResume={jest.fn()} />);
+
+    expect(screen.getByTestId('kiosk-held-reason')).toHaveTextContent('Material shortage');
+    expect(screen.getByTestId('kiosk-held-note')).toHaveTextContent('Waiting for next sheet');
+    expect(screen.queryByTestId('kiosk-held-no-blocker')).not.toBeInTheDocument();
+  });
+
+  it('reports a withheld ordinary hold note on a crew station', () => {
+    render(<KioskHeldCard item={heldRowWith({
+      ...BARE_HOLD, category: 'material_shortage', has_note: true, free_text_withheld: true,
+    })} onResume={jest.fn()} size="crew" />);
+
+    expect(screen.getByTestId('kiosk-held-note-withheld')).toBeInTheDocument();
+    expect(screen.queryByTestId('kiosk-held-note')).not.toBeInTheDocument();
+  });
+
   it('marks the job as on hold and shows its progress', () => {
     render(<KioskHeldCard item={HELD_ROW} onResume={jest.fn()} />);
 

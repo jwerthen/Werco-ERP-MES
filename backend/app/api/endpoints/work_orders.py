@@ -167,6 +167,7 @@ from app.services.work_order_state_service import (
     TERMINAL_WO_STATUSES,
     StatusTransition,
     WorkOrderStateError,
+    active_work_order_operations,
     begin_operation_progress,
     demote_operations_for_sequencing,
     finalize_operation_completion,
@@ -1780,7 +1781,7 @@ def list_work_orders(
         .filter(WorkOrder.company_id == company_id)
         .options(
             joinedload(WorkOrder.part),
-            selectinload(WorkOrder.operations),
+            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.laser_nest),
         )
     )
 
@@ -4617,12 +4618,18 @@ def complete_work_order(
 
     operations = (
         db.query(WorkOrderOperation)
+        .options(selectinload(WorkOrderOperation.laser_nest))
         .filter(WorkOrderOperation.work_order_id == work_order.id, WorkOrderOperation.company_id == company_id)
         .order_by(WorkOrderOperation.id)
         .with_for_update()
         .all()
     )
     work_order.operations = operations
+    # Keep cancelled-nest history attached, but do not force-complete its held
+    # operation or treat it as a live hold that prevents closing this order.
+    operations = active_work_order_operations(work_order)
+    if is_laser_dispatch_work_order(work_order) and not operations:
+        raise HTTPException(status_code=409, detail="Cannot complete a laser work order with no active nests")
 
     # QG-5 / BLK-1 consistency: this privileged override force-completes every open
     # op, but it must NOT silently lift a quality/material hold -- that contradicts
@@ -5506,6 +5513,7 @@ def complete_operation(
     if operation.work_order_id is not None:
         work_order = (
             db.query(WorkOrder)
+            .options(selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.laser_nest))
             .filter(
                 WorkOrder.id == operation.work_order_id,
                 WorkOrder.company_id == company_id,

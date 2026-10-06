@@ -56,6 +56,8 @@ import {
   clearHoldOutcome,
   formatHoldAttribution,
   holdIsUnexplained,
+  holdNoteText,
+  holdReasonFields,
   holdReasonLabel,
   holdSeverityLabel,
   holdTitleText,
@@ -287,9 +289,9 @@ interface HoldSummary {
  */
 function summarizeHold(hold?: OperationHold | null): HoldSummary | null {
   if (!hold) return null;
-  const blocker = hold?.blocker ?? null;
-  const category = holdReasonLabel(blocker?.category);
-  const severity = holdSeverityLabel(blocker?.severity);
+  const fields = holdReasonFields(hold);
+  const category = holdReasonLabel(fields?.category);
+  const severity = holdSeverityLabel(fields?.severity);
   const headline = [category, severity].filter(Boolean).join(' \u00b7 ') || null;
   return {
     headline,
@@ -297,7 +299,7 @@ function summarizeHold(hold?: OperationHold | null): HoldSummary | null {
     // shared `holdTitleText`, so this panel and the shop-floor `OperationHoldReason`
     // cannot decide differently about the same blocker.
     title: holdTitleText(hold),
-    note: (blocker?.note || '').trim() || null,
+    note: holdNoteText(hold),
     attribution: formatHoldAttribution(hold),
     unexplained: holdIsUnexplained(hold),
   };
@@ -330,16 +332,20 @@ function clearHoldMessage(op: WorkOrderOperation, workOrderNumber: string): stri
       'Why it is held: not recorded. No blocker is open on it, and no one was recorded placing the hold.'
     );
   } else {
-    lines.push(`Why it is held: ${hold.headline ?? 'no open blocker explains it'}`);
+    lines.push(`Why it is held: ${hold.headline ?? (hold.note ? 'see the recorded note below' : 'no reason recorded')}`);
     if (hold.title) lines.push(hold.title);
     if (hold.note) lines.push(`\u201c${hold.note}\u201d`);
     lines.push(hold.attribution ?? 'Who placed the hold was not recorded.');
   }
 
   lines.push('');
-  lines.push(
-    'Clearing the hold does NOT close the blocker. It stays open until a supervisor or manager resolves it in the Blockers panel below.'
-  );
+  if (op.hold_context?.blocker) {
+    lines.push(
+      'Clearing the hold does NOT close the blocker. It stays open until a supervisor or manager resolves it in the Blockers panel below.'
+    );
+  } else if (op.hold_context) {
+    lines.push('Clearing the hold is all that is needed. There is no blocker to resolve.');
+  }
   lines.push('');
   lines.push(
     'The operation goes back to where it was. If nobody has clocked time on it yet it returns to Pending, and it will not show on the dispatch board or at the kiosk until the work order is released and any earlier operations are finished.'
@@ -358,7 +364,9 @@ const formatFileSize = (bytes?: number | null) => {
 };
 
 const getOperationProgressMetrics = (workOrder: WorkOrder) => {
-  const operations = workOrder.operations || [];
+  // Cancelled nests keep their operation rows for history and restoration, but
+  // their planned work no longer contributes to the active route's progress.
+  const operations = (workOrder.operations || []).filter((op) => op.cancelled_nest_id == null);
   if (operations.length === 0) {
     const ordered = Number(workOrder.quantity_ordered || 0);
     const complete = Number(workOrder.quantity_complete || 0);

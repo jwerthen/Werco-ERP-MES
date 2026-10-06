@@ -564,9 +564,8 @@ class OperationHoldInfo(UTCModel):
 
     EVERY FIELD IS NULLABLE, and ``blocker is None`` is the case this exists for. There is no
     ``held_by``/``held_at`` column on ``work_order_operations``; provenance is reconstructed from
-    whichever record the hold path happened to write, and the paths differ -- a hold with a note or
-    a non-OTHER category files a ``WorkOrderBlocker``, while a BARE hold (no note, category OTHER --
-    exactly the accidental fat-finger case) emits an ``operation_hold`` event and files no blocker.
+    whichever record the hold path wrote. Nest holds retain their optional reason in an
+    ``operation_hold`` event without creating a blocker. Explicit blockers remain separate.
     So the reason and the attribution are INDEPENDENT: never gate one on the other, or the mis-tap
     renders as both anonymous and reasonless. All-null ("held by unknown, reason not recorded") is a
     real state a hold placed before either record existed produces, not an error.
@@ -577,6 +576,11 @@ class OperationHoldInfo(UTCModel):
     # Public-screen-safe display form ("Dana R."), from wallboard_service.operator_display_name.
     held_by_name: Optional[str] = None
     blocker: Optional[OperationHoldBlockerInfo] = None
+    category: Optional[str] = None
+    severity: Optional[str] = None
+    note: Optional[str] = None
+    has_note: bool = False
+    free_text_withheld: bool = False
 
     @field_serializer("held_at", when_used="json")
     def serialize_utc_datetime(self, value: Optional[datetime]) -> Optional[str]:

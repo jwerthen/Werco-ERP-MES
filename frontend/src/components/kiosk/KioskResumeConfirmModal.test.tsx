@@ -38,6 +38,18 @@ function renderModal(overrides: Partial<React.ComponentProps<typeof KioskResumeC
 }
 
 describe('KioskResumeConfirmModal', () => {
+  it('clears an ordinary noted hold without sending the operator to resolve a blocker', () => {
+    renderModal({ item: heldRowWith({
+      ...BARE_HOLD, category: 'material_shortage', severity: 'medium', note: 'Waiting for next sheet',
+    }) });
+
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent('Material shortage');
+    expect(dialog).toHaveTextContent('Waiting for next sheet');
+    expect(dialog).toHaveTextContent('Resuming clears this hold. There is no blocker left to resolve.');
+    expect(dialog).not.toHaveTextContent(/supervisor|stays recorded|will not clear itself/i);
+  });
+
   it('restates exactly which job is being resumed', () => {
     renderModal();
 

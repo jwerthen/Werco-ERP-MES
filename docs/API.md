@@ -2005,6 +2005,7 @@ a deleted record. Customer pickers independently exclude tombstoned rows.
 > ```
 > hold_context: {
 >   held_at, held_by_user_id, held_by_name,
+>   category, severity, note, has_note, free_text_withheld,
 >   blocker: { id, category, severity, status, title, note, free_text_withheld,
 >              reported_at, reported_by_user_id, reported_by_name } | null
 > } | null
@@ -2022,13 +2023,14 @@ a deleted record. Customer pickers independently exclude tombstoned rows.
 > `services/operation_hold_view.py` — the same batched view the kiosk `held` list reads, so the
 > office page and the floor cannot tell two stories about one hold. Two provenance cases:
 >
-> - **Blocker-backed** — the hold filed a `WorkOrderBlocker` (a note, a non-`OTHER` category, the
->   blocker API, or the kiosk's OOT→NCR one-tap hold). `blocker` carries the reason, and only the
+> - **Blocker-backed** — an explicit blocker report, a categorized non-nest hold, or the kiosk's
+>   OOT→NCR one-tap hold filed a `WorkOrderBlocker`. `blocker` carries the reason, and only the
 >   newest **OPEN / ACKNOWLEDGED** one qualifies: `RESOLVED` / `DISMISSED` blockers are stale
 >   narrative, because the resolve/dismiss flow is what auto-resumes an operation.
-> - **Bare `operation_hold` event** — no note, category `OTHER`, which is exactly the accidental
->   fat-finger case. No blocker is filed at all, so `blocker` is `null` while `held_by_name` /
->   `held_at` still name who pressed it.
+> - **Ordinary nest hold** — an `operation_hold` event keeps `category`, `severity`, and `note`
+>   directly on this context. No blocker is filed, including when a note or category is supplied.
+>   `blocker` is `null`; `held_by_name` / `held_at` name who pressed it. Clearing the hold is
+>   sufficient; no separate blocker resolution is needed. Bare holds also use the event.
 >
 > **Reason and attribution are therefore INDEPENDENT — never gate one on the other**, or the mis-tap
 > renders as anonymous *and* reasonless. When both records exist the **more recent** supplies the
@@ -2036,6 +2038,10 @@ a deleted record. Customer pickers independently exclude tombstoned rows.
 > is `null` — a real state, not an error, since the module reports what was recorded and never infers
 > a holder from `operation.updated_at`. The `audit_log` records every hold too and is deliberately
 > **not** read here: it is the tamper-evident chain, not a display source.
+>
+> **Hold and blocker free text rides this identified-user response.** The top-level `note` has the
+> same audience rule as `blocker.title` / `blocker.note`: shared crew-station payloads omit its key
+> and send `has_note` / `free_text_withheld` instead. Office responses include the note.
 >
 > **The blocker's free text (`title` / `note`) rides this response, unlike the kiosk queue payload.**
 > `shop_floor._hold_blocker_payload` withholds those two keys from a crew-**station** principal (an
@@ -5075,7 +5081,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 |--------|----------|-------------|---------------|
 | GET | `/shop-floor/dashboard` | Shop floor dashboard | Yes |
 | GET | `/shop-floor/my-active-job` | Get current user's active job, incl. the job's written guidance (WO notes/special instructions + the operation's description/setup/run text) | Yes |
-| GET | `/shop-floor/operations` | List not-complete/cancelled operations for the desktop shop-floor pages (paginated, max 200/page; filters `work_center_id` / `status` / `search` / `due_today`) — rows in the **canonical dispatch order**, each carrying the advisory `run_order` display rank (see "Desktop parity" under the Dispatch run order note below). An **`ON_HOLD` row additionally carries `hold`** — `{ held_at, held_by_user_id, held_by_name, blocker }`, from the same batched pure-read `operation_hold_view` the kiosk `held` list uses, so the desk page and the floor cannot tell two stories about one hold. The key is **absent on every other row** (unheld payloads stay byte-identical), every field inside is nullable, and `blocker: null` is the BARE-hold case (no note, category OTHER — the accidental one), which still carries `held_by_name` / `held_at`: reason and attribution are INDEPENDENT. **Free text (`title` / `note`) rides this response** — every caller is an identified `get_current_user` session, never a crew-station principal, so the station withholding rule does not apply and `free_text_withheld` is `false` | Yes |
+| GET | `/shop-floor/operations` | List not-complete/cancelled operations for the desktop shop-floor pages (paginated, max 200/page; filters `work_center_id` / `status` / `search` / `due_today`) — rows in the **canonical dispatch order**, each carrying the advisory `run_order` display rank (see "Desktop parity" under the Dispatch run order note below). An **`ON_HOLD` row additionally carries `hold`** — `{ held_at, held_by_user_id, held_by_name, blocker }`, from the same batched pure-read `operation_hold_view` the kiosk `held` list uses, so the desk page and the floor cannot tell two stories about one hold. The key is **absent on every other row** (unheld payloads stay byte-identical), every field inside is nullable, and `blocker: null` covers ordinary nest holds (including a category or note saved on the hold event) and bare holds, which still carries `held_by_name` / `held_at`: reason and attribution are INDEPENDENT. **Free text (`title` / `note`) rides this response** — every caller is an identified `get_current_user` session, never a crew-station principal, so the station withholding rule does not apply and `free_text_withheld` is `false` | Yes |
 | GET | `/shop-floor/operations/{id}/documents` | Kiosk doc-viewer discovery: the operation's controlled part drawing, live nest reference PDF, nest material, and critical SPC characteristics (see note below) | Yes |
 | GET | `/shop-floor/documents/{id}/inline` | Serve a kiosk-viewable document PDF inline — DRAWING-type or live-nest-referenced only, tenant-scoped, uniform **404** on any miss (see note below) | Yes |
 | POST | `/shop-floor/clock-in` | Clock in to operation | Yes |
@@ -5084,7 +5090,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | POST | `/shop-floor/operations/{id}/production` | Add produced/scrapped quantity while staying clocked in | Yes |
 | POST | `/shop-floor/operations/{id}/reduce-production` | Correct (walk back) good-count an operator OVER-reported on their **own unapproved** labor (open clock-in first, then their own earlier unapproved sessions), **before** the operation/WO is complete — a miscount fix, **not** scrap (see note + schema below) | Yes |
 | POST | `/shop-floor/operations/{id}/complete` | Complete / report progress on an operation | Yes |
-| PUT | `/shop-floor/operations/{id}/hold` | Put an operation on hold (closes open time entries; body optional — category/severity/note file a structured blocker) | Yes |
+| PUT | `/shop-floor/operations/{id}/hold` | Put an operation on hold and close open time entries. For a live laser nest, optional category/severity/note are saved on the hold event and **do not create a blocker**; Resume/Clear Hold is sufficient. Non-nest categorized holds retain their structured blocker behavior. Cancelled nests return **409** and must be restored first | Yes |
 | PUT | `/shop-floor/operations/{id}/resume` | Take an operation **off** hold. **Restores, never promotes**: `IN_PROGRESS` if it ever started, else `PENDING` — lifted to `READY` only where the shared promotion rule would grant it (parent WO released and non-terminal, no incomplete predecessor — which predecessors count is the work order's `sequential_operations` setting: cross-work-center only on a pool, any earlier-sequence operation on a routing), so `pending` is a normal success status. **409** if the operation backs a **cancelled (soft-deleted) laser nest** — that is a tombstone, not a hold; **400** if it is not `ON_HOLD`; cross-tenant id → **404**. Deliberately does **not** resolve the blocker that caused the hold (that stays with the blocker resolve/dismiss flow); the response carries `open_blockers` so the caller can warn (BLK-4) — each `{ id, category, severity, status, has_note, free_text_withheld }`, plus the caller-supplied `title` **only** for a non-station caller (withheld from a badge-minted crew-station token, same rule as `held`). Each `PENDING → READY` flip it does cause emits `operation_ready` (`user_id: null`). Audited **`STATUS_CHANGE`** (old→new status; `extra_data.transition = "resume_operation"`). Reachable by a badge-minted kiosk token — see "Held work" below | Yes |
 | POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/approve` | Approve a TimeEntry (sets `approved` / `approved_by`) | Admin / Manager / Supervisor / Quality |
@@ -5438,7 +5444,9 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >   decided by the server gates at the moment of the action (predecessors, ON_HOLD siblings, open
 >   entries), so a poll asserting `startable: true` would make a claim this read cannot honor. "Held
 >   work cannot be started" is one it can.
-> - **`hold`** — `{held_at, held_by_user_id, held_by_name, blocker}`, where `blocker` is `null` or
+> - **`hold`** — `{held_at, held_by_user_id, held_by_name, category, severity, note, has_note,
+>   free_text_withheld, blocker}`, where top-level reason fields describe an ordinary hold and
+>   `note` is omitted on shared stations. `blocker` is `null` or
 >   `{id, category, severity, status, title, note, reported_at, reported_by_user_id,
 >   reported_by_name}`. Names are the public-screen-safe **"First L."** form
 >   (`wallboard_service.operator_display_name`), the same form the `roster` on this payload already
@@ -5463,8 +5471,8 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > **Hold provenance is reconstructed, never inferred** (`services/operation_hold_view.py`). There is
 > no `held_by` / `held_at` column on `work_order_operations`, so who/when is assembled from the two
 > records the hold paths do write: the still-open (`OPEN` / `ACKNOWLEDGED`) `WorkOrderBlocker` when
-> the hold filed one, else the `operation_hold` OperationalEvent that a **bare** hold — no note,
-> category `OTHER`, which is exactly the accidental fat-finger case — emits. When both exist the
+> the hold filed one, else the `operation_hold` OperationalEvent. Ordinary laser-nest holds keep
+> their reason on that event and never file a blocker, even with a note or category. When both exist the
 > **more recent** record supplies the actor and timestamp (a blocker opened days ago does not get
 > credit for an hour-old bare hold), while the **open blocker is always the reason shown**, whoever
 > pressed hold last. `RESOLVED` / `DISMISSED` blockers are excluded: the resolve/dismiss flow is what

@@ -13,11 +13,11 @@ from app.models.quality import NCRSource, NonConformanceReport
 from app.models.time_entry import TimeEntry, TimeEntrySource, TimeEntryType
 from app.models.user import User
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
-from app.models.work_order_blocker import WorkOrderBlockerCategory
+from app.models.work_order_blocker import WorkOrderBlockerCategory, WorkOrderBlockerSeverity
 from app.schemas.work_order_blocker import WorkOrderBlockerCreate
 from app.services import dispatch_service
-from app.services.laser_nest_service import sync_laser_nest_from_operation
-from app.services.operational_event_service import OperationalEventService
+from app.services.laser_nest_service import active_laser_nest, sync_laser_nest_from_operation
+from app.services.operational_event_service import OperationalEventService, redact_event_payload
 from app.services.production_receipt_service import find_production_replay, record_production_receipt
 from app.services.scrap_reason_service import resolve_scrap_reason_code_or_http
 from app.services.work_order_blocker_service import WorkOrderBlockerService
@@ -328,7 +328,7 @@ def hold_operation_command(db, current_user, company_id, operation_id, hold_data
     """Apply the existing hold, closing the operation crew, without commit or realtime I/O."""
     operation = (
         db.query(WorkOrderOperation)
-        .options(joinedload(WorkOrderOperation.work_order))
+        .options(joinedload(WorkOrderOperation.work_order), joinedload(WorkOrderOperation.laser_nest))
         .filter(WorkOrderOperation.id == operation_id, WorkOrderOperation.company_id == company_id)
         .first()
     )
@@ -352,6 +352,19 @@ def hold_operation_command(db, current_user, company_id, operation_id, hold_data
     # guard). Resolved before any mutation so a disallowed 'import' 422s without changing
     # operation state or closing any entry.
     hold_source = _resolve_labor_source(current_user, hold_data.source if hold_data else None)
+    # A nest hold is a reversible pause. Its reason belongs to the hold itself;
+    # recording that reason must not also create a separately resolvable blocker.
+    is_nest_hold = active_laser_nest(operation) is not None
+    has_hold_reason = bool(hold_data and (hold_data.note or hold_data.category != WorkOrderBlockerCategory.OTHER))
+    hold_details = (
+        {
+            "category": hold_data.category.value if hold_data else WorkOrderBlockerCategory.OTHER.value,
+            "severity": hold_data.severity.value if hold_data else WorkOrderBlockerSeverity.MEDIUM.value,
+            "note": hold_data.note if hold_data else None,
+        }
+        if is_nest_hold and has_hold_reason
+        else {}
+    )
 
     operation.status = OperationStatus.ON_HOLD
     operation.updated_at = datetime.utcnow()
@@ -385,9 +398,10 @@ def hold_operation_command(db, current_user, company_id, operation_id, hold_data
         resource_type="work_order_operation",
         resource_id=operation_id,
         description=f"Put operation {operation.operation_number} on hold",
+        extra_data=redact_event_payload(hold_details) if hold_details else None,
     )
     if work_order := operation.work_order:
-        if hold_data and (hold_data.note or hold_data.category != WorkOrderBlockerCategory.OTHER):
+        if not is_nest_hold and has_hold_reason:
             WorkOrderBlockerService(db).create_blocker(
                 company_id=company_id,
                 user=current_user,
@@ -412,12 +426,13 @@ def hold_operation_command(db, current_user, company_id, operation_id, hold_data
                 work_order_id=work_order.id,
                 operation_id=operation.id,
                 user_id=current_user.id,
-                severity="medium",
+                severity=hold_details.get("severity", "medium"),
                 event_payload={
                     "work_order_number": work_order.work_order_number,
                     "operation_name": operation.name,
                     # A0.1 adoption telemetry: client channel (None = not reported).
                     "source": hold_source,
+                    **hold_details,
                 },
             )
 

@@ -1872,14 +1872,13 @@ export interface OperationHoldBlocker {
  * `work_order_operations`; the server reconstructs provenance from whichever
  * record the hold path happened to write, and the paths differ:
  *
- * - A hold WITH a note or a non-OTHER category files a `WorkOrderBlocker`, so
- *   `blocker` is populated.
- * - A BARE hold (no note, category OTHER) — precisely the accidental fat-finger
- *   case — emits an `operation_hold` event and files NO blocker, so `blocker` is
- *   null while `held_at` / `held_by_name` carry the provenance.
+ * - Ordinary nest holds keep their category, severity and note on the
+ *   `operation_hold` event. Clearing the hold leaves no blocker to resolve.
+ * - An explicitly reported blocker remains in `blocker` until resolved.
  *
  * So the reason and the attribution are INDEPENDENT: read the reason from
- * `blocker`, and who/when from `held_by_name` / `held_at`. Never gate one on the
+ * `blocker` when present, otherwise the top-level fields, and who/when from
+ * `held_by_name` / `held_at`. Never gate one on the
  * other, or the mis-tap case renders as both anonymous and reasonless — which is
  * the one case that most needs to read as an accident.
  *
@@ -1894,6 +1893,12 @@ export interface OperationHold {
   held_by_user_id: number | null;
   /** Display form, e.g. "Dana R.". */
   held_by_name: string | null;
+  category?: string | null;
+  severity?: string | null;
+  /** Ordinary hold note. Absent on shared crew-station responses. */
+  note?: string | null;
+  has_note?: boolean;
+  free_text_withheld?: boolean;
   blocker: OperationHoldBlocker | null;
 }
 

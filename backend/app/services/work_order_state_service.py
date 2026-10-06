@@ -744,7 +744,7 @@ def pooled_quantity_complete(
     """
     total = 0.0
     for op in operations or []:
-        if op.component_part_id:
+        if op.component_part_id or _operation_nest_is_deleted(op):
             continue
         candidate = float(op.quantity_complete or 0)
         op_target = operation_target_quantity(op, work_order)
@@ -904,7 +904,23 @@ def _operation_nest_is_deleted(operation: WorkOrderOperation) -> bool:
     or this walks into an N+1.
     """
     nest = getattr(operation, "laser_nest", None)
-    return nest is not None and bool(getattr(nest, "is_deleted", False))
+    if nest is not None:
+        return bool(getattr(nest, "is_deleted", False))
+    # Office responses hide the deleted relationship while retaining this marker.
+    return getattr(operation, "cancelled_nest_id", None) is not None
+
+
+def active_work_order_operations(work_order: WorkOrder) -> list[WorkOrderOperation]:
+    """Production obligations, excluding retained operations of cancelled nests.
+
+    Cancellation parks the operation ON_HOLD for traceability; it is no longer
+    work to finish. A live nest on hold remains an obligation. Never remove rows
+    from the ORM relationship: their history and nest linkage must survive.
+    """
+    operations = list(work_order.operations or [])
+    if not is_laser_dispatch_work_order(work_order):
+        return operations
+    return [op for op in operations if not _operation_nest_is_deleted(op)]
 
 
 def sync_work_order_quantity_complete(
@@ -1104,7 +1120,7 @@ def reduce_operation_produced_quantity(
     target = float(work_order.quantity_ordered or 0)
     non_component_caps: list[float] = []
     for sibling in work_order_operations:
-        if sibling.component_part_id:
+        if sibling.component_part_id or (is_pool and _operation_nest_is_deleted(sibling)):
             continue
         # Use the freshly-lowered value for the corrected op (it may not be flushed yet).
         candidate = op_after if sibling.id == operation.id else float(sibling.quantity_complete or 0)
@@ -1151,7 +1167,7 @@ def _active_operation_id(work_order: WorkOrder) -> Optional[int]:
     whole route is complete (the WO is no longer on any operation).
     """
     operations = sorted(
-        (op for op in (work_order.operations or []) if op.id is not None),
+        (op for op in active_work_order_operations(work_order) if op.id is not None),
         key=lambda op: (op.sequence if op.sequence is not None else 0),
     )
     for wanted in (OperationStatus.IN_PROGRESS, OperationStatus.READY):
@@ -1202,7 +1218,7 @@ def _remaining_incomplete_operation_ids(
     completed in the same unit of work).
     """
     remaining: list[int] = []
-    for op in work_order.operations or []:
+    for op in active_work_order_operations(work_order):
         if op.id == completed_operation.id:
             continue
         if op.status != OperationStatus.COMPLETE:
@@ -1255,12 +1271,13 @@ def finalize_operation_completion(
     else:
         remaining_ids = _remaining_incomplete_operation_ids(work_order, operation)
 
-    if not remaining_ids:
+    active_operations = active_work_order_operations(work_order)
+    if active_operations and not remaining_ids:
         # All operations complete -> the work order is finished.
         now = datetime.utcnow()
-        end_dates = [op.actual_end for op in (work_order.operations or []) if op.actual_end]
+        end_dates = [op.actual_end for op in active_operations if op.actual_end]
         work_order.actual_end = max(end_dates) if end_dates else now
-        start_dates = [op.actual_start for op in (work_order.operations or []) if op.actual_start]
+        start_dates = [op.actual_start for op in active_operations if op.actual_start]
         # DUP-2: stamp actual_start BEFORE flipping to COMPLETE so no terminal WO
         # is left with actual_end but a NULL actual_start (corrupts cycle-time).
         # When no op carries an actual_start, the `now` fallback is captured AFTER
@@ -1324,7 +1341,7 @@ def work_order_operation_progress(work_order: WorkOrder) -> dict:
     describe routing order, and names/numbers can repeat; none identify shared
     completion evidence, including rows that look like regenerated operations.
     """
-    operations = list(work_order.operations or [])
+    operations = active_work_order_operations(work_order)
     if not operations:
         quantity_ordered = float(work_order.quantity_ordered or 0)
         quantity_complete = float(work_order.quantity_complete or 0)
@@ -1465,7 +1482,7 @@ def reconcile_work_orders_from_completion_evidence(
     # a read-path reconcile. Excluding terminal WOs' operations from the candidate set
     # leaves their committed op state untouched. Read-safe: never raises.
     non_terminal_work_orders = [wo for wo in work_orders if wo.status not in TERMINAL_WO_STATUSES]
-    operations = [op for wo in non_terminal_work_orders for op in (wo.operations or [])]
+    operations = [op for wo in non_terminal_work_orders for op in active_work_order_operations(wo)]
     operation_ids = [op.id for op in operations if op.id is not None]
     if not operation_ids:
         return False
@@ -1652,7 +1669,12 @@ def _sync_operation_status_from_quantity(
         if not operation.started_by and latest_entry:
             operation.started_by = latest_entry.user_id
             changed = True
-    elif quantity_complete >= target_qty and has_closed_completion_evidence and not completion_gated:
+    elif (
+        operation.status != OperationStatus.ON_HOLD
+        and quantity_complete >= target_qty
+        and has_closed_completion_evidence
+        and not completion_gated
+    ):
         operation.status = OperationStatus.COMPLETE
         operation.actual_end = operation.actual_end or (latest_entry.clock_out if latest_entry else None)
         operation.completed_by = operation.completed_by or (latest_entry.user_id if latest_entry else None)
@@ -1675,7 +1697,7 @@ def _sync_work_order_status_from_operations(
     transitions: Optional[list[StatusTransition]] = None,
     entry_ids_by_operation: Optional[dict[int, list[int]]] = None,
 ) -> bool:
-    operations = list(work_order.operations or [])
+    operations = active_work_order_operations(work_order)
     if not operations:
         return False
 

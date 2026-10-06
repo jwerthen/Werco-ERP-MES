@@ -56,6 +56,26 @@ const FULL_HOLD: OperationHold = {
 };
 
 describe('OperationHoldReason', () => {
+  it('shows an ordinary hold reason without needing a blocker', () => {
+    render(<OperationHoldReason hold={{
+      ...FULL_HOLD, blocker: null, category: 'material_shortage', severity: 'medium', note: 'Waiting for next sheet',
+    }} />);
+
+    expect(screen.getByTestId('operation-hold-reason-category')).toHaveTextContent('Material shortage');
+    expect(screen.getByTestId('operation-hold-reason-note')).toHaveTextContent('Waiting for next sheet');
+    expect(screen.queryByTestId('operation-hold-reason-no-blocker')).not.toBeInTheDocument();
+  });
+
+  it('discloses a withheld ordinary hold note without rendering its text', () => {
+    render(<OperationHoldReason hold={{
+      ...FULL_HOLD, blocker: null, note: 'Private note', has_note: true, free_text_withheld: true,
+    }} />);
+
+    expect(screen.getByTestId('operation-hold-reason-note-withheld')).toBeInTheDocument();
+    expect(screen.queryByText('Private note')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('operation-hold-reason-unrecorded')).not.toBeInTheDocument();
+  });
+
   it('renders the category, the severity, the verbatim note and who held it', () => {
     render(<OperationHoldReason hold={FULL_HOLD} />);
 

@@ -935,6 +935,26 @@ def _hold_blocker_payload(
     return payload
 
 
+def _hold_context_payload(hold: HoldContext, *, include_free_text: bool, operation: WorkOrderOperation) -> dict:
+    """Hold provenance and reason, with the same audience gate as blockers."""
+    payload = {
+        "held_at": to_utc_iso(hold.held_at) if hold.held_at else None,
+        "held_by_user_id": hold.held_by_user_id,
+        "held_by_name": hold.held_by_name,
+        "blocker": _hold_blocker_payload(hold.blocker, include_free_text=include_free_text, operation=operation),
+    }
+    if hold.category or hold.severity or hold.note:
+        payload.update(
+            category=hold.category,
+            severity=hold.severity,
+            has_note=hold.has_note,
+            free_text_withheld=not include_free_text,
+        )
+        if include_free_text:
+            payload["note"] = hold.note
+    return payload
+
+
 def _resume_open_blocker_payload(
     blocker: WorkOrderBlocker,
     *,
@@ -1003,16 +1023,7 @@ def _held_job_row(
     """
     row = _kiosk_job_row(operation, run_order=None, roster=roster, step_counts=step_counts, ties=ties)
     row["startable"] = False
-    row["hold"] = {
-        "held_at": to_utc_iso(hold.held_at) if hold.held_at else None,
-        "held_by_user_id": hold.held_by_user_id,
-        "held_by_name": hold.held_by_name,
-        "blocker": _hold_blocker_payload(
-            hold.blocker,
-            include_free_text=include_hold_free_text,
-            operation=operation,
-        ),
-    }
+    row["hold"] = _hold_context_payload(hold, include_free_text=include_hold_free_text, operation=operation)
     return row
 
 
@@ -1719,6 +1730,7 @@ def clock_out(
 
     work_order = (
         db.query(WorkOrder)
+        .options(selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.laser_nest))
         .filter(
             WorkOrder.id == time_entry.work_order_id,
             WorkOrder.company_id == company_id,
@@ -2874,7 +2886,7 @@ def shop_floor_dashboard(
     # stranded. The full fix is the deferred ARQ reconcile job.
     work_orders_to_reconcile = (
         db.query(WorkOrder)
-        .options(selectinload(WorkOrder.operations))
+        .options(selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.laser_nest))
         .filter(
             WorkOrder.company_id == company_id,
             WorkOrder.is_deleted == False,  # noqa: E712
@@ -3346,6 +3358,9 @@ def get_all_operations(
     query = (
         db.query(WorkOrderOperation).options(
             joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
+            joinedload(WorkOrderOperation.work_order)
+            .selectinload(WorkOrder.operations)
+            .selectinload(WorkOrderOperation.laser_nest),
             joinedload(WorkOrderOperation.work_center),
             selectinload(WorkOrderOperation.laser_nest).selectinload(LaserNest.document),
         )
@@ -3495,12 +3510,7 @@ def get_all_operations(
         hold_payload = None
         if op.status == OperationStatus.ON_HOLD:
             hold = hold_contexts.get(op.id, HoldContext())
-            hold_payload = {
-                "held_at": to_utc_iso(hold.held_at) if hold.held_at else None,
-                "held_by_user_id": hold.held_by_user_id,
-                "held_by_name": hold.held_by_name,
-                "blocker": _hold_blocker_payload(hold.blocker, include_free_text=True, operation=op),
-            }
+            hold_payload = _hold_context_payload(hold, include_free_text=True, operation=op)
         result.append(
             {
                 "id": op.id,
@@ -4070,6 +4080,7 @@ def complete_operation(
         raise HTTPException(status_code=404, detail="Operation not found")
     work_order = (
         db.query(WorkOrder)
+        .options(selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.laser_nest))
         .filter(
             WorkOrder.id == operation.work_order_id,
             WorkOrder.company_id == company_id,
@@ -4632,8 +4643,9 @@ def put_operation_on_hold(
     """Put an operation on hold.
 
     The body is optional and backward-compatible. When present it carries the
-    structured hold details -- ``category`` / ``severity`` / ``note`` (a note or a
-    non-OTHER category also files a WorkOrderBlocker) -- plus the optional
+    structured hold details -- ``category`` / ``severity`` / ``note``. Nest holds
+    retain that reason without creating a blocker; other operations still file
+    a WorkOrderBlocker for a note or non-OTHER category. It also accepts the optional
     ``source`` adoption-telemetry channel (kiosk | desktop | scanner | backfill;
     ``import`` is rejected with 422 -- reserved for the bulk-migration loaders -- and a
     kiosk-scoped operator token forces ``kiosk``) that tags the emitted event and fills
