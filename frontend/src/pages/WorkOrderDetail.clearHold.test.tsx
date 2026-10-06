@@ -217,6 +217,23 @@ beforeEach(() => {
 });
 
 describe('WorkOrderDetail — why an operation is held (fix D)', () => {
+  it('shows an ordinary hold reason and says clearing it is sufficient', async () => {
+    setOperations([heldOperation({
+      ...FULL_HOLD, blocker: null, category: 'material_shortage', severity: 'medium', note: 'Waiting for next sheet',
+    })]);
+    renderDetail();
+
+    await screen.findByText('Deburr');
+    expect(screen.getByText('Material shortage · Medium')).toBeInTheDocument();
+    expect(screen.getByText('Waiting for next sheet')).toBeInTheDocument();
+    fireEvent.click(clearHoldButtons()[0]);
+
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('Waiting for next sheet');
+    expect(dialog).toHaveTextContent('Clearing the hold is all that is needed. There is no blocker to resolve.');
+    expect(dialog).not.toHaveTextContent(/does NOT close the blocker|Blockers panel/i);
+  });
+
   it('shows the reason, the written note and who held it, before any click', async () => {
     renderDetail();
 

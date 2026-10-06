@@ -1,7 +1,10 @@
 import React from 'react';
 import KioskModal, { KioskModalClose } from './KioskModal';
 import { KioskQueueItem, formatOperationLabel } from './kioskConstants';
-import { formatHoldAttribution, hasHoldReason, holdFreeTextWithheld, holdReasonLabel } from './heldOperations';
+import {
+  formatHoldAttribution, hasHoldReason, holdFreeTextWithheld, holdNoteText,
+  holdReasonFields, holdReasonLabel,
+} from './heldOperations';
 
 interface KioskResumeConfirmModalProps {
   item: KioskQueueItem;
@@ -25,18 +28,8 @@ interface KioskResumeConfirmModalProps {
  * Built on KioskModal, NOT the shared <ConfirmDialog>: that one portals outside
  * `.fd-scope-kiosk` and would paint office-palette chrome onto a shop tablet.
  *
- * **Why there is no "this was a mistake — clear it" button here.** That is the
- * outcome an accidental hold actually wants (resolving the blocker resumes the
- * operation AND closes the record, leaving nothing diverging), and the copy
- * below exists because the kiosk cannot offer it. `POST
- * /work-order-blockers/{id}/resolve` is blocked from both kiosks by two
- * independent server gates: it requires ADMIN/MANAGER/SUPERVISOR (an OPERATOR
- * gets 403 on the single-operator kiosk, which runs on their own session), and
- * /api/v1/work-order-blockers sits outside KIOSK_TOKEN_PATH_PREFIXES, so a
- * badge-minted crew-station token is 403 there whatever role the badge holds.
- * A button that always 403s would be worse than none, so the kiosk resumes and
- * tells the operator plainly that the record is still open and who closes it.
- * Revisit this if a shop-floor-fenced resolve ever lands.
+ * An ordinary nest hold clears with Resume. Only an explicit blocker earns the
+ * separate warning that its record remains open after the operation resumes.
  */
 export default function KioskResumeConfirmModal({
   item,
@@ -49,8 +42,8 @@ export default function KioskResumeConfirmModal({
 }: KioskResumeConfirmModalProps) {
   const hold = item.hold;
   const blocker = hold?.blocker;
-  const reason = holdReasonLabel(blocker?.category);
-  const note = (blocker?.note || '').trim();
+  const reason = holdReasonLabel(holdReasonFields(hold)?.category);
+  const note = holdNoteText(hold);
   const attribution = formatHoldAttribution(hold);
   const reasonKnown = hasHoldReason(hold);
   const noteWithheld = holdFreeTextWithheld(hold);
@@ -101,7 +94,7 @@ export default function KioskResumeConfirmModal({
             className="rounded-[4px] border border-fd-amber/40 bg-fd-amber/5 px-4 py-3.5"
           >
             <p className="font-mono text-[11px] font-bold uppercase tracking-[0.12em] text-fd-amber">
-              {reasonKnown ? 'This hold stays recorded' : 'Who stopped this job'}
+              {blocker ? 'This hold stays recorded' : reasonKnown ? 'Why this job is held' : 'Who stopped this job'}
             </p>
             {reason && <p className="mt-1.5 text-lg font-semibold text-fd-ink">{reason}</p>}
             {note && <p className="mt-1 text-base text-fd-body">{note}</p>}
@@ -113,7 +106,7 @@ export default function KioskResumeConfirmModal({
               </p>
             )}
             {attribution && <p className="mt-1 font-mono text-sm text-fd-mute">{attribution}</p>}
-            {reasonKnown ? (
+            {blocker ? (
               <>
                 <p className="mt-2.5 text-base text-fd-body">
                   The job starts running again, but this stays on the supervisor&apos;s list until someone clears it.
@@ -125,7 +118,9 @@ export default function KioskResumeConfirmModal({
               </>
             ) : (
               <p data-testid="kiosk-resume-bare-hold" className="mt-2.5 text-base text-fd-body">
-                No reason was filed with this hold, so there is nothing left open. Resuming starts the job again.
+                {reasonKnown
+                  ? 'Resuming clears this hold. There is no blocker left to resolve.'
+                  : 'No reason was filed with this hold, so there is nothing left open. Resuming starts the job again.'}
               </p>
             )}
           </div>

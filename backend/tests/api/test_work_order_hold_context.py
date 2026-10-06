@@ -285,6 +285,40 @@ class TestHoldProvenanceOnTheWorkOrderPage:
         assert context["held_by_name"] == "Sam O."
         assert context["held_at"] is not None
 
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            {"category": {"label": "other"}, "severity": ["high"], "note": 123},
+            {"category": "other", "severity": "high", "note": ["invalid note"]},
+            {"category": True, "severity": 3, "note": "Paused for review"},
+        ],
+    )
+    def test_malformed_optional_event_reason_does_not_break_hold_reads(self, client, db_session, reason):
+        user = make_user(db_session)
+        wc = make_work_center(db_session)
+        wo, ops = make_wo(db_session, work_center=wc, statuses=[OperationStatus.ON_HOLD])
+        response = client.post(
+            "/api/v1/operational-events/",
+            headers=headers_for(user),
+            json={
+                "event_type": "operation_hold",
+                "source_module": "shop_floor",
+                "work_order_id": wo.id,
+                "operation_id": ops[0].id,
+                "event_payload": reason,
+            },
+        )
+        assert response.status_code == 200, response.text
+
+        context = operation_by_id(get_work_order(client, user, wo.id), ops[0].id)["hold_context"]
+
+        assert context["held_by_user_id"] == user.id
+        assert context["held_at"] is not None
+        assert context["blocker"] is None
+        for field in ("category", "severity", "note"):
+            assert context[field] == (reason[field] if isinstance(reason[field], str) else None)
+        assert context["has_note"] == isinstance(reason["note"], str)
+
     def test_hold_with_no_record_at_all_renders_as_all_null(self, client: TestClient, db_session: Session):
         """ "Held by unknown, reason not recorded" is a REAL state, not an error."""
         user = make_user(db_session)
@@ -293,7 +327,17 @@ class TestHoldProvenanceOnTheWorkOrderPage:
 
         context = operation_by_id(get_work_order(client, user, wo.id), ops[0].id)["hold_context"]
 
-        assert context == {"held_at": None, "held_by_user_id": None, "held_by_name": None, "blocker": None}
+        assert context == {
+            "held_at": None,
+            "held_by_user_id": None,
+            "held_by_name": None,
+            "blocker": None,
+            "category": None,
+            "severity": None,
+            "note": None,
+            "has_note": False,
+            "free_text_withheld": False,
+        }
 
     def test_resolved_blocker_is_not_the_current_reason(self, client: TestClient, db_session: Session):
         """A closed blocker on a still-held op is stale narrative -- excluded server-side."""
@@ -350,7 +394,17 @@ class TestTenantIsolation:
 
         context = operation_by_id(get_work_order(client, user, wo.id), ops[0].id)["hold_context"]
 
-        assert context == {"held_at": None, "held_by_user_id": None, "held_by_name": None, "blocker": None}
+        assert context == {
+            "held_at": None,
+            "held_by_user_id": None,
+            "held_by_name": None,
+            "blocker": None,
+            "category": None,
+            "severity": None,
+            "note": None,
+            "has_note": False,
+            "free_text_withheld": False,
+        }
 
 
 class TestTheReadStaysPure:

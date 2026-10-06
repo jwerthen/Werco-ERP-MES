@@ -8,6 +8,8 @@ import {
   hasHoldReason,
   holdFreeTextWithheld,
   holdIsUnexplained,
+  holdNoteText,
+  holdReasonFields,
   holdReasonLabel,
   holdSeverityLabel,
 } from './heldOperations';
@@ -64,10 +66,10 @@ export default function KioskHeldCard({
   size = 'kiosk',
 }: KioskHeldCardProps) {
   const hold = item.hold;
-  const blocker = hold?.blocker;
-  const reason = holdReasonLabel(blocker?.category);
-  const severity = holdSeverityLabel(blocker?.severity);
-  const note = (blocker?.note || '').trim();
+  const fields = holdReasonFields(hold);
+  const reason = holdReasonLabel(fields?.category);
+  const severity = holdSeverityLabel(fields?.severity);
+  const note = holdNoteText(hold);
   const attribution = formatHoldAttribution(hold);
   const reasonKnown = hasHoldReason(hold);
   const unexplained = holdIsUnexplained(hold);

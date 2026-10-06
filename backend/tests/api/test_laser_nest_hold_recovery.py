@@ -2,9 +2,13 @@
 
 import pytest
 
+from app.models.audit_log import AuditLog
 from app.models.laser_nest import LaserNest
-from app.models.work_order import WorkOrder, WorkOrderOperation
+from app.models.operational_event import OperationalEvent
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
+from app.models.work_order_blocker import WorkOrderBlocker
 from tests.api import test_laser_nest_pool_quantity_rollup as pool_fixtures
+from tests.api import test_work_order_hold_context as hold_fixtures
 from tests.api.test_kiosk_resume_fence import badge_headers
 
 upload_dir = pool_fixtures.upload_dir
@@ -24,7 +28,7 @@ def test_repeated_hold_read_clear_keeps_nest_active_and_returns_to_queue(client,
     for cycle in range(3):
         hold_body = {'source': 'kiosk' if surface == 'kiosk' else 'desktop'}
         if with_reason:
-            hold_body.update({'category': 'other', 'note': 'Accidental hold regression'})
+            hold_body.update({'category': 'other', 'severity': 'high', 'note': 'Accidental hold regression'})
         response = client.put(f'/api/v1/shop-floor/operations/{op_id}/hold', json=hold_body, headers=headers)
         assert response.status_code == 200, response.text
         assert response.json()['status'] == 'on_hold'
@@ -44,10 +48,35 @@ def test_repeated_hold_read_clear_keeps_nest_active_and_returns_to_queue(client,
         db_session.expire_all()
         assert db_session.get(LaserNest, nest_id).is_deleted is False
         assert float(db_session.get(WorkOrder, work_order['id']).quantity_ordered) == 9
+        assert db_session.query(WorkOrderBlocker).filter(WorkOrderBlocker.operation_id == op_id).count() == 0
+        events = (
+            db_session.query(OperationalEvent)
+            .filter(OperationalEvent.operation_id == op_id, OperationalEvent.event_type == 'operation_hold')
+            .order_by(OperationalEvent.id)
+            .all()
+        )
+        assert len(events) == cycle + 1
+        event = events[-1]
+        assert event.user_id == admin.id
+        assert event.event_payload['source'] == hold_body['source']
+        audit = (
+            db_session.query(AuditLog)
+            .filter(AuditLog.action == 'HOLD_OPERATION', AuditLog.resource_id == op_id)
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+        assert audit is not None
+        if with_reason:
+            for field in ('category', 'severity', 'note'):
+                assert event.event_payload[field] == hold_body[field]
+                assert audit.extra_data[field] == hold_body[field]
+            assert event.severity == 'high'
+        else:
+            assert not {'category', 'severity', 'note'}.intersection(event.event_payload)
         response = client.put(f'/api/v1/shop-floor/operations/{op_id}/resume', headers=headers)
         assert response.status_code == 200, response.text
         assert response.json()['status'] == 'ready'
-        assert bool(response.json()['open_blockers']) == with_reason
+        assert response.json()['open_blockers'] == []
         response = client.get(f'/api/v1/shop-floor/work-center-queue/{wc.id}', headers=headers)
         assert response.status_code == 200, response.text
         assert any(
@@ -60,8 +89,6 @@ def test_repeated_hold_read_clear_keeps_nest_active_and_returns_to_queue(client,
 
 @pytest.mark.parametrize('surface', ['office', 'shop_floor', 'kiosk'])
 def test_hold_of_cancelled_nest_refuses_before_recording_a_success(client, db_session, surface):
-    from app.models.audit_log import AuditLog
-
     admin = pool_fixtures.make_user(db_session)
     wc = pool_fixtures.make_laser_work_center(db_session)
     wo = pool_fixtures._import_three_nest_wo(client, admin, wc)
@@ -105,3 +132,80 @@ def test_holding_a_running_nest_closes_labor_and_can_be_cleared(client, db_sessi
     db_session.expire_all()
     assert db_session.get(LaserNest, op['laser_nest']['id']).is_deleted is False
     assert db_session.get(TimeEntry, entry.id).clock_out == clock_out
+
+
+def test_categorized_nest_hold_without_note_does_not_create_blocker(client, db_session):
+    admin = pool_fixtures.make_user(db_session)
+    wc = pool_fixtures.make_laser_work_center(db_session)
+    wo = pool_fixtures._import_three_nest_wo(client, admin, wc)
+    op_id = wo['operations'][0]['id']
+    headers = pool_fixtures.headers_for(admin)
+    held = client.put(
+        f'/api/v1/shop-floor/operations/{op_id}/hold',
+        headers=headers,
+        json={'category': 'material_missing', 'severity': 'high'},
+    )
+    assert held.status_code == 200, held.text
+    event = db_session.query(OperationalEvent).filter_by(operation_id=op_id, event_type='operation_hold').one()
+    assert event.event_payload['category'] == 'material_missing'
+    assert event.event_payload['severity'] == 'high'
+    assert event.event_payload['note'] is None
+    assert db_session.query(WorkOrderBlocker).filter_by(operation_id=op_id).count() == 0
+    resumed = client.put(f'/api/v1/shop-floor/operations/{op_id}/resume', headers=headers)
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()['status'] == 'ready'
+    assert resumed.json()['open_blockers'] == []
+
+
+def test_nest_hold_reason_is_redacted_consistently_in_event_and_audit(client, db_session):
+    admin = pool_fixtures.make_user(db_session)
+    wc = pool_fixtures.make_laser_work_center(db_session)
+    wo = pool_fixtures._import_three_nest_wo(client, admin, wc)
+    op_id = wo['operations'][0]['id']
+    held = client.put(
+        f'/api/v1/shop-floor/operations/{op_id}/hold',
+        headers=pool_fixtures.headers_for(admin),
+        json={'note': 'x' * 1100},
+    )
+    assert held.status_code == 200, held.text
+    event = db_session.query(OperationalEvent).filter_by(operation_id=op_id, event_type='operation_hold').one()
+    audit = db_session.query(AuditLog).filter_by(resource_id=op_id, action='HOLD_OPERATION').one()
+    assert event.event_payload['note'] == 'x' * 1000 + '...[truncated]'
+    assert audit.extra_data['note'] == event.event_payload['note']
+
+
+def test_non_nest_hold_with_reason_retains_existing_blocker_behavior(client, db_session):
+    admin = pool_fixtures.make_user(db_session)
+    wc = pool_fixtures.make_laser_work_center(db_session)
+    wo, operations = hold_fixtures.make_wo(db_session, work_center=wc, statuses=[OperationStatus.READY])
+    op = operations[0]
+    held = client.put(
+        f'/api/v1/shop-floor/operations/{op.id}/hold',
+        headers=pool_fixtures.headers_for(admin),
+        json={'category': 'quality_hold', 'severity': 'high', 'note': 'Review weld before continuing'},
+    )
+    assert held.status_code == 200, held.text
+    blocker = db_session.query(WorkOrderBlocker).filter_by(operation_id=op.id).one()
+    assert blocker.work_order_id == wo.id
+    assert blocker.category == 'quality_hold'
+    assert blocker.note == 'Review weld before continuing'
+    assert blocker.status == 'open'
+    assert db_session.query(OperationalEvent).filter_by(operation_id=op.id, event_type='operation_hold').count() == 0
+
+
+def test_explicit_nest_blocker_report_still_creates_blocker(client, db_session):
+    admin = pool_fixtures.make_user(db_session)
+    wc = pool_fixtures.make_laser_work_center(db_session)
+    wo = pool_fixtures._import_three_nest_wo(client, admin, wc)
+    op_id = wo['operations'][0]['id']
+    response = client.post(
+        f"/api/v1/work-order-blockers/work-orders/{wo['id']}",
+        headers=pool_fixtures.headers_for(admin),
+        json={'operation_id': op_id, 'category': 'quality_hold', 'note': 'Explicit quality issue'},
+    )
+    assert response.status_code == 200, response.text
+    blocker = db_session.query(WorkOrderBlocker).filter_by(operation_id=op_id).one()
+    assert blocker.status == 'open'
+    assert blocker.note == 'Explicit quality issue'
+    db_session.expire_all()
+    assert db_session.get(WorkOrderOperation, op_id).status == OperationStatus.ON_HOLD

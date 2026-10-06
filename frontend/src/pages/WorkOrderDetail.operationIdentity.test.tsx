@@ -170,4 +170,37 @@ describe('WorkOrderDetail operation identity', () => {
     expect(within(container.querySelector('#operation-601') as HTMLElement).getByText('ready')).toBeInTheDocument();
     expect(within(container.querySelector('#operation-602') as HTMLElement).getByText('complete')).toBeInTheDocument();
   });
+
+  it('excludes a cancelled nest from progress while keeping its history row visible', async () => {
+    const operations = [
+      operation({ id: 601, status: 'complete', quantity_complete: 16 }),
+      operation({ id: 602, status: 'complete', quantity_complete: 16 }),
+      operation({ id: 603, name: 'Cancelled nest', status: 'on_hold', cancelled_nest_id: 903 }),
+    ];
+    mockedApi.getWorkOrder.mockResolvedValue({
+      ...workOrder(operations),
+      work_order_type: 'laser_cutting',
+    });
+    const { container } = renderDetail();
+
+    await screen.findByRole('heading', { name: 'Operations / Routing' });
+    expect(progressTile().getByText('2/2 ops')).toBeInTheDocument();
+    expect(progressTile().getByText('100%')).toBeInTheDocument();
+    expect(container.querySelectorAll('tr[id^="operation-"]')).toHaveLength(3);
+    expect(within(container.querySelector('#operation-603') as HTMLElement).getByText(
+      'This nest was cancelled. Restore it to return its planned runs to this work order.'
+    )).toBeInTheDocument();
+  });
+
+  it('still includes a live held operation in progress', async () => {
+    mockedApi.getWorkOrder.mockResolvedValue(workOrder([
+      operation({ id: 601, status: 'complete', quantity_complete: 16 }),
+      operation({ id: 602, status: 'on_hold', cancelled_nest_id: null }),
+    ]));
+    renderDetail();
+
+    await screen.findByRole('heading', { name: 'Operations / Routing' });
+    expect(progressTile().getByText('1/2 ops')).toBeInTheDocument();
+    expect(progressTile().getByText('50%')).toBeInTheDocument();
+  });
 });

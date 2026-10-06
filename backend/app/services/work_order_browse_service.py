@@ -7,7 +7,7 @@ from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import joinedload, selectinload
 
 from app.models.part import Part, PartType
-from app.models.work_order import WorkOrder, WorkOrderStatus
+from app.models.work_order import WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.schemas.work_order import WorkOrderSummary
 from app.services.work_order_state_service import work_order_operation_progress
 
@@ -131,7 +131,8 @@ def browse_work_orders(
     ordering.append(WorkOrder.id.asc())
     rows = (
         query.options(
-            joinedload(WorkOrder.part.and_(Part.company_id == company_id)), selectinload(WorkOrder.operations)
+            joinedload(WorkOrder.part.and_(Part.company_id == company_id)),
+            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.laser_nest),
         )
         .order_by(*ordering)
         .offset(skip)

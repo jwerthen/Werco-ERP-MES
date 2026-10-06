@@ -37,6 +37,7 @@ from app.models.user import User
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.services.audit_service import AuditService
 from app.services.quality_gate_service import QualityException, record_completion_quality_exceptions
+from app.services.work_order_state_service import active_work_order_operations
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ def _operations_with_no_labor(db: Session, work_order: WorkOrder, company_id: in
     Tenant-scoped: only the WO's own operations are considered and the duration sum is
     company-scoped. Read-only.
     """
-    operations = [op for op in (work_order.operations or []) if op.id is not None]
+    operations = [op for op in active_work_order_operations(work_order) if op.id is not None]
     if not operations:
         return []
 

@@ -41,26 +41,10 @@
  *    was given. The single-operator kiosk runs on the operator's OWN session and
  *    keeps the full text on both.
  *
- * **Reason and attribution are INDEPENDENT.** `hold.blocker` carries the reason
- * and is null for a BARE hold (no note, category OTHER) — which is exactly the
- * accidental fat-finger case this feature exists for — while `hold.held_by_name`
- * / `hold.held_at` carry who and when from the `operation_hold` event. Gating
- * one on the other makes the mis-tap case render as both anonymous and
- * reasonless, the single case that most needs to read as an accident.
- *
- * **Known gap — the kiosk cannot clear a blocker, only resume past one.** For an
- * ACCIDENTAL hold the right outcome is resolving the blocker: that resumes the
- * operation as a side effect (`_resume_operation_if_no_open_blockers`) AND closes
- * the record, leaving nothing diverging. Resuming alone leaves a phantom blocker
- * for somebody to chase on the dashboard and the WO Blockers panel. The kiosk
- * still ships resume-only because `POST /work-order-blockers/{id}/resolve` is
- * unreachable from BOTH kiosks behind two independent gates: it requires
- * ADMIN/MANAGER/SUPERVISOR (an OPERATOR on the single-operator kiosk, which uses
- * their own session, gets 403), and /api/v1/work-order-blockers sits outside
- * `KIOSK_TOKEN_PATH_PREFIXES`, so a badge-minted crew-station token is 403 there
- * no matter whose badge it is. Widening either is a security/RBAC decision, not
- * a frontend one. Until then the copy tells the operator the record stays open
- * and who closes it — see KioskResumeConfirmModal and KioskBlockerStillOpenScreen.
+ * **Reason and attribution are independent.** An explicit blocker supplies its
+ * reason while it remains open. Ordinary nest holds instead keep their reason
+ * on the hold event; clearing them requires no separate blocker resolution.
+ * Both forms retain who placed the hold and when, even without a written note.
  */
 
 import { HOLD_REASONS } from './kioskConstants';
@@ -112,17 +96,29 @@ export function formatHoldAttribution(hold: OperationHold | null | undefined): s
   return null;
 }
 
+/** Explicit blockers retain their own reason; ordinary holds read their event. */
+export function holdReasonFields(hold: OperationHold | null | undefined) {
+  return hold?.blocker ?? hold;
+}
+
+export function holdNoteText(hold: OperationHold | null | undefined): string | null {
+  const reason = holdReasonFields(hold);
+  if (reason?.free_text_withheld) return null;
+  return (reason?.note || '').trim() || null;
+}
+
 /**
- * True when a blocker explains the hold — i.e. there is reason TEXT to show.
+ * True when an ordinary hold or explicit blocker has a reason to show.
  *
  * Deliberately independent of attribution: a bare hold has no blocker but may
  * still name who pressed it, and both halves render on their own terms.
  */
 export function hasHoldReason(hold: OperationHold | null | undefined): boolean {
-  const blocker = hold?.blocker;
-  if (!blocker) return false;
+  const reason = holdReasonFields(hold);
+  if (!reason) return false;
   return Boolean(
-    (blocker.category || '').trim() || (blocker.note || '').trim() || (blocker.title || '').trim()
+    (reason.category || '').trim() || holdNoteText(hold) || (hold?.blocker?.title || '').trim()
+    || (reason.free_text_withheld && reason.has_note)
   );
 }
 
@@ -148,6 +144,7 @@ export function hasHoldReason(hold: OperationHold | null | undefined): boolean {
  */
 export function holdTitleText(hold: OperationHold | null | undefined): string | null {
   const blocker = hold?.blocker;
+  if (blocker?.free_text_withheld) return null;
   const raw = (blocker?.title || '').trim();
   if (!raw) return null;
   const category = holdReasonLabel(blocker?.category);
@@ -175,9 +172,8 @@ export function holdTitleText(hold: OperationHold | null | undefined): string | 
  * there and gets rendered.
  */
 export function holdFreeTextWithheld(hold: OperationHold | null | undefined): boolean {
-  const blocker = hold?.blocker;
-  if (!blocker) return false;
-  return Boolean(blocker.free_text_withheld && blocker.has_note);
+  const reason = holdReasonFields(hold);
+  return Boolean(reason?.free_text_withheld && reason?.has_note);
 }
 
 /**

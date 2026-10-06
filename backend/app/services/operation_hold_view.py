@@ -11,13 +11,11 @@ WHERE THE FACTS COME FROM. There is no ``held_by`` / ``held_at`` column on
 is reconstructed from the two records they DO write, and which one exists depends
 on which path placed the hold:
 
-* ``PUT /shop-floor/operations/{id}/hold`` WITH a note or a non-OTHER category
-  creates a ``WorkOrderBlocker`` (``reported_by`` / ``reported_at``) and emits no
-  ``operation_hold`` event.
-* The same endpoint with a BARE hold -- no note, category OTHER, which is exactly
-  the accidental fat-finger case this feature exists for -- emits an
-  ``operation_hold`` ``OperationalEvent`` (``user_id`` / ``occurred_at``) and
-  creates no blocker.
+* A laser nest hold emits an ``operation_hold`` event, including any reason.
+  Clearing that hold requires no separate blocker resolution.
+* Other operations with a note or non-OTHER category create a
+  ``WorkOrderBlocker`` (``reported_by`` / ``reported_at``). Bare holds emit an
+  ``operation_hold`` event with attribution only.
 * ``WorkOrderBlockerService.create_blocker(put_operation_on_hold=True)`` (the
   blocker API, the kiosk's OOT->NCR one-tap hold) creates the blocker only.
 
@@ -53,7 +51,7 @@ from app.models.operational_event import OperationalEvent
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
 from app.services.wallboard_service import operator_display_name
 
-# The event a bare hold emits (shop_floor.hold_operation, else-branch).
+# The event a nest hold or a bare operation hold emits.
 HOLD_EVENT_TYPE = "operation_hold"
 
 # A blocker still "explains" the hold while it is OPEN or ACKNOWLEDGED. RESOLVED
@@ -88,6 +86,11 @@ class HoldContext:
     held_by_user_id: Optional[int] = None
     held_by_name: Optional[str] = None
     blocker: Optional[HoldBlockerView] = None
+    category: Optional[str] = None
+    severity: Optional[str] = None
+    note: Optional[str] = None
+    has_note: bool = False
+    free_text_withheld: bool = False
 
 
 def _newest_blocker_per_operation(
@@ -194,11 +197,21 @@ def hold_contexts_for_operations(
 
         if use_event and event is not None:
             actor = event.user
+            # The generic event API accepts arbitrary JSON values. Malformed
+            # optional reason fields must not break every held-operation read.
+            reason = event.event_payload if isinstance(event.event_payload, dict) else {}
+            category = reason.get("category")
+            severity = reason.get("severity")
+            note = reason.get("note")
             contexts[operation_id] = HoldContext(
                 held_at=event_at,
                 held_by_user_id=event.user_id,
                 held_by_name=(operator_display_name(actor.first_name, actor.last_name) if actor is not None else None),
                 blocker=blocker_view,
+                category=category if isinstance(category, str) else None,
+                severity=severity if isinstance(severity, str) else None,
+                note=note if isinstance(note, str) else None,
+                has_note=bool(isinstance(note, str) and note.strip()),
             )
         elif blocker is not None:
             contexts[operation_id] = HoldContext(
