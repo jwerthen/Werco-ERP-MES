@@ -59,6 +59,8 @@ import SaveAsTemplateModal from '../components/workorders/SaveAsTemplateModal';
 import { createdWorkOrders } from '../components/workorders/UseTemplateModal';
 import WorkOrderTemplatesPanel from '../components/workorders/WorkOrderTemplatesPanel';
 import WorkOrderOperationsModal from '../components/workorders/WorkOrderOperationsModal';
+import { CompleteWorkModal, CompleteWorkSubmit } from '../components/workorders/CompleteWorkModal';
+import { extractStepsBypassed, stepsBypassedMessage } from '../utils/processSheetErrors';
 
 
 
@@ -257,6 +259,7 @@ function RowActionsCell({
   onDuplicate,
   onSaveTemplate,
   onRelease,
+  onComplete,
   isReleasing,
   isDeleting,
 }: {
@@ -265,6 +268,7 @@ function RowActionsCell({
   onDuplicate?: (wo: WorkOrderSummary) => void;
   onSaveTemplate?: (wo: WorkOrderSummary) => void;
   onRelease?: (wo: WorkOrderSummary) => void;
+  onComplete?: (wo: WorkOrderSummary) => void;
   isReleasing: boolean;
   isDeleting: boolean;
 }) {
@@ -283,6 +287,16 @@ function RowActionsCell({
           className="p-2 rounded-lg text-emerald-600 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           title="Release"
           aria-label={`Release ${wo.work_order_number}`}
+        >
+          <CheckCircleIcon className="h-4 w-4" aria-hidden="true" />
+        </button>
+      )}
+      {onComplete && wo.status === 'in_progress' && (
+        <button
+          onClick={() => onComplete(wo)}
+          className="p-2 rounded-lg text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/10 transition-colors"
+          title="Quick complete"
+          aria-label={`Quick complete ${wo.work_order_number}`}
         >
           <CheckCircleIcon className="h-4 w-4" aria-hidden="true" />
         </button>
@@ -337,6 +351,7 @@ interface WorkOrderColumnOptions {
   /** Catalog this row's plan under a name. Same gate as Duplicate. */
   onSaveTemplate?: (wo: WorkOrderSummary) => void;
   onRelease?: (wo: WorkOrderSummary) => void;
+  onComplete?: (wo: WorkOrderSummary) => void;
   releasingIds?: Set<number>;
   deletePending?: boolean;
   dueDateEdit?: DueDateCellOptions;
@@ -350,6 +365,7 @@ function buildWorkOrderColumns({
   onSaveTemplate,
   onRelease,
   releasingIds,
+  onComplete,
   deletePending,
   dueDateEdit,
 }: WorkOrderColumnOptions): Array<DataTableColumn<WorkOrderSummary>> {
@@ -457,7 +473,7 @@ function buildWorkOrderColumns({
     {
       key: 'actions',
       header: '',
-      // Fits the widest row: Release (draft only) + Duplicate + Save as
+      // Fits the widest row: Release or Quick complete + Duplicate + Save as
       // template + Delete + View.
       className: 'w-44',
       render: (wo) => (
@@ -467,6 +483,7 @@ function buildWorkOrderColumns({
           onDuplicate={onDuplicate}
           onSaveTemplate={onSaveTemplate}
           onRelease={onRelease}
+          onComplete={onComplete}
           isReleasing={Boolean(releasingIds?.has(wo.id))}
           isDeleting={Boolean(deletePending)}
         />
@@ -494,6 +511,8 @@ export default function WorkOrders() {
   // via require_role itself), so a hidden control and a refused call agree. Both the
   // Duplicate action and the inline due-date edit go through that tier.
   const canEditWorkOrders = hasPermission(user?.role, 'work_orders:edit') || !!user?.is_superuser;
+  // Matches the office completion endpoint, including quality but excluding operators.
+  const canCompleteWorkOrders = canEditWorkOrders || user?.role === 'quality';
   const canDuplicateWorkOrders = canEditWorkOrders;
   const canEditDueDate = canEditWorkOrders;
   const [nestWizardOpen, setNestWizardOpen] = useState(false);
@@ -725,6 +744,46 @@ export default function WorkOrders() {
   const handleDuplicate = useCallback((wo: WorkOrderSummary) => {
     setDuplicateTarget(wo);
   }, []);
+
+  const [completeTarget, setCompleteTarget] = useState<WorkOrderSummary | null>(null);
+  const [completing, setCompleting] = useState(false);
+  const [completeError, setCompleteError] = useState<string | null>(null);
+  const completePendingRef = useRef(false);
+
+  const handleQuickComplete = useCallback((wo: WorkOrderSummary) => {
+    if (!canCompleteWorkOrders || wo.status !== 'in_progress' || completePendingRef.current) return;
+    setCompleteError(null);
+    setCompleteTarget(wo);
+  }, [canCompleteWorkOrders]);
+
+  const handleCompleteSubmit = async (values: CompleteWorkSubmit) => {
+    if (!completeTarget || !canCompleteWorkOrders || completePendingRef.current) return;
+    completePendingRef.current = true;
+    setCompleting(true);
+    setCompleteError(null);
+    try {
+      const result = await api.completeWorkOrder(
+        completeTarget.id,
+        values.quantityComplete,
+        // Browse summaries don't contain recorded scrap. Omit an unchanged zero
+        // so quick completion cannot erase scrap already recorded on the order.
+        values.quantityScrapped > 0 ? values.quantityScrapped : null,
+        values.scrapReason,
+        values.scrapReasonCodeId
+      );
+      await currentReload.current();
+      setCompleteTarget(null);
+      showToast('success', `${completeTarget.work_order_number} completed`);
+      const bypassed = extractStepsBypassed(result);
+      if (bypassed) showToast('info', stepsBypassedMessage(bypassed));
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      setCompleteError(typeof detail === 'string' && detail ? detail : 'Failed to complete work order');
+    } finally {
+      completePendingRef.current = false;
+      setCompleting(false);
+    }
+  };
 
   // Save-as-template writes ONE row and points it at this work order — it copies
   // nothing now and changes nothing on the source, so there is no list state to
@@ -1246,6 +1305,7 @@ export default function WorkOrders() {
         onDuplicate: canDuplicateWorkOrders ? handleDuplicate : undefined,
         onSaveTemplate: canEditWorkOrders ? handleSaveTemplate : undefined,
         onRelease: handleRelease,
+        onComplete: canCompleteWorkOrders ? handleQuickComplete : undefined,
         releasingIds,
         deletePending,
         dueDateEdit: dueDateCellOptions,
@@ -1254,6 +1314,8 @@ export default function WorkOrders() {
       canDeleteWorkOrders,
       canDuplicateWorkOrders,
       canEditWorkOrders,
+      canCompleteWorkOrders,
+      handleQuickComplete,
       handleDelete,
       handleDuplicate,
       handleSaveTemplate,
@@ -1729,6 +1791,7 @@ export default function WorkOrders() {
                     onDuplicate: canDuplicateWorkOrders ? handleDuplicate : undefined,
                     onSaveTemplate: canEditWorkOrders ? handleSaveTemplate : undefined,
                     onRelease: handleRelease,
+                    onComplete: canCompleteWorkOrders ? handleQuickComplete : undefined,
                     releasingIds,
                     deletePending,
                     dueDateEdit: dueDateCellOptions,
@@ -1751,6 +1814,7 @@ export default function WorkOrders() {
                 onDuplicate={canDuplicateWorkOrders ? handleDuplicate : undefined}
                 onSaveTemplate={canEditWorkOrders ? handleSaveTemplate : undefined}
                 onRelease={handleRelease}
+                onComplete={canCompleteWorkOrders ? handleQuickComplete : undefined}
                 releasingIds={releasingIds}
                 deletePending={deletePending}
                 className="lg:hidden p-3"
@@ -1791,6 +1855,7 @@ export default function WorkOrders() {
                 onDuplicate={canDuplicateWorkOrders ? handleDuplicate : undefined}
                 onSaveTemplate={canEditWorkOrders ? handleSaveTemplate : undefined}
                 onRelease={handleRelease}
+                onComplete={canCompleteWorkOrders ? handleQuickComplete : undefined}
                 releasingIds={releasingIds}
                 deletePending={deletePending}
                 className="lg:hidden"
@@ -1811,6 +1876,22 @@ export default function WorkOrders() {
         <button className="btn-secondary lg:hidden" disabled={browse.refreshing || !browse.has_next} onClick={browse.loadMore}>{browse.refreshing ? 'Loading…' : browse.has_next ? 'Load 50 more' : 'All matching orders loaded'}</button>
       </div>}
       {loadError && workOrders.length > 0 && <div role="alert" className="text-amber-300">The update failed. Displayed orders may be out of date. <button className="underline" onClick={() => void loadWorkOrders()}>Retry</button></div>}
+
+      {completeTarget && (
+        <CompleteWorkModal
+          open
+          title={`Complete work order ${completeTarget.work_order_number}`}
+          subtitle={`Ordered: ${completeTarget.quantity_ordered}. Completes all remaining operations.`}
+          defaultQuantityComplete={Number(completeTarget.quantity_ordered)}
+          scrapHint="Enter total scrap to update it; leave 0 to keep recorded scrap."
+          submitting={completing}
+          error={completeError}
+          onSubmit={handleCompleteSubmit}
+          onClose={() => {
+            if (!completePendingRef.current) setCompleteTarget(null);
+          }}
+        />
+      )}
 
       {/* Duplicate a work order's plan onto a new draft. On success we navigate
           to the new WO rather than refreshing this list — a draft that nobody
@@ -1945,12 +2026,13 @@ interface WorkOrderMobileListProps {
   onDuplicate?: (wo: WorkOrderSummary) => void;
   onSaveTemplate?: (wo: WorkOrderSummary) => void;
   onRelease?: (wo: WorkOrderSummary) => void;
+  onComplete?: (wo: WorkOrderSummary) => void;
   releasingIds?: Set<number>;
   deletePending?: boolean;
   className?: string;
 }
 
-const WorkOrderMobileList = React.memo(function WorkOrderMobileList({ workOrders, onOpen, onDelete, onDuplicate, onSaveTemplate, onRelease, releasingIds, deletePending, className = '' }: WorkOrderMobileListProps) {
+const WorkOrderMobileList = React.memo(function WorkOrderMobileList({ workOrders, onOpen, onDelete, onDuplicate, onSaveTemplate, onRelease, onComplete, releasingIds, deletePending, className = '' }: WorkOrderMobileListProps) {
   if (workOrders.length === 0) return null;
 
   return (
@@ -1964,6 +2046,7 @@ const WorkOrderMobileList = React.memo(function WorkOrderMobileList({ workOrders
           onDuplicate={onDuplicate}
           onSaveTemplate={onSaveTemplate}
           onRelease={onRelease}
+          onComplete={onComplete}
           isReleasing={Boolean(releasingIds?.has(wo.id))}
           isDeleting={Boolean(deletePending)}
         />
@@ -1979,11 +2062,12 @@ interface WorkOrderMobileCardProps {
   onDuplicate?: (wo: WorkOrderSummary) => void;
   onSaveTemplate?: (wo: WorkOrderSummary) => void;
   onRelease?: (wo: WorkOrderSummary) => void;
+  onComplete?: (wo: WorkOrderSummary) => void;
   isReleasing?: boolean;
   isDeleting?: boolean;
 }
 
-const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder: wo, onOpen, onDelete, onDuplicate, onSaveTemplate, onRelease, isReleasing, isDeleting }: WorkOrderMobileCardProps) {
+const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder: wo, onOpen, onDelete, onDuplicate, onSaveTemplate, onRelease, onComplete, isReleasing, isDeleting }: WorkOrderMobileCardProps) {
   const overdue = isWorkOrderOverdue(wo);
   const canRelease = onRelease && wo.status === 'draft';
   const canDelete = Boolean(onDelete);
@@ -2073,6 +2157,18 @@ const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder:
               <CheckCircleIcon className="h-4 w-4 mr-1" />
               Release
             </button>
+          )}
+          {onComplete && wo.status === 'in_progress' && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onComplete(wo)}
+              className="text-emerald-400 hover:text-emerald-300"
+              aria-label={`Quick complete ${wo.work_order_number}`}
+            >
+              <CheckCircleIcon className="h-4 w-4 mr-1" aria-hidden="true" />
+              Quick complete
+            </Button>
           )}
           {canDuplicate && (
             <Button

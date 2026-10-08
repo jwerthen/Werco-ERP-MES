@@ -1347,7 +1347,7 @@ class ApiService {
   async completeWorkOrder(
     id: number,
     quantityComplete: number,
-    quantityScrapped = 0,
+    quantityScrapped: number | null = 0,
     scrapReason?: string | null,
     scrapReasonCodeId?: number | null
   ) {
@@ -1358,12 +1358,13 @@ class ApiService {
     // scrap_reason_code_id rides along when a company-managed code was chosen.
     const params: Record<string, number | string> = {
       quantity_complete: quantityComplete,
-      quantity_scrapped: quantityScrapped,
     };
-    if (quantityScrapped > 0 && scrapReason) {
+    // Null preserves already-recorded scrap when the caller has no existing total.
+    if (quantityScrapped !== null) params.quantity_scrapped = quantityScrapped;
+    if (quantityScrapped !== null && quantityScrapped > 0 && scrapReason) {
       params.scrap_reason = scrapReason;
     }
-    if (quantityScrapped > 0 && scrapReasonCodeId != null) {
+    if (quantityScrapped !== null && quantityScrapped > 0 && scrapReasonCodeId != null) {
       params.scrap_reason_code_id = scrapReasonCodeId;
     }
     const response = await this.api.post(`/work-orders/${id}/complete`, null, { params });
