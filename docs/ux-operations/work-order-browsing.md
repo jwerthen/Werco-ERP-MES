@@ -8,6 +8,12 @@ Desktop uses Previous/Next pages and exports only the loaded page. Mobile starts
 
 Text search and existing filter/group deep links survive navigation. Rapid filter changes merge pending query updates, and committed Back/Forward navigation restores the previous query. Saved private or team views restore the same filters and sort. Customer options stay available during a pending filter change. Inline date editing cancels when its row leaves the result; failed deletion cannot reinsert a row into another query/page, and a confirmed deletion refreshes authoritative counts. Mobile header and card actions wrap so Details and destructive controls remain visible at 390px.
 
+## Quick completion
+
+In-progress orders have a green **Quick complete** checkmark in desktop row actions, including grouped tables, and a labeled button on mobile cards. It opens the completion dialog directly from the list. The action follows the existing office completion roles: Admin, Manager, Supervisor, and Quality, plus platform administrators and superusers.
+
+Review the completed quantity (prefilled with the ordered quantity) and scrap before selecting **Complete**. Leaving scrap at `0` or blank preserves the order's recorded scrap; a positive value replaces its total and requires a scrap reason. Completion uses the existing `POST /api/v1/work-orders/{id}/complete` workflow to complete all remaining operations. Operation holds still block completion, and any bypassed required process-sheet steps are audited by the server and reported in a notification. A successful completion closes the dialog and refreshes the current list and counts; server refusals remain visible in the dialog for correction or cancellation.
+
 ## Read contract and limits
 
 The new endpoint is a pure read of persisted work-order status. It computes operation progress for its bounded result, but does not reconcile completion or post inventory effects merely because someone opens the list. Legacy list/detail reconciliation and write workflows are unchanged. Counts describe the persisted population when queried; this is a live list, not a transaction snapshot spanning multiple page requests.

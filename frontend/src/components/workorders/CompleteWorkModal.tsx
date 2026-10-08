@@ -59,6 +59,8 @@ interface CompleteWorkModalProps {
   subtitle?: string;
   /** Server refusal for the current attempt; keep quantities editable for retry. */
   error?: string | null;
+  /** Explain how this caller handles existing scrap totals. */
+  scrapHint?: string;
   /** Pre-fills the quantity-complete field and caps it (the ordered/target qty). */
   defaultQuantityComplete: number;
 }
@@ -71,6 +73,7 @@ export function CompleteWorkModal({
   title,
   subtitle,
   error,
+  scrapHint,
   defaultQuantityComplete,
 }: CompleteWorkModalProps) {
   const [qtyComplete, setQtyComplete] = useState<string>(String(defaultQuantityComplete));
@@ -151,7 +154,7 @@ export function CompleteWorkModal({
             )}
           </FormField>
 
-          <FormField label="Quantity scrapped" error={scrappedError}>
+          <FormField label="Quantity scrapped" error={scrappedError} help={scrapHint}>
             {(field) => (
               <input
                 {...field}
