@@ -12,6 +12,7 @@ from app.api.endpoints import (
     calibration,
     carrier_webhooks,
     companies,
+    consumables,
     continuous_improvement,
     copilot,
     custom_fields,
@@ -83,6 +84,7 @@ from app.api.endpoints import (
 )
 
 api_router = APIRouter()
+api_router.include_router(consumables.router, prefix="/consumables", tags=["Consumables"])
 api_router.include_router(document_deliveries.router, prefix="/document-deliveries", tags=["Document Deliveries"])
 api_router.include_router(operations_inbox.router, prefix="/operations-inbox", tags=["Operations Inbox"])
 api_router.include_router(hank.router, prefix="/hank", tags=["Hank"])

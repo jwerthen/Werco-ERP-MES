@@ -1054,6 +1054,33 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > (tenant-scoped, read-broad — see the access enforcement model above). Superuser / Platform Admin
 > bypass role checks, as elsewhere.
 
+### Consumables
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View stock, employee picker and checkout history | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Record checkout to an employee | ✓ | ✓ | ✓ | | | | |
+| Export filtered checkout history (CSV) | ✓ | ✓ | | | | | |
+| Edit / delete / void a posted checkout | | | | | | | |
+
+`GET /consumables/metadata`, `/stock`, and `/checkouts` use the tenant-scoped
+operational read policy. The in-app `/consumables` route uses `inventory:view`.
+The metadata exposes only numeric user ID, name, department and active
+state; it does not grant access to administrative `/users/` data. Inactive past
+recipients can be used as history filters but cannot receive a new issue.
+
+`POST /consumables/checkouts` requires `ADMIN`, `MANAGER` or `SUPERVISOR`, matching
+existing inventory stock mutations. The server sets the issuer and timestamp;
+the selected employee is the recipient, not the authenticated actor. Stock,
+ledger, immutable employee attribution and required audits commit atomically.
+The existing Platform Admin/superuser bypass remains subject to company scope
+and the read-only context fence. Metadata `can_manage` and `can_export` reflect
+the available actions. There is no separate consumables-attendant role.
+
+`GET /consumables/checkouts/export.csv` follows the existing **Admin/Manager bulk
+export** gate and writes an `EXPORT` audit record. See [Consumables](CONSUMABLES.md)
+for setup, retry handling and the initial correction limitations.
+
 ### Inventory
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
@@ -2003,6 +2030,7 @@ and writes an `EXPORT` audit row through `AuditService`:
 | `GET /api/v1/exports/quotes/export` | `quote` | **customer contact + email (PII)**, subtotal / total |
 | `GET /api/v1/exports/inventory/transactions/export` | `inventory_transaction` | the whole valuation ledger incl. free-text `notes` |
 | `GET /api/v1/analytics/custom-report/export` | `custom_report` | a tenant-authored query over a whole data source — unbounded by construction |
+| `GET /api/v1/consumables/checkouts/export.csv` | `consumable_checkout` | employee names/departments, quantities, issuer and free-text notes |
 
 > **Two surfaces sit at a stricter tier and stay there.** `GET /visitor-logs/export.csv` is
 > `require_role([ADMIN, MANAGER])` because **visitor PII is a documented exception to read-broad**

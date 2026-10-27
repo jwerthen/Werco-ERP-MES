@@ -117,6 +117,29 @@ allowlist stays unchanged. Test upload/review/file recovery and participant/rout
 access; retain tables and file evidence on application rollback. See
 [Hank workflows and document intake](DEPLOYMENT.md#hank-workflows-and-document-intake).
 
+**Consumables checkout.** Apply additive **112_consumable_checkouts** after
+**111_continuous_improvement** before serving the matching API and frontend.
+It creates the empty employee-checkout register, request/ledger uniqueness,
+history indexes, deny-by-default PostgreSQL RLS, public/client table and sequence
+revokes, and immutable UPDATE/DELETE guards. Matching model DDL protects
+`create_all` bootstraps. There are no new environment variables or worker jobs,
+and no automatic item, employee, opening-balance or paper-history import.
+
+Verify **Warehouse → Consumables** in a test company: issue to an active employee,
+confirm stock/ledger/history agree, replay the same request without another
+deduction, refuse unavailable/insufficient stock, and check read-only access plus
+Admin/Manager CSV export and its audit. Confirm Central date filters and that
+checkout audit failure rolls back all effects. The migration suite covers a
+disposable SQLite bootstrap upgrade/downgrade/reupgrade and compiles PostgreSQL
+security DDL; it does not substitute for deployment verification on PostgreSQL.
+
+Retain the additive table when rolling back application code. A deliberate
+migration downgrade removes employee checkout history and retry receipts, while
+existing inventory movements remain; preserve that history before considering a
+production downgrade. See [Consumables setup and operation](CONSUMABLES.md) for
+the attendant workflow. A code change alone does not deploy or initialize this
+feature in production.
+
 ## Table of Contents
 
 1. [Quick Reference](#quick-reference)

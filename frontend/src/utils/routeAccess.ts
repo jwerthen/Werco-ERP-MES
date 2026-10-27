@@ -36,6 +36,7 @@ const routeAccessRequirements: RouteAccessRequirement[] = [
   { prefix: '/engineering-changes', anyOf: ['parts:view', 'boms:view', 'routings:view'] },
   { prefix: '/warehouse', anyOf: ['inventory:view', 'receiving:view', 'shipping:view'] },
   { prefix: '/materials', permission: 'inventory:view' },
+  { prefix: '/consumables', permission: 'inventory:view' },
   { prefix: '/inventory', permission: 'inventory:view' },
   { prefix: '/receiving', permission: 'receiving:view' },
   { prefix: '/shipping', permission: 'shipping:view' },

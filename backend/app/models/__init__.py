@@ -7,6 +7,7 @@ from .bom import BOM, BOMItem, BOMItemType
 from .calibration import CalibrationRecord, CalibrationStatus, Equipment
 from .carrier_account import CarrierAccount, CompanyShippingProfile
 from .company import Company
+from .consumable import ConsumableCheckout
 from .continuous_improvement import ImprovementActivity, ImprovementSuggestion
 from .custom_field import CustomFieldDefinition, CustomFieldValue, EntityType, FieldType
 from .customer import Customer
@@ -236,6 +237,7 @@ __all__ = [
     "UserWorkspaceRecord",
     "TeamWorkspaceRecord",
     "Company",
+    "ConsumableCheckout",
     "AIInteractionEvent",
     "AICorrection",
     "AIRecommendation",

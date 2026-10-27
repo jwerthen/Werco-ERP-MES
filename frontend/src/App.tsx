@@ -49,6 +49,7 @@ const Notifications = lazyWithRetry(() => import('./pages/Notifications'));
 const MySettings = lazyWithRetry(() => import('./pages/MySettings'));
 const Warehouse = lazyWithRetry(() => import('./pages/Warehouse'));
 const Materials = lazyWithRetry(() => import('./pages/Materials'));
+const Consumables = lazyWithRetry(() => import('./pages/Consumables'));
 const MRP = lazyWithRetry(() => import('./pages/MRP'));
 const Quality = lazyWithRetry(() => import('./pages/Quality'));
 const CustomFields = lazyWithRetry(() => import('./pages/CustomFields'));
@@ -620,6 +621,18 @@ function AppRoutes() {
               <Layout>
                 <LazyRoute>
                   <Materials />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/consumables"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <Consumables />
                 </LazyRoute>
               </Layout>
             </PrivateRoute>

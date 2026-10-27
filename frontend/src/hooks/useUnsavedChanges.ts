@@ -35,6 +35,17 @@ export function useUnsavedChanges(isDirty: boolean, message = 'You have unsaved 
   const markSaved = useCallback(() => {
     state.current.bypass = true;
   }, []);
+  // A same-page filter change can update the URL without discarding its editor.
+  // Unlike markSaved, this exception lasts only for the supplied navigation.
+  const allowInternalNavigation = useCallback((navigate: () => void) => {
+    const previousBypass = state.current.bypass;
+    state.current.bypass = true;
+    try {
+      navigate();
+    } finally {
+      state.current.bypass = previousBypass;
+    }
+  }, []);
   const confirmDiscard = useCallback(() => {
     if (!state.current.isDirty) return true;
     const allowed = window.confirm(state.current.message);
@@ -47,6 +58,6 @@ export function useUnsavedChanges(isDirty: boolean, message = 'You have unsaved 
     }
     return allowed;
   }, []);
-  return { confirmDiscard, markSaved };
+  return { confirmDiscard, markSaved, allowInternalNavigation };
 }
 export default useUnsavedChanges;

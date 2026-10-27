@@ -172,6 +172,7 @@ const navSections: NavSection[] = [
         children: [
           { name: 'Inventory', href: '/warehouse?tab=inventory', icon: ArchiveBoxIcon },
           { name: 'Materials & Supplies', href: '/materials', icon: WrenchScrewdriverIcon },
+          { name: 'Consumables', href: '/consumables', icon: ClipboardDocumentCheckIcon },
           { name: 'Receiving', href: '/warehouse?tab=receiving', icon: InboxArrowDownIcon },
           { name: 'Shipping', href: '/warehouse?tab=shipping', icon: PaperAirplaneIcon },
         ],

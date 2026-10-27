@@ -53,6 +53,7 @@ export const routeTitles: Record<string, string> = {
   // Inventory & Purchasing
   '/warehouse': 'Warehouse',
   '/materials': 'Materials & Supplies',
+  '/consumables': 'Consumables',
   '/inventory': 'Inventory',
   '/inventory/parts': 'Part Inventory',
   '/inventory/materials': 'Material Inventory',

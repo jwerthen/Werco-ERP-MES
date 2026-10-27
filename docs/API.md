@@ -7457,6 +7457,63 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 > `POST /receiving/receive` after commit; it no-ops unless the profile is active with
 > **both** `auto_print_on_receipt` and `allow_print_egress` ON.
 
+### Consumables
+
+Consumables reuse `PartType.CONSUMABLE` and existing inventory. The employee
+checkout register adds immutable attribution to each issue; it is not a separate
+stock balance. See [Consumables setup and operation](CONSUMABLES.md).
+
+| Method | Endpoint | Behavior | Server access |
+|---|---|---|---|
+| GET | `/consumables/metadata` | `can_manage`, `can_export`, and a minimal employee list (`id`, `name`, `department`, `is_active`). Includes active employees and inactive historical recipients for filtering. | Authenticated, active company |
+| GET | `/consumables/stock` | `{items, total}` by consumable/location/lot, with on-hand, available quantity, unit, reorder threshold, low-stock and checkout eligibility. Filters `q`, `low_stock`; `skip` ≥ 0, `limit` 1–250 (default 100). Items without stock remain visible. | Authenticated, active company |
+| POST | `/consumables/checkouts` | Record one employee issue atomically; returns 201 and the saved receipt. | Admin, Manager, Supervisor |
+| GET | `/consumables/checkouts` | `{items, total}`, ordered `issued_at DESC, id DESC`; filters `q`, `employee_id`, `part_id`, `date_from`, `date_to`; `skip` ≥ 0, `limit` 1–250 (default 100). | Authenticated, active company |
+| GET | `/consumables/checkouts/export.csv` | Same history filters, all matching rows up to 10,000; 422 if exceeded. CSV includes Central timestamp and `CC-` checkout reference. Audited export. | Admin, Manager |
+
+Checkout request:
+
+```json
+{
+  "inventory_item_id": 123,
+  "employee_id": 45,
+  "quantity": 3,
+  "notes": "Replacement grinding discs",
+  "request_id": "8af26f41-30e6-45c1-9d1a-3ea9e29a53a8"
+}
+```
+
+`employee_id` in commands/filters is the user's numeric primary key. Quantity
+must be finite, greater than zero and at most 1,000,000,000; `each` must be a whole
+number. Serialized stock is not supported by this workflow and is refused with
+**409**. `notes` is optional, maximum 2,000 characters. `request_id` is a UUID.
+Unknown request fields, including client-supplied issuer/time/company, are refused.
+
+The response includes the immutable part number/name, unit, location/lot,
+employee name/department, issuer name, quantity, notes and server UTC
+`issued_at`. `replayed=true` identifies recovery of the same actor/payload under
+the same company/request ID; recovery does not issue again. Conflicting reuse
+returns **409**. Stock eligibility is revalidated under locks; inactive, deleted
+or non-consumable parts, foreign references and inactive recipients cannot be
+selected. Held, expired, nonpickable, allocated and reserved stock is protected.
+An unavailable or insufficient quantity returns **409**. Required audit failure
+returns **503** and rolls back stock, attribution and ledger effects together.
+
+The issue writes a negative `InventoryTransaction` of type `ISSUE`, with
+`reference_type="consumable_checkout"` and `reference_number="CC-<six-digit id>"`.
+It is separate from work-order material issues and does not allocate job cost.
+Dates filter complete inclusive **America/Chicago** calendar days; timestamps
+are stored/returned in UTC and displayed/exported in Central time. `q` is at most
+200 characters. An inverted date range returns **422**.
+
+There is no checkout update/delete, return, void, historical-paper import or
+backdating endpoint. Existing inventory adjustments can correct stock with a
+checkout reference and reason; they do not rewrite employee usage attribution.
+Badge/login credentials are not returned in metadata, receipts, history or CSV,
+and cannot be searched through this feature. Migration `112_consumable_checkouts`
+adds the immutable register and private PostgreSQL access controls. No new
+environment variables are required.
+
 ### Inventory
 
 | Method | Endpoint | Description | Auth Required |
@@ -10138,6 +10195,12 @@ Each bound matches the column the filter compares against, so no request that co
 refused. (Auditing is best-effort in the usual repo-wide sense: `AuditService.log` never propagates
 a failure to the caller, so a chain-write failure lets the export stream unrecorded rather than
 failing the request.)
+
+`GET /consumables/checkouts/export.csv` also requires Admin/Manager. It records
+the `consumable_checkout` export with a required audit in its own transaction;
+an audit failure returns **503** without releasing the CSV. This is stricter than
+the legacy best-effort exporters above. Its separate 10,000-row cap returns
+**422**, and its timestamp column uses America/Chicago.
 
 `GET /visitor-logs/export.csv` (`[ADMIN, MANAGER]`, already audited — visitor PII) and
 `GET /estimate-workbench/{estimate_id}/export/*` (`[ADMIN, MANAGER, SUPERVISOR]`, one estimate
