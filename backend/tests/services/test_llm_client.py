@@ -132,6 +132,16 @@ class TestEstimateCost:
         cost = estimate_cost_usd("claude-opus-4-8", input_tokens=1_000_000, output_tokens=100_000)
         assert cost == Decimal("7.500000")  # $5 + $2.50
 
+    def test_opus_55_with_cache(self):
+        cost = estimate_cost_usd(
+            "claude-opus-5-5",
+            input_tokens=100_000,
+            output_tokens=10_000,
+            cache_creation_tokens=50_000,
+            cache_read_tokens=200_000,
+        )
+        assert cost == Decimal("0.890000")  # 0.4 + 0.2 + 0.25 + 0.04
+
     def test_unknown_model_returns_none_not_crash(self):
         assert estimate_cost_usd("claude-future-9-9", input_tokens=1000, output_tokens=100) is None
 

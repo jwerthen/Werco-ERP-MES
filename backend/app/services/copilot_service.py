@@ -73,11 +73,12 @@ from app.services.work_order_blocker_service import WorkOrderBlockerService
 logger = logging.getLogger(__name__)
 
 COPILOT_MAX_TOOL_ROUNDS = int(os.getenv("COPILOT_MAX_TOOL_ROUNDS", "8"))
-COPILOT_MAX_OUTPUT_TOKENS = int(os.getenv("COPILOT_MAX_OUTPUT_TOKENS", "1024"))
+# Opus 5.5's always-on thinking shares each budget with the visible answer.
+COPILOT_MAX_OUTPUT_TOKENS = int(os.getenv("COPILOT_MAX_OUTPUT_TOKENS", "8192"))
 COPILOT_MAX_TOOL_OUTPUT_TOKENS = int(
     os.getenv("COPILOT_MAX_TOOL_OUTPUT_TOKENS", os.getenv("COPILOT_MAX_OUTPUT_TOKENS", "8192"))
 )
-COPILOT_LLM_TIMEOUT_SECONDS = float(os.getenv("COPILOT_LLM_TIMEOUT_SECONDS", "45"))
+COPILOT_LLM_TIMEOUT_SECONDS = float(os.getenv("COPILOT_LLM_TIMEOUT_SECONDS", "90"))
 _MAX_HISTORY_MESSAGES = 30
 _MAX_MESSAGE_CHARS = 4000
 _MAX_TOOL_RESULT_CHARS = 6000
@@ -834,6 +835,16 @@ def _serialize_assistant_blocks(blocks: List[Any]) -> List[Dict[str, Any]]:
                     "input": _block_attr(block, "input") or {},
                 }
             )
+        elif block_type in {"thinking", "redacted_thinking"}:
+            # Always-on thinking models require these signed blocks to survive
+            # tool round trips unchanged. They remain in this turn's API history
+            # only; the UI and learning event receive final text, not reasoning.
+            if isinstance(block, dict):
+                out.append(dict(block))
+            elif hasattr(block, "model_dump"):
+                out.append(block.model_dump(mode="json", exclude_none=True))
+            else:
+                out.append(dict(vars(block)))
     return out
 
 
@@ -1019,8 +1030,7 @@ class CopilotService:
                 self.db.rollback()
             result = run_llm_task(
                 LLMTaskContext(
-                    # Structured receipt JSON needs space, not a more expensive
-                    # reasoning tier. Route on conversation complexity as before.
+                    # Keep routing context stable across tool and final calls.
                     task="copilot_chat",
                     input_chars=input_chars,
                     max_output_tokens=COPILOT_MAX_OUTPUT_TOKENS,

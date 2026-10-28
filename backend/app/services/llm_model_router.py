@@ -23,6 +23,9 @@ DEFAULT_ANTHROPIC_MODELS = {
     LLMModelTier.REASONING: "claude-opus-4-8",
 }
 
+# Hank stays on one model throughout its tool loop, regardless of chat length.
+DEFAULT_COPILOT_MODEL = "claude-opus-5-5"
+
 
 @dataclass(frozen=True)
 class LLMTaskContext:
@@ -124,9 +127,11 @@ def select_anthropic_model(context: LLMTaskContext) -> LLMModelDecision:
         )
 
     if task == "copilot_chat":
-        if complexity_score >= 5:
-            return model_decision_for_tier(LLMModelTier.REASONING, "long multi-tool copilot conversation")
-        return model_decision_for_tier(LLMModelTier.DEFAULT, "copilot chat needs reliable multi-step tool use")
+        return LLMModelDecision(
+            model=DEFAULT_COPILOT_MODEL,
+            tier=LLMModelTier.REASONING,
+            reason="Hank chat uses Claude Opus 5.5",
+        )
 
     if task == "hank_document_intake":
         # Bounded extraction of a PDF's fields and line items, with page
@@ -160,6 +165,8 @@ def select_anthropic_model(context: LLMTaskContext) -> LLMModelDecision:
 
 
 def tier_for_model(model: str) -> LLMModelTier:
+    if model == DEFAULT_COPILOT_MODEL:
+        return LLMModelTier.REASONING
     for tier in LLMModelTier:
         if model == get_anthropic_model(tier) or model == DEFAULT_ANTHROPIC_MODELS[tier]:
             return tier

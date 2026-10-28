@@ -323,6 +323,13 @@ confirms it.
 
 ## Implementation boundaries
 
+- Hank chat defaults to Claude Opus 5.5
+  (`claude-opus-5-5`). `ANTHROPIC_COPILOT_MODEL` can override it independently
+  of other AI features. Tool loops retain signed thinking blocks without
+  displaying them. The per-call output budget is 8,192 tokens (thinking plus
+  answer), with a 90-second upstream timeout. Deploy the compatible backend
+  before changing a live model override; existing environment overrides take
+  precedence over these defaults.
 - The existing MCP gateway already describes and dispatches broad authenticated
   ERP operations. It is a useful foundation for future actions, but it is not
   connected to Hank's chat tool registry. MCP read/write annotations are hints;

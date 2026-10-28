@@ -788,7 +788,7 @@ AWS_REGION=us-east-1
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `ANTHROPIC_API_KEY` | No | - | Anthropic API key for the AI features (PO/quote + BOM document extraction, AI routing generation, QMS clause extraction, Hank chat and smart PDF intake, `/search/nl` intent parsing). Every call goes through the shared client `app/services/llm_client.py`, which records per-call usage telemetry to the tenant-scoped `ai_usage_events` table (read via `GET /api/v1/ai-usage/summary` / the Admin Settings → AI Usage & Cost tab) |
-| `ANTHROPIC_COPILOT_MODEL` | No | (router auto) | Per-task model override for Hank chat (task `copilot_chat`). Unset: the router uses the Default tier (Sonnet), escalating to the Reasoning tier for long multi-tool conversations |
+| `ANTHROPIC_COPILOT_MODEL` | No | `claude-opus-5-5` | Per-task model override for Hank chat (task `copilot_chat`). With automatic selection, unset/blank/`auto` uses Claude Opus 5.5 at every conversation length. An explicit task model takes precedence over global selection; global forced models/tiers still apply when the task override is absent |
 | `ANTHROPIC_HANK_INTAKE_MODEL` | No | (Default tier) | Per-task model override for saved Hank PDF extraction (`hank_document_intake`). Defaults to Sonnet for layout-aware extraction; document length or a larger structured-output budget alone does not select Opus. Set consistently on API and worker |
 | `ANTHROPIC_NL_SEARCH_MODEL` | No | (router auto) | Per-task model override for the `/search/nl` natural-language intent parse (task `nl_search`). Unset: pinned to the Fast tier (Haiku) |
 | `ANTHROPIC_AUTO_EXECUTE_MODEL` | No | (router auto) | Per-task model override for the always-on auto-execute decision (task `auto_execute`, see [docs/AI_ALWAYS_ON.md](AI_ALWAYS_ON.md)). Unset: Fast tier (Haiku). Same Anthropic client as all other LLM features |
@@ -859,9 +859,9 @@ there is no backend speech service or automatic remote fallback.
 |----------|----------|---------|-------------|
 | `COPILOT_RATE_LIMIT_PER_MINUTE` | No | `20` | Per-user request budget per minute (in-process sliding window, on top of the app-wide per-IP limits). Excess returns 429 |
 | `COPILOT_MAX_TOOL_ROUNDS` | No | `8` | Tool-use rounds per chat turn before the model is forced to answer from gathered data (`truncated: true` in the response) |
-| `COPILOT_MAX_OUTPUT_TOKENS` | No | `1024` | Output-token cap for the forced-final answer. An explicitly set legacy value also supplies the tool-call cap unless `COPILOT_MAX_TOOL_OUTPUT_TOKENS` is set |
+| `COPILOT_MAX_OUTPUT_TOKENS` | No | `8192` | Output-token cap for the forced-final answer, shared by Opus 5.5 thinking and visible text. An explicitly set legacy value also supplies the tool-call cap unless `COPILOT_MAX_TOOL_OUTPUT_TOKENS` is set |
 | `COPILOT_MAX_TOOL_OUTPUT_TOKENS` | No | `8192` | Output-token cap while tools are available, providing room for structured receiving proposals. Actual generated tokens are billed, not this ceiling. Does not itself escalate the model tier. A truncated tool response is never executed |
-| `COPILOT_LLM_TIMEOUT_SECONDS` | No | `45` | Upstream Anthropic timeout per model call (seconds) |
+| `COPILOT_LLM_TIMEOUT_SECONDS` | No | `90` | Upstream Anthropic timeout per model call (seconds) |
 
 ### ProxyBox Thermal-Label Printing
 

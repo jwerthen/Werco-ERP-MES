@@ -6,6 +6,7 @@ fake (loop behavior tests) or driven through a fake Anthropic client
 """
 
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
@@ -64,7 +65,7 @@ class ScriptedLLM:
         self.calls: List[Dict[str, Any]] = []
 
     def __call__(self, ctx, **kwargs):
-        self.calls.append({"ctx": ctx, **kwargs})
+        self.calls.append(deepcopy({"ctx": ctx, **kwargs}))
         index = min(len(self.calls) - 1, len(self.responses) - 1)
         return self.responses[index]
 
@@ -416,6 +417,59 @@ class TestToolRegistry:
 # Chat loop — bounded, read-only, recorded
 # ---------------------------------------------------------------------------
 class TestChatLoop:
+    @pytest.mark.parametrize("representation", ["dict", "sdk"])
+    @pytest.mark.parametrize("thinking_text", ["INTERNAL reasoning text", ""])
+    def test_thinking_survives_tool_round_without_exposing_reasoning(
+        self, monkeypatch, db_session: Session, service: CopilotService, representation: str, thinking_text: str
+    ):
+        from anthropic.types import RedactedThinkingBlock, ThinkingBlock
+
+        thinking = {
+            "type": "thinking",
+            "thinking": thinking_text,
+            "signature": "signed-thinking-block",
+            "provider_metadata": {"preserve": "verbatim"},
+        }
+        redacted = {"type": "redacted_thinking", "data": "opaque-redacted-data"}
+        blocks = (
+            [ThinkingBlock(**thinking), RedactedThinkingBlock(**redacted)]
+            if representation == "sdk"
+            else [dict(thinking), dict(redacted)]
+        )
+        scripted = ScriptedLLM(
+            [
+                FakeLLMResult([*blocks, _tool_use_block("company_snapshot", {})]),
+                FakeLLMResult([*blocks, _text_block("The shop snapshot is ready.")]),
+            ]
+        )
+        monkeypatch.setattr(copilot_service, "run_llm_task", scripted)
+
+        events = list(service.stream_chat(messages=[{"role": "user", "content": "shop status?"}]))
+        final = events[-1]
+        history = scripted.calls[1]["messages"]
+
+        assert history[:1] == scripted.calls[0]["messages"]
+        assert scripted.calls[1]["system"] == scripted.calls[0]["system"]
+        assert scripted.calls[1]["tools"] == scripted.calls[0]["tools"]
+        assert all(call["max_tokens"] == call["ctx"].max_output_tokens == 8192 for call in scripted.calls)
+        assert all(call["timeout"] == 90 for call in scripted.calls)
+        assert history[1] == {
+            "role": "assistant",
+            "content": [
+                thinking,
+                redacted,
+                {"type": "tool_use", "id": "tu_1", "name": "company_snapshot", "input": {}},
+            ],
+        }
+        assert history[2]["content"][0]["tool_use_id"] == "tu_1"
+        assert final["answer"] == "The shop snapshot is ready."
+        assert final["rounds"] == 1
+        event = db_session.query(AIInteractionEvent).filter(AIInteractionEvent.id == final["interaction_id"]).one()
+        exposed = json.dumps({"events": events, "learning": event.event_payload})
+        for private_value in (thinking["thinking"], thinking["signature"], redacted["data"]):
+            if private_value:
+                assert private_value not in exposed
+
     def test_single_tool_round_then_answer(self, monkeypatch, db_session: Session, service: CopilotService):
         scripted = ScriptedLLM(
             [

@@ -7,6 +7,64 @@ from app.services.llm_model_router import (
 )
 
 
+@pytest.mark.parametrize("input_chars", [500, 100_000])
+@pytest.mark.parametrize("override", [None, "", "auto"])
+@pytest.mark.parametrize("global_selection", [None, "", "auto"])
+def test_hank_uses_opus_55_for_every_conversation_length(monkeypatch, input_chars, override, global_selection):
+    if global_selection is None:
+        monkeypatch.delenv("ANTHROPIC_MODEL_SELECTION", raising=False)
+    else:
+        monkeypatch.setenv("ANTHROPIC_MODEL_SELECTION", global_selection)
+    if override is None:
+        monkeypatch.delenv("ANTHROPIC_COPILOT_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("ANTHROPIC_COPILOT_MODEL", override)
+
+    decision = select_anthropic_model(
+        LLMTaskContext(task="copilot_chat", input_chars=input_chars, max_output_tokens=8192)
+    )
+
+    assert decision.model == "claude-opus-5-5"
+    assert decision.tier == LLMModelTier.REASONING
+
+
+@pytest.mark.parametrize(
+    "model,tier", [("claude-sonnet-4-6", LLMModelTier.DEFAULT), ("claude-opus-5-5", LLMModelTier.REASONING)]
+)
+def test_hank_task_override_wins_over_global_selection(monkeypatch, model, tier):
+    monkeypatch.setenv("ANTHROPIC_MODEL_SELECTION", "fast")
+    monkeypatch.setenv("ANTHROPIC_COPILOT_MODEL", model)
+
+    decision = select_anthropic_model(LLMTaskContext(task="copilot_chat", input_chars=500))
+
+    assert decision.model == model
+    assert decision.tier == tier
+    assert decision.reason == "copilot_chat override"
+
+
+@pytest.mark.parametrize("task_override", [None, "", "auto"])
+@pytest.mark.parametrize(
+    "global_selection,expected_model",
+    [
+        ("fast", "claude-haiku-4-5-20251001"),
+        ("reasoning", "claude-opus-4-8"),
+        ("claude-sonnet-4-6", "claude-sonnet-4-6"),
+    ],
+)
+def test_hank_respects_global_forced_selection_without_task_override(
+    monkeypatch, task_override, global_selection, expected_model
+):
+    if task_override is None:
+        monkeypatch.delenv("ANTHROPIC_COPILOT_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("ANTHROPIC_COPILOT_MODEL", task_override)
+    monkeypatch.setenv("ANTHROPIC_MODEL_SELECTION", global_selection)
+
+    decision = select_anthropic_model(LLMTaskContext(task="copilot_chat", input_chars=500))
+
+    assert decision.model == expected_model
+
+
 def test_short_clean_po_uses_fast_tier(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_MODEL_SELECTION", raising=False)
     monkeypatch.delenv("ANTHROPIC_PO_MODEL", raising=False)

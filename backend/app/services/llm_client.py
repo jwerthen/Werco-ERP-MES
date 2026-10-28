@@ -40,11 +40,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Pricing
 # ---------------------------------------------------------------------------
-# USD per million tokens (MTok). Fetched 2026-06-09 from
+# USD per million tokens (MTok). Baseline fetched 2026-06-09 from
 # https://docs.claude.com/en/docs/about-claude/pricing
 # (redirects to https://platform.claude.com/docs/en/about-claude/pricing).
 # cache_write_5m is the 5-minute prompt-cache write rate (1.25x input);
-# cache_read is the cache hit/refresh rate (0.1x input).
+# cache_read is the model-specific cache hit/refresh rate.
 # EDIT HERE when Anthropic pricing changes or new models are pinned.
 # Unknown models record estimated_cost_usd as NULL — they never crash a call.
 MODEL_PRICING_USD_PER_MTOK: Dict[str, Dict[str, Decimal]] = {
@@ -71,6 +71,13 @@ MODEL_PRICING_USD_PER_MTOK: Dict[str, Dict[str, Decimal]] = {
         "output": Decimal("25.00"),
         "cache_write_5m": Decimal("6.25"),
         "cache_read": Decimal("0.50"),
+    },
+    # Verified 2026-10-28: https://platform.claude.com/docs/en/models/opus-5-5/overview
+    "claude-opus-5-5": {
+        "input": Decimal("4.00"),
+        "output": Decimal("20.00"),
+        "cache_write_5m": Decimal("5.00"),
+        "cache_read": Decimal("0.20"),
     },
 }
 
