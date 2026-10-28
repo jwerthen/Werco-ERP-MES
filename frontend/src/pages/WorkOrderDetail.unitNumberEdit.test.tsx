@@ -127,6 +127,16 @@ function renderDetail() {
   );
 }
 
+it('links the customer PO tile to all work orders for that exact customer and PO', async () => {
+  mockedApi.getWorkOrder.mockResolvedValue(makeWorkOrder({ customer_name: 'A&B Aero', customer_po: 'PO/100 #2' }));
+  renderDetail();
+  const link = await screen.findByRole('link', { name: /Customer PO PO\/100 #2 Track all work orders/ });
+  const url = new URL(link.getAttribute('href')!, 'http://localhost');
+  expect(url.pathname).toBe('/work-orders/customer-pos');
+  expect(url.searchParams.get('customer_name')).toBe('A&B Aero');
+  expect(url.searchParams.get('customer_po')).toBe('PO/100 #2');
+});
+
 /**
  * Lands a concurrent server-side change the way production does: through the page's own
  * `onMessage` handler (captured off the mocked useWebSocket), which debounces 500ms in

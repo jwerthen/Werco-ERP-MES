@@ -14,6 +14,7 @@ import {
 import { Modal } from '../components/ui/Modal';
 import { useUnsavedChanges } from '../hooks/useUnsavedChanges';
 import { FormField } from '../components/ui/FormField';
+import CustomerPOAutocomplete from '../components/workorders/CustomerPOAutocomplete';
 import {
   ConfirmDialog,
   LoadingButton,
@@ -823,11 +824,18 @@ export default function Quotes() {
               </FormField>
               <FormField label="Customer PO">
                 {field => (
-                  <input
+                  <CustomerPOAutocomplete
                     {...field}
                     className="input"
                     value={newQuote.customer_po || ''}
-                    onChange={event => setNewQuote({ ...newQuote, customer_po: event.target.value })}
+                    customerName={newQuote.customer_name}
+                    maxLength={100}
+                    onChange={value => setNewQuote(previous => ({ ...previous, customer_po: value }))}
+                    onSelect={suggestion => {
+                      if (!newQuote.customer_name.trim() && suggestion.customer_name) {
+                        setNewQuote(previous => ({ ...previous, customer_name: suggestion.customer_name || '' }));
+                      }
+                    }}
                   />
                 )}
               </FormField>

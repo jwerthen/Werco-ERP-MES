@@ -1922,6 +1922,8 @@ def list_work_orders(
             operation_progress_percent=metrics["operation_progress_percent"],
             due_date=wo.due_date,
             customer_name=wo.customer_name,
+            customer_po=wo.customer_po,
+            po_line_item=wo.po_line_item,
             # Left at their None defaults on every other path -- see WorkOrderSummary.
             # Off the deleted view the ternary short-circuits on ``deleted_only``, so
             # ``.get()`` never runs and no lookup dict was ever built; that is what keeps

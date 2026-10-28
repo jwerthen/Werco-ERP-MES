@@ -1160,6 +1160,27 @@ class ApiService {
     return (await this.api.get('/work-orders/browse', { params })).data;
   }
 
+  async getCustomerPurchaseOrders(
+    params: import('../types/customerPurchaseOrders').CustomerPOListParams = {},
+    signal?: AbortSignal,
+  ): Promise<import('../types/customerPurchaseOrders').CustomerPOListResponse> {
+    return (await this.api.get('/work-orders/customer-pos', { params, signal })).data;
+  }
+
+  async getCustomerPODashboard(
+    params: import('../types/customerPurchaseOrders').CustomerPODashboardParams,
+    signal?: AbortSignal,
+  ): Promise<import('../types/customerPurchaseOrders').CustomerPODashboardResponse> {
+    return (await this.api.get('/work-orders/customer-po-dashboard', { params, signal })).data;
+  }
+
+  async getCustomerPOSuggestions(
+    params: import('../types/customerPurchaseOrders').CustomerPOSuggestionParams,
+    signal?: AbortSignal,
+  ): Promise<import('../types/customerPurchaseOrders').CustomerPOSuggestionsResponse> {
+    return (await this.api.get('/work-orders/customer-po-suggestions', { params, signal })).data;
+  }
+
   async getWorkOrder(id: number, signal?: AbortSignal) {
     const response = await this.api.get(`/work-orders/${id}`, {
       params: { _ts: Date.now() },

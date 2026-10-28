@@ -10,6 +10,7 @@ import { buildWsUrl, getAccessToken } from '../services/realtime';
 import { useAuth } from '../context/AuthContext';
 import { canPublishDocuments } from '../utils/recordWriteAccess';
 import { hasPermission } from '../utils/permissions';
+import { customerPoDashboardUrl } from '../utils/customerPurchaseOrders';
 import LaserNestManualModal from '../components/laser/LaserNestManualModal';
 import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
 import WorkOrderPdfPreviewModal from '../components/workorders/WorkOrderPdfPreviewModal';
@@ -2172,6 +2173,8 @@ export default function WorkOrderDetail() {
           iconColor="text-fd-blue"
           label="Customer PO"
           value={workOrder.customer_po || '-'}
+          href={workOrder.customer_po?.trim() ? customerPoDashboardUrl(workOrder.customer_name, workOrder.customer_po) : undefined}
+          subtitle={workOrder.customer_po?.trim() ? 'Track all work orders →' : undefined}
         />
         <MiniStat
           icon={ClockIcon}

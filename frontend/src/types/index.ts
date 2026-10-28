@@ -866,6 +866,8 @@ export interface WorkOrderSummary {
   due_date?: string;
   customer_name?: string;
   current_operation?: string;
+  customer_po?: string | null;
+  po_line_item?: string | null;
   /**
    * Soft-delete provenance — populated ONLY by the deleted view
    * (`GET /work-orders/?deleted_only=true`), `undefined` on every live row.

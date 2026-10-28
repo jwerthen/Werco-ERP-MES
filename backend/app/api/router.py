@@ -17,6 +17,7 @@ from app.api.endpoints import (
     copilot,
     custom_fields,
     customer_complaints,
+    customer_pos,
     customers,
     document_deliveries,
     documents,
@@ -113,6 +114,8 @@ api_router.include_router(quality.router, prefix="/quality", tags=["Quality Mana
 # Sibling router under the same /quality prefix (quality.py is crowded with NCR/CAR/FAI).
 api_router.include_router(scrap_reasons.router, prefix="/quality", tags=["Quality Management"])
 api_router.include_router(custom_fields.router, prefix="/custom-fields", tags=["Custom Fields"])
+# Register literal customer-PO reads before work_orders' /{work_order_id} route.
+api_router.include_router(customer_pos.router, prefix="/work-orders", tags=["Work Orders"])
 api_router.include_router(work_orders.router, prefix="/work-orders", tags=["Work Orders"])
 # Sibling router under the same /work-orders prefix (work_orders.py is >4k lines and
 # already owns completion/laser-nest/import). Every path here has a LITERAL middle

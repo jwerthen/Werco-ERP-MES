@@ -17,6 +17,7 @@ import {
 import { Breadcrumbs, SelectField, SelectOption, ErrorState, useToast, FormField } from '../components/ui';
 import { getBreadcrumbParent } from '../utils/routeMeta';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
+import CustomerPOAutocomplete from '../components/workorders/CustomerPOAutocomplete';
 
 // Breadcrumb parent from the shared routeMeta source — no literal fallback:
 // if the entry is ever removed there, the crumb visibly disappears rather
@@ -1210,11 +1211,18 @@ export default function WorkOrderNew() {
               </FormField>
               <FormField label="Customer PO #">
                 {(field) => (
-                  <input
+                  <CustomerPOAutocomplete
                     {...field}
-                    type="text"
                     value={form.customer_po}
-                    onChange={(e) => setForm({ ...form, customer_po: e.target.value })}
+                    customerName={form.customer_name}
+                    maxLength={50}
+                    onChange={value => setForm(previous => ({ ...previous, customer_po: value }))}
+                    onSelect={suggestion => {
+                      if (!form.customer_name.trim() && suggestion.customer_name) {
+                        setCustomerSearch(suggestion.customer_name);
+                        setForm(previous => ({ ...previous, customer_name: suggestion.customer_name || '' }));
+                      }
+                    }}
                     className="input"
                   />
                 )}

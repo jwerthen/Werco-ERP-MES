@@ -35,6 +35,8 @@ def summary(wo):
         quantity_complete=wo.quantity_complete,
         due_date=wo.due_date,
         customer_name=wo.customer_name,
+        customer_po=wo.customer_po,
+        po_line_item=wo.po_line_item,
         **metrics,
     )
 

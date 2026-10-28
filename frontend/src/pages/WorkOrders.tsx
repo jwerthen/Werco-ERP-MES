@@ -4,6 +4,7 @@ import { WorkOrderBrowseParams } from '../types/workOrderBrowse';
 import { useTableWorkspace } from '../hooks/useTableWorkspace';
 import { TableWorkspaceControls } from '../components/ui/TableWorkspaceControls';
 import { getPriorityClasses, getPriorityLabel } from '../utils/priority';
+import { customerPoDashboardUrl } from '../utils/customerPurchaseOrders';
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import api from '../services/api';
@@ -441,6 +442,21 @@ function buildWorkOrderColumns({
   }
 
   cols.push(
+    {
+      key: 'customer_po',
+      header: 'Customer PO',
+      accessor: (wo) => wo.customer_po ?? '',
+      render: (wo) => wo.customer_po?.trim() ? (
+        <Link
+          to={customerPoDashboardUrl(wo.customer_name, wo.customer_po)}
+          onClick={(event) => event.stopPropagation()}
+          className="font-mono text-fd-link hover:underline break-words"
+          aria-label={`Track customer PO ${wo.customer_po}`}
+        >
+          {wo.customer_po}
+        </Link>
+      ) : '—',
+    },
     {
       key: 'progress',
       header: 'Progress',
@@ -1408,6 +1424,9 @@ export default function WorkOrders() {
         <p className="page-subtitle">Manage and track manufacturing orders</p>
       </div>
       <div className="page-actions w-full flex-wrap sm:w-auto" data-tour="wo-create">
+        <Link to="/work-orders/customer-pos" className="btn-secondary w-full sm:w-auto">
+          Customer POs
+        </Link>
         <Link to="/work-orders/new" className="btn-primary w-full sm:w-auto">
           <PlusIcon className="h-5 w-5 mr-2 flex-shrink-0" />
           New Work Order
@@ -2099,6 +2118,15 @@ const WorkOrderMobileCard = React.memo(function WorkOrderMobileCard({ workOrder:
             </div>
           ) : null}
           <p className="text-sm text-surface-500 truncate mt-0.5">{wo.customer_name || 'No Customer'}</p>
+          {wo.customer_po?.trim() && (
+            <Link
+              to={customerPoDashboardUrl(wo.customer_name, wo.customer_po)}
+              className="mt-1 block text-sm text-fd-link hover:underline break-words"
+              aria-label={`Track customer PO ${wo.customer_po}`}
+            >
+              PO {wo.customer_po}
+            </Link>
+          )}
         </div>
         <StatusBadge status={wo.status} className="flex-shrink-0" />
       </div>

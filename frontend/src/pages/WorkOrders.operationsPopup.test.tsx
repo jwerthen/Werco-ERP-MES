@@ -137,6 +137,22 @@ it('opens the same operations popup from a mobile card', async () => {
   expect(screen.getByRole('dialog', { name: 'Operations for WO-0042' })).toBeInTheDocument();
 });
 
+it.each([1440, 390])('opens the exact customer PO dashboard without opening operations at %ipx', async width => {
+  window.innerWidth = width;
+  rows = [{ ...summary, customer_name: 'A&B Aerospace', customer_po: 'PO/24 #7+%' }];
+  renderList();
+  const link = await screen.findByRole('link', { name: 'Track customer PO PO/24 #7+%' });
+  expect(screen.getByRole('link', { name: 'Customer POs' })).toHaveAttribute('href', '/work-orders/customer-pos');
+  fireEvent.click(link);
+  const location = screen.getByLabelText('Current location').textContent!;
+  const url = new URL(location, 'http://localhost');
+  expect(url.pathname).toBe('/work-orders/customer-pos');
+  expect(url.searchParams.get('customer_name')).toBe('A&B Aerospace');
+  expect(url.searchParams.get('customer_po')).toBe('PO/24 #7+%');
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  expect(mockedApi.getWorkOrder).not.toHaveBeenCalled();
+});
+
 it('sorts shuffled operations by number in the mobile popup without merging repeated labels', async () => {
   window.innerWidth = 390;
   job.operations = [

@@ -1135,6 +1135,8 @@ class WorkOrderSummary(UTCModel):
     operation_progress_percent: float = 0.0
     due_date: Optional[date]
     customer_name: Optional[str]
+    customer_po: Optional[str] = None
+    po_line_item: Optional[str] = None
     current_operation: Optional[str] = None
 
     # Soft-delete provenance -- populated ONLY by the ``deleted_only=true`` view of

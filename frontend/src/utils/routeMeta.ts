@@ -36,6 +36,7 @@ export const routeTitles: Record<string, string> = {
   '/scheduling': 'Scheduling',
   '/dispatch': 'Dispatch Board',
   '/work-orders': 'Work Orders',
+  '/work-orders/customer-pos': 'Customer POs',
   '/work-orders/new': 'New Work Order',
   '/maintenance': 'Maintenance',
   '/continuous-improvement': 'Continuous Improvement',

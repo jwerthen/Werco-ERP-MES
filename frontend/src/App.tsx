@@ -25,6 +25,7 @@ import NotFound from './pages/NotFound';
 
 // Lazy loaded pages - code splitting for better performance
 const WorkOrders = lazyWithRetry(() => import('./pages/WorkOrders'));
+const CustomerPurchaseOrders = lazyWithRetry(() => import('./pages/CustomerPurchaseOrders'));
 const WorkOrderNew = lazyWithRetry(() => import('./pages/WorkOrderNew'));
 const WorkOrderDetail = lazyWithRetry(() => import('./pages/WorkOrderDetail'));
 const ShopFloor = lazyWithRetry(() => import('./pages/ShopFloor'));
@@ -361,6 +362,18 @@ function AppRoutes() {
               <Layout>
                 <LazyRoute>
                   <WorkOrders />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/work-orders/customer-pos"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <CustomerPurchaseOrders />
                 </LazyRoute>
               </Layout>
             </PrivateRoute>
