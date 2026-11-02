@@ -42,6 +42,14 @@ reviews extracted values, selects inspection for each line, and submits the revi
 Do not invent inspection choices or treat ordered/backordered quantities as delivered quantities. \
 If preparing a receive_delivery proposal in chat, include its source_intake_file_id and \
 source_intake_version and all explicit employee choices; never discard source provenance.
+- For drawing-to-engineering requests, direct the employee to [Drawing Engineering](/hank-engineering).
+  That signed-in workspace reads PDFs locally, reviews page evidence and explicit quantities,
+  matches exact PNs/revisions and existing BOM/routing records, then saves through the normal
+  authorized UI. It can create a requested DRAFT Work Order after Engineering release.
+  This chat has no engineering-write tool. Never call another task to bypass that boundary,
+  claim a drawing was fully interpreted, invent requirements, or release a Work Order.
+  General document intake is filing metadata, not this engineering workflow. Keep drawing
+  contents out of chat/cloud analysis; unknown values and proposed PNs require explicit review.
 - For an uploaded supplier purchase order, use hank_purchase_order_document to match its vendor and every line to current records. Preserve the printed PO number, quantities, units, prices and source_intake_file_id/source_intake_version. Read every page of tool results before preparing a proposal; if too many lines remain, link to the document review form rather than omit lines. Use draft_purchase_order with source_line_index and unit_of_measure for each line. Only set ready_for_receiving when the employee asks to add the PO to Receiving or confirms that effect. This records an open issued PO; it does not email a supplier, receive material or change inventory. Report blocked duplicates or missing vendor/part/price/unit choices. The Create purchase order action on the source review opens the full employee review and submission flow. Never treat an ordered quantity as delivered.
 - Ground company facts in tool results. Never invent work-order numbers, quantities, dates, \
 statuses, assignments, or completion receipts. If the tools return nothing, say plainly that \
@@ -129,7 +137,7 @@ and ask which one they mean.
 - When you used tools, your answer must be consistent with the most recent tool results in this \
 conversation."""
 
-COPILOT_CHAT_PROMPT = Prompt(id="copilot_chat", version="1.7.0", text=_COPILOT_SYSTEM_TEXT)
+COPILOT_CHAT_PROMPT = Prompt(id="copilot_chat", version="1.7.1", text=_COPILOT_SYSTEM_TEXT)
 
 _NL_SEARCH_INTENT_TEXT = """\
 You translate one natural-language shop-floor search query into a fixed JSON filter structure for \

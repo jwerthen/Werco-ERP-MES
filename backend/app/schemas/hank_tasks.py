@@ -164,3 +164,5 @@ class HankCapabilities(BaseModel):
     allowed_kinds: list[HankActionKind]
     can_write: bool
     can_watch: bool = False
+    # Engineering is a signed-in screen workflow, never an executable model action.
+    engineering_ui_path: str = '/hank-engineering'

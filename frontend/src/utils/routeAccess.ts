@@ -23,6 +23,7 @@ const routeAccessRequirements: RouteAccessRequirement[] = [
   { prefix: '/print/packing-slip', permission: 'shipping:view' },
   { prefix: '/print/shipping-label', permission: 'shipping:view' },
   { prefix: '/shop-floor', permission: 'work_orders:view' },
+  { prefix: '/hank-engineering', allOf: ['parts:create', 'boms:create', 'routings:create'] },
   { prefix: '/parts', permission: 'parts:view' },
   // The unit-mismatch worklist is gated ADMIN / MANAGER / SUPERVISOR server-side
   // (bom.py -> list_bom_uom_mismatches) — the roles that can actually edit a BOM
@@ -98,3 +99,4 @@ export function canAccessPath(path: string, can: (permission: Permission) => boo
       (!requirement.allOf || requirement.allOf.every(can)))
   );
 }
+

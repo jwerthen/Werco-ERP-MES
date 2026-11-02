@@ -761,6 +761,7 @@ def create_routing(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Create a new routing for a part"""
     # Check part exists
@@ -784,6 +785,8 @@ def create_routing(
     routing = Routing(**routing_in.model_dump(), created_by=current_user.id)
     routing.company_id = company_id
     db.add(routing)
+    db.flush()
+    audit.log_create("routing", routing.id, f"{part.part_number} Rev {routing.revision}", new_values=routing)
     db.commit()
     db.refresh(routing)
 

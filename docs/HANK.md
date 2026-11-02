@@ -39,6 +39,14 @@ exhaustive inspection of every module. The panel shows lookup activity, source
 links, a stop control, and retry for a failed chat turn. `my_shift_briefing` uses
 the same role-aware briefing sources as **My shift**.
 
+**Drawing Engineering** opens a local-PDF evidence review and signed-in entry
+workspace for Parts, BOMs, Routings and requested DRAFT Work Orders. It extracts
+explicit native-text facts, requires review of every value and unknown, matches
+existing PNs/revisions before creation, and uses the normal UI authorization and
+release controls. It never releases a WO or dispatches engineering model tools.
+See [Hank Drawing Engineering](HANK_ENGINEERING.md) for supported drawings,
+review gates, revision conflicts, partial-save recovery and verification.
+
 **Tasks** provides six reviewed workflows:
 
 - **Repeat a job:** choose the source job, quantity and optional due date; review
@@ -387,3 +395,4 @@ See [API](API.md#hank-ai-shop-teammate),
 [permissions](RBAC_PERMISSIONS.md#hank-ai-chat-and-pdf-filing),
 [configuration](ENVIRONMENT_VARIABLES.md#hank-read-only-ai-chat), and
 [the existing MCP gateway](MCP.md).
+

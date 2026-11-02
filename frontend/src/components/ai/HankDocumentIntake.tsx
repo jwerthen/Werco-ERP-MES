@@ -272,6 +272,13 @@ function IntakeReview({
         {file.status.replace(/_/g, ' ')} · Updated {formatCentralDateTime(file.updated_at)}
         {file.page_count && /\.pdf$/i.test(file.filename) ? ` · ${file.page_count} pages` : ''}
       </p>
+      {file.analysis?.classification === 'drawing' && (
+        <p className="text-sm">
+          For Parts, BOM, Routing or a new Draft Work Order,{' '}
+          <Link className="underline" to="/hank-engineering" onClick={onNavigate}>open Drawing Engineering</Link>
+          {' '}and choose the local PDF. Filing metadata does not create engineering records.
+        </p>
+      )}
       <HankSourceFile
         filename={file.filename}
         pages={pages}
@@ -926,3 +933,4 @@ export function HankDocumentIntake({
     </section>
   );
 }
+

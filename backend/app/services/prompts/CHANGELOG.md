@@ -191,3 +191,9 @@ request layout changes. The version string is recorded on `AIUsageEvent`
   breakpoints are harmless no-ops.
 - `qms_clause_extraction` 1.0.0 — version registration only; prompt text
   remains inline in `app/api/endpoints/qms_standards.py` (baseline).
+
+
+## 2026-11-02: Drawing Engineering UI handoff
+
+- copilot_chat 1.7.1 routes drawing-to-engineering requests to the signed-in local-PDF review workspace. No engineering write tools or model changes.
+- hank_document_intake 1.2.1 clarifies the separation between filing metadata and reviewed engineering entry.
