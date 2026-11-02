@@ -28,8 +28,8 @@ The model remains unchanged.
    with the full printed specification in Description. Job quantity has no default
    and is separate from the quantity per one BOM parent.
 5. Enter the reviewed owner routing: component PN, description, sequence, exact
-   observed work center, approved setup/run minutes, instructions and inspection
-   points. Each manufacturing requirement must appear in operation instructions.
+   observed work center, approved setup minutes and run minutes per owner unit
+   (per assembly for assembly-owned routing), instructions and inspection points. Each manufacturing requirement must appear in operation instructions.
    No estimated labor standards, center substitutions or stock claims are made.
    The author records omitted details, conflicts, assumptions and their explicit
    resolutions, then confirms Engineering entry authorization.
@@ -50,7 +50,9 @@ The model remains unchanged.
    Engineering review/release, then return and match again. This does not release
    production. A requested Draft WO requires an explicit job quantity and its
    authorization source, matching released Engineering, and no component routing
-   that would unexpectedly add operations. The screen creates the normal Draft WO,
+   that would unexpectedly add operations. Nested component BOMs and inspection
+   ordering that the native generator would change are blocked before creation.
+   The screen creates the normal Draft WO,
    reads its actual number/link/status, and checks operations and component
    quantities against the reviewed BOM × job count. It has no WO-release control.
    Jon must separately name an observed WO before authorizing production release.

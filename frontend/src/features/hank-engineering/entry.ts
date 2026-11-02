@@ -39,6 +39,7 @@ export interface RoutingRecord {
     id: number;
     sequence: number;
     name: string;
+    description?: string;
     work_center_id: number;
     setup_hours: number;
     run_hours_per_unit: number;
@@ -87,6 +88,16 @@ export async function matchEngineering(plan: DrawingPlan, guard: Guard): Promise
     guard();
     const boms: { id: number; part_id: number }[] = await api.getBOMs({ active_only: false });
     guard();
+    if (
+      plan.requestedWO &&
+      boms.some(row =>
+        plan.components.some(line => {
+          const component = parts.get(key(line.pn));
+          return component && component.id === row.part_id && ['manufactured', 'assembly'].includes(component.part_type);
+        })
+      )
+    )
+      throw new Error('A component has its own BOM. Review nested Engineering before requesting a Draft WO.');
     const candidates = boms.filter(row => row.part_id === owner.id);
     if (candidates.length > 1) throw new Error('Multiple BOMs match the owner. Review existing Engineering.');
     if (candidates[0]) {
@@ -110,6 +121,29 @@ export async function matchEngineering(plan: DrawingPlan, guard: Guard): Promise
   guard();
   if (plan.operations.some(op => !centers.some(center => center.id === Number(op.center) && center.is_active)))
     throw new Error('A reviewed work center is no longer active. Review the routing again.');
+  const assembly = plan.parts.find(part => key(part.pn) === key(plan.owner))?.type === 'assembly';
+  if (plan.requestedWO && (assembly || plan.components.length > 0 || bom)) {
+    // The native assembly generator renumbers operations and moves inspections
+    // last. Mirror its classification before any WO write, including descriptions
+    // on matched routings and the currently observed work center.
+    if (plan.operations.some((op, index) => op.sequence !== (index + 1) * 10))
+      throw new Error('Assembly Work Orders require consecutive reviewed sequences 10, 20, 30.');
+    let inspectionSeen = false;
+    for (const op of plan.operations) {
+      const center = centers.find(row => row.id === Number(op.center));
+      const saved = routing?.operations.find(row => row.is_active && row.sequence === op.sequence);
+      const inspection =
+        op.inspection ||
+        [title(op), saved?.description || '', center?.name || '', center?.work_center_type || ''].some(value =>
+          /INSPECT|INSPECTION|QUALITY|QC/i.test(value)
+        );
+      if (!inspection && inspectionSeen)
+        throw new Error(
+          'The native assembly Work Order would move an inspection after a later manufacturing step. Review process order in Engineering before creating the job.'
+        );
+      inspectionSeen = inspectionSeen || inspection;
+    }
+  }
   return snapshot;
 }
 

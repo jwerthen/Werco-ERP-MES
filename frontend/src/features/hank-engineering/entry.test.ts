@@ -209,3 +209,69 @@ test('read failures are not interpreted as no matching records', async () => {
   await expect(matchEngineering(p, guard)).rejects.toThrow('network error');
   expect(mock.createPart).not.toHaveBeenCalled();
 });
+
+test.each(['flag', 'name', 'description', 'center name', 'center type'])(
+  'blocks reordered intermediate inspections identified by %s before a WO write',
+  async signal => {
+    const plan = reviewedPlan();
+    plan.operations.push({ ...plan.operations[0], sequence: 20, name: 'Pack' });
+    const existing = routing();
+    existing.operations.push({ ...existing.operations[0], id: 31, sequence: 20, name: 'TEST-DETAIL - Pack' });
+    if (signal === 'flag') {
+      plan.operations[0].inspection = true;
+      existing.operations[0].is_inspection_point = true;
+    } else if (signal === 'name') {
+      plan.operations[0].name = 'In-process quality check';
+      existing.operations[0].name = 'TEST-DETAIL - In-process quality check';
+    } else if (signal === 'description') {
+      existing.operations[0].description = 'Inspect before packing';
+    } else {
+      plan.operations[1].center = '2';
+      existing.operations[1].work_center_id = 2;
+      mock.getWorkCenters.mockResolvedValue([
+        {
+          id: 1,
+          is_active: true,
+          name: signal === 'center name' ? 'Quality' : 'Station',
+          work_center_type: signal === 'center type' ? 'inspection' : 'other',
+        } as Awaited<ReturnType<typeof api.getWorkCenters>>[number],
+        { id: 2, is_active: true, name: 'Packing' } as Awaited<ReturnType<typeof api.getWorkCenters>>[number],
+      ]);
+    }
+    releasedEngineering();
+    mock.getRouting.mockResolvedValue(existing);
+    await expect(createDraftWO(plan, guard, record)).rejects.toThrow(/would move an inspection/);
+    expect(mock.createWorkOrder).not.toHaveBeenCalled();
+  }
+);
+test('allows a final inspection that retains the reviewed assembly order', async () => {
+  const plan = reviewedPlan();
+  plan.operations.push({ ...plan.operations[0], sequence: 20, name: 'Final inspection', inspection: true });
+  const existing = routing();
+  existing.operations.push({
+    ...existing.operations[0],
+    id: 31,
+    sequence: 20,
+    name: 'TEST-DETAIL - Final inspection',
+    is_inspection_point: true,
+  });
+  releasedEngineering();
+  mock.getRouting.mockResolvedValue(existing);
+  await expect(matchEngineering(plan, guard)).resolves.toHaveProperty('routing.id', 20);
+});
+test('blocks assembly sequence gaps even when the owner has no BOM components', async () => {
+  const plan = reviewedPlan();
+  plan.components = [];
+  plan.operations[0].component = plan.owner;
+  plan.operations[0].sequence = 20;
+  await expect(matchEngineering(plan, guard)).rejects.toThrow(/consecutive reviewed sequences/);
+});
+test('blocks nested component BOM expansion before creating a Draft WO', async () => {
+  releasedEngineering();
+  mock.getBOMs.mockResolvedValue([
+    { id: 10, part_id: 1 },
+    { id: 11, part_id: 2 },
+  ]);
+  await expect(createDraftWO(p, guard, record)).rejects.toThrow(/nested Engineering/);
+  expect(mock.createWorkOrder).not.toHaveBeenCalled();
+});
