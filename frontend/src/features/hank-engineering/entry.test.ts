@@ -167,6 +167,10 @@ test('creates Draft WO from released engineering and verifies expanded quantity 
         work_center_id: 1,
         component_part_id: 2,
         component_quantity: 8,
+        run_instructions: 'DEBURR ALL EDGES\nSource: synthetic.pdf, page 1; drawing TEST-ASM Rev B',
+        requires_inspection: false,
+        setup_time_hours: 0.2,
+        run_time_hours: 0.2,
       },
     ],
   };
@@ -181,7 +185,14 @@ test('creates Draft WO from released engineering and verifies expanded quantity 
 });
 test('does not duplicate an observed work order after an uncertain save', async () => {
   releasedEngineering();
-  mock.getWorkOrders.mockResolvedValue([{ id: 40, part_id: 1, notes: `HANK-DRAWING:${p.sha256}` }]);
+  mock.getWorkOrders.mockResolvedValue([{ id: 40, part_id: 1 }]);
+  mock.getWorkOrder.mockResolvedValue({
+    id: 40,
+    part_id: 1,
+    work_order_number: 'WO-EXISTING',
+    status: 'draft',
+    notes: `HANK-DRAWING:${p.sha256}`,
+  });
   await expect(createDraftWO(p, guard, record)).rejects.toThrow(/already references/);
   expect(mock.createWorkOrder).not.toHaveBeenCalled();
 });

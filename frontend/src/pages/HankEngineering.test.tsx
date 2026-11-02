@@ -93,7 +93,7 @@ test('company switch clears drawings and late matching cannot continue entry', a
   fireEvent.click(screen.getByRole('button', { name: 'Match existing records' }));
   jest.mocked(getHankSessionScope).mockReturnValue('user1-company2');
   fireEvent(window, new Event('werco:auth-token-changed'));
-  resolve({ parts: new Map() });
+  resolve({ parts: new Map<string, never>() });
   await waitFor(() => expect(screen.queryByText('Local source preview')).not.toBeInTheDocument());
   expect(screen.queryByRole('button', { name: 'Save missing Parts' })).not.toBeInTheDocument();
   expect(mockedSave).not.toHaveBeenCalled();

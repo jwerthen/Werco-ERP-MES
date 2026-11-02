@@ -10,6 +10,7 @@ export interface Receipt {
   href: string;
   action: 'created' | 'matched';
   status?: string;
+  details?: string[];
 }
 export interface BOMRecord {
   id: number;
@@ -46,6 +47,7 @@ export interface RoutingRecord {
     is_inspection_point: boolean;
     is_outside_operation: boolean;
     process_sheet_id?: number | null;
+    work_center?: { code: string; name: string };
   }[];
 }
 export interface Snapshot {
@@ -290,6 +292,12 @@ export async function saveRouting(plan: DrawingPlan, guard: Guard, record: Recor
     href: `/routing?id=${saved.id}`,
     action,
     status: saved.status,
+    details: saved.operations
+      .filter(op => op.is_active)
+      .map(
+        op =>
+          `${op.sequence}: ${op.name}; ${op.work_center ? `${op.work_center.code} - ${op.work_center.name}` : `work center ID ${op.work_center_id}`}`
+      ),
   });
 }
 
@@ -300,6 +308,10 @@ interface WOOperation {
   component_quantity?: number;
   component_part_id?: number;
   status?: string;
+  run_instructions?: string;
+  requires_inspection?: boolean;
+  setup_time_hours?: number;
+  run_time_hours?: number;
 }
 interface WO {
   id: number;
@@ -321,11 +333,17 @@ function verifyOperations(plan: DrawingPlan, operations: WOOperation[], snapshot
       !op ||
       op.name !== title(wanted) ||
       op.work_center_id !== Number(wanted.center) ||
+      op.run_instructions !== instruction(plan, wanted.instructions, wanted.page) ||
+      op.requires_inspection !== wanted.inspection ||
+      Math.abs(Number(op.setup_time_hours) - Number(wanted.setup) / 60) > 0.00001 ||
+      !Number.isFinite(Number(op.setup_time_hours)) ||
+      Math.abs(Number(op.run_time_hours) - (Number(wanted.run) / 60) * Number(plan.quantity)) > 0.00001 ||
+      !Number.isFinite(Number(op.run_time_hours)) ||
       Number(op.component_quantity ?? plan.quantity) !== expected ||
       (line && op.component_part_id !== snapshot.parts.get(key(line.pn))?.id)
     )
       throw new Error(
-        `Operation ${wanted.sequence}: part, title, center or displayed quantity differs from the reviewed drawing. Stop for Engineering review.`
+        `Operation ${wanted.sequence}: part, instructions, time, inspection, center or displayed quantity differs from the reviewed drawing. Stop for Engineering review.`
       );
   }
 }
@@ -340,12 +358,27 @@ export async function createDraftWO(plan: DrawingPlan, guard: Guard, record: Rec
   )
     throw new Error('Review and release the exact BOM/routing in their existing screens before creating a Draft WO.');
   guard();
-  const existing: WO[] = await api.getWorkOrders({ search: owner.part_number });
+  // The list response is a summary and intentionally has no notes. Read each
+  // candidate detail before deciding the source marker is absent.
+  const existing: { id: number; part_id: number }[] = await api.getWorkOrders({ search: owner.part_number });
   guard();
-  if (existing.some(wo => wo.part_id === owner.id && wo.notes?.includes(marker(plan))))
-    throw new Error(
-      'A Work Order already references this drawing intake. Open Work Orders and verify it before requesting another job.'
-    );
+  for (const candidate of existing.filter(row => row.part_id === owner.id)) {
+    const observed: WO = await api.getWorkOrder(candidate.id);
+    guard();
+    if (observed.notes?.includes(marker(plan))) {
+      record({
+        kind: 'work_order',
+        id: observed.id,
+        label: observed.work_order_number,
+        href: `/work-orders/${observed.id}`,
+        action: 'matched',
+        status: observed.status,
+      });
+      throw new Error(
+        'A Work Order already references this drawing intake. Open its receipt and verify it before requesting another job.'
+      );
+    }
+  }
   // Component routings would be expanded in addition to the owner's routing.
   // Refuse that surprise before creating a job; do not suppress/override operations.
   for (const line of plan.components) {
@@ -382,4 +415,18 @@ export async function createDraftWO(plan: DrawingPlan, guard: Guard, record: Rec
   )
     throw new Error('Saved Work Order does not match the requested Draft job. Stop and inspect the recorded link.');
   verifyOperations(plan, saved.operations, snapshot);
+  record({
+    kind: 'work_order',
+    id: saved.id,
+    label: saved.work_order_number,
+    href: `/work-orders/${saved.id}`,
+    action: 'created',
+    status: saved.status,
+    details: [
+      `Job quantity ${saved.quantity_ordered}; ${saved.operations.length} operations verified`,
+      ...saved.operations.map(
+        op => `${op.sequence}: ${op.name}; quantity ${op.component_quantity ?? saved.quantity_ordered}`
+      ),
+    ],
+  });
 }

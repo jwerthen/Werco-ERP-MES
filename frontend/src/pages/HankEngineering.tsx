@@ -536,7 +536,7 @@ function EngineeringWorkspace({ scope }: { scope: string | null }) {
                         onChange={setup => update({ setup })}
                       />
                       <TextField
-                        label="Approved run minutes per unit"
+                        label="Approved run minutes per owner unit"
                         value={op.run}
                         onChange={run => update({ run })}
                       />
@@ -744,6 +744,11 @@ function EngineeringWorkspace({ scope }: { scope: string | null }) {
                     </Link>{' '}
                     · {receipt.action}
                     {receipt.status ? ` · ${receipt.status}` : ''}
+                    {receipt.details?.map(detail => (
+                      <p key={detail} className="text-sm text-fd-mute">
+                        {detail}
+                      </p>
+                    ))}
                   </li>
                 ))}
               </ul>

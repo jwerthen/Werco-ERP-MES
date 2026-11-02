@@ -71,3 +71,12 @@ test('never silently picks one of multiple exact PNs', () => {
   const p = reviewedPlan();
   expect(() => matchPart(p.parts[0], [savedPart(p, 0), savedPart(p, 0)], p)).toThrow(/multiple/);
 });
+
+test('accepts explicit table columns in another order and preserves source quantity', () => {
+  const p = extractDrawing('columns.pdf', 'x', [
+    'ITEM\tDESCRIPTION\tQTY\tPART NO\tUOM\n10\tBracket\t2.5\tBR-1\tinches',
+  ]);
+  expect(p.components).toEqual([
+    expect.objectContaining({ pn: 'BR-1', quantity: '2.5', uom: 'inches', confirmed: false }),
+  ]);
+});

@@ -45,7 +45,7 @@ async function workspace(context: BrowserContext, baseURL: string) {
     if (path === '/routing/20/release') { routings[0].status = 'released'; return send(routings[0]); }
     if (path === '/routing/20') return send(routings[0]);
     if (path === '/work-orders/' && req.method() === 'POST') {
-      const body = req.postDataJSON(); const saved = { id: 40, work_order_number: 'WO-SYNTHETIC-0040', status: 'draft', ...body, operations: [{ sequence: 10, name: 'TEST-DETAIL - Cut and deburr', work_center_id: 1, component_part_id: parts.find(p => p.part_number === 'TEST-DETAIL')!.id, component_quantity: body.quantity_ordered * 2 }] }; orders.push(saved); return send(saved);
+      const body = req.postDataJSON(); const saved = { id: 40, work_order_number: 'WO-SYNTHETIC-0040', status: 'draft', ...body, operations: [{ sequence: 10, name: 'TEST-DETAIL - Cut and deburr', work_center_id: 1, component_part_id: parts.find(p => p.part_number === 'TEST-DETAIL')!.id, component_quantity: body.quantity_ordered * 2, run_instructions: routings[0].operations[0].work_instructions, requires_inspection: false, setup_time_hours: 0.2, run_time_hours: body.quantity_ordered * 0.05 }] }; orders.push(saved); return send(saved);
     }
     if (path === '/work-orders/') return send(orders);
     if (path === '/work-orders/40') return send(orders[0]);
@@ -73,7 +73,7 @@ async function review(page: Page) {
   await operation.getByLabel('Operation part').selectOption('TEST-DETAIL');
   await operation.getByLabel('Operation description').fill('Cut and deburr');
   await operation.getByLabel('Work center', { exact: true }).selectOption('1');
-  await operation.getByLabel('Approved setup minutes').fill('12'); await operation.getByLabel('Approved run minutes per unit').fill('3');
+  await operation.getByLabel('Approved setup minutes').fill('12'); await operation.getByLabel('Approved run minutes per owner unit').fill('3');
   await operation.getByLabel('Work instructions / manufacturing requirements').fill('DEBURR ALL EDGES');
   await operation.getByLabel('Drawing evidence / approval for supplied values').fill('Page 1. Jon approved sequence, center and time standards.');
   await operation.getByLabel(/^Confirmed against source/).check();
