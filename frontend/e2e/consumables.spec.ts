@@ -1,4 +1,4 @@
-import { expect, Page, test } from '@playwright/test';
+import { expect, Locator, Page, test } from '@playwright/test';
 import type consumables from '../src/services/consumables';
 
 // Local synthetic acceptance only. All API calls are intercepted; no production
@@ -96,6 +96,33 @@ async function mockWorkspace(page: Page, baseURL: string, role = 'manager', seed
   return { rows, stock, mutations, unexpected, historyQueries };
 }
 
+function checkoutHistoryEntry(page: Page) {
+  const history = page.getByRole('region', { name: 'Checkout history', exact: true });
+  // The responsive table and cards coexist in the DOM. Only the visible history
+  // entry counts; the checkout receipt and employee picker cannot satisfy this.
+  return history.getByRole('row').or(history.getByRole('article'))
+    .filter({ has: page.getByText('CC-000042', { exact: true }) })
+    .filter({ visible: true });
+}
+
+async function expectCheckoutHistory(entry: Locator) {
+  await expect(entry).toHaveCount(1);
+  await expect(entry).toBeVisible();
+  // Mobile renders the name as a text node in the same <dd> as the department.
+  // Match that complete value too, while still checking both names in this entry.
+  await expect(entry.getByText(/^Jordan Smith(?:\s*Welding)?$/)).toBeVisible();
+  await expect(entry.getByText('Welding', { exact: true })).toBeVisible();
+  await expect(entry.getByText('Alex Rivera', { exact: true })).toBeVisible();
+  await expect(entry.getByText('4.5 inch grinding disc', { exact: true })).toBeVisible();
+  await expect(entry.getByText('CON-001', { exact: true })).toBeVisible();
+  await expect(entry.getByText('3 each', { exact: true })).toBeVisible();
+  await expect(entry.getByText('Welding bay 2', { exact: true })).toBeVisible();
+  const timestamp = entry.locator('time');
+  await expect(timestamp).toBeVisible();
+  await expect(timestamp).toHaveAttribute('datetime', '2026-10-27T19:15:00Z');
+  await expect(timestamp).toHaveText('Oct 27, 2026, 2:15:00 PM CDT');
+}
+
 test.use({ timezoneId: 'Asia/Tokyo' });
 test.beforeEach(async ({ baseURL }) => {
   test.skip(!baseURL || !['localhost', '127.0.0.1', '[::1]'].includes(new URL(baseURL).hostname),
@@ -122,9 +149,8 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 1100 }, { name: 
     expect(state.mutations[0]).toMatchObject({ inventory_item_id: 101, employee_id: 8, quantity: 3, notes: 'Welding bay 2' });
     expect(state.mutations[0]).not.toHaveProperty('issued_at');
     expect(state.mutations[0]).not.toHaveProperty('issued_by');
-    await expect(page.getByText('Jordan Smith', { exact: true }).filter({ visible: true }).first()).toBeVisible();
-    await expect(page.getByText('Alex Rivera', { exact: true }).filter({ visible: true }).first()).toBeVisible();
-    await expect(page.locator('time:visible').filter({ hasText: /2:15(?::00)? PM CDT/ }).first()).toBeVisible();
+    const historyEntry = checkoutHistoryEntry(page);
+    await expectCheckoutHistory(historyEntry);
     await expect(page.getByRole('button', { name: 'Select 4.5 inch grinding disc at CRIB-A1' })).toContainText('12');
     expect(state.stock.items[0].quantity_on_hand).toBe(17);
     const layout = await page.evaluate(() => ({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth }));
@@ -133,9 +159,12 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 1100 }, { name: 
     await page.screenshot({ path: `/tmp/consumables-${viewport.name}.png`, fullPage: true, animations: 'disabled' });
     await page.getByLabel('Search checkout history', { exact: true }).fill('not found');
     await expect.poll(() => state.historyQueries.at(-1)?.get('q')).toBe('not found');
-    await expect(page.getByText('Jordan Smith', { exact: true })).toHaveCount(0);
+    await expect(page.getByRole('region', { name: 'Checkout history', exact: true })
+      .getByText('No checkouts match these filters', { exact: true })).toBeVisible();
+    await expect(historyEntry).toHaveCount(0);
     await page.getByLabel('Search checkout history', { exact: true }).fill('grinding');
-    await expect(page.getByText('Jordan Smith', { exact: true }).filter({ visible: true }).first()).toBeVisible();
+    await expect.poll(() => state.historyQueries.at(-1)?.get('q')).toBe('grinding');
+    await expectCheckoutHistory(historyEntry);
     expect(state.unexpected).toEqual([]);
     expect(errors).toEqual([]);
   });
@@ -145,8 +174,9 @@ test('viewer sees who received supplies and when without issuing controls', asyn
   const state = await mockWorkspace(page, baseURL!, 'viewer', true);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/consumables');
-  await expect(page.getByText('Jordan Smith', { exact: true }).filter({ visible: true }).first()).toBeVisible();
-  await expect(page.locator('time:visible').filter({ hasText: /2:15(?::00)? PM CDT/ }).first()).toBeVisible();
+  await expectCheckoutHistory(checkoutHistoryEntry(page));
+  await expect(page.getByRole('combobox', { name: /^Employee receiving supplies/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Select 4.5 inch grinding disc at CRIB-A1' })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Record checkout', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Retry checkout', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Export CSV', exact: true })).toHaveCount(0);
