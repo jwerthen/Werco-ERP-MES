@@ -160,7 +160,7 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 1100 }, { name: 
     await page.getByLabel('Search checkout history', { exact: true }).fill('not found');
     await expect.poll(() => state.historyQueries.at(-1)?.get('q')).toBe('not found');
     await expect(page.getByRole('region', { name: 'Checkout history', exact: true })
-      .getByText('No checkouts match these filters', { exact: true })).toBeVisible();
+      .getByRole('heading', { name: 'No checkouts match these filters', exact: true })).toBeVisible();
     await expect(historyEntry).toHaveCount(0);
     await page.getByLabel('Search checkout history', { exact: true }).fill('grinding');
     await expect.poll(() => state.historyQueries.at(-1)?.get('q')).toBe('grinding');
