@@ -35,6 +35,7 @@ const CrewStationKiosk = lazyWithRetry(() => import('./pages/CrewStationKiosk'))
 const Wallboard = lazyWithRetry(() => import('./pages/Wallboard'));
 const TvPair = lazyWithRetry(() => import('./pages/TvPair'));
 const WorkCenters = lazyWithRetry(() => import('./pages/WorkCenters'));
+const HankEngineering = React.lazy(() => import('./pages/HankEngineering'));
 const Parts = lazyWithRetry(() => import('./pages/PartsNew'));
 const PartDetail = lazyWithRetry(() => import('./pages/PartDetail'));
 const PartEdit = lazyWithRetry(() => import('./pages/PartEdit'));
@@ -461,6 +462,8 @@ function AppRoutes() {
             </PrivateRoute>
           }
         />
+
+        <Route path="/hank-engineering" element={<PrivateRoute><Layout><LazyRoute><HankEngineering /></LazyRoute></Layout></PrivateRoute>} />
 
         {/* Parts & BOM */}
         <Route
@@ -1408,3 +1411,4 @@ function App() {
 }
 
 export default App;
+

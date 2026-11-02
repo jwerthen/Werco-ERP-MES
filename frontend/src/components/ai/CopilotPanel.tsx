@@ -531,6 +531,7 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
                 {tab.label}
               </button>
             ))}
+            {(isSuperuser || ['admin', 'manager', 'supervisor'].includes(role || '')) && !isHankReadOnlySession() && <Link to="/hank-engineering" onClick={onClose} className="px-3 py-1.5 text-xs rounded-[3px] text-fd-link">Drawing Engineering</Link>}
           </nav>
         )}
 
@@ -809,3 +810,4 @@ export function CopilotPanel({ isOpen, onClose }: CopilotPanelProps) {
 }
 
 export default CopilotPanel;
+

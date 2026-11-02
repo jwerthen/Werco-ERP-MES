@@ -25,6 +25,7 @@ export interface RouteParent {
  */
 export const routeTitles: Record<string, string> = {
   '/': 'Dashboard',
+  '/hank-engineering': 'Hank Drawing Engineering',
   '/action-inbox': 'Action Inbox',
   '/notifications': 'Notifications',
   '/settings': 'My Settings',
@@ -240,3 +241,4 @@ export function getBreadcrumbParent(pathname: string): RouteParent | null {
   }
   return null;
 }
+
