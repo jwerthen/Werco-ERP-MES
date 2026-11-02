@@ -4,7 +4,8 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Any, Optional, Tuple
 
-from jose import JWTError, jwt
+import jwt
+from jwt import InvalidTokenError
 from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -126,7 +127,7 @@ def verify_display_token(token: str) -> Optional[dict]:
             "company_id": payload.get("cid"),
             "label": payload.get("label"),
         }
-    except JWTError:
+    except InvalidTokenError:
         return None
 
 
@@ -144,7 +145,7 @@ def create_api_token(jti: str, user_id: int, company_id: int, expires_at: Option
     company, revocation and expiry.
 
     ``exp`` is set ONLY when ``expires_at`` is given: the owner's default for a
-    standing bot credential is "never expires", and python-jose accepts a token
+    standing bot credential is "never expires", and PyJWT accepts a token
     with no ``exp``. Rotating ``SECRET_KEY`` invalidates every API token at once
     -- that is a feature, not a hazard.
     """
@@ -179,7 +180,7 @@ def verify_api_token(token: str) -> Optional[dict]:
             "user_id": payload.get("user_id"),
             "company_id": payload.get("company_id"),
         }
-    except JWTError:
+    except InvalidTokenError:
         return None
 
 
@@ -224,7 +225,7 @@ def verify_signin_token(token: str) -> Optional[dict]:
             "company_id": payload.get("cid"),
             "label": payload.get("label"),
         }
-    except JWTError:
+    except InvalidTokenError:
         return None
 
 
@@ -270,7 +271,7 @@ def verify_kiosk_token(token: str) -> Optional[dict]:
             "company_id": payload.get("cid"),
             "label": payload.get("label"),
         }
-    except JWTError:
+    except InvalidTokenError:
         return None
 
 
@@ -296,7 +297,7 @@ def verify_token(token: str) -> Optional[dict]:
             "read_only": bool(payload.get("ro", False)),
             "scope": payload.get("scope"),  # None for unscoped tokens
         }
-    except JWTError:
+    except InvalidTokenError:
         return None
 
 
@@ -324,7 +325,7 @@ def verify_refresh_token(token: str) -> Optional[dict]:
             "company_id": payload.get("cid"),
             "read_only": bool(payload.get("ro", False)),
         }
-    except JWTError:
+    except InvalidTokenError:
         return None
 
 

@@ -881,7 +881,7 @@ real gates (a complete with zero labor recorded is refused 400, exactly as at th
   `auth.py`, **not** `Settings`): `WERCO_ERP_URL`, `WERCO_ERP_TOKEN`, `WERCO_ERP_REFRESH_TOKEN`,
   `WERCO_ERP_EMAIL`, `WERCO_ERP_PASSWORD`, `WERCO_MCP_TRANSPORT`, `WERCO_MCP_HOST`, `WERCO_MCP_PORT`.
   Tables in [ENVIRONMENT_VARIABLES.md → MCP](ENVIRONMENT_VARIABLES.md#mcp-model-context-protocol-door-and-bridge).
-- Dependency: `mcp==2.1.1` (`backend/requirements.txt`; transitives `mcp-types`, `httpx2`,
+- Dependency: `mcp==2.2.0` (`backend/requirements.txt`; transitives `mcp-types`, `httpx2`,
   `sse-starlette`, `jsonschema`, `anyio`).
 - Tests (all in the default `pytest tests/` run, so in CI's required "Backend Tests" job):
   - `backend/tests/test_mcp_catalog.py` (no DB) — membership against the live `app.openapi()` (every

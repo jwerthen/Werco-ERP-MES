@@ -24,10 +24,10 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, timedelta
 
+import jwt
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from jose import jwt
 from sqlalchemy.orm import Session
 from starlette.requests import Request
 

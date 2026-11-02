@@ -3,7 +3,7 @@
 -r requirements.txt
 
 # Pinned compiler for scripts/lock_dependencies.py (not a runtime dependency).
-uv==0.11.15  # >=0.11.15 fixes GHSA-4gg8-gxpx-9rph and includes the RECORD traversal fix
+uv==0.13.6  # includes PYSEC-2026-4321 fix
 
 # Testing Dependencies
 pytest==9.0.3
@@ -15,8 +15,8 @@ pytest-env==1.2.0
 faker==40.4.0
 
 # Code Quality
-pylint==4.0.4
-black==26.3.1
+pylint==4.0.9
+black==26.10.1
 mypy==1.19.1
 flake8==7.3.0
 isort==7.0.0

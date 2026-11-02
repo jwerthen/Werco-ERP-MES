@@ -13,8 +13,9 @@ from types import SimpleNamespace
 from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 
+import jwt
 from fastapi import HTTPException
-from jose import JWTError, jwt
+from jwt import InvalidTokenError
 from sqlalchemy.orm import Session
 
 from app.core.cache import invalidate_work_centers_cache
@@ -508,7 +509,7 @@ class SchedulingImpactService:
     def apply(self, token: str, audit: AuditService) -> dict:
         try:
             claims = jwt.decode(token, _signing_key(), algorithms=["HS256"])
-        except JWTError:
+        except InvalidTokenError:
             raise HTTPException(409, "This scheduling plan expired or is invalid. Generate and review a new preview.")
         if (
             claims.get("purpose") != "scheduling-impact-v1"

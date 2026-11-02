@@ -45,7 +45,7 @@ Invoke these two after the implementing agent finishes, as a matter of course â€
 # Install the complete, hashed development tree (includes runtime dependencies).
 python -m pip install --require-hashes -r requirements-dev.lock
 # Production images and E2E install requirements.lock instead.
-# Edit requirements*.txt inputs, then regenerate BOTH locks with pinned uv==0.11.15.
+# Edit requirements*.txt inputs, then regenerate BOTH locks with pinned uv==0.13.6.
 python scripts/lock_dependencies.py
 python scripts/lock_dependencies.py --check  # resolves without changing files; CI gate
 

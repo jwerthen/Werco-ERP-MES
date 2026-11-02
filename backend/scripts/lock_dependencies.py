@@ -1,6 +1,6 @@
 """Compile or check the runtime and development dependency locks.
 
-Install the compiler with ``python -m pip install uv==0.11.15``. Then run from
+Install the compiler with ``python -m pip install uv==0.13.6``. Then run from
 backend (or any directory):
 
     python scripts/lock_dependencies.py
@@ -24,7 +24,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-UV_VERSION = "0.11.15"
+UV_VERSION = "0.13.6"
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 INPUTS = ("requirements.txt", "requirements-dev.txt")
 LOCKS = ("requirements.lock", "requirements-dev.lock")
