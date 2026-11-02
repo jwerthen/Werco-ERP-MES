@@ -4,6 +4,43 @@ This document records how the CI `Security Scanning` job
 (`.github/workflows/ci-cd.yml`) treats dependency advisories, and the
 justification for any gate that is not hard-blocking.
 
+## November 2, 2026 remediation
+
+The scheduled [audit run 41411573327](https://github.com/jwerthen/Werco-ERP-MES/actions/runs/41411573327)
+failed against main `40f3c6d6`. These were scanner findings, not evidence of exploitation.
+
+- Frontend: update Axios, Zod, Vite, follow-redirects, brace-expansion,
+  Handlebars, and source-map-js within their existing major versions. Raise
+  the direct Axios/Zod/Vite minimums and regenerate the npm lock.
+- Landing: update Vite and source-map-js and regenerate its separate npm lock.
+- API and native quotation worker: pin Pillow 13.0.0 and pypdf 6.21.4 in
+  both dependency inputs; regenerate all three Python hash locks.
+- Backend: update the affected HTTP/DNS, MCP, telemetry, packaging, and
+  development-tool dependencies. Keep multidict on the patched 6.x series.
+- Replace python-jose 3.5.0 (unpatched PYSEC-2026-4298, algorithm confusion)
+  with PyJWT 2.15.1, already required by MCP. Migrate all three JWT call sites
+  and keep explicit verification algorithms, token types, signing secrets,
+  tenant binding, database revocation, and optional API-token expiry intact.
+  Existing HS256 credentials use the same compact JWS format. PyJWT also
+  rejects future `iat` values; the app issues tokens using the current UTC time.
+  Regression tests cover legacy-format credentials for all six token types,
+  wrong signatures, expiry, future `nbf`, algorithm substitution, audience,
+  and cross-type rejection; existing API tests cover row-level authorization.
+- Remove python-jose's unused ecdsa/rsa/pyasn1 dependency chain. Retire the
+  Minerva exception from both workflows and replace its reachability guard
+  with JWT compatibility/security tests. **No backend exclusions remain.**
+
+The frontend still reports moderate/low development-tool findings in
+minimatch, glob, and deepmerge (including their Jest/ESLint dependents).
+These are not allowlisted. The compatible targeted updates clear high/critical
+findings; forcing different major versions into Jest/ESLint's transitive graph
+is deferred until their supported dependency ranges include fixes.
+The frontend allowlist remains empty and the audit threshold is unchanged.
+
+The pinned lock compiler is now **uv 0.13.6**. Regenerate with the existing
+`python scripts/lock_dependencies.py` command. Historical snapshots below
+record the state at their stated dates, including the now-retired ecdsa exception.
+
 ## Policy
 
 - Prefer fixing over tolerating: apply any patch/minor upgrade that clears an
@@ -116,11 +153,10 @@ calls.
 
 ## Backend (`pip-audit`) — advisory on PRs, blocking nightly
 
-The backend scan step runs `pip-audit --require-hashes -r requirements-dev.lock
---ignore-vuln PYSEC-2026-1325` (PyPA/OSV database). It is **scoped to this app's
-locked runtime and development dependency set** via `-r`, preceded by an
-`actions/setup-python` step; the `--ignore-vuln` id is the one accepted
-suppression, justified below.
+The backend scan step runs `pip-audit --require-hashes -r requirements-dev.lock`
+(PyPA/OSV database), with no exclusions. It is **scoped to this app's locked
+runtime and development dependency set** via `-r`, preceded by an
+`actions/setup-python` step.
 
 This replaced the deprecated `safety check`. The old step ran `pip install
 safety; safety check` with **no `-r` and no prior install of `requirements.txt`**,
@@ -146,8 +182,7 @@ a reviewed cadence, run the full backend test suite, and document anything that
 cannot be safely upgraded here.
 
 **How a backend suppression is enforced.** An accepted advisory is silenced with
-`--ignore-vuln <ID>` on the `pip-audit` command — currently
-`--ignore-vuln PYSEC-2026-1325` — in **both** places it runs: the blocking
+`--ignore-vuln <ID>` on the `pip-audit` command in **both** places it runs: the blocking
 nightly in `dependency-audit.yml` and the advisory copy in `ci-cd.yml`. Keep the
 two in sync; a flag on only one of them means the nightly and the PR scan
 disagree about what is acceptable.
@@ -721,7 +756,11 @@ UI client can, is never rejected by it. Sizing was measured against real payload
 cap; the known ceiling is a BOM create above roughly 1300 line items, which is why the
 value is a setting and not a constant.
 
-### Current backend suppression: ecdsa / PYSEC-2026-1325 ("Minerva", CVE-2024-23342)
+### Retired November 2: ecdsa / PYSEC-2026-1325 ("Minerva", CVE-2024-23342)
+
+**Retired:** python-jose and ecdsa were removed; both workflow ignore flags and
+the old backend-selection guard were removed. The following is the historical
+reachability rationale, not a current exception.
 
 **This is the same defect this file previously carried as a "Background" note
 under safety IDs 64459 / 64396** — the P-256 "Minerva" timing side-channel in

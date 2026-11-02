@@ -4,8 +4,9 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 
+import jwt
 from fastapi import HTTPException
-from jose import JWTError, jwt
+from jwt import InvalidTokenError
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
@@ -230,7 +231,7 @@ def review_count(db: Session, company_id: int, user_id: int, count_id: int) -> d
 def validate_review(db: Session, company_id: int, user_id: int, count_id: int, token: str) -> None:
     try:
         claims = jwt.decode(token, _signing_key(), algorithms=["HS256"])
-    except JWTError as exc:
+    except InvalidTokenError as exc:
         raise HTTPException(409, "Adjustment review expired or is invalid. Review the count again.") from exc
     if (claims.get("company_id"), claims.get("user_id"), claims.get("count_id")) != (company_id, user_id, count_id):
         raise HTTPException(409, "This adjustment review belongs to another count or reviewer")

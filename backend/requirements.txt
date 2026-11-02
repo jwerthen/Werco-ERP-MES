@@ -21,7 +21,8 @@ psycopg2-binary==2.9.11
 pydantic==2.12.5
 pydantic-settings==2.14.2  # >=2.14.2 fixes GHSA-4xgf-cpjx-pc3j; needs only pydantic>=2.7.0
 email-validator==2.3.0
-python-jose[cryptography]==3.5.0
+# PyJWT replaces unpatched python-jose; keep existing HS256 tokens compatible.
+PyJWT[crypto]==2.15.1
 passlib==1.7.4
 bcrypt==4.3.0
 python-multipart==0.0.31  # fixes CVE-2026-42561 (0.0.27) + PYSEC-2026-3036/3037 (0.0.30) + PYSEC-2026-3040 (0.0.31)
@@ -30,7 +31,7 @@ httpx==0.28.1
 # MCP server (app/mcp, docs/MCP.md): the official Model Context Protocol SDK, pinned
 # exactly. Transitive: mcp-types (same version), httpx2, sse-starlette, jsonschema,
 # anyio. The Streamable HTTP door is OFF by default (WERCO_MCP_HTTP_ENABLED).
-mcp==2.1.1
+mcp==2.2.0
 boto3==1.42.44
 
 # Security
@@ -56,8 +57,8 @@ hiredis==3.3.0
 sentry-sdk==2.52.0
 
 # Document Processing
-# >=6.16.1 fixes GHSA-763m-79hh-57f2 (repeated XForm extraction resource exhaustion).
-pypdf==6.16.1
+# 6.21.4 includes the October parser resource-exhaustion fixes.
+pypdf==6.21.4
 pdf2image==1.17.0
 pytesseract==0.3.13
 python-docx==1.2.0
@@ -91,3 +92,6 @@ openpyxl>=3.1.5
 xlrd>=2.0.2
 pandas>=3.0.0
 reportlab>=4.4.9
+
+# Security floor shared by API image processing and the isolated quotation worker.
+Pillow==13.0.0

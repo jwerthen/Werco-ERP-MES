@@ -26,8 +26,8 @@ nobody re-derives the wrong model from the setting's name.
 import inspect
 from datetime import datetime, timedelta
 
+import jwt
 import pytest
-from jose import jwt
 
 from app.core.config import Settings, settings
 from app.core.security import create_refresh_token, verify_refresh_token

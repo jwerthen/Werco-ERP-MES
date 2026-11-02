@@ -87,7 +87,7 @@ Cross-cutting platform properties:
 | Backend | Python 3.11, FastAPI 0.136, Starlette 1.3, Uvicorn/Gunicorn |
 | ORM / DB | SQLAlchemy 2.0, Alembic 1.18, PostgreSQL (Supabase), psycopg2 |
 | Validation | Pydantic 2.12 + pydantic-settings |
-| Auth / security | python-jose (JWT), passlib + bcrypt, slowapi (rate limiting) |
+| Auth / security | PyJWT (JWT), passlib + bcrypt, slowapi (rate limiting) |
 | Agent access | `mcp` 2.1.1 (Model Context Protocol SDK), jsonschema |
 | Background jobs | Redis 7, ARQ, croniter |
 | Realtime | websockets |

@@ -19,10 +19,10 @@ import json
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
+import jwt
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from jose import jwt
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -173,7 +173,9 @@ class TestIssue:
         claims = verify_api_token(token)
         assert claims == {"jti": row.jti, "user_id": test_user.id, "company_id": 1}
         assert verify_token(token) is None, "verify_token still rejects anything not type=access"
-        assert "exp" not in jwt.get_unverified_claims(token), "no exp claim on a never-expiring token"
+        assert "exp" not in jwt.decode(
+            token, options={"verify_signature": False}
+        ), "no exp claim on a never-expiring token"
 
         # And it authenticates on its very first use.
         assert client.get(PARTS_URL, headers=_bearer(token)).status_code == 200
@@ -223,7 +225,7 @@ class TestIssue:
         assert timedelta(days=30) - timedelta(minutes=1) <= row.expires_at - before <= timedelta(days=30, minutes=1)
         assert body["expires_at"].endswith("Z")
 
-        exp = jwt.get_unverified_claims(body["token"]).get("exp")
+        exp = jwt.decode(body["token"], options={"verify_signature": False}).get("exp")
         assert isinstance(exp, int)
         assert exp == calendar.timegm(row.expires_at.utctimetuple()), "the JWT exp equals the row's expires_at"
         assert client.get(PARTS_URL, headers=_bearer(body["token"])).status_code == 200

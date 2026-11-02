@@ -8,8 +8,8 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import anyio
+import jwt
 import pytest
-from jose import jwt
 from sqlalchemy.orm import Session
 from starlette.websockets import WebSocketDisconnect
 
@@ -56,7 +56,7 @@ def url(route, resources, token=None):
 
 
 def signed_claims(user, **changes):
-    claims = jwt.get_unverified_claims(create_access_token(user.id, company_id=user.company_id))
+    claims = jwt.decode(create_access_token(user.id, company_id=user.company_id), options={"verify_signature": False})
     claims.update(changes)
     return jwt.encode(claims, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
@@ -244,7 +244,7 @@ def test_live_revocation_prevents_delivery_and_cleans_presence(
                 def now(cls, tz=None):
                     return advanced.astimezone(tz) if tz is not None else advanced.replace(tzinfo=None)
 
-            monkeypatch.setattr(jwt, 'datetime', ExpiredClock)
+            monkeypatch.setattr(jwt.api_jwt, 'datetime', ExpiredClock)
         db_session.commit()
         secret_payload = {'private': 'must never reach a revoked socket'}
         if delivery == 'company':

@@ -94,7 +94,7 @@ python -m pip install --require-hashes -r requirements-dev.lock  # development /
 # Runtime-only environments use: python -m pip install --require-hashes -r requirements.lock
 
 # uv is included in the development lock. Bootstrap the compiler if needed:
-python -m pip install uv==0.11.15
+python -m pip install uv==0.13.6
 python scripts/lock_dependencies.py
 python scripts/lock_dependencies.py --check
 # For a targeted transitive dependency upgrade:
@@ -102,7 +102,7 @@ python scripts/lock_dependencies.py --upgrade-package PACKAGE_NAME
 ```
 
 Edit direct requirements in the `.txt` inputs first, regenerate both locks, and
-review the resulting version/hash changes. The helper requires exactly uv 0.11.15,
+review the resulting version/hash changes. The helper requires exactly uv 0.13.6,
 prefers the compiler beside the active Python interpreter, and retains existing
 locked versions unless the inputs or `--upgrade-package` require a change. It resolves
 both outputs in a temporary directory before publishing either; `--check` fails on

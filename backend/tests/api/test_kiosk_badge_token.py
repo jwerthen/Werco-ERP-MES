@@ -19,10 +19,10 @@ Headline invariants:
 
 from datetime import datetime, timedelta
 
+import jwt
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
-from jose import jwt
 from sqlalchemy.orm import Session
 
 import app.main as app_main
