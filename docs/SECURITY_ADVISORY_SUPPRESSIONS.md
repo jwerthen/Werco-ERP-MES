@@ -24,7 +24,7 @@ failed against main `40f3c6d6`. These were scanner findings, not evidence of exp
   Existing HS256 credentials use the same compact JWS format. PyJWT also
   rejects future `iat` values; the app issues tokens using the current UTC time.
   Regression tests cover legacy-format credentials for all six token types,
-  wrong signatures, expiry, future `nbf`, algorithm substitution, audience,
+  wrong signatures, expiry, future `iat`/`nbf`, algorithm substitution, audience,
   and cross-type rejection; existing API tests cover row-level authorization.
 - Remove python-jose's unused ecdsa/rsa/pyasn1 dependency chain. Retire the
   Minerva exception from both workflows and replace its reachability guard
@@ -36,6 +36,15 @@ These are not allowlisted. The compatible targeted updates clear high/critical
 findings; forcing different major versions into Jest/ESLint's transitive graph
 is deferred until their supported dependency ranges include fixes.
 The frontend allowlist remains empty and the audit threshold is unchanged.
+`npm audit --omit=dev` reports zero production-dependency findings.
+
+All four jobs passed in GitHub [Dependency Audit run 41489939142](https://github.com/jwerthen/Werco-ERP-MES/actions/runs/41489939142)
+for remediation commit `225cba7`: backend and native locks have no known
+vulnerabilities, landing has zero findings, and frontend has no high/critical
+findings and no allowlisted entries. Local validation also passed 4,538 frontend
+tests, 170 JWT/WebSocket tests, frontend/landing type checks and builds, backend
+lint/type/security checks, and the isolated native worker's DXF/STEP/PDF/CSV/nesting
+smoke test. These are repository validation results, not a deployment claim.
 
 The pinned lock compiler is now **uv 0.13.6**. Regenerate with the existing
 `python scripts/lock_dependencies.py` command. Historical snapshots below
@@ -53,9 +62,10 @@ record the state at their stated dates, including the now-retired ecdsa exceptio
   schedule. See "Why the frontend gate moved" below.
 - **Backend `pip-audit` is ADVISORY** on PRs (non-blocking,
   `continue-on-error: true`) and blocking in the same nightly workflow — see below.
-  Exactly one advisory is suppressed (`ecdsa` / PYSEC-2026-1325) via an explicit
-  `--ignore-vuln` flag on the command. **There is no backend allowlist file** —
-  the flag plus this document is the whole record.
+  No advisory is currently suppressed. The old `ecdsa` / PYSEC-2026-1325
+  exception was retired on November 2 when its dependency chain was removed.
+  **There is no backend allowlist file**; any future exception needs an explicit
+  workflow flag and a documented, testable rationale here.
 
 ## Dependency cleanup — 2026-09-13
 

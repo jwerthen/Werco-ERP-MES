@@ -53,7 +53,7 @@ stages are separately branch-gated to pushes, so a PR run does the full CI and n
 | Deploy Production | Railway deployment, then post-deploy health verification | Security (main branch) |
 
 Backend lint/tests install `requirements-dev.lock` with `--require-hashes`; the lint
-job runs `python scripts/lock_dependencies.py --check` using the locked uv 0.11.15
+job runs `python scripts/lock_dependencies.py --check` using the locked uv 0.13.6
 compiler. Runtime images and E2E install `requirements.lock`. MyPy enforces five
 previously suppressed correctness categories in `app.schemas.*`,
 `app.db.tenant_filter`, and `app.services.pdf_text`; other modules keep the existing
