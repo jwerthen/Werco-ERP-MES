@@ -513,8 +513,9 @@ Regression coverage: `utils/apiError.test.ts`, `components/ui/Toast.test.tsx`
 
 ## Database Migrations
 
-> Postgres only. On local SQLite the schema comes from `create_all` (see "Create
-> Schema" above); the migrations are Postgres-targeted and are not run on SQLite.
+> Postgres-targeted. Local SQLite normally gets its schema from `create_all` (see "Create
+> Schema" above); `python -m scripts.reset_dev_db` rebuilds the dev file through the same
+> bootstrap below, where the Postgres-only steps no-op.
 
 ### Bootstrap order (new Postgres database)
 
@@ -538,6 +539,41 @@ alembic upgrade head
 ```
 
 After bootstrap, normal incremental `alembic upgrade head` is the standard path.
+
+> **Every migration after the `058` stamp must be idempotent against a `create_all`-built
+> schema.** Step 3 *runs* those revisions over tables, columns and indexes the models already
+> built, so each one guards every object it creates — table, column, index, unique constraint,
+> FK — **independently** (the `088_api_tokens` `_has_table` / `_has_index` style); a table guard
+> alone still lets the `create_index` after it fail. Inside a `batch_alter_table`, guard every op:
+> on SQLite a constraint or FK op makes the batch rebuild the table, which is where `089`'s
+> re-added column surfaced. Postgres security statements stay **unconditional** and idempotent:
+> `ENABLE ROW LEVEL SECURITY`, `REVOKE`, and trigger DDL (`CREATE OR REPLACE FUNCTION`,
+> `DROP TRIGGER IF EXISTS` + `CREATE TRIGGER`, since model `after_create` listeners may already
+> have built the trigger). The reason is not the bootstrap itself — there, `059`'s `pg_tables`
+> sweep enables RLS on every table `create_all` built — but that `create_all` can build a table
+> *before its migration runs* on an existing database: every non-production boot calls it
+> (`app/main.py`), as does `scripts/seed_data.py`, and it enables RLS only where a model's
+> `after_create` listener does. A security statement nested under a table-exists guard would then
+> never fire, and that table would stay RLS-off. Enforced by
+> `backend/tests/test_migration_fresh_bootstrap.py`: it runs the full bootstrap on a temp SQLite
+> file and asserts it reaches head with a schema matching a pure `create_all`, object for object,
+> and a static check fails any `ENABLE ROW LEVEL SECURITY` / `REVOKE` reachable from `upgrade()`
+> under a table-existence guard. The Postgres trigger rule is not test-enforced; CI's E2E Postgres
+> verifiers run `095`–`098`, `106` and `107` twice, so the guards also execute against existing
+> objects on real Postgres.
+>
+> *2026-11-02:* `089`–`098`, `106` and `107` shipped unguarded, so this path failed at `089`
+> (`python -m scripts.reset_dev_db` included) until guards were retrofitted to those twelve
+> files. Production was unaffected (it migrated incrementally from `088`), and CI never noticed:
+> E2E builds the app's schema with `create_all` + seed, its Postgres verifiers run selected
+> migration modules only in an empty schema, and nothing exercised the create_all → stamp →
+> upgrade chain. The fix is the guards, **not** a later stamp point — stamping past those
+> revisions would skip their Postgres RLS / `REVOKE` statements, the stamped-over hazard below.
+> Retrofitting guards (`_has_*` checks or `IF [NOT] EXISTS` DDL) is the one sanctioned edit to an
+> applied migration (precedent `1897d457`, `a0dd1b09`, `4e5fe4e1`): they no-op on any database
+> that already ran the revision, and on one that hasn't they emit the same DDL — plus, in
+> `106`/`107`, twelve `DROP TRIGGER IF EXISTS` that no-op there — so the resulting schema is
+> identical.
 
 > **`create_all` reproduces only what the models declare — everything else in a stamped-past
 > migration is lost silently.** `Base.metadata.create_all()` emits exactly what SQLAlchemy
@@ -616,11 +652,15 @@ After bootstrap, normal incremental `alembic upgrade head` is the standard path.
 
 > **Keep new revision ids ≤ 32 characters.** On the `create_all → stamp → upgrade` bootstrap path
 > the `alembic_version.version_num` column is `varchar(32)`. Migration `014b_widen_alembic_version`
-> widens it (to `varchar(128)`), but `014b` is *stamped over*, not *run*, when the stamped baseline
-> is newer than it — so on a freshly bootstrapped DB the column stays `varchar(32)` and a revision id
-> longer than 32 chars fails to record (`value too long for type character varying(32)`). Until the
-> baseline is at or past `014b` on every target, keep revision ids to ≤ 32 chars (e.g.
-> `038_optimistic_lock_backfill`, `039_uq_open_time_entry`).
+> widens it (to `varchar(128)`), but on this path `014b` sits below the `058` stamp baseline, so it
+> is *stamped over*, never *run*: the column `alembic stamp` creates stays `varchar(32)`, and a
+> revision id longer than 32 chars fails to record (`value too long for type character
+> varying(32)`). So keep revision ids to ≤ 32 chars (e.g. `038_optimistic_lock_backfill`,
+> `039_uq_open_time_entry`). The limit applies to the `revision`
+> id, not the filename (`099_recoverable_import_batches.py` is 33 characters; its id is 30).
+> Every id from `059` on is within it. SQLite does not enforce `VARCHAR` length, so the bootstrap
+> chain test alone could not catch an overlong one; `test_migration_fresh_bootstrap.py` asserts
+> the limit directly for every revision from the `058` stamp up.
 
 ### Create a new migration
 ```bash

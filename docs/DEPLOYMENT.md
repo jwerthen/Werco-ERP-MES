@@ -482,8 +482,10 @@ sudo certbot --nginx -d werco-erp.yourdomain.com
    # 1. Create the schema (first app boot creates it via create_all; or do it explicitly)
    python -m scripts.seed_data            # calls create_all (+ seeds demo data)
 
-   # 2. Mark the DB as already at the migration baseline create_all matches
-   alembic stamp <baseline-revision>
+   # 2. Mark the DB as at the migration baseline -- 058, NOT head: 059 (RLS hardening) and
+   #    060 (audit_log immutability triggers) build what create_all cannot, so 059+ must
+   #    actually run (each is guarded to no-op over create_all's objects)
+   alembic stamp 058_process_sheets
 
    # 3. Apply migrations newer than the baseline
    alembic upgrade head

@@ -69,6 +69,9 @@ def verify(database_url):
             profiles = migration('107_fabrication_quote_profiles.py', connection)
             base.upgrade()
             profiles.upgrade()
+            # Second pass over existing objects: the fresh bootstrap's case, which only the guards make a no-op.
+            base.upgrade()
+            profiles.upgrade()
             connection.exec_driver_sql("""
                 INSERT INTO fabrication_quotes
                 (id,company_id,title,status,revision,plan_json,calculation_json,created_by,created_at,updated_at)
@@ -100,6 +103,17 @@ def verify(database_url):
                 'fabrication_quote_actuals',
                 'fabrication_quote_profiles',
             )
+            # DROP TRIGGER IF EXISTS + CREATE must leave exactly one trigger per action after two passes.
+            for table in immutable:
+                assert (
+                    connection.scalar(
+                        sa.text(
+                            'SELECT count(*) FROM pg_trigger WHERE tgrelid=to_regclass(:table) AND NOT tgisinternal'
+                        ),
+                        {'table': f'{schema}.{table}'},
+                    )
+                    == 3
+                ), f'{table} does not carry exactly its update/delete/truncate triggers'
             for table in ('fabrication_quotes', *immutable):
                 assert connection.scalar(
                     sa.text('SELECT relrowsecurity FROM pg_class WHERE oid=to_regclass(:table)'),
@@ -145,6 +159,16 @@ def verify(database_url):
                 )
                 == 0
             )
+            assert (
+                connection.scalar(
+                    sa.text(
+                        "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
+                        "WHERE n.nspname=:schema AND p.proname LIKE 'fabrication_quote%_immutable'"
+                    ),
+                    {'schema': schema},
+                )
+                == 0
+            ), 'downgrade left a fabrication_quote*_immutable() trigger function behind'
         finally:
             transaction.rollback()
             engine.dispose()

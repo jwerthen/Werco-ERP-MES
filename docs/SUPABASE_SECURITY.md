@@ -86,7 +86,12 @@ through one.
 The default-privilege revocation from `059` already denies `anon`/`authenticated` any grants on
 future objects, but the advisor lints **RLS state itself** — a new table without RLS brings the
 `rls_disabled_in_public` ERROR back. Guard it the same way `059` does: Postgres-only (skip on
-SQLite). This is also recorded in CLAUDE.md → "Migrations — handle with care".
+SQLite). Keep it **outside** any table-existence guard: `create_all` can build the table before its
+migration runs — every non-production boot calls it (`app/main.py`), as does `scripts/seed_data.py`
+— and it enables RLS only where a model's `after_create` listener does, so an `ENABLE` nested under
+`if not has_table` would never fire and the table would stay RLS-off (see `docs/DEVELOPMENT.md` →
+Database Migrations; `backend/tests/test_migration_fresh_bootstrap.py` fails the build on it). This is also recorded in CLAUDE.md →
+"Migrations — handle with care".
 
 ## Nesting draft revision storage
 

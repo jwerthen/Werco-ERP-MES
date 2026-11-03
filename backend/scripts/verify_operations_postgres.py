@@ -167,6 +167,15 @@ def verify():
             with Operations.context(MigrationContext.configure(connection)):
                 for migration in migrations:
                     migration.upgrade()
+                # Second pass over existing objects: the fresh bootstrap's case, which only the guards make a no-op.
+                for migration in migrations:
+                    if migration.__name__ in {
+                        "095_kiosk_production_receipts",
+                        "096_working_calendars",
+                        "097_team_workspaces",
+                        "098_runtime_metrics",
+                    }:
+                        migration.upgrade()
                 inspector = sa.inspect(connection)
                 new_tables = set(inspector.get_table_names(schema=schema)) - {
                     "companies",
