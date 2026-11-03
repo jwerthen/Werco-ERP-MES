@@ -89,9 +89,75 @@ future objects, but the advisor lints **RLS state itself** — a new table witho
 SQLite). Keep it **outside** any table-existence guard: `create_all` can build the table before its
 migration runs — every non-production boot calls it (`app/main.py`), as does `scripts/seed_data.py`
 — and it enables RLS only where a model's `after_create` listener does, so an `ENABLE` nested under
-`if not has_table` would never fire and the table would stay RLS-off (see `docs/DEVELOPMENT.md` →
-Database Migrations; `backend/tests/test_migration_fresh_bootstrap.py` fails the build on it). This is also recorded in CLAUDE.md →
-"Migrations — handle with care".
+`if not has_table` would never fire and the table would stay RLS-off.
+
+Revoke the way `092` and every revision from `094` through `112` do: the table **and** its id
+sequence, from `PUBLIC`, `anon` and `authenticated`. Any SQL that names `anon`, `authenticated` or
+`service_role` runs under a **role-existence check** (`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles
+WHERE rolname = 'anon') THEN … END IF; END $$`, or a Python check like `059`'s `_role_exists`). That
+covers a `REVOKE`/`GRANT` grantee, a role membership grant, a policy's `TO`, `ALTER DEFAULT
+PRIVILEGES` and `has_table_privilege('anon', …)`. Those roles exist only on Supabase, and on any
+other Postgres a statement naming a missing role aborts the migration. A model's `after_create` DDL
+that names one must carry the `pg_roles` check in its own SQL, because `create_all` executes it as
+written and no Python guard can wrap it. `093` shipped a bare `FROM anon, authenticated` and stopped
+the fresh bootstrap there on plain Postgres until its role checks were retrofitted on 2026-11-03.
+`PUBLIC` needs no guard.
+
+`backend/tests/test_migration_fresh_bootstrap.py` fails the build on three things. The first is an
+RLS/`REVOKE` reachable from `upgrade()` under a table-existence guard. The second is SQL reachable from
+`upgrade()` that names `anon`/`authenticated`/`service_role` outside a role-existence check. SQL
+comments are ignored, a `rolname` comparison is exempt, and a role filled in at run time counts when it
+sits in a grantee, membership, `FOR ROLE` or policy `TO` position. The third is a model DDL literal
+naming one of those roles without its own `pg_roles` check. All three are static **tripwires** for the
+`093` class of regression, not proofs. On SQLite no Postgres branch executes. Some guards are also
+accepted without proof that they work: a `pg_roles` test anywhere in the same literal counts, whether
+or not its `IF` encloses the statement, and a Python guard's polarity is not checked. The test
+module's docstring lists every blind spot.
+
+The statements themselves execute only in the `scripts/verify_*_postgres.py` steps of the
+non-blocking `e2e.yml`. The per-migration verifiers create `anon`/`authenticated` as
+transaction-scoped temporary roles. They assert RLS and Data API denial under simulated inherited
+grants. `verify_fresh_bootstrap_postgres` runs the real `create_all` → stamp → `upgrade head` chain on
+CI's role-less Postgres, which executes the role guards' skip branch. It also requires RLS on every
+`public` table. `docs/DEVELOPMENT.md` → Database Migrations lists what each verifier covers. This is
+also recorded in CLAUDE.md → "Migrations — handle with care".
+
+## Data API revoke parity (migration 113)
+
+Migration `113_data_api_revoke_parity` brings two earlier tables to that shape:
+
+- `091_user_workspaces` revoked `user_workspace_records` from `PUBLIC`/`anon`/`authenticated` but
+  never touched `user_workspace_records_id_seq`;
+- `093_mrp_supply_links` revoked `mrp_supply_links` and its sequence from `anon`/`authenticated`
+  but never from `PUBLIC`.
+
+`has_table_privilege` / `has_sequence_privilege` count a `PUBLIC` grant for every role, so a
+default privilege granting `PUBLIC` (or the Data API roles) would have left those objects reachable.
+`113` issues the missing statements for both tables and both sequences — `FROM PUBLIC`
+unconditionally, `FROM anon` / `FROM authenticated` each under its role-existence check. It is a new
+revision rather than an edit to `091`/`093` because it adds an effect those applied revisions never
+had. Postgres-only (nothing on SQLite), never under a table-existence guard, and idempotent. It
+changes catalog ACLs only: no rows read or written, no table rewrite, no backfill, no deploy
+ordering — the app connects as the owning `postgres` role, which a `REVOKE ... FROM PUBLIC` does not
+affect. On prod it is very likely a no-op for `FROM PUBLIC`: no migration ever granted `PUBLIC`
+these objects, and Postgres grants `PUBLIC` nothing on tables or sequences by default. That has not
+been checked against prod; this read-only query shows it (expect no `relacl` entry that begins
+with `=`, which is `PUBLIC`, and none for `anon` or `authenticated`):
+
+```sql
+SELECT relname, relacl FROM pg_class
+WHERE relnamespace = 'public'::regnamespace
+  AND relname IN ('mrp_supply_links', 'mrp_supply_links_id_seq',
+                  'user_workspace_records', 'user_workspace_records_id_seq');
+```
+
+**The downgrade is a deliberate no-op** — unlike `059`'s, which restores a pre-state it audited on
+the live database and documented. Nothing records what `113` revoked: no migration granted `PUBLIC`
+these privileges, and whether `anon`/`authenticated` held the `091` sequence depended on each
+database's default privileges when `091` ran (`059` strips only the `postgres`-granted ones).
+Re-granting to undo a `REVOKE` could open Data API access that never existed, so the unrecoverable
+prior value resolves to the restrictive setting (CLAUDE.md invariant 3's rule). Downgrading past
+`113` leaves the objects revoked, which every older revision already tolerates.
 
 ## Nesting draft revision storage
 

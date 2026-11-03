@@ -97,8 +97,6 @@ jobs:
         working-directory: ./frontend
         run: npx playwright install --with-deps chromium
 
-      # Creates the schema (Base.metadata.create_all) and seeds the default
-      # company, users, work centers, parts, and work orders the specs expect.
       - name: Verify operations migrations and percentiles on PostgreSQL
         working-directory: ./backend
         run: python -m scripts.verify_operations_postgres
@@ -107,6 +105,14 @@ jobs:
         working-directory: ./backend
         run: python scripts/verify_fabrication_quoting_postgres.py --database-url "$DATABASE_URL"
 
+      # Only CI run of the real fresh-bootstrap chain on Postgres. No Supabase
+      # roles exist here, so it also exercises the role guards' no-role branch.
+      - name: Verify fresh-database bootstrap chain on PostgreSQL
+        working-directory: ./backend
+        run: python -m scripts.verify_fresh_bootstrap_postgres
+
+      # Creates the schema (Base.metadata.create_all) and seeds the default
+      # company, users, work centers, parts, and work orders the specs expect.
       - name: Seed database
         working-directory: ./backend
         run: python -m scripts.seed_data

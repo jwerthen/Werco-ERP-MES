@@ -157,10 +157,14 @@ class PurchaseOrder(Base, SoftDeleteMixin, TenantMixin):
     # Supplier evidence is separate from the requested date and legacy estimate.
     supplier_confirmed_date = Column(Date, nullable=True)
     supplier_acknowledged_at = Column(DateTime, nullable=True)
-    supplier_acknowledged_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    # FK names are lock-step with migration 100_receiving_supplier_followup, so a
+    # create_all-built database names them exactly as an incrementally migrated one.
+    supplier_acknowledged_by = Column(
+        Integer, ForeignKey("users.id", name="fk_po_supplier_acknowledged_by"), nullable=True
+    )
     supplier_confirmation_reference = Column(String(100), nullable=True)
     supplier_confirmation_note = Column(Text, nullable=True)
-    follow_up_owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    follow_up_owner_id = Column(Integer, ForeignKey("users.id", name="fk_po_follow_up_owner"), nullable=True)
     follow_up_due_date = Column(Date, nullable=True)
 
     # Totals
@@ -276,8 +280,17 @@ class POReceipt(Base, SoftDeleteMixin, TenantMixin):
     serial_numbers = Column(Text)  # Comma-separated or JSON
     heat_number = Column(String(100))  # For metals
     cert_number = Column(String(100))  # Cert of conformance
-    certificate_document_id = Column(Integer, ForeignKey("documents.id"), nullable=True, index=True)
-    delivery_batch_id = Column(Integer, ForeignKey("receiving_delivery_batches.id"), nullable=True, index=True)
+    # FK names are lock-step with migration 100_receiving_supplier_followup, so a
+    # create_all-built database names them exactly as an incrementally migrated one.
+    certificate_document_id = Column(
+        Integer, ForeignKey("documents.id", name="fk_receipt_certificate_document"), nullable=True, index=True
+    )
+    delivery_batch_id = Column(
+        Integer,
+        ForeignKey("receiving_delivery_batches.id", name="fk_receipt_delivery_batch"),
+        nullable=True,
+        index=True,
+    )
     coc_attached = Column(Boolean, default=False)  # Certificate of Conformance attached
 
     # Location
