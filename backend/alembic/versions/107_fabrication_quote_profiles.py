@@ -13,6 +13,29 @@ down_revision = "106_fabrication_quoting"
 branch_labels = None
 depends_on = None
 
+# Every object is guarded: the fresh bootstrap (create_all -> stamp 058 -> upgrade) runs
+# this over a schema the models already built. ``_security`` stays unconditional; its
+# triggers are DROP IF EXISTS + CREATE, as in the model's integrity_ddl().
+
+
+def _offline() -> bool:
+    # ``--sql`` has no database to inspect: emit every statement, as before.
+    return op.get_context().as_sql
+
+
+def _inspector():
+    return sa.inspect(op.get_bind())
+
+
+def _has_table(table_name: str) -> bool:
+    return _inspector().has_table(table_name)
+
+
+def _has_index(table_name: str, index_name: str) -> bool:
+    if not _has_table(table_name):
+        return False
+    return any(ix["name"] == index_name for ix in _inspector().get_indexes(table_name))
+
 
 def _security():
     table = "fabrication_quote_profiles"
@@ -28,6 +51,7 @@ def _security():
             f"CREATE OR REPLACE FUNCTION {table}_immutable() RETURNS TRIGGER LANGUAGE plpgsql SET search_path = '' AS $$ BEGIN RAISE EXCEPTION 'Process profiles are immutable' USING ERRCODE='23514'; RETURN NULL; END; $$"
         )
         for action in ("update", "delete", "truncate"):
+            op.execute(f"DROP TRIGGER IF EXISTS tr_{table}_{action} ON {table}")
             op.execute(
                 f"CREATE TRIGGER tr_{table}_{action} BEFORE {action.upper()} ON {table} FOR EACH {'STATEMENT' if action == 'truncate' else 'ROW'} EXECUTE FUNCTION {table}_immutable()"
             )
@@ -39,47 +63,46 @@ def _security():
 
 
 def upgrade():
-    op.create_table(
-        "fabrication_quote_profiles",
-        sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column(
-            "company_id", sa.Integer(), sa.ForeignKey("companies.id"), nullable=False
-        ),
-        sa.Column("key", sa.String(36), nullable=False),
-        sa.Column("revision", sa.Integer(), nullable=False),
-        sa.Column("name", sa.String(200), nullable=False),
-        sa.Column("process", sa.String(100), nullable=False),
-        sa.Column("machine", sa.String(200)),
-        sa.Column("material", sa.String(200)),
-        sa.Column("thickness_mm", sa.Numeric(24, 9)),
-        sa.Column("currency", sa.String(3), nullable=False),
-        sa.Column("template_json", sa.JSON(), nullable=False),
-        sa.Column("evidence_note", sa.Text(), nullable=False),
-        sa.Column("content_sha256", sa.String(64), nullable=False),
-        sa.Column(
-            "created_by", sa.Integer(), sa.ForeignKey("users.id"), nullable=False
-        ),
-        sa.Column("created_at", sa.DateTime(), nullable=False),
-        sa.UniqueConstraint("company_id", "key", "revision", name="uq_fqp_revision"),
-        sa.CheckConstraint("revision >= 1", name="ck_fqp_revision"),
-        sa.CheckConstraint(
-            "thickness_mm IS NULL OR thickness_mm > 0", name="ck_fqp_thickness"
-        ),
-    )
-    op.create_index(
-        "ix_fabrication_quote_profiles_company_id",
-        "fabrication_quote_profiles",
-        ["company_id"],
-    )
-    op.create_index(
-        "ix_fqp_company_process",
-        "fabrication_quote_profiles",
-        ["company_id", "process", "name"],
-    )
+    offline = _offline()
+    if offline or not _has_table("fabrication_quote_profiles"):
+        op.create_table(
+            "fabrication_quote_profiles",
+            sa.Column("id", sa.Integer(), primary_key=True),
+            sa.Column(
+                "company_id", sa.Integer(), sa.ForeignKey("companies.id"), nullable=False
+            ),
+            sa.Column("key", sa.String(36), nullable=False),
+            sa.Column("revision", sa.Integer(), nullable=False),
+            sa.Column("name", sa.String(200), nullable=False),
+            sa.Column("process", sa.String(100), nullable=False),
+            sa.Column("machine", sa.String(200)),
+            sa.Column("material", sa.String(200)),
+            sa.Column("thickness_mm", sa.Numeric(24, 9)),
+            sa.Column("currency", sa.String(3), nullable=False),
+            sa.Column("template_json", sa.JSON(), nullable=False),
+            sa.Column("evidence_note", sa.Text(), nullable=False),
+            sa.Column("content_sha256", sa.String(64), nullable=False),
+            sa.Column(
+                "created_by", sa.Integer(), sa.ForeignKey("users.id"), nullable=False
+            ),
+            sa.Column("created_at", sa.DateTime(), nullable=False),
+            sa.UniqueConstraint("company_id", "key", "revision", name="uq_fqp_revision"),
+            sa.CheckConstraint("revision >= 1", name="ck_fqp_revision"),
+            sa.CheckConstraint(
+                "thickness_mm IS NULL OR thickness_mm > 0", name="ck_fqp_thickness"
+            ),
+        )
+    for name, columns in [
+        ("ix_fabrication_quote_profiles_company_id", ["company_id"]),
+        ("ix_fqp_company_process", ["company_id", "process", "name"]),
+    ]:
+        if offline or not _has_index("fabrication_quote_profiles", name):
+            op.create_index(name, "fabrication_quote_profiles", columns)
     _security()
 
 
 def downgrade():
-    op.drop_table("fabrication_quote_profiles")
+    if _offline() or _has_table("fabrication_quote_profiles"):
+        op.drop_table("fabrication_quote_profiles")
     if op.get_bind().dialect.name == "postgresql":
         op.execute("DROP FUNCTION IF EXISTS fabrication_quote_profiles_immutable()")
