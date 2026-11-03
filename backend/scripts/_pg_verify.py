@@ -22,10 +22,13 @@ LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "postgres"})
 # SQLAlchemy's psycopg2 dialect copies URL query parameters into the connect kwargs AFTER the
 # URL's own host and database (``opts.update(url.query)``), and libpq honours them. So
 # ``postgresql://u:p@localhost/db?host=<remote>`` connects to <remote> while ``url.host`` still
-# reads ``localhost``. ``hostaddr`` and ``service`` redirect the same way. ``dbname`` does not
-# leave the machine, but it would override the database a caller set, so a "scratch" database
-# could silently resolve to the seeded one.
-REDIRECTING_QUERY_KEYS = frozenset({"host", "hostaddr", "service", "dbname"})
+# reads ``localhost``. ``hostaddr`` and ``service`` redirect the same way, and so does ``dsn``:
+# psycopg2 merges it with the explicit keywords, so ``?dsn=hostaddr%3D<remote>`` keeps the
+# embedded ``hostaddr`` beside ``host=localhost``. ``dbname`` does not leave the machine, but it
+# would override the database a caller set, so a "scratch" database could silently resolve to the
+# seeded one. A denylist of those keys already missed ``dsn`` once, so query parameters are
+# ALLOWLISTED instead: only keys that tune a connection, never choose its server or database.
+ALLOWED_QUERY_KEYS = frozenset({"sslmode", "application_name", "connect_timeout", "options", "client_encoding"})
 
 # libpq fills every keyword the connection did not set from the environment (and from the
 # service file a service name selects). PGHOSTADDR, or a PGSERVICE entry's hostaddr, picks the
@@ -39,7 +42,7 @@ def require_local_test_postgres(url, environ=None):
     """Return ``url`` as a URL object if these scripts may run against it; raise otherwise.
 
     Accepts only: ``ENVIRONMENT=test``; a ``postgresql`` backend; an explicit host in
-    ``LOCAL_HOSTS``; no ``host``/``hostaddr``/``service``/``dbname`` query parameter; and no
+    ``LOCAL_HOSTS``; query parameters drawn from ``ALLOWED_QUERY_KEYS`` (exact spelling); and no
     ``PGHOSTADDR``/``PGSERVICE`` in the environment.
     """
     environ = os.environ if environ is None else environ
@@ -53,9 +56,12 @@ def require_local_test_postgres(url, environ=None):
         problems.append("the URL names no host (libpq would fall back to PGHOST or a socket)")
     elif url.host not in LOCAL_HOSTS:
         problems.append(f"host {url.host!r} is not one of {sorted(LOCAL_HOSTS)}")
-    redirecting = sorted(key for key in url.query if key.lower() in REDIRECTING_QUERY_KEYS)
-    if redirecting:
-        problems.append(f"query parameter(s) {redirecting} override the URL's host or database")
+    unlisted = sorted(key for key in url.query if key not in ALLOWED_QUERY_KEYS)
+    if unlisted:
+        problems.append(
+            f"query parameter(s) {unlisted} are not in {sorted(ALLOWED_QUERY_KEYS)}; libpq could take the"
+            " server or database from them instead of the URL's host and database"
+        )
     environment = [name for name in REDIRECTING_ENV_VARS if environ.get(name)]
     if environment:
         problems.append(f"{environment} set in the environment would redirect libpq")

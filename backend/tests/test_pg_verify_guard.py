@@ -9,6 +9,7 @@ Pure: no database, no network, no ``os.environ`` (every case passes its own envi
 
 import pytest
 import sqlalchemy as sa
+from psycopg2.extensions import make_dsn, parse_dsn
 
 from scripts._pg_verify import require_local_test_postgres
 
@@ -21,17 +22,33 @@ BYPASS_URLS = {
     "query host": "postgresql://u:p@localhost/db?host=prod.example.com",
     "query hostaddr": "postgresql://u:p@localhost/db?hostaddr=203.0.113.7",
     "query service": "postgresql://u:p@localhost/db?service=prod",
+    # psycopg2 merges ``dsn`` with the explicit keywords, keeping the embedded hostaddr.
+    "query dsn hostaddr": "postgresql://u:p@localhost/db?dsn=hostaddr%3D203.0.113.7",
 }
+
+LOCAL_URLS = [
+    CI_URL,
+    "postgresql://werco_user:test_password@127.0.0.1:55432/werco_erp_e2e",
+    "postgresql+psycopg2://werco_user:test_password@127.0.0.1:55432/werco_erp_e2e",
+    "postgresql://werco_user:test_password@postgres:5432/werco_erp",
+    "postgresql://u:p@localhost/db?sslmode=disable&application_name=verify",
+]
+
+
+def _libpq_target(url):
+    """The connection keywords libpq finally receives, after psycopg2 merges any ``dsn``."""
+    parsed = sa.engine.make_url(url)
+    _, kwargs = parsed.get_dialect()().create_connect_args(parsed)
+    return parse_dsn(make_dsn(kwargs.pop("dsn", None), **kwargs))
 
 
 @pytest.mark.parametrize("url", sorted(BYPASS_URLS.values()), ids=sorted(BYPASS_URLS))
 def test_the_bypass_is_real_so_the_refusal_is_not_vacuous(url):
-    """``url.host`` reads local, yet the dialect hands libpq a remote target."""
-    parsed = sa.engine.make_url(url)
-    assert parsed.host == "localhost"
-    _, kwargs = parsed.get_dialect()().create_connect_args(parsed)
-    redirected = kwargs["host"] != "localhost" or "hostaddr" in kwargs or "service" in kwargs
-    assert redirected, kwargs
+    """``url.host`` reads local, yet libpq is handed a remote target."""
+    assert sa.engine.make_url(url).host == "localhost"
+    target = _libpq_target(url)
+    redirected = target["host"] != "localhost" or "hostaddr" in target or "service" in target
+    assert redirected, target
 
 
 @pytest.mark.parametrize(
@@ -39,12 +56,15 @@ def test_the_bypass_is_real_so_the_refusal_is_not_vacuous(url):
     [
         *BYPASS_URLS.values(),
         "postgresql://u:p@localhost/db?HOST=prod.example.com",
+        "postgresql://u:p@localhost/db?DSN=hostaddr%3D203.0.113.7",
+        "postgresql://u:p@localhost/db?dsn=host%3Dprod.example.com",
         "postgresql://u:p@localhost/werco_erp_e2e_scratch?dbname=werco_erp_e2e",
         "postgresql://u:p@localhost/db?host=localhost&hostaddr=203.0.113.7",
+        "postgresql://u:p@localhost/db?sslmode=disable&passfile=%2Ftmp%2Fpgpass",
     ],
 )
-def test_query_parameters_that_redirect_libpq_are_refused(url):
-    with pytest.raises(RuntimeError, match="override the URL's host or database"):
+def test_query_parameters_off_the_allowlist_are_refused(url):
+    with pytest.raises(RuntimeError, match="libpq could take the server or database from them"):
         require_local_test_postgres(url, TEST_ENV)
 
 
@@ -89,24 +109,15 @@ def test_wrong_environment_or_backend_is_refused(url, environ, reason):
         require_local_test_postgres(url, environ)
 
 
-@pytest.mark.parametrize(
-    "url",
-    [
-        CI_URL,
-        "postgresql://werco_user:test_password@127.0.0.1:55432/werco_erp_e2e",
-        "postgresql+psycopg2://werco_user:test_password@127.0.0.1:55432/werco_erp_e2e",
-        "postgresql://werco_user:test_password@postgres:5432/werco_erp",
-        "postgresql://u:p@localhost/db?sslmode=disable&application_name=verify",
-    ],
-)
+@pytest.mark.parametrize("url", LOCAL_URLS)
 def test_local_urls_are_accepted(url):
     accepted = require_local_test_postgres(url, {**TEST_ENV, "PGHOST": "localhost"})
     assert accepted == sa.engine.make_url(url)
 
 
-def test_accepted_urls_really_connect_locally():
-    """What the guard accepts, the dialect does send to a local host with no override."""
-    url = require_local_test_postgres(CI_URL, TEST_ENV)
-    _, kwargs = url.get_dialect()().create_connect_args(url)
-    assert kwargs["host"] == "localhost"
-    assert not {"hostaddr", "service"} & set(kwargs)
+@pytest.mark.parametrize("url", LOCAL_URLS)
+def test_accepted_urls_really_connect_locally(url):
+    """What the guard accepts, libpq is handed as a local host with no override."""
+    target = _libpq_target(require_local_test_postgres(url, TEST_ENV))
+    assert target["host"] in {"localhost", "127.0.0.1", "postgres"}
+    assert not {"hostaddr", "service"} & set(target)

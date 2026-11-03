@@ -759,11 +759,14 @@ They share one guard, `scripts/_pg_verify.py::require_local_test_postgres`, unit
 
 - `ENVIRONMENT=test`;
 - a `postgresql` URL with an explicit host in `localhost` / `127.0.0.1` / `::1` / `postgres`;
-- no `host`, `hostaddr`, `service` or `dbname` query parameter;
+- query parameters only from an allowlist (`sslmode`, `application_name`, `connect_timeout`,
+  `options`, `client_encoding`);
 - no `PGHOSTADDR` or `PGSERVICE` in the environment.
 
 The query and environment rules exist because SQLAlchemy hands query parameters to libpq, which
-honours them over the URL's own host: `…@localhost/db?host=<remote>` connects to the remote.
+honours them over the URL's own host: `…@localhost/db?host=<remote>` connects to the remote, and
+so do `hostaddr`, `service` and `dsn` (psycopg2 merges `?dsn=hostaddr%3D<remote>` beside
+`host=localhost`). The query rule is an allowlist because a denylist of those keys missed `dsn`.
 
 `verify_fresh_bootstrap_postgres` also re-checks, in each child process, the URL the app's
 `Settings` actually resolves, and requires it to name the scratch database. `Settings` prefers a
