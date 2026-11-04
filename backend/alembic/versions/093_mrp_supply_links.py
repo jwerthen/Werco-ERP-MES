@@ -65,8 +65,22 @@ def upgrade():
     if op.get_bind().dialect.name == 'postgresql':
         op.execute('ALTER TABLE public.mrp_supply_links ENABLE ROW LEVEL SECURITY')
         # App users authenticate through FastAPI, not Supabase auth.uid().
-        op.execute('REVOKE ALL ON TABLE public.mrp_supply_links FROM anon, authenticated')
-        op.execute('REVOKE ALL ON SEQUENCE public.mrp_supply_links_id_seq FROM anon, authenticated')
+        # 2026-11-03: role-existence guards retrofitted (CLAUDE.md's sanctioned "existence
+        # guards" exception), matching 091/092/094-098. The bare form failed on any Postgres
+        # without the Supabase roles (CI, local Docker). Any database with 093 recorded had
+        # both roles -- a REVOKE naming a missing role aborts the migration -- so there the
+        # guarded form runs exactly the same two statements per role. FROM PUBLIC is NOT
+        # added here: that would be a new effect, so it lives in 113_data_api_revoke_parity.
+        op.execute("""DO $$ BEGIN
+          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+            REVOKE ALL ON TABLE public.mrp_supply_links FROM anon;
+            REVOKE ALL ON SEQUENCE public.mrp_supply_links_id_seq FROM anon;
+          END IF;
+          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+            REVOKE ALL ON TABLE public.mrp_supply_links FROM authenticated;
+            REVOKE ALL ON SEQUENCE public.mrp_supply_links_id_seq FROM authenticated;
+          END IF;
+        END $$""")
 
 
 def downgrade():

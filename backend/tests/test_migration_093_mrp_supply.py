@@ -1,6 +1,7 @@
 """Supply links have durable uniqueness and are server-auth only in Supabase."""
 
 import importlib.util
+import re
 from io import StringIO
 from pathlib import Path
 
@@ -49,7 +50,17 @@ def test_postgres_migration_has_rls_and_no_direct_browser_grants():
     output = sql.getvalue()
     assert revision().down_revision == '092_operational_inbox_state'
     assert 'ENABLE ROW LEVEL SECURITY' in output
-    assert 'REVOKE ALL ON TABLE public.mrp_supply_links FROM anon, authenticated' in output
-    assert 'REVOKE ALL ON SEQUENCE public.mrp_supply_links_id_seq FROM anon, authenticated' in output
+    # Each role's REVOKEs run only inside its own pg_roles existence check, so the
+    # migration also applies on a Postgres without the Supabase roles (CI, local Docker).
+    for role in ('anon', 'authenticated'):
+        guarded = re.search(
+            rf"IF EXISTS \(SELECT 1 FROM pg_roles WHERE rolname = '{role}'\) THEN(.*?)END IF;", output, re.S
+        )
+        assert guarded, f'no pg_roles existence guard for {role}'
+        assert f'REVOKE ALL ON TABLE public.mrp_supply_links FROM {role};' in guarded.group(1)
+        assert f'REVOKE ALL ON SEQUENCE public.mrp_supply_links_id_seq FROM {role};' in guarded.group(1)
+    assert 'FROM anon, authenticated' not in output
+    # FROM PUBLIC would be a new effect on an applied revision; 113 owns it.
+    assert 'FROM PUBLIC' not in output
     assert 'UNIQUE (company_id, action_id)' in output
     assert 'UNIQUE (company_id, request_key)' in output

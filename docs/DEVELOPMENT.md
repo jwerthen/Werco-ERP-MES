@@ -554,13 +554,78 @@ After bootstrap, normal incremental `alembic upgrade head` is the standard path.
 > *before its migration runs* on an existing database: every non-production boot calls it
 > (`app/main.py`), as does `scripts/seed_data.py`, and it enables RLS only where a model's
 > `after_create` listener does. A security statement nested under a table-exists guard would then
-> never fire, and that table would stay RLS-off. Enforced by
-> `backend/tests/test_migration_fresh_bootstrap.py`: it runs the full bootstrap on a temp SQLite
-> file and asserts it reaches head with a schema matching a pure `create_all`, object for object,
-> and a static check fails any `ENABLE ROW LEVEL SECURITY` / `REVOKE` reachable from `upgrade()`
-> under a table-existence guard. The Postgres trigger rule is not test-enforced; CI's E2E Postgres
-> verifiers run `095`–`098`, `106` and `107` twice, so the guards also execute against existing
-> objects on real Postgres.
+> never fire, and that table would stay RLS-off. The one guard such a statement may need is a
+> **role**-existence check. Any SQL naming Supabase's `anon`, `authenticated` or `service_role`
+> runs under `DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '<role>') THEN …
+> END IF; END $$` (or a Python check like `059`'s `_role_exists`). That means a `REVOKE` / `GRANT`
+> grantee, and equally a role membership grant, a policy's `TO`, `ALTER DEFAULT PRIVILEGES … FOR
+> ROLE` or `has_table_privilege('anon', …)`. Those roles exist only on Supabase. On CI, local Docker
+> or a self-hosted Postgres, a statement naming a missing role aborts the migration, and the chain
+> with it. Model `after_create` DDL that names one carries the `pg_roles` check in its own SQL:
+> `create_all` executes it as written, where no Python guard can reach. `PUBLIC` always exists and
+> needs no guard.
+>
+> **What enforces this.** `backend/tests/test_migration_fresh_bootstrap.py`, on SQLite in the
+> blocking Backend Tests job: (1) the full bootstrap on a temp file reaches head with a schema
+> matching a pure `create_all`, object for object, and a re-run moves nothing; (2) a
+> **round-trip** — `create_all` → `stamp heads` → `downgrade 088_api_tokens` → `upgrade head` —
+> must rebuild that same schema, FK names included. On (1) every `089`+ create is skipped by its own
+> guard, so a deleted create or a `create_table` drifting from its model is invisible there; the
+> round-trip makes them execute. Its floor is `088`, not `058`: a `058` round-trip surfaces 34
+> known, accepted model-vs-migration differences in `059`–`088` (as of `113`), and an allowlist
+> would hide the next real one. It proves each downgrade *completes*, not that it removes
+> everything — an object a downgrade leaves behind is found again by its upgrade's guard, so that
+> create stays unexercised;
+> (3) static checks:
+>
+> - **Table-existence guards.** `test_rls_and_revoke_never_run_under_a_table_existence_guard`
+>   fails any `ENABLE`/`FORCE ROW LEVEL SECURITY` / `REVOKE` reachable from `upgrade()` under a
+>   table-existence guard, in every revision the path runs.
+> - **Supabase roles in migrations.**
+>   `test_sql_naming_a_supabase_role_runs_only_under_a_role_existence_check` fails any executable
+>   SQL literal reachable from `upgrade()` that names `anon` / `authenticated` / `service_role`
+>   outside a role-existence check. SQL comments are stripped first, and `rolname` comparisons and
+>   `PUBLIC` are exempt. A role interpolated into a grantee, membership, `FOR ROLE` or policy `TO`
+>   position counts too.
+> - **Supabase roles in models.**
+>   `test_model_ddl_naming_a_supabase_role_carries_its_own_role_check` requires every model DDL
+>   literal naming one of those roles to carry its own `pg_roles` check.
+>
+> They are regression **tripwires**, not proofs. They check where a statement sits, not what it does.
+> An in-SQL `pg_roles` test anywhere in the same literal counts, with no proof that its `IF` encloses
+> the statement. A Python guard's polarity is not checked. A role interpolated anywhere else, or into
+> model DDL, is not seen. The module docstring lists every blind spot.
+>
+> No `postgresql` branch executes on SQLite. These statements run on real Postgres only in the
+> `scripts/verify_*_postgres.py` steps of the **non-blocking** `e2e.yml`, which also exercise the
+> trigger rule. That rule is still not a blocking gate. The steps run in this order:
+>
+> - **`verify_operations_postgres` and `verify_fabrication_quoting_postgres`** are per-migration.
+>   - They load selected migration modules and re-run `095`–`098`, `106` and `107` over their own
+>     objects.
+>   - They build the `101`–`103` and `106`/`107` tables from the **models** first (their
+>     `after_create` listeners create RLS, revokes and triggers) and run the migrations over them.
+>     They then assert RLS, `anon`/`authenticated` denial under simulated inherited grants, the
+>     immutability guards and an unchanged trigger set.
+>   - They run `091`–`094` + `113` in a scratch database. The first pass is on a cluster without the
+>     Supabase roles (CI's has none). The next passes are under simulated `ALTER DEFAULT PRIVILEGES …
+>     GRANT ALL … TO PUBLIC, anon, authenticated`, and they assert that every table and sequence
+>     stays private, including after `113`'s downgrade.
+>   - They create `anon`/`authenticated` as transaction-scoped temporary roles, so they are the only
+>     place in CI where the role guards' **roles-present** branch executes.
+> - **`verify_fresh_bootstrap_postgres`** runs next, before the seed. It is the only real-Postgres
+>   run of the actual chain. In a scratch database, dropped afterwards, it checks four things:
+>   - `create_all` → `stamp 058_process_sheets` → `upgrade head` runs every revision from `059` to
+>     head over a `create_all` schema and ends at the single head.
+>   - A re-stamp + `upgrade head` leaves the schema unchanged.
+>   - Every `public` table has RLS on, `alembic_version` included.
+>   - `downgrade 088_api_tokens` → `upgrade head` restores the identical schema. That executes every
+>     `089`+ Postgres downgrade branch.
+>
+>   Its snapshot covers catalog state SQLite cannot hold: ACLs, RLS flags, trigger and function
+>   definitions, policies and enum labels. It compares runs with each other, not with a pure
+>   `create_all`; the SQLite test above does that. On CI's role-less cluster it exercises the role
+>   guards' **skip** branch.
 >
 > *2026-11-02:* `089`–`098`, `106` and `107` shipped unguarded, so this path failed at `089`
 > (`python -m scripts.reset_dev_db` included) until guards were retrofitted to those twelve
@@ -569,11 +634,33 @@ After bootstrap, normal incremental `alembic upgrade head` is the standard path.
 > migration modules only in an empty schema, and nothing exercised the create_all → stamp →
 > upgrade chain. The fix is the guards, **not** a later stamp point — stamping past those
 > revisions would skip their Postgres RLS / `REVOKE` statements, the stamped-over hazard below.
-> Retrofitting guards (`_has_*` checks or `IF [NOT] EXISTS` DDL) is the one sanctioned edit to an
-> applied migration (precedent `1897d457`, `a0dd1b09`, `4e5fe4e1`): they no-op on any database
-> that already ran the revision, and on one that hasn't they emit the same DDL — plus, in
-> `106`/`107`, twelve `DROP TRIGGER IF EXISTS` that no-op there — so the resulting schema is
-> identical.
+> Retrofitting existence guards — `_has_*` checks, `IF [NOT] EXISTS` DDL, or a `pg_roles`
+> role-existence check — is the one sanctioned edit to an applied migration (precedent
+> `1897d457`, `a0dd1b09`, `4e5fe4e1`; for a role check, `093` on 2026-11-03). Object guards no-op on
+> any database that already ran the revision, and on one that hasn't they emit the same DDL — plus,
+> in `106`/`107`, twelve `DROP TRIGGER IF EXISTS` that no-op there — so the resulting schema is
+> identical. A role check qualifies because a statement naming a missing role aborts the
+> migration: any database with the revision recorded had the role, so the guarded form runs the
+> identical statements there. Anything a retrofit would *add* is a new effect and goes in a new
+> revision.
+>
+> *2026-11-03:* four more gaps between the incremental path and this one. (1) `100` creates four
+> FKs by name (`fk_receipt_certificate_document`, `fk_receipt_delivery_batch`,
+> `fk_po_supplier_acknowledged_by`, `fk_po_follow_up_owner`) and its downgrade drops them by name,
+> but `app/models/purchasing.py` declared them unnamed — prod carried the names, every
+> `create_all` database auto-generated others. The model now names them (the lock-step convention);
+> `100` is unchanged, since it guards by column and still no-ops on the fresh path, and
+> `test_migration_100_receiving_supplier_followup.py` pins both sides. Dev databases built by
+> `create_all` before the fix keep auto-generated names: harmless (`100`'s downgrade still
+> completes), but different from prod until rebuilt. (2) The chain test could not see (1), which is
+> what the round-trip above closes. (3) `093` revoked with a bare `FROM anon, authenticated`, so on
+> any Postgres without those roles this path died at `093` (`role "anon" does not exist`; reproduced
+> on a local postgres:15) — nothing in CI ran `093` on Postgres. It now carries the role checks
+> `091`/`092`/`094`–`098` already had. The static role checks now catch the next one, and
+> `verify_fresh_bootstrap_postgres` now runs the chain on a role-less Postgres in `e2e.yml`. (4) `093`
+> never revoked `FROM PUBLIC`, and `091` never revoked `user_workspace_records_id_seq` at all. Those
+> are new effects, so they went into a new revision, `113_data_api_revoke_parity`, whose downgrade is
+> a deliberate no-op (`docs/SUPABASE_SECURITY.md` → Data API revoke parity).
 
 > **`create_all` reproduces only what the models declare — everything else in a stamped-past
 > migration is lost silently.** `Base.metadata.create_all()` emits exactly what SQLAlchemy
@@ -661,6 +748,54 @@ After bootstrap, normal incremental `alembic upgrade head` is the standard path.
 > Every id from `059` on is within it. SQLite does not enforce `VARCHAR` length, so the bootstrap
 > chain test alone could not catch an overlong one; `test_migration_fresh_bootstrap.py` asserts
 > the limit directly for every revision from the `058` stamp up.
+
+### Running the PostgreSQL verifiers locally
+
+The verifiers create and drop scratch schemas and databases (`DROP DATABASE … WITH (FORCE)`), so
+`verify_operations_postgres`, `verify_fabrication_quoting_postgres` and
+`verify_fresh_bootstrap_postgres` all refuse anything but a local, disposable test Postgres.
+They share one guard, `scripts/_pg_verify.py::require_local_test_postgres`, unit-tested by
+`tests/test_pg_verify_guard.py`. The guard requires all of these:
+
+- `ENVIRONMENT=test`;
+- a `postgresql` URL with an explicit host in `localhost` / `127.0.0.1` / `::1` / `postgres`;
+- query parameters only from an allowlist (`sslmode`, `application_name`, `connect_timeout`,
+  `options`, `client_encoding`);
+- no `PGHOSTADDR` or `PGSERVICE` in the environment.
+
+The query and environment rules exist because SQLAlchemy hands query parameters to libpq, which
+honours them over the URL's own host: `…@localhost/db?host=<remote>` connects to the remote, and
+so do `hostaddr`, `service` and `dsn` (psycopg2 merges `?dsn=hostaddr%3D<remote>` beside
+`host=localhost`). The query rule is an allowlist because a denylist of those keys missed `dsn`.
+
+`verify_fresh_bootstrap_postgres` also re-checks, in each child process, the URL the app's
+`Settings` actually resolves, and requires it to name the scratch database. `Settings` prefers a
+Supabase URL from the environment or `backend/.env` over `DATABASE_URL`, so a Supabase URL there
+makes this verifier refuse.
+
+The five older race/API verifiers (`verify_nesting_runs_postgres`,
+`verify_nesting_spacing_postgres`, `verify_nesting_sources_postgres`,
+`verify_stock_piece_postgres`, `verify_stock_piece_api_postgres`) still check only `url.host`. CI
+reaches them only through `verify_operations_postgres`, after its guard, so run them that way.
+
+To run them, start a throwaway `postgres:15` container. Its `POSTGRES_USER` is a superuser, which
+the verifiers need to create databases and temporary roles. Then run each script from `backend/` as
+`e2e.yml` does:
+
+```bash
+docker run --rm -d --name werco-pg-verify -p 55432:5432 \
+  -e POSTGRES_USER=werco_user -e POSTGRES_PASSWORD=verify -e POSTGRES_DB=werco_verify postgres:15
+
+cd backend
+export DATABASE_URL=postgresql://werco_user:verify@127.0.0.1:55432/werco_verify
+export ENVIRONMENT=test
+export SECRET_KEY=<any 32+ characters> REFRESH_TOKEN_SECRET_KEY=<another 32+ characters>
+python -m scripts.verify_operations_postgres
+python scripts/verify_fabrication_quoting_postgres.py --database-url "$DATABASE_URL"
+python -m scripts.verify_fresh_bootstrap_postgres
+
+docker rm -f werco-pg-verify
+```
 
 ### Create a new migration
 ```bash

@@ -1,7 +1,10 @@
-"""Exercise migrations 095–103 and runtime p75 on CI's disposable PostgreSQL.
+"""Exercise migrations 091–103 and 113, and runtime p75, on CI's disposable PostgreSQL.
 
-This uses an isolated schema, rolls everything back, and refuses remote/production DBs.
-Run before the E2E seed so schema migration failures stop the browser suite early.
+095–103 run in an isolated schema, then 101–103 again over tables the MODELS built (the
+fresh bootstrap's real case). 091–094 and 113 run in a scratch database instead, because
+093 qualifies its statements with ``public.``; that database is dropped afterwards. Every
+check rolls back, and the script refuses remote/production DBs. Run before the E2E seed so
+schema migration failures stop the browser suite early.
 """
 
 import importlib.util
@@ -17,16 +20,75 @@ from sqlalchemy.orm import Session
 
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
+from app.db.database import Base
 from app.models.runtime_metric import RuntimeMetricSample
 from app.services.runtime_metric_service import summarize_runtime_metrics
+from scripts._pg_verify import (
+    DATA_API_ROLES,
+    create_missing_data_api_roles,
+    existing_data_api_roles,
+    grant_inherited_data_api_privileges,
+    require_local_test_postgres,
+    scratch_database,
+    trigger_names,
+)
 from scripts.verify_nesting_runs_postgres import assert_nesting_run_races
 from scripts.verify_nesting_sources_postgres import assert_nesting_source_races
 from scripts.verify_nesting_spacing_postgres import assert_spacing_policy_races
 from scripts.verify_stock_piece_postgres import assert_stock_piece_races
 
-DATA_API_ROLES = ("anon", "authenticated")
 TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
 SEQUENCE_PRIVILEGES = ("USAGE", "SELECT", "UPDATE")
+MIGRATIONS = (
+    "095_kiosk_production_receipts",
+    "096_working_calendars",
+    "097_team_workspaces",
+    "098_runtime_metrics",
+    "099_recoverable_import_batches",
+    "100_receiving_supplier_followup",
+    "101_quote_nesting_drafts",
+    "102_quote_nesting_runs",
+    "103_quote_nesting_spacing_policies",
+)
+NESTING_MIGRATIONS = (
+    "101_quote_nesting_drafts",
+    "102_quote_nesting_runs",
+    "103_quote_nesting_spacing_policies",
+)
+# Their models carry after_create listeners (RLS, REVOKEs, triggers) that run before 101–103 do.
+NESTING_TABLES = (
+    "quote_nesting_drafts",
+    "quote_nesting_revisions",
+    "quote_nesting_runs",
+    "quote_nesting_run_checkpoints",
+    "quote_nesting_spacing_policies",
+    "quote_nesting_spacing_revisions",
+    "quote_nesting_spacing_events",
+)
+REVOKE_PARITY_MIGRATIONS = (
+    "091_user_workspaces",
+    "092_operational_inbox_state",
+    "093_mrp_supply_links",
+    "094_document_deliveries",
+    "113_data_api_revoke_parity",
+)
+REVOKE_PARITY_REFERENCES = ("companies", "users", "mrp_actions", "purchase_orders", "work_orders")
+# Exactly what 091–094 create. Asserted, not derived: an empty or short set would let the
+# privacy check below pass vacuously.
+REVOKE_PARITY_TABLES = frozenset(
+    {"user_workspace_records", "operational_inbox_states", "mrp_supply_links", "document_deliveries"}
+)
+
+
+def load_migrations(names):
+    migrations = []
+    for filename in names:
+        path = Path(__file__).resolve().parents[1] / "alembic/versions" / (filename + ".py")
+        spec = importlib.util.spec_from_file_location(filename, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        migrations.append(module)
+    return migrations
 
 
 def assert_nesting_revision_guards(connection):
@@ -103,55 +165,105 @@ def assert_private_objects(connection, schema, tables):
                 assert not allowed, f"{role} retains {privilege} on {sequence}"
 
 
+def assert_model_built_nesting_tables(connection, migrations, migration_triggers):
+    """Run 101–103 over tables the MODELS built, as the fresh bootstrap does.
+
+    create_all's after_create listeners have already enabled RLS, revoked and built the
+    triggers by the time the migrations run, so this catches model/migration drift (a
+    differently named trigger would survive the migration's DROP IF EXISTS as a duplicate)
+    that the migration-only pass above cannot see.
+    """
+    schema = "ux_model_check_" + uuid4().hex
+    connection.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
+    connection.execute(sa.text(f'SET LOCAL search_path TO "{schema}"'))
+    grant_inherited_data_api_privileges(connection, schema)
+    for table in ("companies", "users", "api_tokens"):
+        connection.execute(sa.text(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)"))
+    Base.metadata.create_all(connection, tables=[Base.metadata.tables[name] for name in NESTING_TABLES])
+    assert (
+        trigger_names(connection, schema, NESTING_TABLES) == migration_triggers
+    ), "the quote_nesting models' after_create triggers differ from 101–103's"
+    for migration in migrations:
+        if migration.__name__ in NESTING_MIGRATIONS:
+            migration.upgrade()
+    assert (
+        trigger_names(connection, schema, NESTING_TABLES) == migration_triggers
+    ), "101–103 over model-built tables left a duplicate or missing trigger"
+    assert_private_objects(connection, schema, NESTING_TABLES)
+    connection.execute(sa.text("INSERT INTO companies (id) VALUES (1)"))
+    connection.execute(sa.text("INSERT INTO users (id) VALUES (1)"))
+    assert_nesting_revision_guards(connection)
+
+
+def verify_data_api_revocations(url, migrations):
+    """Run 091–094 and 113 in a scratch database, then drop it.
+
+    Not an isolated schema: 093 names ``public.mrp_supply_links``, which only a real
+    ``public`` schema can satisfy. Checks (i) they apply on a cluster WITHOUT the Supabase
+    roles, where 093's once-bare REVOKE aborted, and (ii) their tables and sequences end
+    private under inherited PUBLIC/anon/authenticated grants. ``has_*_privilege`` counts
+    PUBLIC grants, so (ii) needs 113's FROM PUBLIC and 091's missing sequence revoke.
+    """
+    with scratch_database(url, "revoke_check_") as scratch_url:
+        scratch = sa.create_engine(scratch_url)
+        try:
+            with scratch.connect() as connection:
+                transaction = connection.begin()
+                try:
+                    for table in REVOKE_PARITY_REFERENCES:
+                        connection.execute(sa.text(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)"))
+                    present = existing_data_api_roles(connection)
+                    with Operations.context(MigrationContext.configure(connection)):
+                        if present:
+                            no_role = f"SKIPPED the no-role check ({', '.join(present)} already exist in this cluster)"
+                        else:
+                            savepoint = connection.begin_nested()
+                            for migration in migrations:
+                                migration.upgrade()
+                            savepoint.rollback()
+                            no_role = "applied on a cluster without anon/authenticated"
+                        create_missing_data_api_roles(connection)
+                        grant_inherited_data_api_privileges(connection, "public")
+                        for migration in (*migrations, *migrations):
+                            migration.upgrade()
+                        inspector = sa.inspect(connection)
+                        tables = set(inspector.get_table_names(schema="public")) - set(REVOKE_PARITY_REFERENCES)
+                        assert tables == REVOKE_PARITY_TABLES, f"091–094 created {sorted(tables)}"
+                        # The reference stubs use plain INTEGER keys, so every sequence is a migration's.
+                        sequences = set(inspector.get_sequence_names(schema="public"))
+                        assert sequences == {f"{table}_id_seq" for table in REVOKE_PARITY_TABLES}, sorted(sequences)
+                        assert_private_objects(connection, "public", tables)
+                        # 113's downgrade is a deliberate no-op: it must never hand access back.
+                        for migration in migrations:
+                            if migration.__name__ == "113_data_api_revoke_parity":
+                                migration.downgrade()
+                        assert_private_objects(connection, "public", tables)
+                finally:
+                    transaction.rollback()
+        finally:
+            scratch.dispose()
+    print(
+        f"PostgreSQL migrations 091–094 and 113 (scratch database): {no_role}; their tables and "
+        "sequences stayed private under inherited PUBLIC/anon/authenticated grants, re-run and after "
+        "113's downgrade."
+    )
+
+
 def verify():
-    url = sa.engine.make_url(os.environ["DATABASE_URL"])
-    if os.environ.get("ENVIRONMENT") != "test" or url.host not in {"localhost", "127.0.0.1", "postgres"}:
-        raise RuntimeError("This check requires a local disposable test database")
-    if url.get_backend_name() != "postgresql":
-        raise RuntimeError("This check requires PostgreSQL")
+    url = require_local_test_postgres(os.environ["DATABASE_URL"])
+    # Before the transaction below creates its temporary roles: the no-role check needs a cluster without them.
+    verify_data_api_revocations(url, load_migrations(REVOKE_PARITY_MIGRATIONS))
     engine = sa.create_engine(url)
     schema = "ux_check_" + uuid4().hex
-    migrations = []
-    for filename in (
-        "095_kiosk_production_receipts",
-        "096_working_calendars",
-        "097_team_workspaces",
-        "098_runtime_metrics",
-        "099_recoverable_import_batches",
-        "100_receiving_supplier_followup",
-        "101_quote_nesting_drafts",
-        "102_quote_nesting_runs",
-        "103_quote_nesting_spacing_policies",
-    ):
-        path = Path(__file__).resolve().parents[1] / "alembic/versions" / (filename + ".py")
-        spec = importlib.util.spec_from_file_location(filename, path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        migrations.append(module)
+    migrations = load_migrations(MIGRATIONS)
     with engine.connect() as connection:
         transaction = connection.begin()
         try:
-            # CI's test owner is a superuser. Exercise the conditional REVOKE
-            # branches even on stock PostgreSQL; never alter an existing role.
             # These temporary role definitions roll back with the schema below.
-            for role in DATA_API_ROLES:
-                exists = connection.execute(
-                    sa.text("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :role)"),
-                    {"role": role},
-                ).scalar_one()
-                if not exists:
-                    connection.execute(sa.text(f'CREATE ROLE "{role}" NOLOGIN'))
+            create_missing_data_api_roles(connection)
             connection.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
             connection.execute(sa.text(f'SET LOCAL search_path TO "{schema}"'))
-            # Simulate inherited Data API grants, so the denial checks exercise
-            # the migrations' REVOKEs rather than pristine PostgreSQL defaults.
-            for objects in ("TABLES", "SEQUENCES"):
-                connection.execute(
-                    sa.text(
-                        f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema}" '
-                        f"GRANT ALL ON {objects} TO PUBLIC, anon, authenticated"
-                    )
-                )
+            grant_inherited_data_api_privileges(connection, schema)
             # Existing references only; these migrations must not depend on seed data.
             for table in ("companies", "users", "api_tokens", "work_centers", "work_order_operations", "time_entries"):
                 connection.execute(sa.text(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)"))
@@ -190,6 +302,8 @@ def verify():
                     "po_receipts",
                 }
                 assert_private_objects(connection, schema, new_tables)
+                nesting_triggers = trigger_names(connection, schema, NESTING_TABLES)
+                assert nesting_triggers, "101–103 created no quote_nesting triggers"
                 connection.execute(sa.text("INSERT INTO companies (id) VALUES (1)"))
                 connection.execute(sa.text("INSERT INTO users (id) VALUES (1)"))
                 assert_nesting_revision_guards(connection)
@@ -258,9 +372,12 @@ def verify():
                 assert set(sa.inspect(connection).get_table_names(schema=schema)) == remaining
                 assert not sa.inspect(connection).get_sequence_names(schema=schema)
                 assert not sa.inspect(connection).get_indexes("work_orders", schema=schema)
+                assert_model_built_nesting_tables(connection, migrations, nesting_triggers)
             print(
                 "PostgreSQL migrations 095–103 passed upgrade/downgrade twice, "
-                "RLS and Data API table/sequence privilege checks, and p75 cohorts 1/4/5/8."
+                "RLS and Data API table/sequence privilege checks, and p75 cohorts 1/4/5/8; "
+                "101–103 over model-built tables kept exactly their triggers, RLS, Data API denial "
+                "and revision guards."
             )
         finally:
             transaction.rollback()

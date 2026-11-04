@@ -140,6 +140,17 @@ production downgrade. See [Consumables setup and operation](CONSUMABLES.md) for
 the attendant workflow. A code change alone does not deploy or initialize this
 feature in production.
 
+**Data API revoke parity.** **113_data_api_revoke_parity** applies after **112** through
+the normal API boot migration path, with no deploy ordering and no matching
+frontend/worker release. It is a catalog-only ACL change: it revokes
+`mrp_supply_links`, `user_workspace_records` and their id sequences from `PUBLIC`,
+and from `anon`/`authenticated` where those roles exist. No rows are read or written
+and no table is rewritten; the app connects as the owning role, which the revoke does
+not affect. It is very likely a no-op in prod for `FROM PUBLIC`. Its downgrade is a
+deliberate no-op that never re-grants. Applied revision `093` also gained role-existence
+checks in place; a database that already ran it is unaffected. See
+[SUPABASE_SECURITY.md → Data API revoke parity](SUPABASE_SECURITY.md#data-api-revoke-parity-migration-113).
+
 ## Table of Contents
 
 1. [Quick Reference](#quick-reference)
