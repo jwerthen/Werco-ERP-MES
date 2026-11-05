@@ -297,23 +297,54 @@ def test_text_plain_label_variants_are_accepted(client: TestClient, content_type
     assert response.json() == {"status": "queued", "count": 1}
 
 
-def test_text_plain_body_gets_the_same_validation_as_json(client: TestClient):
-    """Relabelling is not a validation bypass: the per-field and batch caps apply."""
-    over_cap_field = _post_text_plain(client, {"errors": [_entry(message="A" * 4001)]})
-    over_cap_batch = _post_text_plain(
-        client, {"errors": [_entry(id=f"err_{i}") for i in range(errors_module.MAX_ERRORS_PER_REQUEST + 1)]}
-    )
-    missing_field = _post_text_plain(client, {"errors": [{"id": "err_1"}]})
+def _post_json_twin(client: TestClient, raw):
+    return client.post(ENDPOINT, content=raw, headers={"content-type": "application/json"})
 
-    assert over_cap_field.status_code == 422, over_cap_field.text
-    assert over_cap_batch.status_code == 422, over_cap_batch.text
-    assert missing_field.status_code == 422, missing_field.text
+
+# A bare "422" would pass against the PRE-fix code too: it refused every text/plain
+# body with 422 -- one "Input should be a valid dictionary" error at loc ["body"],
+# because the body was never parsed. So each case below compares the text/plain
+# response with the SAME bytes labelled application/json: identical status and an
+# identical error list proves the text/plain body was parsed and validated exactly
+# as JSON is, field by field.
+_INVALID_BODIES = {
+    "field_over_cap": json.dumps({"errors": [_entry(message="A" * 4001)]}),
+    "batch_over_cap": json.dumps(
+        {"errors": [_entry(id=f"err_{i}") for i in range(errors_module.MAX_ERRORS_PER_REQUEST + 1)]}
+    ),
+    "missing_required_fields": json.dumps({"errors": [{"id": "err_1"}]}),
+    "not_json": b"this is not json",
+}
+
+
+@pytest.mark.parametrize("case", sorted(_INVALID_BODIES))
+def test_text_plain_body_gets_the_same_validation_as_json(client: TestClient, case: str):
+    """Relabelling is not a validation bypass: the per-field and batch caps apply."""
+    raw = _INVALID_BODIES[case]
+
+    as_text = _post_text_plain(client, raw)
+    as_json = _post_json_twin(client, raw)
+
+    assert as_json.status_code == 422, as_json.text
+    assert as_text.status_code == 422, as_text.text
+    assert as_text.json() == as_json.json()
+    # And the errors are about the body's CONTENT, not about the body being unparsed.
+    assert all(error["loc"] != ["body"] for error in as_text.json()["detail"]), as_text.text
 
 
 def test_text_plain_body_that_is_not_json_is_a_422(client: TestClient):
     response = _post_text_plain(client, b"this is not json")
 
     assert response.status_code == 422, response.text
+    assert [error["type"] for error in response.json()["detail"]] == ["json_invalid"]
+
+
+def test_text_plain_body_that_is_not_utf8_is_refused_not_a_500(client: TestClient):
+    """``json.loads`` raises UnicodeDecodeError (not JSONDecodeError) on undecodable bytes.
+    An unauthenticated route must refuse that, never 500 on it."""
+    response = _post_text_plain(client, b'{"errors": ["\xff\xfe"]}')
+
+    assert 400 <= response.status_code < 500, response.text
 
 
 def test_text_plain_beacon_is_bound_by_the_json_body_cap(client: TestClient, monkeypatch: pytest.MonkeyPatch):
@@ -346,3 +377,116 @@ def test_text_plain_media_type_helper():
     assert not errors_module.is_text_plain_media_type("text/plainx")
     assert not errors_module.is_text_plain_media_type("")
     assert not errors_module.is_text_plain_media_type(None)
+
+
+def _chunked(data: bytes, chunk_size: int = 256):
+    """A generator body: httpx sends it ``Transfer-Encoding: chunked`` with NO Content-Length."""
+    for offset in range(0, len(data), chunk_size):
+        yield data[offset : offset + chunk_size]
+
+
+def _send_chunked_text_plain(client: TestClient, data: bytes):
+    request = client.build_request(
+        "POST", ENDPOINT, content=_chunked(data), headers={"content-type": _LEGACY_BEACON_CONTENT_TYPE}
+    )
+    # The premise, established rather than assumed: no declared length for gate 1 to read.
+    assert "content-length" not in request.headers
+    assert request.headers["transfer-encoding"] == "chunked"
+    return client.send(request)
+
+
+def test_chunked_text_plain_beacon_is_capped_on_the_bytes_that_actually_arrive(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Gate 2 of the body cap (the post-read length check) covers the text/plain label on
+    this path too. The 413 test above sends a Content-Length, so it only reaches gate 1."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "MAX_JSON_BODY_BYTES", 1024)
+    oversized = json.dumps({"errors": [_entry(stack="A" * 4000)]}).encode()
+    assert len(oversized) > 1024
+
+    response = _send_chunked_text_plain(client, oversized)
+
+    assert response.status_code == 413, response.text
+
+
+def test_chunked_text_plain_beacon_under_the_cap_reaches_the_route_intact(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """The cap middleware READS the body to measure it; the relabelled request must then be
+    handed those same bytes (Starlette replays the cached body), not an empty stream."""
+    from app.core.config import settings
+
+    alerted: list[str] = []
+
+    async def _fake_alert(error):
+        alerted.append(error.id)
+
+    monkeypatch.setattr(settings, "MAX_JSON_BODY_BYTES", 4096)
+    monkeypatch.setattr(errors_module, "send_error_alert", _fake_alert)
+    body = json.dumps({"errors": [_entry(id="err_chunked", boundaryLevel="global")]}).encode()
+    assert len(body) < 4096
+
+    response = _send_chunked_text_plain(client, body)
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"status": "queued", "count": 1}
+    assert alerted == ["err_chunked"]
+
+
+def test_openapi_contract_for_the_beacon_route_is_unchanged():
+    """The text/plain carve-in lives in a route class, not in a raw-``Request`` handler, so the
+    published request body is still the typed ``ErrorLogRequest`` JSON schema -- the API docs
+    and every generated client stay accurate. A handler that parsed the body itself would
+    silently drop this schema."""
+    operation = app_main.app.openapi()["paths"][ENDPOINT]["post"]
+    content = operation["requestBody"]["content"]
+
+    assert set(content) == {"application/json"}
+    assert content["application/json"]["schema"] == {"$ref": "#/components/schemas/ErrorLogRequest"}
+    assert operation["requestBody"]["required"] is True
+
+
+def test_text_plain_is_not_parsed_as_json_on_any_other_router(client: TestClient):
+    """The route class is installed on the errors router ONLY -- the carve-in must not leak
+    app-wide (e.g. by moving ``route_class`` onto the parent router). ``/auth/refresh`` is
+    an unauthenticated, CSRF-exempt JSON route: a parsed body would be checked as a refresh
+    token (401); an unparsed one fails validation as a whole (422 at loc ["body"])."""
+    response = client.post(
+        "/api/v1/auth/refresh",
+        content=json.dumps({"refresh_token": "not-a-real-token"}),
+        headers={"content-type": _LEGACY_BEACON_CONTENT_TYPE},
+    )
+
+    assert response.status_code == 422, response.text
+    assert [error["loc"] for error in response.json()["detail"]] == [["body"]]
+
+    # Control: the same bytes labelled JSON ARE parsed, and refused on their merits.
+    as_json = client.post(
+        "/api/v1/auth/refresh",
+        content=json.dumps({"refresh_token": "not-a-real-token"}),
+        headers={"content-type": "application/json"},
+    )
+    assert as_json.status_code == 401, as_json.text
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "PRE-EXISTING, not introduced here: validation_exception_handler (app/main.py) runs "
+        "jsonable_encoder over exc.errors(); for a non-JSON Content-Type the error's `input` is the raw "
+        "body bytes, which the encoder .decode()s -- undecodable bytes raise UnicodeDecodeError inside the "
+        "422 handler and the request 500s. Unauthenticated and app-wide (e.g. /auth/refresh too), and each "
+        "one is an ERROR log line plus Sentry events -- the spend this route's caps exist to bound. "
+        "The text/plain label is immune on THIS route only because it is now parsed as JSON (400)."
+    ),
+)
+def test_undecodable_body_with_a_non_json_label_is_refused_not_a_500():
+    client = TestClient(app_main.app, raise_server_exceptions=False)
+
+    response = client.post(
+        ENDPOINT, content=b'{"errors": ["\xff\xfe"]}', headers={"content-type": "application/octet-stream"}
+    )
+
+    assert 400 <= response.status_code < 500, response.text
