@@ -34,6 +34,16 @@ jest.mock('../services/api', () => ({
   },
 }));
 
+// The create controls render only for the server's author tier (quality:inspect);
+// a Quality user holds it. RBAC coverage lives in CustomerComplaints.rbac.test.tsx.
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({
+    user: { id: 1, role: 'quality', is_superuser: false },
+    isAuthenticated: true,
+    isLoading: false,
+  }),
+}));
+
 const mockedApi = api as jest.Mocked<typeof api>;
 
 const renderPage = () =>
