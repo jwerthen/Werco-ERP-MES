@@ -14,15 +14,19 @@ What these tests lock (router prefix ``/complaints`` + in-router ``/complaints/.
 - every by-id route and verb -> 404 for another tenant's id, with no row change, no
   audit row, no NCR/CAR and no event; the owning tenant's own call on the same row,
   state and body SUCCEEDS, so the 404 is tenancy and nothing else;
-- the dashboard counts only the caller's company;
+- the dashboard counts only the caller's company (every aggregate, including the
+  resolution average), and no legacy cross-tenant part / customer / RMA link is shown;
 - Viewer / Operator / Shipping -> 403 on every gated write with no side effect, and
   Supervisor -> 403 on the approver-tier verbs while keeping the author-tier ones;
+  Manager and Quality keep every gated verb, and Viewer / Operator keep every read;
+- the RMA from-state guards refuse out-of-order verbs with no side effect;
 - every write audits; resolve / close / RMA dispose / RMA complete fail closed (503,
   nothing saved) when the required audit row cannot be written;
 - ``status`` (complaint) and ``disposition`` (RMA) are refused on PUT;
 - selected references must be live rows of the active company;
 - create-ncr / create-car produce tenant-correct, per-company-numbered records and
-  emit the same events as the quality router's create paths.
+  emit the same events as the quality router's create paths. A strict xfail pins the
+  known defect that per-company NCR/CAR numbers collide on their global unique index.
 """
 
 from datetime import date, datetime, timedelta
@@ -30,6 +34,7 @@ from datetime import date, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token
@@ -115,10 +120,12 @@ def make_part(db: Session, *, company_id: int = COMPANY_A, is_deleted: bool = Fa
     return part
 
 
-def make_customer(db: Session, *, company_id: int = COMPANY_A, name: str = None) -> Customer:
+def make_customer(db: Session, *, company_id: int = COMPANY_A, name: str = None, is_deleted: bool = False) -> Customer:
     _ensure_company(db, company_id)
     n = _next()
-    customer = Customer(name=name or f"Customer {company_id}-{n}", code=f"CC-C-{n}", company_id=company_id)
+    customer = Customer(
+        name=name or f"Customer {company_id}-{n}", code=f"CC-C-{n}", company_id=company_id, is_deleted=is_deleted
+    )
     db.add(customer)
     db.commit()
     db.refresh(customer)
@@ -178,7 +185,7 @@ def make_rma(
     _ensure_company(db, company_id)
     n = _next()
     rma = ReturnMaterialAuthorization(
-        rma_number=f"RMA-T-{company_id}-{n:05d}",
+        rma_number=fields.pop("rma_number", f"RMA-T-{company_id}-{n:05d}"),
         customer_name="Acme Aerospace",
         quantity=2,
         reason="Return for inspection",
@@ -393,6 +400,70 @@ class TestScopedReads:
             assert [row["id"] for row in body["rmas"]] == [own_rma.id]
         assert rma["part"] is None
 
+    def test_legacy_cross_tenant_rma_links_are_not_disclosed(self, client: TestClient, db_session: Session, quality_a):
+        # The RMA's own customer/part loads are scoped separately from the complaint's,
+        # on both the detail and the list read.
+        foreign_part = make_part(db_session, company_id=COMPANY_B)
+        foreign_customer = make_customer(db_session, company_id=COMPANY_B, name="Bravo Secret Co")
+        own_rma = make_rma(db_session, company_id=COMPANY_A, part_id=foreign_part.id, customer_id=foreign_customer.id)
+
+        detail = client.get(f"{API}/rma/{own_rma.id}", headers=headers_for(quality_a)).json()
+        listed = client.get(f"{API}/rma/", headers=headers_for(quality_a)).json()
+
+        assert [row["id"] for row in listed] == [own_rma.id]
+        for body in (detail, listed[0]):
+            assert body["customer"] is None
+            assert body["part"] is None
+            assert "Bravo Secret Co" not in str(body)
+
+    def test_dashboard_resolution_average_is_scoped(self, client: TestClient, db_session: Session, quality_a):
+        # avg_resolution_days is its own query; the open-count / severity / satisfaction
+        # assertions above cannot see whether it is scoped. Ours: 10 days. Unscoped: 55.
+        today = date.today()
+        make_complaint(
+            db_session,
+            company_id=COMPANY_A,
+            status=ComplaintStatus.RESOLVED,
+            date_received=today - timedelta(days=10),
+            resolved_date=today,
+        )
+        make_complaint(
+            db_session,
+            company_id=COMPANY_B,
+            status=ComplaintStatus.RESOLVED,
+            date_received=today - timedelta(days=100),
+            resolved_date=today,
+        )
+
+        response = client.get(f"{API}/complaints/dashboard", headers=headers_for(quality_a))
+
+        assert response.status_code == 200, response.text
+        assert response.json()["avg_resolution_days"] == 10.0
+
+    READ_ROUTES = [
+        ("dashboard", "/complaints/dashboard"),
+        ("list_complaints", "/complaints/"),
+        ("get_complaint", "/complaints/{complaint_id}"),
+        ("get_8d_report", "/complaints/8d-report/{complaint_id}"),
+        ("list_rmas", "/rma/"),
+        ("get_rma", "/rma/{rma_id}"),
+    ]
+
+    @pytest.mark.parametrize("role", [UserRole.VIEWER, UserRole.OPERATOR])
+    @pytest.mark.parametrize("name,path", READ_ROUTES, ids=[r[0] for r in READ_ROUTES])
+    def test_reads_stay_open_to_view_only_roles(self, client: TestClient, db_session: Session, role, name, path):
+        # The page is gated on quality:view, which Operator and Viewer hold; the write
+        # gates must not leak onto the reads they still rely on.
+        caller = make_user(db_session, company_id=COMPANY_A, role=role)
+        complaint = make_complaint(db_session, company_id=COMPANY_A)
+        rma = make_rma(db_session, company_id=COMPANY_A, complaint_id=complaint.id)
+
+        response = client.get(
+            f"{API}{path.format(complaint_id=complaint.id, rma_id=rma.id)}", headers=headers_for(caller)
+        )
+
+        assert response.status_code == 200, response.text
+
 
 # ---------------------------------------------------------------- roles
 
@@ -477,6 +548,36 @@ class TestRoleGates:
         response = client.post(f"{API}{path}", json=body, headers=headers_for(caller))
 
         assert response.status_code == 200, response.text
+
+    # Nobody who held a verb before the gates moved may lose it: create-ncr / create-car
+    # and the four RMA decisions were already Admin / Manager / Quality, and every
+    # previously-open verb is in one of the two tiers both roles sit in. The tenancy
+    # control above only exercises Admin.
+    @pytest.mark.parametrize("role", [UserRole.MANAGER, UserRole.QUALITY])
+    @pytest.mark.parametrize(
+        "name,method,path,body,status,kind", GATED_BY_ID_ROUTES, ids=[r[0] for r in GATED_BY_ID_ROUTES]
+    )
+    def test_manager_and_quality_keep_every_gated_verb(
+        self, client: TestClient, db_session: Session, role, name, method, path, body, status, kind
+    ):
+        caller = make_user(db_session, company_id=COMPANY_A, role=role)
+        _model, own_id = _seed(db_session, kind, COMPANY_A, status)
+
+        response = _call(client, method, path.format(id=own_id), body, headers_for(caller))
+
+        assert response.status_code == 200, response.text
+        assert response.json()["id"] == own_id
+
+    @pytest.mark.parametrize("role", [UserRole.MANAGER, UserRole.QUALITY])
+    @pytest.mark.parametrize("name,path,body", WRITE_CREATES, ids=[r[0] for r in WRITE_CREATES])
+    def test_manager_and_quality_can_create(self, client: TestClient, db_session: Session, role, name, path, body):
+        caller = make_user(db_session, company_id=COMPANY_A, role=role)
+
+        response = client.post(f"{API}{path}", json=body, headers=headers_for(caller))
+
+        assert response.status_code == 200, response.text
+        model = CustomerComplaint if name == "create_complaint" else ReturnMaterialAuthorization
+        assert db_session.get(model, response.json()["id"]).company_id == COMPANY_A
 
 
 # ---------------------------------------------------------------- workflow + audit
@@ -691,6 +792,140 @@ class TestComplaintWorkflowAudit:
         assert _side_effect_counts(db_session) == before_counts
 
 
+class TestRMAWorkflow:
+    # The RMA from-state guards were rewritten onto one shared ``_rma_transition``; the
+    # lifecycle test above only walks the happy path, so nothing held them.
+    @pytest.mark.parametrize(
+        "verb,body,status",
+        [
+            ("approve", None, RMAStatus.APPROVED),
+            ("approve", None, RMAStatus.DENIED),
+            ("deny", None, RMAStatus.APPROVED),
+            ("deny", None, RMAStatus.COMPLETED),
+            ("receive", {"shipping_tracking": "1Z999"}, RMAStatus.REQUESTED),
+            ("receive", {"shipping_tracking": "1Z999"}, RMAStatus.DENIED),
+            ("inspect", {"inspection_findings": "Dent confirmed"}, RMAStatus.APPROVED),
+            ("dispose", {"disposition": "scrap"}, RMAStatus.REQUESTED),
+            ("dispose", {"disposition": "scrap"}, RMAStatus.APPROVED),
+            ("dispose", {"disposition": "scrap"}, RMAStatus.DISPOSITION_DECIDED),
+            ("complete", None, RMAStatus.UNDER_INSPECTION),
+            ("complete", None, RMAStatus.COMPLETED),
+        ],
+        ids=lambda value: value.value if isinstance(value, RMAStatus) else None,
+    )
+    def test_out_of_order_rma_transitions_refused(
+        self, client: TestClient, db_session: Session, quality_a, verb, body, status
+    ):
+        rma = make_rma(db_session, company_id=COMPANY_A, status=status)
+        before_row = _state(db_session, ReturnMaterialAuthorization, rma.id)
+        before_counts = _side_effect_counts(db_session)
+
+        response = client.post(f"{API}/rma/{rma.id}/{verb}", json=body, headers=headers_for(quality_a))
+
+        assert response.status_code == 400, response.text
+        assert _state(db_session, ReturnMaterialAuthorization, rma.id) == before_row
+        assert _side_effect_counts(db_session) == before_counts
+
+    def test_dispose_is_allowed_straight_from_material_received(
+        self, client: TestClient, db_session: Session, quality_a
+    ):
+        rma = make_rma(db_session, company_id=COMPANY_A, status=RMAStatus.MATERIAL_RECEIVED)
+
+        response = client.post(
+            f"{API}/rma/{rma.id}/dispose",
+            json={"disposition": "credit", "credit_amount": 40},
+            headers=headers_for(quality_a),
+        )
+
+        assert response.status_code == 200, response.text
+        state = _state(db_session, ReturnMaterialAuthorization, rma.id)
+        assert (state["status"], state["disposition"], state["credit_amount"]) == (
+            RMAStatus.DISPOSITION_DECIDED,
+            "credit",
+            40,
+        )
+        rows = _audit_rows(db_session, "rma", rma.id)
+        assert [(row.action, row.old_values["status"], row.new_values["status"]) for row in rows] == [
+            ("STATUS_CHANGE", "material_received", "disposition_decided")
+        ]
+        assert rows[0].extra_data["changes"]["disposition"] == {"old": None, "new": "credit"}
+
+    @pytest.mark.parametrize("verb,expected", [("approve", RMAStatus.APPROVED), ("deny", RMAStatus.DENIED)])
+    def test_rma_decision_records_who_decided(self, client: TestClient, db_session: Session, verb, expected):
+        decider = make_user(db_session, company_id=COMPANY_A, role=UserRole.MANAGER)
+        rma = make_rma(db_session, company_id=COMPANY_A)
+
+        response = client.post(f"{API}/rma/{rma.id}/{verb}", headers=headers_for(decider))
+
+        assert response.status_code == 200, response.text
+        state = _state(db_session, ReturnMaterialAuthorization, rma.id)
+        assert state["status"] == expected
+        assert state["authorized_by"] == decider.id
+        assert state["authorized_date"] == date.today()
+        rows = _audit_rows(db_session, "rma", rma.id)
+        assert [(row.action, row.new_values["status"], row.user_id) for row in rows] == [
+            ("STATUS_CHANGE", expected.value, decider.id)
+        ]
+        assert rows[0].extra_data["changes"]["authorized_by"] == {"old": None, "new": decider.id}
+
+    def test_put_rma_audits_the_changed_fields(self, client: TestClient, db_session: Session, quality_a):
+        rma = make_rma(db_session, company_id=COMPANY_A)
+
+        response = client.put(
+            f"{API}/rma/{rma.id}",
+            json={"notes": "Customer asked for expedite", "lot_number": "LOT-9"},
+            headers=headers_for(quality_a),
+        )
+
+        assert response.status_code == 200, response.text
+        rows = _audit_rows(db_session, "rma", rma.id)
+        assert [(row.action, row.company_id) for row in rows] == [("UPDATE", COMPANY_A)]
+        assert rows[0].extra_data["changes"] == {
+            "notes": {"old": None, "new": "Customer asked for expedite"},
+            "lot_number": {"old": None, "new": "LOT-9"},
+        }
+
+    def test_rma_numbers_are_one_global_sequence(self, client: TestClient, db_session: Session, quality_a):
+        # rma_number is globally unique like complaint_number, so the sequence is global.
+        make_rma(db_session, company_id=COMPANY_B, rma_number=f"RMA-{datetime.now():%Y}-0003")
+
+        response = client.post(
+            f"{API}/rma/",
+            json={"customer_name": "Acme", "quantity": 1, "reason": "Return for inspection"},
+            headers=headers_for(quality_a),
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["rma_number"] == f"RMA-{datetime.now():%Y}-0004"
+
+    def test_complaint_and_rma_numbers_are_allocated_under_the_generator_lock(
+        self, client: TestClient, db_session: Session, quality_a, monkeypatch
+    ):
+        # SQLite cannot exercise the advisory lock itself; this holds that both
+        # allocators still take it (the read-max-plus-one scan is racy without it).
+        from app.services import customer_complaint_service
+
+        taken = []
+        monkeypatch.setattr(
+            customer_complaint_service,
+            "acquire_generator_lock",
+            lambda db, namespace, company_id=None: taken.append((namespace, company_id)),
+        )
+        headers = headers_for(quality_a)
+
+        complaint = client.post(
+            f"{API}/complaints/",
+            json={"customer_name": "Acme", "title": "Dented", "description": "Dented flange"},
+            headers=headers,
+        )
+        rma = client.post(
+            f"{API}/rma/", json={"customer_name": "Acme", "quantity": 1, "reason": "Return it now"}, headers=headers
+        )
+
+        assert complaint.status_code == 200 and rma.status_code == 200
+        assert taken == [("complaint_number", None), ("rma_number", None)]
+
+
 # ---------------------------------------------------------------- references
 
 
@@ -715,13 +950,16 @@ class TestReferenceValidation:
         assert field in response.json()["detail"]
         assert _side_effect_counts(db_session) == before_counts
 
-    @pytest.mark.parametrize("field", ["part_id", "work_order_id", "assigned_to"])
+    # Customer is soft-deletable too (SoftDeleteMixin), so a retired customer is not selectable.
+    @pytest.mark.parametrize("field", ["customer_id", "part_id", "work_order_id", "assigned_to"])
     def test_create_refuses_retired_reference(self, client: TestClient, db_session: Session, quality_a, field):
         retired = {
+            "customer_id": lambda: make_customer(db_session, is_deleted=True).id,
             "part_id": lambda: make_part(db_session, is_deleted=True).id,
             "work_order_id": lambda: make_work_order(db_session, is_deleted=True).id,
             "assigned_to": lambda: make_user(db_session, active=False).id,
         }[field]()
+        before_counts = _side_effect_counts(db_session)
 
         response = client.post(
             f"{API}/complaints/",
@@ -730,6 +968,8 @@ class TestReferenceValidation:
         )
 
         assert response.status_code == 422, response.text
+        assert field in response.json()["detail"]
+        assert _side_effect_counts(db_session) == before_counts
 
     def test_create_accepts_own_live_references(self, client: TestClient, db_session: Session, quality_a):
         part = make_part(db_session)
@@ -812,6 +1052,79 @@ class TestReferenceValidation:
         assert _state(db_session, ReturnMaterialAuthorization, rma.id) == before_row
         assert _side_effect_counts(db_session) == before_counts
 
+    @pytest.mark.parametrize("variant", ["foreign", "retired"])
+    @pytest.mark.parametrize("field", ["work_order_id", "assigned_to"])
+    def test_update_refuses_foreign_or_retired_reference(
+        self, client: TestClient, db_session: Session, quality_a, field, variant
+    ):
+        target = {
+            ("work_order_id", "foreign"): lambda: make_work_order(db_session, company_id=COMPANY_B).id,
+            ("work_order_id", "retired"): lambda: make_work_order(db_session, is_deleted=True).id,
+            ("assigned_to", "foreign"): lambda: make_user(db_session, company_id=COMPANY_B).id,
+            ("assigned_to", "retired"): lambda: make_user(db_session, active=False).id,
+        }[(field, variant)]()
+        complaint = make_complaint(db_session, company_id=COMPANY_A)
+        before_row = _state(db_session, CustomerComplaint, complaint.id)
+        before_counts = _side_effect_counts(db_session)
+
+        response = client.put(f"{API}/complaints/{complaint.id}", json={field: target}, headers=headers_for(quality_a))
+
+        assert response.status_code == 422, response.text
+        assert field in response.json()["detail"]
+        assert _state(db_session, CustomerComplaint, complaint.id) == before_row
+        assert _side_effect_counts(db_session) == before_counts
+
+    @pytest.mark.parametrize("field", ["customer_id", "part_id"])
+    def test_rma_create_refuses_foreign_customer_or_part(
+        self, client: TestClient, db_session: Session, quality_a, field
+    ):
+        foreign = {
+            "customer_id": lambda: make_customer(db_session, company_id=COMPANY_B).id,
+            "part_id": lambda: make_part(db_session, company_id=COMPANY_B).id,
+        }[field]()
+        before_counts = _side_effect_counts(db_session)
+
+        response = client.post(
+            f"{API}/rma/",
+            json={"customer_name": "Acme", "quantity": 1, "reason": "Return it now", field: foreign},
+            headers=headers_for(quality_a),
+        )
+
+        assert response.status_code == 422, response.text
+        assert field in response.json()["detail"]
+        assert _side_effect_counts(db_session) == before_counts
+
+    @pytest.mark.parametrize("variant", ["foreign", "retired"])
+    def test_put_rma_refuses_foreign_or_retired_replacement_work_order(
+        self, client: TestClient, db_session: Session, quality_a, variant
+    ):
+        wo = make_work_order(
+            db_session,
+            company_id=COMPANY_B if variant == "foreign" else COMPANY_A,
+            is_deleted=variant == "retired",
+        )
+        rma = make_rma(db_session, company_id=COMPANY_A)
+        before_row = _state(db_session, ReturnMaterialAuthorization, rma.id)
+        before_counts = _side_effect_counts(db_session)
+
+        response = client.put(f"{API}/rma/{rma.id}", json={"replacement_wo_id": wo.id}, headers=headers_for(quality_a))
+
+        assert response.status_code == 422, response.text
+        assert "replacement_wo_id" in response.json()["detail"]
+        assert _state(db_session, ReturnMaterialAuthorization, rma.id) == before_row
+        assert _side_effect_counts(db_session) == before_counts
+
+    def test_put_rma_accepts_an_own_live_replacement_work_order(
+        self, client: TestClient, db_session: Session, quality_a
+    ):
+        wo = make_work_order(db_session, company_id=COMPANY_A)
+        rma = make_rma(db_session, company_id=COMPANY_A)
+
+        response = client.put(f"{API}/rma/{rma.id}", json={"replacement_wo_id": wo.id}, headers=headers_for(quality_a))
+
+        assert response.status_code == 200, response.text
+        assert _state(db_session, ReturnMaterialAuthorization, rma.id)["replacement_wo_id"] == wo.id
+
 
 # ---------------------------------------------------------------- NCR / CAR escalation
 
@@ -826,6 +1139,7 @@ class TestEscalation:
             db_session, company_id=COMPANY_A, part_id=part.id, work_order_id=wo.id, lot_number="LOT-42"
         )
         today = f"{datetime.now():%Y%m%d}"
+        _ensure_company(db_session, COMPANY_B)
         existing = NonConformanceReport(
             ncr_number=f"NCR-{today}-001",
             title="Earlier NCR",
@@ -833,7 +1147,17 @@ class TestEscalation:
             source=NCRSource.IN_PROCESS,
             company_id=COMPANY_A,
         )
-        db_session.add(existing)
+        # The other tenant's higher same-day number is what makes "-002" prove per-company
+        # allocation: a global scan would hand out -006. (-005 cannot collide with A's -002
+        # on the globally-unique ncr_number.)
+        other_tenant = NonConformanceReport(
+            ncr_number=f"NCR-{today}-005",
+            title="Other tenant NCR",
+            description="Other tenant",
+            source=NCRSource.IN_PROCESS,
+            company_id=COMPANY_B,
+        )
+        db_session.add_all([existing, other_tenant])
         db_session.commit()
 
         response = client.post(f"{API}/complaints/{complaint.id}/create-ncr", headers=headers_for(quality_a))
@@ -853,30 +1177,52 @@ class TestEscalation:
         assert [row.action for row in complaint_rows] == ["UPDATE"]
         assert complaint_rows[0].extra_data["changes"]["ncr_id"] == {"old": None, "new": ncr.id}
 
+        before_again = _side_effect_counts(db_session)
         again = client.post(f"{API}/complaints/{complaint.id}/create-ncr", headers=headers_for(quality_a))
         assert again.status_code == 400, again.text
-        assert _count(db_session, NonConformanceReport) == 2
+        assert _count(db_session, NonConformanceReport) == 3
+        assert _side_effect_counts(db_session) == before_again
+        assert _state(db_session, CustomerComplaint, complaint.id)["ncr_id"] == ncr.id
 
     def test_create_car_is_tenant_correct_numbered_evented_and_audited(
         self, client: TestClient, db_session: Session, quality_a
     ):
         complaint = make_complaint(db_session, company_id=COMPANY_A)
+        today = f"{datetime.now():%Y%m%d}"
+        _ensure_company(db_session, COMPANY_B)
+        # Another tenant's same-day CAR: per-company allocation gives A -001, a global scan -005.
+        db_session.add(
+            CorrectiveActionRequest(
+                car_number=f"CAR-{today}-004",
+                title="Other tenant CAR",
+                problem_description="Other tenant",
+                company_id=COMPANY_B,
+            )
+        )
+        db_session.commit()
 
         response = client.post(f"{API}/complaints/{complaint.id}/create-car", headers=headers_for(quality_a))
 
         assert response.status_code == 200, response.text
         car = db_session.get(CorrectiveActionRequest, response.json()["car_id"])
         assert car.company_id == COMPANY_A
-        assert car.car_number == f"CAR-{datetime.now():%Y%m%d}-001"
+        assert car.car_number == f"CAR-{today}-001"
         assert car.initiated_by == quality_a.id
         assert car.problem_description == complaint.description
         event = db_session.query(OperationalEvent).filter(OperationalEvent.event_type == "car_created").one()
         assert (event.company_id, event.entity_id) == (COMPANY_A, car.id)
+        assert event.event_payload["complaint_number"] == complaint.complaint_number
         assert [row.action for row in _audit_rows(db_session, "car", car.id)] == ["CREATE"]
+        complaint_rows = _audit_rows(db_session, "customer_complaint", complaint.id)
+        assert [row.action for row in complaint_rows] == ["UPDATE"]
+        assert complaint_rows[0].extra_data["changes"]["car_id"] == {"old": None, "new": car.id}
 
+        before_again = _side_effect_counts(db_session)
         again = client.post(f"{API}/complaints/{complaint.id}/create-car", headers=headers_for(quality_a))
         assert again.status_code == 400, again.text
-        assert _count(db_session, CorrectiveActionRequest) == 1
+        assert _count(db_session, CorrectiveActionRequest) == 2
+        assert _side_effect_counts(db_session) == before_again
+        assert _state(db_session, CustomerComplaint, complaint.id)["car_id"] == car.id
 
     @pytest.mark.parametrize("verb,field", [("create-ncr", "ncr_id"), ("create-car", "car_id")])
     def test_long_titles_fit_the_record(self, client: TestClient, db_session: Session, quality_a, verb, field):
@@ -908,3 +1254,62 @@ class TestEscalation:
 
         assert response.status_code == 200, response.text
         assert db_session.get(NonConformanceReport, response.json()["ncr_id"]).part_id == part.id
+
+    def test_create_ncr_refuses_a_legacy_cross_tenant_work_order(
+        self, client: TestClient, db_session: Session, quality_a
+    ):
+        # The part check above cannot see whether the work-order check exists.
+        foreign_wo = make_work_order(db_session, company_id=COMPANY_B)
+        complaint = make_complaint(db_session, company_id=COMPANY_A, work_order_id=foreign_wo.id)
+        before_counts = _side_effect_counts(db_session)
+
+        response = client.post(f"{API}/complaints/{complaint.id}/create-ncr", headers=headers_for(quality_a))
+
+        assert response.status_code == 409, response.text
+        assert "work order" in response.json()["detail"]
+        assert _state(db_session, CustomerComplaint, complaint.id)["ncr_id"] is None
+        assert _side_effect_counts(db_session) == before_counts
+
+    # KNOWN DEFECT, pinned rather than hidden. quality_numbering allocates NCR / CAR
+    # numbers PER COMPANY, but ncrs.ncr_number and cars.car_number are GLOBALLY unique
+    # (unique=True; never re-keyed to (company_id, number)). The first same-day NCR/CAR
+    # of a second tenant therefore gets the same "-001" the first tenant already holds,
+    # and the insert fails. This affects every NCR/CAR writer, not only this router, and
+    # needs a migration re-keying both uniques. strict=True: once that lands this XPASSes
+    # and fails, so the marker has to come off.
+    @pytest.mark.xfail(
+        strict=True,
+        raises=IntegrityError,
+        reason="ncr_number / car_number are globally unique but numbered per company",
+    )
+    @pytest.mark.parametrize("verb", ["create-ncr", "create-car"])
+    def test_same_day_escalations_in_two_tenants_do_not_collide(
+        self, client: TestClient, db_session: Session, quality_a, verb
+    ):
+        today = f"{datetime.now():%Y%m%d}"
+        _ensure_company(db_session, COMPANY_B)
+        if verb == "create-ncr":
+            db_session.add(
+                NonConformanceReport(
+                    ncr_number=f"NCR-{today}-001",
+                    title="Other tenant NCR",
+                    description="Other tenant",
+                    source=NCRSource.IN_PROCESS,
+                    company_id=COMPANY_B,
+                )
+            )
+        else:
+            db_session.add(
+                CorrectiveActionRequest(
+                    car_number=f"CAR-{today}-001",
+                    title="Other tenant CAR",
+                    problem_description="Other tenant",
+                    company_id=COMPANY_B,
+                )
+            )
+        db_session.commit()
+        complaint = make_complaint(db_session, company_id=COMPANY_A)
+
+        response = client.post(f"{API}/complaints/{complaint.id}/{verb}", headers=headers_for(quality_a))
+
+        assert response.status_code == 200, response.text
