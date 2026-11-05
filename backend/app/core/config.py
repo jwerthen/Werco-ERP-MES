@@ -737,6 +737,15 @@ class Settings(BaseSettings):
     # handler logs a WARNING that the shop has outgrown read-path reconcile.
     SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT: int = 250
 
+    # Realtime WebSocket pushes (``app.core.realtime.safe_broadcast``). ON by default.
+    # A kill switch, not a feature flag: when false, no write schedules a push, and the
+    # listening screens refresh only on their own timers (Dashboard / Work Orders / Work
+    # Order Detail every 30 s) or on load -- exactly how production ran from 2026-06-07
+    # to 2026-11-05, when a defect silently dropped every tenant-scoped push. Restoring
+    # delivery turned ~85 dormant call sites back on at once, each push triggers
+    # refetches on every listening tab, and that load had never been measured.
+    REALTIME_BROADCAST_ENABLED: bool = True
+
     # Audit Log Retention / Archival (CMMC AU-3.3.8 + AS9100D)
     # Audit logs are immutable (DB triggers block UPDATE/DELETE) and must NOT be
     # row-deleted by maintenance jobs. Aged rows are exported to cold storage by

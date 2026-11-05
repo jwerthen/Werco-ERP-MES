@@ -10229,12 +10229,31 @@ dropped and logged at WARNING (message type and event name only, never the paylo
 company the socket's path does not narrow delivery: every socket in the company receives every one
 of that company's events, and clients filter on `type` and the id in `data`.
 
-Delivery is **best-effort and supplementary; polling is the guarantee.** Handlers call
-`safe_broadcast` after the write commits; it starts the broadcast as a background task on the event
-loop and returns at once, from sync and `async` routes alike. The HTTP response does not wait for
-the per-socket authorization recheck, and a failed broadcast never fails the write: it is logged at
-WARNING with the helper name and exception, never the payload. Connections are held in memory per
-API process, so a socket held by a different API worker process does not receive the event.
+Delivery is **best-effort and supplementary; a fetch is the guarantee.** Dashboard, Work Orders
+and Work Order Detail also refresh every 30 seconds; Scheduling and Analytics refresh only on load.
+Handlers call `safe_broadcast` after the write commits; it queues the broadcast as a background task
+on the event loop and returns at once, from sync and `async` routes alike. The HTTP response does not
+wait for the per-socket authorization recheck, and a failed broadcast never fails the write: it is
+logged at WARNING with the helper name and exception, never the payload. Connections are held in
+memory per API process, so a socket held by a different API worker process does not receive the
+event.
+
+Queued broadcasts are delivered **one at a time per API process, in call order**. Each delivery
+rechecks every recipient socket against the database on a worker thread with its own session, and
+those threads and connections are shared with every HTTP request. Serializing keeps realtime to at
+most one worker thread and one pooled connection per process, and each socket receives events in the
+order they were broadcast. Three limits keep the queue from backing up:
+
+- At most **1000** broadcasts may wait per process. Past that, a new broadcast is dropped and
+  logged at WARNING (`Realtime broadcast ... dropped`).
+- A single send to one socket is bounded at **5 seconds**. A socket that does not accept the send in
+  time is dropped from delivery, like any socket whose send fails.
+- `REALTIME_BROADCAST_ENABLED=false` turns every push off without a code change
+  (`docs/ENVIRONMENT_VARIABLES.md` → Realtime WebSocket pushes).
+
+`ConnectionManager.send_to_user` follows the same tenant rule as the broadcasts: it takes
+`company_id` as a required keyword and sends only to that user's sockets admitted under that company.
+A platform admin can hold sockets in several companies at once. Nothing in `app/` calls it today.
 
 > **Fixed 2026-11-05: two defects in this path.** (1) Blocker create/update/resolve
 > (`POST /work-order-blockers/work-orders/{work_order_id}`, `PUT /work-order-blockers/{id}`,

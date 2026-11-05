@@ -5,6 +5,7 @@ Handles broadcasting messages to connected clients.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -14,13 +15,24 @@ from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
 
+# Upper bound on one ``send_text`` to one socket. Realtime delivery is serialized per
+# process (``app.core.realtime``), so a socket whose client has stopped reading would
+# otherwise hold up every other socket's events behind it. A send that times out is
+# treated like any failed send: that socket is dropped from delivery.
+WS_SEND_TIMEOUT_SECONDS = 5.0
+
+
+async def _send_bounded(websocket: WebSocket, message_json: str) -> None:
+    await asyncio.wait_for(websocket.send_text(message_json), timeout=WS_SEND_TIMEOUT_SECONDS)
+
 
 class ConnectionManager:
     """Manages WebSocket connections and broadcasts messages.
 
     Tenant isolation (invariant #1): each connection's active ``company_id`` is
     captured at connect time so broadcasts can be scoped to a single tenant.
-    ``broadcast_to_company`` only sends to sockets belonging to that company.
+    ``broadcast_to_company`` only sends to sockets belonging to that company, and
+    ``send_to_user`` only to that user's sockets admitted under the named company.
 
     There is deliberately NO all-tenants fan-out. Every event this app broadcasts
     is tenant data (work-order, operation, blocker and work-center ids, statuses),
@@ -140,16 +152,35 @@ class ConnectionManager:
             try:
                 if not await self._may_deliver(connection):
                     continue
-                await connection.send_text(message_json)
+                await _send_bounded(connection, message_json)
             except Exception as e:
-                logger.error(f"Error sending to company WebSocket: {e}")
+                logger.error("Error sending to company WebSocket: %s: %s", type(e).__name__, e)
                 disconnected.append(connection)
 
         for conn in disconnected:
             self.disconnect(conn)
 
-    async def send_to_user(self, user_id: str, message: Dict[str, Any], message_type: str = "notification"):
-        """Send a message to a specific user's connections."""
+    async def send_to_user(
+        self,
+        user_id: str,
+        message: Dict[str, Any],
+        message_type: str = "notification",
+        *,
+        company_id: Optional[int],
+    ):
+        """Send a message to ``user_id``'s connections admitted under ``company_id`` only.
+
+        A user is not a tenant boundary: a platform principal can hold one socket in
+        each company it has switched into, so "every socket this user holds" spans
+        tenants. ``company_id`` is therefore REQUIRED (keyword-only, no default) and an
+        explicit ``None`` reaches nobody -- the same rule as the ``broadcast_*`` helpers.
+        """
+        if company_id is None:
+            logger.warning(
+                "Dropped %s message to a user with no company_id: tenant events are never sent across tenants",
+                message_type,
+            )
+            return
         if user_id not in self.user_connections:
             return
 
@@ -159,12 +190,14 @@ class ConnectionManager:
         disconnected = []
 
         for connection in list(self.user_connections[user_id]):
+            if self.connection_company.get(connection) != company_id:
+                continue
             try:
                 if not await self._may_deliver(connection):
                     continue
-                await connection.send_text(message_json)
+                await _send_bounded(connection, message_json)
             except Exception as e:
-                logger.error(f"Error sending to user WebSocket: {e}")
+                logger.error("Error sending to user WebSocket: %s: %s", type(e).__name__, e)
                 disconnected.append(connection)
 
         # Remove disconnected clients

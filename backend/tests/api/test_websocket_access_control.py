@@ -255,7 +255,7 @@ def test_live_revocation_prevents_delivery_and_cleans_presence(
             # (There is no all-tenants ``manager.broadcast`` any more to exercise.)
             client.portal.call(functools.partial(ws_core.broadcast_dashboard_update, secret_payload, company_id=1))
         else:
-            client.portal.call(manager.send_to_user, user_id, secret_payload)
+            client.portal.call(functools.partial(manager.send_to_user, user_id, secret_payload, company_id=1))
         # Receiving CLOSE next proves no final business payload preceded it.
         assert_policy_close(socket)
         assert_empty_presence(manager)
@@ -312,7 +312,12 @@ def test_resource_revocation_keeps_users_other_authorized_socket(
             resources[1].is_deleted = True
             db_session.commit()
             client.portal.call(
-                socket_sessions.send_to_user, str(test_user.id), {'visible': 'authorized general channel'}
+                functools.partial(
+                    socket_sessions.send_to_user,
+                    str(test_user.id),
+                    {'visible': 'authorized general channel'},
+                    company_id=1,
+                )
             )
             assert_policy_close(specific)
             assert json.loads(receive_message(general)['text'])['data']['visible'] == 'authorized general channel'

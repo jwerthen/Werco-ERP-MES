@@ -12,6 +12,7 @@ import ast
 import asyncio
 import functools
 import inspect
+import json
 import logging
 from pathlib import Path
 
@@ -20,6 +21,7 @@ import pytest
 
 from app.core import realtime
 from app.core import websocket as ws_module
+from app.core.config import settings
 from app.core.realtime import safe_broadcast
 from app.core.websocket import (
     ConnectionManager,
@@ -147,6 +149,35 @@ def test_connection_manager_has_no_all_tenant_fanout():
     global path, so it is gone; re-adding one must be a deliberate, explicitly named
     method for tenant-free messages -- this tripwire makes that a visible decision."""
     assert not hasattr(ConnectionManager, "broadcast")
+
+
+def test_send_to_user_requires_a_company():
+    """A user is not a tenant boundary: a platform principal holds one socket per company
+    it has switched into. ``send_to_user`` must therefore name the company, keyword-only
+    with no default, like the ``broadcast_*`` helpers -- never "every socket this user has"."""
+    param = inspect.signature(ConnectionManager.send_to_user).parameters["company_id"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is inspect.Parameter.empty
+
+
+async def test_send_to_user_stays_inside_the_named_company(caplog):
+    manager = ConnectionManager()
+    in_company_a = await _connect(manager, user_id="1", company_id=10)
+    in_company_b = await _connect(manager, user_id="1", company_id=20)  # same platform user, switched
+
+    await manager.send_to_user("1", {"event": "for-a"}, company_id=10)
+
+    assert len(in_company_a.sent) == 1
+    assert in_company_b.sent == []
+
+    with caplog.at_level(logging.WARNING, logger="app.core.websocket"):
+        await manager.send_to_user("1", {"event": "nowhere", "note": "tenant-a-secret"}, company_id=None)
+    assert len(in_company_a.sent) == 1 and in_company_b.sent == []
+    assert any("no company_id" in r.getMessage() for r in caplog.records)
+    assert not any("tenant-a-secret" in r.getMessage() for r in caplog.records)
+
+    with pytest.raises(TypeError):
+        await manager.send_to_user("1", {"event": "x"})  # type: ignore[call-arg]
 
 
 async def test_safe_broadcast_carries_company_id_into_the_helper(monkeypatch):
@@ -314,6 +345,153 @@ async def test_cancelled_broadcast_is_released_quietly(caplog):
     assert _in_flight_on_this_loop() == []
     assert loop_errors == []
     assert [r for r in caplog.records if r.name == "app.core.realtime"] == []
+
+
+# --- Delivery is serialized, bounded and switchable ---------------------------------------
+#
+# Each delivery revalidates every recipient socket through ``run_in_threadpool`` and a
+# fresh ``SessionLocal`` -- the same worker-thread limiter and connection pool every
+# request uses. One write can schedule dozens of broadcasts; run concurrently they would
+# compete with unrelated requests for both. Realtime must hold at most one at a time.
+
+
+async def _connect_checked(manager: ConnectionManager, authorize, *, user_id: str, company_id: int) -> FakeSocket:
+    sock = FakeSocket()
+    await manager.connect(sock, user_id=user_id, company_id=company_id, authorize=authorize)
+    return sock
+
+
+class ConcurrencyProbe:
+    """A stand-in recipient check that records how many run at the same time."""
+
+    def __init__(self) -> None:
+        self.active = 0
+        self.peak = 0
+        self.calls = 0
+
+    async def __call__(self) -> bool:
+        self.active += 1
+        self.calls += 1
+        self.peak = max(self.peak, self.active)
+        await asyncio.sleep(0.001)
+        self.active -= 1
+        return True
+
+
+async def test_burst_from_sync_routes_runs_one_recipient_check_at_a_time(monkeypatch):
+    """Fifty writes broadcast at once from fifty worker threads (fifty sync requests): the
+    recipient checks -- each a worker-thread token plus a pooled connection in production
+    -- must never overlap, and every broadcast must still be delivered."""
+    manager = ConnectionManager()
+    monkeypatch.setattr(ws_module, "manager", manager)
+    probe = ConcurrencyProbe()
+    sockets = [await _connect_checked(manager, probe, user_id=str(n), company_id=10) for n in range(3)]
+    other_tenant = await _connect_checked(manager, probe, user_id="99", company_id=20)
+
+    async with anyio.create_task_group() as group:
+        for n in range(50):
+            group.start_soon(
+                anyio.to_thread.run_sync,
+                functools.partial(safe_broadcast, broadcast_dashboard_update, {"event": "e", "n": n}, company_id=10),
+            )
+    await drain_broadcasts()
+
+    assert probe.peak == 1
+    assert probe.calls == 50 * len(sockets)
+    for sock in sockets:
+        assert sorted(json.loads(m)["data"]["n"] for m in sock.sent) == list(range(50))
+    assert other_tenant.sent == []
+
+
+async def test_each_socket_receives_events_in_broadcast_order(monkeypatch):
+    """Serialized delivery keeps call order per socket: the lock wakes waiters first-come,
+    first-served, so a later event can never overtake an earlier one."""
+    manager = ConnectionManager()
+    monkeypatch.setattr(ws_module, "manager", manager)
+    probe = ConcurrencyProbe()
+    sockets = [await _connect_checked(manager, probe, user_id=str(n), company_id=10) for n in range(2)]
+
+    for n in range(30):
+        safe_broadcast(broadcast_work_order_update, n, {"event": "e"}, company_id=10)
+    await drain_broadcasts()
+
+    assert probe.peak == 1
+    for sock in sockets:
+        assert [json.loads(m)["data"]["work_order_id"] for m in sock.sent] == list(range(30))
+
+
+async def test_backlog_past_the_cap_is_dropped_with_a_warning(monkeypatch, caplog):
+    """Serialized delivery queues; the queue is bounded. Past the cap a new broadcast is
+    dropped and logged -- by name, never by payload -- rather than growing without limit."""
+    monkeypatch.setattr(realtime, "MAX_PENDING_BROADCASTS", 3)
+    release = asyncio.Event()
+    delivered: list = []
+
+    async def held_helper(message, *, company_id):
+        await release.wait()
+        delivered.append(message["n"])
+
+    with caplog.at_level(logging.WARNING, logger="app.core.realtime"):
+        for n in range(5):
+            safe_broadcast(held_helper, {"n": n, "note": "tenant-a-secret"}, company_id=10)
+
+    assert len(_in_flight_on_this_loop()) == 3
+    dropped = [r for r in caplog.records if "dropped" in r.getMessage()]
+    assert len(dropped) == 2
+    assert all("held_helper" in r.getMessage() for r in dropped)
+    assert not any("tenant-a-secret" in r.getMessage() for r in caplog.records)
+
+    release.set()
+    await drain_broadcasts()
+    assert delivered == [0, 1, 2]
+
+
+async def test_kill_switch_schedules_nothing(monkeypatch):
+    """``REALTIME_BROADCAST_ENABLED=false`` turns every push off, from sync and async routes
+    alike -- nothing is queued, nothing reaches a socket."""
+    manager = ConnectionManager()
+    monkeypatch.setattr(ws_module, "manager", manager)
+    sock = await _connect(manager, user_id="1", company_id=10)
+    monkeypatch.setattr(settings, "REALTIME_BROADCAST_ENABLED", False)
+
+    safe_broadcast(broadcast_dashboard_update, {"event": "x"}, company_id=10)
+    await anyio.to_thread.run_sync(
+        functools.partial(safe_broadcast, broadcast_dashboard_update, {"event": "y"}, company_id=10)
+    )
+
+    assert _in_flight_on_this_loop() == []
+    await drain_broadcasts()
+    assert sock.sent == []
+
+    monkeypatch.setattr(settings, "REALTIME_BROADCAST_ENABLED", True)
+    safe_broadcast(broadcast_dashboard_update, {"event": "z"}, company_id=10)
+    await drain_broadcasts()
+    assert len(sock.sent) == 1
+
+
+class StalledSocket(FakeSocket):
+    """A client that has stopped reading: ``send_text`` never completes."""
+
+    async def send_text(self, message: str) -> None:
+        await asyncio.Event().wait()
+
+
+async def test_stalled_socket_does_not_hold_up_the_others(monkeypatch):
+    """Delivery is one-at-a-time, so a socket whose send never completes would freeze every
+    other socket's events behind it. The send is bounded; the stalled socket is dropped
+    from delivery and the rest are served."""
+    monkeypatch.setattr(ws_module, "WS_SEND_TIMEOUT_SECONDS", 0.05)
+    manager = ConnectionManager()
+    stalled = StalledSocket()
+    await manager.connect(stalled, user_id="1", company_id=10)
+    healthy = await _connect(manager, user_id="2", company_id=10)
+
+    with anyio.fail_after(2):
+        await manager.broadcast_to_company(10, {"event": "ping"})
+
+    assert len(healthy.sent) == 1
+    assert stalled not in manager.connection_company
+    assert manager.company_connections.get(10) == [healthy]
 
 
 async def test_disconnect_cleans_up_company_registry():
