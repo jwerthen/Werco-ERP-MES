@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -8,8 +8,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
+from app.core.time_utils import CENTRAL_TIME_ZONE, ensure_utc
 from app.db.database import get_db
 from app.db.tenant_filter import tenant_query
+from app.models.audit_log import AuditLog
 from app.models.calibration import CalibrationRecord, CalibrationStatus, Equipment
 from app.models.user import User, UserRole
 from app.services.audit_service import AuditService, AuditWriteError
@@ -32,9 +34,10 @@ CALIBRATION_RESULTS = ("pass", "adjusted", "fail")
 PASSING_RESULTS = frozenset({"pass", "adjusted"})
 
 # The only statuses ``PUT /equipment/{id}`` may set. They take a gauge OUT of
-# service. ACTIVE is reachable only through a passing calibration record, and
+# service. A gauge returns to ACTIVE only through a passing calibration record, and
 # DUE / OVERDUE are derived from dates, so hand-setting any of the three is refused.
 MANUAL_EQUIPMENT_STATUSES = frozenset({CalibrationStatus.OUT_OF_SERVICE, CalibrationStatus.RETIRED})
+_OUT_OF_SERVICE_VALUES = frozenset({CalibrationStatus.OUT_OF_SERVICE.value, CalibrationStatus.RETIRED.value})
 
 # Fields ``PUT /equipment/{id}`` may write, applied explicitly (never a blind setattr
 # over the request body).
@@ -56,6 +59,25 @@ _AUDIT_UNAVAILABLE = "Unable to save audit record. No changes were committed."
 
 def _normalize_lower(value: Any) -> Any:
     return value.strip().lower() if isinstance(value, str) else value
+
+
+def _latest_calendar_today() -> date:
+    """The latest date that is "today" for any caller: the later of the server's local and UTC dates.
+
+    The page sends the Central calendar date, which is never ahead of the UTC date, so bounding a
+    calibration date by this never refuses a real same-day entry whatever the server's timezone.
+    """
+    return max(date.today(), datetime.now(timezone.utc).date())
+
+
+def _central_date(value: Optional[datetime]) -> Optional[date]:
+    """The shop-local (Central) calendar date of a stored UTC instant.
+
+    ``calibration_date`` is a calendar date a person enters in Central time, so an instant it is
+    compared with has to be read on the same calendar.
+    """
+    utc = ensure_utc(value)
+    return utc.astimezone(CENTRAL_TIME_ZONE).date() if utc else None
 
 
 class EquipmentCreate(BaseModel):
@@ -113,12 +135,25 @@ class CalibrationRecordCreate(BaseModel):
     performed_by: Optional[str] = None
     calibration_provider: Optional[str] = None
     certificate_number: Optional[str] = None
-    result: str = "pass"
+    # REQUIRED, no default. A default is never run through the validator below, so
+    # ``result: str = "pass"`` turned an omitted field into a certified gauge -- an outcome
+    # nobody stated. Every caller must name the result (the page always does).
+    result: str
     as_found: Optional[str] = None
     as_left: Optional[str] = None
     standards_used: Optional[str] = None
     cost: float = 0.0
     notes: Optional[str] = None
+
+    @field_validator("calibration_date")
+    @classmethod
+    def _refuse_future_date(cls, value: date) -> date:
+        # A calibration cannot have been performed in the future. Unbounded, a year typo on a
+        # certificate certified the gauge a year too long AND, as the newest record on file,
+        # outranked a genuine fail recorded today -- leaving a failed gauge ACTIVE.
+        if value > _latest_calendar_today():
+            raise ValueError("calibration_date cannot be in the future")
+        return value
 
     @field_validator("result", mode="before")
     @classmethod
@@ -172,8 +207,9 @@ class CalibrationRecordedResponse(CalibrationRecordResponse):
     """``POST /equipment/{id}/calibrate`` response: the record plus what it did to the gauge.
 
     ``applied_to_equipment`` is False when the record was filed as history only -- the
-    gauge is RETIRED, or the record is dated before a calibration already on file -- so
-    a caller can tell "filed" from "filed and the gauge's state moved".
+    gauge is RETIRED, the record is dated before a calibration already on file, or it is a
+    pass dated before the gauge was taken out of service by hand -- so a caller can tell
+    "filed" from "filed and the gauge's state moved".
     """
 
     equipment_status: str
@@ -181,7 +217,14 @@ class CalibrationRecordedResponse(CalibrationRecordResponse):
 
 
 def update_equipment_status(equipment: Equipment):
-    """Update equipment status based on calibration dates"""
+    """Recompute a gauge's date-driven status (ACTIVE / DUE / OVERDUE) from its due date.
+
+    No live caller today. OUT_OF_SERVICE and RETIRED are deliberate states set by a person or a
+    failed calibration and are never recomputed: a date sweep must not put a pulled gauge back
+    in service.
+    """
+    if equipment.status in MANUAL_EQUIPMENT_STATUSES:
+        return
     if not equipment.next_calibration_date:
         return
 
@@ -200,16 +243,66 @@ def _status_value(status: Any) -> Optional[str]:
     return status.value if hasattr(status, "value") else status
 
 
-def _equipment_or_404(db: Session, equipment_id: int, company_id: int) -> Equipment:
+def _equipment_or_404(db: Session, equipment_id: int, company_id: int, *, for_update: bool = False) -> Equipment:
     """Resolve a gauge inside the caller's tenant, or a flat 404.
 
     A foreign gauge must be indistinguishable from a nonexistent one, so the status
     code cannot be used as an existence oracle over another tenant's equipment.
+
+    ``for_update`` row-locks the gauge (``FOR UPDATE OF equipment`` on Postgres; a no-op on
+    SQLite) for the write verbs: ``Equipment`` has no ``version`` column, and two calibrations
+    posted together would otherwise both read the same "newest record on file".
     """
-    equipment = tenant_query(db, Equipment, company_id).filter(Equipment.id == equipment_id).first()
+    query = tenant_query(db, Equipment, company_id).filter(Equipment.id == equipment_id)
+    if for_update:
+        query = query.with_for_update(of=Equipment)
+    equipment = query.first()
     if not equipment:
         raise HTTPException(status_code=404, detail="Equipment not found")
     return equipment
+
+
+def _manual_pull_floor(db: Session, equipment: Equipment, company_id: int) -> Optional[date]:
+    """The earliest calibration date a PASS may carry and still put this OUT_OF_SERVICE gauge back.
+
+    A person can take a gauge out of service by hand (``PUT`` -> ``out_of_service``: it was
+    dropped, it is suspect) without writing a calibration record, so "newest record on file"
+    alone let a stale certificate -- dated after the last record but BEFORE the pull -- re-certify
+    the very gauge someone just quarantined. The floor is the Central date of the newest manual
+    pull in the gauge's current out-of-service episode, read from its ``STATUS_CHANGE`` audit
+    rows (no migration: the audit row IS the record of who pulled it and when).
+
+    * Rows written by ``calibrate`` (they carry ``calibration_record_id``) are skipped: a
+      failed calibration is already ordered by its record date via the newest-on-file rule.
+    * The walk stops at the first row that put the gauge back in service -- a pull that a later
+      passing calibration resolved does not constrain the next one.
+    * No status evidence that explains the current state (legacy rows from before this router
+      was audited) falls back to ``updated_at``, which can only be later than the real pull, so
+      it can only refuse more, never less.
+
+    Returns ``None`` when no manual pull bounds the gauge.
+    """
+    rows = (
+        tenant_query(db, AuditLog, company_id)
+        .filter(
+            AuditLog.resource_type == "equipment",
+            AuditLog.resource_id == equipment.id,
+            AuditLog.action == "STATUS_CHANGE",
+        )
+        .order_by(AuditLog.id.desc())
+        .all()
+    )
+    current = _status_value(equipment.status)
+    if not rows or (rows[0].new_values or {}).get("status") != current:
+        return _central_date(equipment.updated_at)
+    for row in rows:
+        new_status = (row.new_values or {}).get("status")
+        if new_status not in _OUT_OF_SERVICE_VALUES:
+            return None
+        extra = row.extra_data if isinstance(row.extra_data, dict) else {}
+        if "calibration_record_id" not in extra:
+            return _central_date(row.timestamp)
+    return None
 
 
 def _equipment_response(equipment: Equipment) -> EquipmentResponse:
@@ -392,11 +485,15 @@ def update_equipment(
     """Update equipment. **Role: ADMIN / MANAGER / QUALITY.**
 
     ``status`` may only take a gauge OUT of service (``out_of_service`` / ``retired``).
-    Putting one INTO service is **409**: ACTIVE is reached only through a passing
-    ``POST /equipment/{id}/calibrate``, so a gauge can never be re-certified without a
+    Putting one back INTO service is **409**: a gauge returns to ACTIVE only through a
+    passing ``POST /equipment/{id}/calibrate``, so it can never be re-certified without a
     calibration record. Re-sending the gauge's current status is a no-op, not a refusal.
+
+    A status change is the start of the AS9100D 7.1.5.2 suspect-product window, so its
+    ``STATUS_CHANGE`` audit row is REQUIRED evidence: if it cannot be written, nothing is
+    saved (**503**). It is also what a later backdated pass is measured against.
     """
-    equipment = _equipment_or_404(db, equipment_id, company_id)
+    equipment = _equipment_or_404(db, equipment_id, company_id, for_update=True)
 
     update_data = equipment_in.model_dump(exclude_unset=True)
     old_status = equipment.status
@@ -412,29 +509,41 @@ def update_equipment(
         )
 
     old_values = {field: getattr(equipment, field) for field in _EQUIPMENT_EDITABLE_FIELDS}
-    for field in _EQUIPMENT_EDITABLE_FIELDS:
-        if field in update_data:
-            setattr(equipment, field, update_data[field])
-    if status_changes:
-        equipment.status = new_status
+    try:
+        for field in _EQUIPMENT_EDITABLE_FIELDS:
+            if field in update_data:
+                setattr(equipment, field, update_data[field])
+        if status_changes:
+            equipment.status = new_status
 
-    db.flush()
-    audit.log_update(
-        "equipment",
-        equipment.id,
-        equipment.equipment_id,
-        old_values=old_values,
-        new_values={field: getattr(equipment, field) for field in _EQUIPMENT_EDITABLE_FIELDS},
-    )
-    if status_changes:
-        audit.log_status_change(
+        db.flush()
+        audit.log_update(
             "equipment",
             equipment.id,
             equipment.equipment_id,
-            old_status=_status_value(old_status),
-            new_status=_status_value(new_status),
+            old_values=old_values,
+            new_values={field: getattr(equipment, field) for field in _EQUIPMENT_EDITABLE_FIELDS},
         )
-    db.commit()
+        if status_changes:
+            audit.log_required(
+                "STATUS_CHANGE",
+                "equipment",
+                resource_id=equipment.id,
+                resource_identifier=equipment.equipment_id,
+                description=(
+                    f"Changed equipment status: {equipment.equipment_id} from '{_status_value(old_status)}' "
+                    f"to '{_status_value(new_status)}' by hand"
+                ),
+                old_values={"status": _status_value(old_status)},
+                new_values={"status": _status_value(new_status)},
+            )
+        db.commit()
+    except AuditWriteError as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail=_AUDIT_UNAVAILABLE) from exc
+    except Exception:
+        db.rollback()
+        raise
     db.refresh(equipment)
 
     return _equipment_response(equipment)
@@ -459,14 +568,22 @@ def record_calibration(
       never extends the gauge's certification. The record's own ``due_date`` is the
       calibration date: the gauge is due for recalibration now.
 
+    ``result`` is required and ``calibration_date`` cannot be in the future (**422**).
+
     The record is ALWAYS filed, but it moves the gauge only when it is the newest
     calibration on file (a backdated certificate is history: entering an old pass
     must not re-certify a gauge that has failed since) and the gauge is not RETIRED.
+    A PASS also cannot lift a gauge a person took out of service by hand unless it is
+    dated on or after that pull (``_manual_pull_floor``): a stale certificate must not
+    re-certify a gauge someone just quarantined.
+
+    The gauge row is locked for the whole decision, so two calibrations posted together
+    are ordered rather than both reading the same "newest on file".
 
     The record and its audit rows commit atomically; if the audit evidence cannot be
     written nothing is saved (**503**). This is the AS9100D 7.1.5.2 quality record.
     """
-    equipment = _equipment_or_404(db, equipment_id, company_id)
+    equipment = _equipment_or_404(db, equipment_id, company_id, for_update=True)
     result = record_in.result
     passed = result in PASSING_RESULTS
 
@@ -483,6 +600,9 @@ def record_calibration(
     )
     is_newest = newest_on_file is None or record_in.calibration_date >= newest_on_file
     applies = is_newest and equipment.status != CalibrationStatus.RETIRED
+    if applies and passed and equipment.status == CalibrationStatus.OUT_OF_SERVICE:
+        floor = _manual_pull_floor(db, equipment, company_id)
+        applies = floor is None or record_in.calibration_date >= floor
 
     old_status = equipment.status
     record = CalibrationRecord(

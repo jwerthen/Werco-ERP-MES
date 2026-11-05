@@ -4913,10 +4913,10 @@ uploads go through text extraction + LLM. See
 | GET | `/tool-management/tools/{id}` | Tool detail | Yes |
 | GET | `/tool-management/tools/{id}/history` | Checkout ledger and usage log | Yes |
 | POST | `/tool-management/tools/` | Create a tool | Admin / Manager / Supervisor |
-| PUT | `/tool-management/tools/{id}` | Edit a tool (`in_use` rules below) | Admin / Manager / Supervisor |
-| DELETE | `/tool-management/tools/{id}` | **Retire** (status → `retired`, `is_active` → `false`; the row, ledger and usage history are kept) | Admin / Manager / Supervisor |
+| PUT | `/tool-management/tools/{id}` | Edit a tool (`in_use` / `retired` rules below) | Admin / Manager / Supervisor |
+| DELETE | `/tool-management/tools/{id}` | **Retire** (status → `retired`, `is_active` → `false`; the row, ledger and usage history are kept). Already retired and inactive → no-op, no second audit row | Admin / Manager / Supervisor |
 | POST | `/tool-management/tools/{id}/checkout` | Check out (→ `in_use`); 400 if already out or `retired` / `lost` / `damaged` | Any role except Viewer |
-| POST | `/tool-management/tools/{id}/checkin` | Check in: `condition_in` `damaged` → `damaged`, `needs_maintenance` → `maintenance`, anything else → `available` | Any role except Viewer |
+| POST | `/tool-management/tools/{id}/checkin` | Check in: `condition_in` (alias `condition`) `good` / `worn` → `available`, `damaged` → `damaged`, `needs_maintenance` / `needs_repair` → `maintenance`; any other word **422** | Any role except Viewer |
 | POST | `/tool-management/tools/{id}/log-usage` | Add `usage_hours` / `usage_cycles` to the tool's life totals | Any role except Viewer |
 
 > ⚠️ **Checkout and log-usage were returning 500 on every call.** `ToolCheckout` and `ToolUsageLog`
@@ -4947,9 +4947,16 @@ uploads go through text extraction + LLM. See
 > carrying the tool's new life totals.
 
 > **`in_use` is entered only by checkout and left only by checkin**, so the checkout ledger and the
-> tool's status cannot drift apart. `PUT` with `status: in_use` is **409** (use checkout), changing
-> the status of a checked-out tool is **409** (check it in first), and retiring a checked-out tool is
-> **409**. `PUT` applies an explicit field allowlist rather than a blind `setattr` over the body. An
+> tool's status cannot drift apart. `PUT` with `status: in_use` is **409** (use checkout); changing
+> the status **or `is_active`** of a checked-out tool is **409** (check it in first — hiding a
+> checked-out tool would drop it off `/checked-out` and strand its open checkout); and retiring a
+> checked-out tool is **409**. **Retirement has one door:** `PUT` with `status: retired` is **409**
+> naming `DELETE /tools/{id}`, because a `PUT` retire left `is_active` true and the "retired" tool on
+> every active list. Every refusal is raised before any field is written. Every write verb (`PUT`,
+> `DELETE`, checkout, checkin, log-usage) row-locks the tool (`SELECT … FOR UPDATE OF tools` on
+> Postgres) before reading its state, so two simultaneous checkouts cannot both see `available` and
+> leave two open ledger rows, and two usage logs cannot lose an increment. `PUT` applies an explicit
+> field allowlist rather than a blind `setattr` over the body. An
 > unknown `status` or `tool_type` (previously a 500) and an explicit `null` on `name`, `tool_type`,
 > `status` or `is_active` are **422**. `usage_hours` / `usage_cycles` below 0 are **422** — a
 > negative entry would rewind a tool's life and hide it from replacement-due — and
@@ -4957,13 +4964,19 @@ uploads go through text extraction + LLM. See
 > **400** `"Tool ID already exists"` instead of a 500: `tools.tool_id` still carries a global unique
 > constraint (see Calibration → `equipment_id` codes).
 
-> ⚠️ **The Tool Management page does not match this contract (pre-existing, not fixed here).**
-> `ToolManagement.tsx` sends `tool_number` / `max_uses` / `checked_out_to`, so creating a tool from
-> the page is a **422** (missing `tool_id`). Check-in sends `condition` (`good` / `worn` / `damaged` /
-> `needs_repair`) where the API reads `condition_in`, so a tool reported damaged at check-in is
-> recorded as `good`, returned to `available`, and the new audit row records exactly that. The page
-> also shows its write controls to a Viewer, who now gets a 403. Fixing the contract is a separate
-> change.
+> **Check-in records the condition the person picked.** The Tool Management page sends `condition`
+> (`good` / `worn` / `damaged` / `needs_repair`) where the API read only `condition_in`, defaulted to
+> `good`; so once checkout started saving, a tool reported **damaged** would have gone back to
+> `available` with an audit row saying `condition_in: good`. The API now accepts `condition` as an
+> alias, takes a closed vocabulary (trimmed, case-insensitive), stores the word as given on the
+> checkout row and in the audit row's `extra_data`, and refuses anything else with **422** — the tool
+> stays checked out and nothing is written. An omitted condition still means `good`.
+>
+> ⚠️ **The rest of the page's contract still does not match (pre-existing, not fixed here).**
+> `ToolManagement.tsx` sends `tool_number` / `max_uses` on create, so creating a tool from the page is
+> a **422** (missing `tool_id`). Checkout sends `checked_out_to`, which the API ignores: custody is
+> recorded against the signed-in user who performed the checkout. The page also shows its write
+> controls to a Viewer, who now gets a 403. Fixing those is a separate change.
 
 ### Routing
 
@@ -6816,9 +6829,18 @@ those two fields is what the check is worth.
 > | `pass`, `adjusted` | `active` | calibration date / calibration date + `calibration_interval_days` | calibration date + interval |
 > | `fail` | `out_of_service` | unchanged — a failed calibration never extends certification | calibration date (due now) |
 >
-> `result` is trimmed and matched case-insensitively (`" Fail "` is `fail`); any other word is **422**
-> with nothing written, so an unrecognised result is never read as either outcome. `adjusted` means
-> the gauge was brought back into tolerance and certified as-left.
+> `result` is **required** — omitting it is **422** with nothing written. (It used to default to
+> `pass`, and a default never reaches the validator, so a request that named no outcome — an API or
+> MCP caller leaving the field out — certified the gauge.) It is trimmed and matched
+> case-insensitively (`" Fail "` is `fail`); any other word is **422** with nothing written, so an
+> unrecognised or missing result is never read as either outcome. `adjusted` means the gauge was
+> brought back into tolerance and certified as-left.
+>
+> **`calibration_date` cannot be in the future** — **422** with nothing written. The bound is the
+> later of the server's local and UTC dates, so the Central "today" the Calibration page sends is
+> never refused. Unbounded, a future-dated pass (a year typo on a certificate) certified the gauge a
+> year too long and, as the newest record on file, outranked a genuine `fail` recorded today —
+> leaving the failed gauge `active` and passing the gauge check.
 >
 > **A record is always filed, but it moves the gauge only when it is the newest on file and the
 > gauge is not `retired`.** A record dated before the latest calibration already on file (a backdated
@@ -6828,6 +6850,23 @@ those two fields is what the check is worth.
 > `equipment_status` and `applied_to_equipment` (`false` when the record was filed as history only),
 > so a caller can tell "filed" from "filed and the gauge moved".
 >
+> **A pass cannot lift a hand pull it predates.** Taking a gauge out of service with `PUT` (it was
+> dropped, it is suspect) writes no calibration record, so "newest on file" alone would let a stale
+> certificate — dated after the last record but *before* the pull — re-certify the gauge someone had
+> just quarantined. While a gauge is `out_of_service`, a `pass` / `adjusted` record applies only if
+> its `calibration_date` is **on or after** the Central date of the newest hand pull in the current
+> out-of-service episode; otherwise it is filed as history (`applied_to_equipment: false`). The pull
+> date comes from the gauge's `equipment` `STATUS_CHANGE` audit rows (no new column): rows written by
+> a failed calibration are skipped, since a fail is already ordered by its own record date, and a pull
+> that a later passing calibration resolved does not count. A gauge that is out of service with no
+> status evidence explaining it (set before this router was audited) uses its `updated_at` instead —
+> never earlier than the real pull, so it can only refuse more. Date granularity means a certificate
+> dated the same day as the pull is accepted.
+>
+> **Writes are serialized per gauge.** `calibrate` and `PUT` row-lock the gauge
+> (`SELECT … FOR UPDATE OF equipment` on Postgres) before deciding anything, so two calibrations
+> posted together are ordered rather than both reading the same "newest on file".
+>
 > **The evidence is fail-closed.** The record, its `CREATE` audit row (resource type `calibration`:
 > result, dates, certificate, performer, provider, as-found / as-left, `applied_to_equipment`) and,
 > when the status moved, an `equipment` `STATUS_CHANGE` row commit in one transaction through
@@ -6835,18 +6874,12 @@ those two fields is what the check is worth.
 > **503** (`"Unable to save audit record. No changes were committed."`). This is the AS9100D 7.1.5.2
 > calibration record.
 
-> ⚠️ **Known defect — a future-dated record can mask a real failure.** `calibration_date` is not
-> bounded to today. A pass entered with a future date (a year typo on a certificate) becomes the
-> newest record on file, so a genuine `fail` recorded today is filed as history and the gauge **stays
-> `active` and passes the gauge check**. Pinned by a strict `xfail` in
-> `backend/tests/api/test_calibration_integrity.py`; not fixed yet. Until it is, a `fail` that comes
-> back with `applied_to_equipment: false` has **not** taken the gauge out of service — do that with
-> `PUT /calibration/equipment/{id}` → `out_of_service`.
-
 > **`PUT /calibration/equipment/{id}` can take a gauge out of service but never put one back.**
 > `status` accepts `out_of_service` or `retired`. Setting `active`, `due` or `overdue` is **409**,
-> naming `POST /calibration/equipment/{id}/calibrate`: `active` is reached only through a passing
-> calibration record, and `due` / `overdue` are derived from dates. Re-sending the gauge's current
+> naming `POST /calibration/equipment/{id}/calibrate`: a gauge returns to `active` only through a
+> passing calibration record, and `due` / `overdue` are derived from dates. (A newly registered gauge
+> is stored `active` with no due date; the gauge check refuses it until its first passing calibration
+> sets one.) Re-sending the gauge's current
 > status is a no-op, not a refusal. A retired gauge comes back only by `PUT` → `out_of_service` and
 > then a passing calibration. Before this change `PUT` was a blind `setattr` over the body, so any
 > authenticated user could set `active` on an out-of-calibration gauge, and an unknown status word was
@@ -6854,8 +6887,11 @@ those two fields is what the check is worth.
 > `equipment_type`, `location`, `assigned_to`, `calibration_interval_days`, `calibration_provider`,
 > `is_active`, `notes`, plus `status`); `calibration_interval_days` is bounded `1…3650` on create and
 > update; an explicit `null` on `name`, `calibration_interval_days`, `is_active` or `status` is
-> **422**. `PUT` writes a `log_update` row (self-suppressed when nothing changed) plus a
-> `log_status_change` row when the status moved; `POST /calibration/equipment` writes a `log_create`.
+> **422**. `PUT` writes a `log_update` row (self-suppressed when nothing changed) plus, when the status
+> moved, a `STATUS_CHANGE` row that is **required evidence**: a hand pull starts the AS9100D 7.1.5.2
+> suspect-product window and is what a later backdated pass is measured against, so it is written
+> through `AuditService.log_required` and, if it cannot be saved, the whole edit rolls back with
+> **503**. A field-only edit is not gated on it. `POST /calibration/equipment` writes a `log_create`.
 > `is_active: false` hides a gauge from the lists but does **not** affect the gauge check, which reads
 > `status` and the due date only — take a gauge out of use with `status`, not `is_active`.
 
@@ -9037,13 +9073,16 @@ There is no delete endpoint.
 > column and `reported_by` is NOT NULL, so every event failed response validation: list, get and
 > active were 500s, and create, update and resolve were 500s *after* their change had committed.
 > `reporter.username`
-> and `resolver.username` are now optional and **always `null`**; the field stays only because the
-> page's TypeScript type declares it. Read `full_name`.
+> and `resolver.username` are now optional and **always `null`** (the page's TypeScript type now says
+> `username?: string | null`; nothing renders it). Read `full_name`.
 
 > **Tenancy: the work center and work order are validated, and a legacy cross-tenant link no longer
 > renders.** `work_center_id` and `work_order_id` on create and on `PUT` must belong to the active
 > company — a flat **404** (`"Work center not found"` / `"Work order not found"`), never 403 — and a
-> soft-deleted work order is refused the same way. The work center need not be active: downtime is
+> soft-deleted work order is refused the same way. On `PUT` only a reference that **changes** is
+> validated: re-sending the work order the event already names (a client that `PUT`s the whole object
+> back to fix `category`) is not a new selection, so it still saves after that job was soft-deleted —
+> the historical record keeps naming what it named (invariant 3). The work center need not be active: downtime is
 > what you record against a machine that is down. Unvalidated, the write doubled as a read, because
 > the response rendered the foreign machine's name straight back. A row written before this guard is
 > owned by the caller and passes every `company_id` filter, so event reads now load `work_center` /
@@ -9063,7 +9102,9 @@ There is no delete endpoint.
 > `downtime_event` `log_create` on create, `log_update` on `PUT`, and `log_status_change` (`active` →
 > `resolved`, with `end_time`, `duration_minutes` and `resolution` in `extra_data`) on resolve;
 > `downtime_reason_code` `log_create` / `log_update`. The `downtime_started` / `downtime_resolved`
-> operational events are unchanged. `PUT /downtime/{id}` applies an explicit allowlist
+> operational events are unchanged. `PUT` and resolve row-lock the event (`SELECT … FOR UPDATE OF
+> downtime_events` on Postgres), so two simultaneous resolves cannot both pass the "not yet resolved"
+> check. `PUT /downtime/{id}` applies an explicit allowlist
 > (`work_center_id`, `work_order_id`, `category`, `planned_type`, `reason_code`, `description`,
 > `resolution`) rather than a blind `setattr`; an explicit `null` on `work_center_id`, `category` or
 > `planned_type` (NOT NULL columns) is **422**. A reason-code edit onto a code the tenant already has

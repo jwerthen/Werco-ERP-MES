@@ -19,11 +19,13 @@ Every write case asserts the STORED rows and the audit-row count after the call,
 status code: a handler that refuses and mutates anyway would pass a status-only test.
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.orm import Session
+from sqlalchemy import update
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import Query, Session
 
 from app.models.audit_log import AuditLog
 from app.models.calibration import CalibrationRecord, CalibrationStatus, Equipment
@@ -588,15 +590,13 @@ class TestSameDayOrdering:
 
 
 class TestFutureDatedRecords:
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "DEFECT (reported, not fixed here): calibration_date is not bounded to today. A future-dated "
-            "pass becomes the 'newest record on file', so a real FAIL recorded today is filed as history and "
-            "the failed gauge stays ACTIVE and kiosk-usable. Fix by refusing calibration_date > today (422) "
-            "or by never letting a fail be outranked by a future date; then drop this marker."
-        ),
-    )
+    """``calibration_date`` cannot be in the future (422).
+
+    Unbounded, a future-dated pass (a year typo on a certificate) became the "newest record on
+    file", so a real FAIL recorded today was filed as history and the failed gauge stayed ACTIVE
+    and kiosk-usable. This class shipped as a strict xfail in the first pass of this change.
+    """
+
     def test_a_future_dated_record_cannot_mask_a_real_failure_today(self, client: TestClient, db_session: Session):
         gauge = make_gauge(db_session, status=CalibrationStatus.OUT_OF_SERVICE)
         headers = quality_headers(db_session)
@@ -617,6 +617,235 @@ class TestFutureDatedRecords:
         assert failed.status_code == 200, failed.text
         db_session.refresh(gauge)
         assert gauge.status == CalibrationStatus.OUT_OF_SERVICE
+
+    @pytest.mark.parametrize("days_ahead", [2, 365])
+    def test_a_future_calibration_date_is_422_and_writes_nothing(
+        self, client: TestClient, db_session: Session, days_ahead: int
+    ):
+        # +2, not +1: the bound is the later of the server's local and UTC dates, so on a
+        # Central machine in the evening "tomorrow" is legitimately still today in UTC.
+        gauge = make_gauge(db_session, status=CalibrationStatus.OUT_OF_SERVICE)
+        headers = quality_headers(db_session)
+        before = audit_count(db_session)
+
+        response = client.post(
+            calibrate_url(gauge.id),
+            json={"calibration_date": (date.today() + timedelta(days=days_ahead)).isoformat(), "result": "pass"},
+            headers=headers,
+        )
+
+        assert response.status_code == 422, response.text
+        assert "future" in response.text
+        assert record_count(db_session, gauge) == 0
+        assert audit_count(db_session) == before
+        db_session.refresh(gauge)
+        assert gauge.status == CalibrationStatus.OUT_OF_SERVICE
+        assert gauge.next_calibration_date is None
+
+
+class TestResultIsRequired:
+    def test_an_omitted_result_is_422_not_a_pass(self, client: TestClient, db_session: Session):
+        # ``result: str = "pass"`` never ran the validator on its default, so a request that
+        # named no outcome certified the gauge (200, ACTIVE, a year of due date).
+        gauge = make_gauge(db_session, status=CalibrationStatus.OUT_OF_SERVICE)
+        headers = quality_headers(db_session)
+        before = audit_count(db_session)
+
+        response = client.post(
+            calibrate_url(gauge.id), json={"calibration_date": date.today().isoformat()}, headers=headers
+        )
+
+        assert response.status_code == 422, response.text
+        assert "result" in response.text
+        assert record_count(db_session, gauge) == 0
+        assert audit_count(db_session) == before
+        db_session.refresh(gauge)
+        assert gauge.status == CalibrationStatus.OUT_OF_SERVICE
+        assert gauge.next_calibration_date is None
+
+
+class TestManualPullFloor:
+    """A pass dated before a hand pull (``PUT`` -> ``out_of_service``) cannot put the gauge back.
+
+    The pull writes no calibration record, so "newest record on file" alone let a stale
+    certificate -- dated after the last record but before the gauge was dropped -- re-certify it.
+    """
+
+    def _pull_by_hand(self, client: TestClient, gauge: Equipment, headers: dict) -> None:
+        pulled = client.put(f"{EQUIPMENT_URL}/{gauge.id}", json={"status": "out_of_service"}, headers=headers)
+        assert pulled.status_code == 200, pulled.text
+
+    def test_a_pass_dated_before_the_pull_is_filed_as_history(self, client: TestClient, db_session: Session):
+        last_cal = date.today() - timedelta(days=100)
+        next_cal = last_cal + timedelta(days=365)
+        gauge = make_gauge(db_session, last_cal=last_cal, next_cal=next_cal)
+        make_record(db_session, gauge, cal_date=last_cal)
+        headers = quality_headers(db_session)
+        self._pull_by_hand(client, gauge, headers)
+
+        response = client.post(
+            calibrate_url(gauge.id),
+            json={"calibration_date": (date.today() - timedelta(days=50)).isoformat(), "result": "pass"},
+            headers=headers,
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert (body["applied_to_equipment"], body["equipment_status"]) == (False, "out_of_service")
+        assert record_count(db_session, gauge) == 2  # filed, never discarded
+        db_session.refresh(gauge)
+        assert gauge.status == CalibrationStatus.OUT_OF_SERVICE
+        assert (gauge.last_calibration_date, gauge.next_calibration_date) == (last_cal, next_cal)
+
+    def test_a_pass_dated_on_the_day_of_the_pull_puts_the_gauge_back(self, client: TestClient, db_session: Session):
+        gauge = make_gauge(db_session, next_cal=date.today() + timedelta(days=200))
+        headers = quality_headers(db_session)
+        self._pull_by_hand(client, gauge, headers)
+
+        response = client.post(
+            calibrate_url(gauge.id),
+            json={"calibration_date": date.today().isoformat(), "result": "pass"},
+            headers=headers,
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["applied_to_equipment"] is True
+        db_session.refresh(gauge)
+        assert gauge.status == CalibrationStatus.ACTIVE
+        assert gauge.next_calibration_date == date.today() + timedelta(days=365)
+
+    def test_a_failed_calibration_sets_no_floor_beyond_its_own_record_date(
+        self, client: TestClient, db_session: Session
+    ):
+        # The floor reads only HAND pulls. Out of service because of a recorded FAIL dated 10 days
+        # ago (entered today), a recalibration dated 5 days ago is the newest record and must
+        # apply -- measuring it against the day the fail was ENTERED would strand the gauge.
+        gauge = make_gauge(db_session)
+        headers = quality_headers(db_session)
+        failed = client.post(
+            calibrate_url(gauge.id),
+            json={"calibration_date": (date.today() - timedelta(days=10)).isoformat(), "result": "fail"},
+            headers=headers,
+        )
+        assert failed.status_code == 200, failed.text
+        recal_date = date.today() - timedelta(days=5)
+
+        response = client.post(
+            calibrate_url(gauge.id),
+            json={"calibration_date": recal_date.isoformat(), "result": "pass"},
+            headers=headers,
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["applied_to_equipment"] is True
+        db_session.refresh(gauge)
+        assert gauge.status == CalibrationStatus.ACTIVE
+        assert gauge.next_calibration_date == recal_date + timedelta(days=365)
+
+    def test_an_unexplained_out_of_service_state_falls_back_to_the_last_modified_date(
+        self, client: TestClient, db_session: Session
+    ):
+        # Legacy: out of service with no status evidence at all (set before this router was
+        # audited). ``updated_at`` can only be later than the real pull, so it refuses more.
+        gauge = make_gauge(db_session, status=CalibrationStatus.OUT_OF_SERVICE)
+        db_session.execute(
+            update(Equipment).where(Equipment.id == gauge.id).values(updated_at=datetime.utcnow() - timedelta(days=10))
+        )
+        db_session.commit()
+        headers = quality_headers(db_session)
+
+        stale = client.post(
+            calibrate_url(gauge.id),
+            json={"calibration_date": (date.today() - timedelta(days=20)).isoformat(), "result": "pass"},
+            headers=headers,
+        )
+        fresh = client.post(
+            calibrate_url(gauge.id),
+            json={"calibration_date": (date.today() - timedelta(days=5)).isoformat(), "result": "pass"},
+            headers=headers,
+        )
+
+        assert (stale.status_code, fresh.status_code) == (200, 200)
+        assert stale.json()["applied_to_equipment"] is False
+        assert fresh.json()["applied_to_equipment"] is True
+        db_session.refresh(gauge)
+        assert gauge.status == CalibrationStatus.ACTIVE
+
+
+class TestManualStatusChangeEvidence:
+    def test_a_lost_status_change_row_rolls_the_whole_edit_back(
+        self, client: TestClient, db_session: Session, monkeypatch
+    ):
+        # Taking a gauge out of service by hand starts the 7.1.5.2 suspect-product window and is
+        # what the pull floor above reads, so its STATUS_CHANGE row is required evidence. The
+        # UPDATE row IS flushed before the failure, so the rollback has to take it too.
+        gauge = make_gauge(db_session, next_cal=date.today() + timedelta(days=200))
+        headers = quality_headers(db_session)
+        before = audit_count(db_session)
+        _fail_audit_on(monkeypatch, action="STATUS_CHANGE", resource_type="equipment")
+
+        response = client.put(
+            f"{EQUIPMENT_URL}/{gauge.id}",
+            json={"status": "out_of_service", "location": "Quarantine shelf"},
+            headers=headers,
+        )
+
+        assert response.status_code == 503, response.text
+        assert audit_count(db_session) == before
+        db_session.refresh(gauge)
+        assert gauge.status == CalibrationStatus.ACTIVE
+        assert gauge.location is None
+
+    def test_a_field_only_edit_is_not_gated_on_status_evidence(
+        self, client: TestClient, db_session: Session, monkeypatch
+    ):
+        gauge = make_gauge(db_session)
+        _fail_audit_on(monkeypatch, action="STATUS_CHANGE", resource_type="equipment")
+        response = client.put(
+            f"{EQUIPMENT_URL}/{gauge.id}", json={"location": "Crib"}, headers=quality_headers(db_session)
+        )
+        assert response.status_code == 200, response.text
+
+
+class TestCalibrationWritesLockTheGauge:
+    """Both write verbs row-lock the gauge before deciding anything.
+
+    ``Equipment`` has no ``version`` column: two calibrations posted together both read the same
+    "newest record on file". SQLite renders no ``FOR UPDATE``, so the lock is asserted on the
+    query the verb actually built, compiled for Postgres (CLAUDE.md: dialect-compile, never trust
+    SQLite to execute engine-specific SQL).
+    """
+
+    def _spy(self, monkeypatch) -> list:
+        built: list = []
+        original = Query.with_for_update
+
+        def spy(self, *args, **kwargs):
+            locked = original(self, *args, **kwargs)
+            built.append(locked)
+            return locked
+
+        monkeypatch.setattr(Query, "with_for_update", spy)
+        return built
+
+    @pytest.mark.parametrize("verb", ["calibrate", "put"])
+    def test_the_verb_locks_the_gauge_row(self, client: TestClient, db_session: Session, monkeypatch, verb: str):
+        gauge = make_gauge(db_session)
+        headers = quality_headers(db_session)
+        built = self._spy(monkeypatch)
+
+        if verb == "calibrate":
+            response = client.post(
+                calibrate_url(gauge.id),
+                json={"calibration_date": date.today().isoformat(), "result": "pass"},
+                headers=headers,
+            )
+        else:
+            response = client.put(f"{EQUIPMENT_URL}/{gauge.id}", json={"location": "Crib"}, headers=headers)
+
+        assert response.status_code == 200, response.text
+        compiled = [str(q.statement.compile(dialect=postgresql.dialect())) for q in built]
+        assert any("FROM equipment" in sql and "FOR UPDATE OF equipment" in sql for sql in compiled), compiled
 
 
 class TestEquipmentWritesAudited:

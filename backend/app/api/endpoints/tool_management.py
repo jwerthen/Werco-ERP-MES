@@ -2,7 +2,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -58,6 +58,18 @@ _TOOL_EDITABLE_FIELDS = (
     "is_active",
 )
 _TOOL_NON_NULLABLE_UPDATE_FIELDS = ("name", "tool_type", "status", "is_active")
+
+# What a check-in condition does to the tool. A closed vocabulary: an unknown word is a
+# 422, never silently read as "good". It covers both the API's own words and the ones the
+# Tool Management page offers (``worn`` / ``needs_repair``), so the condition a person
+# picked is the condition recorded -- on the checkout row and in the audit row.
+CHECKIN_CONDITION_STATUS = {
+    "good": ToolStatus.AVAILABLE,
+    "worn": ToolStatus.AVAILABLE,
+    "damaged": ToolStatus.DAMAGED,
+    "needs_maintenance": ToolStatus.MAINTENANCE,
+    "needs_repair": ToolStatus.MAINTENANCE,
+}
 
 
 def _normalize_lower(value: Any) -> Any:
@@ -133,8 +145,19 @@ class CheckoutRequest(BaseModel):
 
 
 class CheckinRequest(BaseModel):
-    condition_in: str = "good"
+    # ``condition`` is accepted as an alias because that is the key the Tool Management page
+    # sends. Before, the page's choice was dropped as an unknown key and every check-in --
+    # "damaged" included -- was recorded as ``good`` and returned the tool to AVAILABLE.
+    condition_in: str = Field("good", validation_alias=AliasChoices("condition_in", "condition"))
     notes: Optional[str] = None
+
+    @field_validator("condition_in", mode="before")
+    @classmethod
+    def _validate_condition(cls, value: Any) -> Any:
+        normalized = _normalize_lower(value)
+        if normalized not in CHECKIN_CONDITION_STATUS:
+            raise ValueError(f"condition_in must be one of: {', '.join(CHECKIN_CONDITION_STATUS)}")
+        return normalized
 
 
 class UsageLogRequest(BaseModel):
@@ -187,13 +210,21 @@ def _status_value(status: Any) -> Optional[str]:
     return status.value if hasattr(status, "value") else status
 
 
-def _tool_or_404(db: Session, tool_id: int, company_id: int) -> Tool:
+def _tool_or_404(db: Session, tool_id: int, company_id: int, *, for_update: bool = False) -> Tool:
     """Resolve a tool inside the caller's tenant, or a flat 404 (never 403).
 
     A foreign tool must be indistinguishable from a nonexistent one, so the status
     code cannot be used as an existence oracle over another tenant's crib.
+
+    ``for_update`` row-locks the tool (``FOR UPDATE OF tools`` on Postgres; a no-op on
+    SQLite) for the write verbs. ``Tool`` has no ``version`` column: without the lock two
+    simultaneous checkouts both read AVAILABLE and leave two open ledger rows, and two usage
+    logs lose one of their increments to ``current_life_hours``.
     """
-    tool = tenant_query(db, Tool, company_id).filter(Tool.id == tool_id).first()
+    query = tenant_query(db, Tool, company_id).filter(Tool.id == tool_id)
+    if for_update:
+        query = query.with_for_update(of=Tool)
+    tool = query.first()
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")
     return tool
@@ -495,10 +526,12 @@ def update_tool(
 
     ``in_use`` is entered only by ``POST /tools/{id}/checkout`` and left only by
     ``POST /tools/{id}/checkin``, so the checkout ledger and the tool's status cannot
-    drift apart: setting ``status: in_use`` here, or changing the status of a tool that
-    is checked out, is **409**.
+    drift apart: setting ``status: in_use`` here, or changing the status or ``is_active``
+    of a tool that is checked out, is **409**. Retirement has one door too:
+    ``status: retired`` here is **409** naming ``DELETE /tools/{id}``, which also clears
+    ``is_active`` and refuses a checked-out tool.
     """
-    tool = _tool_or_404(db, tool_id, company_id)
+    tool = _tool_or_404(db, tool_id, company_id, for_update=True)
 
     update_data = tool_in.model_dump(exclude_unset=True)
     old_status = tool.status
@@ -508,7 +541,12 @@ def update_tool(
         raise HTTPException(
             status_code=409, detail=f"A tool is marked in use only by checking it out: POST /tools/{tool.id}/checkout"
         )
-    if status_changes and old_status == ToolStatus.IN_USE:
+    if status_changes and new_status == ToolStatus.RETIRED:
+        raise HTTPException(status_code=409, detail=f"Retire a tool with DELETE /tools/{tool.id}")
+    active_changes = "is_active" in update_data and update_data["is_active"] != tool.is_active
+    if (status_changes or active_changes) and old_status == ToolStatus.IN_USE:
+        # Hiding a checked-out tool (``is_active: false``) drops it off ``/tools/checked-out``
+        # and strands its open checkout row -- the same drift the status rule prevents.
         raise HTTPException(
             status_code=409,
             detail=f"Tool {tool.tool_id} is checked out. Check it in first: POST /tools/{tool.id}/checkin",
@@ -551,14 +589,17 @@ def retire_tool(
 
     Not a delete: the row, its checkout ledger and usage history are kept; the tool
     moves to RETIRED and drops off the active lists. A checked-out tool is **409** --
-    check it in first, so no open checkout is left behind.
+    check it in first, so no open checkout is left behind. Retiring a tool that is
+    already retired (and inactive) is a no-op: no second audit row.
     """
-    tool = _tool_or_404(db, tool_id, company_id)
+    tool = _tool_or_404(db, tool_id, company_id, for_update=True)
     if tool.status == ToolStatus.IN_USE:
         raise HTTPException(
             status_code=409,
             detail=f"Tool {tool.tool_id} is checked out. Check it in first: POST /tools/{tool.id}/checkin",
         )
+    if tool.status == ToolStatus.RETIRED and not tool.is_active:
+        return {"message": f"Tool {tool.tool_id} is already retired"}
     old_status = tool.status
     old_active = tool.is_active
     tool.status = ToolStatus.RETIRED
@@ -590,7 +631,7 @@ def checkout_tool(
     audit: AuditService = Depends(get_audit_service),
 ):
     """Check out a tool. **Role: any tenant role except VIEWER.**"""
-    tool = _tool_or_404(db, tool_id, company_id)
+    tool = _tool_or_404(db, tool_id, company_id, for_update=True)
     if tool.status == ToolStatus.IN_USE:
         raise HTTPException(status_code=400, detail="Tool is already checked out")
     if tool.status in (ToolStatus.RETIRED, ToolStatus.LOST, ToolStatus.DAMAGED):
@@ -643,8 +684,13 @@ def checkin_tool(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Check in a tool. **Role: any tenant role except VIEWER.**"""
-    tool = _tool_or_404(db, tool_id, company_id)
+    """Check in a tool. **Role: any tenant role except VIEWER.**
+
+    ``condition_in`` (alias ``condition``) decides the tool's next status: ``good`` / ``worn``
+    → available, ``damaged`` → damaged, ``needs_maintenance`` / ``needs_repair`` →
+    maintenance. Any other word is **422**.
+    """
+    tool = _tool_or_404(db, tool_id, company_id, for_update=True)
     if tool.status != ToolStatus.IN_USE:
         raise HTTPException(status_code=400, detail="Tool is not currently checked out")
 
@@ -666,13 +712,7 @@ def checkin_tool(
             checkout.notes = (checkout.notes or "") + ("\n" if checkout.notes else "") + req.notes
 
     old_status = tool.status
-    # Update tool status based on condition
-    if req.condition_in == "damaged":
-        tool.status = ToolStatus.DAMAGED
-    elif req.condition_in == "needs_maintenance":
-        tool.status = ToolStatus.MAINTENANCE
-    else:
-        tool.status = ToolStatus.AVAILABLE
+    tool.status = CHECKIN_CONDITION_STATUS[req.condition_in]
 
     tool.current_user_id = None
     tool.current_work_center_id = None
@@ -704,7 +744,7 @@ def log_usage(
     audit: AuditService = Depends(get_audit_service),
 ):
     """Log usage hours/cycles for a tool. **Role: any tenant role except VIEWER.**"""
-    tool = _tool_or_404(db, tool_id, company_id)
+    tool = _tool_or_404(db, tool_id, company_id, for_update=True)
     _assert_refs_in_company(db, company_id, work_center_id=req.work_center_id, work_order_id=req.work_order_id)
 
     log = ToolUsageLog(

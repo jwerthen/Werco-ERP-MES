@@ -17,7 +17,8 @@ from datetime import date, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.orm import Session
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import Query, Session
 
 from app.models.audit_log import AuditLog
 from app.models.tool_management import Tool, ToolCheckout, ToolStatus, ToolUsageLog
@@ -212,7 +213,36 @@ class TestToolExplicitUpdate:
         assert tool.is_active is True
         assert audit_count(db_session) == before
 
-    def test_fields_outside_the_schema_are_never_written(self, client: TestClient, db_session: Session):
+    def test_a_refused_status_writes_none_of_the_fields_sent_with_it(self, client: TestClient, db_session: Session):
+        # Every refusal is raised before the first setattr: a 409 that renamed the tool anyway
+        # would pass a status-only assertion.
+        checked_out = make_tool(db_session, status=ToolStatus.IN_USE)
+        available = make_tool(db_session)
+        headers = headers_for(db_session, role=UserRole.MANAGER)
+        before = audit_count(db_session)
+        edits = {"name": "Renamed", "location": "Crib Z"}
+
+        for tool, extra in (
+            (checked_out, {"status": "available"}),
+            (checked_out, {"is_active": False}),
+            (available, {"status": "in_use"}),
+            (available, {"status": "retired"}),
+        ):
+            response = client.put(f"{TOOLS_URL}/{tool.id}", json={**edits, **extra}, headers=headers)
+            assert response.status_code == 409, (extra, response.text)
+
+        for tool, status in ((checked_out, ToolStatus.IN_USE), (available, ToolStatus.AVAILABLE)):
+            db_session.refresh(tool)
+            assert (tool.name, tool.location, tool.status, tool.is_active) == ("Shell mill", None, status, True)
+        assert audit_count(db_session) == before
+
+    def test_unknown_keys_are_ignored_forward_guard(self, client: TestClient, db_session: Session):
+        """Forward guard, not a regression test: it passes against the pre-allowlist code too.
+
+        Pydantic already drops keys ``ToolUpdate`` does not declare. What this pins is that
+        nothing outside ``_TOOL_EDITABLE_FIELDS`` is written if one of these columns is ever
+        added to ``ToolUpdate`` for another reason.
+        """
         tool = make_tool(db_session, max_life_hours=100, current_life_hours=40)
         response = client.put(
             f"{TOOLS_URL}/{tool.id}",
@@ -233,6 +263,148 @@ class TestToolExplicitUpdate:
             f"{TOOLS_URL}/{tool.id}", json=payload, headers=headers_for(db_session, role=UserRole.MANAGER)
         )
         assert response.status_code == 422
+
+    def test_put_cannot_hide_a_checked_out_tool(self, client: TestClient, db_session: Session):
+        # ``is_active: false`` on an IN_USE tool dropped it off /tools/checked-out and stranded its
+        # open checkout -- exactly what DELETE's 409 exists to prevent.
+        tool = make_tool(db_session, status=ToolStatus.IN_USE)
+        before = audit_count(db_session)
+        response = client.put(
+            f"{TOOLS_URL}/{tool.id}", json={"is_active": False}, headers=headers_for(db_session, role=UserRole.MANAGER)
+        )
+        assert response.status_code == 409, response.text
+        assert "checkin" in response.json()["detail"]
+        db_session.refresh(tool)
+        assert (tool.is_active, tool.status) == (True, ToolStatus.IN_USE)
+        assert audit_count(db_session) == before
+
+    def test_put_cannot_retire_a_tool_delete_is_the_one_door(self, client: TestClient, db_session: Session):
+        # PUT ``status: retired`` left ``is_active`` true, so the "retired" tool stayed on every
+        # active list and in the dashboard counts; DELETE clears both.
+        tool = make_tool(db_session)
+        before = audit_count(db_session)
+        response = client.put(
+            f"{TOOLS_URL}/{tool.id}", json={"status": "retired"}, headers=headers_for(db_session, role=UserRole.MANAGER)
+        )
+        assert response.status_code == 409, response.text
+        assert f"DELETE /tools/{tool.id}" in response.json()["detail"]
+        db_session.refresh(tool)
+        assert (tool.status, tool.is_active) == (ToolStatus.AVAILABLE, True)
+        assert audit_count(db_session) == before
+
+    def test_retiring_a_retired_tool_writes_no_second_row(self, client: TestClient, db_session: Session):
+        tool = make_tool(db_session)
+        headers = headers_for(db_session, role=UserRole.MANAGER)
+        assert client.delete(f"{TOOLS_URL}/{tool.id}", headers=headers).status_code == 200
+        after_first = audit_count(db_session)
+
+        again = client.delete(f"{TOOLS_URL}/{tool.id}", headers=headers)
+
+        assert again.status_code == 200, again.text
+        assert "already retired" in again.json()["message"]
+        assert audit_count(db_session) == after_first
+
+
+# ---------------------------------------------------------------------------
+# 2b. Check-in records the condition the person picked
+# ---------------------------------------------------------------------------
+
+
+class TestCheckinCondition:
+    """``condition_in`` (alias ``condition``, the page's key) is a closed vocabulary.
+
+    The page sends ``condition`` with ``good`` / ``worn`` / ``damaged`` / ``needs_repair``; the API
+    read only ``condition_in`` and defaulted it to ``good``. So a tool reported DAMAGED went back
+    to AVAILABLE -- and, once checkout saved, the new audit row said ``condition_in: good``.
+    """
+
+    def _checked_out(self, client: TestClient, db_session: Session, headers: dict) -> Tool:
+        tool = make_tool(db_session)
+        assert client.post(f"{TOOLS_URL}/{tool.id}/checkout", json={}, headers=headers).status_code == 200
+        return tool
+
+    @pytest.mark.parametrize(
+        "payload, expected_status, recorded",
+        [
+            ({"condition": "damaged"}, ToolStatus.DAMAGED, "damaged"),
+            ({"condition": "needs_repair"}, ToolStatus.MAINTENANCE, "needs_repair"),
+            ({"condition": "worn"}, ToolStatus.AVAILABLE, "worn"),
+            ({"condition": " Damaged "}, ToolStatus.DAMAGED, "damaged"),
+            ({"condition_in": "needs_maintenance"}, ToolStatus.MAINTENANCE, "needs_maintenance"),
+            ({}, ToolStatus.AVAILABLE, "good"),
+        ],
+    )
+    def test_the_pages_condition_is_what_is_recorded(
+        self, client: TestClient, db_session: Session, payload: dict, expected_status: ToolStatus, recorded: str
+    ):
+        headers = headers_for(db_session)
+        tool = self._checked_out(client, db_session, headers)
+
+        response = client.post(f"{TOOLS_URL}/{tool.id}/checkin", json=payload, headers=headers)
+
+        assert response.status_code == 200, response.text
+        db_session.refresh(tool)
+        assert tool.status == expected_status
+        checkout = db_session.query(ToolCheckout).filter(ToolCheckout.tool_id == tool.id).one()
+        assert checkout.condition_in == recorded
+        row = (
+            db_session.query(AuditLog)
+            .filter(AuditLog.resource_type == "tool", AuditLog.resource_id == tool.id)
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+        assert row.extra_data["condition_in"] == recorded
+
+    @pytest.mark.parametrize("payload", [{"condition": "smashed"}, {"condition_in": "fine"}, {"condition": ""}])
+    def test_an_unknown_condition_is_422_and_the_tool_stays_checked_out(
+        self, client: TestClient, db_session: Session, payload: dict
+    ):
+        headers = headers_for(db_session)
+        tool = self._checked_out(client, db_session, headers)
+        before = audit_count(db_session)
+
+        response = client.post(f"{TOOLS_URL}/{tool.id}/checkin", json=payload, headers=headers)
+
+        assert response.status_code == 422, response.text
+        db_session.refresh(tool)
+        assert tool.status == ToolStatus.IN_USE
+        checkout = db_session.query(ToolCheckout).filter(ToolCheckout.tool_id == tool.id).one()
+        assert checkout.checked_in_at is None
+        assert audit_count(db_session) == before
+
+
+class TestToolWritesLockTheTool:
+    """Every write verb row-locks the tool first (``Tool`` has no ``version`` column).
+
+    Without it two simultaneous checkouts both read AVAILABLE and leave two open ledger rows,
+    and two usage logs lose an increment. Asserted on the query each verb built, compiled for
+    Postgres -- SQLite renders no ``FOR UPDATE``.
+    """
+
+    @pytest.mark.parametrize("verb", ["put", "delete", "checkout", "checkin", "log-usage"])
+    def test_the_verb_locks_the_tool_row(self, client: TestClient, db_session: Session, monkeypatch, verb: str):
+        tool = make_tool(db_session, status=ToolStatus.IN_USE if verb == "checkin" else ToolStatus.AVAILABLE)
+        headers = headers_for(db_session, role=UserRole.MANAGER)
+        built: list = []
+        original = Query.with_for_update
+
+        def spy(self, *args, **kwargs):
+            locked = original(self, *args, **kwargs)
+            built.append(locked)
+            return locked
+
+        monkeypatch.setattr(Query, "with_for_update", spy)
+
+        if verb == "put":
+            response = client.put(f"{TOOLS_URL}/{tool.id}", json={"location": "Crib B"}, headers=headers)
+        elif verb == "delete":
+            response = client.delete(f"{TOOLS_URL}/{tool.id}", headers=headers)
+        else:
+            response = client.post(f"{TOOLS_URL}/{tool.id}/{verb}", json={"usage_hours": 1}, headers=headers)
+
+        assert response.status_code == 200, response.text
+        compiled = [str(q.statement.compile(dialect=postgresql.dialect())) for q in built]
+        assert any("FROM tools" in sql and "FOR UPDATE OF tools" in sql for sql in compiled), compiled
 
 
 # ---------------------------------------------------------------------------

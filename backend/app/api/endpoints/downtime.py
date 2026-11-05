@@ -232,8 +232,17 @@ def _event_query(db: Session, company_id: int) -> OrmQuery:
     )
 
 
-def _event_or_404(db: Session, event_id: int, company_id: int) -> DowntimeEvent:
-    event = tenant_query(db, DowntimeEvent, company_id).filter(DowntimeEvent.id == event_id).first()
+def _event_or_404(db: Session, event_id: int, company_id: int, *, for_update: bool = False) -> DowntimeEvent:
+    """Resolve an event inside the caller's tenant, or a flat 404.
+
+    ``for_update`` row-locks the event (``FOR UPDATE OF downtime_events`` on Postgres; a no-op
+    on SQLite) for the write verbs: ``DowntimeEvent`` has no ``version`` column, so two
+    simultaneous resolves would both pass the ``end_time is None`` check and both write.
+    """
+    query = tenant_query(db, DowntimeEvent, company_id).filter(DowntimeEvent.id == event_id)
+    if for_update:
+        query = query.with_for_update(of=DowntimeEvent)
+    event = query.first()
     if not event:
         raise HTTPException(status_code=404, detail="Downtime event not found")
     return event
@@ -261,6 +270,13 @@ def _assert_event_refs_in_company(
         )
         if not live:
             raise HTTPException(status_code=404, detail="Work order not found")
+
+
+def _changed_ref(update_data: dict, field: str, current: Optional[int]) -> Optional[int]:
+    """The id ``field`` is being re-pointed AT, or None when the body leaves it unchanged."""
+    if field not in update_data or update_data[field] == current:
+        return None
+    return update_data[field]
 
 
 def _event_identifier(event: DowntimeEvent) -> str:
@@ -602,15 +618,18 @@ def update_downtime_event(
     """Correct a downtime event. **Role: ADMIN / MANAGER / SUPERVISOR.**
 
     A re-pointed ``work_center_id`` / ``work_order_id`` must belong to the active company (404).
+    Only a CHANGED reference is validated: re-sending the one the event already names is not a
+    new selection, so a correction to another field still saves after that work order was
+    soft-deleted -- a historical record keeps naming what it named (invariant 3).
     """
-    event = _event_or_404(db, event_id, company_id)
+    event = _event_or_404(db, event_id, company_id, for_update=True)
 
     update_data = data.model_dump(exclude_unset=True)
     _assert_event_refs_in_company(
         db,
         company_id,
-        work_center_id=update_data.get("work_center_id"),
-        work_order_id=update_data.get("work_order_id"),
+        work_center_id=_changed_ref(update_data, "work_center_id", event.work_center_id),
+        work_order_id=_changed_ref(update_data, "work_order_id", event.work_order_id),
     )
 
     old_values = _event_audit_values(event)
@@ -644,7 +663,7 @@ def resolve_downtime_event(
 
     **Role: any tenant role except VIEWER.**
     """
-    event = _event_or_404(db, event_id, company_id)
+    event = _event_or_404(db, event_id, company_id, for_update=True)
 
     if event.end_time is not None:
         raise HTTPException(status_code=400, detail="Downtime event is already resolved")

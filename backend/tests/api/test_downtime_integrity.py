@@ -14,7 +14,8 @@ from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.orm import Session
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import Query, Session
 
 from app.models.audit_log import AuditLog
 from app.models.downtime import DowntimeCategory, DowntimeEvent, DowntimeReasonCode
@@ -261,6 +262,64 @@ class TestDowntimeTenantIsolation:
         assert FOREIGN_WC_NAME not in listed.text
         assert FOREIGN_WC_NAME not in by_wc.text
 
+    def test_a_legacy_event_on_another_tenants_work_order_does_not_render_it(
+        self, client: TestClient, db_session: Session
+    ):
+        # The WorkOrder half of the loader criteria: owned by B, on B's machine, but linked to
+        # A's job before work_order_id was validated. The id stays visible so it can be fixed.
+        foreign_wo, _ = make_wo_with_operation(
+            db_session, company_id=COMPANY_A, work_center=make_work_center(db_session, company_id=COMPANY_A)
+        )
+        own_wc = make_work_center(db_session, company_id=COMPANY_B)
+        event = make_event(db_session, company_id=COMPANY_B, work_center_id=own_wc.id)
+        event.work_order_id = foreign_wo.id
+        db_session.commit()
+        headers = headers_for(db_session, company_id=COMPANY_B, role=UserRole.ADMIN)
+
+        single = client.get(f"{DOWNTIME_URL}/{event.id}", headers=headers)
+        listed = client.get(f"{DOWNTIME_URL}/", headers=headers)
+
+        assert single.status_code == 200, single.text
+        assert single.json()["work_order"] is None
+        assert single.json()["work_order_id"] == foreign_wo.id
+        assert single.json()["work_center"]["id"] == own_wc.id
+        row = next(r for r in listed.json() if r["id"] == event.id)
+        assert row["work_order"] is None
+
+
+class TestDowntimeWritesLockTheEvent:
+    """PUT and resolve row-lock the event (``DowntimeEvent`` has no ``version`` column).
+
+    Without it two simultaneous resolves both pass ``end_time is None`` and both write. Asserted
+    on the query each verb built, compiled for Postgres -- SQLite renders no ``FOR UPDATE``.
+    """
+
+    @pytest.mark.parametrize("verb", ["put", "resolve"])
+    def test_the_verb_locks_the_event_row(self, client: TestClient, db_session: Session, monkeypatch, verb: str):
+        work_center = make_work_center(db_session)
+        event = make_event(db_session, work_center_id=work_center.id)
+        headers = headers_for(db_session, role=UserRole.SUPERVISOR)
+        built: list = []
+        original = Query.with_for_update
+
+        def spy(self, *args, **kwargs):
+            locked = original(self, *args, **kwargs)
+            built.append(locked)
+            return locked
+
+        monkeypatch.setattr(Query, "with_for_update", spy)
+
+        if verb == "put":
+            response = client.put(f"{DOWNTIME_URL}/{event.id}", json={"description": "Fixed"}, headers=headers)
+        else:
+            response = client.post(f"{DOWNTIME_URL}/{event.id}/resolve", json={}, headers=headers)
+
+        assert response.status_code == 200, response.text
+        compiled = [str(q.statement.compile(dialect=postgresql.dialect())) for q in built]
+        assert any(
+            "FROM downtime_events" in sql and "FOR UPDATE OF downtime_events" in sql for sql in compiled
+        ), compiled
+
 
 # ---------------------------------------------------------------------------
 # 3. RBAC: the floor keeps logging downtime; Viewer cannot; corrections are supervisory
@@ -396,6 +455,34 @@ class TestDowntimeWorkOrderReferences:
         assert audit_count(db_session) == audit_before
         db_session.refresh(event)
         assert event.work_order_id is None
+
+    def test_a_correction_that_resends_an_unchanged_deleted_work_order_still_saves(
+        self, client: TestClient, db_session: Session
+    ):
+        # The event named the job before it was soft-deleted. A client that PUTs the whole
+        # object back to fix ``category`` is not SELECTING that job, so it is not refused; the
+        # historical link stays (invariant 3). Re-pointing AT a deleted job is still a 404.
+        work_center = make_work_center(db_session)
+        live_wo, _ = make_wo_with_operation(db_session, work_center=work_center)
+        event = make_event(db_session, work_center_id=work_center.id)
+        event.work_order_id = live_wo.id
+        db_session.commit()
+        live_wo.soft_delete(make_user(db_session, role=UserRole.ADMIN).id)
+        db_session.commit()
+        other_deleted = self._soft_deleted_own_work_order(db_session, work_center)
+        headers = headers_for(db_session, role=UserRole.SUPERVISOR)
+
+        resent = client.put(
+            f"{DOWNTIME_URL}/{event.id}",
+            json={"work_center_id": work_center.id, "work_order_id": live_wo.id, "category": "electrical"},
+            headers=headers,
+        )
+        repointed = client.put(f"{DOWNTIME_URL}/{event.id}", json={"work_order_id": other_deleted.id}, headers=headers)
+
+        assert resent.status_code == 200, resent.text
+        assert repointed.status_code == 404, repointed.text
+        db_session.refresh(event)
+        assert (event.work_order_id, event.category) == (live_wo.id, DowntimeCategory.ELECTRICAL)
 
     def test_an_own_live_work_order_is_accepted_and_rendered(self, client: TestClient, db_session: Session):
         # Positive control for the refusals above.
