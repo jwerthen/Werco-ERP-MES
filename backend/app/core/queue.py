@@ -408,6 +408,35 @@ async def enqueue_job(job_function: str, *args, queue: str = "default", _job_id:
     return job
 
 
+async def _close_enqueue_pool(pool: ArqRedis, job_function: str) -> None:
+    """Close a short-lived enqueue pool and its connections. Never raises.
+
+    ``ArqRedis`` is a ``redis.asyncio.Redis`` subclass. Under redis-py 5 it has NO
+    ``wait_closed`` (that was aioredis 1.x), and its ``close`` is a deprecated *coroutine*
+    alias. So the ``pool.close(); await pool.wait_closed()`` this replaced did two things
+    wrong on every call (fixed 2026-11-05, seen in prod on a shop-floor completion's
+    ``dispatch_notification_job``):
+
+    * ``pool.close()`` built a coroutine that was never awaited, so the connection was
+      never closed. The warnings it raised (``DeprecationWarning`` and a never-awaited
+      ``RuntimeWarning``) are easy to miss, and ``pytest.ini`` ignores the first.
+    * ``pool.wait_closed`` raised ``AttributeError`` AFTER the job was already in Redis.
+      Every successful enqueue was then logged at ERROR as a failure and reported ``False``.
+
+    ``aclose(close_connection_pool=True)`` is arq's own close idiom (``Worker.close``,
+    ``async_check_health``) under its non-deprecated name. The pool belongs to this one
+    enqueue, so its connections go with it.
+
+    A failure HERE is logged at WARNING and swallowed. It happens after the enqueue has
+    either succeeded or already raised, so it must not change what the caller is told about
+    the job, and it must not mask the enqueue's own exception.
+    """
+    try:
+        await pool.aclose(close_connection_pool=True)
+    except Exception:
+        logger.warning("Closing the Redis pool used to enqueue %s failed", job_function, exc_info=True)
+
+
 def enqueue_job_best_effort(job_function: str, *args, fast_fail: bool = False, **kwargs) -> bool:
     """Enqueue a background job from a SYNC request handler, never raising.
 
@@ -418,11 +447,16 @@ def enqueue_job_best_effort(job_function: str, *args, fast_fail: bool = False, *
     swallowed (logged) so the already-committed completion still returns 200.
 
     ``fast_fail=True`` uses a single ~1s connect attempt instead of arq's default
-    ~5s retry storm -- used by the notification outbox's after-commit enqueue,
-    which runs in the request's commit path and must not block it during a Redis
-    outage (the relay sweeper is the delivery backstop).
+    ~11s retry budget (see ``get_redis_settings``) -- used by the notification
+    outbox's after-commit enqueue, which runs in the request's commit path and must
+    not block it during a Redis outage (the relay sweeper is the delivery backstop).
 
-    Returns ``True`` when the job was enqueued, ``False`` when it was swallowed.
+    Returns ``True`` when the enqueue completed without error, ``False`` when an
+    error was swallowed. ``True`` includes arq declining a duplicate ``_job_id``:
+    that job is already queued or has already run. A failure to close the pool
+    afterwards is not an enqueue failure and does not change the result (see
+    ``_close_enqueue_pool``).
+
     Must only be called from a thread WITHOUT a running event loop (FastAPI runs
     sync ``def`` endpoints in a threadpool worker, which satisfies this).
     """
@@ -435,8 +469,7 @@ def enqueue_job_best_effort(job_function: str, *args, fast_fail: bool = False, *
         try:
             await pool.enqueue_job(job_function, *args, **kwargs)
         finally:
-            pool.close()
-            await pool.wait_closed()
+            await _close_enqueue_pool(pool, job_function)
 
     try:
         asyncio.run(_runner())
@@ -462,7 +495,6 @@ async def enqueue_job_fire_and_forget_fastfail(job_function: str, *args, **kwarg
         try:
             await pool.enqueue_job(job_function, *args, **kwargs)
         finally:
-            pool.close()
-            await pool.wait_closed()
+            await _close_enqueue_pool(pool, job_function)
     except Exception:
         logger.warning("Fast-fail enqueue of %s failed; the relay sweeper will retry", job_function, exc_info=True)
