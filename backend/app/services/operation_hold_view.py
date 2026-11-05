@@ -121,7 +121,17 @@ def _newest_blocker_per_operation(
 def _newest_hold_event_per_operation(
     db: Session, company_id: int, operation_ids: Sequence[int]
 ) -> Dict[int, OperationalEvent]:
-    """Newest ``operation_hold`` event per operation, tenant-scoped. One query."""
+    """Newest ``operation_hold`` event per operation, tenant-scoped. One query.
+
+    Bounded above by now: a row dated in the future would otherwise be "the newest"
+    until its date passed, beating every real hold record (and an open blocker) for
+    the who/when. ``POST /operational-events`` refuses this type and clamps
+    ``occurred_at``, so only a row written some other way can be future-dated -- the
+    bound makes the read correct regardless of who wrote it. ``now`` is NAIVE UTC, the
+    form ``OperationalEventService.emit`` writes, so a just-written hold compares alike
+    to the bound whatever the database session's time zone.
+    """
+    now = datetime.utcnow()
     rows: List[OperationalEvent] = (
         db.query(OperationalEvent)
         .options(joinedload(OperationalEvent.user))
@@ -129,6 +139,7 @@ def _newest_hold_event_per_operation(
             OperationalEvent.company_id == company_id,
             OperationalEvent.event_type == HOLD_EVENT_TYPE,
             OperationalEvent.operation_id.in_(list(operation_ids)),
+            OperationalEvent.occurred_at <= now,
         )
         .order_by(OperationalEvent.occurred_at.asc(), OperationalEvent.id.asc())
         .all()
@@ -197,8 +208,10 @@ def hold_contexts_for_operations(
 
         if use_event and event is not None:
             actor = event.user
-            # The generic event API accepts arbitrary JSON values. Malformed
-            # optional reason fields must not break every held-operation read.
+            # The payload is JSON of whatever shape the writer stored. The generic
+            # event API no longer accepts this type, but a row written any other way
+            # (or before that refusal) may still carry malformed reason fields, and
+            # they must not break every held-operation read.
             reason = event.event_payload if isinstance(event.event_payload, dict) else {}
             category = reason.get("category")
             severity = reason.get("severity")
