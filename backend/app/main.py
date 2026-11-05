@@ -14,10 +14,12 @@ from sqlalchemy.orm.exc import StaleDataError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from app.api.endpoints.errors import is_text_plain_media_type
 from app.api.router import api_router
 from app.core.cache import cache, init_cache
 from app.core.config import settings
-from app.core.logging import configure_logging, get_logger
+from app.core.logging import configure_logging, generate_correlation_id, get_logger
+from app.core.observability import capture_exception_to_sentry
 from app.core.observability import init_sentry as _init_sentry
 from app.core.queue import log_redis_target as _log_redis_target
 from app.db.database import Base, engine
@@ -317,6 +319,14 @@ app.add_middleware(FabricationQuoteBodyLimitMiddleware)
 # GZip compression middleware
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=6)
 
+# Response headers the cross-origin SPA must be able to READ. Without
+# Access-Control-Expose-Headers a browser hides every non-safelisted response header
+# from a cross-origin caller (the SPA on Vercel calling the API on Railway), so:
+#   X-Correlation-ID    -- the reference a user can quote for a failed request;
+#   Content-Disposition -- the server-chosen filename of CSV/XLSX/PDF downloads;
+#   ETag                -- what the client's conditional-request cache keys on.
+CORS_EXPOSE_HEADERS = (CorrelationIdMiddleware.HEADER_NAME, "Content-Disposition", "ETag")
+
 # CORS middleware with configurable settings
 app.add_middleware(
     CORSMiddleware,
@@ -324,15 +334,22 @@ app.add_middleware(
     allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
     allow_methods=settings.CORS_ALLOW_METHODS.split(","),
     allow_headers=settings.CORS_ALLOW_HEADERS.split(","),
+    expose_headers=list(CORS_EXPOSE_HEADERS),
 )
 
 
 # Helper to add CORS headers to error responses
 def add_cors_headers(response: JSONResponse, origin: str = None):
-    """Add CORS headers to a response for cross-origin error handling"""
+    """Add CORS headers to a response for cross-origin error handling.
+
+    For responses that never pass back through CORSMiddleware (a middleware
+    short-circuit, the app-wide 500), so it mirrors what CORSMiddleware would add --
+    including the expose list, without which the 500's X-Correlation-ID is unreadable.
+    """
     if origin and origin in settings.cors_origins_list:
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Expose-Headers"] = ", ".join(CORS_EXPOSE_HEADERS)
     return response
 
 
@@ -420,9 +437,27 @@ def _json_body_too_large_response(request: Request, size: int) -> JSONResponse:
     return add_cors_headers(response, request.headers.get("origin"))
 
 
+# The frontend crash beacon. errors.py parses a ``text/plain`` body on this path as JSON
+# (that is what a string ``navigator.sendBeacon`` body is labelled), so the JSON cap
+# must cover that label here too -- otherwise relabelling would open an uncapped
+# unauthenticated JSON parse.
+_ERROR_BEACON_PATH = f"{settings.API_V1_PREFIX}/errors/log"
+
+
+def _is_capped_json_body(request: Request) -> bool:
+    """Whether this request's body is parsed as JSON and therefore subject to the cap."""
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("application/json"):
+        return True
+    return request.url.path == _ERROR_BEACON_PATH and is_text_plain_media_type(content_type)
+
+
 @app.middleware("http")
 async def limit_json_body_size(request: Request, call_next):
     """Bound the size of an ``application/json`` request body; 413 over the cap.
+
+    Also a ``text/plain`` body on the crash-beacon path, which errors.py parses as JSON
+    (see ``_is_capped_json_body``).
 
     General request-size hygiene, applied ahead of every route's auth dependency.
     An unauthenticated caller can otherwise make the app buffer an arbitrarily
@@ -459,9 +494,7 @@ async def limit_json_body_size(request: Request, call_next):
 
     # JSON bodies only: multipart/UploadFile paths (every CSV/XLSX bulk import) are
     # routinely far larger and are bounded by their own per-endpoint caps.
-    if request.method in ("POST", "PUT", "PATCH") and request.headers.get("content-type", "").startswith(
-        "application/json"
-    ):
+    if request.method in ("POST", "PUT", "PATCH") and _is_capped_json_body(request):
         max_body_bytes = _json_body_limit(request)
 
         # Gate 1: reject on the declared Content-Length BEFORE buffering the body,
@@ -761,15 +794,48 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts, www_redi
 logger.log(*_host_validation_log_record(settings.ENVIRONMENT, _allowed_hosts))
 
 
+def _request_correlation_id(request: Request) -> str:
+    """The correlation id CorrelationIdMiddleware assigned this request, read from the scope.
+
+    This runs in Starlette's ServerErrorMiddleware, outside every user middleware and in
+    a parent task, so the logging contextvar is not visible here -- the middleware also
+    leaves the id on ``request.state`` for exactly this reader. When the request failed
+    before that middleware ran, a fresh id is minted so the user still has a reference
+    to quote and the log line below carries the same one.
+    """
+    correlation_id = getattr(request.state, "correlation_id", None)
+    return str(correlation_id) if correlation_id else generate_correlation_id()
+
+
 # Global exception handler - ensures CORS headers on all error responses
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled exception: {exc}", exc_info=True)
-    if settings.SENTRY_DSN:
-        import sentry_sdk
+    """Turn an unhandled exception into a 500 the user can quote.
 
-        sentry_sdk.capture_exception(exc)
-    response = JSONResponse(status_code=500, content={"detail": "Internal server error"})
+    The body carries the request's correlation id (``correlation_id``, and inside
+    ``detail``, which the SPA already displays verbatim), and so does the
+    ``X-Correlation-ID`` header -- set here because this response never passes back
+    through CorrelationIdMiddleware. The same id is on the log line and the Sentry event,
+    so "reference: abc123" finds the traceback. Nothing else about the exception (type,
+    message, traceback) reaches the client.
+    """
+    correlation_id = _request_correlation_id(request)
+    # Sentry before the log line: the SDK's logging integration also turns this ERROR
+    # into an event for the same exception, and its dedupe keeps whichever comes first.
+    capture_exception_to_sentry(exc, context={"correlation_id": correlation_id})
+    logger.error(
+        f"Unhandled exception [correlation_id={correlation_id}] on {request.method} {request.url.path}: {exc}",
+        exc_info=True,
+        data={"correlation_id": correlation_id},
+    )
+    response = JSONResponse(
+        status_code=500,
+        content={
+            "detail": f"Internal server error (reference: {correlation_id})",
+            "correlation_id": correlation_id,
+        },
+        headers={CorrelationIdMiddleware.HEADER_NAME: correlation_id},
+    )
     # Add CORS headers so browser doesn't mask the error as CORS failure
     origin = request.headers.get("origin")
     return add_cors_headers(response, origin)

@@ -1,6 +1,6 @@
 /**
  * Error Logging Service
- * 
+ *
  * Collects, batches, and sends frontend errors to the backend for monitoring.
  * Handles unhandled promise rejections and global errors.
  */
@@ -35,6 +35,29 @@ interface ErrorLogEntry {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * Queue a batch as a beacon whose body is labelled `application/json`.
+ *
+ * The body MUST be a Blob of that type. A bare string beacon goes out as
+ * `text/plain;charset=UTF-8`, which FastAPI does not parse as JSON, so every crash
+ * beacon was rejected 422 and never reached the logs. (The server now also accepts
+ * that legacy shape, for tabs still running an older bundle.)
+ *
+ * Returns false when no beacon was queued -- no `sendBeacon`, the browser refused the
+ * payload (e.g. over its keepalive quota), or it threw (some Chromium versions refuse
+ * a Blob whose type is not CORS-safelisted, and the API is cross-origin in
+ * production) -- so the caller can fall back to a keepalive `fetch`, which can
+ * preflight.
+ */
+const sendJsonBeacon = (url: string, body: string): boolean => {
+  if (typeof navigator === 'undefined' || typeof navigator.sendBeacon !== 'function') return false;
+  try {
+    return navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }));
+  } catch {
+    return false;
+  }
+};
+
 class ErrorLoggingService {
   private queue: ErrorLogEntry[] = [];
   private isProcessing = false;
@@ -54,21 +77,19 @@ class ErrorLoggingService {
     window.addEventListener('beforeunload', () => this.flush(true));
 
     // Capture unhandled promise rejections
-    window.addEventListener('unhandledrejection', (event) => {
+    window.addEventListener('unhandledrejection', event => {
       this.log({
-        error: event.reason instanceof Error 
-          ? event.reason 
-          : new Error(String(event.reason)),
+        error: event.reason instanceof Error ? event.reason : new Error(String(event.reason)),
         boundaryName: 'unhandledrejection',
         boundaryLevel: 'global',
       });
     });
 
     // Capture global errors
-    window.addEventListener('error', (event) => {
+    window.addEventListener('error', event => {
       // Avoid duplicate logging if error was already caught by boundary
       if (event.error?._boundaryLogged) return;
-      
+
       this.log({
         error: event.error || new Error(event.message),
         boundaryName: 'window.onerror',
@@ -126,26 +147,25 @@ class ErrorLoggingService {
 
     try {
       const apiUrl = process.env.REACT_APP_API_URL || '/api/v1';
-      
-      if (sync && navigator.sendBeacon) {
-        // Use sendBeacon for sync (page unload)
-        navigator.sendBeacon(
-          `${apiUrl}/errors/log`,
-          JSON.stringify({ errors: entries })
-        );
-      } else {
-        await fetch(`${apiUrl}/errors/log`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ errors: entries }),
-        });
-      }
+      const url = `${apiUrl}/errors/log`;
+      const body = JSON.stringify({ errors: entries });
+
+      // Sync (a global crash, or page unload): a beacon outlives the page. If the
+      // browser declines it, fall through to a keepalive fetch rather than dropping
+      // the batch -- this service is the only channel frontend crashes have.
+      if (sync && sendJsonBeacon(url, body)) return;
+
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+        keepalive: sync,
+      });
     } catch {
       // Re-queue on failure (but don't cause infinite loop)
       if (this.queue.length < this.maxQueueSize) {
         this.queue = [...entries, ...this.queue].slice(-this.maxQueueSize);
       }
-      
     } finally {
       this.isProcessing = false;
     }

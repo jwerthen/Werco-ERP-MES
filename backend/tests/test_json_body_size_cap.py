@@ -32,7 +32,10 @@ why removing it was sound.
 carrier webhooks (``/api/v1/webhooks/carriers/...``) skip the whole middleware — they
 HMAC-verify the *exact raw bytes*, and a carrier's retry logic does not recover from a
 413. And the cap gates ``application/json`` only: every CSV/XLSX bulk import arrives as
-``multipart/form-data`` through ``UploadFile`` and must not be capped at 256 KB.
+``multipart/form-data`` through ``UploadFile`` and must not be capped at 256 KB. (One
+carve-in: ``text/plain`` on the crash-beacon path, ``/api/v1/errors/log``, is capped too,
+because that route parses a text/plain body as JSON -- pinned in
+``tests/api/test_error_logging_endpoint.py``.)
 """
 
 import json

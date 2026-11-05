@@ -14,7 +14,7 @@ so API and worker events are separable in the same project.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, List, Optional, Sequence
+from typing import Any, Callable, List, Mapping, Optional, Sequence, Union
 
 from app.core.config import settings
 
@@ -88,3 +88,97 @@ def init_sentry(
         settings.SENTRY_TRACES_SAMPLE_RATE,
         settings.APP_RELEASE or "unset",
     )
+
+
+# Sentry caps a tag value at 200 characters; a longer one is dropped, not truncated.
+_SENTRY_TAG_MAX_LENGTH = 200
+
+
+def _sentry_sdk_if_configured() -> Any:
+    """The ``sentry_sdk`` module when a DSN is configured and the SDK is importable, else None.
+
+    Gated on the DSN, not merely on the import: with no DSN the SDK is never initialized,
+    and tagging its process-global default scope would only accumulate stale values.
+    """
+    if not settings.SENTRY_DSN:
+        return None
+    try:
+        import sentry_sdk
+    except ImportError:
+        return None
+    return sentry_sdk
+
+
+def _tag_value(value: Any) -> str:
+    return str(value)[:_SENTRY_TAG_MAX_LENGTH]
+
+
+def set_sentry_tags(**tags: Any) -> None:
+    """Tag the current Sentry scope with request context. ``None`` values are skipped.
+
+    Under the FastAPI integration each request runs in its own isolation scope, so a tag
+    set while serving a request lands on that request's events only. No-op when Sentry is
+    not configured; never raises -- tagging is diagnostics and must not fail a request.
+    """
+    sentry_sdk = _sentry_sdk_if_configured()
+    if sentry_sdk is None:
+        return
+    try:
+        for key, value in tags.items():
+            if value is not None:
+                sentry_sdk.set_tag(key, _tag_value(value))
+    except Exception:  # pragma: no cover - tagging must never be fatal
+        logger.debug("Failed to set Sentry tags", exc_info=True)
+
+
+def capture_exception_to_sentry(exc: BaseException, *, context: Optional[Mapping[str, Any]] = None) -> None:
+    """Report ``exc`` to Sentry with ``context`` attached. No-op without a DSN; never raises.
+
+    Scalar context values (str/int/bool) become tags, so events can be filtered by them;
+    every value is also attached as an extra, so list-valued context (a batch of ids) is
+    still on the event without becoming a high-cardinality tag.
+    """
+    sentry_sdk = _sentry_sdk_if_configured()
+    if sentry_sdk is None:
+        return
+    context = dict(context or {})
+    tags = {
+        key: _tag_value(value)
+        for key, value in context.items()
+        if value is not None and isinstance(value, (str, int, bool))
+    }
+    try:
+        sentry_sdk.capture_exception(exc, tags=tags, extras=context)
+    except Exception:  # pragma: no cover - reporting must never be fatal
+        logger.debug("Failed to report an exception to Sentry", exc_info=True)
+
+
+def report_absorbed_exception(
+    log: Union[logging.Logger, logging.LoggerAdapter],
+    message: str,
+    exc: BaseException,
+    *,
+    context: Mapping[str, Any],
+) -> None:
+    """Make an exception that a best-effort path deliberately absorbs VISIBLE.
+
+    Some paths must not fail on a secondary error -- a reconcile-on-read side effect may
+    never turn a GET into a 500 -- but "must not fail" is not "must not be seen". This
+    records the failure without changing anything about the caller's control flow:
+
+    * an ERROR log line with the traceback, with ``context`` rendered into the message
+      (so the plain-text development formatter shows it) and attached as ``extra_data``
+      (which the production JSON formatter emits as ``data``);
+    * a Sentry event carrying the same context (see ``capture_exception_to_sentry``).
+
+    Sentry is reported FIRST: Sentry's logging integration also turns the ERROR line into
+    an event for the same exception object, and its dedupe keeps whichever arrives first,
+    so this order keeps the tagged one. Never raises -- the caller is already handling one
+    failure, and reporting it must not become a second.
+    """
+    capture_exception_to_sentry(exc, context=context)
+    rendered = " ".join(f"{key}={value}" for key, value in context.items())
+    try:
+        log.error("%s [%s]", message, rendered, exc_info=exc, extra={"extra_data": dict(context)})
+    except Exception:  # pragma: no cover - logging must never be fatal
+        pass

@@ -36,19 +36,92 @@ unauthenticated call can make the app parse and log; ``MAX_JSON_BODY_BYTES``
 (413) is the outer bound on the body itself, and main.py's ENDPOINT_RATE_LIMITS
 entry bounds call frequency. ``MAX_GLOBAL_ALERTS_PER_REQUEST`` bounds the one
 remaining outbound side-effect (Sentry).
+
+``POST /errors/log`` accepts its JSON body labelled either ``application/json`` or
+``text/plain`` -- see ``_BeaconBodyRoute`` for why the second exists and why it is
+safe. The body cap covers both labels on this path (main.py's
+``limit_json_body_size``).
 """
 
 import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Callable, Coroutine, List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, Request, Response
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
+from starlette.datastructures import Headers
 
 from app.core.time_utils import to_utc_iso
 
-router = APIRouter(prefix="/errors", tags=["errors"])
 logger = logging.getLogger(__name__)
+
+
+def is_text_plain_media_type(content_type: Optional[str]) -> bool:
+    """True when a ``Content-Type`` header value names ``text/plain`` (any parameters).
+
+    ``navigator.sendBeacon(url, someString)`` sends ``text/plain;charset=UTF-8``.
+    Shared with main.py so the body-size cap and this router agree on what counts.
+    """
+    if not content_type:
+        return False
+    return content_type.split(";", 1)[0].strip().lower() == "text/plain"
+
+
+class _TextPlainAsJsonRequest(Request):
+    """The same request (same scope, same body stream) with its Content-Type read as JSON.
+
+    Only the ``headers`` view changes: the scope is shared, not copied, so anything a
+    dependency or exception handler writes to ``request.scope`` / ``request.state``
+    still lands where the rest of the stack can see it.
+    """
+
+    @property
+    def headers(self) -> Headers:
+        if not hasattr(self, "_json_relabelled_headers"):
+            raw = [(key, value) for key, value in self.scope["headers"] if key.lower() != b"content-type"]
+            raw.append((b"content-type", b"application/json"))
+            self._json_relabelled_headers = Headers(raw=raw)
+        return self._json_relabelled_headers
+
+
+class _BeaconBodyRoute(APIRoute):
+    """Read a ``text/plain`` request body on this router as the JSON it is.
+
+    Every client deployed before 2026-11-05 sent its crash beacon as
+    ``navigator.sendBeacon(url, JSON.stringify(...))``. A string beacon body is
+    labelled ``text/plain;charset=UTF-8``, and FastAPI parses a body as JSON only
+    when it is labelled ``application/json`` (or ``+json``), so every one of those
+    beacons -- the white-screen crashes, the one report we most needed -- was
+    rejected 422 and never reached a log line or Sentry. The current client sends
+    an ``application/json`` Blob, but a tab that loaded the old bundle keeps sending
+    the old shape until it reloads, and a beacon is fire-and-forget: nothing
+    retries it.
+
+    So a ``text/plain`` request is relabelled ``application/json`` before FastAPI
+    reads it, and from there it takes exactly the path a JSON-labelled request
+    takes: the same ``json.loads``, the same ``ErrorLogRequest`` validation with the
+    same caps, the same 422 shape on a bad body, and an unchanged OpenAPI contract.
+    No other content type is relabelled. This is safe because the label is not a
+    trust boundary here: the route is unauthenticated and CSRF-exempt by design, a
+    ``text/plain`` cross-origin POST was always a "simple" request any page could
+    send, and what it can do is still bounded by validation, the per-request alert
+    cap, the rate limit and the body cap (which main.py applies to ``text/plain`` on
+    this path for exactly this reason).
+    """
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        original_handler = super().get_route_handler()
+
+        async def handler(request: Request) -> Response:
+            if is_text_plain_media_type(request.headers.get("content-type")):
+                request = _TextPlainAsJsonRequest(request.scope, request.receive)
+            return await original_handler(request)
+
+        return handler
+
+
+router = APIRouter(prefix="/errors", tags=["errors"], route_class=_BeaconBodyRoute)
 
 # Matches ``maxQueueSize`` in frontend/src/services/errorLogging.ts — the client
 # never batches more than this, so a larger batch is not a real SPA tab.
@@ -110,6 +183,9 @@ async def log_errors(request: ErrorLogRequest, background_tasks: BackgroundTasks
 
     Unauthenticated and CSRF-exempt by necessity (sendBeacon). Nothing is
     persisted — see the module docstring for why the audit write was removed.
+
+    The JSON body may be labelled ``application/json`` or ``text/plain`` (what a
+    string ``sendBeacon`` body carries); both are parsed and validated identically.
     """
     # Get client IP for additional context
     client_ip = http_request.client.host if http_request.client else "unknown"

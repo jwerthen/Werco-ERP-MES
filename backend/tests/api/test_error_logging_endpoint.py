@@ -22,6 +22,7 @@ the write from being reintroduced by someone who reads only the handler.
 """
 
 import ast
+import json
 from pathlib import Path
 
 import pytest
@@ -248,3 +249,100 @@ def test_error_logging_module_cannot_reach_the_database():
         f"{source_path.name} must stay database-free — it is an unauthenticated, "
         f"CSRF-exempt endpoint. Offending imports: {offenders}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The beacon wire format: a text/plain JSON body.
+#
+# ``navigator.sendBeacon(url, someString)`` labels its body
+# ``text/plain;charset=UTF-8``. FastAPI parses only ``application/json`` (or
+# ``+json``) as JSON, so until 2026-11-05 every string beacon -- including the
+# global-boundary crashes that blank the screen -- was rejected 422 and reached
+# no log and no Sentry. Every test above posts ``json=``, which is why it was
+# never seen. The current client sends an ``application/json`` Blob; a tab still
+# running an older bundle keeps sending text/plain, so the route accepts both.
+# ---------------------------------------------------------------------------
+
+_LEGACY_BEACON_CONTENT_TYPE = "text/plain;charset=UTF-8"
+
+
+def _post_text_plain(client: TestClient, body, content_type: str = _LEGACY_BEACON_CONTENT_TYPE):
+    raw = body if isinstance(body, (bytes, str)) else json.dumps(body)
+    return client.post(ENDPOINT, content=raw, headers={"content-type": content_type})
+
+
+def test_text_plain_beacon_body_is_accepted_and_processed(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    """The legacy sendBeacon shape lands: 200, and the entries are actually processed
+    (the global entry reaches the alert path), not merely acknowledged."""
+    alerted: list[str] = []
+
+    async def _fake_alert(error):
+        alerted.append(error.id)
+
+    monkeypatch.setattr(errors_module, "send_error_alert", _fake_alert)
+
+    payload = {"errors": [_entry(id="err_crash", boundaryLevel="global"), _entry(id="err_page")]}
+    response = _post_text_plain(client, payload)
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"status": "queued", "count": 2}
+    assert alerted == ["err_crash"]
+
+
+@pytest.mark.parametrize("content_type", ["text/plain", "text/plain; charset=utf-8", "TEXT/PLAIN;charset=UTF-8"])
+def test_text_plain_label_variants_are_accepted(client: TestClient, content_type: str):
+    response = _post_text_plain(client, {"errors": [_entry()]}, content_type=content_type)
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"status": "queued", "count": 1}
+
+
+def test_text_plain_body_gets_the_same_validation_as_json(client: TestClient):
+    """Relabelling is not a validation bypass: the per-field and batch caps apply."""
+    over_cap_field = _post_text_plain(client, {"errors": [_entry(message="A" * 4001)]})
+    over_cap_batch = _post_text_plain(
+        client, {"errors": [_entry(id=f"err_{i}") for i in range(errors_module.MAX_ERRORS_PER_REQUEST + 1)]}
+    )
+    missing_field = _post_text_plain(client, {"errors": [{"id": "err_1"}]})
+
+    assert over_cap_field.status_code == 422, over_cap_field.text
+    assert over_cap_batch.status_code == 422, over_cap_batch.text
+    assert missing_field.status_code == 422, missing_field.text
+
+
+def test_text_plain_body_that_is_not_json_is_a_422(client: TestClient):
+    response = _post_text_plain(client, b"this is not json")
+
+    assert response.status_code == 422, response.text
+
+
+def test_text_plain_beacon_is_bound_by_the_json_body_cap(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    """Parsing text/plain as JSON must not open an uncapped unauthenticated JSON parse:
+    main.py's body cap covers the text/plain label on this path."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "MAX_JSON_BODY_BYTES", 1024)
+    body = json.dumps({"errors": [_entry(stack="A" * 4000)]})
+    assert len(body) > 1024
+
+    response = _post_text_plain(client, body)
+
+    assert response.status_code == 413, response.text
+
+
+def test_only_text_plain_is_relabelled(client: TestClient):
+    """Any other non-JSON label is still refused -- the carve-in is for the beacon's
+    exact shape, not "parse whatever arrives"."""
+    response = _post_text_plain(client, {"errors": [_entry()]}, content_type="application/octet-stream")
+
+    assert response.status_code == 422, response.text
+
+
+def test_text_plain_media_type_helper():
+    assert errors_module.is_text_plain_media_type("text/plain")
+    assert errors_module.is_text_plain_media_type("text/plain;charset=UTF-8")
+    assert errors_module.is_text_plain_media_type(" Text/Plain ; charset=utf-8")
+    assert not errors_module.is_text_plain_media_type("application/json")
+    assert not errors_module.is_text_plain_media_type("text/plainx")
+    assert not errors_module.is_text_plain_media_type("")
+    assert not errors_module.is_text_plain_media_type(None)

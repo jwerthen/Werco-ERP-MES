@@ -21,6 +21,7 @@ from app.core.logging import (
     set_correlation_id,
     set_request_context,
 )
+from app.core.observability import set_sentry_tags
 
 logger = get_logger(__name__)
 
@@ -31,8 +32,9 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
 
     - Checks for existing correlation ID in X-Correlation-ID header
     - Generates new ID if not present
-    - Adds correlation ID to response headers
-    - Sets correlation ID in context for logging
+    - Adds correlation ID to response headers (a response this middleware never sees --
+      the app-wide 500 -- has the header added by main.py's handler instead)
+    - Sets correlation ID in context for logging, on ``request.state`` and as a Sentry tag
     """
 
     HEADER_NAME = "X-Correlation-ID"
@@ -45,6 +47,15 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
 
         # Set in context for logging
         set_correlation_id(correlation_id)
+        # ALSO on the request scope. The app-wide Exception handler (main.py) runs in
+        # Starlette's ServerErrorMiddleware -- outside every user middleware and in a
+        # parent task, because each BaseHTTPMiddleware runs its downstream app in a child
+        # task -- so the contextvar set above is invisible to it. ``request.state`` is
+        # backed by the scope dict, which every layer shares, so the 500 response can
+        # still quote this id.
+        request.state.correlation_id = correlation_id
+        # Tags this request's Sentry events (no-op when Sentry is not configured).
+        set_sentry_tags(correlation_id=correlation_id)
 
         # Process request
         response = await call_next(request)

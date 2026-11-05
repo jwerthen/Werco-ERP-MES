@@ -178,6 +178,7 @@ from app.services.work_order_state_service import (
     operations_worked_out_of_sequence,
     reconcile_work_orders_from_completion_evidence,
     release_first_ready_operation,
+    report_reconcile_leg_failure,
     resolve_absolute_operation_quantity,
     sync_work_order_quantity_complete,
     validate_operation_quantity,
@@ -195,6 +196,7 @@ def _audit_reconcile_transitions(
     db: Session,
     current_user: User,
     transitions: list[StatusTransition],
+    company_id: Optional[int] = None,
 ) -> None:
     """Emit a tamper-evident status-change audit row per reconcile-driven transition.
 
@@ -234,8 +236,15 @@ def _audit_reconcile_transitions(
             # not the read path -- documented partial coverage.
             if tr.resource_type == "work_order_operation":
                 record_reconcile_inspection_exception(db, operation_id=tr.resource_id, audit=audit, user=current_user)
-    except Exception:  # pragma: no cover - reads must never 500 on audit failure
-        pass
+    except Exception as exc:  # reads must never 500 on an audit failure -- but it must be seen
+        # KNOWN GAP (follow-up: a savepoint per leg, with an audit failure aborting the
+        # reconcile): the caller commits AFTER this returns. A database error here poisons
+        # the session, so that commit fails and rolls the status flips back with their
+        # audit rows; but a NON-database error lets the flips commit with some or all of
+        # their audit rows missing. Until that lands, this report is the only trace.
+        report_reconcile_leg_failure(
+            logger, "audit", exc, company_id=company_id, user=current_user, transitions=transitions
+        )
 
 
 def _emit_reconcile_events(
@@ -288,8 +297,10 @@ def _emit_reconcile_events(
         # now terminal. Attributed to the requesting user, source="reconcile_on_read".
         # FULLY best-effort: a parent-advance failure must never 500 a GET.
         _emit_reconcile_parent_advance(db, company_id, current_user, transitions)
-    except Exception:  # pragma: no cover - reads must never 500 on event-emit failure
-        pass
+    except Exception as exc:  # reads must never 500 on an event-emit failure -- but it must be seen
+        report_reconcile_leg_failure(
+            logger, "events", exc, company_id=company_id, user=current_user, transitions=transitions
+        )
 
 
 def _emit_reconcile_parent_advance(
@@ -334,8 +345,10 @@ def _emit_reconcile_parent_advance(
                     audit=audit,
                     source="reconcile_on_read",
                 )
-    except Exception:  # pragma: no cover - reads must never 500 on parent-advance failure
-        pass
+    except Exception as exc:  # reads must never 500 on a parent-advance failure -- but it must be seen
+        report_reconcile_leg_failure(
+            logger, "parent_advance", exc, company_id=company_id, user=current_user, transitions=transitions
+        )
 
 
 def _refresh_reconcile_scheduling(db: Session, company_id: int, transitions: list[StatusTransition]) -> None:
@@ -355,8 +368,10 @@ def _refresh_reconcile_scheduling(db: Session, company_id: int, transitions: lis
         SchedulingService(db, company_id).update_availability_rates(
             work_center_ids=work_center_ids, horizon_days=90, commit=False
         )
-    except Exception:  # pragma: no cover - reads must never 500 on scheduling refresh
-        pass
+    except Exception as exc:  # reads must never 500 on a scheduling refresh -- but it must be seen
+        report_reconcile_leg_failure(
+            logger, "scheduling", exc, company_id=company_id, user=None, transitions=transitions
+        )
 
 
 def _apply_reconcile_inventory_effects(
@@ -389,8 +404,10 @@ def _apply_reconcile_inventory_effects(
                 apply_completion_inventory_effects(
                     db, work_order, user_id=current_user.id, company_id=company_id, audit=audit
                 )
-    except Exception:  # pragma: no cover - reads must never 500 on inventory-effect failure
-        pass
+    except Exception as exc:  # reads must never 500 on an inventory-effect failure -- but it must be seen
+        report_reconcile_leg_failure(
+            logger, "inventory_effects", exc, company_id=company_id, user=current_user, transitions=transitions
+        )
 
 
 def _apply_reconcile_cost_rollup(
@@ -433,8 +450,10 @@ def _apply_reconcile_cost_rollup(
                 record_reconcile_labor_data_quality(
                     db, work_order=work_order, company_id=company_id, audit=audit, user=current_user
                 )
-    except Exception:  # pragma: no cover - reads must never 500 on cost-rollup failure
-        pass
+    except Exception as exc:  # reads must never 500 on a cost-rollup failure -- but it must be seen
+        report_reconcile_leg_failure(
+            logger, "cost_rollup", exc, company_id=company_id, user=current_user, transitions=transitions
+        )
 
 
 def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_user: User, company_id: int) -> None:
@@ -460,13 +479,19 @@ def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_use
     rows share one unit of work, the rollback drops BOTH atomically -- no orphaned
     state change, no unaudited transition -- and the next read retries.
 
+    That atomicity covers DATABASE failures only. A non-database exception inside a
+    side-effect leg is absorbed by the leg itself (logged + reported to Sentry via
+    ``report_reconcile_leg_failure``) and never reaches this rollback, so the commit
+    below still runs -- with whatever that leg wrote before it failed and without the
+    rest -- see the KNOWN GAP note in ``_audit_reconcile_transitions``.
+
     (The root ``sequence_number`` race is a separately-tracked follow-up; this
     guard only guarantees reads never 500.)
     """
     transitions: list[StatusTransition] = []
     try:
         if reconcile_work_orders_from_completion_evidence(db, work_orders, transitions):
-            _audit_reconcile_transitions(db, current_user, transitions)
+            _audit_reconcile_transitions(db, current_user, transitions, company_id)
             # EVT-4: in-process completion events for the materialized transitions
             # (NO outbound notify/webhook on a read -- see helper).
             _emit_reconcile_events(db, company_id, current_user, transitions)

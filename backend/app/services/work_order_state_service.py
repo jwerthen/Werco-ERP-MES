@@ -4,11 +4,12 @@ import logging
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Iterable, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence, Union
 
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
+from app.core.observability import report_absorbed_exception
 from app.db.tenant_filter import tenant_query
 from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.work_order import (
@@ -194,6 +195,57 @@ class StatusTransition:
     # scheduled-load query, so the persisted availability_rate would otherwise stay
     # understated). Empty for operation transitions and non-completion transitions.
     work_center_ids: list[int] = field(default_factory=list)
+
+
+def report_reconcile_leg_failure(
+    log: Union[logging.Logger, logging.LoggerAdapter],
+    step: str,
+    exc: BaseException,
+    *,
+    company_id: Optional[int],
+    user: Optional[Any],
+    transitions: Sequence[StatusTransition],
+) -> None:
+    """Log + report a reconcile-on-read side-effect leg that failed and was absorbed.
+
+    The read handlers' reconcile legs (audit, events, parent advance, scheduling,
+    inventory effects, cost rollup) each swallow their own failure so a GET can never
+    500 on one. They used to swallow it SILENTLY -- a bare ``except Exception: pass`` --
+    so a reconcile that committed status flips without their audit rows, or without
+    the FG receipt / backflush the completion owed, left no trace anywhere. This makes
+    each one an ERROR log line (traceback + the work orders, operations and company it
+    was reconciling) and a Sentry event tagged ``reconcile_step``.
+
+    Reporting only: the caller's control flow and transaction are unchanged, and this
+    never raises. ``log`` is the CALLER's logger, so the record is attributed to the
+    router whose read triggered the reconcile. ``user`` is read defensively: the leg may
+    have failed on a database error, and an expired ORM instance would try to reload
+    from that failed session.
+    """
+    context: dict[str, Any] = {"reconcile_step": step, "company_id": company_id}
+    try:
+        context["user_id"] = getattr(user, "id", None)
+    except Exception:  # an expired instance on a failed session cannot reload -- skip it
+        context["user_id"] = None
+    try:
+        context["work_order_ids"] = sorted(
+            {
+                tr.work_order_id if tr.work_order_id is not None else tr.resource_id
+                for tr in transitions
+                if tr.work_order_id is not None or tr.resource_type == "work_order"
+            }
+        )
+        context["operation_ids"] = sorted(
+            {tr.resource_id for tr in transitions if tr.resource_type == "work_order_operation"}
+        )
+    except Exception:  # pragma: no cover - context is best-effort; the report must still go out
+        pass
+    report_absorbed_exception(
+        log,
+        f"Reconcile-on-read {step} leg failed; its remaining writes were skipped and the read continues",
+        exc,
+        context=context,
+    )
 
 
 def incomplete_child_work_orders(
