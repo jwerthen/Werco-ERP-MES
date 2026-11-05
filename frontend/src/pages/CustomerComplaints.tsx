@@ -26,6 +26,7 @@ import {
 } from '../components/ui';
 import { formatCentralDate, getCentralTodayISODate } from '../utils/centralTime';
 import useUnsavedChanges from '../hooks/useUnsavedChanges';
+import usePermissions from '../hooks/usePermissions';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -195,6 +196,11 @@ const fmt = (n: number) =>
 
 export default function CustomerComplaints() {
   const { showToast } = useToast();
+  // Recording a complaint or an RMA is the server's AUTHOR tier
+  // (Admin / Manager / Supervisor / Quality = quality:inspect). View-only roles that
+  // can open this page (Operator, Viewer) do not get controls the server would refuse.
+  const { can } = usePermissions();
+  const canRecord = can('quality:inspect');
 
   // Data
   const [complaints, setComplaints] = useState<Complaint[]>([]);
@@ -605,13 +611,15 @@ export default function CustomerComplaints() {
             Track, investigate, and resolve customer complaints and return material authorizations
           </p>
         </div>
-        <button
-          onClick={openCreateModal}
-          className="du-btn du-btn-primary du-btn-sm gap-1"
-        >
-          <PlusIcon className="h-4 w-4" />
-          New Complaint
-        </button>
+        {canRecord && (
+          <button
+            onClick={openCreateModal}
+            className="du-btn du-btn-primary du-btn-sm gap-1"
+          >
+            <PlusIcon className="h-4 w-4" />
+            New Complaint
+          </button>
+        )}
       </div>
 
       {/* Summary Cards */}
@@ -729,7 +737,8 @@ export default function CustomerComplaints() {
           description: activeFilter
             ? 'Try adjusting your search or filters.'
             : 'Logged customer complaints will appear here.',
-          action: activeFilter ? undefined : { label: 'New Complaint', onClick: openCreateModal },
+          action:
+            activeFilter || !canRecord ? undefined : { label: 'New Complaint', onClick: openCreateModal },
         }}
       />
 
@@ -894,13 +903,15 @@ export default function CustomerComplaints() {
 
             {/* Action buttons */}
             <div className="flex gap-2 pt-2 border-t border-base-300">
-              <button
-                onClick={() => openRMAModal(expandedComplaint)}
-                className="du-btn du-btn-sm du-btn-outline gap-1"
-              >
-                <TruckIcon className="h-4 w-4" />
-                Create RMA
-              </button>
+              {canRecord && (
+                <button
+                  onClick={() => openRMAModal(expandedComplaint)}
+                  className="du-btn du-btn-sm du-btn-outline gap-1"
+                >
+                  <TruckIcon className="h-4 w-4" />
+                  Create RMA
+                </button>
+              )}
               <button
                 onClick={() => setExpandedId(null)}
                 className="du-btn du-btn-sm du-btn-ghost gap-1"
