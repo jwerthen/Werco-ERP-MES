@@ -20,10 +20,18 @@ What these tests lock (router prefix ``/complaints`` + in-router ``/complaints/.
   Supervisor -> 403 on the approver-tier verbs while keeping the author-tier ones;
   Manager and Quality keep every gated verb, and Viewer / Operator keep every read;
 - the RMA from-state guards refuse out-of-order verbs with no side effect;
-- every write audits; resolve / close / RMA dispose / RMA complete fail closed (503,
-  nothing saved) when the required audit row cannot be written;
-- ``status`` (complaint) and ``disposition`` (RMA) are refused on PUT;
-- selected references must be live rows of the active company;
+- every write audits; resolve / close, RMA approve / deny / dispose / complete and
+  create-ncr / create-car fail closed (503, nothing saved) when a required audit row
+  cannot be written;
+- ``status`` (complaint) and ``disposition`` (RMA) are refused on PUT, and so is every
+  field a workflow verb owns (investigate / resolve on a complaint, ``credit_amount``
+  on an RMA), so an Author-tier PUT cannot rewrite an Approver's decision;
+- PUT refuses (409) a closed / void complaint and a completed / denied RMA, an RMA
+  ``quantity`` / ``reason`` change after REQUESTED, ``inspection_findings`` outside
+  UNDER_INSPECTION, and a ``replacement_wo_id`` link on an RMA not dispositioned
+  ``replace``;
+- selected references must be live rows of the active company, except an RMA's
+  customer / part copied from its own complaint, which only has to be ours;
 - create-ncr / create-car produce tenant-correct, per-company-numbered records and
   emit the same events as the quality router's create paths. A strict xfail pins the
   known defect that per-company NCR/CAR numbers collide on their global unique index.
@@ -691,8 +699,13 @@ class TestComplaintWorkflowAudit:
                 RMAStatus.UNDER_INSPECTION,
             ),
             ("rma", "/rma/{id}/complete", None, RMAStatus.DISPOSITION_DECIDED, "status", RMAStatus.DISPOSITION_DECIDED),
+            ("rma", "/rma/{id}/approve", None, RMAStatus.REQUESTED, "status", RMAStatus.REQUESTED),
+            ("rma", "/rma/{id}/deny", None, RMAStatus.REQUESTED, "status", RMAStatus.REQUESTED),
+            # The NCR / CAR, its event and the complaint's link all roll back together.
+            ("complaint", "/complaints/{id}/create-ncr", None, ComplaintStatus.RECEIVED, "ncr_id", None),
+            ("complaint", "/complaints/{id}/create-car", None, ComplaintStatus.RECEIVED, "car_id", None),
         ],
-        ids=["resolve", "close", "dispose", "complete"],
+        ids=["resolve", "close", "dispose", "complete", "approve", "deny", "create-ncr", "create-car"],
     )
     def test_required_audit_failure_rolls_back(
         self, client: TestClient, db_session: Session, quality_a, monkeypatch, kind, path, body, status, field, expected
@@ -739,13 +752,13 @@ class TestComplaintWorkflowAudit:
         complaint = make_complaint(db_session, company_id=COMPANY_A)
 
         response = client.put(
-            f"{API}/complaints/{complaint.id}", json={"root_cause": "Loose packing"}, headers=headers_for(quality_a)
+            f"{API}/complaints/{complaint.id}", json={"lot_number": "LOT-77"}, headers=headers_for(quality_a)
         )
 
         assert response.status_code == 200, response.text
         rows = _audit_rows(db_session, "customer_complaint", complaint.id)
         assert [row.action for row in rows] == ["UPDATE"]
-        assert rows[0].extra_data["changes"] == {"root_cause": {"old": None, "new": "Loose packing"}}
+        assert rows[0].extra_data["changes"] == {"lot_number": {"old": None, "new": "LOT-77"}}
 
     def test_rma_lifecycle_audits_every_step(self, client: TestClient, db_session: Session, quality_a):
         headers = headers_for(quality_a)
@@ -926,6 +939,174 @@ class TestRMAWorkflow:
         assert taken == [("complaint_number", None), ("rma_number", None)]
 
 
+# ---------------------------------------------------------------- PUT vs the workflow verbs
+
+
+class TestPutCannotBypassTheVerbs:
+    # The update schemas used to carry the fields resolve and dispose decide, and PUT is
+    # Author-tier with no state check. A Supervisor (refused on /resolve and /dispose)
+    # could therefore set them anyway: a review probe got 200 on PUT credit_amount=99999
+    # against a COMPLETED RMA, and on a rewrite of a CLOSED complaint's resolution.
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("resolution_description", "Rewritten resolution"),
+            ("corrective_action", "Rewritten corrective action"),
+            ("preventive_action", "Rewritten preventive action"),
+            ("actual_cost", 0),
+            ("investigation_findings", "Findings outside investigate"),
+            ("root_cause", "Root cause outside investigate"),
+            ("containment_action", "Containment outside investigate"),
+        ],
+    )
+    def test_complaint_put_refuses_a_verb_owned_field(self, client: TestClient, db_session: Session, field, value):
+        supervisor = make_user(db_session, company_id=COMPANY_A, role=UserRole.SUPERVISOR)
+        complaint = make_complaint(db_session, company_id=COMPANY_A, status=ComplaintStatus.UNDER_INVESTIGATION)
+        before_row = _state(db_session, CustomerComplaint, complaint.id)
+        before_counts = _side_effect_counts(db_session)
+
+        response = client.put(f"{API}/complaints/{complaint.id}", json={field: value}, headers=headers_for(supervisor))
+
+        assert response.status_code == 422, response.text
+        assert field in response.text
+        assert _state(db_session, CustomerComplaint, complaint.id) == before_row
+        assert _side_effect_counts(db_session) == before_counts
+
+    def test_rma_put_refuses_credit_amount(self, client: TestClient, db_session: Session):
+        supervisor = make_user(db_session, company_id=COMPANY_A, role=UserRole.SUPERVISOR)
+        rma = make_rma(
+            db_session, company_id=COMPANY_A, status=RMAStatus.COMPLETED, disposition="credit", credit_amount=40
+        )
+        before_row = _state(db_session, ReturnMaterialAuthorization, rma.id)
+        before_counts = _side_effect_counts(db_session)
+
+        response = client.put(f"{API}/rma/{rma.id}", json={"credit_amount": 99999}, headers=headers_for(supervisor))
+
+        assert response.status_code == 422, response.text
+        assert "credit_amount" in response.text
+        assert _state(db_session, ReturnMaterialAuthorization, rma.id) == before_row
+        assert _side_effect_counts(db_session) == before_counts
+
+    @pytest.mark.parametrize("status", [ComplaintStatus.CLOSED, ComplaintStatus.VOID])
+    def test_a_closed_complaint_cannot_be_edited(self, client: TestClient, db_session: Session, quality_a, status):
+        # Once create-ncr has copied the lot, a later rewrite would make the closed
+        # complaint and its NCR disagree about which lot was affected.
+        complaint = make_complaint(db_session, company_id=COMPANY_A, status=status, lot_number="LOT-1")
+        before_row = _state(db_session, CustomerComplaint, complaint.id)
+        before_counts = _side_effect_counts(db_session)
+
+        response = client.put(
+            f"{API}/complaints/{complaint.id}", json={"lot_number": "LOT-2"}, headers=headers_for(quality_a)
+        )
+
+        assert response.status_code == 409, response.text
+        assert "closed quality record" in response.json()["detail"]
+        assert _state(db_session, CustomerComplaint, complaint.id) == before_row
+        assert _side_effect_counts(db_session) == before_counts
+
+    def test_a_resolved_complaint_is_still_editable(self, client: TestClient, db_session: Session, quality_a):
+        # Control: the freeze is CLOSED / VOID only; RESOLVED still awaits close.
+        complaint = make_complaint(db_session, company_id=COMPANY_A, status=ComplaintStatus.RESOLVED)
+
+        response = client.put(
+            f"{API}/complaints/{complaint.id}", json={"lot_number": "LOT-2"}, headers=headers_for(quality_a)
+        )
+
+        assert response.status_code == 200, response.text
+        assert _state(db_session, CustomerComplaint, complaint.id)["lot_number"] == "LOT-2"
+
+    @pytest.mark.parametrize("status", [RMAStatus.COMPLETED, RMAStatus.DENIED])
+    def test_a_finished_rma_cannot_be_edited(self, client: TestClient, db_session: Session, quality_a, status):
+        rma = make_rma(db_session, company_id=COMPANY_A, status=status)
+        before_row = _state(db_session, ReturnMaterialAuthorization, rma.id)
+        before_counts = _side_effect_counts(db_session)
+
+        response = client.put(f"{API}/rma/{rma.id}", json={"notes": "Late note"}, headers=headers_for(quality_a))
+
+        assert response.status_code == 409, response.text
+        assert _state(db_session, ReturnMaterialAuthorization, rma.id) == before_row
+        assert _side_effect_counts(db_session) == before_counts
+
+    @pytest.mark.parametrize(
+        "status,body,field",
+        [
+            # approve authorized this quantity and reason
+            (RMAStatus.APPROVED, {"quantity": 50}, "quantity"),
+            (RMAStatus.APPROVED, {"reason": "A different reason now"}, "reason"),
+            (RMAStatus.UNDER_INSPECTION, {"quantity": 50}, "quantity"),
+            # inspect writes the findings (from MATERIAL_RECEIVED); dispose decides on them
+            (RMAStatus.REQUESTED, {"inspection_findings": "Findings before receipt"}, "inspection_findings"),
+            (RMAStatus.MATERIAL_RECEIVED, {"inspection_findings": "Findings skipping inspect"}, "inspection_findings"),
+            (RMAStatus.DISPOSITION_DECIDED, {"inspection_findings": "Findings after decision"}, "inspection_findings"),
+        ],
+        ids=["qty-approved", "reason-approved", "qty-inspecting", "find-requested", "find-received", "find-decided"],
+    )
+    def test_rma_put_refuses_a_field_outside_its_window(
+        self, client: TestClient, db_session: Session, quality_a, status, body, field
+    ):
+        rma = make_rma(db_session, company_id=COMPANY_A, status=status)
+        before_row = _state(db_session, ReturnMaterialAuthorization, rma.id)
+        before_counts = _side_effect_counts(db_session)
+
+        response = client.put(f"{API}/rma/{rma.id}", json=body, headers=headers_for(quality_a))
+
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"].startswith(f"{field} can only be changed while the RMA is")
+        assert _state(db_session, ReturnMaterialAuthorization, rma.id) == before_row
+        assert _side_effect_counts(db_session) == before_counts
+
+    @pytest.mark.parametrize(
+        "status,body",
+        [
+            (RMAStatus.REQUESTED, {"quantity": 5, "reason": "Customer revised the count"}),
+            (RMAStatus.UNDER_INSPECTION, {"inspection_findings": "Amended: dent and a scratch"}),
+            # A full-object client resending the authorized values changes nothing locked.
+            (RMAStatus.APPROVED, {"quantity": 2, "reason": "Return for inspection", "notes": "Expedite"}),
+        ],
+        ids=["requested", "under-inspection", "unchanged-after-approval"],
+    )
+    def test_rma_put_allows_a_field_inside_its_window(
+        self, client: TestClient, db_session: Session, quality_a, status, body
+    ):
+        rma = make_rma(db_session, company_id=COMPANY_A, status=status)
+
+        response = client.put(f"{API}/rma/{rma.id}", json=body, headers=headers_for(quality_a))
+
+        assert response.status_code == 200, response.text
+        state = _state(db_session, ReturnMaterialAuthorization, rma.id)
+        assert {key: state[key] for key in body} == body
+
+    @pytest.mark.parametrize(
+        "status,disposition", [(RMAStatus.REQUESTED, None), (RMAStatus.DISPOSITION_DECIDED, "credit")]
+    )
+    def test_replacement_work_order_links_only_on_a_replace_disposition(
+        self, client: TestClient, db_session: Session, quality_a, status, disposition
+    ):
+        wo = make_work_order(db_session, company_id=COMPANY_A)
+        rma = make_rma(db_session, company_id=COMPANY_A, status=status, disposition=disposition)
+        before_row = _state(db_session, ReturnMaterialAuthorization, rma.id)
+        before_counts = _side_effect_counts(db_session)
+
+        response = client.put(f"{API}/rma/{rma.id}", json={"replacement_wo_id": wo.id}, headers=headers_for(quality_a))
+
+        assert response.status_code == 409, response.text
+        assert "dispositioned 'replace'" in response.json()["detail"]
+        assert _state(db_session, ReturnMaterialAuthorization, rma.id) == before_row
+        assert _side_effect_counts(db_session) == before_counts
+
+    @pytest.mark.parametrize("field", ["title", "description", "customer_name"])
+    def test_complaint_put_refuses_blank_required_text(self, client: TestClient, db_session: Session, quality_a, field):
+        # The same minimums create enforces; "" used to pass where null was refused.
+        complaint = make_complaint(db_session, company_id=COMPANY_A)
+        before_row = _state(db_session, CustomerComplaint, complaint.id)
+
+        response = client.put(f"{API}/complaints/{complaint.id}", json={field: ""}, headers=headers_for(quality_a))
+
+        assert response.status_code == 422, response.text
+        assert _state(db_session, CustomerComplaint, complaint.id) == before_row
+
+
 # ---------------------------------------------------------------- references
 
 
@@ -1017,7 +1198,7 @@ class TestReferenceValidation:
 
         response = client.put(
             f"{API}/complaints/{complaint.id}",
-            json={"part_id": part.id, "root_cause": "Loose packing"},
+            json={"part_id": part.id, "lot_number": "LOT-77"},
             headers=headers_for(quality_a),
         )
 
@@ -1103,7 +1284,8 @@ class TestReferenceValidation:
             company_id=COMPANY_B if variant == "foreign" else COMPANY_A,
             is_deleted=variant == "retired",
         )
-        rma = make_rma(db_session, company_id=COMPANY_A)
+        # Dispositioned 'replace', so the link window is open and only the reference is wrong.
+        rma = make_rma(db_session, company_id=COMPANY_A, status=RMAStatus.DISPOSITION_DECIDED, disposition="replace")
         before_row = _state(db_session, ReturnMaterialAuthorization, rma.id)
         before_counts = _side_effect_counts(db_session)
 
@@ -1117,13 +1299,90 @@ class TestReferenceValidation:
     def test_put_rma_accepts_an_own_live_replacement_work_order(
         self, client: TestClient, db_session: Session, quality_a
     ):
+        # The replacement job is often opened after the 'replace' decision; PUT links it.
         wo = make_work_order(db_session, company_id=COMPANY_A)
-        rma = make_rma(db_session, company_id=COMPANY_A)
+        rma = make_rma(db_session, company_id=COMPANY_A, status=RMAStatus.DISPOSITION_DECIDED, disposition="replace")
 
         response = client.put(f"{API}/rma/{rma.id}", json={"replacement_wo_id": wo.id}, headers=headers_for(quality_a))
 
         assert response.status_code == 200, response.text
         assert _state(db_session, ReturnMaterialAuthorization, rma.id)["replacement_wo_id"] == wo.id
+
+    @pytest.mark.parametrize("field", ["customer_id", "part_id"])
+    def test_rma_from_complaint_keeps_naming_its_retired_customer_or_part(
+        self, client: TestClient, db_session: Session, quality_a, field
+    ):
+        # The page copies the complaint's customer_id / part_id into the RMA body. Retiring
+        # either after the complaint was logged must not block the return (create-ncr
+        # accepts the same retired part).
+        target = make_customer(db_session) if field == "customer_id" else make_part(db_session)
+        complaint = make_complaint(db_session, company_id=COMPANY_A, **{field: target.id})
+        target.is_deleted = True
+        db_session.commit()
+
+        response = client.post(
+            f"{API}/rma/",
+            json={
+                "complaint_id": complaint.id,
+                "customer_name": "Acme",
+                "quantity": 1,
+                "reason": "Return dented",
+                field: target.id,
+            },
+            headers=headers_for(quality_a),
+        )
+
+        assert response.status_code == 200, response.text
+        assert _state(db_session, ReturnMaterialAuthorization, response.json()["id"])[field] == target.id
+
+    def test_rma_from_complaint_still_refuses_a_different_retired_part(
+        self, client: TestClient, db_session: Session, quality_a
+    ):
+        # Only the value the complaint names is a record; any other part is a new choice.
+        complaint = make_complaint(db_session, company_id=COMPANY_A, part_id=make_part(db_session).id)
+        other_retired = make_part(db_session, is_deleted=True)
+        before_counts = _side_effect_counts(db_session)
+
+        response = client.post(
+            f"{API}/rma/",
+            json={
+                "complaint_id": complaint.id,
+                "customer_name": "Acme",
+                "quantity": 1,
+                "reason": "Return dented",
+                "part_id": other_retired.id,
+            },
+            headers=headers_for(quality_a),
+        )
+
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"] == "part_id does not reference a live part in your company"
+        assert _side_effect_counts(db_session) == before_counts
+
+    def test_rma_from_complaint_refuses_a_legacy_foreign_part_it_copied(
+        self, client: TestClient, db_session: Session, quality_a
+    ):
+        # A copied value is still checked for ownership: a legacy cross-tenant link on the
+        # complaint does not launder the other tenant's part into a new RMA.
+        foreign_part = make_part(db_session, company_id=COMPANY_B)
+        complaint = make_complaint(db_session, company_id=COMPANY_A, part_id=foreign_part.id)
+        before_counts = _side_effect_counts(db_session)
+
+        response = client.post(
+            f"{API}/rma/",
+            json={
+                "complaint_id": complaint.id,
+                "customer_name": "Acme",
+                "quantity": 1,
+                "reason": "Return dented",
+                "part_id": foreign_part.id,
+            },
+            headers=headers_for(quality_a),
+        )
+
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"] == "part_id does not reference a part in your company"
+        assert _side_effect_counts(db_session) == before_counts
 
 
 # ---------------------------------------------------------------- NCR / CAR escalation

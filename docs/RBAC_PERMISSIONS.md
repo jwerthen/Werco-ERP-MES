@@ -1867,11 +1867,19 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > **404** before anything is read or changed, the dashboard aggregates only the active company,
 > and part / customer / RMA expansions never cross tenants.
 >
+> **An Author-tier edit cannot make an Approver's decision.** `PUT` is Author-tier, so the update
+> schemas carry no field an Approver verb decides: no `status`, no resolution fields
+> (`resolution_description`, `corrective_action`, `preventive_action`, `actual_cost`) on a
+> complaint, and no `disposition` or `credit_amount` on an RMA (all **422**). The fields an
+> approval rests on are locked once it is made: RMA `quantity` / `reason` change only while
+> `requested`, and a `closed` / `void` complaint or a `completed` / `denied` RMA refuses every edit
+> (**409**). Investigation and inspection findings are likewise written only by their own verbs.
+>
 > **Writes are audited.** Resource types are `customer_complaint`, `rma`, `ncr` and `car`. `resolve`,
-> `close`, RMA `dispose` and RMA `complete` write their audit row with `log_required`: if the row
-> cannot be saved the request returns **503** and nothing commits. The other writes use the
-> best-effort helpers. Status moves only through the workflow verbs, which return **400** from the
-> wrong state. The update schemas no longer accept `status` (complaint) or `disposition` (RMA).
+> `close`, RMA `approve` / `deny` / `dispose` / `complete`, and the NCR or CAR a complaint raises
+> (with the complaint's link) write their audit rows with `log_required`: if a row cannot be saved
+> the request returns **503** and nothing commits. The other writes use the best-effort helpers.
+> Status moves only through the workflow verbs, which return **400** from the wrong state.
 > See [API: Customer Complaints & RMA](API.md#customer-complaints--rma).
 
 ### Engineering Change Orders (ECO)

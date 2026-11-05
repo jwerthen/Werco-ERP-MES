@@ -16,14 +16,32 @@ one place because they were all missing together before:
   must be live (not soft-deleted) rows of the active company, the assignee an active
   user of it, and an RMA's complaint a complaint of it. Each failure is a 422 raised
   before the first mutation. An UNCHANGED reference on update is a record and is not
-  re-checked, so retiring a part never strands the complaints that name it.
+  re-checked, so retiring a part never strands the complaints that name it. An RMA's
+  ``customer_id`` / ``part_id`` equal to the ones its complaint already names is a
+  record COPIED from that complaint (the page sends exactly that), so it is checked
+  for ownership only. A complaint's own customer / part / work order stay selections
+  (chosen from the live pickers): a complaint about an already-retired item is
+  recorded without the link and names it in the text.
 * **Status.** Status moves only through the workflow verbs, each with a from-state
   guard (400, as the RMA verbs always answered). ``ComplaintUpdate`` carries no
   ``status`` and ``RMAUpdate`` no ``disposition``.
-* **Audit.** Every write records through ``AuditService``. Resolve, close, RMA dispose
-  and RMA complete use ``log_required``, so their evidence commits with the change or
-  nothing commits (503 via ``complaint_transaction``). The other writes keep
-  best-effort semantics.
+* **PUT cannot do a verb's job.** The update schemas carry no field a workflow verb
+  owns: none of investigate's or resolve's fields on a complaint, and no
+  ``credit_amount`` (dispose) on an RMA. Otherwise an author-tier caller could rewrite
+  an approver's decision, or write findings outside the verb's from-state guard. The
+  RMA fields a later decision rests on are editable only in their own window
+  (``_RMA_FIELD_WINDOWS``): ``quantity`` / ``reason`` while REQUESTED (approve
+  authorizes them), ``inspection_findings`` while UNDER_INSPECTION (dispose decides
+  on them). ``replacement_wo_id`` links only on an RMA dispositioned ``replace``. A
+  CLOSED / VOID complaint and a COMPLETED / DENIED RMA are closed quality records, so
+  PUT refuses them outright (the FAI rule: final status makes the evidence immutable,
+  invariant 5). Every PUT refusal is a 409 raised before the first ``setattr``.
+* **Audit.** Every write records through ``AuditService``. The decisions and the
+  quality records they raise use ``log_required``: resolve, close, RMA approve / deny /
+  dispose / complete, the NCR or CAR a complaint raises, and the complaint's link to
+  it. Their evidence commits with the change or nothing commits (503 via
+  ``complaint_transaction``). The other writes (create, PUT, investigate, receive,
+  inspect) keep best-effort semantics.
 * **Roles.** ``AUTHOR_ROLES`` (the ``quality:inspect`` tier) record and investigate.
   ``APPROVER_ROLES`` (the ``quality:approve`` tier) decide: they resolve, close,
   raise NCRs/CARs, and approve, deny, dispose and complete RMAs. Reads are
@@ -83,12 +101,27 @@ OPEN_RMA_STATUSES = (
 )
 VALID_DISPOSITIONS = ("replace", "repair", "credit", "scrap", "return_to_customer")
 
+# Closed quality records: PUT refuses them outright (409). No verb leaves these states.
+FROZEN_COMPLAINT_STATUSES = (ComplaintStatus.CLOSED, ComplaintStatus.VOID)
+FROZEN_RMA_STATUSES = (RMAStatus.COMPLETED, RMAStatus.DENIED)
+
+# RMA fields a later decision rests on -> the only statuses PUT may change them in.
+# quantity / reason are what approve authorizes; inspection_findings are what dispose
+# decides on (inspect writes them first, from MATERIAL_RECEIVED).
+_RMA_FIELD_WINDOWS: Dict[str, tuple] = {
+    "quantity": (RMAStatus.REQUESTED,),
+    "reason": (RMAStatus.REQUESTED,),
+    "inspection_findings": (RMAStatus.UNDER_INSPECTION,),
+}
+# An RMA references these through its complaint too; a matching value is copied, not chosen.
+_COMPLAINT_COPIED_REFERENCES = ("customer_id", "part_id")
+
 # NOT NULL columns, or response fields typed non-optional: an explicit null on update
 # would otherwise fail at INSERT/serialization time as a 500.
 _COMPLAINT_REQUIRED_FIELDS = frozenset(
-    {"customer_name", "title", "description", "quantity_affected", "severity", "estimated_cost", "actual_cost"}
+    {"customer_name", "title", "description", "quantity_affected", "severity", "estimated_cost"}
 )
-_RMA_REQUIRED_FIELDS = frozenset({"quantity", "reason", "credit_amount"})
+_RMA_REQUIRED_FIELDS = frozenset({"quantity", "reason"})
 
 # Body field -> (model, label) for references a caller can SELECT.
 _REFERENCES: Dict[str, tuple] = {
@@ -96,7 +129,7 @@ _REFERENCES: Dict[str, tuple] = {
     "part_id": (Part, "part"),
     "work_order_id": (WorkOrder, "work order"),
     "replacement_wo_id": (WorkOrder, "work order"),
-    "assigned_to": (User, "active user"),
+    "assigned_to": (User, "user"),
     "complaint_id": (CustomerComplaint, "complaint"),
 }
 
@@ -212,8 +245,19 @@ def _refuse_cleared(values: Dict[str, Any], required: Iterable[str]) -> None:
         raise HTTPException(status_code=422, detail=f"{', '.join(cleared)} cannot be cleared")
 
 
-def _validate_references(db: Session, company_id: int, values: Dict[str, Any], current: Optional[Any] = None) -> None:
-    """422 unless every newly selected reference is a live row of the active company."""
+def _validate_references(
+    db: Session,
+    company_id: int,
+    values: Dict[str, Any],
+    current: Optional[Any] = None,
+    records: Iterable[str] = (),
+) -> None:
+    """422 unless every reference names a row of the active company.
+
+    A new selection must also be live: not soft-deleted, and for a user, active. A field
+    in ``records`` names what an existing record already names, so only ownership is
+    checked. An unchanged reference on update (``current``) is not re-checked at all.
+    """
     for field, ref_id in values.items():
         target = _REFERENCES.get(field)
         if target is None or ref_id is None:
@@ -221,13 +265,40 @@ def _validate_references(db: Session, company_id: int, values: Dict[str, Any], c
         if current is not None and getattr(current, field) == ref_id:
             continue  # unchanged: a record, not a new selection
         model, label = target
+        live = field not in records
         query = tenant_query(db, model, company_id).filter(model.id == ref_id)
-        if hasattr(model, "is_deleted"):
+        if live and hasattr(model, "is_deleted"):
             query = query.filter(model.is_deleted.is_(False))
-        if model is User:
+            label = f"live {label}"
+        if live and model is User:
             query = query.filter(User.is_active.is_(True))
+            label = f"active {label}"
         if query.with_entities(model.id).first() is None:
-            raise HTTPException(status_code=422, detail=f"{field} does not reference a {label} in your company")
+            article = "an" if label[0] in "aeiou" else "a"
+            raise HTTPException(status_code=422, detail=f"{field} does not reference {article} {label} in your company")
+
+
+def _refuse_frozen(row: Any, frozen: Iterable[Any], noun: str) -> None:
+    """409 on any edit of a closed quality record."""
+    if row.status in tuple(frozen):
+        raise HTTPException(
+            status_code=409,
+            detail=f"A {_value(row.status)} {noun} is a closed quality record and cannot be edited",
+        )
+
+
+def _refuse_outside_window(rma: ReturnMaterialAuthorization, values: Dict[str, Any]) -> None:
+    """409 when PUT would change a field after the decision that rests on it."""
+    refused = [
+        f"{field} can only be changed while the RMA is {' or '.join(_value(s) for s in statuses)}"
+        for field, statuses in sorted(_RMA_FIELD_WINDOWS.items())
+        if field in values and values[field] != getattr(rma, field) and rma.status not in statuses
+    ]
+    changes_link = "replacement_wo_id" in values and values["replacement_wo_id"] != rma.replacement_wo_id
+    if changes_link and rma.disposition != "replace":
+        refused.append("replacement_wo_id can only be linked on an RMA dispositioned 'replace'")
+    if refused:
+        raise HTTPException(status_code=409, detail=f"{'; '.join(refused)} (current status: {_value(rma.status)})")
 
 
 def _require_owned(db: Session, company_id: int, model: Any, ref_id: Optional[int], label: str) -> None:
@@ -254,6 +325,8 @@ def _audit_transition(
     *,
     required: bool = False,
 ) -> None:
+    """A STATUS_CHANGE row when the status moved, else an UPDATE row, shaped like the
+    ``log_status_change`` / ``log_update`` helpers; ``required`` makes it fail closed."""
     after = _snapshot(row)
     changes = {key: {"old": before.get(key), "new": value} for key, value in after.items() if before.get(key) != value}
     old_status, new_status = before.get("status"), after.get("status")
@@ -265,15 +338,42 @@ def _audit_transition(
         else:
             audit.log_update(resource_type, row.id, identifier, old_values=before, new_values=after)
         return
+    if old_status != new_status:
+        audit.log_required(
+            "STATUS_CHANGE",
+            resource_type,
+            resource_id=row.id,
+            resource_identifier=identifier,
+            description=f"Changed {resource_type} status: {identifier} from '{old_status}' to '{new_status}'",
+            old_values={"status": old_status},
+            new_values={"status": new_status},
+            extra_data={"changes": changes},
+            company_id=row.company_id,
+        )
+        return
     audit.log_required(
-        "STATUS_CHANGE" if old_status != new_status else "UPDATE",
+        "UPDATE",
         resource_type,
         resource_id=row.id,
         resource_identifier=identifier,
-        description=f"Changed {resource_type} status: {identifier} from '{old_status}' to '{new_status}'",
-        old_values={"status": old_status},
-        new_values={"status": new_status},
+        description=f"Updated {resource_type}: {identifier}",
+        old_values=before,
+        new_values=after,
         extra_data={"changes": changes},
+        company_id=row.company_id,
+    )
+
+
+def _audit_escalation(audit: AuditService, resource_type: str, row: Any, identifier: str, complaint: Any) -> None:
+    """Required CREATE row for the NCR / CAR a complaint raises."""
+    audit.log_required(
+        "CREATE",
+        resource_type,
+        resource_id=row.id,
+        resource_identifier=identifier,
+        description=f"Created {resource_type}: {identifier} from complaint {complaint.complaint_number}",
+        new_values=_snapshot(row),
+        extra_data={"complaint_id": complaint.id, "complaint_number": complaint.complaint_number},
         company_id=row.company_id,
     )
 
@@ -435,6 +535,7 @@ def update_complaint(
     db: Session, company_id: int, complaint_id: int, values: Dict[str, Any], audit: AuditService
 ) -> CustomerComplaint:
     complaint = _locked_complaint(db, company_id, complaint_id)
+    _refuse_frozen(complaint, FROZEN_COMPLAINT_STATUSES, "complaint")
     _refuse_cleared(values, _COMPLAINT_REQUIRED_FIELDS)
     _validate_references(db, company_id, values, current=complaint)
     before = _snapshot(complaint)
@@ -564,9 +665,7 @@ def _link_record(db: Session, complaint: CustomerComplaint, field: str, record_i
     before = _snapshot(complaint)
     setattr(complaint, field, record_id)
     db.flush()
-    audit.log_update(
-        COMPLAINT_RESOURCE, complaint.id, complaint.complaint_number, old_values=before, new_values=_snapshot(complaint)
-    )
+    _audit_transition(audit, COMPLAINT_RESOURCE, complaint, complaint.complaint_number, before, required=True)
 
 
 def create_ncr_from_complaint(
@@ -617,13 +716,7 @@ def create_ncr_from_complaint(
             "complaint_number": complaint.complaint_number,
         },
     )
-    audit.log_create(
-        "ncr",
-        ncr.id,
-        ncr.ncr_number,
-        new_values=_snapshot(ncr),
-        extra_data={"complaint_id": complaint.id, "complaint_number": complaint.complaint_number},
-    )
+    _audit_escalation(audit, "ncr", ncr, ncr.ncr_number, complaint)
     _link_record(db, complaint, "ncr_id", ncr.id, audit)
     return complaint
 
@@ -665,13 +758,7 @@ def create_car_from_complaint(
             "complaint_number": complaint.complaint_number,
         },
     )
-    audit.log_create(
-        "car",
-        car.id,
-        car.car_number,
-        new_values=_snapshot(car),
-        extra_data={"complaint_id": complaint.id, "complaint_number": complaint.complaint_number},
-    )
+    _audit_escalation(audit, "car", car, car.car_number, complaint)
     _link_record(db, complaint, "car_id", car.id, audit)
     return complaint
 
@@ -679,10 +766,32 @@ def create_car_from_complaint(
 # ============== RMA writes ==============
 
 
+def _copied_from_complaint(db: Session, company_id: int, values: Dict[str, Any]) -> frozenset:
+    """The RMA reference fields whose value is the one its complaint already names.
+
+    The page builds the RMA from the complaint and sends those ids back, so they are a
+    record of what the complaint named, not a new choice: retiring the part or customer
+    after the complaint was logged must not block the return (create-ncr follows the
+    same rule). A foreign complaint resolves to nothing here and is refused (422) by
+    ``_validate_references`` on ``complaint_id`` itself.
+    """
+    complaint_id = values.get("complaint_id")
+    if complaint_id is None:
+        return frozenset()
+    complaint = tenant_query(db, CustomerComplaint, company_id).filter(CustomerComplaint.id == complaint_id).first()
+    if complaint is None:
+        return frozenset()
+    return frozenset(
+        field
+        for field in _COMPLAINT_COPIED_REFERENCES
+        if values.get(field) is not None and values[field] == getattr(complaint, field)
+    )
+
+
 def create_rma(
     db: Session, company_id: int, values: Dict[str, Any], audit: AuditService
 ) -> ReturnMaterialAuthorization:
-    _validate_references(db, company_id, values)
+    _validate_references(db, company_id, values, records=_copied_from_complaint(db, company_id, values))
     rma = ReturnMaterialAuthorization(company_id=company_id, rma_number=generate_rma_number(db), **values)
     db.add(rma)
     db.flush()
@@ -694,7 +803,9 @@ def update_rma(
     db: Session, company_id: int, rma_id: int, values: Dict[str, Any], audit: AuditService
 ) -> ReturnMaterialAuthorization:
     rma = _locked_rma(db, company_id, rma_id)
+    _refuse_frozen(rma, FROZEN_RMA_STATUSES, "RMA")
     _refuse_cleared(values, _RMA_REQUIRED_FIELDS)
+    _refuse_outside_window(rma, values)
     _validate_references(db, company_id, values, current=rma)
     before = _snapshot(rma)
     for field, value in values.items():
@@ -743,6 +854,7 @@ def decide_rma(
         allowed_from=(RMAStatus.REQUESTED,),
         refusal=f"RMA can only be {verb} from REQUESTED status",
         apply=apply,
+        required=True,
     )
 
 

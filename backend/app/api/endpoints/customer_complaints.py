@@ -99,9 +99,15 @@ class ComplaintUpdate(BaseModel):
     # (investigate / resolve / close), each role-gated, state-guarded and audited.
     # Consequence, accepted: PENDING_RESOLUTION and VOID have no writer until a
     # dedicated, reasoned and audited verb ships for them.
+    #
+    # The VERBS' OWN FIELDS are absent for the same reason. Investigate owns
+    # investigation_findings / root_cause / containment_action (re-run it to amend them
+    # while the complaint is open). Resolve owns resolution_description /
+    # corrective_action / preventive_action / actual_cost: that is the Approver's
+    # corrective-action decision, and an Author-tier PUT must not rewrite it.
     model_config = ConfigDict(extra="forbid")
 
-    customer_name: Optional[str] = Field(None, max_length=255)
+    customer_name: Optional[str] = Field(None, min_length=1, max_length=255)
     customer_po_number: Optional[str] = Field(None, max_length=100)
     customer_contact: Optional[str] = Field(None, max_length=255)
     part_id: Optional[int] = None
@@ -110,17 +116,10 @@ class ComplaintUpdate(BaseModel):
     serial_number: Optional[str] = Field(None, max_length=100)
     quantity_affected: Optional[float] = Field(None, gt=0)
     severity: Optional[ComplaintSeverity] = None
-    title: Optional[str] = Field(None, max_length=255)
-    description: Optional[str] = None
-    investigation_findings: Optional[str] = None
-    root_cause: Optional[str] = None
-    containment_action: Optional[str] = None
-    corrective_action: Optional[str] = None
-    preventive_action: Optional[str] = None
-    resolution_description: Optional[str] = None
+    title: Optional[str] = Field(None, min_length=3, max_length=255)
+    description: Optional[str] = Field(None, min_length=5)
     assigned_to: Optional[int] = None
     estimated_cost: Optional[float] = Field(None, ge=0)
-    actual_cost: Optional[float] = Field(None, ge=0)
 
 
 class InvestigateRequest(BaseModel):
@@ -197,17 +196,20 @@ class RMACreate(BaseModel):
 
 
 class RMAUpdate(BaseModel):
-    # ``disposition`` IS DELIBERATELY ABSENT (unknown fields are refused, 422): it was a
-    # free-text field here that bypassed ``POST /rma/{id}/dispose`` -- its allow-list, its
-    # Admin/Manager/Quality gate, its from-state guard and its required audit row.
+    # ``disposition`` and ``credit_amount`` ARE DELIBERATELY ABSENT (unknown fields are
+    # refused, 422): both are outputs of ``POST /rma/{id}/dispose``, and a PUT carrying
+    # them bypassed its allow-list, its Admin/Manager/Quality gate, its from-state guard
+    # and its required audit row. The service also holds the remaining decision-bearing
+    # fields to their window (409): quantity / reason only while REQUESTED,
+    # inspection_findings only while UNDER_INSPECTION, replacement_wo_id only on an RMA
+    # dispositioned 'replace'; and a COMPLETED / DENIED RMA cannot be edited at all.
     model_config = ConfigDict(extra="forbid")
 
     quantity: Optional[float] = Field(None, gt=0)
     lot_number: Optional[str] = Field(None, max_length=100)
-    reason: Optional[str] = None
+    reason: Optional[str] = Field(None, min_length=5)
     shipping_tracking: Optional[str] = Field(None, max_length=255)
-    inspection_findings: Optional[str] = None
-    credit_amount: Optional[float] = Field(None, ge=0)
+    inspection_findings: Optional[str] = Field(None, min_length=5)
     replacement_wo_id: Optional[int] = None
     notes: Optional[str] = None
 
@@ -390,10 +392,12 @@ def update_complaint(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Edit a complaint's details. Admin / Manager / Supervisor / Quality.
+    """Edit a complaint's details. Admin / Manager / Supervisor / Quality. 409 once the
+    complaint is closed or void.
 
-    Status is not editable here: use investigate / resolve / close. A changed reference
-    must name a live record of the active company (422 otherwise)."""
+    Status, investigation and resolution fields are not editable here (422): use
+    investigate / resolve / close. A changed reference must name a live record of the
+    active company (422 otherwise)."""
     with complaint_transaction(db):
         complaints.update_complaint(db, company_id, complaint_id, data.model_dump(exclude_unset=True), audit)
     return complaints.get_complaint_or_404(db, company_id, complaint_id)
@@ -460,7 +464,8 @@ def create_ncr_from_complaint(
     """Raise a customer-return NCR from the complaint and link it. Admin / Manager / Quality.
 
     Numbered, evented (``ncr_created``) and tenant-tagged like ``POST /quality/ncr``.
-    400 if the complaint already has an NCR."""
+    400 if the complaint already has an NCR. The audit rows are required: 503 and
+    nothing saved if they cannot be written."""
     with complaint_transaction(db):
         complaints.create_ncr_from_complaint(db, company_id, complaint_id, current_user, audit)
     return complaints.get_complaint_or_404(db, company_id, complaint_id)
@@ -477,7 +482,8 @@ def create_car_from_complaint(
     """Raise a corrective action request from the complaint and link it. Admin / Manager / Quality.
 
     Numbered, evented (``car_created``) and tenant-tagged like ``POST /quality/car``.
-    400 if the complaint already has a CAR."""
+    400 if the complaint already has a CAR. The audit rows are required: 503 and
+    nothing saved if they cannot be written."""
     with complaint_transaction(db):
         complaints.create_car_from_complaint(db, company_id, complaint_id, current_user, audit)
     return complaints.get_complaint_or_404(db, company_id, complaint_id)
@@ -532,7 +538,8 @@ def create_rma(
     """Open a return material authorization (status REQUESTED). Admin / Manager / Supervisor / Quality.
 
     ``complaint_id``, ``customer_id`` and ``part_id`` must name records of the active
-    company (422 otherwise)."""
+    company (422 otherwise). A ``customer_id`` / ``part_id`` equal to the one the
+    complaint already names is accepted even if that record has since been retired."""
     with complaint_transaction(db):
         rma_id = complaints.create_rma(db, company_id, data.model_dump(), audit).id
     return complaints.get_rma_or_404(db, company_id, rma_id)
@@ -547,9 +554,13 @@ def update_rma(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Edit an RMA's details. Admin / Manager / Supervisor / Quality.
+    """Edit an RMA's details. Admin / Manager / Supervisor / Quality. 409 once the RMA is
+    completed or denied.
 
-    Status and disposition are not editable here: use the RMA workflow verbs."""
+    Status, disposition and credit_amount are not editable here (422): use the RMA
+    workflow verbs. 409 when the RMA's state locks a field: quantity / reason change only
+    while requested, inspection_findings only while under inspection, and
+    replacement_wo_id links only on an RMA dispositioned 'replace'."""
     with complaint_transaction(db):
         complaints.update_rma(db, company_id, rma_id, data.model_dump(exclude_unset=True), audit)
     return complaints.get_rma_or_404(db, company_id, rma_id)
@@ -563,7 +574,8 @@ def approve_rma(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Approve a REQUESTED RMA, recording who authorized it. Admin / Manager / Quality."""
+    """Approve a REQUESTED RMA, recording who authorized it. Admin / Manager / Quality.
+    The audit row is required: 503 and nothing saved if it cannot be written."""
     with complaint_transaction(db):
         complaints.decide_rma(db, company_id, rma_id, current_user, audit, approve=True)
     return complaints.get_rma_or_404(db, company_id, rma_id)
@@ -577,7 +589,8 @@ def deny_rma(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Deny a REQUESTED RMA, recording who decided. Admin / Manager / Quality."""
+    """Deny a REQUESTED RMA, recording who decided. Admin / Manager / Quality. The audit
+    row is required: 503 and nothing saved if it cannot be written."""
     with complaint_transaction(db):
         complaints.decide_rma(db, company_id, rma_id, current_user, audit, approve=False)
     return complaints.get_rma_or_404(db, company_id, rma_id)
