@@ -1162,43 +1162,48 @@ def test_closed_po_cannot_be_revived_to_a_live_status_against_a_deleted_vendor(c
     REVIVES rather than creates.
 
     ``delete_vendor``'s "no live POs" check is point-in-time; nothing re-evaluates it. And
-    ``PUT /purchase-orders/{id}`` validates no transition at all -- ``POStatus(value)`` only
-    checks enum membership -- so a CLOSED PO took ``{"status": "sent"}`` and landed straight
-    back in ``GET /receiving/open-pos``, receivable, against a vendor the quality system says
-    was removed. ``POST .../send`` refuses (not DRAFT/APPROVED) and ``POST .../restore``
-    refuses (vendor deleted); this verb bypassed both.
+    ``PUT /purchase-orders/{id}`` used to validate no transition at all -- ``POStatus(value)``
+    only checked enum membership -- so a CLOSED PO took ``{"status": "sent"}`` and landed
+    straight back in ``GET /receiving/open-pos``, receivable, against a vendor the quality
+    system says was removed. ``POST .../send`` refuses (not DRAFT/APPROVED) and
+    ``POST .../restore`` refuses (vendor deleted); this verb bypassed both.
 
-    Moving the PO INTO a terminal status stays allowed: closing out a removed supplier's
-    paperwork must never be blocked. Non-status edits are likewise untouched.
+    The PUT transition whitelist (``assert_po_status_edit_allowed``) now refuses EVERY move
+    out of CLOSED/CANCELLED -- with a 409 that names the real rule (terminal; raise a new PO)
+    rather than "restore the vendor", which would not have made the edit succeed. The
+    vendor-revival guard stays behind it as defense in depth. Non-status edits are untouched.
     """
     admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
     headers = headers_for(admin)
     line, vendor_name, po_number = _closed_po_with_deleted_vendor(client, db_session, admin)
     po_id = line.purchase_order_id
 
-    revived = client.put(f"{PO_BASE}/{po_id}", headers=headers, json={"version": 0, "status": "sent"})
-    assert revived.status_code == status.HTTP_400_BAD_REQUEST, revived.text
-    detail = revived.json()["detail"]
-    assert vendor_name in detail and "Restore the vendor first" in detail
-    db_session.expire_all()
-    assert db_session.get(PurchaseOrder, po_id).status == POStatus.CLOSED, "a refusal must not mutate the row"
+    for target in ("sent", "draft", "cancelled"):
+        revived = client.put(f"{PO_BASE}/{po_id}", headers=headers, json={"version": 0, "status": target})
+        assert revived.status_code == status.HTTP_409_CONFLICT, revived.text
+        assert "final" in revived.json()["detail"] and po_number in revived.json()["detail"]
+        db_session.expire_all()
+        assert db_session.get(PurchaseOrder, po_id).status == POStatus.CLOSED, "a refusal must not mutate the row"
 
-    # Terminal statuses stay reachable, and so do ordinary field edits.
-    cancelled = client.put(f"{PO_BASE}/{po_id}", headers=headers, json={"version": 0, "status": "cancelled"})
-    assert cancelled.status_code == status.HTTP_200_OK, cancelled.text
+    # Echoing the current terminal status, and ordinary field edits, stay allowed.
+    echoed = client.put(f"{PO_BASE}/{po_id}", headers=headers, json={"version": 0, "status": "closed"})
+    assert echoed.status_code == status.HTTP_200_OK, echoed.text
     noted = client.put(f"{PO_BASE}/{po_id}", headers=headers, json={"version": 0, "notes": "supplier removed"})
     assert noted.status_code == status.HTTP_200_OK, noted.text
 
 
 def test_status_change_on_a_po_with_a_live_vendor_is_untouched(client: TestClient, db_session: Session):
-    """Positive control -- the revival guard must not gate ordinary status edits."""
+    """Positive control -- the revival guard must not gate ordinary status edits that the
+    PUT transition whitelist permits (here: a received PO closed out)."""
     admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
     headers = headers_for(admin)
     line = _closed_po_for(db_session)
+    line.purchase_order.status = POStatus.RECEIVED
+    db_session.commit()
 
-    resp = client.put(f"{PO_BASE}/{line.purchase_order_id}", headers=headers, json={"version": 0, "status": "sent"})
+    resp = client.put(f"{PO_BASE}/{line.purchase_order_id}", headers=headers, json={"version": 0, "status": "closed"})
     assert resp.status_code == status.HTTP_200_OK, resp.text
-    assert resp.json()["status"] == "sent"
+    assert resp.json()["status"] == "closed"
 
 
 def test_scanner_withholds_a_cross_tenant_vendor_name(client: TestClient, db_session: Session):

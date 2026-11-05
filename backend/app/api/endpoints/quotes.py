@@ -8,15 +8,47 @@ from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.fabrication_quote import FabricationQuote
 from app.models.quote import Quote, QuoteLine, QuoteStatus
 from app.models.rfq_quote import QuoteEstimate, RfqPackage
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
+from app.services.audit_service import AuditService
 
 router = APIRouter()
+
+# Every quote WRITE verb on this router (edit, send, convert) shares one role set. It is the
+# set that holds ``purchasing:create`` by default -- the permission Fabrication Quoting
+# requires to approve an estimate and hand it off as the ERP quote these verbs act on -- and
+# the set ``convert`` was already gated to. Reads stay tenant-scoped and role-open (the
+# read-broad / write-restricted model in docs/RBAC_PERMISSIONS.md), so a Viewer who can open
+# the Quotes page still cannot accept, reject, expire, re-word or mark sent a customer quote.
+QUOTE_WRITE_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]
+
+# Columns written into a quote's UPDATE audit diff. ``status`` is deliberately absent: every
+# status move gets its own STATUS_CHANGE row (``log_status_change``), so a reviewer searching
+# for "who accepted / rejected / expired this quote" finds exactly one row per transition
+# instead of a status buried in a content diff as well.
+_QUOTE_AUDIT_EXCLUDED_COLUMNS = frozenset({"status"})
+
+
+def _status_value(value: Any) -> str:
+    return value.value if hasattr(value, "value") else str(value)
+
+
+def _quote_audit_snapshot(quote: Quote) -> Dict[str, Any]:
+    return {
+        column.key: getattr(quote, column.key)
+        for column in quote.__table__.columns
+        if column.key not in _QUOTE_AUDIT_EXCLUDED_COLUMNS
+    }
+
+
+def _line_work_order_links(quote: Quote) -> Dict[str, Optional[int]]:
+    # String keys: audit values are JSON and feed the hash chain, so keep them unambiguous.
+    return {str(line.id): line.work_order_id for line in quote.lines}
 
 
 class QuoteLineCreate(BaseModel):
@@ -343,14 +375,23 @@ def update_quote(
     quote_id: int,
     quote_in: QuoteUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(QUOTE_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
+    """Edit a draft/pending quote's commercial terms, or move its status (accept / reject / expire).
+
+    Role-gated to ``QUOTE_WRITE_ROLES``. Audited on the tamper-evident chain: a content edit
+    writes one UPDATE row (field diff, ``status`` excluded) and any status move -- an explicit
+    one, or the reset to DRAFT that a content edit forces -- writes one STATUS_CHANGE row. Both
+    are written before the terminal commit, so they commit atomically with the change. Every
+    refusal below is raised before the first ``setattr`` and writes nothing.
+    """
     quote = db.query(Quote).filter(Quote.id == quote_id, Quote.company_id == company_id).with_for_update().first()
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
 
-    previous_status = quote.status.value if hasattr(quote.status, "value") else str(quote.status)
+    previous_status = _status_value(quote.status)
     update_data = quote_in.model_dump(exclude_unset=True)
     expected_updated_at = update_data.pop("expected_updated_at", None)
     if expected_updated_at is not None:
@@ -388,6 +429,7 @@ def update_quote(
             status_code=409,
             detail="Customer quote prices and lines are frozen. Revise and approve the estimate in Fabrication Quoting.",
         )
+    old_snapshot = _quote_audit_snapshot(quote)
     for field, value in update_data.items():
         setattr(quote, field, value)
     if content_keys or line_data is not None:
@@ -396,6 +438,31 @@ def update_quote(
         quote.approved_at = None
         quote.approved_by = None
         quote.status = QuoteStatus.DRAFT
+
+    db.flush()
+    new_status = _status_value(quote.status)
+    if content_keys:
+        audit.log_update(
+            "quote",
+            quote.id,
+            quote.quote_number,
+            old_values=old_snapshot,
+            new_values=_quote_audit_snapshot(quote),
+            extra_data={"edited_fields": sorted(content_keys)},
+        )
+    if new_status != previous_status:
+        audit.log_status_change(
+            "quote",
+            quote.id,
+            quote.quote_number,
+            old_status=previous_status,
+            new_status=new_status,
+            extra_data={
+                # "edit": a content edit reset an issued-for-review quote to DRAFT and cleared
+                # its approval stamp. "status_update": the caller asked for this status.
+                "source": "edit" if content_keys else "status_update",
+            },
+        )
 
     # Phase 0 always-on AI: capture win/loss/expired outcomes on status change.
     if "status" in update_data:
@@ -423,17 +490,33 @@ def update_quote(
 def send_quote(
     quote_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(QUOTE_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Mark quote as sent to customer"""
+    """Mark quote as sent to customer (records the status only; no message is dispatched).
+
+    Role-gated to ``QUOTE_WRITE_ROLES``. Writes one STATUS_CHANGE audit row when the status
+    actually moves; re-sending an already-SENT quote stays an idempotent 200 that writes none.
+    """
     quote = db.query(Quote).filter(Quote.id == quote_id, Quote.company_id == company_id).with_for_update().first()
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
 
     if quote.status not in [QuoteStatus.DRAFT, QuoteStatus.PENDING, QuoteStatus.SENT]:
         raise HTTPException(status_code=409, detail="Only draft or pending quotes can be marked as sent")
+    previous_status = _status_value(quote.status)
     quote.status = QuoteStatus.SENT
+    db.flush()
+    if previous_status != QuoteStatus.SENT.value:
+        audit.log_status_change(
+            "quote",
+            quote.id,
+            quote.quote_number,
+            old_status=previous_status,
+            new_status=QuoteStatus.SENT.value,
+            extra_data={"source": "send", "customer_message_dispatched": False},
+        )
     db.commit()
 
     return {"message": "Quote marked as sent", "quote_number": quote.quote_number}
@@ -498,10 +581,18 @@ def convert_to_work_order(
     quote_id: int,
     conversion: Optional[QuoteConvertRequest] = Body(default=None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    current_user: User = Depends(require_role(QUOTE_WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Convert explicitly reviewed lines atomically; each line keeps its own WO."""
+    """Convert explicitly reviewed lines atomically; each line keeps its own WO.
+
+    Audit, all before the single terminal commit: one CREATE row per work order minted (the
+    same ``log_create("work_order", ...)`` shape ``POST /work-orders/`` writes, with the quote
+    and line it came from in ``extra_data``), plus one row on the quote -- a STATUS_CHANGE
+    when the quote moves (to ACCEPTED or CONVERTED), otherwise an UPDATE carrying the new
+    line -> work-order links (a second partial conversion of an already-ACCEPTED quote).
+    """
     quote = db.query(Quote).filter(Quote.id == quote_id, Quote.company_id == company_id).with_for_update().first()
     if not quote:
         raise HTTPException(status_code=404, detail="Quote not found")
@@ -518,6 +609,8 @@ def convert_to_work_order(
         raise HTTPException(status_code=422, detail="Review quote-only items: they do not create work orders")
     from app.api.endpoints.work_orders import generate_work_order_number
 
+    previous_links = _line_work_order_links(quote)
+    previous_work_order_id = quote.work_order_id
     created = []
     for line in sorted(quote.lines, key=lambda line: (line.line_number, line.id)):
         if line.id not in ids:
@@ -536,6 +629,21 @@ def convert_to_work_order(
         db.add(wo)
         db.flush()  # Makes this number visible to the next line in this transaction.
         line.work_order_id = wo.id
+        audit.log_create(
+            resource_type="work_order",
+            resource_id=wo.id,
+            resource_identifier=wo.work_order_number,
+            new_values=wo,
+            extra_data={
+                "source": "quote_conversion",
+                "quote_id": quote.id,
+                "quote_number": quote.quote_number,
+                "quote_line_id": line.id,
+                "quote_line_number": line.line_number,
+                "part_id": line.part_id,
+                "quantity": float(line.quantity),
+            },
+        )
         created.append(
             {
                 "line_id": line.id,
@@ -544,7 +652,7 @@ def convert_to_work_order(
                 "work_order_number": wo.work_order_number,
             }
         )
-    previous_status = quote.status.value if hasattr(quote.status, "value") else str(quote.status)
+    previous_status = _status_value(quote.status)
     # Purchased/material lines do not create production orders. Inactive production
     # parts and unresolved references still need resolution before completion.
     remaining = [
@@ -560,6 +668,36 @@ def convert_to_work_order(
     ]
     quote.status = QuoteStatus.ACCEPTED if remaining else QuoteStatus.CONVERTED
     quote.work_order_id = quote.work_order_id or created[0]["work_order_id"]
+    db.flush()
+    new_status = _status_value(quote.status)
+    conversion_detail = {
+        "source": "conversion",
+        "work_orders": created,
+        "remaining_line_ids": remaining,
+    }
+    if new_status != previous_status:
+        audit.log_status_change(
+            "quote",
+            quote.id,
+            quote.quote_number,
+            old_status=previous_status,
+            new_status=new_status,
+            description=(
+                f"Converted quote {quote.quote_number} to {len(created)} work order(s); "
+                f"status '{previous_status}' -> '{new_status}'"
+            ),
+            extra_data=conversion_detail,
+        )
+    else:
+        audit.log_update(
+            "quote",
+            quote.id,
+            quote.quote_number,
+            old_values={"line_work_orders": previous_links, "work_order_id": previous_work_order_id},
+            new_values={"line_work_orders": _line_work_order_links(quote), "work_order_id": quote.work_order_id},
+            description=f"Converted {len(created)} more line(s) of quote {quote.quote_number} to work orders",
+            extra_data=conversion_detail,
+        )
     from app.services.ai_outcome_capture_service import record_quote_status_outcome
 
     record_quote_status_outcome(

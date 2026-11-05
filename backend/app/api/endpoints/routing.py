@@ -54,6 +54,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _generation_provenance(gen_result: Dict[str, Any]) -> Dict[str, Any]:
+    """The model / prompt identity behind a generated proposal, from its extraction metadata.
+
+    Only keys the generator actually reported are returned (``None`` values are dropped), so a
+    proposal produced without an LLM call records nothing rather than a misleading null.
+    """
+    metadata = gen_result.get("_extraction_metadata") or {}
+    provenance = {
+        "model": metadata.get("model"),
+        "model_tier": metadata.get("model_tier"),
+        "prompt_version": metadata.get("prompt_version"),
+    }
+    return {key: value for key, value in provenance.items() if value is not None}
+
+
 def _routing_generation_corrections(
     generation_session: RoutingGenerationSession,
     approved_operations: List[Dict[str, Any]],
@@ -188,8 +203,13 @@ async def generate_routing_from_drawing(
     Upload a drawing (PDF, DXF, STEP) and get a proposed draft routing.
     Returns the proposed routing for user review -- does NOT create it yet.
     """
-    # Validate part exists
-    part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
+    # Validate part exists -- live parts only, matching ``create-from-generation`` (a proposal
+    # for a soft-deleted part could never be accepted, so don't spend a model call on one).
+    part = (
+        db.query(Part)
+        .filter(Part.id == part_id, Part.company_id == company_id, Part.is_deleted == False)  # noqa: E712
+        .first()
+    )
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
 
@@ -394,7 +414,12 @@ async def generate_routing_from_drawing(
         warnings=all_warnings,
         extraction_confidence=gen_result.get("extraction_confidence", "medium"),
         source_was_ocr=is_ocr,
-        learned_context=learned_context,
+        # The model and prompt version that produced THIS proposal ride along with the learned
+        # context, so approving it later (``create-from-generation``) can name them in the
+        # routing's CREATE audit row and the AI-learning event -- both of which read
+        # ``learned_context["model"]``, a key nothing used to write. Recorded at generation
+        # time on purpose: the prompt can be bumped between proposal and approval.
+        learned_context={**learned_context, **_generation_provenance(gen_result)},
     )
     db.commit()
     db.refresh(generation_session)
@@ -419,13 +444,24 @@ def create_routing_from_generation(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """
     Create a routing and its operations from the reviewed/edited generation result.
     The routing is created in 'draft' status.
+
+    This is the step where a named person accepts an AI proposal, so it writes the routing's
+    CREATE row on the tamper-evident audit chain -- the same row ``POST /routing/`` writes --
+    with the generation session, model, prompt version and the count of human corrections in
+    ``extra_data``. The AI-learning interaction event below is telemetry, not that record.
     """
-    # Check part exists
-    part = db.query(Part).filter(Part.id == data.part_id, Part.company_id == company_id).first()
+    # Live part only: attaching a new routing to a soft-deleted part is a SELECTION of a
+    # withdrawn record (invariant 3), not a historical read.
+    part = (
+        db.query(Part)
+        .filter(Part.id == data.part_id, Part.company_id == company_id, Part.is_deleted == False)  # noqa: E712
+        .first()
+    )
     if not part:
         raise HTTPException(status_code=404, detail="Part not found")
 
@@ -503,6 +539,7 @@ def create_routing_from_generation(
     db.flush()
     db.refresh(routing)
     calculate_routing_totals(routing, db)
+    ai_corrections: List[AICorrectionCreate] = []
     if generation_session:
         correction_summary = learn_from_approved_generation(
             db,
@@ -539,6 +576,29 @@ def create_routing_from_generation(
                 corrections=ai_corrections,
             ),
         )
+    generation_context = (generation_session.learned_context or {}) if generation_session else {}
+    audit.log_create(
+        "routing",
+        routing.id,
+        f"{part.part_number} Rev {routing.revision}",
+        new_values=routing,
+        description=(
+            f"Created routing {part.part_number} Rev {routing.revision} from "
+            + ("an accepted AI drawing proposal" if generation_session else "a drawing-generation form")
+        ),
+        extra_data={
+            "source": "ai_routing_generation" if generation_session else "create_from_generation",
+            "generation_session_id": generation_session.id if generation_session else None,
+            # Generation-time identity, recorded on the session when the proposal was made;
+            # None for a session generated before that was recorded, or with no LLM call.
+            "model": generation_context.get("model"),
+            "prompt_version": generation_context.get("prompt_version"),
+            "extraction_confidence": generation_session.extraction_confidence if generation_session else None,
+            "correction_count": len(ai_corrections),
+            "operation_count": len(approved_operations),
+            "approved_by": current_user.id,
+        },
+    )
     db.commit()
 
     # Reload with relationships for response

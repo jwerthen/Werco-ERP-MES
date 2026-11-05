@@ -5,6 +5,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import api from '../services/api';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { formatCentralDate } from '../utils/centralTime';
+import { canWriteQuotes } from '../utils/recordWriteAccess';
 import {
   PlusIcon,
   PaperAirplaneIcon,
@@ -118,6 +119,9 @@ export default function Quotes() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const canEmail = !!user?.is_superuser || ['admin', 'manager', 'supervisor'].includes(user?.role || '');
+  // Edit / mark sent / convert are server-gated to QUOTE_WRITE_ROLES; hide them for read-only
+  // roles so a visible control and a refused call agree (the server stays the enforcement).
+  const canWriteQuote = canWriteQuotes(user);
   const [emailQuoteId, setEmailQuoteId] = useState<number | null>(null);
   const { showToast } = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -432,7 +436,7 @@ export default function Quotes() {
   const renderRowActions = (q: Quote) => (
     <div className="flex flex-wrap justify-center gap-2">
       {canEmail && <button type="button" className="text-fd-link hover:underline text-sm" aria-label={`Email ${q.quote_number}`} onClick={event => { event.stopPropagation(); setEmailQuoteId(q.id); }}>Email</button>}
-      {['draft', 'pending'].includes(q.status) && (
+      {canWriteQuote && ['draft', 'pending'].includes(q.status) && (
         <button
           onClick={e => {
             e.stopPropagation();
@@ -446,7 +450,8 @@ export default function Quotes() {
           <PaperAirplaneIcon className="h-5 w-5" aria-hidden="true" />
         </button>
       )}
-      {(q.status === 'sent' || q.status === 'accepted') &&
+      {canWriteQuote &&
+        (q.status === 'sent' || q.status === 'accepted') &&
         (q.lines.some(line => line.part_id && !line.work_order_id) || !q.work_order_id) && (
           <button
             onClick={e => {
@@ -635,7 +640,7 @@ export default function Quotes() {
             <div className="mt-4 space-y-4">
               <div className="flex flex-wrap gap-3 items-center">
                 <StatusBadge status={selectedQuote.status} />
-                {['draft', 'pending'].includes(selectedQuote.status) && (
+                {canWriteQuote && ['draft', 'pending'].includes(selectedQuote.status) && (
                   <Button variant="secondary" onClick={() => openEditor(selectedQuote)}>
                     Edit draft
                   </Button>
