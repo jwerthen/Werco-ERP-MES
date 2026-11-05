@@ -17,10 +17,12 @@ from fastapi import status
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.core.security import create_access_token
 from app.models.audit_log import AuditLog
+from app.models.company import Company
 from app.models.quote_config import SettingsAuditLog
 from app.models.role_permission import DEFAULT_ROLE_PERMISSIONS, RolePermission
-from app.models.user import UserRole
+from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.services.audit_service import AuditService
 
@@ -117,6 +119,8 @@ def test_rbac_change_rolls_back_when_its_audit_row_cannot_be_written(
     reset = client.post(f"{BASE}/role-permissions/manager/reset", headers=admin_headers)
     assert reset.status_code == status.HTTP_503_SERVICE_UNAVAILABLE, reset.text
     assert _stored(db_session, UserRole.MANAGER).permissions == original
+    # The settings-history row is in the same transaction, so it rolls back with the change.
+    assert db_session.query(SettingsAuditLog).filter(SettingsAuditLog.entity_type == "role_permission").count() == 0
 
 
 def test_non_admin_cannot_change_role_permissions(client: TestClient, db_session: Session, manager_headers):
@@ -181,3 +185,149 @@ def test_work_center_types_change_writes_chain_row(client: TestClient, db_sessio
     assert row.action == "UPDATE"
     assert "waterjet_audit" in row.new_values["types"]
     assert "waterjet_audit" not in (row.old_values.get("types") or [])
+
+
+# ---------------------------------------------------------------------------
+# Coverage added in review: tenant attribution, refusals, the admin-only gate
+# ---------------------------------------------------------------------------
+
+_SETTINGS_RESOURCE_TYPES = [
+    "role_permission",
+    "work_center",
+    "notification_email_recipients",
+    "work_center_types",
+]
+_seq = {"n": 0}
+
+
+def _company(db: Session, company_id: int) -> Company:
+    company = db.query(Company).filter(Company.id == company_id).first()
+    if company is None:
+        company = Company(id=company_id, name=f"Settings co {company_id}", slug=f"settings-co-{company_id}")
+        company.is_active = True
+        db.add(company)
+        db.commit()
+    return company
+
+
+def _make_user(db: Session, *, role: UserRole, company_id: int) -> User:
+    _company(db, company_id)
+    _seq["n"] += 1
+    n = _seq["n"]
+    user = User(
+        email=f"settings-chain-{n}@co{company_id}.test",
+        employee_id=f"SCH-{n:05d}",
+        first_name="Settings",
+        last_name=role.value,
+        hashed_password="$2b$12$abcdefghijklmnopqrstuv",
+        role=role,
+        is_active=True,
+        company_id=company_id,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def _headers_for(user: User, *, active_company_id: int = None) -> dict:
+    """A switched context is simulated by minting the token for another company (see the
+    scope note in ``test_admin_settings_audit_tenant.py`` -- production switches are read-only)."""
+    cid = active_company_id if active_company_id is not None else user.company_id
+    token = create_access_token(subject=user.id, company_id=cid)
+    return {"Authorization": f"Bearer {token}", "X-Requested-With": "XMLHttpRequest"}
+
+
+def _settings_chain_rows(db: Session):
+    db.rollback()
+    db.expire_all()
+    return db.query(AuditLog).filter(AuditLog.resource_type.in_(_SETTINGS_RESOURCE_TYPES)).all()
+
+
+def test_switched_platform_admin_attributes_chain_rows_to_the_active_company(client: TestClient, db_session: Session):
+    """``role_permission`` passes ``company_id`` explicitly to ``log_required``; the rate row
+    resolves it from the request user. Both must land on the ACTIVE tenant (2), never the
+    platform admin's home tenant (1) -- otherwise company 2's RBAC history is filed under
+    company 1."""
+    platform_admin = _make_user(db_session, role=UserRole.PLATFORM_ADMIN, company_id=1)
+    _company(db_session, 2)
+    center = WorkCenter(code="RATE-CO2", name="Co2 cell", work_center_type="laser", hourly_rate=40.0, company_id=2)
+    db_session.add(center)
+    db_session.commit()
+    headers = _headers_for(platform_admin, active_company_id=2)
+
+    permissions = client.put(f"{BASE}/role-permissions/viewer", headers=headers, json=["parts:view"])
+    assert permissions.status_code == status.HTTP_200_OK, permissions.text
+    rate = client.put(f"{BASE}/work-center-rates/{center.id}", headers=headers, json={"hourly_rate": 55.0})
+    assert rate.status_code == status.HTTP_200_OK, rate.text
+
+    rows = {row.resource_type: row for row in _settings_chain_rows(db_session)}
+    assert set(rows) == {"role_permission", "work_center"}
+    for row in rows.values():
+        assert row.company_id == 2, row.resource_type
+        assert row.user_id == platform_admin.id
+    stored = db_session.query(RolePermission).filter(RolePermission.role == UserRole.VIEWER).one()
+    assert stored.company_id == 2 and rows["role_permission"].resource_id == stored.id
+
+
+def _refusal_cases(db: Session):
+    """(method, url, body, expected status) for every settings write that must refuse."""
+    _company(db, 2)
+    foreign_center = WorkCenter(code="RATE-FOREIGN", name="Foreign", work_center_type="laser", company_id=2)
+    in_use_center = WorkCenter(code="TYPE-IN-USE", name="In use", work_center_type="welding", company_id=1)
+    db.add_all([foreign_center, in_use_center])
+    db.commit()
+    foreign_user = _make_user(db, role=UserRole.MANAGER, company_id=2)
+    return [
+        ("put", f"{BASE}/role-permissions/not_a_role", ["parts:view"], status.HTTP_400_BAD_REQUEST),
+        ("put", f"{BASE}/role-permissions/viewer", ["not:a_permission"], status.HTTP_400_BAD_REQUEST),
+        ("post", f"{BASE}/role-permissions/not_a_role/reset", None, status.HTTP_400_BAD_REQUEST),
+        ("put", f"{BASE}/work-center-rates/{foreign_center.id}", {"hourly_rate": 1.0}, status.HTTP_404_NOT_FOUND),
+        ("put", f"{BASE}/email-recipients/not.an.event", {"user_ids": None}, status.HTTP_400_BAD_REQUEST),
+        (
+            "put",
+            f"{BASE}/email-recipients/wo.completed",
+            {"user_ids": [foreign_user.id]},
+            status.HTTP_400_BAD_REQUEST,
+        ),
+        ("put", f"{BASE}/work-center-types", {"types": ["laser"]}, status.HTTP_400_BAD_REQUEST),
+    ]
+
+
+def test_refused_settings_writes_leave_no_chain_or_history_row(client: TestClient, db_session: Session, admin_headers):
+    """Every refusal -- bad role, unknown permission, another tenant's work center or user,
+    unknown email event, removing an in-use work-center type -- is raised before any write:
+    no chain row, no history row, no override, and the foreign work center's rate untouched."""
+    cases = _refusal_cases(db_session)
+    for method, url, body, expected in cases:
+        response = getattr(client, method)(url, headers=admin_headers, **({} if body is None else {"json": body}))
+        assert response.status_code == expected, (url, response.text)
+
+    assert _settings_chain_rows(db_session) == []
+    assert db_session.query(SettingsAuditLog).count() == 0
+    assert db_session.query(RolePermission).count() == 0
+    foreign = db_session.query(WorkCenter).filter(WorkCenter.code == "RATE-FOREIGN").one()
+    assert foreign.hourly_rate != 1.0
+
+
+@pytest.mark.parametrize("role", [UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.VIEWER])
+def test_non_admins_cannot_write_rates_recipients_or_types(client: TestClient, db_session: Session, role):
+    actor = _make_user(db_session, role=role, company_id=1)
+    center = WorkCenter(code=f"RATE-GATE-{role.value}", name="Gate", work_center_type="laser", hourly_rate=40.0)
+    center.company_id = 1
+    db_session.add(center)
+    db_session.commit()
+    headers = _headers_for(actor)
+
+    responses = [
+        client.put(f"{BASE}/work-center-rates/{center.id}", headers=headers, json={"hourly_rate": 99.0}),
+        client.put(f"{BASE}/email-recipients/wo.completed", headers=headers, json={"user_ids": [actor.id]}),
+        client.put(f"{BASE}/work-center-types", headers=headers, json={"types": ["laser", "gate_probe"]}),
+        client.post(f"{BASE}/role-permissions/viewer/reset", headers=headers),
+    ]
+    for response in responses:
+        assert response.status_code == status.HTTP_403_FORBIDDEN, response.text
+
+    assert _settings_chain_rows(db_session) == []
+    assert db_session.query(SettingsAuditLog).count() == 0
+    assert db_session.query(WorkCenter).filter(WorkCenter.id == center.id).one().hourly_rate == 40.0

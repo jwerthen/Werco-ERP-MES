@@ -194,3 +194,55 @@ def test_read_only_roles_cannot_put(client: TestClient, db_session: Session, rol
     assert response.status_code == status.HTTP_403_FORBIDDEN, response.text
     assert _reload(db_session, po.id).status == POStatus.DRAFT
     assert _committed_po_rows(db_session, po.id) == []
+
+
+def test_vendor_revival_guard_still_holds_behind_the_whitelist(client: TestClient, db_session: Session):
+    """Defense in depth, pinned. The whitelist now refuses every move out of CLOSED/CANCELLED,
+    so the deleted-vendor guard is no longer reachable from the vendor-sweep scenario. It stays
+    for a pre-send PO whose vendor was removed underneath it (``delete_vendor``'s live-PO check
+    is point-in-time): a transition the WHITELIST allows (DRAFT -> APPROVED) must still be
+    refused 400 by the vendor guard, while closing the paperwork out (-> CANCELLED) stays open."""
+    po = _po(db_session, POStatus.DRAFT)
+    vendor = db_session.get(Vendor, po.vendor_id)
+    vendor.soft_delete(None)
+    vendor.is_active = False
+    db_session.commit()
+    headers = _headers(_user(db_session, UserRole.ADMIN))
+
+    revived = client.put(f"{PO_BASE}/{po.id}", headers=headers, json={"version": 0, "status": "approved"})
+    assert revived.status_code == status.HTTP_400_BAD_REQUEST, revived.text
+    assert "Restore the vendor first" in revived.json()["detail"]
+    assert _reload(db_session, po.id).status == POStatus.DRAFT
+    assert _committed_po_rows(db_session, po.id) == []
+
+    cancelled = client.put(f"{PO_BASE}/{po.id}", headers=headers, json={"version": 0, "status": "cancelled"})
+    assert cancelled.status_code == status.HTTP_200_OK, cancelled.text
+    assert _reload(db_session, po.id).status == POStatus.CANCELLED
+
+
+def test_other_tenant_cannot_move_a_po_status(client: TestClient, db_session: Session):
+    """The whitelist is not a tenancy check: a company-2 Admin gets 404 on company 1's PO for
+    an otherwise-allowed transition, and nothing moves."""
+    from app.models.company import Company
+
+    db_session.add(Company(id=2, name="PO transition other tenant", slug="po-transition-other", is_active=True))
+    db_session.commit()
+    po = _po(db_session, POStatus.DRAFT)
+    n = _next()
+    outsider = User(
+        email=f"po-transition-outsider-{n}@co2.test",
+        employee_id=f"POTR-X{n:05d}",
+        first_name="Other",
+        last_name="Tenant",
+        hashed_password=FIXTURE_PASSWORD_HASH,
+        role=UserRole.ADMIN,
+        is_active=True,
+        company_id=2,
+    )
+    db_session.add(outsider)
+    db_session.commit()
+
+    response = client.put(f"{PO_BASE}/{po.id}", headers=_headers(outsider), json={"version": 0, "status": "approved"})
+    assert response.status_code == status.HTTP_404_NOT_FOUND, response.text
+    assert _reload(db_session, po.id).status == POStatus.DRAFT
+    assert _committed_po_rows(db_session, po.id) == []
