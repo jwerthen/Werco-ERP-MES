@@ -38,9 +38,9 @@ entry bounds call frequency. ``MAX_GLOBAL_ALERTS_PER_REQUEST`` bounds the one
 remaining outbound side-effect (Sentry).
 
 ``POST /errors/log`` accepts its JSON body labelled either ``application/json`` or
-``text/plain`` -- see ``_BeaconBodyRoute`` for why the second exists and why it is
-safe. The body cap covers both labels on this path (main.py's
-``limit_json_body_size``).
+``text/plain`` -- the second is the client's beacon contract; see ``_BeaconBodyRoute``
+for why it exists and why it is safe. The body cap covers both labels on this path
+(main.py's ``limit_json_body_size``).
 """
 
 import logging
@@ -52,20 +52,10 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
 from starlette.datastructures import Headers
 
+from app.core.media_types import is_text_plain_media_type
 from app.core.time_utils import to_utc_iso
 
 logger = logging.getLogger(__name__)
-
-
-def is_text_plain_media_type(content_type: Optional[str]) -> bool:
-    """True when a ``Content-Type`` header value names ``text/plain`` (any parameters).
-
-    ``navigator.sendBeacon(url, someString)`` sends ``text/plain;charset=UTF-8``.
-    Shared with main.py so the body-size cap and this router agree on what counts.
-    """
-    if not content_type:
-        return False
-    return content_type.split(";", 1)[0].strip().lower() == "text/plain"
 
 
 class _TextPlainAsJsonRequest(Request):
@@ -86,28 +76,37 @@ class _TextPlainAsJsonRequest(Request):
 
 
 class _BeaconBodyRoute(APIRoute):
-    """Read a ``text/plain`` request body on this router as the JSON it is.
+    """Read a ``text/plain`` request body on ``POST /errors/log`` as the JSON it is.
 
-    Every client deployed before 2026-11-05 sent its crash beacon as
-    ``navigator.sendBeacon(url, JSON.stringify(...))``. A string beacon body is
-    labelled ``text/plain;charset=UTF-8``, and FastAPI parses a body as JSON only
-    when it is labelled ``application/json`` (or ``+json``), so every one of those
-    beacons -- the white-screen crashes, the one report we most needed -- was
-    rejected 422 and never reached a log line or Sentry. The current client sends
-    an ``application/json`` Blob, but a tab that loaded the old bundle keeps sending
-    the old shape until it reloads, and a beacon is fire-and-forget: nothing
-    retries it.
+    THIS IS THE SUPPORTED BEACON CONTRACT, NOT A LEGACY SHIM -- do not remove it. The SPA
+    sends its crash/unload report with ``navigator.sendBeacon`` and labels the body
+    ``text/plain;charset=UTF-8`` on purpose: that is a CORS-safelisted type, so the beacon
+    is a "simple" request that needs no preflight and works cross-origin in every browser
+    (production is cross-origin: Vercel SPA -> Railway API). An ``application/json`` Blob
+    is not safelisted, and Chromium has long refused such a beacon outright (it throws;
+    crbug.com/490015), so a JSON label is not an option for the one report that has to
+    survive an unloading page. The current client and every bundle deployed before
+    2026-11-05 (which sent a bare string, labelled the same way) depend on this.
 
-    So a ``text/plain`` request is relabelled ``application/json`` before FastAPI
-    reads it, and from there it takes exactly the path a JSON-labelled request
-    takes: the same ``json.loads``, the same ``ErrorLogRequest`` validation with the
-    same caps, the same 422 shape on a bad body, and an unchanged OpenAPI contract.
-    No other content type is relabelled. This is safe because the label is not a
-    trust boundary here: the route is unauthenticated and CSRF-exempt by design, a
-    ``text/plain`` cross-origin POST was always a "simple" request any page could
-    send, and what it can do is still bounded by validation, the per-request alert
-    cap, the rate limit and the body cap (which main.py applies to ``text/plain`` on
-    this path for exactly this reason).
+    FastAPI parses a body as JSON only when it is labelled ``application/json`` (or
+    ``application/*+json``), so before this existed every one of those beacons -- the
+    white-screen crashes, the report we most needed -- was rejected 422 and never reached
+    a log line or Sentry.
+
+    So a ``text/plain`` request is relabelled ``application/json`` before FastAPI reads
+    it, and from there it takes exactly the path a JSON-labelled request takes: the same
+    ``json.loads``, the same ``ErrorLogRequest`` validation with the same caps, the same
+    422 shape on a bad body, and an unchanged OpenAPI contract. No other content type is
+    relabelled. This is safe because the label is not a trust boundary here: the route is
+    unauthenticated and CSRF-exempt by design, a ``text/plain`` cross-origin POST was
+    always a "simple" request any page could send, and what it can do is still bounded by
+    validation, the per-request alert cap, the rate limit and the body cap.
+
+    Applied to the ``/log`` route ONLY (``route_class_override`` below), never to the
+    whole router: main.py's ``limit_json_body_size`` caps ``text/plain`` on exactly that
+    path (``_ERROR_BEACON_PATH``), so a route added to this router later must not inherit
+    the relabel without the cap. The two are tied together by
+    ``tests/api/test_error_logging_endpoint.py``.
     """
 
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
@@ -121,7 +120,7 @@ class _BeaconBodyRoute(APIRoute):
         return handler
 
 
-router = APIRouter(prefix="/errors", tags=["errors"], route_class=_BeaconBodyRoute)
+router = APIRouter(prefix="/errors", tags=["errors"])
 
 # Matches ``maxQueueSize`` in frontend/src/services/errorLogging.ts — the client
 # never batches more than this, so a larger batch is not a real SPA tab.
@@ -173,7 +172,6 @@ class ErrorLogResponse(BaseModel):
     count: int
 
 
-@router.post("/log", response_model=ErrorLogResponse)
 async def log_errors(request: ErrorLogRequest, background_tasks: BackgroundTasks, http_request: Request):
     """
     Log frontend errors for monitoring and debugging.
@@ -184,8 +182,8 @@ async def log_errors(request: ErrorLogRequest, background_tasks: BackgroundTasks
     Unauthenticated and CSRF-exempt by necessity (sendBeacon). Nothing is
     persisted — see the module docstring for why the audit write was removed.
 
-    The JSON body may be labelled ``application/json`` or ``text/plain`` (what a
-    string ``sendBeacon`` body carries); both are parsed and validated identically.
+    The JSON body may be labelled ``application/json`` or ``text/plain`` (what the
+    client's ``sendBeacon`` body carries); both are parsed and validated identically.
     """
     # Get client IP for additional context
     client_ip = http_request.client.host if http_request.client else "unknown"
@@ -194,6 +192,18 @@ async def log_errors(request: ErrorLogRequest, background_tasks: BackgroundTasks
     background_tasks.add_task(process_error_logs, request.errors, client_ip)
 
     return ErrorLogResponse(status="queued", count=len(request.errors))
+
+
+# Registered explicitly (not ``@router.post``) because only ``add_api_route`` takes a
+# per-route class: the ``text/plain`` relabel belongs to this one route -- see
+# ``_BeaconBodyRoute`` for why it must not cover the whole router.
+router.add_api_route(
+    "/log",
+    log_errors,
+    methods=["POST"],
+    response_model=ErrorLogResponse,
+    route_class_override=_BeaconBodyRoute,
+)
 
 
 async def process_error_logs(errors: List[ErrorLogEntry], client_ip: str):

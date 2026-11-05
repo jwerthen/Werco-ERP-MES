@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 
 import app.main as app_main
 from app.api.endpoints import errors as errors_module
+from app.core.media_types import is_text_plain_media_type
 from app.models.audit_log import AuditLog
 from app.models.user import User
 
@@ -252,27 +253,27 @@ def test_error_logging_module_cannot_reach_the_database():
 
 
 # ---------------------------------------------------------------------------
-# The beacon wire format: a text/plain JSON body.
+# The beacon wire format: a text/plain JSON body -- the SUPPORTED contract.
 #
-# ``navigator.sendBeacon(url, someString)`` labels its body
-# ``text/plain;charset=UTF-8``. FastAPI parses only ``application/json`` (or
-# ``+json``) as JSON, so until 2026-11-05 every string beacon -- including the
-# global-boundary crashes that blank the screen -- was rejected 422 and reached
-# no log and no Sentry. Every test above posts ``json=``, which is why it was
-# never seen. The current client sends an ``application/json`` Blob; a tab still
-# running an older bundle keeps sending text/plain, so the route accepts both.
+# The client's ``navigator.sendBeacon`` body is labelled ``text/plain;charset=UTF-8``
+# on purpose: it is CORS-safelisted, so the cross-origin beacon needs no preflight,
+# while Chromium refuses an ``application/json`` Blob beacon outright. FastAPI parses
+# only ``application/json`` (or ``+json``) as JSON, so until 2026-11-05 every beacon --
+# including the global-boundary crashes that blank the screen -- was rejected 422 and
+# reached no log and no Sentry. Every test above posts ``json=``, which is why it was
+# never seen. The route now reads both labels.
 # ---------------------------------------------------------------------------
 
-_LEGACY_BEACON_CONTENT_TYPE = "text/plain;charset=UTF-8"
+_BEACON_CONTENT_TYPE = "text/plain;charset=UTF-8"
 
 
-def _post_text_plain(client: TestClient, body, content_type: str = _LEGACY_BEACON_CONTENT_TYPE):
+def _post_text_plain(client: TestClient, body, content_type: str = _BEACON_CONTENT_TYPE):
     raw = body if isinstance(body, (bytes, str)) else json.dumps(body)
     return client.post(ENDPOINT, content=raw, headers={"content-type": content_type})
 
 
 def test_text_plain_beacon_body_is_accepted_and_processed(client: TestClient, monkeypatch: pytest.MonkeyPatch):
-    """The legacy sendBeacon shape lands: 200, and the entries are actually processed
+    """The sendBeacon shape lands: 200, and the entries are actually processed
     (the global entry reaches the alert path), not merely acknowledged."""
     alerted: list[str] = []
 
@@ -370,13 +371,30 @@ def test_only_text_plain_is_relabelled(client: TestClient):
 
 
 def test_text_plain_media_type_helper():
-    assert errors_module.is_text_plain_media_type("text/plain")
-    assert errors_module.is_text_plain_media_type("text/plain;charset=UTF-8")
-    assert errors_module.is_text_plain_media_type(" Text/Plain ; charset=utf-8")
-    assert not errors_module.is_text_plain_media_type("application/json")
-    assert not errors_module.is_text_plain_media_type("text/plainx")
-    assert not errors_module.is_text_plain_media_type("")
-    assert not errors_module.is_text_plain_media_type(None)
+    assert is_text_plain_media_type("text/plain")
+    assert is_text_plain_media_type("text/plain;charset=UTF-8")
+    assert is_text_plain_media_type(" Text/Plain ; charset=utf-8")
+    assert not is_text_plain_media_type("application/json")
+    assert not is_text_plain_media_type("text/plainx")
+    # ``email.message`` would read a malformed label as text/plain; this helper must not,
+    # or a garbage Content-Type would be relabelled and parsed as JSON.
+    assert not is_text_plain_media_type("garbage")
+    assert not is_text_plain_media_type("")
+    assert not is_text_plain_media_type(None)
+
+
+def test_the_relabel_is_installed_on_exactly_the_path_the_body_cap_covers():
+    """The ``text/plain`` relabel and main.py's ``text/plain`` cap are two halves of one
+    rule: a relabelled body must be a capped body. So the route class sits on the ONE
+    ``/errors/log`` route (not the whole router, where a POST added later would inherit
+    the relabel without the cap), and that route's path is exactly the cap's path."""
+    relabelled = {route.path for route in app_main.app.routes if isinstance(route, errors_module._BeaconBodyRoute)}
+
+    assert relabelled == {ENDPOINT}
+    assert app_main._ERROR_BEACON_PATH == ENDPOINT
+    # Its sibling on the same router is an ordinary route.
+    health = [route for route in app_main.app.routes if getattr(route, "path", None) == "/api/v1/errors/health"]
+    assert health and not any(isinstance(route, errors_module._BeaconBodyRoute) for route in health)
 
 
 def _chunked(data: bytes, chunk_size: int = 256):
@@ -387,7 +405,7 @@ def _chunked(data: bytes, chunk_size: int = 256):
 
 def _send_chunked_text_plain(client: TestClient, data: bytes):
     request = client.build_request(
-        "POST", ENDPOINT, content=_chunked(data), headers={"content-type": _LEGACY_BEACON_CONTENT_TYPE}
+        "POST", ENDPOINT, content=_chunked(data), headers={"content-type": _BEACON_CONTENT_TYPE}
     )
     # The premise, established rather than assumed: no declared length for gate 1 to read.
     assert "content-length" not in request.headers
@@ -449,14 +467,14 @@ def test_openapi_contract_for_the_beacon_route_is_unchanged():
 
 
 def test_text_plain_is_not_parsed_as_json_on_any_other_router(client: TestClient):
-    """The route class is installed on the errors router ONLY -- the carve-in must not leak
-    app-wide (e.g. by moving ``route_class`` onto the parent router). ``/auth/refresh`` is
+    """The route class is installed on the ``/errors/log`` route ONLY -- the carve-in must not
+    leak app-wide (e.g. by moving ``route_class`` onto a router). ``/auth/refresh`` is
     an unauthenticated, CSRF-exempt JSON route: a parsed body would be checked as a refresh
     token (401); an unparsed one fails validation as a whole (422 at loc ["body"])."""
     response = client.post(
         "/api/v1/auth/refresh",
         content=json.dumps({"refresh_token": "not-a-real-token"}),
-        headers={"content-type": _LEGACY_BEACON_CONTENT_TYPE},
+        headers={"content-type": _BEACON_CONTENT_TYPE},
     )
 
     assert response.status_code == 422, response.text
@@ -471,22 +489,32 @@ def test_text_plain_is_not_parsed_as_json_on_any_other_router(client: TestClient
     assert as_json.status_code == 401, as_json.text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "PRE-EXISTING, not introduced here: validation_exception_handler (app/main.py) runs "
-        "jsonable_encoder over exc.errors(); for a non-JSON Content-Type the error's `input` is the raw "
-        "body bytes, which the encoder .decode()s -- undecodable bytes raise UnicodeDecodeError inside the "
-        "422 handler and the request 500s. Unauthenticated and app-wide (e.g. /auth/refresh too), and each "
-        "one is an ERROR log line plus Sentry events -- the spend this route's caps exist to bound. "
-        "The text/plain label is immune on THIS route only because it is now parsed as JSON (400)."
-    ),
-)
-def test_undecodable_body_with_a_non_json_label_is_refused_not_a_500():
+@pytest.mark.parametrize("path", [ENDPOINT, "/api/v1/auth/refresh"])
+def test_undecodable_body_with_a_non_json_label_is_refused_not_a_500(path: str):
+    """``validation_exception_handler`` (app/main.py) echoes each error's ``input``; for a
+    non-JSON label that is the raw body BYTES, which ``jsonable_encoder`` ``.decode()``s
+    strictly. Undecodable bytes used to raise inside the 422 handler and turn an
+    unauthenticated request into a 500 -- an ERROR line and Sentry events per request, on
+    any JSON route. The handler now decodes them with replacement characters."""
     client = TestClient(app_main.app, raise_server_exceptions=False)
 
     response = client.post(
-        ENDPOINT, content=b'{"errors": ["\xff\xfe"]}', headers={"content-type": "application/octet-stream"}
+        path, content=b'{"errors": ["\xff\xfe"]}', headers={"content-type": "application/octet-stream"}
     )
 
-    assert 400 <= response.status_code < 500, response.text
+    assert response.status_code == 422, response.text
+    [error] = response.json()["detail"]
+    assert error["loc"] == ["body"]
+    assert error["input"] == '{"errors": ["\ufffd\ufffd"]}'
+
+
+def test_decodable_raw_body_in_a_422_is_echoed_exactly_as_before():
+    """The undecodable-bytes fix must not change the 422 for bytes that DO decode: those
+    were always echoed as their text, and still are, byte for byte."""
+    response = TestClient(app_main.app).post(
+        "/api/v1/auth/refresh", content=b"plain caf\xc3\xa9 body", headers={"content-type": "application/octet-stream"}
+    )
+
+    assert response.status_code == 422, response.text
+    [error] = response.json()["detail"]
+    assert error["input"] == "plain caf\u00e9 body"

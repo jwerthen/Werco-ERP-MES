@@ -31,7 +31,9 @@ why removing it was sound.
 **Two deliberate exemptions, both tested here because both are load-bearing.** Inbound
 carrier webhooks (``/api/v1/webhooks/carriers/...``) skip the whole middleware — they
 HMAC-verify the *exact raw bytes*, and a carrier's retry logic does not recover from a
-413. And the cap gates ``application/json`` only: every CSV/XLSX bulk import arrives as
+413. And the cap gates JSON bodies only -- every label FastAPI parses as JSON, i.e.
+``application/json`` and any ``application/*+json``, case-insensitive
+(``app.core.media_types.is_json_media_type``): every CSV/XLSX bulk import arrives as
 ``multipart/form-data`` through ``UploadFile`` and must not be capped at 256 KB. (One
 carve-in: ``text/plain`` on the crash-beacon path, ``/api/v1/errors/log``, is capped too,
 because that route parses a text/plain body as JSON -- pinned in
@@ -406,6 +408,66 @@ def test_get_request_with_a_large_json_body_is_not_capped(client: TestClient, ec
 
     assert response.status_code != status.HTTP_413_CONTENT_TOO_LARGE
     assert response.status_code == status.HTTP_405_METHOD_NOT_ALLOWED
+
+
+# Every label FastAPI itself parses as JSON (``fastapi/routing.py``: the media type is
+# read case-insensitively with ``email.message``, and ``application/json`` or ANY
+# ``application/*+json`` is JSON). The cap used to test ``startswith("application/json")``,
+# so the last four were parsed by the route yet never capped -- an uncapped,
+# unauthenticated JSON parse on every route, the exact thing this middleware exists to
+# stop. The cap must recognise every label FastAPI does.
+FASTAPI_JSON_LABELS = [
+    "application/json",
+    "application/json; charset=utf-8",
+    "Application/JSON",
+    "application/merge-patch+json",
+    "application/x+json",
+    "application/vnd.api+json; charset=utf-8",
+]
+
+
+@pytest.mark.parametrize("content_type", FASTAPI_JSON_LABELS)
+def test_every_label_fastapi_parses_as_json_is_capped(
+    client: TestClient, echo_route: str, small_cap: int, content_type: str
+):
+    response = client.post(
+        echo_route, content=json_body_of_exact_size(small_cap + 1), headers={"content-type": content_type}
+    )
+
+    assert response.status_code == status.HTTP_413_CONTENT_TOO_LARGE, (content_type, response.text)
+
+
+@pytest.mark.parametrize("content_type", ["Application/JSON", "application/merge-patch+json"])
+def test_every_json_label_is_capped_on_the_bytes_that_actually_arrive(
+    client: TestClient, echo_route: str, small_cap: int, content_type: str
+):
+    """Gate 2 (no Content-Length to read) covers the newly recognised labels too."""
+    request = client.build_request(
+        "POST",
+        echo_route,
+        content=chunked(json_body_of_exact_size(small_cap + 1)),
+        headers={"content-type": content_type},
+    )
+    assert "content-length" not in request.headers
+
+    response = client.send(request)
+
+    assert response.status_code == status.HTTP_413_CONTENT_TOO_LARGE, (content_type, response.text)
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    ["application/jsonx", "application/x-ndjson", "text/json", "application/octet-stream", "garbage"],
+)
+def test_labels_fastapi_does_not_parse_as_json_are_not_capped(
+    client: TestClient, echo_route: str, small_cap: int, content_type: str
+):
+    """The other side of mirroring FastAPI: no wider than its rule either, so a large
+    non-JSON body on a route that takes one is not refused by a JSON cap."""
+    response = client.post(echo_route, content=b"x" * (small_cap * 2), headers={"content-type": content_type})
+
+    assert response.status_code == status.HTTP_200_OK, (content_type, response.text)
+    assert response.json()["length"] == small_cap * 2
 
 
 def test_non_json_content_type_is_not_capped(client: TestClient, echo_route: str, small_cap: int):

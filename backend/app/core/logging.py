@@ -10,6 +10,7 @@ Features:
 
 import json
 import logging
+import re
 import sys
 import uuid
 from contextvars import ContextVar
@@ -36,6 +37,21 @@ def set_correlation_id(correlation_id: str) -> None:
 def generate_correlation_id() -> str:
     """Generate a new correlation ID."""
     return str(uuid.uuid4())[:8]  # Short ID for readability
+
+
+# The only shape in which a caller-supplied ``X-Correlation-ID`` is adopted (anything else
+# is replaced by a freshly generated id). The id is echoed back in the response header,
+# in the 500 body's ``detail`` and on the ERROR log line, so an unbounded or free-form
+# value would let a caller choose what all three carry. Wide enough for a UUID, a
+# W3C/vendor trace id or a load-test tag.
+_ACCEPTABLE_CORRELATION_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+def is_acceptable_correlation_id(value: Optional[str]) -> bool:
+    """True when a caller-supplied correlation id may be adopted verbatim (1-64 of ``A-Za-z0-9._-``)."""
+    if not value:
+        return False
+    return _ACCEPTABLE_CORRELATION_ID.fullmatch(value) is not None
 
 
 def get_request_context() -> Dict[str, Any]:

@@ -503,3 +503,249 @@ def test_no_reconcile_status_flip_commits_without_its_audit_row(
             .count()
         )
         assert audit_rows == 1, f"{resource_type} {pk} committed {before.value} -> {committed.value} unaudited"
+
+
+# ---------------------------------------------------------------------------
+# An audit row AuditService ABSORBED is reported too.
+#
+# ``AuditService.log`` catches its own failures and returns None (a ``sequence_number``
+# collision that outlasts its savepoint retries, or any other error). That loss never
+# raises into the audit leg's ``except``, so the twelve-block reporting above could not
+# see it: the flip committed unaudited with only AuditService's generic "Failed to create
+# audit log" line. The leg now checks each row it asked for.
+# ---------------------------------------------------------------------------
+
+
+class _AbsorbingAuditService:
+    """An AuditService whose status-change write fails the way the real one does: quietly."""
+
+    def __init__(self, *args, **kwargs):
+        self.status_rows_requested: list[int] = []
+
+    def log_status_change(self, **kwargs):
+        self.status_rows_requested.append(kwargs["resource_id"])
+        return None
+
+
+@pytest.mark.parametrize("router", sorted(ROUTER_MODULES))
+def test_audit_rows_auditservice_absorbed_are_reported_with_the_transitions_they_covered(
+    router: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sentry_spy: _SentrySpy,
+):
+    from app.services.audit_service import AuditWriteError
+
+    module = ROUTER_MODULES[router]
+    monkeypatch.setattr(module, "AuditService", _AbsorbingAuditService)
+    inspected: list[int] = []
+    monkeypatch.setattr(
+        module,
+        "record_reconcile_inspection_exception",
+        lambda db, operation_id, audit, user: inspected.append(operation_id),
+    )
+
+    with caplog.at_level(logging.ERROR, logger=module.__name__):
+        module._audit_reconcile_transitions(object(), SimpleNamespace(id=USER_ID), _transitions(), COMPANY_ID)
+
+    # Reporting only: the loop still ran to the end.
+    assert inspected == [OPERATION_ID]
+    [record] = _reconcile_records(caplog, module)
+    assert "AuditService could not write every status-change row" in record.getMessage()
+    assert isinstance(record.exc_info[1], AuditWriteError)
+    assert "2 reconcile status-change audit row(s)" in str(record.exc_info[1])
+    assert record.extra_data == {
+        "reconcile_step": "audit",
+        "company_id": COMPANY_ID,
+        "user_id": USER_ID,
+        "work_order_ids": [WORK_ORDER_ID],
+        "operation_ids": [OPERATION_ID],
+    }
+    [(exc, scope_kwargs)] = sentry_spy.captured
+    assert isinstance(exc, AuditWriteError)
+    assert scope_kwargs["tags"]["reconcile_step"] == "audit"
+
+
+@pytest.mark.parametrize("router", sorted(ROUTER_MODULES))
+def test_audit_leg_reports_nothing_when_every_row_is_written(
+    router: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, sentry_spy: _SentrySpy
+):
+    class _WritingAuditService(_AbsorbingAuditService):
+        def log_status_change(self, **kwargs):
+            return object()
+
+    module = ROUTER_MODULES[router]
+    monkeypatch.setattr(module, "AuditService", _WritingAuditService)
+    monkeypatch.setattr(module, "record_reconcile_inspection_exception", lambda *a, **k: None)
+
+    with caplog.at_level(logging.ERROR, logger=module.__name__):
+        module._audit_reconcile_transitions(object(), SimpleNamespace(id=USER_ID), _transitions(), COMPANY_ID)
+
+    assert _reconcile_records(caplog, module) == []
+    assert sentry_spy.captured == []
+
+
+@pytest.mark.requires_db
+@pytest.mark.parametrize(
+    "router,path_for",
+    [
+        ("work_orders", lambda wo, op: f"/api/v1/work-orders/{wo.id}"),
+        ("shop_floor", lambda wo, op: f"/api/v1/shop-floor/operations/{op.id}"),
+    ],
+)
+def test_an_absorbed_audit_row_on_a_reconciling_get_is_reported(
+    router: str,
+    path_for: Callable,
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    """On a real read, through each router's call site. The flip still commits (that is
+    the KNOWN GAP, unchanged here); what changes is that it is no longer silent."""
+    from app.services.audit_service import AuditService, AuditWriteError
+
+    class _StatusRowsAbsorbed(AuditService):
+        def log_status_change(self, **kwargs):
+            return None
+
+    module = ROUTER_MODULES[router]
+    admin, wo, op = _stranded_completion(db_session)
+    monkeypatch.setattr(module, "AuditService", _StatusRowsAbsorbed)
+
+    with caplog.at_level(logging.ERROR, logger=module.__name__):
+        response = client.get(path_for(wo, op), headers=headers_for(admin))
+
+    assert response.status_code == status.HTTP_200_OK, response.text
+    records = [r for r in _reconcile_records(caplog, module) if r.extra_data["reconcile_step"] == "audit"]
+    assert len(records) == 1, [r.getMessage() for r in _reconcile_records(caplog, module)]
+    assert isinstance(records[0].exc_info[1], AuditWriteError)
+    context = records[0].extra_data
+    assert context["company_id"] == COMPANY_A
+    assert context["user_id"] == admin.id
+    assert op.id in context["operation_ids"]
+
+
+# ---------------------------------------------------------------------------
+# An echo of an EARLIER failure is not a new one.
+#
+# Once a database error leaves the session needing a rollback, every later leg that
+# touches it raises ``PendingRollbackError``, and the handler's commit then fails and rolls
+# the whole reconcile back. The cause was reported where it happened; reporting each echo
+# as its own ERROR + Sentry event would spend up to five events per read -- on every read,
+# since the rollback makes the next one retry -- and bury that cause.
+# ---------------------------------------------------------------------------
+
+
+def _pending_rollback_error():
+    from sqlalchemy.exc import PendingRollbackError
+
+    try:
+        raise PendingRollbackError(
+            "This Session's transaction has been rolled back due to a previous exception during flush. "
+            "Original exception was: (sqlite3.IntegrityError) UNIQUE constraint failed: things.id"
+        )
+    except PendingRollbackError as exc:
+        return exc
+
+
+def test_a_session_already_failed_echo_is_a_warning_with_no_sentry_event(
+    caplog: pytest.LogCaptureFixture, sentry_spy: _SentrySpy
+):
+    from app.services.work_order_state_service import report_reconcile_leg_failure
+
+    log = logging.getLogger("tests.reconcile_reporter.pending_rollback")
+    with caplog.at_level(logging.WARNING, logger=log.name):
+        report_reconcile_leg_failure(
+            log,
+            "inventory_effects",
+            _pending_rollback_error(),
+            company_id=COMPANY_ID,
+            user=SimpleNamespace(id=USER_ID),
+            transitions=_transitions(),
+        )
+
+    [record] = [r for r in caplog.records if r.name == log.name]
+    assert record.levelno == logging.WARNING
+    message = record.getMessage()
+    assert "inventory_effects leg skipped" in message
+    assert f"company_id={COMPANY_ID}" in message
+    # The echo quotes the original error, so the cause is still on the line.
+    assert "UNIQUE constraint failed" in message
+    assert record.extra_data["reconcile_step"] == "inventory_effects"
+    assert record.extra_data["operation_ids"] == [OPERATION_ID]
+    assert sentry_spy.captured == []
+
+
+@pytest.mark.parametrize("router", sorted(ROUTER_MODULES))
+def test_a_leg_hitting_an_already_failed_session_does_not_raise_an_error_report(
+    router: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, sentry_spy: _SentrySpy
+):
+    """Through a real leg: the events leg's service construction raises the echo."""
+    module = ROUTER_MODULES[router]
+    echo = _pending_rollback_error()
+
+    class _SessionAlreadyFailed:
+        def __init__(self, *args, **kwargs):
+            raise echo
+
+    monkeypatch.setattr(module, "OperationalEventService", _SessionAlreadyFailed)
+
+    with caplog.at_level(logging.WARNING, logger=module.__name__):
+        module._emit_reconcile_events(object(), COMPANY_ID, SimpleNamespace(id=USER_ID), _transitions())
+
+    assert _reconcile_records(caplog, module) == []
+    warnings = [r for r in caplog.records if r.name == module.__name__ and r.levelno == logging.WARNING]
+    assert [r.extra_data["reconcile_step"] for r in warnings] == ["events"]
+    assert sentry_spy.captured == []
+
+
+# ---------------------------------------------------------------------------
+# The same rule on a write path: POST /shop-floor/operations/{id}/inspection.
+#
+# Its ``operation_inspected`` signal emit was the last ``except Exception: pass`` of this
+# class in the shop-floor router. The emit is telemetry, so its failure must still not
+# break the inspection sign-off -- but it must be seen.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.requires_db
+def test_a_failed_operation_inspected_emit_is_reported_and_the_sign_off_still_commits(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sentry_spy: _SentrySpy,
+):
+    admin = make_user(db_session)
+    wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=4)
+    wc = make_work_center(db_session)
+    op = make_op(db_session, wo, wc, sequence=10, status_=OperationStatus.IN_PROGRESS)
+    monkeypatch.setattr(sf_module, "OperationalEventService", _Boom)
+
+    with caplog.at_level(logging.ERROR, logger=sf_module.__name__):
+        response = client.post(
+            f"/api/v1/shop-floor/operations/{op.id}/inspection",
+            json={"inspection_type": "final"},
+            headers=headers_for(admin),
+        )
+
+    assert response.status_code == status.HTTP_200_OK, response.text
+    records = [
+        r
+        for r in caplog.records
+        if r.name == sf_module.__name__ and "operation_inspected signal emit failed" in r.getMessage()
+    ]
+    assert len(records) == 1
+    assert isinstance(records[0].exc_info[1], RuntimeError)
+    assert records[0].extra_data == {
+        "company_id": COMPANY_A,
+        "user_id": admin.id,
+        "work_order_id": wo.id,
+        "operation_id": op.id,
+    }
+    assert [type(exc) for exc, _ in sentry_spy.captured] == [RuntimeError]
+
+    db_session.rollback()
+    db_session.expire_all()
+    assert db_session.get(WorkOrderOperation, op.id).inspection_complete is True

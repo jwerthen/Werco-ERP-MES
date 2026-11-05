@@ -36,27 +36,57 @@ interface ErrorLogEntry {
 }
 
 /**
- * Queue a batch as a beacon whose body is labelled `application/json`.
+ * Server-side length caps on each `ErrorLogEntry` field (`ErrorLogEntry` in
+ * backend/app/api/endpoints/errors.py). The server REJECTS an over-cap field with a 422
+ * rather than truncating it, and one bad entry fails the whole batch -- so a long,
+ * filter-laden URL or a huge error message would silently cost every other crash in the
+ * same flush. Clamp on the way out instead. (`.length` counts UTF-16 code units, never
+ * fewer than the code points the server counts, so a clamped value always fits.)
+ */
+const FIELD_LIMITS = {
+  id: 128,
+  message: 4000,
+  stack: 20000,
+  componentStack: 20000,
+  boundaryName: 200,
+  boundaryLevel: 50,
+  url: 2000,
+  timestamp: 64,
+  userAgent: 1000,
+  userId: 64,
+  sessionId: 128,
+} as const;
+
+const clamp = (value: string, max: number): string => (value.length > max ? value.slice(0, max) : value);
+
+const clampOptional = (value: string | undefined, max: number): string | undefined =>
+  value === undefined ? undefined : clamp(value, max);
+
+/**
+ * Queue a batch as a beacon whose body is labelled `text/plain;charset=UTF-8`.
  *
- * The body MUST be a Blob of that type. A bare string beacon goes out as
- * `text/plain;charset=UTF-8`, which FastAPI does not parse as JSON, so every crash
- * beacon was rejected 422 and never reached the logs. (The server now also accepts
- * that legacy shape, for tabs still running an older bundle.)
+ * The label is deliberate and is the API's supported beacon contract: `POST /errors/log`
+ * reads a `text/plain` body as JSON. `text/plain` is CORS-safelisted, so the beacon is a
+ * simple request -- no preflight, and it works cross-origin (production is Vercel ->
+ * Railway). An `application/json` Blob is not safelisted and Chromium refuses that beacon
+ * outright (it throws), which would leave the unload-time crash report with no beacon at
+ * all.
  *
  * Returns false when no beacon was queued -- no `sendBeacon`, the browser refused the
- * payload (e.g. over its keepalive quota), or it threw (some Chromium versions refuse
- * a Blob whose type is not CORS-safelisted, and the API is cross-origin in
- * production) -- so the caller can fall back to a keepalive `fetch`, which can
- * preflight.
+ * payload (e.g. over its keepalive quota), or it threw -- so the caller can fall back to
+ * a keepalive `fetch`.
  */
-const sendJsonBeacon = (url: string, body: string): boolean => {
+const sendBeaconReport = (url: string, body: string): boolean => {
   if (typeof navigator === 'undefined' || typeof navigator.sendBeacon !== 'function') return false;
   try {
-    return navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }));
+    return navigator.sendBeacon(url, new Blob([body], { type: 'text/plain;charset=UTF-8' }));
   } catch {
     return false;
   }
 };
+
+/** A failed send worth retrying: the request may succeed later. A 413/422 would not. */
+const isRetryableStatus = (status: number): boolean => status === 429 || status >= 500;
 
 class ErrorLoggingService {
   private queue: ErrorLogEntry[] = [];
@@ -99,25 +129,34 @@ class ErrorLoggingService {
   }
 
   log(payload: ErrorLogPayload): void {
-    // Mark error as logged to prevent duplicates
-    if (payload.error) {
-      (payload.error as Error & { _boundaryLogged?: boolean })._boundaryLogged = true;
+    // `throw 'text'` (or any other non-Error) reaches the global listeners as a non-Error
+    // `event.error`. Normalise it: reading `.message` off it below would throw inside the
+    // error listener, and that crash report would be lost without a trace.
+    const raw: unknown = payload.error;
+    const error = raw instanceof Error ? raw : new Error(String(raw));
+
+    // Mark error as logged to prevent duplicates (only an object can carry the flag)
+    if (raw !== null && typeof raw === 'object') {
+      (raw as { _boundaryLogged?: boolean })._boundaryLogged = true;
     }
 
     const entry: ErrorLogEntry = {
-      id: generateErrorId(payload.error),
-      message: payload.error.message,
-      stack: payload.error.stack,
-      componentStack: payload.errorInfo?.componentStack ?? undefined,
-      boundaryName: payload.boundaryName,
-      boundaryLevel: payload.boundaryLevel,
-      url: payload.url || window.location.href,
-      timestamp: payload.timestamp || new Date().toISOString(),
-      userAgent: payload.userAgent || navigator.userAgent,
-      userId: payload.userId || this.getCurrentUserId(),
-      sessionId: payload.sessionId || this.getSessionId(),
+      id: clamp(generateErrorId(error), FIELD_LIMITS.id),
+      message: clamp(error.message, FIELD_LIMITS.message),
+      stack: clampOptional(error.stack, FIELD_LIMITS.stack),
+      componentStack: clampOptional(payload.errorInfo?.componentStack ?? undefined, FIELD_LIMITS.componentStack),
+      boundaryName: clampOptional(payload.boundaryName, FIELD_LIMITS.boundaryName),
+      boundaryLevel: clampOptional(payload.boundaryLevel, FIELD_LIMITS.boundaryLevel),
+      url: clamp(payload.url || window.location.href, FIELD_LIMITS.url),
+      timestamp: clamp(payload.timestamp || new Date().toISOString(), FIELD_LIMITS.timestamp),
+      userAgent: clamp(payload.userAgent || navigator.userAgent, FIELD_LIMITS.userAgent),
+      userId: clampOptional(payload.userId || this.getCurrentUserId(), FIELD_LIMITS.userId),
+      sessionId: clampOptional(payload.sessionId || this.getSessionId(), FIELD_LIMITS.sessionId),
+      // `payload.preservedData` (a form boundary's recovered, half-typed form contents) is
+      // deliberately NOT sent: the server never reads `metadata`, and that unbounded value
+      // could push the batch past the beacon's keepalive quota or the API's body cap, which
+      // loses every crash in the flush, not just this one.
       metadata: {
-        preservedData: payload.preservedData,
         screenWidth: window.innerWidth,
         screenHeight: window.innerHeight,
         language: navigator.language,
@@ -153,21 +192,30 @@ class ErrorLoggingService {
       // Sync (a global crash, or page unload): a beacon outlives the page. If the
       // browser declines it, fall through to a keepalive fetch rather than dropping
       // the batch -- this service is the only channel frontend crashes have.
-      if (sync && sendJsonBeacon(url, body)) return;
+      if (sync && sendBeaconReport(url, body)) return;
 
-      await fetch(url, {
+      const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body,
         keepalive: sync,
       });
-    } catch {
-      // Re-queue on failure (but don't cause infinite loop)
-      if (this.queue.length < this.maxQueueSize) {
-        this.queue = [...entries, ...this.queue].slice(-this.maxQueueSize);
+      // fetch resolves on any HTTP status. A rate-limited or failed server can take the
+      // batch later; a 413/422 never will, so those are not retried.
+      if (response && !response.ok && isRetryableStatus(response.status)) {
+        this.requeue(entries);
       }
+    } catch {
+      this.requeue(entries);
     } finally {
       this.isProcessing = false;
+    }
+  }
+
+  /** Put an unsent batch back at the front of the queue (bounded, so it cannot grow forever). */
+  private requeue(entries: ErrorLogEntry[]): void {
+    if (this.queue.length < this.maxQueueSize) {
+      this.queue = [...entries, ...this.queue].slice(-this.maxQueueSize);
     }
   }
 

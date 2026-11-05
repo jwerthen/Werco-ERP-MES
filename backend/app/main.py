@@ -2,6 +2,7 @@
 import logging
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime
+from typing import Any, Sequence
 
 from fastapi import FastAPI, Request, status
 from fastapi.encoders import jsonable_encoder
@@ -14,11 +15,11 @@ from sqlalchemy.orm.exc import StaleDataError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from app.api.endpoints.errors import is_text_plain_media_type
 from app.api.router import api_router
 from app.core.cache import cache, init_cache
 from app.core.config import settings
 from app.core.logging import configure_logging, generate_correlation_id, get_logger
+from app.core.media_types import is_json_media_type, is_text_plain_media_type
 from app.core.observability import capture_exception_to_sentry
 from app.core.observability import init_sentry as _init_sentry
 from app.core.queue import log_redis_target as _log_redis_target
@@ -437,17 +438,24 @@ def _json_body_too_large_response(request: Request, size: int) -> JSONResponse:
     return add_cors_headers(response, request.headers.get("origin"))
 
 
-# The frontend crash beacon. errors.py parses a ``text/plain`` body on this path as JSON
-# (that is what a string ``navigator.sendBeacon`` body is labelled), so the JSON cap
-# must cover that label here too -- otherwise relabelling would open an uncapped
-# unauthenticated JSON parse.
+# The frontend crash beacon. errors.py parses a ``text/plain`` body on this one route as
+# JSON (that is the label the client's ``navigator.sendBeacon`` body carries), so the JSON
+# cap must cover that label here too -- otherwise relabelling would open an uncapped
+# unauthenticated JSON parse. errors.py scopes the relabel to this exact route for the
+# same reason.
 _ERROR_BEACON_PATH = f"{settings.API_V1_PREFIX}/errors/log"
 
 
 def _is_capped_json_body(request: Request) -> bool:
-    """Whether this request's body is parsed as JSON and therefore subject to the cap."""
-    content_type = request.headers.get("content-type", "")
-    if content_type.startswith("application/json"):
+    """Whether this request's body is parsed as JSON and therefore subject to the cap.
+
+    ``is_json_media_type`` is FastAPI's own rule -- ``application/json`` and every
+    ``application/*+json``, case-insensitive -- not a ``startswith("application/json")``
+    check: under the narrower check ``Application/JSON`` or ``application/merge-patch+json``
+    was parsed as JSON by the route yet skipped the cap, on every route, unauthenticated.
+    """
+    content_type = request.headers.get("content-type")
+    if is_json_media_type(content_type):
         return True
     return request.url.path == _ERROR_BEACON_PATH and is_text_plain_media_type(content_type)
 
@@ -820,8 +828,13 @@ async def global_exception_handler(request: Request, exc: Exception):
     message, traceback) reaches the client.
     """
     correlation_id = _request_correlation_id(request)
-    # Sentry before the log line: the SDK's logging integration also turns this ERROR
-    # into an event for the same exception, and its dedupe keeps whichever comes first.
+    # Sentry before the log line: the SDK's logging integration also turns THIS handler's
+    # ERROR line into an event for the same exception, and dedupe drops whichever arrives
+    # second, so this order keeps the tagged event for this line. It does not make a 500
+    # one event: RequestLoggingMiddleware logs the same exception with exc_info from a
+    # BaseHTTPMiddleware child task, which dedupe's last-seen context does not reach, so
+    # Sentry still receives a second event for it -- also tagged ``correlation_id`` (the
+    # correlation middleware's request-scope tag), so both point at the same reference.
     capture_exception_to_sentry(exc, context={"correlation_id": correlation_id})
     logger.error(
         f"Unhandled exception [correlation_id={correlation_id}] on {request.method} {request.url.path}: {exc}",
@@ -873,10 +886,30 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     return add_cors_headers(response, origin)
 
 
+def _encodable_validation_errors(errors: Sequence[Any]) -> list[Any]:
+    """``exc.errors()`` made safe for ``jsonable_encoder``.
+
+    For a body FastAPI did not parse (any non-JSON label), an error's ``input`` is the raw
+    body BYTES, and ``jsonable_encoder`` ``.decode()``s bytes strictly -- so undecodable
+    bytes raised inside this 422 handler and turned an unauthenticated request into a 500
+    (an ERROR line and Sentry events per request, on any JSON route). Decode with
+    replacement characters instead. Bytes that decode cleanly come out exactly as the
+    encoder always rendered them, so the 422 is unchanged for every body that worked.
+    """
+    safe: list[Any] = []
+    for error in errors:
+        if isinstance(error, dict) and isinstance(error.get("input"), (bytes, bytearray)):
+            error = {**error, "input": bytes(error["input"]).decode("utf-8", "replace")}
+        safe.append(error)
+    return safe
+
+
 # Validation error handler - ensures CORS headers on validation errors (422)
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    response = JSONResponse(status_code=422, content={"detail": jsonable_encoder(exc.errors())})
+    response = JSONResponse(
+        status_code=422, content={"detail": jsonable_encoder(_encodable_validation_errors(exc.errors()))}
+    )
     origin = request.headers.get("origin")
     return add_cors_headers(response, origin)
 

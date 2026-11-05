@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Iterable, Optional, Sequence, Union
 
 from sqlalchemy import and_, func, or_
+from sqlalchemy.exc import PendingRollbackError
 from sqlalchemy.orm import Session
 
 from app.core.observability import report_absorbed_exception
@@ -205,6 +206,7 @@ def report_reconcile_leg_failure(
     company_id: Optional[int],
     user: Optional[Any],
     transitions: Sequence[StatusTransition],
+    summary: Optional[str] = None,
 ) -> None:
     """Log + report a reconcile-on-read side-effect leg that failed and was absorbed.
 
@@ -220,7 +222,18 @@ def report_reconcile_leg_failure(
     never raises. ``log`` is the CALLER's logger, so the record is attributed to the
     router whose read triggered the reconcile. ``user`` is read defensively: the leg may
     have failed on a database error, and an expired ORM instance would try to reload
-    from that failed session.
+    from that failed session. ``summary`` replaces the default message when the leg did
+    not stop (e.g. the audit leg reporting rows ``AuditService`` absorbed).
+
+    A ``PendingRollbackError`` is NOT a new failure and is logged at WARNING with no
+    Sentry event: an earlier step's database error already left the session needing a
+    rollback, so every later leg that touches the session raises it, and the handler's
+    commit will fail and roll the whole reconcile back. The cause was already reported
+    where it happened (that leg's own report, ``AuditService``'s "Failed to create audit
+    log" line, or the READY-promotion heal's), and the exception text quotes it. Reporting
+    each echo as its own ERROR + Sentry event would spend up to five events per read of
+    the same work order -- on every read, since the rollback makes the next one retry --
+    and bury the cause under them.
     """
     context: dict[str, Any] = {"reconcile_step": step, "company_id": company_id}
     try:
@@ -240,9 +253,23 @@ def report_reconcile_leg_failure(
         )
     except Exception:  # pragma: no cover - context is best-effort; the report must still go out
         pass
+    if isinstance(exc, PendingRollbackError):
+        rendered = " ".join(f"{key}={value}" for key, value in context.items())
+        try:
+            log.warning(
+                "Reconcile-on-read %s leg skipped: the session already failed earlier in this reconcile, "
+                "and the handler's commit will roll it back [%s]: %s",
+                step,
+                rendered,
+                exc,
+                extra={"extra_data": dict(context)},
+            )
+        except Exception:  # pragma: no cover - logging must never be fatal
+            pass
+        return
     report_absorbed_exception(
         log,
-        f"Reconcile-on-read {step} leg failed; its remaining writes were skipped and the read continues",
+        summary or f"Reconcile-on-read {step} leg failed; its remaining writes were skipped and the read continues",
         exc,
         context=context,
     )

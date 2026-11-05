@@ -1,11 +1,15 @@
 /**
  * The crash beacon's wire format.
  *
- * A string `navigator.sendBeacon` body is sent as `text/plain;charset=UTF-8`, which
- * the API (FastAPI) does not parse as JSON -- so the global-boundary crashes, the ones
- * that blank the screen, were rejected 422 and never reached a log line. These pin
- * that the beacon now carries an `application/json` Blob, and that a beacon the
- * browser declines falls back to a keepalive fetch instead of dropping the batch.
+ * The beacon was a bare string, and the API (FastAPI) did not parse a `text/plain` body
+ * as JSON -- so the global-boundary crashes, the ones that blank the screen, were
+ * rejected 422 and never reached a log line. The API now reads `text/plain` on
+ * `POST /errors/log` as JSON, and that label is the supported beacon contract: it is
+ * CORS-safelisted, so the cross-origin beacon needs no preflight, whereas Chromium refuses
+ * an `application/json` Blob beacon outright. These pin that the beacon carries a
+ * `text/plain` Blob of the JSON batch, that a beacon the browser declines falls back to a
+ * keepalive fetch instead of dropping the batch, that a retryable failure is kept for the
+ * next flush, and that no entry is sent in a shape the server would reject.
  */
 import { logError } from './errorLogging';
 
@@ -45,7 +49,7 @@ describe('errorLogging crash beacon', () => {
     global.fetch = originalFetch;
   });
 
-  it('sends a global-boundary crash as an application/json Blob, not a text/plain string', async () => {
+  it('sends a global-boundary crash as a text/plain Blob of the JSON batch (the CORS-safelisted beacon)', async () => {
     logError({ error: new Error('white screen'), boundaryName: 'App', boundaryLevel: 'global' });
 
     expect(sendBeacon).toHaveBeenCalledTimes(1);
@@ -53,7 +57,8 @@ describe('errorLogging crash beacon', () => {
     expect(url).toMatch(/\/errors\/log$/);
     expect(typeof payload).not.toBe('string');
     expect(payload).toBeInstanceOf(Blob);
-    expect((payload as Blob).type).toBe('application/json');
+    // The Blob constructor lowercases its type; the label is text/plain either way.
+    expect((payload as Blob).type.toLowerCase()).toBe('text/plain;charset=utf-8');
 
     const parsed = JSON.parse(await readBlobText(payload as Blob));
     expect(parsed.errors).toHaveLength(1);
@@ -61,9 +66,9 @@ describe('errorLogging crash beacon', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('falls back to a keepalive JSON fetch when the browser throws on the Blob beacon', async () => {
+  it('falls back to a keepalive JSON fetch when the browser throws on the beacon', async () => {
     sendBeacon.mockImplementation(() => {
-      throw new DOMException('sendBeacon() with a non-CORS-safelisted Blob type is disabled', 'SecurityError');
+      throw new DOMException('beacon refused', 'SecurityError');
     });
 
     logError({ error: new Error('refused beacon'), boundaryLevel: 'global' });
@@ -121,7 +126,7 @@ describe('errorLogging crash beacon', () => {
     expect(delivered).toEqual(['first crash', 'second crash']);
   });
 
-  it('flushes queued errors on page unload as the same application/json Blob beacon', async () => {
+  it('flushes queued errors on page unload as the same text/plain Blob beacon', async () => {
     logError({ error: new Error('queued page error'), boundaryLevel: 'page' });
     // A non-global error only queues; nothing is sent yet.
     expect(sendBeacon).not.toHaveBeenCalled();
@@ -132,10 +137,89 @@ describe('errorLogging crash beacon', () => {
     expect(sendBeacon).toHaveBeenCalledTimes(1);
     const payload = sendBeacon.mock.calls[0][1];
     expect(payload).toBeInstanceOf(Blob);
-    expect((payload as Blob).type).toBe('application/json');
+    expect((payload as Blob).type.toLowerCase()).toBe('text/plain;charset=utf-8');
     const parsed = JSON.parse(await readBlobText(payload as Blob));
     expect(parsed.errors.map((e: { message: string }) => e.message)).toEqual(['queued page error']);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([429, 500, 503])(
+    'keeps a batch the server answered %i to, and sends it with the next flush',
+    async status => {
+      sendBeacon.mockReturnValue(false);
+      fetchMock.mockResolvedValueOnce({ ok: false, status });
+
+      logError({ error: new Error('first crash'), boundaryLevel: 'global' });
+      await settle();
+      logError({ error: new Error('second crash'), boundaryLevel: 'global' });
+      await settle();
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const delivered = JSON.parse(fetchMock.mock.calls[1][1].body).errors.map((e: { message: string }) => e.message);
+      expect(delivered).toEqual(['first crash', 'second crash']);
+    }
+  );
+
+  it.each([413, 422])('does not resend a batch the server refused with %i (it would refuse it again)', async status => {
+    sendBeacon.mockReturnValue(false);
+    fetchMock.mockResolvedValueOnce({ ok: false, status });
+
+    logError({ error: new Error('refused batch'), boundaryLevel: 'global' });
+    await settle();
+    logError({ error: new Error('next crash'), boundaryLevel: 'global' });
+    await settle();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const delivered = JSON.parse(fetchMock.mock.calls[1][1].body).errors.map((e: { message: string }) => e.message);
+    expect(delivered).toEqual(['next crash']);
+  });
+
+  it("clamps every field to the server's cap, so one oversized entry cannot 422 the whole batch", async () => {
+    const error = new Error('m'.repeat(5000));
+    error.stack = 's'.repeat(25000);
+    logError({
+      error,
+      errorInfo: { componentStack: 'c'.repeat(25000) },
+      boundaryName: 'b'.repeat(300),
+      boundaryLevel: 'global',
+      url: `https://app.example/work-orders?${'q'.repeat(3000)}`,
+      userAgent: 'u'.repeat(1500),
+      userId: 'i'.repeat(100),
+      sessionId: 'x'.repeat(200),
+    });
+
+    const [entry] = JSON.parse(await readBlobText(sendBeacon.mock.calls[0][1] as Blob)).errors;
+    // Caps from ErrorLogEntry in backend/app/api/endpoints/errors.py.
+    expect(entry.message).toHaveLength(4000);
+    expect(entry.stack).toHaveLength(20000);
+    expect(entry.componentStack).toHaveLength(20000);
+    expect(entry.boundaryName).toHaveLength(200);
+    expect(entry.url).toHaveLength(2000);
+    expect(entry.userAgent).toHaveLength(1000);
+    expect(entry.userId).toHaveLength(64);
+    expect(entry.sessionId).toHaveLength(128);
+    expect(entry.boundaryLevel).toBe('global');
+    expect(entry.id.length).toBeLessThanOrEqual(128);
+    expect(entry.timestamp.length).toBeLessThanOrEqual(64);
+  });
+
+  it('never sends the half-typed form contents a form boundary preserved', async () => {
+    logError({
+      error: new Error('form crash'),
+      boundaryLevel: 'global',
+      preservedData: { customer_notes: 'confidential draft text' },
+    });
+
+    const text = await readBlobText(sendBeacon.mock.calls[0][1] as Blob);
+    expect(text).not.toContain('confidential draft text');
+    expect(JSON.parse(text).errors[0].metadata).not.toHaveProperty('preservedData');
+  });
+
+  it('reports a thrown non-Error value (`throw "text"`) instead of throwing inside the error listener', async () => {
+    expect(() => logError({ error: 'plain text thrown' as unknown as Error, boundaryLevel: 'global' })).not.toThrow();
+
+    const [entry] = JSON.parse(await readBlobText(sendBeacon.mock.calls[0][1] as Blob)).errors;
+    expect(entry.message).toBe('plain text thrown');
   });
 });
 

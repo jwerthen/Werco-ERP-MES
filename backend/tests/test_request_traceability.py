@@ -255,19 +255,66 @@ def test_500_for_a_disallowed_origin_grants_no_cors_read(server_error_client: Te
 
 
 def test_sentry_tags_skip_none_and_cut_values_to_sentrys_limit(sentry_spy: _SentrySpy):
-    """Sentry DROPS a tag value over 200 characters rather than truncating it, and the
-    correlation id is caller-supplied (``X-Correlation-ID`` is adopted verbatim) -- so an
-    oversized one must be cut, or the request's events lose the tag entirely."""
+    """Sentry DROPS a tag value over 200 characters rather than truncating it, so any
+    oversized value must be cut, or the event loses the tag entirely."""
     set_sentry_tags(correlation_id="x" * 500, company_id=None, user_id=7)
 
     assert sentry_spy.tags == {"correlation_id": "x" * 200, "user_id": "7"}
 
 
-def test_an_oversized_caller_correlation_id_still_tags_the_request(client: TestClient, sentry_spy: _SentrySpy):
+# ---------------------------------------------------------------------------
+# A caller-supplied X-Correlation-ID is adopted only in a bounded, inert shape.
+#
+# The id is echoed into the response header, the 500 body's ``detail`` and the ERROR log
+# line, so a free-form or unbounded value would let a caller choose what all three carry.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "supplied",
+    [
+        "c" * 65,  # over the 64-character bound
+        "has space",
+        "line\nbreak",
+        "<script>",
+        "reference: forged",
+        "\u00e9t\u00e9",
+    ],
+)
+def test_a_caller_correlation_id_outside_the_accepted_shape_is_replaced_not_echoed(
+    server_error_client: TestClient, caplog: pytest.LogCaptureFixture, supplied: str
+):
+    with caplog.at_level(logging.ERROR, logger="app.main"):
+        # httpx refuses a raw newline in a header value, so send the bytes it would carry.
+        response = server_error_client.get(BOOM_PATH, headers=[(b"X-Correlation-ID", supplied.encode("utf-8"))])
+
+    assert response.status_code == 500
+    correlation_id = response.json()["correlation_id"]
+    assert _MINTED_ID.match(correlation_id), correlation_id
+    assert response.headers["X-Correlation-ID"] == correlation_id
+    assert supplied not in response.text
+    [record] = [r for r in caplog.records if r.name == "app.main" and "Unhandled exception" in r.getMessage()]
+    assert supplied not in record.getMessage()
+    assert f"correlation_id={correlation_id}" in record.getMessage()
+
+
+@pytest.mark.parametrize("supplied", ["a", "c" * 64, "0b9e6c1f-3f0a-4f5e-9a51-1c2d3e4f5a6b", "lt.run_7-node.2"])
+def test_a_caller_correlation_id_in_the_accepted_shape_is_adopted(client: TestClient, supplied: str):
+    response = client.get("/api/v1/errors/health", headers={"X-Correlation-ID": supplied})
+
+    assert response.status_code == 200
+    assert response.headers["X-Correlation-ID"] == supplied
+
+
+def test_an_oversized_caller_correlation_id_is_replaced_and_the_request_still_tagged(
+    client: TestClient, sentry_spy: _SentrySpy
+):
     response = client.get("/api/v1/errors/health", headers={"X-Correlation-ID": "c" * 300})
 
     assert response.status_code == 200
-    assert sentry_spy.tags["correlation_id"] == "c" * 200
+    minted = response.headers["X-Correlation-ID"]
+    assert _MINTED_ID.match(minted), minted
+    assert sentry_spy.tags["correlation_id"] == minted
 
 
 def test_a_failing_sentry_tag_call_never_fails_the_request(

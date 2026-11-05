@@ -73,7 +73,7 @@ from app.schemas.work_order import (
 )
 from app.schemas.work_order_timeline import TimelineCategory, WorkOrderTimelineResponse
 from app.services import dispatch_service, process_sheet_service
-from app.services.audit_service import AuditService
+from app.services.audit_service import AuditService, AuditWriteError
 from app.services.completion_cost_service import (
     apply_completion_cost_rollup,
     compute_and_store_estimated_cost,
@@ -212,8 +212,9 @@ def _audit_reconcile_transitions(
         return
     try:
         audit = AuditService(db, current_user)
+        unaudited: list[StatusTransition] = []
         for tr in transitions:
-            audit.log_status_change(
+            entry = audit.log_status_change(
                 resource_type=tr.resource_type,
                 resource_id=tr.resource_id,
                 resource_identifier=tr.resource_identifier or str(tr.resource_id),
@@ -230,21 +231,45 @@ def _audit_reconcile_transitions(
                     "time_entry_ids": tr.time_entry_ids,
                 },
             )
+            # ``AuditService.log`` absorbs its own failures and returns None (e.g. a
+            # ``sequence_number`` collision that outlasts its savepoint retries), so a lost
+            # row never raises into the ``except`` below. Collect it and report it there.
+            if entry is None:
+                unaudited.append(tr)
             # QG-4 (partial): a completion can happen on a GET via reconcile. Record
             # at minimum the inspection_incomplete exception (cheapest gate, no extra
             # query). NCR/FAI/blocker gates are evaluated on the live completion path,
             # not the read path -- documented partial coverage.
             if tr.resource_type == "work_order_operation":
                 record_reconcile_inspection_exception(db, operation_id=tr.resource_id, audit=audit, user=current_user)
+        if unaudited:
+            report_reconcile_leg_failure(
+                logger,
+                "audit",
+                AuditWriteError(f"{len(unaudited)} reconcile status-change audit row(s) could not be written"),
+                company_id=company_id,
+                user=current_user,
+                transitions=unaudited,
+                summary=(
+                    "Reconcile-on-read audit leg: AuditService could not write every status-change row "
+                    "(it absorbed the failure); the read continues"
+                ),
+            )
     except Exception as exc:  # reads must never 500 on an audit failure -- but it must be seen
-        # KNOWN GAP (follow-up: a savepoint per leg, with an audit failure aborting the
-        # reconcile): the caller commits AFTER this returns. A database error here poisons
-        # the session, so that commit fails and rolls the status flips back with their
-        # audit rows; but a NON-database error lets the flips commit with some or all of
-        # their audit rows missing. Until that lands, this report is the only trace.
         report_reconcile_leg_failure(
             logger, "audit", exc, company_id=company_id, user=current_user, transitions=transitions
         )
+    # KNOWN GAP (invariant 2). Follow-up: write these rows with ``AuditService.log_required``
+    # inside a savepoint and let a failure abort the whole reconcile. Until then the caller
+    # commits AFTER this leg returns, so a status flip can commit with its audit row missing
+    # in two ways:
+    #   * ``AuditService.log`` absorbed the failure (the ``unaudited`` report above). Its
+    #     savepoint keeps the session usable after a sequence collision, so the commit
+    #     succeeds without the row;
+    #   * a non-database exception raised in this leg (e.g. by the inspection-exception
+    #     hook) ended the loop early, and the flips commit without the rows not yet written.
+    # Only a failure that leaves the session unusable rolls the flips back with their audit
+    # rows (the commit then fails). Each case above is reported; that report is the only trace.
 
 
 def _emit_reconcile_events(
@@ -469,21 +494,25 @@ def _reconcile_and_commit(db: Session, work_orders: list[WorkOrder], current_use
 
     Reconcile-on-read is a best-effort optimization, so this intentionally
     swallows ALL of its own commit failures, not just the version race. AUD-3:
-    the audit INSERT can itself fail (e.g. an ``audit_log.sequence_number``
-    unique collision under concurrency); ``AuditService.log`` absorbs that
-    without rolling back, which POISONS the session, so the subsequent
-    ``db.commit()`` here raises ``PendingRollbackError`` / ``InvalidRequestError``
-    / ``IntegrityError`` rather than ``StaleDataError``. We catch ``SQLAlchemyError``
-    broadly, roll back, expire, and serve the read normally so a poisoned session
-    can never turn a GET into a 500. Because the reconcile mutation and its audit
-    rows share one unit of work, the rollback drops BOTH atomically -- no orphaned
-    state change, no unaudited transition -- and the next read retries.
+    a write in one of the side-effect legs can fail in a way that leaves the session
+    unusable (a database error inside a flush that no savepoint contains), so the
+    subsequent ``db.commit()`` here raises ``PendingRollbackError`` /
+    ``InvalidRequestError`` / ``IntegrityError`` rather than ``StaleDataError``. We
+    catch ``SQLAlchemyError`` broadly, roll back, expire, and serve the read normally
+    so a poisoned session can never turn a GET into a 500. Because the reconcile
+    mutation and its audit rows share one unit of work, the rollback drops BOTH
+    atomically -- no orphaned state change, no unaudited transition -- and the next
+    read retries.
 
-    That atomicity covers DATABASE failures only. A non-database exception inside a
-    side-effect leg is absorbed by the leg itself (logged + reported to Sentry via
-    ``report_reconcile_leg_failure``) and never reaches this rollback, so the commit
-    below still runs -- with whatever that leg wrote before it failed and without the
-    rest -- see the KNOWN GAP note in ``_audit_reconcile_transitions``.
+    That atomicity covers only a failure that leaves the session UNUSABLE. Two kinds of
+    failure never reach this rollback, so the commit below still runs -- with whatever
+    was written and without the rest: a non-database exception inside a side-effect leg
+    (absorbed by the leg itself, logged + reported to Sentry via
+    ``report_reconcile_leg_failure``), and an audit row ``AuditService.log`` failed to
+    write -- it writes each row under a savepoint and absorbs its own failures, so a
+    ``sequence_number`` collision that outlasts its retries no longer poisons the session
+    and the flip commits without its row. See the KNOWN GAP note in
+    ``_audit_reconcile_transitions``.
 
     (The root ``sequence_number`` race is a separately-tracked follow-up; this
     guard only guarantees reads never 500.)

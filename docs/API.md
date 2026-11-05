@@ -1498,7 +1498,9 @@ a deleted record. Customer pickers independently exclude tombstoned rows.
 > the completion evidence has landed, so a stranded work order repairs itself the next time anyone
 > loads it. No new endpoint, no data migration, no owner action.
 > - **Which reads heal.** `GET /work-orders`, `GET /work-orders/{id}`, `GET /shop-floor/dashboard`
->   (bounded to the most-recently-touched open WOs by `SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT`),
+>   (bounded to the most-recently-touched open WOs by `SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT`, and only
+>   on a **200**: its `ETag` **304** returns before the reconcile, which a cross-origin SPA now
+>   actually receives — see [CORS](#cors)),
 >   `GET /shop-floor/operations`, and `GET /shop-floor/operations/{id}`. `POST /work-orders/` also
 >   reconciles, but a brand-new WO is DRAFT, so the DRAFT carve-out below makes it the no-op it has
 >   always been — **six** handlers call the reconcile, five of which can actually promote.
@@ -1536,13 +1538,24 @@ a deleted record. Customer pickers independently exclude tombstoned rows.
 > (`except Exception: pass`). It is now an **ERROR** log line with the traceback, carrying
 > `reconcile_step`, `company_id`, `user_id`, `work_order_ids` and `operation_ids`. With `SENTRY_DSN`
 > set it is also a Sentry event tagged `reconcile_step`, `company_id` and, where known, `user_id`.
-> Transaction behaviour is unchanged. A **database** error that poisons the session makes the handler's
-> commit fail, which rolls the status flips back together with their audit rows, and the next read
-> retries. A **non-database** error does not: the commit goes ahead without whatever the failed leg had
-> not yet written. On the `audit` leg that means a status flip can commit with some or all of its
-> status-change audit rows missing. This is a known gap, tracked as a follow-up (a savepoint per leg,
-> with an audit failure aborting the reconcile). Until that lands, the ERROR line and the Sentry event
-> are the only record that it happened.
+> The `audit` leg also reports, the same way, any status-change audit row that `AuditService` failed
+> to write and absorbed (it returns nothing rather than raising), naming the transitions left
+> unaudited.
+>
+> Once a database error has left the session unusable, every later leg that touches it fails with
+> `PendingRollbackError`. Those echoes are logged at **WARNING**, quoting the original error, with no
+> Sentry event: the cause was already reported where it happened, and the handler's commit will fail
+> and roll the whole reconcile back, so the next read retries.
+>
+> Transaction behaviour is unchanged. Only a failure that leaves the session unusable makes the
+> handler's commit fail, which rolls the status flips back together with their audit rows. Everything
+> else commits without whatever the failed leg did not write. On the `audit` leg that is a **known
+> gap** (invariant 2): a status flip can commit with its status-change audit row missing, either
+> because `AuditService` absorbed the write failure (it writes each row under a savepoint, so a
+> `sequence_number` collision that outlasts its retries leaves the session usable) or because a
+> non-database error ended the leg early. It is tracked as a follow-up: write these rows with
+> `AuditService.log_required` inside a savepoint and let an audit failure abort the reconcile. Until
+> that lands, the ERROR line and the Sentry event are the only record that it happened.
 >
 > **`PUT /scheduling/work-orders/{id}/unschedule` no longer demotes durably.** That endpoint clears
 > the schedule and flips each non-COMPLETE READY operation back to PENDING. On a released work order
@@ -10273,6 +10286,12 @@ display; the web UI renders them in shop-local Central time.
 }
 ```
 
+Each error also carries the offending `input`. When the route did not parse the body (it was sent
+under a non-JSON `Content-Type`), `input` is the raw body as text. Bytes that are not valid UTF-8 are
+rendered with replacement characters (`U+FFFD`). Until 2026-11-05 such a body made the 422 handler
+itself fail, so the caller got a **500** instead of the **422**, on any JSON route and without
+authentication.
+
 ### Not Found error (404)
 ```json
 {
@@ -10297,9 +10316,12 @@ display; the web UI renders them in shop-local Central time.
 
 An unhandled exception returns this body. The response also carries an `X-Correlation-ID` header
 with the same value. The value is the request's correlation id: the caller's own `X-Correlation-ID`
-request header if it sent one, otherwise an 8-character id the server generates. If the request
-failed before the correlation middleware ran, a fresh id is minted, and body, header and log line
-still agree. The id also appears on the server's ERROR log line that carries the traceback
+request header if it sent one of 1–64 characters drawn from `A–Z a–z 0–9 . _ -`, otherwise an
+8-character id the server generates. A caller's value in any other shape (too long, spaces,
+punctuation, non-ASCII) is replaced, never trimmed or echoed, because the id is repeated in the
+response header, in `detail` and on the log line. The same rule applies to every response's
+`X-Correlation-ID`, not only the 500. If the request failed before the correlation middleware ran, a
+fresh id is minted, and body, header and log line still agree. The id also appears on the server's ERROR log line that carries the traceback
 (`correlation_id=<id>`). When `SENTRY_DSN` is set it is the `correlation_id` tag on the Sentry
 event, so a quoted reference finds the traceback.
 
@@ -10520,20 +10542,35 @@ forge tamper-evident audit-chain entries attributed to a named employee in a nam
 body is additionally capped at **50 entries** with per-field length limits (**422** over either).
 
 **`POST /errors/log` reads its JSON body under either `application/json` or `text/plain`** (the
-`text/plain` label may carry parameters, e.g. `text/plain;charset=UTF-8`, which is what a string
-`navigator.sendBeacon` body is sent as). A `text/plain` request is relabelled as JSON before FastAPI
-parses it, so it gets the same parse, the same `ErrorLogRequest` validation and caps, and the same
-**422** shape, and the OpenAPI `requestBody` is unchanged. No other content type is relabelled: an
-`application/octet-stream` body, for example, is still a **422**. The relabel applies to this router
-only, and `text/plain` is not parsed as JSON on any other path. The `MAX_JSON_BODY_BYTES` cap
-(**413**) covers the `text/plain` label on this path (see [Request Size Limits](#request-size-limits)).
+`text/plain` label may carry parameters, e.g. `text/plain;charset=UTF-8`). A `text/plain` request is
+relabelled as JSON before FastAPI parses it, so it gets the same parse, the same `ErrorLogRequest`
+validation and caps, and the same **422** shape, and the OpenAPI `requestBody` is unchanged. No other
+content type is relabelled: an `application/octet-stream` body, for example, is still a **422**. The
+relabel is installed on this one route only (not on the errors router, and not app-wide), and
+`text/plain` is not parsed as JSON on any other path. The `MAX_JSON_BODY_BYTES` cap (**413**) covers
+the `text/plain` label on this path (see [Request Size Limits](#request-size-limits)).
 
-Why: until 2026-11-05 the SPA sent its unload/crash beacon as a string. The beacon went out as
-`text/plain`, and FastAPI does not parse that as JSON, so every global-boundary crash report was
-rejected **422** and never reached a log line or Sentry. The current client sends an
-`application/json` Blob instead. If `sendBeacon` is unavailable, returns `false` or throws, it falls
-back to a `fetch` with `keepalive: true`, and a failed send is re-queued. The `text/plain` acceptance
-is for tabs still running an older bundle, which keep sending the old shape until they reload.
+**`text/plain` is the supported beacon contract, not a legacy shim — do not remove it.** The SPA
+(`frontend/src/services/errorLogging.ts`) sends its crash and unload reports with
+`navigator.sendBeacon` and a `text/plain;charset=UTF-8` Blob on purpose. That label is
+CORS-safelisted, so the beacon is a simple request: no preflight, and it works cross-origin, which
+production is (Vercel → Railway). An `application/json` Blob is not safelisted, and Chromium refuses
+that beacon outright. If `sendBeacon` is unavailable, returns `false` or throws, the client falls back
+to a `fetch` with `keepalive: true` and `Content-Type: application/json`; the periodic flush is an
+ordinary JSON `fetch`.
+
+The client also guards the batch against the server's own refusals, because one bad entry fails the
+whole batch:
+- every field is clamped to the server's `ErrorLogEntry` cap (`url` 2,000, `message` 4,000, `stack`
+  20,000, …) instead of being sent over it and drawing a **422**;
+- a form boundary's preserved form contents (`metadata.preservedData`) are not sent at all; the server
+  never read them, and they could push the batch past the beacon's keepalive quota or the body cap;
+- a batch answered **429** or **5xx**, or lost to a network error, is re-queued for the next flush. A
+  **413** or **422** is not, since the same batch would be refused again.
+
+Why: until 2026-11-05 the SPA sent the beacon as a bare string. That is also labelled `text/plain`,
+and FastAPI does not parse `text/plain` as JSON, so every global-boundary crash report was rejected
+**422** and never reached a log line or Sentry.
 
 An over-limit request returns **HTTP 429** with a `Retry-After` header (seconds until the window
 resets) and body:
@@ -10574,9 +10611,14 @@ an admin reset. Both key on a caller-supplied IP while `--forwarded-allow-ips=*`
 
 **JSON request bodies are capped at 256 KB** (`MAX_JSON_BODY_BYTES`, env-overridable; the
 pre-rename `MAX_SANITIZED_JSON_BODY_BYTES` is still honored as a deprecated alias). Every
-`application/json` `POST`/`PUT`/`PATCH` body is size-checked by middleware before the route
-runs — ahead of route auth, so an unauthenticated caller cannot choose how many bytes the app
-buffers and parses. Over the cap the request is **rejected**:
+JSON `POST`/`PUT`/`PATCH` body is size-checked by middleware before the route runs — ahead of
+route auth, so an unauthenticated caller cannot choose how many bytes the app buffers and parses.
+"JSON" means every label FastAPI itself parses as JSON: `application/json` and any
+`application/*+json` (`application/merge-patch+json`, `application/vnd.api+json`, …), matched
+case-insensitively with parameters ignored. Until 2026-11-05 the middleware matched only a
+literal `application/json…` prefix, so `Application/JSON` or a `+json` label was parsed by the
+route but never capped, and a non-JSON label such as `application/jsonx` was capped though never
+parsed. Over the cap the request is **rejected**:
 
 ```json
 { "detail": "Request body too large: 300000 bytes exceeds the 262144-byte limit for JSON requests." }
@@ -10586,7 +10628,7 @@ Returned as **HTTP 413**. The check is applied to the declared `Content-Length` 
 is read, and again to the bytes actually received (chunked encoding, or a header that lies).
 
 **One non-JSON label is capped as well:** a `text/plain` body on `POST /errors/log`. That route
-parses `text/plain` as JSON (it is the label a string `navigator.sendBeacon` body carries; see
+parses `text/plain` as JSON (it is the label the SPA's `navigator.sendBeacon` body carries; see
 [Rate Limiting](#rate-limiting)), so without the cap the relabel would open an uncapped,
 unauthenticated JSON parse. Both gates apply to it. On every other path `text/plain` is neither
 parsed as JSON nor capped by this middleware.
@@ -10759,7 +10801,11 @@ is readable to it, whatever the expose list says.
 
 Before 2026-11-05 no headers were exposed, so a cross-origin SPA could read none of these three.
 Downloads fell back to the client's hard-coded filenames, and the ETag cache never stored an entry.
-Expect more **304**s once the cache starts working.
+Expect more **304**s once the cache starts working. `GET /shop-floor/dashboard` is the one route that
+emits an `ETag`, and its **304** returns before that read's reconcile runs, so the dashboard heals a
+stranded work order only on a read that returns **200** (the first load, or any read after the
+company's data changes). The other reconciling reads (`GET /work-orders`, `GET /work-orders/{id}`,
+`GET /shop-floor/operations…`) emit no `ETag` and still heal on every read.
 
 ## Trusted Hosts
 

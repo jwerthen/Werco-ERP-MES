@@ -18,6 +18,7 @@ from starlette.types import ASGIApp
 from app.core.logging import (
     generate_correlation_id,
     get_logger,
+    is_acceptable_correlation_id,
     set_correlation_id,
     set_request_context,
 )
@@ -30,8 +31,9 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
     """
     Middleware to generate and propagate correlation IDs.
 
-    - Checks for existing correlation ID in X-Correlation-ID header
-    - Generates new ID if not present
+    - Checks for existing correlation ID in X-Correlation-ID header, adopting it only when it
+      is 1-64 characters of ``A-Za-z0-9._-`` (``is_acceptable_correlation_id``)
+    - Generates new ID if not present, or if the caller's value is not in that shape
     - Adds correlation ID to response headers (a response this middleware never sees --
       the app-wide 500 -- has the header added by main.py's handler instead)
     - Sets correlation ID in context for logging, on ``request.state`` and as a Sentry tag
@@ -40,9 +42,11 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
     HEADER_NAME = "X-Correlation-ID"
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        # Get or generate correlation ID
-        correlation_id = request.headers.get(self.HEADER_NAME)
-        if not correlation_id:
+        # Get or generate correlation ID. A caller-supplied one is echoed into the response
+        # header, the 500 body and the log line, so it is adopted only in a bounded, inert
+        # shape; anything else is replaced rather than trimmed.
+        correlation_id = request.headers.get(self.HEADER_NAME) or ""
+        if not is_acceptable_correlation_id(correlation_id):
             correlation_id = generate_correlation_id()
 
         # Set in context for logging
