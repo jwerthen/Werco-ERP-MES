@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
 from app.models.custom_field import CustomFieldDefinition, CustomFieldValue, EntityType, FieldType
@@ -18,6 +18,8 @@ from app.schemas.custom_field import (
     CustomFieldValueSet,
     EntityCustomFields,
 )
+from app.services import custom_field_values
+from app.services.audit_service import AuditService
 
 router = APIRouter()
 
@@ -143,8 +145,16 @@ def delete_field_definition(
 
 
 # Value endpoints
+#
+# Every /values/* route is tenant-scoped end to end (custom_field_values module
+# docstring): the definition is resolved by (company, field_key, entity_type), the
+# target entity must exist in the active company (404 otherwise -- reads accept a
+# soft-deleted entity, writes require a live one), and value rows are read through
+# their own company_id. Writes and deletes are audited before the commit.
 def parse_value(value: Any, field_type: FieldType) -> Dict[str, Any]:
-    """Parse and validate value based on field type, return dict with appropriate column"""
+    """Parse and validate value based on field type, return dict with appropriate column.
+
+    Raises ``ValueError`` / ``TypeError`` for a value the type cannot hold."""
     result = {"value_text": None, "value_number": None, "value_boolean": None, "value_date": None, "value_json": None}
 
     if value is None:
@@ -195,20 +205,15 @@ def get_entity_custom_fields(
     entity_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
-    """Get all custom field values for an entity"""
-    values = (
-        db.query(CustomFieldValue)
-        .join(CustomFieldDefinition)
-        .filter(
-            and_(
-                CustomFieldValue.entity_type == entity_type,
-                CustomFieldValue.entity_id == entity_id,
-                CustomFieldDefinition.is_active == True,
-            )
-        )
-        .all()
-    )
+    """Get all custom field values for an entity of the active company.
+
+    404 when the entity is not one of the active company's records. Values of
+    deactivated field definitions are omitted.
+    """
+    custom_field_values.require_entity(db, company_id, entity_type, entity_id, live=False)
+    values = custom_field_values.entity_values(db, company_id, entity_type, entity_id)
 
     fields = {}
     for val in values:
@@ -218,6 +223,15 @@ def get_entity_custom_fields(
     return EntityCustomFields(entity_type=entity_type, entity_id=entity_id, fields=fields)
 
 
+def _parse_or_400(raw: Any, field_def: CustomFieldDefinition) -> Dict[str, Any]:
+    try:
+        return parse_value(raw, field_def.field_type)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid value for '{field_def.field_key}' ({field_def.field_type.value})"
+        ) from exc
+
+
 @router.post("/values/{entity_type}/{entity_id}")
 def set_custom_field_value(
     entity_type: EntityType,
@@ -225,116 +239,79 @@ def set_custom_field_value(
     value_in: CustomFieldValueSet,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Set a custom field value for an entity"""
-    # Find the field definition
-    field_def = (
-        db.query(CustomFieldDefinition)
-        .filter(
-            and_(
-                CustomFieldDefinition.field_key == value_in.field_key,
-                CustomFieldDefinition.entity_type == entity_type,
-                CustomFieldDefinition.is_active == True,
-            )
-        )
-        .first()
-    )
+    """Set one custom field value on a live entity of the active company.
 
+    404 when the entity is not a live record of the active company or the field is
+    not an active definition there; 400 when the value does not fit the field type.
+    Creates or overwrites the value and writes an audit row.
+    """
+    custom_field_values.require_entity(db, company_id, entity_type, entity_id, live=True)
+    field_def = custom_field_values.find_definition(db, company_id, entity_type, value_in.field_key, active_only=True)
     if not field_def:
         raise HTTPException(status_code=404, detail=f"Field '{value_in.field_key}' not found for {entity_type.value}")
 
-    # Parse the value
-    parsed = parse_value(value_in.value, field_def.field_type)
-
-    # Find existing value or create new
-    existing = (
-        db.query(CustomFieldValue)
-        .filter(
-            and_(
-                CustomFieldValue.field_definition_id == field_def.id,
-                CustomFieldValue.entity_type == entity_type,
-                CustomFieldValue.entity_id == entity_id,
-            )
-        )
-        .first()
+    parsed = _parse_or_400(value_in.value, field_def)
+    outcome, _ = custom_field_values.upsert_value(
+        db,
+        audit,
+        company_id=company_id,
+        user=current_user,
+        field_def=field_def,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        parsed=parsed,
     )
-
-    if existing:
-        for key, val in parsed.items():
-            setattr(existing, key, val)
-        existing.updated_by = current_user.id
-        db.commit()
-        return {"message": "Value updated", "field_key": value_in.field_key}
-    else:
-        new_value = CustomFieldValue(
-            field_definition_id=field_def.id,
-            entity_type=entity_type,
-            entity_id=entity_id,
-            updated_by=current_user.id,
-            **parsed,
-        )
-        db.add(new_value)
-        db.commit()
-        return {"message": "Value created", "field_key": value_in.field_key}
+    db.commit()
+    message = "Value updated" if outcome == "updated" else "Value created"
+    return {"message": message, "field_key": value_in.field_key}
 
 
 @router.post("/values/bulk")
 def set_bulk_custom_fields(
-    bulk_in: BulkSetCustomFields, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    bulk_in: BulkSetCustomFields,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Set multiple custom field values at once"""
+    """Set several custom field values on one live entity of the active company.
+
+    404 (and nothing written) when the entity is not a live record of the active
+    company. Otherwise each key is reported on its own: an unknown field or a value
+    that does not fit its type is an ``error`` result and the rest still apply.
+    Every value written is audited.
+    """
+    custom_field_values.require_entity(db, company_id, bulk_in.entity_type, bulk_in.entity_id, live=True)
     results = []
 
     for field_key, value in bulk_in.values.items():
+        field_def = custom_field_values.find_definition(
+            db, company_id, bulk_in.entity_type, field_key, active_only=True
+        )
+        if not field_def:
+            results.append({"field_key": field_key, "status": "error", "message": "Field not found"})
+            continue
+
         try:
-            field_def = (
-                db.query(CustomFieldDefinition)
-                .filter(
-                    and_(
-                        CustomFieldDefinition.field_key == field_key,
-                        CustomFieldDefinition.entity_type == bulk_in.entity_type,
-                        CustomFieldDefinition.is_active == True,
-                    )
-                )
-                .first()
-            )
-
-            if not field_def:
-                results.append({"field_key": field_key, "status": "error", "message": "Field not found"})
-                continue
-
             parsed = parse_value(value, field_def.field_type)
+        except (TypeError, ValueError) as exc:
+            results.append({"field_key": field_key, "status": "error", "message": str(exc)})
+            continue
 
-            existing = (
-                db.query(CustomFieldValue)
-                .filter(
-                    and_(
-                        CustomFieldValue.field_definition_id == field_def.id,
-                        CustomFieldValue.entity_type == bulk_in.entity_type,
-                        CustomFieldValue.entity_id == bulk_in.entity_id,
-                    )
-                )
-                .first()
-            )
-
-            if existing:
-                for key, val in parsed.items():
-                    setattr(existing, key, val)
-                existing.updated_by = current_user.id
-            else:
-                new_value = CustomFieldValue(
-                    field_definition_id=field_def.id,
-                    entity_type=bulk_in.entity_type,
-                    entity_id=bulk_in.entity_id,
-                    updated_by=current_user.id,
-                    **parsed,
-                )
-                db.add(new_value)
-
-            results.append({"field_key": field_key, "status": "success"})
-
-        except Exception as e:
-            results.append({"field_key": field_key, "status": "error", "message": str(e)})
+        custom_field_values.upsert_value(
+            db,
+            audit,
+            company_id=company_id,
+            user=current_user,
+            field_def=field_def,
+            entity_type=bulk_in.entity_type,
+            entity_id=bulk_in.entity_id,
+            parsed=parsed,
+        )
+        results.append({"field_key": field_key, "status": "success"})
 
     db.commit()
     return {"results": results}
@@ -347,32 +324,26 @@ def delete_custom_field_value(
     field_key: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Delete a specific custom field value"""
-    field_def = (
-        db.query(CustomFieldDefinition)
-        .filter(and_(CustomFieldDefinition.field_key == field_key, CustomFieldDefinition.entity_type == entity_type))
-        .first()
-    )
+    """Delete one custom field value from a live entity of the active company.
 
+    404 when the entity, the field or the value is not the active company's. The
+    removed value is recorded in the audit row.
+    """
+    custom_field_values.require_entity(db, company_id, entity_type, entity_id, live=True)
+    # Not active_only: a value of a since-deactivated field can still be removed.
+    field_def = custom_field_values.find_definition(db, company_id, entity_type, field_key, active_only=False)
     if not field_def:
         raise HTTPException(status_code=404, detail="Field not found")
 
-    value = (
-        db.query(CustomFieldValue)
-        .filter(
-            and_(
-                CustomFieldValue.field_definition_id == field_def.id,
-                CustomFieldValue.entity_type == entity_type,
-                CustomFieldValue.entity_id == entity_id,
-            )
-        )
-        .first()
-    )
-
+    value = custom_field_values.find_value(db, company_id, field_def, entity_type, entity_id)
     if not value:
         raise HTTPException(status_code=404, detail="Value not found")
 
-    db.delete(value)
+    custom_field_values.delete_value(
+        db, audit, field_def=field_def, value=value, entity_type=entity_type, entity_id=entity_id
+    )
     db.commit()
     return {"message": "Value deleted"}
