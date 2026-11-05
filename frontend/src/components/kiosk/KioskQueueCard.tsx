@@ -1,5 +1,5 @@
 import React from 'react';
-import { ArrowUpRightIcon } from '@heroicons/react/24/outline';
+import { ArrowUpIcon, ArrowUpRightIcon } from '@heroicons/react/24/outline';
 import { formatCentralDate, isDateBeforeTodayInCentral, isDateTodayInCentral } from '../../utils/centralTime';
 import { UnitBadge } from '../ui';
 import { KioskQueueItem, formatOperationLabel, formatStepsChip, operationNumberText } from './kioskConstants';
@@ -21,6 +21,28 @@ export function KioskStepsChip({ item }: { item: Pick<KioskQueueItem, 'steps_tot
       }`}
     >
       {formatStepsChip(item)}
+    </span>
+  );
+}
+
+/**
+ * "MOVED UP" — the planner moved this operation ahead of work it used to follow
+ * (its id is in an unacknowledged dispatch notice's `moved_up`). Shown until the
+ * screen's "Got it" acknowledges the notice; purely informational — it changes
+ * nothing about what may be started (run order is advisory).
+ *
+ * Shared by the kiosk queue card and the crew job card so the two read alike.
+ */
+export function KioskMovedUpChip({ size = 'kiosk' }: { size?: 'kiosk' | 'crew' }) {
+  return (
+    <span
+      data-testid="kiosk-moved-up-chip"
+      className={`inline-flex items-center gap-1 rounded-[3px] border border-fd-amber/60 bg-fd-amber/15 font-mono font-bold uppercase text-fd-amber ${
+        size === 'crew' ? 'px-2 py-1 text-xs tracking-widest' : 'px-2 py-1 text-[11px] tracking-[0.06em]'
+      }`}
+    >
+      <ArrowUpIcon aria-hidden="true" className={size === 'crew' ? 'h-4 w-4' : 'h-3 w-3'} />
+      Moved up
     </span>
   );
 }
@@ -79,6 +101,8 @@ interface KioskQueueCardProps {
   disabled?: boolean;
   /** Foundry doc-viewer entry: renders the CNC-strip PDF chip as a real button. */
   onOpenPdf?: (item: KioskQueueItem) => void;
+  /** The planner moved this job up and the operator has not said "Got it" yet. */
+  movedUp?: boolean;
 }
 
 /**
@@ -88,7 +112,14 @@ interface KioskQueueCardProps {
  * doc-viewer entry, so the card is a role="button" div (the sanctioned wrapper
  * pattern) and the chip stops propagation.
  */
-export default function KioskQueueCard({ item, onSelect, active = false, disabled = false, onOpenPdf }: KioskQueueCardProps) {
+export default function KioskQueueCard({
+  item,
+  onSelect,
+  active = false,
+  disabled = false,
+  onOpenPdf,
+  movedUp = false,
+}: KioskQueueCardProps) {
   const pastDue = item.due_date ? isDateBeforeTodayInCentral(item.due_date) : false;
   const dueToday = item.due_date ? isDateTodayInCentral(item.due_date) : false;
   const inProgress = String(item.status).toLowerCase() === 'in_progress';
@@ -119,7 +150,7 @@ export default function KioskQueueCard({ item, onSelect, active = false, disable
       // for a new one -- the same operation, named two ways, in the same card.
       aria-label={`Work order ${item.work_order_number}, operation ${
         item.operation_name || operationNumberText(item.operation_number) || ''
-      }`}
+      }${movedUp ? ', moved up' : ''}`}
       className={`w-full rounded-[4px] border bg-fd-panel px-4 py-3.5 text-left transition-transform duration-150 ease-out active:scale-[0.99] ${
         active
           ? 'border-fd-line-bright border-l-2 border-l-fd-green'
@@ -130,6 +161,7 @@ export default function KioskQueueCard({ item, onSelect, active = false, disable
     >
       <div className="flex flex-wrap items-center gap-2.5">
         <KioskRunOrderChip item={item} active={active} />
+        {movedUp && <KioskMovedUpChip />}
         <span className="font-mono text-lg font-bold text-fd-ink">{item.work_order_number}</span>
         <UnitBadge unitNumber={item.unit_number} size="md" />
         <span

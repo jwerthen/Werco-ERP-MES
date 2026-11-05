@@ -59,6 +59,9 @@ import type { OneTapBinding } from '../components/kiosk/useOneTapPieces';
 import { addStranded, clearStranded, clearStrandedByKey, readStranded } from '../components/kiosk/oneTapStrandedStore';
 import type { StrandedOneTapRecord } from '../components/kiosk/oneTapStrandedStore';
 import KioskJobNotes from '../components/kiosk/KioskJobNotes';
+import DispatchNoticeBanner from '../components/kiosk/DispatchNoticeBanner';
+import { useDispatchNotice } from '../hooks/useDispatchNotice';
+import type { DispatchNoticeSource } from '../hooks/useDispatchNotice';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
 import {
   HOLD_REASONS,
@@ -85,6 +88,8 @@ import type { ScrapReasonCodeOption } from '../types/scrapReason';
 import type { MissingStepInfo, QualityHoldResult } from '../types/processSheet';
 
 const POLL_INTERVAL_MS = 10_000;
+/** The crew station's acknowledgement is per DEVICE per work center (one shared terminal). */
+const CREW_NOTICE_SCOPE = { kind: 'device' } as const;
 const PIN_MIN = 4;
 const PIN_MAX = 8;
 // Idle abandons a half-entered flow back to the crew board (flow reset, NOT a
@@ -259,6 +264,9 @@ export default function CrewStationKiosk() {
   // (the station/badge tokens cannot reach /quality/scrap-reason-codes — path
   // fence). [] -> the legacy SCRAP_REASONS fallback inside KioskQuantityScreen.
   const [scrapCodes, setScrapCodes] = useState<ScrapReasonCodeOption[]>([]);
+  // This machine's newest dispatch notice + the payload clock it is aged against.
+  // Rides the station-token queue poll; absent on an older backend → no banner.
+  const [noticeSource, setNoticeSource] = useState<DispatchNoticeSource>({});
   const [serverSkewMs, setServerSkewMs] = useState(0);
   const [online, setOnline] = useState(true);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
@@ -296,6 +304,7 @@ export default function CrewStationKiosk() {
     setHeld([]);
     setHeldTruncated(false);
     setScrapCodes([]);
+    setNoticeSource({});
     setInitialLoadDone(false);
     setView({ name: 'board' });
     setPin('');
@@ -323,6 +332,7 @@ export default function CrewStationKiosk() {
       // Active scrap codes ride every poll (absent on a pre-Lean backend -> []
       // -> the legacy fallback grid, never a crash).
       setScrapCodes(Array.isArray(res.scrap_reason_codes) ? res.scrap_reason_codes : []);
+      setNoticeSource({ notices: [res.dispatch_notice], serverTime: res.server_time ?? null });
       const serverMs = res.server_time ? Date.parse(res.server_time) : NaN;
       if (Number.isFinite(serverMs)) setServerSkewMs(serverMs - Date.now());
       setOnline(true);
@@ -431,6 +441,15 @@ export default function CrewStationKiosk() {
   }, [queue, held, view, busy, initialLoadDone, resetToBoard]);
 
   const mutationsBlocked = busy || !online;
+
+  // "The planner changed this machine's order." Acknowledged per DEVICE per work
+  // center. Deliberately NOT a view: a view carries an operationId the ghost-guard
+  // above acts on, and the banner must survive the idle reset back to the board.
+  // Pure display — it never navigates and never touches the idle timer.
+  const dispatchNotice = useDispatchNotice({
+    sources: [noticeSource],
+    scope: hasToken ? CREW_NOTICE_SCOPE : null,
+  });
 
   // --- One-tap +1 on REPORT PRODUCTION -----------------------------------------
   // TWO refs, and the split is the whole attribution guarantee.
@@ -580,6 +599,7 @@ export default function CrewStationKiosk() {
       setHeld([]);
       setHeldTruncated(false);
       setScrapCodes([]);
+      setNoticeSource({});
       setInitialLoadDone(false);
       setBoardBadgeBuffer('');
       setBadgeError(null);
@@ -1341,6 +1361,7 @@ export default function CrewStationKiosk() {
                   setQueue([]);
                   setHeld([]);
                   setHeldTruncated(false);
+                  setNoticeSource({});
                   setInitialLoadDone(false);
                   setBoardBadgeBuffer('');
                   setChoosingWorkstation(true);
@@ -1438,6 +1459,17 @@ export default function CrewStationKiosk() {
             ))}
           </div>
         </div>
+      )}
+
+      {/* Dispatch notice — BELOW the offline and unsaved-pieces strips, never in
+          place of them. Up on every view (the board the idle reset returns to
+          included) except the full-bleed doc viewer. */}
+      {view.name !== 'docs' && (
+        <DispatchNoticeBanner
+          variant="kiosk"
+          notices={dispatchNotice.active}
+          onAcknowledge={dispatchNotice.acknowledge}
+        />
       )}
 
       {/* Writing pieces off is a decision about production that was actually
@@ -1607,6 +1639,7 @@ export default function CrewStationKiosk() {
                     item={item}
                     nowMs={skewedNowMs}
                     disabled={busy}
+                    movedUp={dispatchNotice.movedUpOperationIds.has(item.operation_id)}
                     onSelect={(it) => {
                       setBadgeError(null);
                       setView({ name: 'job', operationId: it.operation_id });

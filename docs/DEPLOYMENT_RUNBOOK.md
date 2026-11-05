@@ -151,6 +151,57 @@ deliberate no-op that never re-grants. Applied revision `093` also gained role-e
 checks in place; a database that already ran it is unaffected. See
 [SUPABASE_SECURITY.md → Data API revoke parity](SUPABASE_SECURITY.md#data-api-revoke-parity-migration-113).
 
+**Work-order dispatch plan (Dispatch Board v2).** Apply additive **114_wo_dispatch_rank**
+after **113** through the normal API boot migration path (`start.sh` / `Dockerfile.prod` run
+`alembic upgrade head` before the server starts). It adds the nullable
+`work_orders.dispatch_rank` (no default, no backfill — metadata-only on PostgreSQL) and two
+indexes, `ix_work_orders_company_dispatch_rank` and
+`ix_operational_events_company_entity_time`. It creates no table and no RLS, revoke or role
+statement, writes no row, and adds no environment variable, secret, cron or worker job.
+
+- **The migration ships with the code, never after it.** The new API reads and writes
+  `dispatch_rank`, so it must never serve against an un-migrated database. The old API never
+  touches the column, so the migration may land ahead of it. The boot path already gives this
+  order: the new image migrates before it serves. The worker loads the same models, so deploy it
+  after the API, which is the order CI already uses.
+- **The `operational_events` index build blocks event writes while it runs.** A plain
+  `CREATE INDEX` takes a SHARE lock. Reads continue, but every operational-event emit (each
+  operation start, completion and READY flip) waits until the build finishes. At this shop's
+  volume that should take well under a few seconds. The `work_orders` index is small and costs
+  nothing noticeable. To deploy mid-shift, or once the events table has grown, build the index out
+  of band first; the migration's guard then skips it:
+
+  ```sql
+  -- autocommit: CONCURRENTLY cannot run inside a transaction block
+  CREATE INDEX CONCURRENTLY ix_operational_events_company_entity_time
+      ON operational_events (company_id, entity_type, entity_id, occurred_at);
+  ```
+
+  An interrupted concurrent build leaves an INVALID index behind. The migration checks
+  `pg_index.indisvalid`, then drops that index and builds it again.
+- **Old and new versions overlap briefly.** The Vercel frontend can reach the old API for a short
+  time after merge. During that window:
+  - the Dispatch Board's Work orders view shows a retryable error, because the old API returns 404
+    for it (the Machines view keeps working);
+  - floor screens show no dispatch strip, because the notice fields are absent;
+  - the old run-order schema ignores the new optional `expected_operation_ids`.
+- **Verify after deploy:**
+  - In a test company, add a released work order to the plan on `/dispatch`.
+  - Confirm its jobs move to the front of each machine queue on the kiosk and in the Machines view.
+  - Reorder the plan. A kiosk at an affected machine should show the RUN NEXT strip within one
+    poll.
+  - Check that the Audit Log shows one `dispatch_board` row for the save.
+- **Rollback.** On an ordinary application rollback, keep the column and both indexes. Older code
+  ignores `dispatch_rank`, so the queues fall back to the pre-plan order. Two things carry over:
+  - Operations ordered inside a planned work order keep their `run_order` values, and the old sort
+    reads those as machine ranks.
+  - Redeploying the feature restores the stored plan. Clear the plan on the board first if it is no
+    longer wanted.
+
+  Downgrading 114 drops the column and both indexes and discards the plan. That is advisory data;
+  the audit rows recording each change survive. The downgrade is not part of an ordinary rollback.
+  See [API.md → Work-order dispatch plan](API.md).
+
 ## Table of Contents
 
 1. [Quick Reference](#quick-reference)

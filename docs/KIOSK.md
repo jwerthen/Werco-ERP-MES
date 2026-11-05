@@ -243,17 +243,26 @@ never-clocked work stays a supervisor/quality call. See `docs/API.md` → Shop F
 **Queue order and the RUN chip.** Both kiosk modes list the work center's queue in the order the
 server returns it — the kiosk never re-sorts client-side. That order is:
 
-1. jobs a manager ranked on the **Dispatch Board** (`/dispatch`), in rank order — these carry a
-   `run_order` and render a **`RUN n`** chip (`KioskRunOrderChip`) on the queue card and the crew
-   job card;
-2. then everything unranked, by work-order priority, then due date, then operation sequence.
+1. jobs of work orders in the planner's **work-order plan** (Dispatch Board → Work orders view,
+   `/dispatch`), in plan order — each planned work order's jobs stay together as one block, and
+   inside a block they follow the planner's operation order. A work order that is **on hold** drops
+   out of this group (as does a pending or held job of a planned one), so a held job never reads
+   "RUN 1";
+2. then jobs a manager ranked on a machine column (Dispatch Board → Machines view), in rank order;
+3. then everything unranked, by work-order priority, then due date, then operation sequence.
 
-Unranked jobs therefore always sort **after** every ranked job, and carry no chip. The rank is
+Jobs in groups 1 and 2 carry a `run_order` and render a **`RUN n`** chip (`KioskRunOrderChip`) on
+the queue card and the crew job card, numbered 1..N with no gaps. Unranked jobs therefore always
+sort **after** every ranked job, and carry no chip. With no work-order plan set, the order is exactly
+what it was before the plan existed. The rank is
 **advisory**: it tells the operator what the shop wants run next, but **any** queued job can still
 be started. The rank itself never gates a clock-in; the existing backend gating (sequence /
 predecessor, on-hold, locks) is unchanged and stays the only thing that refuses one, still surfaced
-verbatim as described above. Moving an operation to a different machine clears its rank; it lands
-unranked at the tail of the new work center's queue until a manager re-ranks it there. This order
+verbatim as described above. Moving an operation to a different machine clears its machine rank; it
+lands at the bottom of its own work order's block at the new machine when that work order is in the
+plan, otherwise unranked at the tail of the new work center's queue until a manager re-ranks it
+there. When the planner's change alters a machine's order, the floor is told on screen — see
+[Dispatch notice (RUN NEXT strip)](#dispatch-notice-run-next-strip). This order
 is not kiosk-only: the desktop shop-floor pages (`/shop-floor` "Time Clock" and
 `/shop-floor/operations` "Operations") render the same server order verbatim and reuse the same
 chip (`KioskRunOrderChip`, compact `size="sm"` — one implementation, do not fork), so an operator
@@ -467,6 +476,88 @@ jobs look exactly as they did before. Work orders raised before `083` keep whate
 Notes; nothing parses it out, and the open jobs are re-keyed by hand. See
 [docs/API.md](API.md) → Work Orders → "Unit #" and Shop Floor → "Unit # on operator and display
 reads" for the payload contract.
+
+## Dispatch notice (RUN NEXT strip)
+
+Dispatch Board v2 made the board live: a planner's save reaches every machine's queue on the next
+poll. Because a queue that reshuffles silently under an operator is worse than one that never
+changes, every floor screen that shows a machine now says so when a **planner** changes that
+machine's order. A notice is written per machine whose order actually changed — by the work-order
+plan, a work order's operation order, a machine column rewrite, or an operation moved onto or off
+the machine. Nothing else writes one: no notice for completions, holds, priority or due-date edits,
+or a save that changed nothing (contract: `docs/API.md` → Shop Floor → "Floor dispatch notices").
+
+**Where each screen gets it** — on the poll it already makes; the server reports only the newest
+notice per machine from the last 12 hours:
+
+| Screen | Source |
+|---|---|
+| Single-operator kiosk | its queue read's `dispatch_notice` (this machine) **plus** `my-active-job`'s `dispatch_notices` (every machine the operator holds an open labor entry on), de-duplicated by notice id |
+| Crew station | its station-token queue read's `dispatch_notice` |
+| `/shop-floor/operations` (ShopFloorSimple) | `my-active-job`'s `dispatch_notices`, plus — when filtered to one machine — that list's `dispatch_notices` (or the queue read it falls back to) |
+| `/shop-floor` (ShopFloor) | `my-active-job`'s `dispatch_notices` |
+
+**What it says.** One strip per machine (`components/kiosk/DispatchNoticeBanner.tsx`, shared by all
+four screens; the decision logic is `hooks/useDispatchNotice.ts`):
+
+- **The job to run next changed** → an amber strip, announced (`role="alert"`):
+  *"RUN NEXT: WO-1234 · Unit 7 · Op 20 Bend — moved up by Jon W. 10:34 AM"*. A job that arrived by
+  a machine move reads *"moved to this machine by …"*; a queue that is now empty reads
+  *"RUN NEXT: nothing queued here now — changed by …"*.
+- **Only the order behind it changed** → a calmer panel strip (`role="status"`):
+  *"Queue order updated by Jon W. 10:34 AM — your next job is unchanged"*.
+- Every card the change moved ahead carries an amber **↑ MOVED UP** chip beside its `RUN n` chip
+  (kiosk queue card and crew board card; the card's accessible name gains ", moved up") until the
+  strip is acknowledged.
+- **"Changed N times since you last checked"** appears only when **this device** has itself seen
+  more than one distinct notice for that machine since its last "Got it". The payload's
+  `updates_in_window` is a 12-hour total, not "since you checked", so it is never shown. The
+  device's count covers only what it saw while polling — a screen that was off starts again at 1.
+- Times are Central (`formatCentralTime`); the planner is the "First L." form the roster uses, or
+  "the planner" when absent. The kiosks name the machine only when more than one strip is up; the
+  desktop pages always do.
+
+**"Got it" — the acknowledgement.** It hides that machine's strip (and its MOVED UP chips) until a
+newer notice arrives; nothing else changes. Who it hides it for is the load-bearing part:
+
+- **Crew station: per device, per machine.** One shared terminal, and the board is its identity.
+- **Single-operator kiosk and the desktop pages: per (user, machine).** The single-operator kiosk is
+  a shared tablet, so a per-device acknowledgement would let one operator's "Got it" hide the change
+  from the next operator to badge in. They see it.
+- **First sighting older than 15 minutes counts as already seen**, so a tablet switched on mid-shift
+  does not flash hours-old changes. The age is the payload's own `server_time` − `occurred_at`,
+  never the tablet's clock; an unknown age counts as fresh.
+- Stored in `localStorage` (`werco.dispatchNoticeAck.v1:…`), every access wrapped: with blocked or
+  cleared site data the acknowledgement lives in memory for as long as the page stays open (a reload
+  shows the strip again). A "Got it" in one tab clears the strip in another.
+
+**Disclosure: the crew station shows it.** The notice rides the station token's own queue read, so
+a PIN-unlocked shared screen displays it. That is a deliberate decision, and its bounds are
+structural: the payload carries only office-authored work-order / operation identity the same
+station already renders on its queue cards (WO number, unit, operation number and name, part
+number) plus the **planner's** "First L." — no operator-typed text, customer name, quantity or
+dollar figure — and it is built through a fixed schema, so a field added to the event later cannot
+reach a station without a schema change and the test that pins the station's keys.
+
+**Idle, lockdown and the other strips.**
+
+- It stacks **below** the OFFLINE, unsaved-pieces and (single-operator) idle-countdown strips,
+  never in place of them. When a poll fails, the last-known strip stays under the OFFLINE banner.
+- It never navigates, never resets an idle timer by itself and is never a timed toast. A tap on
+  "Got it" is an ordinary tap, so it counts as activity like any other.
+- **Single-operator kiosk:** hidden only behind the full-screen drawing / nest viewer. Idle logout,
+  sign-out and a workstation change clear what is on screen; the next operator gets their own
+  acknowledgement state.
+- **Crew station:** shown on every view except the document viewer, and it **survives the 90 s idle
+  flow reset** back to the board — it is a strip, not a view, so the ghost-guard has nothing to act
+  on. Cleared on **Lock station** and on a workstation change. Known keyboard trap, shared by every
+  board button: the board's badge scanner captures Enter at window level, so Enter on a focused
+  "Got it" submits the badge buffer instead — tap it, or use Space.
+- Against an older backend the notice fields are simply absent and no strip renders.
+
+The same change also lands in the **Notifications** inbox as `dispatch.changed` for operators
+clocked in at that machine (generic text, linking to `/shop-floor/operations`; see
+[docs/NOTIFICATIONS.md](NOTIFICATIONS.md)). The strip, not the inbox row, carries what to run next.
 
 ## Held work and RESUME
 
@@ -852,8 +943,8 @@ array the station's own `GET /shop-floor/work-center-queue/{id}` already returns
 `/work-orders/{id}/material-allocations`, which sits outside the `/shop-floor` path fence and which a
 badge-minted kiosk token gets a 403 from. This is the identical rationale already recorded for the
 **scrap reason codes** under [Crew station mode](#crew-station-mode-kioskkiosk1stationid): carry the
-data on a read the fence permits rather than widen the fence, so the station token keeps being
-honored by exactly two things. The kiosk gets no
+data on a read the fence permits rather than widen the fence, so the station token's short list of
+routes does not grow (see [Two-tier auth](#two-tier-auth)). The kiosk gets no
 tie *mutation* verb at all — tying material is an office act (Admin / Manager / Supervisor).
 
 The prediction arithmetic and every string above live in one place, `frontend/src/utils/materialTie.ts`,
@@ -1155,9 +1246,12 @@ every station-login failure write tamper-evident audit rows.
 
 - **Station tier.** Entering the PIN calls the public, rate-limited
   `POST /shop-floor/kiosk-stations/station-login`, which mints a **24 h scoped `type="kiosk"`
-  JWT** (sessionStorage only). That token is honored by exactly **two** things: the
+  JWT** (sessionStorage only). That token is honored by exactly **four** routes: the
   roster-enriched queue read (`GET /shop-floor/work-center-queue/{id}`, its own work center
-  only — any other work center is **403**) and the badge-token mint below. Every other endpoint
+  only — any other work center is **403**), the badge-token mint below, and the station's own
+  workstation pair — `GET /shop-floor/kiosk-stations/work-centers` (its company's active work
+  centers) and `PUT /shop-floor/kiosk-stations/work-center` (re-bind this station to one of them,
+  audited as a `kiosk_station` update). Every other endpoint
   rejects it with **401** (`verify_token` accepts only `type="access"` JWTs), so the station can
   never act as a user. The `kiosk_stations` DB row is authoritative on every request — company
   scope comes from the row (never the JWT's `cid`), and the `revoked` flag is re-checked each
@@ -1172,9 +1266,11 @@ every station-login failure write tamper-evident audit rows.
   scanned manager badge must not be able to reset a station PIN from the shared terminal), the
   labor-approval pair (`/shop-floor/time-entries/{id}/approve|unapprove` — G5-A approval is
   a desktop supervisor workflow), and the manager dispatch tools
-  (`GET /shop-floor/dispatch-board` and `PUT /shop-floor/work-centers/{id}/run-order` — reading
+  (`GET /shop-floor/dispatch-board` and every route under it — a prefix rule, so the work-order
+  plan routes are covered too — and `PUT /shop-floor/work-centers/{id}/run-order` — reading
   the whole shop's board, or dictating what every machine runs next, is a desk workflow). The
-  crew station keeps its own work-center queue read, so operators still see the `RUN n` chips.
+  crew station keeps its own work-center queue read, so operators still see the `RUN n` chips and
+  the [dispatch notice](#dispatch-notice-run-next-strip).
   Badge lookup is fenced to the station's company; unknown / inactive / locked / foreign-tenant
   badges are a uniform **401 "Invalid badge"**. Mints and failures are audited
   (`KIOSK_BADGE_TOKEN_ISSUED` / `KIOSK_BADGE_TOKEN_FAILED`). The one outcome outside that uniform
@@ -1210,9 +1306,10 @@ codes-or-legacy picker as the single-operator mode (see "Scrap reason picker" un
 codes off the **queue payload itself** (the top-level `scrap_reason_codes` array on
 `GET /shop-floor/work-center-queue/{id}`), not a separate read. Deliberately so: badge-minted
 kiosk tokens are path-fenced to `/shop-floor` and cannot call
-`GET /quality/scrap-reason-codes`, and the station token stays honored by exactly the same two
-things (its own queue read + the badge mint) — the two-capability invariant is intact and no
-token scope was widened. An empty array means no active codes → the legacy grid.
+`GET /quality/scrap-reason-codes`, and the station token's route list (see
+[Two-tier auth](#two-tier-auth)) was not widened for it — no token scope was. The planner's
+[dispatch notice](#dispatch-notice-run-next-strip) rides the same payload for the same reason. An
+empty array means no active codes → the legacy grid.
 
 **Quantity entry on the crew station** is one shared screen (`components/kiosk/KioskQuantityScreen.tsx`)
 with a GOOD field, a SCRAP field and one big keypad between them, used by all three quantity flows

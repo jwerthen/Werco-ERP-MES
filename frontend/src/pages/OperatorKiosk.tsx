@@ -46,6 +46,9 @@ import {
 } from '../components/kiosk/oneTapStrandedStore';
 import type { StrandedOneTapRecord } from '../components/kiosk/oneTapStrandedStore';
 import KioskJobNotes from '../components/kiosk/KioskJobNotes';
+import DispatchNoticeBanner from '../components/kiosk/DispatchNoticeBanner';
+import { useDispatchNotice } from '../hooks/useDispatchNotice';
+import type { DispatchNoticeSource } from '../hooks/useDispatchNotice';
 import LaserNestOperatorPanel from '../components/laser/LaserNestOperatorPanel';
 import {
   KIOSK_SOURCE,
@@ -69,6 +72,19 @@ import { useProductionReportRequest } from '../components/kiosk/useProductionRep
 import { useScrapReasonCodes } from '../hooks/useScrapReasonCodes';
 
 const POLL_INTERVAL_MS = 15_000;
+
+/**
+ * The two payloads that carry dispatch notices to this kiosk: the station's
+ * queue (`dispatch_notice`, this machine) and the operator's my-active-job
+ * (`dispatch_notices`, every machine they are clocked in at). Each keeps its own
+ * `server_time`, the only clock a notice is aged against.
+ */
+interface KioskNoticeSources {
+  queue: DispatchNoticeSource;
+  activeJob: DispatchNoticeSource;
+}
+
+const NO_NOTICE_SOURCES: KioskNoticeSources = { queue: {}, activeJob: {} };
 
 type KioskView =
   | { name: 'queue' }
@@ -243,6 +259,7 @@ export default function OperatorKiosk() {
   const [heldTruncated, setHeldTruncated] = useState(false);
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null);
   const [workCenter, setWorkCenter] = useState<KioskQueueWorkCenter | null>(null);
+  const [noticeSources, setNoticeSources] = useState<KioskNoticeSources>(NO_NOTICE_SOURCES);
   const [online, setOnline] = useState(true);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [view, setView] = useState<KioskView>({ name: 'queue' });
@@ -328,6 +345,7 @@ export default function OperatorKiosk() {
     setHeld([]);
     setHeldTruncated(false);
     setWorkCenter(null);
+    setNoticeSources(NO_NOTICE_SOURCES);
     setInitialLoadDone(false);
     setView({ name: 'queue' });
     setChoosingWorkstation(false);
@@ -356,6 +374,11 @@ export default function OperatorKiosk() {
       if (queueRes.work_center) setWorkCenter(queueRes.work_center);
       const jobs: ActiveJob[] = activeRes.active_jobs || (activeRes.active_job ? [activeRes.active_job] : []);
       setActiveJob(jobs[0] || null);
+      // Dispatch notices: absent on an older backend → no banner, never a crash.
+      setNoticeSources({
+        queue: { notices: [queueRes.dispatch_notice], serverTime: queueRes.server_time ?? null },
+        activeJob: { notices: activeRes.dispatch_notices, serverTime: activeRes.server_time ?? null },
+      });
       const serverTime = queueRes.server_time || activeRes.server_time;
       const serverMs = serverTime ? Date.parse(serverTime) : NaN;
       if (Number.isFinite(serverMs)) setServerSkewMs(serverMs - Date.now());
@@ -412,6 +435,16 @@ export default function OperatorKiosk() {
    */
   const userId = user?.id ?? null;
   const activeOperationId = activeJob?.operation_id ?? null;
+
+  // "The planner changed this machine's order" — acknowledged per (operator,
+  // work center), NOT per tablet: this is a shared station, and the operator who
+  // badges in after someone else tapped "Got it" still has to see it. The queue
+  // payload and my-active-job can both carry the same notice; the hook dedupes by
+  // id. Pure display: it never navigates and never touches the idle timer.
+  const dispatchNotice = useDispatchNotice({
+    sources: [noticeSources.queue, noticeSources.activeJob],
+    scope: isAuthenticated && userId != null ? { kind: 'user', userId } : null,
+  });
   const liveBinding = useMemo<OneTapBinding<OperatorOneTapTarget> | null>(() => {
     if (userId == null || activeOperationId == null) return null;
     return {
@@ -645,6 +678,7 @@ export default function OperatorKiosk() {
     setActiveJob(null);
     setSessionNcr(null);
     setCorrectError(null);
+    setNoticeSources(NO_NOTICE_SOURCES);
   }, [isAuthenticated]);
 
   // Mutations are blocked while a request is in flight (busy) OR while the
@@ -1199,6 +1233,17 @@ export default function OperatorKiosk() {
         </div>
       )}
 
+      {/* Dispatch notice — BELOW the offline / unsaved-pieces / idle strips, never
+          in place of them. Hidden only behind the full-height doc viewer; it is
+          back the moment the operator returns. */}
+      {view.name !== 'viewer' && (
+        <DispatchNoticeBanner
+          variant="kiosk"
+          notices={dispatchNotice.active}
+          onAcknowledge={dispatchNotice.acknowledge}
+        />
+      )}
+
       {/* Toasts — full width, plain language, above overlays */}
       <div className="fixed inset-x-0 bottom-0 z-[70] space-y-2 p-3">
         {toasts.map((toast) => (
@@ -1598,6 +1643,7 @@ export default function OperatorKiosk() {
                         key={item.operation_id}
                         item={item}
                         active={item.operation_id === activeJob?.operation_id}
+                        movedUp={dispatchNotice.movedUpOperationIds.has(item.operation_id)}
                         disabled={mutationsBlocked}
                         onSelect={(it) => setView({ name: 'confirm', item: it })}
                         onOpenPdf={(it) =>

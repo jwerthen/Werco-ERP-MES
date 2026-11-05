@@ -2854,9 +2854,10 @@ def set_dispatch_operation_order(
     unplanned work keep their order.
 
     Refused before any write: **404** for a work order that is not this company's
-    or is deleted; **409** when it is closed, when it is a sequenced routing ("This
-    work order runs in routing sequence." -- the routing is the order) or when it is
-    not in the plan ("Add this work order to the plan first."); **400** for an id
+    or is deleted; **409** when it is closed, when it is on hold ("This work order is
+    on hold. Clear the hold before ordering its operations."), when it is a sequenced
+    routing ("This work order runs in routing sequence." -- the routing is the order)
+    or when it is not in the plan ("Add this work order to the plan first."); **400** for an id
     that is not one of its operations or a list that does not name every queued
     operation once; **409** when ``expected_operation_ids`` (the queued operations
     as the client last rendered the lane) no longer matches -- an operation that

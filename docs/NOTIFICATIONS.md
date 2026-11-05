@@ -137,7 +137,8 @@ the emitted `OperationalEvent.event_type` strings that map to this key.
   push channels) are **suppressed while an unread row for the same `(event_key, related_type,
   related_id, user_id)` exists** — the digest still accrues. So a WO late for two weeks is one inbox
   row + the digest, not 14 emails. Recurring in PR 1: `wo.late`, `stock.low`, `calibration.due`,
-  `quote.expiring`, `cert.expiring`, `maintenance.overdue`.
+  `quote.expiring`, `cert.expiring`, `maintenance.overdue`. Added since: `dispatch.changed` (Dispatch
+  v2), keyed per machine.
 
 ### Hank personal follow-ups
 
@@ -172,7 +173,41 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 `shipment.shipped`,
 `coc.generation_failed`, `downtime.started`, `downtime.resolved`, `material.allocation_shortage`,
 `material.backflush_shortage`, `material.allocation_consumption_failed`, `material.backflush_failed`,
-`material.backflush_demand_refused`.
+`material.backflush_demand_refused`, `dispatch.changed`.
+
+> **`dispatch.changed` — added with Dispatch Board v2 (2026-11-04).** The planner changed the run
+> order at a machine; the people clocked in there are told.
+>
+> | Field | Value |
+> |-------|-------|
+> | `event_key` | `dispatch.changed` |
+> | `label` | Dispatch order changed |
+> | `category` | **Production** |
+> | `severity` | **info** |
+> | `default_channels` | `in_app` only |
+> | `mandatory_channel` | none |
+> | `sms_eligible` | `false` — owner decision: the floor banner plus the inbox, no SMS |
+> | `recurring` | `true` — one unread row per (machine, operator); a planner dragging cards does not stack a row per drag |
+> | Recipients | resolver `resolve_clocked_in_operators`: **active** users of the event's company holding an **open labor** `TimeEntry` (setup / run / rework / inspection — never break or downtime) on an operation whose **current** `work_center_id` is the event's `entity_id`; the planner is excluded by `_fan_out` |
+> | `source_event_types` | `("dispatch_order_changed",)` — outbox-driven |
+>
+> **What emits it.** Every dispatch-order writer (`dispatch_service.record_dispatch_change`): the
+> work-order plan `PUT`, the operation-order `PUT`, the machine run-order `PUT`, and the four
+> operation move paths — one event per machine whose queue order actually changed, `entity_type =
+> "work_center"`, deliberately with **no** `work_order_id`. The emit is best-effort inside a savepoint
+> that is shielded from the outbox's session listeners, so the fan-out is enqueued only by the
+> request's real commit and a rolled-back reorder notifies nobody.
+>
+> **The body is the catalog description, on purpose** ("The planner changed the run order at a
+> machine you are clocked in at. Check the shop floor for what runs next."), and the title is the
+> label plus the machine code ("Dispatch order changed: BRAKE-1" — see the `_IDENTIFIER_KEYS` note in
+> §11.1). Recurring suppression keeps the first unread row's text, so a "next up" line in the body
+> would go stale; the live detail is the floor banner (`docs/KIOSK.md` → "Dispatch notice (RUN NEXT
+> strip)"). Link: the record-less `/shop-floor/operations`.
+>
+> **Known gap, by design of "clocked in".** Recipients are resolved when the worker dispatches
+> (seconds after the commit). An operator between jobs — the kiosk clocks out before completing —
+> holds no open entry and is not found; the banner on the queue read is what reaches them.
 
 **Direct-dispatch** (crons / MRP / scheduling call `dispatch_direct`):
 `calibration.due`, `wo.late`, `stock.low`, `quote.expiring` (the four recurring crons in
