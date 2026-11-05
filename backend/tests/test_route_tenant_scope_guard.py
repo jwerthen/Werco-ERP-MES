@@ -239,11 +239,6 @@ GLOBAL_ROUTES: Dict[RouteKey, str] = {
     ),
 }
 
-_COMPLAINTS = "fix/complaints-rma-tenant-audit"
-_CUSTOM_FIELDS = "fix/customers-custom-fields-tenant"
-_CAL_TOOLS = "fix/calibration-tools-downtime-tenant"
-
-
 # The one entry pair no Wave 1 branch owns. Its write branch is unreachable only while the
 # unscoped ``db.query(User).first()`` existence gate holds -- nothing machine-checks that -- so it
 # is filed as debt with a named fix rather than excused as global.
@@ -255,96 +250,8 @@ _SEED_DATABASE = (
 )
 
 
-def _by_id(model: str, verb: str) -> str:
-    return f"Resolves {model} by id with no company filter: any authenticated user can {verb} another tenant's row."
-
-
 # Authenticated routes that SHOULD be tenant-scoped and are not. Each fixing PR deletes its rows.
 TRACKED_DEBT: Dict[RouteKey, TrackedDebt] = {
-    # -- customer_complaints.py: by-id complaint/RMA verbs and the cross-tenant dashboard ------
-    ("GET", "/api/v1/complaints/complaints/dashboard"): TrackedDebt(
-        "Aggregates CustomerComplaint/RMA counts across every tenant (no company filter).", _COMPLAINTS
-    ),
-    ("GET", "/api/v1/complaints/complaints/8d-report/{complaint_id}"): TrackedDebt(
-        _by_id("CustomerComplaint", "read the 8D report of"), _COMPLAINTS
-    ),
-    ("GET", "/api/v1/complaints/complaints/{complaint_id}"): TrackedDebt(
-        _by_id("CustomerComplaint", "read"), _COMPLAINTS
-    ),
-    ("POST", "/api/v1/complaints/complaints/{complaint_id}/investigate"): TrackedDebt(
-        _by_id("CustomerComplaint", "move to investigating"), _COMPLAINTS
-    ),
-    ("POST", "/api/v1/complaints/complaints/{complaint_id}/resolve"): TrackedDebt(
-        _by_id("CustomerComplaint", "resolve"), _COMPLAINTS
-    ),
-    ("POST", "/api/v1/complaints/complaints/{complaint_id}/close"): TrackedDebt(
-        _by_id("CustomerComplaint", "close"), _COMPLAINTS
-    ),
-    ("POST", "/api/v1/complaints/complaints/{complaint_id}/create-ncr"): TrackedDebt(
-        _by_id("CustomerComplaint", "escalate to an NCR")
-        + " The NCR is also built without company_id (see UNGUARDED_CONSTRUCTIONS).",
-        _COMPLAINTS,
-    ),
-    ("POST", "/api/v1/complaints/complaints/{complaint_id}/create-car"): TrackedDebt(
-        _by_id("CustomerComplaint", "escalate to a CAR")
-        + " The CAR is also built without company_id (see UNGUARDED_CONSTRUCTIONS).",
-        _COMPLAINTS,
-    ),
-    ("GET", "/api/v1/complaints/rma/{rma_id}"): TrackedDebt(_by_id("ReturnMaterialAuthorization", "read"), _COMPLAINTS),
-    ("POST", "/api/v1/complaints/rma/{rma_id}/approve"): TrackedDebt(
-        _by_id("ReturnMaterialAuthorization", "approve"), _COMPLAINTS
-    ),
-    ("POST", "/api/v1/complaints/rma/{rma_id}/deny"): TrackedDebt(
-        _by_id("ReturnMaterialAuthorization", "deny"), _COMPLAINTS
-    ),
-    ("POST", "/api/v1/complaints/rma/{rma_id}/receive"): TrackedDebt(
-        _by_id("ReturnMaterialAuthorization", "receive"), _COMPLAINTS
-    ),
-    ("POST", "/api/v1/complaints/rma/{rma_id}/inspect"): TrackedDebt(
-        _by_id("ReturnMaterialAuthorization", "inspect"), _COMPLAINTS
-    ),
-    ("POST", "/api/v1/complaints/rma/{rma_id}/dispose"): TrackedDebt(
-        _by_id("ReturnMaterialAuthorization", "dispose"), _COMPLAINTS
-    ),
-    ("POST", "/api/v1/complaints/rma/{rma_id}/complete"): TrackedDebt(
-        _by_id("ReturnMaterialAuthorization", "complete"), _COMPLAINTS
-    ),
-    # -- custom_fields.py: the VALUES routes (the definitions routes are scoped) ---------------
-    ("GET", "/api/v1/custom-fields/values/{entity_type}/{entity_id}"): TrackedDebt(
-        "Reads CustomFieldValue rows joined to definitions with no company filter.", _CUSTOM_FIELDS
-    ),
-    ("POST", "/api/v1/custom-fields/values/{entity_type}/{entity_id}"): TrackedDebt(
-        "Resolves the CustomFieldDefinition by field_key with no company filter, then writes the value. A new "
-        "value is also built without company_id (see UNGUARDED_CONSTRUCTIONS).",
-        _CUSTOM_FIELDS,
-    ),
-    ("POST", "/api/v1/custom-fields/values/bulk"): TrackedDebt(
-        "Resolves each CustomFieldDefinition by field_key with no company filter, then writes values. A new "
-        "value is also built without company_id (see UNGUARDED_CONSTRUCTIONS).",
-        _CUSTOM_FIELDS,
-    ),
-    ("DELETE", "/api/v1/custom-fields/values/{entity_type}/{entity_id}/{field_key}"): TrackedDebt(
-        "Resolves the definition and deletes the value with no company filter.", _CUSTOM_FIELDS
-    ),
-    # -- calibration.py / tool_management.py --------------------------------------------------
-    ("GET", "/api/v1/calibration/equipment/{equipment_id}/history"): TrackedDebt(
-        "Reads CalibrationRecord rows by equipment_id with no company filter.", _CAL_TOOLS
-    ),
-    ("GET", "/api/v1/tool-management/tools/dashboard"): TrackedDebt(
-        "Aggregates every tenant's Tool rows (no company filter).", _CAL_TOOLS
-    ),
-    ("GET", "/api/v1/tool-management/tools/checked-out"): TrackedDebt(
-        "Lists every tenant's checked-out tools (no company filter).", _CAL_TOOLS
-    ),
-    ("GET", "/api/v1/tool-management/tools/replacement-due"): TrackedDebt(
-        "Lists every tenant's replacement-due tools (no company filter).", _CAL_TOOLS
-    ),
-    ("GET", "/api/v1/tool-management/tools/inspection-due"): TrackedDebt(
-        "Lists every tenant's inspection-due tools (no company filter).", _CAL_TOOLS
-    ),
-    ("GET", "/api/v1/tool-management/tools/{tool_id}/history"): TrackedDebt(
-        _by_id("Tool", "read the checkout/usage history of"), _CAL_TOOLS
-    ),
     # -- unowned follow-up (no Wave 1 branch): debt, NOT an approved global exception -----------
     ("POST", "/api/v1/admin/settings/seed-database"): TrackedDebt(
         _SEED_DATABASE + " Today an authenticated caller is a user row, so it only answers already_seeded.",
@@ -355,39 +262,6 @@ TRACKED_DEBT: Dict[RouteKey, TrackedDebt] = {
 # Tenant-model constructions under app/ that neither pass company_id nor assign it.
 # Keyed by (path relative to backend/, innermost enclosing function, model class name).
 UNGUARDED_CONSTRUCTIONS: Dict[ConstructionKey, UnguardedConstruction] = {
-    ("app/api/endpoints/calibration.py", "record_calibration", "CalibrationRecord"): UnguardedConstruction(
-        "Every call 500s on the NOT NULL; set company_id from the resolved equipment.", _CAL_TOOLS
-    ),
-    ("app/api/endpoints/tool_management.py", "checkout_tool", "ToolCheckout"): UnguardedConstruction(
-        "Every call 500s on the NOT NULL; set company_id from the resolved tool.", _CAL_TOOLS
-    ),
-    ("app/api/endpoints/tool_management.py", "log_usage", "ToolUsageLog"): UnguardedConstruction(
-        "Every call 500s on the NOT NULL; set company_id from the resolved tool.", _CAL_TOOLS
-    ),
-    (
-        "app/api/endpoints/customer_complaints.py",
-        "create_ncr_from_complaint",
-        "NonConformanceReport",
-    ): UnguardedConstruction(
-        "Every call 500s on the NOT NULL; build through quality_numbering with the complaint's company.",
-        _COMPLAINTS,
-    ),
-    (
-        "app/api/endpoints/customer_complaints.py",
-        "create_car_from_complaint",
-        "CorrectiveActionRequest",
-    ): UnguardedConstruction(
-        "Every call 500s on the NOT NULL; build through quality_numbering with the complaint's company.",
-        _COMPLAINTS,
-    ),
-    ("app/api/endpoints/custom_fields.py", "set_custom_field_value", "CustomFieldValue"): UnguardedConstruction(
-        "Every create 500s on the NOT NULL: the **parsed splat is parse_value()'s value_* keys only, no company_id.",
-        _CUSTOM_FIELDS,
-    ),
-    ("app/api/endpoints/custom_fields.py", "set_bulk_custom_fields", "CustomFieldValue"): UnguardedConstruction(
-        "Every create 500s on the NOT NULL: the **parsed splat is parse_value()'s value_* keys only, no company_id.",
-        _CUSTOM_FIELDS,
-    ),
     # Unowned follow-up, paired with the seed-database TRACKED_DEBT row; named so a new User(...)
     # elsewhere still fails.
     ("app/api/endpoints/admin_settings.py", "seed_database", "User"): UnguardedConstruction(

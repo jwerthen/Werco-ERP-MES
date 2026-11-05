@@ -403,7 +403,9 @@ What the guards do **not** prove:
 The lists were seeded from the 2026-11-05 audit: 25 unscoped routes (complaint/RMA by-id
 verbs and the complaints dashboard, custom-field value routes, calibration history, the tool
 crib) and seven live constructor calls that omit `company_id` (five verbs plus both
-custom-field value writes). The file is the current list, not this paragraph.
+custom-field value writes). The 2026-11 security/integrity PRs fixed every one of them, so the
+only entries left are the `seed-database` pair, a dead write branch filed as an unowned
+follow-up. The file is the current list, not this paragraph.
 
 ### Frontend Testing
 
