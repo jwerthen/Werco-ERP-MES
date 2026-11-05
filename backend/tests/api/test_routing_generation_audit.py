@@ -12,7 +12,10 @@ Pinned here:
   the proposal, the extraction confidence and the number of human corrections;
 * ``generate-from-drawing`` now RECORDS that model / prompt version on the session at
   generation time (``learned_context``), which is where the approval reads it from;
-* a soft-deleted part is refused 404 on both doors and nothing is written.
+* the row also snapshots WHAT was accepted (``operations``), and the AI-learning event names the
+  same generation-time prompt version as the row;
+* a soft-deleted part is refused 404 on every door that attaches a new routing (both AI doors,
+  manual ``POST /routing/`` and the copy target) and nothing is written.
 """
 
 import pytest
@@ -28,6 +31,7 @@ from app.models.routing import Routing
 from app.models.routing_learning import RoutingGenerationSession
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
+from app.services.prompts import ROUTING_GENERATION_PROMPT
 from app.services.routing_learning_service import create_generation_session
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
@@ -177,6 +181,38 @@ def test_accepting_a_generated_routing_writes_one_create_row_with_provenance(cli
     assert extra["approved_by"] == approver.id
     # The human renamed the proposed "Brake Flange" -> "Form Flange": one recorded correction.
     assert extra["correction_count"] >= 1
+    # WHAT was accepted, not just how many: the operation number is the stored one (the bare
+    # sequence fallback), and the work center / hours are the human-approved values.
+    assert extra["operations"] == [
+        {
+            "sequence": 10,
+            "operation_number": "10",
+            "name": "Form Flange",
+            "work_center_id": center.id,
+            "setup_hours": 0.1,
+            "run_hours_per_unit": 0.05,
+            "is_inspection_point": False,
+            "is_outside_operation": False,
+        }
+    ]
+    # The AI-learning event names the SAME prompt as the audit row: the one recorded at
+    # generation time, not whatever the live prompt constant is at approval time.
+    assert ROUTING_GENERATION_PROMPT.version != "9.9.9"
+    assert _interaction_event(db_session, routing_id).prompt_version == "9.9.9"
+
+
+def _interaction_event(db: Session, routing_id: int):
+    from app.models.ai_learning import AIInteractionEvent
+
+    return (
+        db.query(AIInteractionEvent)
+        .filter(
+            AIInteractionEvent.company_id == 1,
+            AIInteractionEvent.entity_type == "routing",
+            AIInteractionEvent.entity_id == routing_id,
+        )
+        .one()
+    )
 
 
 def test_session_without_recorded_provenance_still_audits(client: TestClient, db_session: Session):
@@ -193,6 +229,9 @@ def test_session_without_recorded_provenance_still_audits(client: TestClient, db
     (row,) = _committed_routing_rows(db_session)
     assert row.extra_data["generation_session_id"] == session.id
     assert row.extra_data["model"] is None and row.extra_data["prompt_version"] is None
+    # Telemetry keeps its pre-existing fallback for a session that predates the recording; the
+    # audit row stays honest (None = not recorded) rather than guessing.
+    assert _interaction_event(db_session, response.json()["id"]).prompt_version == ROUTING_GENERATION_PROMPT.version
 
 
 def test_form_without_a_generation_session_is_audited_as_such(client: TestClient, db_session: Session):
@@ -390,6 +429,8 @@ def test_generate_then_accept_names_the_generating_model_end_to_end(
         .one()
     )
     assert event.model_version == "claude-e2e-model"
+    # ...and the generation-time prompt version, which telemetry used to read from the live constant.
+    assert event.prompt_version == "4.5.6"
 
 
 def test_other_tenants_part_or_generation_session_is_refused_and_nothing_is_written(
@@ -490,3 +531,61 @@ def test_generation_provenance_drops_unreported_keys():
         "model": "m",
         "prompt_version": "1.0.0",
     }
+
+
+# ---------------------------------------------------------------------------
+# Every door that attaches a NEW routing resolves a LIVE part (``_live_part_or_404``)
+# ---------------------------------------------------------------------------
+
+
+def test_manual_create_refuses_a_soft_deleted_part(client: TestClient, db_session: Session):
+    """``POST /routing/`` -- the manual door -- used to accept a soft-deleted part while both AI
+    doors refused it. A routing attached to a withdrawn part is a selection, not a history read."""
+    approver = _user(db_session)
+    part, _center = _part_and_center(db_session)
+    part.soft_delete(approver.id)
+    db_session.commit()
+
+    response = client.post("/api/v1/routing/", headers=_headers(approver), json={"part_id": part.id, "revision": "A"})
+    assert response.status_code == status.HTTP_404_NOT_FOUND, response.text
+    assert response.json()["detail"] == "Part not found"
+    db_session.rollback()
+    assert db_session.query(Routing).filter(Routing.part_id == part.id).count() == 0
+    assert _committed_routing_rows(db_session) == []
+
+
+def test_manual_create_still_accepts_a_live_part(client: TestClient, db_session: Session):
+    part, _center = _part_and_center(db_session)
+
+    response = client.post(
+        "/api/v1/routing/", headers=_headers(_user(db_session)), json={"part_id": part.id, "revision": "A"}
+    )
+    assert response.status_code == status.HTTP_200_OK, response.text
+    (row,) = _committed_routing_rows(db_session)
+    assert row.action == "CREATE" and row.resource_id == response.json()["id"]
+
+
+def test_copy_refuses_a_soft_deleted_target_part(client: TestClient, db_session: Session):
+    """``POST /routing/{id}/copy`` attaches a NEW routing to its target part, so a deleted target
+    is refused exactly like the create doors; the source routing is untouched."""
+    manager = _user(db_session, UserRole.MANAGER)
+    source_part, _center = _part_and_center(db_session)
+    target_part, _other_center = _part_and_center(db_session)
+    created = client.post(
+        "/api/v1/routing/", headers=_headers(manager), json={"part_id": source_part.id, "revision": "A"}
+    )
+    assert created.status_code == status.HTTP_200_OK, created.text
+    target_part.soft_delete(manager.id)
+    db_session.commit()
+
+    response = client.post(
+        f"/api/v1/routing/{created.json()['id']}/copy",
+        headers=_headers(manager),
+        params={"target_part_id": target_part.id, "new_revision": "A"},
+    )
+    assert response.status_code == status.HTTP_404_NOT_FOUND, response.text
+    assert response.json()["detail"] == "Target part not found"
+    db_session.rollback()
+    assert db_session.query(Routing).filter(Routing.part_id == target_part.id).count() == 0
+    # Only the source routing's own CREATE row exists.
+    assert [row.resource_id for row in _committed_routing_rows(db_session)] == [created.json()["id"]]

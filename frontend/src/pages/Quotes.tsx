@@ -118,10 +118,12 @@ const quoteStatuses = ['open', 'all', 'draft', 'pending', 'sent', 'accepted', 'r
 export default function Quotes() {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const canEmail = !!user?.is_superuser || ['admin', 'manager', 'supervisor'].includes(user?.role || '');
   // Edit / mark sent / convert are server-gated to QUOTE_WRITE_ROLES; hide them for read-only
   // roles so a visible control and a refused call agree (the server stays the enforcement).
   const canWriteQuote = canWriteQuotes(user);
+  // Quote email delivery (DocumentDeliveryService.authorize for 'quote') admits the same set:
+  // admin / manager / supervisor plus superuser and platform_admin.
+  const canEmail = canWriteQuote;
   const [emailQuoteId, setEmailQuoteId] = useState<number | null>(null);
   const { showToast } = useToast();
   const [searchParams, setSearchParams] = useSearchParams();

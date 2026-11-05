@@ -45,6 +45,7 @@ ALLOWED = {
 # The verb a refusal must point at, keyed by what made the move illegal.
 TERMINAL_HINT = "Raise a new purchase order"
 RECEIVING_HINT = "/receiving/receive"
+VOID_HINT = "/receiving/receipt/{id}/void"
 
 
 def _next() -> int:
@@ -129,7 +130,14 @@ def test_put_status_transition_matrix(client: TestClient, db_session: Session, c
     if current in (POStatus.CLOSED, POStatus.CANCELLED):
         assert TERMINAL_HINT in detail
     elif target == POStatus.SENT:
-        assert f"/purchase-orders/{po.id}/send" in detail
+        # Send is named only where Send would accept the PO (DRAFT / APPROVED), or as the step
+        # after approval; a received PO must not be pointed at a verb that refuses it too.
+        send_named = f"/purchase-orders/{po.id}/send" in detail
+        assert send_named == (current in (POStatus.DRAFT, POStatus.APPROVED, POStatus.PENDING_APPROVAL))
+        if current == POStatus.PENDING_APPROVAL:
+            assert "Approve it first" in detail
+        if current in (POStatus.PARTIAL, POStatus.RECEIVED):
+            assert VOID_HINT in detail
     elif target in (POStatus.PARTIAL, POStatus.RECEIVED):
         assert RECEIVING_HINT in detail
     # A refusal is raised before the first setattr: row and chain untouched.

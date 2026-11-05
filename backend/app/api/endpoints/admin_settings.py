@@ -124,7 +124,10 @@ def update_email_recipients(
     """Set (or, with ``user_ids: null``, restore the default for) one email event's audience.
 
     Audited on the tamper-evident chain (``notification_email_recipients`` UPDATE row) as
-    well as in the settings history the Admin page reads.
+    well as in the settings history the Admin page reads. Both sides of the chain row are the
+    EFFECTIVE audience (``email_recipient_ids``, read before and after the write) plus
+    ``uses_default``, so the two sides mean the same thing; a save that changes neither -- e.g.
+    restoring the default when no override is saved -- writes no row to either record.
     """
     if event_key not in EMAIL_EVENTS:
         raise HTTPException(status_code=400, detail="This email type does not have configurable recipients.")
@@ -144,8 +147,9 @@ def update_email_recipients(
     )
     previous_ids = email_recipient_ids(db, company_id, event_key)
     old_value = sorted(previous_ids) if previous_ids is not None else None
-    # No saved row = the shipped default audience (``old_value`` is then that default's
-    # resolved ids, or None when it resolves to nobody) -- not an explicit selection.
+    # No saved row = the shipped default audience (``old_value`` is then that default's resolved
+    # ids, or None for an event with no default addresses, i.e. the automatic audience) -- not
+    # an explicit selection.
     old_uses_default = setting is None
     if ids is None:
         if setting is not None:
@@ -162,29 +166,36 @@ def update_email_recipients(
                 description=f"Email recipients: {EMAIL_EVENTS[event_key].label}",
             )
         )
-    log_change(
-        db,
-        "email_recipients",
-        None,
-        EMAIL_EVENTS[event_key].label,
-        "update",
-        current_user,
-        "user_ids",
-        old_value,
-        ids,
-        get_client_ip(request),
-    )
-    # ``uses_default`` disambiguates the ids: a default audience is not an explicit selection,
-    # and a ``None`` request restores the default rather than emailing nobody.
-    audit.log_update(
-        "notification_email_recipients",
-        None,
-        event_key,
-        old_values={"user_ids": old_value, "uses_default": old_uses_default},
-        new_values={"user_ids": ids, "uses_default": ids is None},
-        description=f"Updated email recipients: {EMAIL_EVENTS[event_key].label}",
-        extra_data={"event_key": event_key},
-    )
+    db.flush()
+    # Re-resolve AFTER the write, so the new side is the effective audience too -- the request's
+    # ``None`` means "restore the default", not "nobody", and must not be recorded as the latter.
+    current_ids = email_recipient_ids(db, company_id, event_key)
+    new_value = sorted(current_ids) if current_ids is not None else None
+    new_uses_default = ids is None
+    if (old_value, old_uses_default) != (new_value, new_uses_default):
+        log_change(
+            db,
+            "email_recipients",
+            None,
+            EMAIL_EVENTS[event_key].label,
+            "update",
+            current_user,
+            "user_ids",
+            old_value,
+            ids,
+            get_client_ip(request),
+        )
+        # ``uses_default`` disambiguates the ids: a default audience is not an explicit
+        # selection, even when it resolves to the same users.
+        audit.log_update(
+            "notification_email_recipients",
+            None,
+            event_key,
+            old_values={"user_ids": old_value, "uses_default": old_uses_default},
+            new_values={"user_ids": new_value, "uses_default": new_uses_default},
+            description=f"Updated email recipients: {EMAIL_EVENTS[event_key].label}",
+            extra_data={"event_key": event_key},
+        )
     db.commit()
     return email_settings_response(db, company_id)
 

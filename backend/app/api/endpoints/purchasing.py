@@ -984,6 +984,30 @@ _PO_RECEIVING_STATUSES = (POStatus.PARTIAL, POStatus.RECEIVED)
 _PO_TERMINAL_STATUSES = (POStatus.CLOSED, POStatus.CANCELLED)
 
 
+def _po_sent_refusal(po: PurchaseOrder, current: POStatus) -> str:
+    """The 409 text for an edit asking for SENT -- pointing at a verb that will actually take it.
+
+    ``POST .../send`` accepts DRAFT / APPROVED only (400 otherwise), so it is named only there.
+    """
+    send_verb = f"POST /purchasing/purchase-orders/{po.id}/send"
+    if current in (POStatus.DRAFT, POStatus.APPROVED):
+        return (
+            f"Use Send ({send_verb}) to mark purchase order {po.po_number} as sent; it records the order date, "
+            "which an edit does not."
+        )
+    if current == POStatus.PENDING_APPROVAL:
+        return (
+            f"Purchase order {po.po_number} is pending approval. Approve it first (status 'approved'), then use "
+            f"Send ({send_verb}); Send records the order date, which an edit does not."
+        )
+    # PARTIAL / RECEIVED: material is on record against it.
+    return (
+        f"Purchase order {po.po_number} has material received against it ({current.value}) and cannot be set back "
+        "to 'sent' by an edit. It returns to 'sent' only when its receipts are voided "
+        "(POST /receiving/receipt/{id}/void)."
+    )
+
+
 def assert_po_status_edit_allowed(po: PurchaseOrder, target: POStatus) -> None:
     """Refuse (409) a ``status`` that ``PUT /purchase-orders/{id}`` may not write.
 
@@ -1002,8 +1026,10 @@ def assert_po_status_edit_allowed(po: PurchaseOrder, target: POStatus) -> None:
     CLOSED / CANCELLED                         nothing -- terminal
     =========================================  ==========================================
 
-    * SENT is only ever set by ``POST /purchase-orders/{id}/send`` (and the reviewed-import
-      path), which stamps ``order_date``.
+    * SENT is only ever set by ``POST /purchase-orders/{id}/send`` (DRAFT / APPROVED only), the
+      reviewed-import path, and an accepted emailed delivery
+      (``document_delivery_service.update_accepted_source``, Admin/Manager) -- each of which
+      stamps ``order_date``. The refusal names Send only where Send would accept the PO.
     * PARTIAL / RECEIVED are only ever derived by receiving (and its void, which can walk a
       PO back to SENT).
     * CLOSED means material was received; a PO nothing was received against is CANCELLED.
@@ -1027,13 +1053,7 @@ def assert_po_status_edit_allowed(po: PurchaseOrder, target: POStatus) -> None:
             ),
         )
     if target == POStatus.SENT:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Use Send (POST /purchasing/purchase-orders/{po.id}/send) to mark purchase order {po.po_number} "
-                "as sent; it records the order date, which an edit does not."
-            ),
-        )
+        raise HTTPException(status_code=409, detail=_po_sent_refusal(po, current))
     if target in _PO_RECEIVING_STATUSES:
         raise HTTPException(
             status_code=409,

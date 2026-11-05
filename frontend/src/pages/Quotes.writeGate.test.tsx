@@ -70,6 +70,7 @@ test('a Viewer sees no Send, Convert or Edit draft control', async () => {
   expect(screen.queryByRole('button', { name: 'Mark as sent' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Convert to Work Order' })).not.toBeInTheDocument();
   expect(within(panel).queryByRole('button', { name: 'Edit draft' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Email QUO-0007' })).not.toBeInTheDocument();
 });
 
 test('a Supervisor keeps every write control', async () => {
@@ -80,4 +81,16 @@ test('a Supervisor keeps every write control', async () => {
   expect(within(panel).getByRole('button', { name: 'Edit draft' })).toBeInTheDocument();
   expect((await screen.findAllByRole('button', { name: 'Mark as sent' })).length).toBeGreaterThan(0);
   expect((await screen.findAllByRole('button', { name: 'Convert to Work Order' })).length).toBeGreaterThan(0);
+});
+
+test('a platform admin gets Email as well as the write controls (same server role set)', async () => {
+  // Quote email delivery admits platform_admin on the server; the Email control used to be an
+  // inline role list that left it out, so a platform admin saw Send/Convert but not Email.
+  mockRole = 'platform_admin';
+  renderAt('/quotes?id=7');
+  const panel = (await screen.findByText('Selected quote')).closest('div.mb-4') as HTMLElement;
+
+  expect(within(panel).getByRole('button', { name: 'Edit draft' })).toBeInTheDocument();
+  expect((await screen.findAllByRole('button', { name: 'Email QUO-0007' })).length).toBeGreaterThan(0);
+  expect((await screen.findAllByRole('button', { name: 'Mark as sent' })).length).toBeGreaterThan(0);
 });

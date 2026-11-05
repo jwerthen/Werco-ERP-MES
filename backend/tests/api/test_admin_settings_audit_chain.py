@@ -170,8 +170,46 @@ def test_email_recipient_change_writes_chain_row(
     first, second = rows
     assert first.resource_identifier == "wo.completed" and first.user_id == admin_user.id
     assert first.new_values == {"user_ids": [test_user.id], "uses_default": False}
-    assert first.old_values["uses_default"] is True
-    assert second.new_values == {"user_ids": None, "uses_default": True}
+    # Both sides are the EFFECTIVE audience. Company 1 is the Werco tenant whose three default
+    # addresses match no test user, so its default audience resolves to nobody ([]), and the
+    # restore records that -- never the request's ``null``, which means "default", not "nobody".
+    assert first.old_values == {"user_ids": [], "uses_default": True}
+    assert second.old_values == {"user_ids": [test_user.id], "uses_default": False}
+    assert second.new_values == {"user_ids": [], "uses_default": True}
+
+
+def test_email_recipient_save_that_changes_nothing_writes_no_row(
+    client: TestClient, db_session: Session, admin_headers, test_user
+):
+    """Restoring the default when no override is saved, or re-saving the same explicit list, is
+    a no-op: no chain row and no settings-history row (the chain row used to record a phantom
+    ``[...] -> null`` change because its two sides meant different things)."""
+    url = f"{BASE}/email-recipients/wo.completed"
+    restore_default = client.put(url, headers=admin_headers, json={"user_ids": None})
+    assert restore_default.status_code == status.HTTP_200_OK, restore_default.text
+    assert _committed(db_session, "notification_email_recipients") == []
+    assert db_session.query(SettingsAuditLog).filter(SettingsAuditLog.entity_type == "email_recipients").count() == 0
+
+    pinned = client.put(url, headers=admin_headers, json={"user_ids": [test_user.id]})
+    assert pinned.status_code == status.HTTP_200_OK, pinned.text
+    same_again = client.put(url, headers=admin_headers, json={"user_ids": [test_user.id]})
+    assert same_again.status_code == status.HTTP_200_OK, same_again.text
+    assert len(_committed(db_session, "notification_email_recipients")) == 1
+    assert db_session.query(SettingsAuditLog).filter(SettingsAuditLog.entity_type == "email_recipients").count() == 1
+
+
+def test_email_recipient_pin_matching_the_default_is_still_recorded(
+    client: TestClient, db_session: Session, admin_headers
+):
+    """Pinning an explicit list that happens to equal the default's resolution IS a change (the
+    audience no longer follows the default), so ``uses_default`` alone carries the row."""
+    response = client.put(f"{BASE}/email-recipients/wo.completed", headers=admin_headers, json={"user_ids": []})
+    assert response.status_code == status.HTTP_200_OK, response.text
+
+    (row,) = _committed(db_session, "notification_email_recipients")
+    assert row.old_values == {"user_ids": [], "uses_default": True}
+    assert row.new_values == {"user_ids": [], "uses_default": False}
+    assert row.extra_data["changes"] == {"uses_default": {"old": True, "new": False}}
 
 
 def test_work_center_types_change_writes_chain_row(client: TestClient, db_session: Session, admin_headers):

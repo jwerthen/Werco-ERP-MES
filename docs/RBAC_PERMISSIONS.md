@@ -1460,7 +1460,10 @@ Follow-up owners must be active users in the same company with purchasing access
 > the intended UI. In the UI, `/quotes` requires `purchasing:view` (`frontend/src/utils/routeAccess.ts`),
 > so Operator / Quality / Shipping cannot open the page, and a Viewer who can open it no longer sees
 > **Edit draft**, **Send** or **Convert** (`canWriteQuotes` in
-> `frontend/src/utils/recordWriteAccess.ts`, which mirrors `QUOTE_WRITE_ROLES`).
+> `frontend/src/utils/recordWriteAccess.ts`, which mirrors `QUOTE_WRITE_ROLES`). The **Email** action
+> uses the same helper: quote email delivery (`DocumentDeliveryService.authorize`) admits the same
+> Admin / Manager / Supervisor set plus superuser and Platform Admin, which the page's old inline role
+> list left out.
 
 ### Material Nesting
 

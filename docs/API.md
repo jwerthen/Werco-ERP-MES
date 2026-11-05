@@ -4909,11 +4909,11 @@ uploads go through text extraction + LLM. See
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/routing/` | List all routings | Yes |
-| POST | `/routing/` | Create routing | Yes |
+| POST | `/routing/` | Create routing. **404** on another tenant's or a soft-deleted part | Yes |
 | GET | `/routing/{id}` | Get routing by ID | Yes |
 | PUT | `/routing/{id}` | Update routing | Yes |
 | POST | `/routing/{id}/release` | Release a draft routing for production (status → `released`, stamps `approved_by`/`approved_at`/`effective_date`) | Admin / Manager |
-| POST | `/routing/{id}/copy` | Copy a routing to a target part or new revision as a new **draft** — query params `target_part_id` (required) and `new_revision` (default `A`); copies all operations incl. `process_sheet_id`; **404** if the source routing or target part isn't found; writes one tamper-evident `audit_log` CREATE for the new routing (`extra_data.copied_from` = source routing id) | Admin / Manager |
+| POST | `/routing/{id}/copy` | Copy a routing to a target part or new revision as a new **draft** — query params `target_part_id` (required) and `new_revision` (default `A`); copies all operations incl. `process_sheet_id`; **404** if the source routing isn't found or the target part isn't a live part of this company (a soft-deleted target is refused); writes one tamper-evident `audit_log` CREATE for the new routing (`extra_data.copied_from` = source routing id) | Admin / Manager |
 | POST | `/routing/{id}/operations` | Add an operation (**400** on a released routing) | Admin / Manager / Supervisor |
 | PUT | `/routing/{id}/operations/{operation_id}` | Update an operation — draft: all fields; released: **time standards only** (see note) | Admin / Manager / Supervisor (released-routing edits: Admin / Manager) |
 | DELETE | `/routing/{id}/operations/{operation_id}` | Delete an operation (**400** on a released routing) | Admin / Manager / Supervisor |
@@ -4929,14 +4929,20 @@ uploads go through text extraction + LLM. See
 > <revision>"`) — the same row `POST /routing/` writes — with `extra_data`: `source`
 > (`ai_routing_generation`, or `create_from_generation` when no `generation_session_id` was sent),
 > `generation_session_id`, `model`, `prompt_version`, `extraction_confidence`, `correction_count` (human
-> edits to the proposal), `operation_count` and `approved_by`. Before this, the step wrote only the
+> edits to the proposal), `operation_count`, `operations` (one compact entry per accepted operation:
+> `sequence`, `operation_number` as stored, `name`, `work_center_id`, `setup_hours`, `run_hours_per_unit`,
+> `is_inspection_point`, `is_outside_operation` — *what* the person accepted, since these operations get
+> no per-operation `routing_operation` rows on this path) and `approved_by`. Before this, the step wrote only the
 > AI-learning interaction event, which is telemetry, not audit. `model` / `prompt_version` are
 > recorded on the generation session by `generate-from-drawing` **at proposal time** (the prompt can be
 > bumped between proposal and approval), and are `null` for a session generated before 2026-11-05 or
 > with no LLM call. The same change fixed the AI-learning event's `model_version`, which was always
-> `null` because nothing wrote the key it read. Both steps resolve the part with `is_deleted == false`,
-> so neither spends a model call on, nor attaches a routing to, a soft-deleted part. The manual
-> `POST /routing/` part lookup does not yet carry that filter.
+> `null` because nothing wrote the key it read, and made its `prompt_version` read the same
+> generation-time value as the audit row (falling back to the live prompt constant only for a session
+> generated before the version was recorded). Every door that attaches a new routing to a part —
+> both AI steps, manual `POST /routing/` and the `/{id}/copy` target — resolves it through one
+> live-part helper (`is_deleted == false`), so none spends a model call on, or attaches a routing to,
+> a soft-deleted part (**404**).
 
 > **Editing a RELEASED routing's operations — time standards only (`feat/routing-editable-time-standards`).**
 > A released routing's manufacturing **process** is frozen on release: `PUT /routing/{id}/operations/{operation_id}`
@@ -7088,8 +7094,10 @@ when an estimate is approved and handed off in Fabrication Quoting (`/fabricatio
 > | `closed` / `cancelled` | nothing — terminal |
 >
 > Re-sending the **current** status is always allowed (a client echoing the record back). Everything
-> else is **409** with a `detail` naming the verb that owns the move: `sent` → use `POST
-> .../{po_id}/send`; `partial` / `received` → set by receiving (`POST /receiving/receive`); out of
+> else is **409** with a `detail` naming the verb that owns the move: `sent` from `draft` / `approved` →
+> use `POST .../{po_id}/send`; from `pending_approval` → approve it first, then Send (Send accepts only
+> `draft` / `approved`); from `partial` / `received` → refused, a received PO returns to `sent` only when
+> its receipts are voided (`POST /receiving/receipt/{id}/void`); `partial` / `received` → set by receiving (`POST /receiving/receive`); out of
 > `closed` / `cancelled` → *"…closed and cancelled purchase orders are final… Raise a new purchase order
 > instead."*; `closed` with nothing received → cancel it instead; `cancelled` after material was
 > received → close it, or void the receipts first; back to a pre-send status once sent → cancel and
@@ -9164,7 +9172,7 @@ roles). See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
 > |---|---|---|
 > | `PUT /role-permissions/{role}`, `POST /role-permissions/{role}/reset` | `role_permission` UPDATE, identifier = the role; old/new `permissions` + `is_customized`; `extra_data` `action` (`update` / `reset`), `granted`, `revoked` | **Required** — `log_required` inside `atomic_security_write`. If the audit row cannot be written the RBAC change is rolled back and the caller gets **503** `"Unable to save audit record"`, the same posture as account administration |
 > | `PUT /work-center-rates/{work_center_id}` | `work_center` UPDATE (the resource type `PUT /work-centers/{id}` writes), identifier = the work-center code, `extra_data.source = "admin_settings"` | Best-effort |
-> | `PUT /email-recipients/{event_key}` | `notification_email_recipients` UPDATE, identifier = the event key; old/new `user_ids` + `uses_default` (a default audience is not an explicit selection) | Best-effort |
+> | `PUT /email-recipients/{event_key}` | `notification_email_recipients` UPDATE, identifier = the event key; old/new `user_ids` are the **effective** audience before and after (a `null` request records the default it restores, never `null`) + `uses_default` (a default audience is not an explicit selection). A save that changes neither writes no row, here or in the settings history | Best-effort |
 > | `PUT /work-center-types` | `work_center_types` UPDATE; old/new `types` | Best-effort |
 >
 > Refusals (bad role, unknown permission, foreign work center or user, unknown email type, removing an
