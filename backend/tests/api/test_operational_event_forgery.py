@@ -64,7 +64,11 @@ pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 EVENTS_URL = "/api/v1/operational-events/"
 API_TOKENS_URL = "/api/v1/api-tokens/"
 APP_DIR = Path(__file__).resolve().parents[2] / "app"
-FUTURE = datetime(2030, 1, 1)
+# Far enough ahead that the future-dated rows below stay in the future. A near date
+# (2030) would make every reader test fail once the calendar reached it, since the row
+# would no longer be in the future.
+FUTURE = datetime(2999, 1, 1)
+FUTURE_ISO = "2999-01-01T00:00:00Z"
 
 
 @pytest.fixture(autouse=True)
@@ -188,7 +192,7 @@ class TestRefusedSetComposition:
             "ncr_updated",
             "fai_updated",
         } <= found
-        assert found <= SERVER_ONLY_EVENT_TYPES, sorted(found - SERVER_ONLY_EVENT_TYPES)
+        assert found <= READER_TRUSTED_EVENT_TYPES, sorted(found - READER_TRUSTED_EVENT_TYPES)
 
 
 # --------------------------------------------------------------------------
@@ -214,7 +218,7 @@ class TestForgedPostsAreRefused:
             work_order_id=wo.id,
             operation_id=op.id,
             severity="high",
-            occurred_at="2030-01-01T00:00:00Z",
+            occurred_at=FUTURE_ISO,
             event_payload={"category": "quality", "note": "forged"},
         )
 
@@ -313,7 +317,7 @@ class TestOccurredAtClamp:
     def test_a_future_occurred_at_is_stored_as_now(self, client: TestClient, db_session: Session):
         user = make_user(db_session)
         before = datetime.now(timezone.utc)
-        resp = _post(client, user_headers(user), "agent_observation", occurred_at="2030-01-01T00:00:00Z")
+        resp = _post(client, user_headers(user), "agent_observation", occurred_at=FUTURE_ISO)
         after = datetime.now(timezone.utc)
 
         assert resp.status_code == status.HTTP_200_OK, resp.text
