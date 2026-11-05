@@ -4012,6 +4012,11 @@ environment variable or deployment configuration change is needed.
 > Do **not** add `is_active` or `status` to `PartUpdate`: `PUT /parts/{id}` and `PUT /materials/{id}`
 > are blind `setattr` loops whose lookups do not filter `is_deleted`, so exposing the flag there would
 > hand every Supervisor a way to clear a soft-delete mask through an ordinary form save.
+> **Until 2026-11-05 this was not actually true:** `PartUpdate` still declared `is_active` and a
+> free-text `status`, so both doors could write them. Both fields are now gone from the schema
+> (guarded by `tests/test_part_update_activation_fields.py`). A client that still sends either key
+> gets **200** with the key silently dropped (the schema ignores unknown keys): the row and the
+> `part` UPDATE audit diff are untouched.
 >
 > **Role: ADMIN / MANAGER — deliberately not the Supervisor edit tier**, matching the Combine verb
 > these shipped with and the renumber/revision identity tier. See `docs/RBAC_PERMISSIONS.md` → Parts.
@@ -4915,6 +4920,23 @@ uploads go through text extraction + LLM. See
 | POST | `/routing/{id}/operations/reorder` | Reorder operations (**400** on a released routing, **422** on a malformed body). **Also rewrites each listed operation's `operation_number` from its new `sequence`** — see the `operation_number` note below | Admin / Manager / Supervisor |
 | POST | `/routing/import/preview` | Upload a routing CSV/XLSX (multipart `file`), preview it WITHOUT writing (dry-run, fully rolled back) | Admin / Manager / Supervisor |
 | POST | `/routing/import/commit` | Commit a routing CSV/XLSX import — one draft routing per part, with one `audit_log` CREATE per routing | Admin / Manager / Supervisor |
+| POST | `/routing/generate-from-drawing` | AI step 1: upload a drawing (multipart `file` + `part_id`) and get a **proposed** routing for review — creates no routing. **404** on a soft-deleted part | Admin / Manager / Supervisor |
+| POST | `/routing/create-from-generation` | AI step 2: create the reviewed/edited proposal as a **draft** routing, writing one tamper-evident `audit_log` CREATE (see note). **404** on a soft-deleted part or an unknown generation session | Admin / Manager / Supervisor |
+
+> **AI routing generation — the accept step is the audited record (2026-11-05).**
+> `POST /routing/create-from-generation` is where a named person accepts an AI proposal, so it writes
+> the routing's `audit_log` CREATE (`resource_type="routing"`, identifier `"<part_number> Rev
+> <revision>"`) — the same row `POST /routing/` writes — with `extra_data`: `source`
+> (`ai_routing_generation`, or `create_from_generation` when no `generation_session_id` was sent),
+> `generation_session_id`, `model`, `prompt_version`, `extraction_confidence`, `correction_count` (human
+> edits to the proposal), `operation_count` and `approved_by`. Before this, the step wrote only the
+> AI-learning interaction event, which is telemetry, not audit. `model` / `prompt_version` are
+> recorded on the generation session by `generate-from-drawing` **at proposal time** (the prompt can be
+> bumped between proposal and approval), and are `null` for a session generated before 2026-11-05 or
+> with no LLM call. The same change fixed the AI-learning event's `model_version`, which was always
+> `null` because nothing wrote the key it read. Both steps resolve the part with `is_deleted == false`,
+> so neither spends a model call on, nor attaches a routing to, a soft-deleted part. The manual
+> `POST /routing/` part lookup does not yet carry that filter.
 
 > **Editing a RELEASED routing's operations — time standards only (`feat/routing-editable-time-standards`).**
 > A released routing's manufacturing **process** is frozen on release: `PUT /routing/{id}/operations/{operation_id}`
@@ -6948,6 +6970,56 @@ the public paths are `/eco/eco/…`.
 > plus task create/update and approval create — write to the tamper-evident `audit_log` (`GET /audit/`),
 > so the engineering-change lifecycle is fully traceable for AS9100D.
 
+### Quotes
+
+Customer quotes (`app/api/endpoints/quotes.py`). There is no create endpoint: an ERP quote is created
+when an estimate is approved and handed off in Fabrication Quoting (`/fabrication-quotes`).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/quotes/` | List quotes, newest first. `status` (`all` = full history; omitted excludes `converted` / `expired`; unknown value **422**), `customer`, `search`, `limit` 1–5000 (default 100), `offset` | Yes |
+| GET | `/quotes/{quote_id}` | Get a quote | Yes |
+| PUT | `/quotes/{quote_id}` | Edit a draft/pending quote's commercial terms, or set its status (accept / reject / expire). Refusals in the note below | Admin / Manager / Supervisor |
+| POST | `/quotes/{quote_id}/send` | Mark the quote sent. Records the status only; no message is dispatched. **409** unless `draft` / `pending` / `sent` (re-sending a `sent` quote is an idempotent 200) | Admin / Manager / Supervisor |
+| GET | `/quotes/{quote_id}/conversion-plan` | Per line: whether it can become a work order, and why not | Yes |
+| POST | `/quotes/{quote_id}/convert` | Convert the reviewed lines (`line_ids`; default all eligible) into **DRAFT** work orders, one per line, in one transaction. **400** unless `sent` / `accepted`; **422** on an ineligible line, or on unlinked quote-only lines without `acknowledge_unlinked` | Admin / Manager / Supervisor |
+| POST | `/quotes/{quote_id}/generate-pdf` | Customer-ready quote PDF | Yes |
+
+> **Quote writes are role-gated and audited (2026-11-05).** `PUT`, `/send` and `/convert` share one
+> role set, `QUOTE_WRITE_ROLES` = Admin / Manager / Supervisor (superuser and Platform Admin pass, as
+> with every `require_role`). Until this change `PUT` and `/send` were open to any authenticated user,
+> so a Viewer could accept, reject, expire or mark sent a customer quote. Operator, Quality, Shipping
+> and Viewer now get **403**; reads are unchanged (read-broad, see `docs/RBAC_PERMISSIONS.md` →
+> Quotes). Audit rows, all written before the single terminal commit:
+>
+> - **Status moves** write one `quote` STATUS_CHANGE row each, with `extra_data.source`: `send`
+>   (`draft` / `pending` → `sent`, plus `customer_message_dispatched: false`), `status_update` (a `PUT`
+>   that sets the status), `edit` (the reset to `draft` that a content edit forces, which also clears
+>   the approval stamp) or `conversion`. A `PUT` that echoes the current status, and a re-send of a
+>   `sent` quote, write nothing.
+> - **A content edit** writes one `quote` UPDATE row with the field diff (`status` excluded, so each
+>   transition is exactly one row) and `extra_data.edited_fields`.
+> - **`/convert`** writes one `work_order` CREATE per work order minted — the same row `POST
+>   /work-orders/` writes, with `extra_data.source = "quote_conversion"`, `quote_id`, `quote_number`,
+>   `quote_line_id`, `quote_line_number`, `part_id` and `quantity` — plus one row on the quote: a
+>   STATUS_CHANGE to `accepted` (lines remain) or `converted`, carrying the created `work_orders` and
+>   `remaining_line_ids`, or, when the status does not move (a second partial conversion of an
+>   `accepted` quote), an UPDATE carrying the line → work-order links.
+>
+> These are best-effort, like `POST /work-orders/`: a failed audit write is logged and does not refuse
+> the change. Refusals are raised before the first field is written and write nothing.
+>
+> **`PUT` refusals.** **409** when `expected_updated_at` is stale; **409** on a content edit, or a move
+> back to `draft` / `pending`, once any line is linked to a work order; **409** on a content edit of a
+> quote that is not `draft` / `pending`; **409** when `lines` is sent (customer quote prices and lines
+> are frozen — revise the estimate in Fabrication Quoting); **409** on any status change to a
+> `converted` quote; **422** on `status: "converted"` (use `/convert`). Status transitions through
+> `PUT` are otherwise not whitelisted: for example `expired` → `sent` is still accepted, and audited.
+>
+> **UI.** The Quotes page shows **Edit draft**, **Send** and **Convert** only to the same role set
+> (`canWriteQuotes` in `frontend/src/utils/recordWriteAccess.ts`), so a hidden control and a refused
+> call agree. The server stays the enforcement.
+
 ### Purchasing
 
 | Method | Endpoint | Description | Auth Required |
@@ -6962,7 +7034,7 @@ the public paths are `/eco/eco/…`.
 | POST | `/purchasing/purchase-orders` | Create purchase order with its lines | Admin / Manager / Supervisor |
 | GET | `/purchasing/purchase-orders/{po_id}` | Get PO by ID | Yes |
 | PUT | `/purchasing/purchase-orders/{po_id}/supplier-confirmation` | Record acknowledgment, supplier-confirmed date and follow-up owner/due date on sent/partial POs; requires current `expected_updated_at`, stale returns 409. Requested dates remain unchanged | Admin / Manager / Supervisor, plus purchasing view/create permission |
-| PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order. **404** on a soft-deleted PO; **400** on a `status` change to anything but `closed`/`cancelled` while the vendor is soft-deleted (see note) | Admin / Manager / Supervisor |
+| PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order. **404** on a soft-deleted PO; a `status` is held to a transition whitelist — **409** naming the verb that owns the move, **422** on an unknown value or an explicit `null` (see *PO status edits* below); **400** on a `status` change to anything but `closed`/`cancelled` while the vendor is soft-deleted (see note) | Admin / Manager / Supervisor |
 | POST | `/purchasing/purchase-orders/{po_id}/send` | Issue a PO to the vendor — status → `sent`, stamps `order_date`; only `draft`/`approved` POs (else **400**). **404** on a soft-deleted PO | Admin / Manager |
 | POST | `/purchasing/purchase-orders/{po_id}/lines` | Add a line to a `draft` PO (else **400**) and roll the PO subtotal/total. **404** on a soft-deleted PO | Admin / Manager / Supervisor |
 | DELETE | `/purchasing/purchase-orders/{po_id}` | Soft-delete a purchase order — guarded, see note below | Admin / Manager |
@@ -6999,6 +7071,35 @@ the public paths are `/eco/eco/…`.
 > the PO recording the subtotal/total roll (`extra_data.cause = "po_line_added"`). Audit rows are
 > flushed before the terminal commit so they commit atomically with the change. (These endpoints
 > were RBAC-gated but unaudited prior to 2026-07-12; the import loader was already per-row audited.)
+>
+> **PO status edits — `PUT` may only make these moves (2026-11-05).** `PUT
+> /purchasing/purchase-orders/{po_id}` used to `setattr` any `POStatus` member, so a caller at the edit
+> tier could mark a PO `sent` without the Admin/Manager send verb or its `order_date` stamp, declare it
+> `received` with nothing received, or reopen a `closed` one. `POUpdate.status` is now typed as the enum
+> (an unknown value, or an explicit `"status": null`, is **422**; it used to be a **500**), and
+> `assert_po_status_edit_allowed` checks the move **before the first field is written**, so a refused
+> status rejects the whole body and leaves the row untouched (and writes no audit row):
+>
+> | Current status | `PUT` may set |
+> |---|---|
+> | `draft` / `pending_approval` / `approved` | each other, or `cancelled` |
+> | `sent` | `cancelled` (nothing received yet) |
+> | `partial` / `received` | `closed` (short-close / close-out) |
+> | `closed` / `cancelled` | nothing — terminal |
+>
+> Re-sending the **current** status is always allowed (a client echoing the record back). Everything
+> else is **409** with a `detail` naming the verb that owns the move: `sent` → use `POST
+> .../{po_id}/send`; `partial` / `received` → set by receiving (`POST /receiving/receive`); out of
+> `closed` / `cancelled` → *"…closed and cancelled purchase orders are final… Raise a new purchase order
+> instead."*; `closed` with nothing received → cancel it instead; `cancelled` after material was
+> received → close it, or void the receipts first; back to a pre-send status once sent → cancel and
+> raise a new PO. The Purchasing UI never sends `status` on this route, so only API and MCP callers see
+> these refusals.
+>
+> **Not decided here: who may approve.** `pending_approval` / `approved` stay reachable through this
+> `PUT` at its Admin / Manager / Supervisor tier, exactly as before, with no `approved_by` /
+> `approved_at` stamp. A dedicated approve verb is an open follow-up — see `docs/RBAC_PERMISSIONS.md`
+> → Purchasing.
 >
 > **Vendor / PO soft-delete + restore (`Vendor`, `PurchaseOrder` now `SoftDeleteMixin`).** Both
 > `DELETE` endpoints are **soft** deletes (compliance invariant #3 — never a physical `DELETE`):
@@ -7039,7 +7140,7 @@ the public paths are `/eco/eco/…`.
 > |---|---|---|
 > | `PUT /purchasing/vendors/{id}` | **200** — and its blind `setattr` loop accepts `is_active`, so one call could leave a vendor `is_deleted=true` **and** `is_active=true`, bypassing `/restore` and its `action="restore"` audit row | **404** |
 > | `POST /po-upload/create-from-upload` (`vendor_id`) | created a live, receivable PO against the removed supplier — the PO Upload table below already promised this refusal, but only the *part* half of it was enforced | **400** "Vendor not found" |
-> | `PUT /purchasing/purchase-orders/{id}` (`status`) | flipped a **closed** PO back to `sent`, making it live and receivable against the removed supplier — this endpoint validates no transition at all, it only checks enum membership | **400** *"…its vendor X is deleted. Restore the vendor first."*, for any target status other than `closed`/`cancelled` |
+> | `PUT /purchasing/purchase-orders/{id}` (`status`) | flipped a **closed** PO back to `sent`, making it live and receivable against the removed supplier — this endpoint validated no transition at all, it only checked enum membership | Since 2026-11-05 the status whitelist (see *PO status edits* above) refuses every move out of `closed`/`cancelled` first: **409** *"…closed and cancelled purchase orders are final…"*. The vendor guard stays behind it as defense in depth and still answers **400** *"…its vendor X is deleted. Restore the vendor first."* for an allowed pre-send move (e.g. `draft` → `approved`) against a removed vendor |
 > | `POST /scanner/mappings` (`vendor_id`) | created the mapping | **404** "Vendor not found" |
 > | `POST /supplier-scorecards/approved-suppliers/` and `PUT .../approved-suppliers/{asl_id}` | entered / re-approved the removed supplier on the ASL | **409** *"…has been removed and cannot be approved…"* (see the next section) |
 > | `POST /purchasing/purchase-orders/import` (`vendor_code`) | imported the PO silently | row error naming the restore verb (see the Excel-migration section) |
@@ -9035,16 +9136,40 @@ roles). See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/admin/settings` | Get system settings | Admin |
-| PUT | `/admin/settings` | Update system settings | Admin |
 | GET | `/admin/settings/audit-log` | Settings/quote-config change history (filterable, up to 1yr) | Admin |
+| GET | `/admin/settings/email-recipients` | Email types, selections, missing defaults and the company's user directory | Admin |
+| PUT | `/admin/settings/email-recipients/{event_key}` | Set one email type's recipients (`{"user_ids": [...]}`; `null` restores the default). **400** on an unknown email type, or on a user who is not an active user of this company with a deliverable address | Admin |
+| GET | `/admin/settings/work-center-rates` | Work centers with their hourly rates (`include_inactive` default false) | Admin |
+| PUT | `/admin/settings/work-center-rates/{work_center_id}` | Set a work center's hourly (labor costing) rate. **404** on another company's work center | Admin |
+| GET | `/admin/settings/work-center-types` | Allowed work-center types, plus the ones in use | Admin |
+| PUT | `/admin/settings/work-center-types` | Replace the allowed work-center types. **400** if it would remove a type still in use | Admin |
+| GET | `/admin/settings/role-permissions` | Every role's effective permissions (company override or default), plus the permission catalog | Admin |
+| GET | `/admin/settings/role-permissions/{role}` | One role's effective permissions and `is_customized` | Admin |
+| PUT | `/admin/settings/role-permissions/{role}` | Replace a role's permissions with a company override (body: JSON array of permission keys). **400** on an unknown role or permission; **503** if its required audit row cannot be written (see note) | Admin |
+| POST | `/admin/settings/role-permissions/{role}/reset` | Drop the company override so the role reverts to its defaults; a role with no override is a no-op. **503** as above | Admin |
 
 > **Settings-audit tenancy:** `GET /admin/settings/audit-log` reads the `SettingsAuditLog` trail
 > (admin / quote-config changes) and is **scoped to the caller's active company**
 > (`get_current_company_id`). Writes to this trail are tagged with that same active company, so a
 > platform admin's changes attribute to the company they have switched into — matching the
 > `/audit/*` (`AuditLog`) attribution. This is a separate trail from `/audit/*` and is **not** part
-> of the tamper-evident hash chain.
+> of the tamper-evident hash chain: it is the Admin page's settings-history display table, a plain
+> mutable tenant table.
+>
+> **Admin-settings writes are on the tamper-evident chain too (2026-11-05).** Every write that adds a
+> `SettingsAuditLog` row now also writes the authoritative `audit_log` row (`GET /audit/`) in the same
+> transaction:
+>
+> | Write | `audit_log` row | Failure posture |
+> |---|---|---|
+> | `PUT /role-permissions/{role}`, `POST /role-permissions/{role}/reset` | `role_permission` UPDATE, identifier = the role; old/new `permissions` + `is_customized`; `extra_data` `action` (`update` / `reset`), `granted`, `revoked` | **Required** — `log_required` inside `atomic_security_write`. If the audit row cannot be written the RBAC change is rolled back and the caller gets **503** `"Unable to save audit record"`, the same posture as account administration |
+> | `PUT /work-center-rates/{work_center_id}` | `work_center` UPDATE (the resource type `PUT /work-centers/{id}` writes), identifier = the work-center code, `extra_data.source = "admin_settings"` | Best-effort |
+> | `PUT /email-recipients/{event_key}` | `notification_email_recipients` UPDATE, identifier = the event key; old/new `user_ids` + `uses_default` (a default audience is not an explicit selection) | Best-effort |
+> | `PUT /work-center-types` | `work_center_types` UPDATE; old/new `types` | Best-effort |
+>
+> Refusals (bad role, unknown permission, foreign work center or user, unknown email type, removing an
+> in-use type) write neither row. A first customization of a role's permissions now records the new
+> override's real id in both records; the settings history used to log `entity_id` `0` for it.
 
 > **`POST /admin/settings/seed-database` ships no default credentials (Admin-only).** The one-time
 > bootstrap seed **no-ops once any user exists** (returns `{"status": "already_seeded"}`); on an

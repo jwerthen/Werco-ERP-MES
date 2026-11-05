@@ -782,7 +782,10 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > through an ordinary blind-`setattr` form save on `PUT /parts/{id}` or `PUT /materials/{id}`, neither
 > of which filters `is_deleted` on its lookup. That is the 2026-08-16 `Vendor` trap invariant 3
 > records. Both verbs additionally **404 a soft-deleted part** (*"restore it first"*) for the same
-> reason.
+> reason. **Until 2026-11-05 the schema did not match this paragraph:** `PartUpdate` still declared
+> `is_active` and `status`, so a Supervisor could write both through either `PUT`. Both fields are
+> now removed (`tests/test_part_update_activation_fields.py`); a `PUT` that still sends either key has
+> it dropped and changes nothing.
 >
 > **A restore returns the RECORD, not the permission (behaviour change).**
 > `POST /parts/{id}/restore` used to hard-code `is_active = True`. It now returns the part to the
@@ -920,6 +923,13 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > endpoint writes a tamper-evident `audit_log` CREATE with `extra_data.copied_from` (the source
 > routing id) — see `docs/API.md` → Routing and the
 > [CMMC change log](CMMC_LEVEL_2_COMPLIANCE.md) entry dated 2026-07-06.
+>
+> **The AI accept step names who accepted (2026-11-05).** `create-from-generation` is the step where a
+> named person at that role set accepts an AI proposal; nothing is created by `generate-from-drawing`
+> alone. It now writes the routing's `audit_log` CREATE with `extra_data.approved_by`, the generation
+> session, model and prompt version, and the count of human corrections. Before this the step wrote
+> only AI-learning telemetry, so an AI-originated routing had no audit row attributing its creation.
+> See `docs/API.md` → Routing → *AI routing generation*.
 
 ### Work Centers
 
@@ -1308,6 +1318,20 @@ Follow-up owners must be active users in the same company with purchasing access
 > restriction. Only the write/approve actions (Create, Approve, send, line edits) are
 > role-gated. Receiving (below) follows the same read-broad / write-restricted pattern.
 
+> **PO status edits: a state rule landed, and the Approve row is still not enforced on `PUT`
+> (2026-11-05).** `PUT /purchasing/purchase-orders/{id}` is `require_role([ADMIN, MANAGER,
+> SUPERVISOR])` and used to write any status, so a Supervisor could mark a PO `sent` without the
+> Admin / Manager `POST .../send`, declare it `received`, or reopen a closed one. A transition
+> whitelist now refuses those moves (**409** naming the verb that owns each one). That makes the send
+> gate real: `sent` is reachable only through the Admin / Manager send verb. The whitelist is a
+> **state** rule, not a role rule, and it deliberately leaves one gap open. `pending_approval` and
+> `approved` are still settable through that `PUT`, so **a Supervisor can still move a PO to
+> `approved`**, and nothing stamps `approved_by` / `approved_at`. The **Approve** row above (Admin /
+> Manager) is therefore **not server-enforced** on this path. A dedicated Admin / Manager approve verb
+> is an open follow-up. Until it ships, read an `approved` status as "set by someone at the PO edit
+> tier", and find who in the PO's `purchase_order` UPDATE audit row. See `docs/API.md` → Purchasing →
+> *PO status edits*.
+
 > **Vendor / PO soft-delete + restore — endpoint mapping.** `DELETE /purchasing/vendors/{id}`,
 > `POST /purchasing/vendors/{id}/restore`, `DELETE /purchasing/purchase-orders/{id}`, and
 > `POST /purchasing/purchase-orders/{id}/restore` (`app/api/endpoints/purchasing.py`) are enforced **in
@@ -1411,6 +1435,32 @@ Follow-up owners must be active users in the same company with purchasing access
 > (`purchasing:approve` — the same Admin / Manager set the `PUT` enforces), not `canRestoreVendor`:
 > the button calls the update endpoint, so it must match the update endpoint. See `docs/API.md` →
 > Purchasing → *Restoring a vendor returns the record, not the approval*.
+
+### Quotes
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View (list, detail, conversion plan, quote PDF) | ✓ | ✓ | ✓ | | | | ✓ |
+| Edit terms / accept / reject / expire (`PUT /quotes/{id}`) | ✓ | ✓ | ✓ | | | | |
+| Mark sent (`POST /quotes/{id}/send`) | ✓ | ✓ | ✓ | | | | |
+| Convert to work orders (`POST /quotes/{id}/convert`) | ✓ | ✓ | ✓ | | | | |
+
+> **Endpoint mapping (2026-11-05).** The three write verbs share one constant, `QUOTE_WRITE_ROLES =
+> [ADMIN, MANAGER, SUPERVISOR]` in `app/api/endpoints/quotes.py`, enforced with `require_role`
+> (superuser and Platform Admin pass, as elsewhere). It is a fixed role gate: company role-permission
+> overrides neither grant nor remove it. The set is the one `convert` was already gated to, and the
+> roles that hold `purchasing:create` by default, which Fabrication Quoting requires to approve the
+> estimate that becomes the ERP quote. Until this change `PUT` and `/send` used `get_current_user`, so
+> any authenticated user, a Viewer included, could accept, reject, expire, re-word or mark sent a
+> customer quote. Each write is now also audited on the tamper-evident chain (see `docs/API.md` →
+> Quotes).
+>
+> **Reads stay read-broad.** Per the [Access enforcement model](#access-enforcement-model), the list,
+> detail, conversion-plan and PDF routes are tenant-scoped but not role-restricted; the **View** row is
+> the intended UI. In the UI, `/quotes` requires `purchasing:view` (`frontend/src/utils/routeAccess.ts`),
+> so Operator / Quality / Shipping cannot open the page, and a Viewer who can open it no longer sees
+> **Edit draft**, **Send** or **Convert** (`canWriteQuotes` in
+> `frontend/src/utils/recordWriteAccess.ts`, which mirrors `QUOTE_WRITE_ROLES`).
 
 ### Material Nesting
 
@@ -2395,6 +2445,19 @@ and writes an `EXPORT` audit row through `AuditService`:
 | Visitor sign-in stations (`/visitor-logs/stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
 | Crew kiosk stations (`/shop-floor/kiosk-stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
 | System | ✓ | | | | | | |
+
+> **Changing a role's permissions is an audited RBAC change that fails closed (2026-11-05).** The
+> **Settings** row covers every `/admin/settings/*` route in `app/api/endpoints/admin_settings.py`
+> (`admin_only = require_role([ADMIN])`). Of those, the company role-permission overrides — `PUT
+> /admin/settings/role-permissions/{role}` and `POST /admin/settings/role-permissions/{role}/reset` —
+> now require their evidence: a `role_permission` UPDATE row (old/new permissions, `granted`,
+> `revoked`, `action`) written through `AuditService.log_required` inside
+> `user_provisioning.atomic_security_write`. If that row cannot be written, the permission change is
+> rolled back and the caller gets **503**, the same posture as account administration. The other
+> admin-settings writes (work-center rates, email recipients, work-center types) now also write
+> best-effort rows to the tamper-evident `audit_log`. Before this change all of them wrote only to
+> `SettingsAuditLog`, the Admin page's mutable history table, which is outside the hash chain and
+> still written for display. See `docs/API.md` → Admin Settings.
 
 > **Integrations (carrier-account credentials + shipping profile) — endpoint mapping.** The
 > carrier-integration admin console — `app/api/endpoints/integrations.py`, mounted under
