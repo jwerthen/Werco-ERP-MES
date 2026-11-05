@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 from typing import FrozenSet, List, Optional
 
@@ -5,7 +6,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_company_id, get_current_user
-from app.core.time_utils import ensure_utc
 from app.db.database import get_db
 from app.models.user import User
 from app.schemas.operational_event import OperationalEventCreate, OperationalEventResponse
@@ -13,6 +13,8 @@ from app.services.dispatch_service import DISPATCH_NOTICE_EVENT_TYPE
 from app.services.notification_catalog import SOURCE_EVENT_TYPE_TO_KEY
 from app.services.operation_hold_view import HOLD_EVENT_TYPE
 from app.services.operational_event_service import OperationalEventService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -75,17 +77,25 @@ def server_only_event_type_detail(event_type: str) -> str:
 
 
 def clamp_occurred_at(occurred_at: Optional[datetime], now: datetime) -> Optional[datetime]:
-    """A client-supplied ``occurred_at`` no later than ``now`` (tz-aware UTC). Backdating is kept.
+    """A client-supplied ``occurred_at`` no later than ``now``, as NAIVE UTC. Backdating is kept.
 
     Readers order by ``occurred_at``; a row dated in the future would stay "the newest"
-    in each of them until that date passed. ``None`` stays ``None`` (the service stamps
-    the time itself). The result is normalized to UTC -- the same instant -- and a naive
-    value is read as UTC, matching ``ensure_utc``.
+    in each of them until that date passed. ``now`` is tz-aware UTC; a naive input is
+    read as UTC. The result is the same instant stored the way ``OperationalEventService.emit``
+    stamps every server row (naive ``datetime.utcnow()``), so a client row and a server
+    row compare alike in every reader whatever the database session's time zone.
+    ``None`` stays ``None`` (the service stamps the time itself).
+
+    Raises ``OverflowError`` for an instant whose UTC form is outside the representable
+    range (e.g. ``0001-01-01T00:00:00+05:00``). A far-FUTURE value never raises: aware
+    comparison does not convert, and it clamps to ``now``.
     """
     if occurred_at is None:
         return None
-    utc = ensure_utc(occurred_at)
-    return now if utc is None or utc > now else utc
+    aware = occurred_at if occurred_at.tzinfo is not None else occurred_at.replace(tzinfo=timezone.utc)
+    if aware > now:
+        aware = now
+    return aware.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 @router.get("/", response_model=List[OperationalEventResponse])
@@ -115,24 +125,37 @@ def record_operational_event(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Record a custom, tenant-scoped operational event as context for AI assistants.
+    """Record a custom event for AI context (e.g. ``agent_observation``). Types the system
+    records itself -- every one that sends a notification or that a screen or report reads
+    as fact -- are refused with 400; call the endpoint that performs the action instead. A
+    future ``occurred_at`` is stored as now. Posted events never notify.
 
-    Use this for a note of your own (for example ``event_type: "agent_observation"``),
-    not to report that something happened in the ERP: event types the system records
-    itself are refused with 400. That covers every type that sends notifications (work
-    order released / started / completed / closed, operation completed / ready / hold,
-    NCR / CAR / FAI, receipts, shipments, purchase orders, downtime, backflush and
-    material shortages, dispatch order changes, ...) and every type a screen or report
-    reads as fact. To make one of those happen, call the endpoint that performs the
-    action; it records the event itself.
+    (Only the paragraph above reaches the generated MCP tool's description, so it carries
+    the rules an agent needs.) Refused types include work order released / started /
+    completed / closed / priority updated and blocker created / escalated / updated;
+    operation ready / completed / hold / production reduced; NCR, CAR and FAI created and
+    NCR / FAI updated; purchase order sent / received and receipt inspected / corrected /
+    voided / inspection cleared; shipment shipped; downtime started / resolved; backflush
+    and material-allocation shortages / failures; CoC generation failures; and dispatch
+    order changes. The full list is ``SERVER_ONLY_EVENT_TYPES`` in this module.
 
-    ``occurred_at`` may be in the past; a future value is stored as the current time.
-    A ``work_order_id`` or ``operation_id`` from another company is 404. Events posted
-    here never send notifications.
+    ``occurred_at`` may be in the past (kept, normalized to UTC); a value later than the
+    server's clock is stored as the current time, and one outside the representable
+    range is 422. A ``work_order_id`` or ``operation_id`` from another company is 404.
     """
     if is_server_only_event_type(data.event_type):
+        # Leave a trace of the attempt: a refused post writes no row anywhere else.
+        logger.warning(
+            "operational event post refused (server-only event type): company_id=%s user_id=%s event_type=%r",
+            company_id,
+            current_user.id,
+            data.event_type,
+        )
         raise HTTPException(status_code=400, detail=server_only_event_type_detail(data.event_type))
-    occurred_at = clamp_occurred_at(data.occurred_at, datetime.now(timezone.utc))
+    try:
+        occurred_at = clamp_occurred_at(data.occurred_at, datetime.now(timezone.utc))
+    except OverflowError as exc:
+        raise HTTPException(status_code=422, detail="occurred_at is outside the supported date range") from exc
     try:
         event = OperationalEventService(db).emit(
             company_id=company_id,

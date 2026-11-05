@@ -258,6 +258,35 @@ class TestForgedPostsAreRefused:
         assert accepted.status_code == status.HTTP_200_OK, accepted.text
         assert accepted.json()["user_id"] == bot.id
 
+    def test_a_refusal_is_logged_with_who_and_what(self, client: TestClient, db_session: Session, caplog):
+        user = make_user(db_session, role=UserRole.VIEWER)
+        caplog.set_level("WARNING", logger="app.api.endpoints.operational_events")
+        resp = _post(client, user_headers(user), "ncr_created")
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
+        (record,) = [r for r in caplog.records if "operational event post refused" in r.getMessage()]
+        message = record.getMessage()
+        assert f"company_id={COMPANY_A}" in message
+        assert f"user_id={user.id}" in message
+        assert "event_type='ncr_created'" in message
+
+    def test_the_mcp_tool_description_carries_the_rules(self):
+        """The generated ``record_operational_event`` tool shows only the docstring's FIRST
+        paragraph (``mcp.catalog.describe_operation``), so the refusal, the clamp and the
+        no-notification rule must all live there -- and fit untruncated."""
+        from app.main import app as fastapi_app
+        from app.mcp.catalog import describe_operation
+
+        operation = fastapi_app.openapi()["paths"]["/api/v1/operational-events/"]["post"]
+        description = describe_operation("POST", "/api/v1/operational-events/", operation, "Operational Events")
+        assert "…" not in description
+        for phrase in (
+            "refused with 400",
+            "call the endpoint that performs the action",
+            "stored as now",
+            "never notify",
+        ):
+            assert phrase in description, description
+
     def test_the_dispatch_notice_keeps_its_board_hint_and_others_do_not(self):
         assert server_only_event_type_detail("dispatch_order_changed").endswith(
             "To change a machine's run order, use the Dispatch Board."
@@ -349,12 +378,36 @@ class TestOccurredAtClamp:
         served = datetime.fromisoformat(resp.json()["occurred_at"].replace("Z", "+00:00"))
         assert abs(served - datetime.now(timezone.utc)) < timedelta(minutes=1)
 
-    def test_clamp_helper(self):
+    def test_clamp_helper_returns_naive_utc_like_a_server_row(self):
+        """Naive UTC is the form ``OperationalEventService.emit`` stamps every server row
+        with, so a client row and a server row compare alike in every reader."""
         now = datetime(2026, 11, 5, 12, 0, tzinfo=timezone.utc)
+        naive_now = datetime(2026, 11, 5, 12, 0)
         assert clamp_occurred_at(None, now) is None
-        assert clamp_occurred_at(now + timedelta(seconds=1), now) == now
-        assert clamp_occurred_at(datetime(2026, 11, 5, 13, 0), now) == now  # naive is UTC
-        assert clamp_occurred_at(datetime(2026, 11, 5, 11, 0), now) == datetime(2026, 11, 5, 11, 0, tzinfo=timezone.utc)
+        assert clamp_occurred_at(now + timedelta(seconds=1), now) == naive_now
+        assert clamp_occurred_at(datetime(2026, 11, 5, 13, 0), now) == naive_now  # naive is read as UTC
+        assert clamp_occurred_at(datetime(2026, 11, 5, 11, 0), now) == datetime(2026, 11, 5, 11, 0)
+        eastern = timezone(timedelta(hours=-5))
+        assert clamp_occurred_at(datetime(2026, 11, 5, 6, 0, tzinfo=eastern), now) == datetime(2026, 11, 5, 11, 0)
+        # Far future never overflows -- it clamps.
+        assert (
+            clamp_occurred_at(datetime(9999, 12, 31, 23, 59, tzinfo=timezone(timedelta(hours=-12))), now) == naive_now
+        )
+        for value in (now + timedelta(seconds=1), datetime(2026, 1, 1, tzinfo=eastern), datetime(2026, 1, 1)):
+            assert clamp_occurred_at(value, now).tzinfo is None
+
+    def test_an_out_of_range_instant_is_422_not_500(self, client: TestClient, db_session: Session):
+        user = make_user(db_session)
+        resp = _post(client, user_headers(user), "agent_observation", occurred_at="0001-01-01T00:00:00+05:00")
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, resp.text
+        assert _rows(db_session) == []
+
+    def test_a_far_future_instant_with_an_offset_is_clamped(self, client: TestClient, db_session: Session):
+        user = make_user(db_session)
+        resp = _post(client, user_headers(user), "agent_observation", occurred_at="9999-12-31T23:59:59-12:00")
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        (row,) = _rows(db_session)
+        assert ensure_utc(row.occurred_at) <= datetime.now(timezone.utc)
 
 
 # --------------------------------------------------------------------------

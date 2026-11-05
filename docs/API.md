@@ -9169,7 +9169,8 @@ writes to the `audit_log` hash chain. Both routes scope to the caller's active c
 >   `ncr_updated` / `fai_updated` (quality rows on the work-order timeline). Listed on their own so a
 >   type dropped from the catalog stays refused while a reader still trusts it.
 >
-> Matched after trimming, case-insensitively. Nothing is written and no notification is queued. Exact
+> Matched after trimming, case-insensitively. Nothing is written and no notification is queued; the
+> attempt is logged at WARNING (`operational event post refused …` with company, user and type). Exact
 > detail: `Event type '{event_type}' is recorded by the system itself and cannot be posted. Perform the
 > action through its own screen or endpoint; the system records the event when it happens.` — for
 > `dispatch_order_changed` followed by ` To change a machine's run order, use the Dispatch Board.` To
@@ -9181,7 +9182,9 @@ writes to the `audit_log` hash chain. Both routes scope to the caller's active c
 > generated MCP tool `record_operational_event` is this route and carries the same refusal.
 >
 > **`occurred_at` is clamped.** A value later than the server's now is stored as now; a past value is
-> kept (normalized to UTC, same instant); omitted, the server stamps it. The readers that trust
+> kept (normalized to UTC, same instant, and stored naive like every server-written row); omitted, the
+> server stamps it. An instant outside the representable range (e.g. `0001-01-01T00:00:00+05:00`) is
+> **422**. The readers that trust
 > `occurred_at` also ignore rows dated after now, whoever wrote them — hold context, the AI work-order
 > context (the copilot's `recent_events`), the timeline's quality telemetry, adoption metrics and flow
 > metrics — and adoption metrics treats a non-object payload as an unreported source rather than

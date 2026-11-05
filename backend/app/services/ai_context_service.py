@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session, joinedload
@@ -50,13 +50,14 @@ class AIContextService:
         # Newest 20, bounded above by now: a row dated in the future would otherwise
         # hold a "most recent" slot until its date passed and push real events out of
         # the assistant's context. (POST /operational-events clamps occurred_at, so
-        # only a row written some other way can be future-dated.)
+        # only a row written some other way can be future-dated.) Naive UTC, the form
+        # OperationalEventService.emit writes.
         events = (
             self.db.query(OperationalEvent)
             .filter(
                 OperationalEvent.company_id == company_id,
                 OperationalEvent.work_order_id == work_order.id,
-                OperationalEvent.occurred_at <= datetime.now(timezone.utc),
+                OperationalEvent.occurred_at <= datetime.utcnow(),
             )
             .order_by(OperationalEvent.occurred_at.desc())
             .limit(20)

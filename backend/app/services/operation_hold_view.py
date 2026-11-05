@@ -41,7 +41,7 @@ how many operations are on it.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Dict, List, Optional, Sequence
 
 from sqlalchemy.orm import Session, joinedload
@@ -127,9 +127,11 @@ def _newest_hold_event_per_operation(
     until its date passed, beating every real hold record (and an open blocker) for
     the who/when. ``POST /operational-events`` refuses this type and clamps
     ``occurred_at``, so only a row written some other way can be future-dated -- the
-    bound makes the read correct regardless of who wrote it.
+    bound makes the read correct regardless of who wrote it. ``now`` is NAIVE UTC, the
+    form ``OperationalEventService.emit`` writes, so a just-written hold compares alike
+    to the bound whatever the database session's time zone.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.utcnow()
     rows: List[OperationalEvent] = (
         db.query(OperationalEvent)
         .options(joinedload(OperationalEvent.user))
