@@ -31,7 +31,9 @@
  * stale by construction — and every control is `aria-disabled` while it is.
  *
  * Freshness: polls every 10 s while the tab is visible, and on focus; a poll is
- * deferred while a drag or a write is under way and runs once it ends. Polls are
+ * deferred while a drag, a write or a plan dialog is under way and runs once it
+ * ends. A write also drops every read already in flight (a manual Refresh
+ * included), so nothing answered before the write can land after it. Polls are
  * silent. The aria-live status line speaks only for the user's own actions,
  * refusals and failures.
  *
@@ -101,6 +103,18 @@ interface OpsCtx {
   announce: string;
 }
 
+/**
+ * The "Set position… / Add at position…" dialog. Its default is FROZEN when it
+ * opens: the dialog re-seeds its field whenever `defaultValue` changes, so a
+ * default computed live from the plan length would overwrite what the planner
+ * typed the moment a read changed the plan. The 1..max range check at submit
+ * stays live.
+ */
+interface PositionDialog {
+  lane: DispatchLane;
+  defaultValue: string;
+}
+
 interface PendingFocus {
   laneId: number;
   /** Set for an operation-level control inside an expanded lane. */
@@ -145,7 +159,7 @@ export default function DispatchWorkOrderView({
   const [dragLaneId, setDragLaneId] = useState<number | null>(null);
   const [laneDropSlot, setLaneDropSlot] = useState<number | null>(null);
   const [opDragActive, setOpDragActive] = useState(false);
-  const [positionLane, setPositionLane] = useState<DispatchLane | null>(null);
+  const [positionDialog, setPositionDialog] = useState<PositionDialog | null>(null);
   const [addAllLanes, setAddAllLanes] = useState<DispatchLane[] | null>(null);
 
   const requestRef = useRef(0);
@@ -157,11 +171,15 @@ export default function DispatchWorkOrderView({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const planListRef = useRef<HTMLOListElement | null>(null);
 
-  const interacting = pendingAction != null || dragLaneId != null || opDragActive;
+  // An open plan dialog counts too: a poll that lands while the planner is
+  // typing a position (or reading the add-all confirmation) would change the
+  // plan the answer is about. It runs once the dialog closes.
+  const planDialogOpen = positionDialog != null || addAllLanes != null;
+  const interacting = pendingAction != null || dragLaneId != null || opDragActive || planDialogOpen;
   interactionRef.current = interacting;
   useEffect(() => {
     epochRef.current += 1;
-  }, [pendingAction, dragLaneId, opDragActive]);
+  }, [pendingAction, dragLaneId, opDragActive, planDialogOpen]);
 
   /** Resolves false when the read failed — callers must not report success then. */
   const load = useCallback(async (options?: { silent?: boolean; background?: boolean }): Promise<boolean> => {
@@ -175,11 +193,16 @@ export default function DispatchWorkOrderView({
     else setLoading(true);
     try {
       const data = await api.getDispatchWorkOrderBoard();
-      if (requestId !== requestRef.current) return false;
+      // A poll that raced a drag, a dialog or a write is DEFERRED, not just
+      // dropped — checked before the request id, because a write supersedes
+      // every read issued before it (`dropReadsInFlight`) and the poll must
+      // still run once the write settles: an operation-order answer replaces
+      // one lane only, so whatever else the poll would have shown is still owed.
       if (options?.background && (interactionRef.current || epoch !== epochRef.current)) {
         setUpdatesDeferred(true);
         return false;
       }
+      if (requestId !== requestRef.current) return false;
       if (!isLanesPayload(data)) throw new Error(OLD_API_DETAIL);
       setBoard(data);
       setError(null);
@@ -201,16 +224,31 @@ export default function DispatchWorkOrderView({
     }
   }, []);
 
-  /** A write answered with authoritative state: any read already in flight is older — drop it. */
-  const acceptServerBoard = useCallback((next: Board) => {
+  /**
+   * Any read already in flight was answered before this point — drop it. Called
+   * the moment a write applies its optimistic guess (so a Refresh issued just
+   * before the write can never land after it and put the old order back) and
+   * again when the write answers with authoritative state. The dropped read's
+   * own `finally` no longer matches the request id, so the spinners are
+   * cleared here instead.
+   */
+  const dropReadsInFlight = useCallback(() => {
     requestRef.current += 1;
     setLoading(false);
     setRefreshing(false);
-    setBoard(next);
-    setError(null);
-    setStaleNotice(null);
-    setLastRefreshed(new Date().toISOString());
   }, []);
+
+  /** A write answered with authoritative state: any read already in flight is older — drop it. */
+  const acceptServerBoard = useCallback(
+    (next: Board) => {
+      dropReadsInFlight();
+      setBoard(next);
+      setError(null);
+      setStaleNotice(null);
+      setLastRefreshed(new Date().toISOString());
+    },
+    [dropReadsInFlight]
+  );
 
   useEffect(() => {
     void load();
@@ -293,6 +331,7 @@ export default function DispatchWorkOrderView({
   // --- Plan write (OPTIMISTIC) ----------------------------------------------
   const { run: runPlan } = useOptimisticMutation<Board, PlanCtx>({
     applyOptimistic: ctx => {
+      dropReadsInFlight();
       setBoard(applyPlanToBoard(ctx.prevBoard, ctx.nextIds));
       setStatusMessage(ctx.announce);
     },
@@ -389,17 +428,27 @@ export default function DispatchWorkOrderView({
     );
   };
 
+  const openPositionDialog = (lane: DispatchLane) =>
+    setPositionDialog({
+      lane,
+      defaultValue: String(lane.dispatch_position != null ? lane.dispatch_position : planIds.length + 1),
+    });
+
+  /** Live: the highest position the lane can take in the plan as it is NOW. */
+  const positionMaxFor = (lane: DispatchLane) =>
+    planIds.includes(lane.work_order_id) ? planIds.length : planIds.length + 1;
+
   const submitPosition = (value: string) => {
-    const lane = positionLane;
+    const lane = positionDialog?.lane;
     if (!lane) return;
-    const planned = lane.dispatch_position != null;
-    const max = planned ? planIds.length : planIds.length + 1;
+    const planned = planIds.includes(lane.work_order_id);
+    const max = positionMaxFor(lane);
     const position = Number(value);
     if (!Number.isInteger(position) || position < 1 || position > max) {
       showToast('error', `Enter a whole number from 1 to ${max}.`);
       return;
     }
-    setPositionLane(null);
+    setPositionDialog(null);
     const next = moveIdToIndex(planIds, lane.work_order_id, position - 1);
     changePlan(
       next,
@@ -484,6 +533,7 @@ export default function DispatchWorkOrderView({
   // --- Operation order within one lane (OPTIMISTIC) ------------------------
   const { run: runOps } = useOptimisticMutation<DispatchLane, OpsCtx>({
     applyOptimistic: ctx => {
+      dropReadsInFlight();
       setBoard(previous => (previous ? replaceLane(previous, ctx.nextLane) : previous));
       setStatusMessage(ctx.announce);
     },
@@ -495,10 +545,14 @@ export default function DispatchWorkOrderView({
     reconcile: (result, ctx) => {
       if (opsSeqRef.current !== ctx.seq) return;
       // The response is that one lane, re-sorted by queue position; other
-      // lanes' RUN positions are unchanged by a block permutation.
-      if (isLanePayload(result, ctx.laneId))
+      // lanes' RUN positions are unchanged by a block permutation. It is
+      // authoritative, so a Refresh clicked WHILE the PUT was out (answered
+      // before the write committed, arriving after it) is dropped too — the
+      // same rule acceptServerBoard applies to the plan write.
+      if (isLanePayload(result, ctx.laneId)) {
+        dropReadsInFlight();
         setBoard(previous => (previous ? replaceLane(previous, result) : previous));
-      else void load({ silent: true });
+      } else void load({ silent: true });
     },
     onError: err => {
       const detail = dispatchErrorDetail(err, 'Failed to save the operation order.');
@@ -607,9 +661,17 @@ export default function DispatchWorkOrderView({
           setStatusMessage(message);
           return;
         }
+        // A move clears the operation's own machine rank. If its work order is in
+        // the plan (and not held) it stays inside that work order's plan block on
+        // the target, after the block's ranked operations; otherwise it joins the
+        // target's unranked work below the plan.
+        const inPlanBlock = lane.dispatch_position != null && lane.status !== 'on_hold';
+        const landing = inPlanBlock
+          ? `It runs within ${lane.work_order_number}'s plan block there, after that work order's ranked operations.`
+          : "It joins that machine's unranked work, after the plan.";
         const message =
           moved.length === 1
-            ? `${laneOperationLabel(moved[0])} of ${lane.work_order_number} moved to ${where}. It runs at the end of its work order's block there.`
+            ? `${laneOperationLabel(moved[0])} of ${lane.work_order_number} moved to ${where}. ${landing}`
             : `Moved ${moved.length} operations of ${lane.work_order_number} to ${where}.`;
         showToast('success', message);
         setStatusMessage(message);
@@ -676,7 +738,7 @@ export default function DispatchWorkOrderView({
         onMoveUp={moveLaneUp}
         onMoveDown={moveLaneDown}
         onMoveToTop={moveLaneToTop}
-        onSetPosition={setPositionLane}
+        onSetPosition={openPositionDialog}
         onRemove={removeLane}
         onAdd={addLane}
         onDragStart={handleLaneDragStart}
@@ -690,7 +752,8 @@ export default function DispatchWorkOrderView({
     );
   };
 
-  const positionMax = positionLane ? (positionLane.dispatch_position != null ? planIds.length : planIds.length + 1) : 1;
+  const positionLane = positionDialog?.lane ?? null;
+  const positionMax = positionLane ? positionMaxFor(positionLane) : 1;
 
   return (
     <div className="space-y-3" ref={containerRef}>
@@ -870,12 +933,10 @@ export default function DispatchWorkOrderView({
         }
         message={`Enter a position from 1 to ${positionMax}. The other work orders keep their order around it.`}
         label="Plan position"
-        defaultValue={
-          positionLane?.dispatch_position != null ? String(positionLane.dispatch_position) : String(positionMax)
-        }
+        defaultValue={positionDialog?.defaultValue ?? ''}
         submitLabel={positionLane?.dispatch_position != null ? 'Move' : 'Add'}
         onSubmit={submitPosition}
-        onCancel={() => setPositionLane(null)}
+        onCancel={() => setPositionDialog(null)}
       />
 
       <ConfirmDialog

@@ -15,8 +15,17 @@ This file covers the MIGRATION, in the layers the suite already uses (â€¦068, â€
    recording stand-in for ``op`` with every guard stubbed both ways (088's idiom), so
    "each object is guarded independently", "the bootstrapped database is a clean no-op",
    "an INVALID Postgres index is rebuilt" and "the downgrade drops indexes before the
-   column" are proven by execution, not by grepping source.
-3. **Source invariants** (unit) -- pure DDL, no table created (so no RLS statement), no
+   column" are proven by execution, not by grepping source. The recorder also marks the
+   autocommit block, so "the events index is built CONCURRENTLY only after the
+   work_orders DDL has been committed" is proven the same way.
+2b. **The SQL PostgreSQL actually receives** (unit) -- the real alembic ``Operations`` in
+   offline (``as_sql``) mode renders ``upgrade()`` / ``downgrade()`` for the postgresql
+   dialect, transaction boundaries included. That pins the lock behaviour the runbook
+   promises: ``ADD COLUMN`` (ACCESS EXCLUSIVE on ``work_orders``) and the small
+   work-order index run inside the transaction, a COMMIT releases that lock, and only
+   then does ``CREATE INDEX CONCURRENTLY IF NOT EXISTS`` run, outside any transaction.
+3. **Source invariants** (unit) -- pure DDL (the one executed statement is the
+   transaction-local ``lock_timeout``), no table created (so no RLS statement), no
    ``audit_log`` contact.
 4. **Model / migration lock-step** (unit) -- the models declare exactly the objects the
    migration builds (the stamped-over hazard), asserted by DIALECT-COMPILING the DDL for
@@ -36,19 +45,28 @@ THE THINGS A FUTURE READER WILL TRY TO "FIX"
   pre-existing work order; inventing ranks would assert a dispatch decision nobody made.
 * **``ix_operational_events_company_entity`` is not dropped** even though the new index
   has it as a prefix. Dropping an index is its own decision, not a side effect.
+* **The events index is built LAST, after a COMMIT.** Built first, inside the
+  transaction, it holds SHARE on ``operational_events`` while ``ADD COLUMN`` waits for
+  requests that read ``work_orders`` and then emit an event -- requests that are waiting
+  on that SHARE lock: a deadlock the migration loses. Built inside the transaction after
+  ``ADD COLUMN``, it keeps ``work_orders`` (reads included) locked for the whole build.
 """
 
 import importlib.util
+import io
 import os
 import subprocess
 import sys
 from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import List
 
 import pytest
 import sqlalchemy as sa
 
 from alembic.config import Config
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from alembic.script import ScriptDirectory
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -67,6 +85,14 @@ EVENTS_TABLE = "operational_events"
 EVENTS_INDEX = "ix_operational_events_company_entity_time"
 EVENTS_INDEX_COLUMNS = ["company_id", "entity_type", "entity_id", "occurred_at"]
 EVENTS_PREFIX_INDEX = "ix_operational_events_company_entity"
+
+LOCK_TIMEOUT = "SET LOCAL lock_timeout = '5s'"
+RESET_LOCK_TIMEOUT = "SET LOCAL lock_timeout = DEFAULT"
+PLAIN_CREATE = {"unique": False}
+CONCURRENT_CREATE = {"unique": False, "postgresql_concurrently": True, "if_not_exists": True}
+CONCURRENT_DROP = {"table_name": EVENTS_TABLE, "postgresql_concurrently": True, "if_exists": True}
+BLOCK_BEGIN = ("autocommit_block", "begin")
+BLOCK_END = ("autocommit_block", "end")
 
 
 def _script_directory() -> ScriptDirectory:
@@ -106,11 +132,17 @@ def _body() -> str:
 # ---------------------------------------------------------------------------
 
 
+_DDL_KINDS = ("add_column", "drop_column", "create_index", "drop_index", "batch_drop_column")
+
+
 class _RecordedDDL:
     """A stand-in for alembic's ``op`` that records calls instead of executing them.
 
     ``index_validity`` is what the fake Postgres catalog answers for the
-    ``pg_index.indisvalid`` probe, per index name (absent key = valid).
+    ``pg_index.indisvalid`` probe, per index name (absent key = valid). Entering and
+    leaving ``op.get_context().autocommit_block()`` is recorded as BLOCK_BEGIN / BLOCK_END,
+    so a call's position relative to the block shows whether it ran inside the migration
+    transaction or after its COMMIT.
     """
 
     def __init__(self, dialect_name: str, index_validity: dict = None):
@@ -127,6 +159,19 @@ class _RecordedDDL:
 
         return SimpleNamespace(dialect=SimpleNamespace(name=self.dialect_name), execute=execute)
 
+    def get_context(self):
+        recorder = self
+
+        @contextmanager
+        def autocommit_block():
+            if recorder.dialect_name != "postgresql":
+                raise AssertionError("migration opened an autocommit_block on a non-Postgres dialect")
+            recorder.calls.append(BLOCK_BEGIN)
+            yield
+            recorder.calls.append(BLOCK_END)
+
+        return SimpleNamespace(autocommit_block=autocommit_block)
+
     def add_column(self, table_name, column, **kwargs):
         self.calls.append(("add_column", table_name, column))
 
@@ -137,7 +182,7 @@ class _RecordedDDL:
         self.calls.append(("create_index", index_name, table_name, list(columns), kwargs))
 
     def drop_index(self, index_name, **kwargs):
-        self.calls.append(("drop_index", index_name, kwargs.get("table_name")))
+        self.calls.append(("drop_index", index_name, kwargs.get("table_name"), kwargs))
 
     @contextmanager
     def batch_alter_table(self, table_name, **kwargs):
@@ -149,7 +194,7 @@ class _RecordedDDL:
 
         yield _Batch()
 
-    def execute(self, statement):  # pragma: no cover - must never be reached
+    def execute(self, statement):
         self.calls.append(("execute", str(statement)))
 
     def bulk_insert(self, *args, **kwargs):  # pragma: no cover - must never be reached
@@ -158,6 +203,16 @@ class _RecordedDDL:
     @property
     def kinds(self) -> list:
         return [call[0] for call in self.calls]
+
+    @property
+    def sequence(self) -> list:
+        """``(kind, subject)`` for every call, markers and executed SQL included."""
+        return [(call[0], call[1]) for call in self.calls]
+
+    @property
+    def ddl(self) -> list:
+        """``(kind, subject)`` for the schema changes only -- what a database ends up with."""
+        return [(call[0], call[1]) for call in self.calls if call[0] in _DDL_KINDS]
 
 
 def _record(
@@ -221,6 +276,8 @@ def test_module_loads_and_names_exactly_the_objects_it_owns():
         (WO_TABLE, WO_INDEX, WO_INDEX_COLUMNS),
         (EVENTS_TABLE, EVENTS_INDEX, EVENTS_INDEX_COLUMNS),
     ]
+    assert module.LOCK_TIMEOUT_SQL == LOCK_TIMEOUT
+    assert module.RESET_LOCK_TIMEOUT_SQL == RESET_LOCK_TIMEOUT
 
 
 # ---------------------------------------------------------------------------
@@ -233,52 +290,138 @@ def test_module_loads_and_names_exactly_the_objects_it_owns():
 def test_a_virgin_database_gets_the_column_then_both_indexes(dialect: str):
     recorder = _record("upgrade", dialect=dialect, has_column=False, has_indexes=False)
 
-    assert recorder.kinds == ["add_column", "create_index", "create_index"]
-    _kind, table, column = recorder.calls[0]
+    assert recorder.ddl == [("add_column", WO_TABLE), ("create_index", WO_INDEX), ("create_index", EVENTS_INDEX)]
+    [(_kind, table, column)] = [call for call in recorder.calls if call[0] == "add_column"]
     assert table == WO_TABLE
     assert column.name == COLUMN
     assert isinstance(column.type, sa.Integer)
     assert column.nullable is True
     assert column.server_default is None and column.default is None, "no default, no backfill"
 
-    built = {call[1]: (call[2], call[3], call[4]) for call in recorder.calls if call[0] == "create_index"}
+    built = {call[1]: (call[2], call[3]) for call in recorder.calls if call[0] == "create_index"}
     assert built == {
-        WO_INDEX: (WO_TABLE, WO_INDEX_COLUMNS, {"unique": False}),
-        EVENTS_INDEX: (EVENTS_TABLE, EVENTS_INDEX_COLUMNS, {"unique": False}),
+        WO_INDEX: (WO_TABLE, WO_INDEX_COLUMNS),
+        EVENTS_INDEX: (EVENTS_TABLE, EVENTS_INDEX_COLUMNS),
     }
-    # The work-order index names the new column, so it is built AFTER it.
-    assert recorder.calls[1][1] == WO_INDEX
+    for call in recorder.calls:
+        if call[0] == "create_index":
+            assert call[4]["unique"] is False
+
+
+@pytest.mark.unit
+def test_postgres_commits_the_work_orders_ddl_before_building_the_events_index_concurrently():
+    """The PG-2 fix. ADD COLUMN takes ACCESS EXCLUSIVE on work_orders -- reads included --
+    until the migration transaction commits. So the column and the small work-order index
+    run inside the transaction (under the local lock_timeout), the autocommit block COMMITS
+    it, and only then is the events index built CONCURRENTLY: a build that blocks neither
+    work_orders reads nor operational_events writes, however large that table has grown."""
+    recorder = _record("upgrade", dialect="postgresql", has_column=False, has_indexes=False)
+
+    assert recorder.sequence == [
+        ("execute", LOCK_TIMEOUT),
+        ("add_column", WO_TABLE),
+        ("create_index", WO_INDEX),
+        ("execute", RESET_LOCK_TIMEOUT),
+        BLOCK_BEGIN,
+        ("create_index", EVENTS_INDEX),
+        BLOCK_END,
+    ]
+    wo_create, events_create = [call for call in recorder.calls if call[0] == "create_index"]
+    # Plain, in the transaction: work_orders is already exclusively locked by ADD COLUMN.
+    assert wo_create[4] == PLAIN_CREATE
+    assert events_create[4] == CONCURRENT_CREATE
+
+
+@pytest.mark.unit
+def test_sqlite_builds_both_indexes_plainly_and_never_opens_an_autocommit_block():
+    """CONCURRENTLY and lock_timeout are PostgreSQL features. The recorder raises if the
+    migration opens an autocommit block on SQLite; nothing is executed either."""
+    recorder = _record("upgrade", dialect="sqlite", has_column=False, has_indexes=False)
+    assert "execute" not in recorder.kinds
+    assert BLOCK_BEGIN not in recorder.sequence
+    assert [call[4] for call in recorder.calls if call[0] == "create_index"] == [PLAIN_CREATE, PLAIN_CREATE]
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("dialect", ["postgresql", "sqlite"])
 def test_the_bootstrapped_database_is_a_clean_no_op(dialect: str):
-    """create_all already built all three objects (valid): every guard fires."""
+    """create_all already built all three objects (valid): every guard fires -- no DDL, no
+    lock_timeout, and no autocommit block (so no early COMMIT on the bootstrap path)."""
     recorder = _record("upgrade", dialect=dialect, has_column=True, has_indexes=True)
     assert recorder.calls == []
 
 
 @pytest.mark.unit
-def test_each_object_is_guarded_independently():
+@pytest.mark.parametrize("dialect", ["postgresql", "sqlite"])
+def test_each_object_is_guarded_independently(dialect: str):
     """A hand-patched database holding SOME of the objects gets exactly the missing ones."""
-    only_column = _record("upgrade", has_column=True, has_indexes=False)
-    assert only_column.kinds == ["create_index", "create_index"]
+    only_column = _record("upgrade", dialect=dialect, has_column=True, has_indexes=False)
+    assert only_column.ddl == [("create_index", WO_INDEX), ("create_index", EVENTS_INDEX)]
 
-    only_events_index = _record("upgrade", has_column=True, has_indexes={EVENTS_INDEX})
-    assert [(c[0], c[1]) for c in only_events_index.calls] == [("create_index", WO_INDEX)]
+    only_events_index = _record("upgrade", dialect=dialect, has_column=True, has_indexes={EVENTS_INDEX})
+    assert only_events_index.ddl == [("create_index", WO_INDEX)]
 
-    only_wo_index = _record("upgrade", has_column=True, has_indexes={WO_INDEX})
-    assert [(c[0], c[1]) for c in only_wo_index.calls] == [("create_index", EVENTS_INDEX)]
+    only_wo_index = _record("upgrade", dialect=dialect, has_column=True, has_indexes={WO_INDEX})
+    assert only_wo_index.ddl == [("create_index", EVENTS_INDEX)]
 
-    indexes_without_column = _record("upgrade", has_column=False, has_indexes=True)
-    assert indexes_without_column.kinds == ["add_column"]
+    indexes_without_column = _record("upgrade", dialect=dialect, has_column=False, has_indexes=True)
+    assert indexes_without_column.ddl == [("add_column", WO_TABLE)]
 
 
 @pytest.mark.unit
-def test_an_invalid_postgres_index_is_dropped_and_rebuilt():
-    """An interrupted out-of-band ``CREATE INDEX CONCURRENTLY`` leaves an INVALID index the
-    inspector still reports. A name-only guard would skip it forever; the validity probe
-    rebuilds it -- and leaves the VALID sibling alone."""
+def test_the_lock_timeout_is_set_only_when_work_orders_ddl_runs():
+    """It bounds the wait for the work_orders locks, so it is set exactly when the
+    transaction is about to take one -- and never for an events-index-only run, whose
+    concurrent build must be free to wait for older transactions."""
+    column_missing = _record("upgrade", has_column=False, has_indexes=False)
+    assert column_missing.sequence[0] == ("execute", LOCK_TIMEOUT)
+
+    wo_index_missing = _record("upgrade", has_column=True, has_indexes={EVENTS_INDEX})
+    assert wo_index_missing.sequence == [
+        ("execute", LOCK_TIMEOUT),
+        ("create_index", WO_INDEX),
+        ("execute", RESET_LOCK_TIMEOUT),
+    ]
+
+    events_index_missing = _record("upgrade", has_column=True, has_indexes={WO_INDEX})
+    assert events_index_missing.sequence == [BLOCK_BEGIN, ("create_index", EVENTS_INDEX), BLOCK_END]
+
+
+@pytest.mark.unit
+def test_the_lock_timeout_is_handed_back_when_no_commit_follows():
+    """Latent-hazard pin. When the events index is already valid (e.g. pre-built out of
+    band, which the runbook still allows) and only the column is missing, 114 opens no
+    autocommit block, so nothing COMMITs inside it and the migration transaction carries
+    on into any later revision in the same ``alembic upgrade head`` run. The 5 s bound
+    is this revision's alone: it must be reset before upgrade() returns, as the LAST
+    statement, after every work_orders statement."""
+    recorder = _record("upgrade", dialect="postgresql", has_column=False, has_indexes={WO_INDEX, EVENTS_INDEX})
+    assert recorder.sequence == [
+        ("execute", LOCK_TIMEOUT),
+        ("add_column", WO_TABLE),
+        ("execute", RESET_LOCK_TIMEOUT),
+    ]
+    statements = _render(
+        "upgrade",
+        dialect="postgresql",
+        has_column=False,
+        index_states={WO_INDEX: "valid", EVENTS_INDEX: "valid"},
+    )
+    assert statements == [
+        "BEGIN",
+        LOCK_TIMEOUT,
+        f"ALTER TABLE {WO_TABLE} ADD COLUMN {COLUMN} INTEGER",
+        RESET_LOCK_TIMEOUT,
+        "COMMIT",
+    ]
+
+
+@pytest.mark.unit
+def test_an_invalid_postgres_events_index_is_dropped_and_rebuilt_concurrently():
+    """An interrupted ``CREATE INDEX CONCURRENTLY`` leaves an INVALID index the inspector
+    still reports. A name-only guard (or ``IF NOT EXISTS``) would skip it forever; the
+    validity probe drops it CONCURRENTLY and rebuilds it CONCURRENTLY, outside the
+    transaction -- and leaves the VALID sibling alone."""
     recorder = _record(
         "upgrade",
         dialect="postgresql",
@@ -286,11 +429,16 @@ def test_an_invalid_postgres_index_is_dropped_and_rebuilt():
         has_indexes=True,
         index_validity={EVENTS_INDEX: False},
     )
-    assert [(c[0], c[1]) for c in recorder.calls] == [
+    assert recorder.sequence == [
+        BLOCK_BEGIN,
         ("drop_index", EVENTS_INDEX),
         ("create_index", EVENTS_INDEX),
+        BLOCK_END,
     ]
-    assert recorder.calls[0][2] == EVENTS_TABLE
+    drop, create = recorder.calls[1], recorder.calls[2]
+    assert drop[2] == EVENTS_TABLE
+    assert drop[3] == CONCURRENT_DROP
+    assert create[4] == CONCURRENT_CREATE
     # The probe is a catalog READ, scoped to the index AND its table.
     assert recorder.probes, "the validity probe must run on PostgreSQL"
     for sql, params in recorder.probes:
@@ -306,6 +454,27 @@ def test_an_invalid_postgres_index_is_dropped_and_rebuilt():
 
 
 @pytest.mark.unit
+def test_an_invalid_postgres_work_order_index_is_rebuilt_inside_the_transaction():
+    """The small work-order index is built in the transaction, so an INVALID leftover of it
+    (only an out-of-band concurrent build could leave one) is rebuilt there too."""
+    recorder = _record(
+        "upgrade",
+        dialect="postgresql",
+        has_column=True,
+        has_indexes=True,
+        index_validity={WO_INDEX: False},
+    )
+    assert recorder.sequence == [
+        ("execute", LOCK_TIMEOUT),
+        ("drop_index", WO_INDEX),
+        ("create_index", WO_INDEX),
+        ("execute", RESET_LOCK_TIMEOUT),
+    ]
+    assert recorder.calls[1][3] == {"table_name": WO_TABLE}
+    assert recorder.calls[2][4] == PLAIN_CREATE
+
+
+@pytest.mark.unit
 def test_the_validity_probe_never_runs_on_sqlite():
     recorder = _record("upgrade", dialect="sqlite", has_column=True, has_indexes=True)
     assert recorder.probes == []
@@ -313,27 +482,35 @@ def test_the_validity_probe_never_runs_on_sqlite():
 
 
 @pytest.mark.unit
-def test_postgres_downgrade_drops_both_indexes_then_the_column():
+def test_postgres_downgrade_drops_the_events_index_concurrently_then_the_work_order_objects():
+    """Mirror of the upgrade: the events index goes CONCURRENTLY, in an autocommit block,
+    BEFORE this revision takes any lock on work_orders; then the work-order index and the
+    column, under the same local lock_timeout."""
     recorder = _record("downgrade", dialect="postgresql", has_column=True, has_indexes=True)
-    assert [(c[0], c[1]) for c in recorder.calls] == [
-        ("drop_index", WO_INDEX),
+    assert recorder.sequence == [
+        BLOCK_BEGIN,
         ("drop_index", EVENTS_INDEX),
+        BLOCK_END,
+        ("execute", LOCK_TIMEOUT),
+        ("drop_index", WO_INDEX),
         ("drop_column", WO_TABLE),
+        ("execute", RESET_LOCK_TIMEOUT),
     ]
-    assert recorder.calls[0][2] == WO_TABLE
-    assert recorder.calls[1][2] == EVENTS_TABLE
-    assert recorder.calls[2][2] == COLUMN
+    assert recorder.calls[1][3] == CONCURRENT_DROP
+    assert recorder.calls[4][3] == {"table_name": WO_TABLE}
+    assert recorder.calls[5][2] == COLUMN
 
 
 @pytest.mark.unit
 def test_sqlite_downgrade_drops_the_column_in_batch_mode():
     """Batch mode recreates the table without the column (precedent 063/064/065/083)."""
     recorder = _record("downgrade", dialect="sqlite", has_column=True, has_indexes=True)
-    assert [(c[0], c[1]) for c in recorder.calls] == [
-        ("drop_index", WO_INDEX),
+    assert recorder.sequence == [
         ("drop_index", EVENTS_INDEX),
+        ("drop_index", WO_INDEX),
         ("batch_drop_column", WO_TABLE),
     ]
+    assert recorder.calls[0][3] == {"table_name": EVENTS_TABLE}
     assert recorder.calls[2][2] == COLUMN
 
 
@@ -352,6 +529,123 @@ def test_downgrade_is_not_a_stub():
 
 
 # ---------------------------------------------------------------------------
+# 2b. The SQL PostgreSQL actually receives (alembic offline rendering)
+# ---------------------------------------------------------------------------
+
+
+def _render(function_name: str, *, dialect: str, has_column: bool, index_states: dict) -> List[str]:
+    """Render ``upgrade()`` / ``downgrade()`` through alembic's REAL ``Operations`` in offline
+    (``as_sql``) mode, wrapped in the one transaction ``alembic/env.py`` opens.
+
+    Offline mode emits the ``BEGIN`` / ``COMMIT`` an autocommit block issues on a
+    transactional-DDL dialect, so the rendering shows exactly which statements run while
+    the migration transaction (and every lock it took) is still open. Only the catalog
+    guards are stubbed: there is no database to inspect.
+    """
+    module = _load_module()
+    buffer = io.StringIO()
+    context = MigrationContext.configure(dialect_name=dialect, opts={"as_sql": True, "output_buffer": buffer})
+    module.op = Operations(context)
+    module._has_column = lambda _table, _column: has_column
+    module._index_state = lambda _table, index: index_states.get(index, "absent")
+    module._has_index = lambda _table, index: index_states.get(index, "absent") != "absent"
+    with context.begin_transaction():
+        getattr(module, function_name)()
+    return [" ".join(statement.split()) for statement in buffer.getvalue().split(";") if statement.strip()]
+
+
+def _in_transaction(statements: List[str]) -> List[bool]:
+    """For each statement, whether a transaction is open when it runs."""
+    flags, open_ = [], False
+    for statement in statements:
+        if statement == "BEGIN":
+            open_ = True
+        elif statement == "COMMIT":
+            open_ = False
+        flags.append(open_)
+    return flags
+
+
+_EVENTS_BUILD = (
+    f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {EVENTS_INDEX} " f"ON {EVENTS_TABLE} ({', '.join(EVENTS_INDEX_COLUMNS)})"
+)
+
+
+@pytest.mark.unit
+def test_postgres_upgrade_sql_releases_work_orders_before_the_concurrent_build():
+    statements = _render("upgrade", dialect="postgresql", has_column=False, index_states={})
+    assert statements == [
+        "BEGIN",
+        LOCK_TIMEOUT,
+        f"ALTER TABLE {WO_TABLE} ADD COLUMN {COLUMN} INTEGER",
+        f"CREATE INDEX {WO_INDEX} ON {WO_TABLE} (company_id, dispatch_rank)",
+        RESET_LOCK_TIMEOUT,
+        "COMMIT",
+        _EVENTS_BUILD,
+        "BEGIN",
+        "COMMIT",
+    ]
+    in_transaction = dict(zip(statements, _in_transaction(statements)))
+    # Every work_orders statement runs inside the migration transaction, and the
+    # concurrent build runs outside ANY transaction -- after the COMMIT that released the
+    # ACCESS EXCLUSIVE lock ADD COLUMN took.
+    for statement in statements:
+        if WO_TABLE in statement:
+            assert in_transaction[statement] is True, statement
+    assert in_transaction[_EVENTS_BUILD] is False
+    assert statements.index("COMMIT") < statements.index(_EVENTS_BUILD)
+
+
+@pytest.mark.unit
+def test_postgres_upgrade_sql_rebuilds_an_invalid_events_index_concurrently():
+    statements = _render(
+        "upgrade",
+        dialect="postgresql",
+        has_column=True,
+        index_states={WO_INDEX: "valid", EVENTS_INDEX: "invalid"},
+    )
+    assert statements == [
+        "BEGIN",
+        "COMMIT",
+        f"DROP INDEX CONCURRENTLY IF EXISTS {EVENTS_INDEX}",
+        _EVENTS_BUILD,
+        "BEGIN",
+        "COMMIT",
+    ]
+
+
+@pytest.mark.unit
+def test_postgres_downgrade_sql_drops_the_events_index_before_locking_work_orders():
+    statements = _render(
+        "downgrade",
+        dialect="postgresql",
+        has_column=True,
+        index_states={WO_INDEX: "valid", EVENTS_INDEX: "valid"},
+    )
+    assert statements == [
+        "BEGIN",
+        "COMMIT",
+        f"DROP INDEX CONCURRENTLY IF EXISTS {EVENTS_INDEX}",
+        "BEGIN",
+        LOCK_TIMEOUT,
+        f"DROP INDEX {WO_INDEX}",
+        f"ALTER TABLE {WO_TABLE} DROP COLUMN {COLUMN}",
+        RESET_LOCK_TIMEOUT,
+        "COMMIT",
+    ]
+
+
+@pytest.mark.unit
+def test_sqlite_upgrade_sql_is_plain_ddl():
+    statements = _render("upgrade", dialect="sqlite", has_column=False, index_states={})
+    assert statements == [
+        f"ALTER TABLE {WO_TABLE} ADD COLUMN {COLUMN} INTEGER",
+        f"CREATE INDEX {WO_INDEX} ON {WO_TABLE} (company_id, dispatch_rank)",
+        f"CREATE INDEX {EVENTS_INDEX} ON {EVENTS_TABLE} ({', '.join(EVENTS_INDEX_COLUMNS)})",
+    ]
+
+
+# ---------------------------------------------------------------------------
 # 3. Source invariants
 # ---------------------------------------------------------------------------
 
@@ -361,11 +655,48 @@ def test_pure_ddl_no_backfill_and_no_data_statement():
     """Every pre-existing work order is legitimately NULL (not in the plan), so the
     migration emits no data statement at all -- which also makes it structurally
     incapable of touching the tamper-evident audit_log hash chain. The one ``sa.text``
-    is the read-only ``pg_index`` validity probe, asserted above."""
+    is the read-only ``pg_index`` validity probe, asserted above, and the only executed
+    statements are the transaction-local ``lock_timeout`` and its reset."""
     body = _body()
-    for forbidden in ("op.bulk_insert", "op.execute", "conn.execute", "UPDATE ", "INSERT ", "DELETE "):
+    for forbidden in ("op.bulk_insert", "conn.execute", "UPDATE ", "INSERT ", "DELETE "):
         assert forbidden not in body, f"114 must be pure DDL; found {forbidden!r}"
+    assert body.count("op.execute(LOCK_TIMEOUT_SQL)") == body.count("op.execute(RESET_LOCK_TIMEOUT_SQL)") == 2
+    assert body.count("op.execute(") == 4
     assert "audit_log" not in body
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("function_name", ["upgrade", "downgrade"])
+@pytest.mark.parametrize("has_column", [True, False])
+@pytest.mark.parametrize("has_indexes", [True, False])
+def test_the_only_statement_ever_executed_is_the_local_lock_timeout(function_name, has_column, has_indexes):
+    """LOCAL, never a session-level ``SET``: a session setting would outlive the COMMIT and
+    reach the concurrent build -- and every later revision in the same run. Whenever it is
+    set it is also reset, after it and after every work_orders statement."""
+    recorder = _record(function_name, has_column=has_column, has_indexes=has_indexes)
+    executed = [call[1] for call in recorder.calls if call[0] == "execute"]
+    assert executed in ([], [LOCK_TIMEOUT, RESET_LOCK_TIMEOUT])
+    if executed:
+        sequence = recorder.sequence
+        reset_at = sequence.index(("execute", RESET_LOCK_TIMEOUT))
+        assert sequence.index(("execute", LOCK_TIMEOUT)) < reset_at
+        for position, step in enumerate(sequence):
+            if step[0] in ("add_column", "drop_column") or (step[0].endswith("_index") and step[1] == WO_INDEX):
+                assert position < reset_at, step
+
+
+@pytest.mark.unit
+def test_postgres_builds_and_drops_the_events_index_concurrently_inside_autocommit_blocks():
+    """The 042/078/079 posture, at source level as those tests check it."""
+    body = _body()
+    upgrade = body[body.index("def upgrade") : body.index("def downgrade")]
+    downgrade = body[body.index("def downgrade") :]
+    assert "autocommit_block()" in upgrade
+    assert "autocommit_block()" in downgrade
+    assert "postgresql_concurrently=True" in downgrade, "rollback must drop CONCURRENTLY too"
+    concurrent = body[body.index("def _ensure_index_concurrently") : body.index("def upgrade")]
+    assert "postgresql_concurrently=True, if_not_exists=True" in concurrent
+    assert "postgresql_concurrently=True, if_exists=True" in concurrent
 
 
 @pytest.mark.unit

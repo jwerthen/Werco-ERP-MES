@@ -164,21 +164,34 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   touches the column, so the migration may land ahead of it. The boot path already gives this
   order: the new image migrates before it serves. The worker loads the same models, so deploy it
   after the API, which is the order CI already uses.
-- **The `operational_events` index build blocks event writes while it runs.** A plain
-  `CREATE INDEX` takes a SHARE lock. Reads continue, but every operational-event emit (each
-  operation start, completion and READY flip) waits until the build finishes. At this shop's
-  volume that should take well under a few seconds. The `work_orders` index is small and costs
-  nothing noticeable. To deploy mid-shift, or once the events table has grown, build the index out
-  of band first; the migration's guard then skips it:
+- **What the migration locks, and for how long.** Alembic runs every pending revision in one
+  transaction, and PostgreSQL holds each lock until that transaction commits. 114 splits its work
+  around a commit so the expensive step locks nothing:
+  - Inside the transaction, `ADD COLUMN` takes an ACCESS EXCLUSIVE lock on `work_orders`. That
+    lock blocks reads as well as writes, but it covers only the `ADD COLUMN` and the small
+    `ix_work_orders_company_dispatch_rank` build, both quick. The migration first runs
+    `SET LOCAL lock_timeout = '5s'`. If a long transaction is holding `work_orders`, the
+    migration fails after 5 seconds instead of making every `work_orders` query queue behind it.
+    The new container then fails to start, the old deployment keeps serving, and redeploying is
+    safe.
+  - The migration then commits, which releases the `work_orders` lock. It builds
+    `ix_operational_events_company_entity_time` with `CREATE INDEX CONCURRENTLY IF NOT EXISTS`,
+    outside any transaction. A concurrent build blocks neither reads nor operational-event writes,
+    however large the table has grown. It does wait for transactions that were already running
+    to finish, so a long-running transaction delays the boot rather than the floor.
+  - An interrupted concurrent build (a failed statement, or the boot killed by its health-check
+    timeout) leaves an INVALID index. 114 is recorded as applied only after the build succeeds, so
+    the next boot runs it again: the column and the `work_orders` index are already there and are
+    skipped, and the migration checks `pg_index.indisvalid`, drops the INVALID index concurrently
+    and builds it again.
+  - Building the events index out of band first is no longer needed, even mid-shift. It is still
+    harmless, because the migration skips a valid index:
 
-  ```sql
-  -- autocommit: CONCURRENTLY cannot run inside a transaction block
-  CREATE INDEX CONCURRENTLY ix_operational_events_company_entity_time
-      ON operational_events (company_id, entity_type, entity_id, occurred_at);
-  ```
-
-  An interrupted concurrent build leaves an INVALID index behind. The migration checks
-  `pg_index.indisvalid`, then drops that index and builds it again.
+    ```sql
+    -- optional; autocommit: CONCURRENTLY cannot run inside a transaction block
+    CREATE INDEX CONCURRENTLY ix_operational_events_company_entity_time
+        ON operational_events (company_id, entity_type, entity_id, occurred_at);
+    ```
 - **Old and new versions overlap briefly.** The Vercel frontend can reach the old API for a short
   time after merge. During that window:
   - the Dispatch Board's Work orders view shows a retryable error, because the old API returns 404

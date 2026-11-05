@@ -27,7 +27,12 @@
  *  - filters narrow lanes without renumbering them, and a move made while
  *    filtered lands next to the visible neighbour;
  *  - a 404 from an older API (deploy window) is a retryable ErrorState;
- *  - a background poll replaces the board WITHOUT announcing anything.
+ *  - a background poll replaces the board WITHOUT announcing anything;
+ *  - nothing read before a write lands after it: a poll in flight when a plan or
+ *    operation write starts is DEFERRED (and runs once the write settles), a
+ *    manual Refresh in flight is dropped, and neither undoes the move;
+ *  - "Set / Add at position…" keeps what the planner typed: its default is
+ *    frozen at open, and polls wait while a plan dialog is open.
  */
 
 import React from 'react';
@@ -758,6 +763,97 @@ describe('DispatchWorkOrderView — reordering the plan (optimistic)', () => {
     );
   });
 
+  it('Add at position… keeps what the planner typed: a poll while the dialog is open waits until it closes', async () => {
+    const user = userEvent.setup();
+    let resolvePut: (value: DispatchWorkOrderBoardResponse) => void = () => undefined;
+    mockApi.setDispatchWorkOrderOrder.mockReturnValue(
+      new Promise(resolve => {
+        resolvePut = resolve;
+      })
+    );
+    renderPage();
+    await waitForBoard();
+
+    await user.click(screen.getByRole('button', { name: 'Add WO-20261104-001 to plan at a position' }));
+    const field = screen.getByLabelText(/Plan position/);
+    expect(field).toHaveValue('4');
+    await user.clear(field);
+    await user.type(field, '2');
+
+    // WO-20261101-007 completes on the floor: the next poll would shrink the plan
+    // (and with it the dialog's default) under the planner's typing.
+    mockApi.getDispatchWorkOrderBoard.mockResolvedValue(makeBoard([LANE_A(), LANE_B(), LANE_D(), LANE_E(), LANE_F()]));
+    fireEvent(window, new Event('focus'));
+    await act(async () => {});
+
+    expect(mockApi.getDispatchWorkOrderBoard).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('dispatch-lanes-freshness')).toHaveTextContent('Updates deferred');
+    expect(field).toHaveValue('2');
+
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+    expect(mockApi.setDispatchWorkOrderOrder).toHaveBeenCalledWith([412, 431, 398, 405], [412, 398, 405]);
+
+    // The deferred poll runs once the write it waited for has settled.
+    await act(async () => {
+      resolvePut(makeBoard([LANE_A(), { ...LANE_D(), dispatch_position: 2 }, { ...LANE_B(), dispatch_position: 3 }]));
+    });
+    await waitFor(() => expect(mockApi.getDispatchWorkOrderBoard).toHaveBeenCalledTimes(2));
+  });
+
+  it('the add-all confirmation also holds polls back, and the deferred poll runs once it is cancelled', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitForBoard();
+
+    await user.click(screen.getByRole('button', { name: 'Add all 3 by promise date' }));
+    fireEvent(window, new Event('focus'));
+    await act(async () => {});
+    expect(mockApi.getDispatchWorkOrderBoard).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('dispatch-lanes-freshness')).toHaveTextContent('Updates deferred');
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(mockApi.getDispatchWorkOrderBoard).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByTestId('dispatch-lanes-freshness')).not.toHaveTextContent('Updates deferred')
+    );
+    expect(mockApi.setDispatchWorkOrderOrder).not.toHaveBeenCalled();
+  });
+
+  it('Add at position… keeps the typed position when a read already in flight lands under the open dialog', async () => {
+    const user = userEvent.setup();
+    mockApi.setDispatchWorkOrderOrder.mockReturnValue(new Promise(() => undefined));
+    renderPage();
+    await waitForBoard();
+
+    // A manual Refresh is not deferred: it is still in flight when the dialog opens.
+    let resolveRefresh: (value: DispatchWorkOrderBoardResponse) => void = () => undefined;
+    mockApi.getDispatchWorkOrderBoard.mockReturnValueOnce(
+      new Promise(resolve => {
+        resolveRefresh = resolve;
+      })
+    );
+    await user.click(screen.getByRole('button', { name: 'Refresh' }));
+    await user.click(screen.getByRole('button', { name: 'Add WO-20261104-001 to plan at a position' }));
+    const field = screen.getByLabelText(/Plan position/);
+    expect(field).toHaveValue('4');
+    await user.clear(field);
+    await user.type(field, '2');
+
+    // It answers without WO-20261101-007 (completed): the plan is now two long.
+    await act(async () => {
+      resolveRefresh(makeBoard([LANE_A(), LANE_B(), LANE_D(), LANE_E(), LANE_F()]));
+    });
+
+    expect(field).toHaveValue('2');
+    // The range is still checked against the plan as it is now.
+    expect(screen.getByText(/Enter a position from 1 to 3\./)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+    expect(mockApi.setDispatchWorkOrderOrder).toHaveBeenCalledWith([412, 431, 398], [412, 398]);
+    expect(screen.getByTestId('dispatch-lanes-status')).toHaveTextContent(
+      'WO-20261104-001 added to the plan at position 2 of 3.'
+    );
+  });
+
   it('a lane dragged onto the top half of another lands before it, through the same PUT', async () => {
     mockApi.setDispatchWorkOrderOrder.mockReturnValue(new Promise(() => undefined));
     renderPage();
@@ -963,6 +1059,10 @@ describe('DispatchWorkOrderView — operations inside a lane', () => {
       )
     );
     expect(screen.getAllByText(/Op 10 Brake form flange of WO-20261103-004 moved to WELD-2/)).toHaveLength(2);
+    // A PLANNED work order's moved operation stays inside its plan block there.
+    expect(screen.getByTestId('dispatch-lanes-status')).toHaveTextContent(
+      "It runs within WO-20261103-004's plan block there, after that work order's ranked operations."
+    );
     // A full success is a SUCCESS toast — not a warning, not an error.
     const toast = await findToast('Op 10 Brake form flange of WO-20261103-004 moved to WELD-2');
     expect(toast).toHaveClass('bg-green-600');
@@ -970,6 +1070,23 @@ describe('DispatchWorkOrderView — operations inside a lane', () => {
 
     // Running work is pinned to its machine.
     expect(screen.getByLabelText('Move Op 25 Tack weld to another machine')).toBeDisabled();
+  });
+
+  it("an UNPLANNED work order's moved operation is announced as unranked work, never as a plan block", async () => {
+    const user = userEvent.setup();
+    mockApi.updateOperation.mockResolvedValue({});
+    renderPage();
+    await waitForBoard();
+    await expand(user, 'WO-20261104-001');
+
+    await user.selectOptions(screen.getByLabelText(/CNC0412 to another machine/), 'LASER-2 · Bystronic');
+
+    await waitFor(() =>
+      expect(screen.getByTestId('dispatch-lanes-status')).toHaveTextContent(
+        "It joins that machine's unranked work, after the plan."
+      )
+    );
+    expect(screen.getByTestId('dispatch-lanes-status')).not.toHaveTextContent('plan block');
   });
 
   it('a multi-select move that partly fails reports a WARNING naming what did not move', async () => {
@@ -1166,5 +1283,203 @@ describe('DispatchWorkOrderView — filters, freshness', () => {
     expect(screen.getByTestId('dispatch-lanes-freshness')).toHaveTextContent('Updates deferred');
     fireEvent.dragEnd(handle);
     await waitFor(() => expect(mockApi.getDispatchWorkOrderBoard).toHaveBeenCalledTimes(2));
+  });
+
+  /** Hold the NEXT board read open; returns its resolver. */
+  const holdNextRead = () => {
+    let resolveRead: (value: DispatchWorkOrderBoardResponse) => void = () => undefined;
+    mockApi.getDispatchWorkOrderBoard.mockReturnValueOnce(
+      new Promise(resolve => {
+        resolveRead = resolve;
+      })
+    );
+    return (value: DispatchWorkOrderBoardResponse) => resolveRead(value);
+  };
+
+  /** LANE_A as the server answers after the gusset moved up at BRAKE-1. */
+  const laneAGussetFirst = (): DispatchLane => {
+    const serverLane = LANE_A();
+    const [flange, gusset, ...rest] = serverLane.operations;
+    serverLane.operations = [{ ...gusset, run_position: 1 }, { ...flange, run_position: 2 }, ...rest];
+    return serverLane;
+  };
+
+  it('a poll already in flight when a plan move starts is deferred: the move stays, and a fresh read follows the PUT', async () => {
+    const user = userEvent.setup();
+    let resolvePut: (value: DispatchWorkOrderBoardResponse) => void = () => undefined;
+    mockApi.setDispatchWorkOrderOrder.mockReturnValue(
+      new Promise(resolve => {
+        resolvePut = resolve;
+      })
+    );
+    renderPage();
+    await waitForBoard();
+
+    const resolvePoll = holdNextRead();
+    fireEvent(window, new Event('focus'));
+    expect(mockApi.getDispatchWorkOrderBoard).toHaveBeenCalledTimes(2);
+
+    await user.click(screen.getByRole('button', { name: 'Move WO-20261030-002 up' }));
+    expect(planOrder()).toEqual([398, 412, 405]);
+
+    // The server answered the poll before the PUT committed: the pre-write plan.
+    await act(async () => {
+      resolvePoll(board());
+    });
+    expect(planOrder()).toEqual([398, 412, 405]);
+    expect(screen.getByTestId('dispatch-lanes-freshness')).toHaveTextContent('Updates deferred');
+    expect(mockApi.getDispatchWorkOrderBoard).toHaveBeenCalledTimes(2);
+
+    const afterWrite = makeBoard([
+      { ...LANE_B(), dispatch_position: 1 },
+      { ...LANE_A(), dispatch_position: 2 },
+      LANE_C(),
+      LANE_D(),
+      LANE_E(),
+      LANE_F(),
+    ]);
+    mockApi.getDispatchWorkOrderBoard.mockResolvedValue(afterWrite);
+    await act(async () => {
+      resolvePut(afterWrite);
+    });
+
+    await waitFor(() => expect(mockApi.getDispatchWorkOrderBoard).toHaveBeenCalledTimes(3));
+    await waitFor(() =>
+      expect(screen.getByTestId('dispatch-lanes-freshness')).not.toHaveTextContent('Updates deferred')
+    );
+    expect(planOrder()).toEqual([398, 412, 405]);
+  });
+
+  it('a poll already in flight when an operation reorder starts is deferred: the order stays, and a fresh read follows the PUT', async () => {
+    const user = userEvent.setup();
+    let resolvePut: (value: DispatchLane) => void = () => undefined;
+    mockApi.setDispatchOperationOrder.mockReturnValue(
+      new Promise(resolve => {
+        resolvePut = resolve;
+      })
+    );
+    renderPage();
+    await waitForBoard();
+    await expand(user, 'WO-20261103-004');
+    const brake = 'BRAKE-1 operations of WO-20261103-004';
+
+    const resolvePoll = holdNextRead();
+    fireEvent(window, new Event('focus'));
+    expect(mockApi.getDispatchWorkOrderBoard).toHaveBeenCalledTimes(2);
+
+    await user.click(screen.getByRole('button', { name: 'Move Op 20 Brake form gusset up' }));
+    expect(groupOrder(brake)).toEqual([3102, 3101]);
+
+    await act(async () => {
+      resolvePoll(board());
+    });
+    expect(groupOrder(brake)).toEqual([3102, 3101]);
+    expect(screen.getByTestId('dispatch-lanes-freshness')).toHaveTextContent('Updates deferred');
+    expect(mockApi.getDispatchWorkOrderBoard).toHaveBeenCalledTimes(2);
+
+    // The PUT answers one lane; the poll it displaced is still owed for the rest.
+    const serverLane = laneAGussetFirst();
+    mockApi.getDispatchWorkOrderBoard.mockResolvedValue(
+      makeBoard([serverLane, LANE_B(), LANE_C(), LANE_D(), LANE_E(), LANE_F()])
+    );
+    await act(async () => {
+      resolvePut(serverLane);
+    });
+
+    await waitFor(() => expect(mockApi.getDispatchWorkOrderBoard).toHaveBeenCalledTimes(3));
+    await waitFor(() =>
+      expect(screen.getByTestId('dispatch-lanes-freshness')).not.toHaveTextContent('Updates deferred')
+    );
+    expect(groupOrder(brake)).toEqual([3102, 3101]);
+  });
+
+  it('a plan move drops a Refresh already in flight: it cannot undo the move while the PUT is out', async () => {
+    const user = userEvent.setup();
+    mockApi.setDispatchWorkOrderOrder.mockReturnValue(new Promise(() => undefined));
+    renderPage();
+    await waitForBoard();
+
+    const resolveRefresh = holdNextRead();
+    await user.click(screen.getByRole('button', { name: 'Refresh' }));
+    await user.click(screen.getByRole('button', { name: 'Move WO-20261030-002 up' }));
+    expect(planOrder()).toEqual([398, 412, 405]);
+
+    await act(async () => {
+      resolveRefresh(board());
+    });
+
+    expect(planOrder()).toEqual([398, 412, 405]);
+    expect(screen.getByRole('button', { name: 'Refresh' })).not.toBeDisabled();
+  });
+
+  it('an operation reorder drops a Refresh already in flight: the stale read never puts the old order back', async () => {
+    const user = userEvent.setup();
+    let resolvePut: (value: DispatchLane) => void = () => undefined;
+    mockApi.setDispatchOperationOrder.mockReturnValue(
+      new Promise(resolve => {
+        resolvePut = resolve;
+      })
+    );
+    renderPage();
+    await waitForBoard();
+    await expand(user, 'WO-20261103-004');
+    const brake = 'BRAKE-1 operations of WO-20261103-004';
+
+    const resolveRefresh = holdNextRead();
+    await user.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(screen.getByRole('button', { name: 'Refreshing…' })).toBeDisabled();
+
+    await user.click(screen.getByRole('button', { name: 'Move Op 20 Brake form gusset up' }));
+    expect(groupOrder(brake)).toEqual([3102, 3101]);
+
+    await act(async () => {
+      resolvePut(laneAGussetFirst());
+    });
+    expect(groupOrder(brake)).toEqual([3102, 3101]);
+
+    // The Refresh was answered before the PUT committed — it carries the old order.
+    await act(async () => {
+      resolveRefresh(board());
+    });
+
+    expect(groupOrder(brake)).toEqual([3102, 3101]);
+    expect(screen.getByTestId('lane-op-3102')).toHaveTextContent(/Run\s*1/);
+    // The dropped read does not leave the Refresh button spinning.
+    expect(screen.getByRole('button', { name: 'Refresh' })).not.toBeDisabled();
+  });
+
+  it('a Refresh clicked WHILE an operation reorder is out cannot put the old order back when it lands after the PUT', async () => {
+    const user = userEvent.setup();
+    let resolvePut: (value: DispatchLane) => void = () => undefined;
+    mockApi.setDispatchOperationOrder.mockReturnValue(
+      new Promise(resolve => {
+        resolvePut = resolve;
+      })
+    );
+    renderPage();
+    await waitForBoard();
+    await expand(user, 'WO-20261103-004');
+    const brake = 'BRAKE-1 operations of WO-20261103-004';
+
+    await user.click(screen.getByRole('button', { name: 'Move Op 20 Brake form gusset up' }));
+    expect(groupOrder(brake)).toEqual([3102, 3101]);
+
+    // Refresh stays enabled while the PUT is out; this read is answered by the
+    // server BEFORE the write commits, but its response arrives AFTER the PUT's.
+    const resolveRefresh = holdNextRead();
+    await user.click(screen.getByRole('button', { name: 'Refresh' }));
+
+    await act(async () => {
+      resolvePut(laneAGussetFirst());
+    });
+    expect(groupOrder(brake)).toEqual([3102, 3101]);
+
+    await act(async () => {
+      resolveRefresh(board());
+    });
+
+    expect(groupOrder(brake)).toEqual([3102, 3101]);
+    expect(screen.getByTestId('lane-op-3102')).toHaveTextContent(/Run\s*1/);
+    expect(screen.getByRole('button', { name: 'Refresh' })).not.toBeDisabled();
   });
 });

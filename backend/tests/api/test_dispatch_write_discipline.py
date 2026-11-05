@@ -10,6 +10,9 @@ single-connection SQLite database and a regression in any of them passes everyth
    interleave a read and a write and silently overwrite each other on Postgres, while
    every SQLite test still passes (the lock is a no-op there). The existing tests only
    prove the lock is CALLED; these prove it is called before the guarded read.
+   The two work-order schedule routes also take it before their ROW locks: one lock
+   order on every path (dispatch lock -> work order / operation rows -> material rows ->
+   audit chain), or Postgres aborts one side of the cycle as a deadlock.
 2. WRITE ORDER: rank UPDATEs -> audit row -> notice event. The audit chain lock is
    global, so writing the audit row before the rank UPDATEs risks a deadlock against a
    completion; the notice describes the committed change and must follow the record.
@@ -22,8 +25,9 @@ single-connection SQLite database and a regression in any of them passes everyth
 """
 
 import re
+from datetime import date
 from types import SimpleNamespace
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import pytest
 from fastapi import status
@@ -32,6 +36,7 @@ from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 import app.services.notification_outbox as notification_outbox
+from app.api.endpoints import scheduling as scheduling_endpoint
 from app.models.user import UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
@@ -73,13 +78,16 @@ def _manager(db: Session):
     return make_user(db, role=UserRole.MANAGER, first_name="Jon", last_name="Werthen")
 
 
-def _record(db: Session, monkeypatch, fn: Callable[[], object]) -> Tuple[object, List[str]]:
+def _record(
+    db: Session, monkeypatch, fn: Callable[[], object], log: Optional[List[str]] = None
+) -> Tuple[object, List[str]]:
     """Run ``fn`` recording every SQL statement AND the dispatch lock, in one ordered list.
 
     ``fn`` must touch no expired fixture object (resolve ids to plain ints first): a
     lazy refresh of a test's own object would be recorded as if the request had read it.
+    Pass ``log`` to share the list with another spy's marker, so one list orders both.
     """
-    log: List[str] = []
+    log = [] if log is None else log
     monkeypatch.setattr(dispatch_service, "acquire_generator_lock", lambda db_, namespace, company_id: log.append(LOCK))
 
     def _listen(conn, cursor, statement, parameters, context, executemany):
@@ -179,6 +187,110 @@ class TestTheLockComesFirst:
         assert early == [], f"read before the dispatch lock: {early[0][:200]}"
         # Non-vacuity: the guarded read really happens, after the lock.
         assert _first(log, guarded) > lock_at
+
+
+# --------------------------------------------------------------------------
+# 1b. The schedule routes take the dispatch lock before their ROW locks
+# --------------------------------------------------------------------------
+
+
+READINESS = "<<load_locked_material_readiness>>"
+SCHEDULE_ROUTES = ("schedule", "schedule_earliest")
+# Any read of a work order or its operations -- including the row locks
+# load_locked_material_readiness takes (SQLite renders them without FOR UPDATE).
+_WORK_ORDER_ROWS = re.compile(r"\b(work_orders|work_order_operations)\b")
+_ANY_NOTICE = re.compile(r"'dispatch_order_changed'")
+
+
+def _spy_readiness(monkeypatch, log: List[str]) -> None:
+    """Append READINESS to ``log`` each time a schedule route row-locks its work order."""
+    real = scheduling_endpoint.load_locked_material_readiness
+
+    def _spy(*args, **kwargs):
+        log.append(READINESS)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(scheduling_endpoint, "load_locked_material_readiness", _spy)
+
+
+def _schedule_without_work_center(client: TestClient, headers: dict, route: str, wo_id: int):
+    if route == "schedule":
+        return client.put(
+            f"/api/v1/scheduling/work-orders/{wo_id}/schedule",
+            json={"scheduled_start": date.today().isoformat()},
+            headers=headers,
+        )
+    return client.post(f"/api/v1/scheduling/work-orders/{wo_id}/schedule-earliest", json={}, headers=headers)
+
+
+class TestScheduleRoutesLockBeforeRowLocks:
+    """``load_locked_material_readiness`` row-locks the work order and every one of its
+    operations (``SELECT ... FOR UPDATE``). Every other dispatch-order writer holds the
+    dispatch lock and THEN writes those very rows (the plan's rank UPDATE, the operation
+    order, the column rewrite, the other two move verbs). A schedule route that took the
+    dispatch lock AFTER its row locks would close that cycle, and Postgres would abort one
+    side with DeadlockDetected -- a 500. Neither lock exists on SQLite, so only the recorded
+    ORDER can show it."""
+
+    @pytest.mark.parametrize("moves", [True, False], ids=["move", "same-machine-resend"])
+    @pytest.mark.parametrize("route", SCHEDULE_ROUTES)
+    def test_the_dispatch_lock_precedes_every_row_lock(
+        self, client: TestClient, db_session: Session, monkeypatch, route, moves
+    ):
+        """Keyed on the request CARRYING a work center, not on the comparison: a
+        same-machine re-send takes the lock too (it cannot know it is not a move until it
+        has read the operation, and that read is what the lock must precede)."""
+        headers = user_headers(_manager(db_session))
+        source = make_work_center(db_session)
+        target = make_work_center(db_session) if moves else source
+        mover_wo, (mover,) = make_plan_wo(db_session, [ready(source)])
+        op, wo_id, target_id = SimpleNamespace(id=mover.id, version=mover.version), mover_wo.id, target.id
+
+        log: List[str] = []
+        _spy_readiness(monkeypatch, log)
+        resp, log = _record(
+            db_session, monkeypatch, lambda: _move(client, headers, route, op, wo_id, target_id), log=log
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+
+        assert log.count(LOCK) == 1, "the dispatch lock is taken exactly once"
+        assert log.count(READINESS) == 1
+        lock_at = log.index(LOCK)
+        assert lock_at < log.index(READINESS), "the dispatch lock must precede the WO/operation row locks"
+        early = [statement for statement in log[:lock_at] if _WORK_ORDER_ROWS.search(statement)]
+        assert early == [], f"work-order read before the dispatch lock: {early[0][:200]}"
+        # Non-vacuity: the work order really is read (and row-locked), after the lock.
+        assert _first(log, _WORK_ORDER_ROWS) > lock_at
+        # A re-send is not a move: no notice.
+        assert any(_ANY_NOTICE.search(statement) for statement in log) is moves
+
+    @pytest.mark.parametrize("route", SCHEDULE_ROUTES)
+    def test_a_call_without_a_work_center_takes_no_lock_and_moves_nothing(
+        self, client: TestClient, db_session: Session, monkeypatch, route
+    ):
+        """No work center in the request -> the call can never move the operation, so it
+        behaves exactly as before: no dispatch lock, no notice, the operation stays put --
+        and it still validates material under its row locks."""
+        headers = user_headers(_manager(db_session))
+        wc = make_work_center(db_session)
+        wo, (operation,) = make_plan_wo(db_session, [ready(wc)])
+        wo_id, op_id, wc_id = wo.id, operation.id, wc.id
+
+        log: List[str] = []
+        _spy_readiness(monkeypatch, log)
+        resp, log = _record(
+            db_session, monkeypatch, lambda: _schedule_without_work_center(client, headers, route, wo_id), log=log
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert LOCK not in log
+        assert log.count(READINESS) == 1
+        assert not any(_ANY_NOTICE.search(statement) for statement in log)
+        assert resp.json()["work_center_id"] == wc_id
+
+        db_session.expire_all()
+        row = db_session.get(WorkOrderOperation, op_id)
+        assert row.work_center_id == wc_id
+        assert row.scheduled_start is not None, "the call still scheduled the operation"
 
 
 # --------------------------------------------------------------------------

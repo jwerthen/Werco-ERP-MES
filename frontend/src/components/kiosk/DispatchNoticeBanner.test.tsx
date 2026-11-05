@@ -9,7 +9,12 @@
 
 import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
-import DispatchNoticeBanner, { describeNextUp, dispatchNoticeText } from './DispatchNoticeBanner';
+import userEvent from '@testing-library/user-event';
+import DispatchNoticeBanner, {
+  describeNextUp,
+  dispatchNoticeText,
+  type DispatchNoticeBannerVariant,
+} from './DispatchNoticeBanner';
 import type { DispatchNotice } from '../../types';
 import type { ActiveDispatchNotice } from '../../hooks/useDispatchNotice';
 
@@ -187,3 +192,62 @@ describe('DispatchNoticeBanner control', () => {
     expect(stripText()).toMatch(/^BRAKE-1 RUN NEXT:/);
   });
 });
+
+/** A caller like the real ones: "Got it" drops that notice from what it renders. */
+function AckHarness({ initial, variant }: { initial: ActiveDispatchNotice[]; variant: DispatchNoticeBannerVariant }) {
+  const [notices, setNotices] = React.useState(initial);
+  return (
+    <>
+      <button type="button">Before</button>
+      <DispatchNoticeBanner
+        variant={variant}
+        notices={notices}
+        onAcknowledge={acked => setNotices(previous => previous.filter(item => item.notice.id !== acked.id))}
+      />
+      <button type="button">After</button>
+    </>
+  );
+}
+
+describe.each<DispatchNoticeBannerVariant>(['kiosk', 'desktop'])(
+  'DispatchNoticeBanner focus after "Got it" (%s)',
+  variant => {
+    const weld = () => entry(makeNotice({ id: 90300, work_center_id: 14, work_center_code: 'WELD-2' }));
+    const brake = () => entry(makeNotice());
+
+    it('moves focus to the next strip\'s "Got it", then to a stable anchor — never to <body>', async () => {
+      const user = userEvent.setup();
+      render(<AckHarness variant={variant} initial={[weld(), brake()]} />);
+
+      screen.getByRole('button', { name: /got it.*WELD-2/i }).focus();
+      await user.keyboard('{Enter}');
+
+      expect(screen.queryByRole('button', { name: /got it.*WELD-2/i })).not.toBeInTheDocument();
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: /got it.*BRAKE-1/i }));
+
+      await user.keyboard('{Enter}');
+
+      expect(screen.queryByTestId('dispatch-notice')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('dispatch-notice-banner')).not.toBeInTheDocument();
+      expect(document.activeElement).not.toBe(document.body);
+      const anchor = screen.getByTestId('dispatch-notice-focus-anchor');
+      expect(document.activeElement).toBe(anchor);
+      // Visually hidden — no empty box is drawn where the strips were.
+      expect(anchor).toHaveClass('sr-only');
+      expect(anchor).toHaveTextContent('Queue changes acknowledged');
+      // The keyboard user carries on from where the strips were.
+      await user.tab();
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'After' }));
+    });
+
+    it('acknowledging the LAST of several strips focuses the one above it', async () => {
+      const user = userEvent.setup();
+      render(<AckHarness variant={variant} initial={[weld(), brake()]} />);
+
+      screen.getByRole('button', { name: /got it.*BRAKE-1/i }).focus();
+      await user.keyboard('{Enter}');
+
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: /got it.*WELD-2/i }));
+    });
+  }
+);

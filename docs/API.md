@@ -2185,7 +2185,10 @@ a deleted record. Customer pickers independently exclude tombstoned rows.
 > **before** mutating anything, and after its audit row emits a floor notice for each machine whose
 > order changed — `moved_out` at the old one, `moved_in` at the new one (see "Floor dispatch
 > notices" under Shop Floor). Unlike the plan verbs, a move is an ordinary ORM write and **does**
-> bump the moved operation's `version`. A no-op re-send takes no lock and emits nothing.
+> bump the moved operation's `version`. The two work-order schedule routes take the lock whenever
+> the request names a `work_center_id`, **before** their row locks, so a no-op re-send there takes
+> the lock but emits nothing. On the two operation move endpoints a no-op re-send takes no lock
+> and emits nothing.
 >
 > **Both reschedule routes are audited like the dedicated move endpoints.** Each writes a
 > tamper-evident `audit_log` row (`log_update`, resource type `work_order_operation`) on the work
@@ -5254,17 +5257,24 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > 3. the work-order id — **only** for rows with an effective rank (a constant `null` otherwise), so
 >    two work orders can never interleave their operations at a machine: each planned work order is
 >    one contiguous **block**;
-> 4. `run_order IS NULL` ascending — ranked work first, unranked last (an explicit boolean key, so
->    PostgreSQL and SQLite agree without a `NULLS LAST` clause). Within a planned work order's block
->    this is the planner's operation order; across the unplanned tail it is the manager's machine
->    order, as before;
-> 5. `run_order` ascending;
+> 4. **effective** `run_order IS NULL` ascending — ranked work first, unranked last (an explicit
+>    boolean key, so PostgreSQL and SQLite agree without a `NULLS LAST` clause). Within a planned work
+>    order's block this is the planner's operation order; across the unplanned tail it is the
+>    manager's machine order, as before. The *effective* `run_order` is the stored value **unless the
+>    work order is `ON_HOLD`**, when it is `null` (`dispatch_service.effective_run_order_expr`, with a
+>    Python twin `effective_run_order` that must stay identical). Holding a work order leaves its
+>    operations `READY` and changes neither stored value, so without this gate a held job's operation
+>    order kept it at the head of the unplanned tail reading "RUN 1"; now its rows sort and label like
+>    never-ranked work (priority fallback, no chip). The stored value is never touched by the hold,
+>    so lifting it restores the order and the RUN chips with no write. Unlike the plan rank this
+>    gate does not look at the operation's own status;
+> 5. effective `run_order` ascending;
 > 6. `WorkOrder.priority`, then `WorkOrder.due_date`, then `WorkOrderOperation.sequence` — the
 >    repo's canonical fallback for unranked work;
 > 7. `WorkOrderOperation.id` as a final deterministic tiebreak.
 >
-> With every `dispatch_rank` `null` (no plan set), keys 1–3 are constant and the order is
-> byte-identical to the pre-114 sort. The same expression list is the sort on every surface — the
+> With every `dispatch_rank` `null` (no plan set) and no held work order carrying a stored
+> `run_order`, keys 1–3 are constant and the order is byte-identical to the pre-114 sort. The same expression list is the sort on every surface — the
 > kiosk and crew station queue, both dispatch-board views, `GET /shop-floor/operations`, and the
 > scheduling RUN chip — so none of them may re-sort client-side.
 >
@@ -5273,7 +5283,8 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > rank — stored ranks go sparse in normal use (completing or moving a job takes its rank out of the
 > column, leaving e.g. 1, 2, 4), and "RUN 4" on a three-job queue reads as a missing job. A queued
 > row is **ranked** — gets a `RUN n` position — when its effective plan rank is set **or** it carries
-> a stored `run_order`; under the sort above those rows are always a prefix of the queue, so the
+> an effective `run_order` (a held work order's stored rank does not count); under the sort above
+> those rows are always a prefix of the queue, so the
 > numbering stays gap-free. Unranked rows are `null` and take no position. The kiosk renders **server order** and only *displays* the
 > rank (`RUN n` chip) — it never re-sorts client-side. The filter set is unchanged (operation
 > `READY`/`IN_PROGRESS`, parent WO not `COMPLETE`/`CLOSED`/`CANCELLED` and not soft-deleted) and is
@@ -5417,6 +5428,14 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > ahead of one of an earlier-planned work order: that is a **409** naming the first offending pair,
 > placed-earlier operation first — reorder the work orders instead. The Dispatch Board blocks such a
 > drag itself; the 409 is the backstop.
+>
+> **Rows of an `ON_HOLD` work order** have no effective plan rank, so they belong to the unplanned
+> region and are accepted anywhere in it — never refused. Their submitted rank is stored as usual but
+> has no effect while the hold stands (key 4 above), so the response lists them in the never-ranked
+> part of the tail, with no `RUN n`, and the submitted position takes effect when the hold lifts.
+> That is the one case where the returned column can differ from the submitted order; refusing it
+> instead would make a rendered column unsaveable, because held rows interleave with never-ranked
+> rows by priority.
 >
 > **Optional compare-and-swap (`expected_operation_ids`, Dispatch v2).** The column's queue as the
 > client rendered it, top to bottom (`column.queue[].operation_id`). When present, operations that
@@ -5593,7 +5612,11 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > one sequence: (1) the per-company advisory lock
 > `dispatch_service.acquire_dispatch_order_lock` (`acquire_generator_lock(db, "dispatch_order",
 > company_id)`; transaction-scoped, a no-op on SQLite), taken **before** any read it compares
-> against — never `SELECT … FOR UPDATE` on work-order rows; (2) the CAS read, as column tuples;
+> against — the lock itself is advisory, never `SELECT … FOR UPDATE` on work-order rows. The two
+> work-order schedule routes do also row-lock the work order, its operations and its material rows
+> (`SELECT … FOR UPDATE`, for the material-readiness check), always **after** the advisory lock, so
+> every path locks in one order: dispatch lock → work order / operation rows → material rows →
+> audit chain; (2) the CAS read, as column tuples;
 > (3) the notice "before" snapshot; (4) the rank writes; (5) the audit row; (6) the notices; (7)
 > commit, then the websocket nudge. Rank writes go before the audit row because the audit chain lock
 > is global. The plan verbs write with Core `UPDATE`s in the WHERE + `CASE` form touching **only**
@@ -5642,7 +5665,23 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > **Where it surfaces** — on polls the floor already makes; only the newest notice per work center
 > from the last **12 hours**, read with one query per poll on
 > `ix_operational_events_company_entity_time (company_id, entity_type, entity_id, occurred_at)`
-> (migration `114`), tenant-scoped, writing nothing:
+> (migration `114`), tenant-scoped, writing nothing.
+>
+> **The reader trusts no row.** Only the dispatch-order verbs write these rows (`POST
+> /operational-events/` refuses the type — see "Operational Events"), but the floor reads are robust
+> regardless of how a row got there:
+> - **The window is bounded on both sides**: `now − 12 h ≤ occurred_at ≤ now` (server clock, UTC). A
+>   row dated in the future is never served and never counted, so it cannot pin a machine's banner.
+>   `updates_in_window` counts only rows inside both bounds.
+> - **A malformed row never fails a floor read.** A row whose payload does not build a
+>   `DispatchNotice` (not a JSON object, or a value of the wrong type) is skipped and logged at
+>   warning, and that machine falls back to its **newest valid** notice in the window. The same
+>   single query ranks each machine's newest **`DISPATCH_NOTICE_READ_DEPTH` (5)** rows, so the
+>   fallback adds no query whatever the number of machines; if none of the five is valid the machine
+>   gets no notice (`null` / omitted), never a 500. A skipped row still counts toward
+>   `updates_in_window` when it is inside the window. `next_up_*` values that fail their own schema
+>   degrade to `null` rather than condemn the notice, and `moved_up` keeps plain integers only,
+>   capped at 10.
 >
 > | Read | Key | Contents |
 > |---|---|---|
@@ -9101,6 +9140,33 @@ shipping integration. All routes are mounted under `/admin/settings` and gated t
 > is recorded as a **status change** on the tamper-evident audit trail. While OFF, every
 > customer-data-bearing carrier call (`/shipping/validate-address`, `/rate-shop`, `/buy-label`,
 > `/buy-bol`, `/schedule-pickup`, `/void-label`, `/refund`) is blocked with **409**.
+
+### Operational Events
+
+The durable, tenant-scoped operational event stream (`operational_events`) that feeds real-time AI
+context, the notification outbox, and a few floor reads. Telemetry, not audit data: nothing here
+writes to the `audit_log` hash chain. Both routes scope to the caller's active company
+(`get_current_company_id`).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/operational-events/` | Read the stream, newest first; filters `source_module`, `event_type`, `work_order_id`, `limit` (1–250, default 100) | Yes |
+| POST | `/operational-events/` | Record an event (`event_type`, `source_module`, optional `entity_type` / `entity_id` / `work_order_id` / `operation_id` / `severity` / `event_payload` / `occurred_at`). A `work_order_id` or `operation_id` that is not this company's is **404**. **400** for a server-only event type (below) | Yes |
+
+> **Server-only event types are refused (400).** `operational_events.SERVER_ONLY_EVENT_TYPES` names
+> the event types the system writes itself and a floor screen trusts as "the system said this". Today
+> it holds one: **`dispatch_order_changed`**, the Dispatch Board's "the planner changed this
+> machine's order" notice. Its rows are read back on every kiosk, crew-station, my-active-job and
+> filtered `/shop-floor/operations` poll at that machine as the RUN NEXT banner, and they fan out the
+> `dispatch.changed` notification to the operators clocked in there, so a posted one would let any
+> signed-in user (or API token) put a fake planner instruction on a machine. Matched after trimming,
+> case-insensitively. Exact detail: `Event type '{event_type}' is recorded by the system itself and
+> cannot be posted. To change a machine's run order, use the Dispatch Board.` Nothing is written and
+> no notification is queued. **Every other event type is accepted as before** (the hold-context flow
+> posts `operation_hold` here), and a client-supplied `occurred_at` is still taken as given for them.
+> To add another server-written type a reader trusts, extend that one set rather than adding a second
+> check. The dispatch-notice reader is also robust against rows written any other way — see
+> "Floor dispatch notices" under Shop Floor.
 
 ### AI Usage Telemetry
 

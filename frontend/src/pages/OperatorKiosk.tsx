@@ -1235,12 +1235,16 @@ export default function OperatorKiosk() {
 
       {/* Dispatch notice — BELOW the offline / unsaved-pieces / idle strips, never
           in place of them. Hidden only behind the full-height doc viewer; it is
-          back the moment the operator returns. */}
+          back the moment the operator returns. my-active-job brings notices for
+          EVERY machine the operator holds open labor at, so a strip that is not
+          for this station's own machine is always named — an untagged RUN NEXT
+          reads as this station's next job. */}
       {view.name !== 'viewer' && (
         <DispatchNoticeBanner
           variant="kiosk"
           notices={dispatchNotice.active}
           onAcknowledge={dispatchNotice.acknowledge}
+          showWorkCenter={dispatchNotice.active.some(entry => entry.notice.work_center_id !== workCenterId)}
         />
       )}
 

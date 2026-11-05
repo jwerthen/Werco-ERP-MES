@@ -18,7 +18,11 @@ makes:
 * the reads: the crew station sees exactly the documented keys on the queue,
   ``my-active-job`` only for the machines the caller holds an open LABOR entry at
   (via the operation's CURRENT machine), ``/shop-floor/operations`` only when
-  filtered to one machine; a 12-hour window; tenant-scoped; one query.
+  filtered to one machine; a 12-hour window; tenant-scoped; one query;
+* forgery and bad rows: ``POST /operational-events/`` refuses this event type (and
+  writes / enqueues nothing); a future-dated row is never served or counted; a
+  malformed row never 500s a floor read and never outranks a real notice -- the
+  machine falls back to its newest VALID notice, inside the same single query.
 """
 
 from datetime import datetime, timedelta
@@ -88,6 +92,11 @@ NOTICE_KEYS = {
     "moved_up",
     "updates_in_window",
 }
+
+# A dispatch notice payload the schema refuses: ``work_center_code`` must be a string.
+# Before the reader skipped bad rows, ONE such row made every floor read at that
+# machine (kiosk queue, my-active-job, filtered /shop-floor/operations) a 500.
+MALFORMED_PAYLOAD = {"work_center_code": 123, "change_kind": "machine_order", "moved_up": []}
 
 
 @pytest.fixture(autouse=True)
@@ -601,7 +610,10 @@ class TestLatestNoticesHelper:
             entity_type=overrides.pop("entity_type", "work_center"),
             entity_id=wc_id,
             severity="info",
-            event_payload={"work_center_id": wc_id, "change_kind": "machine_order", "moved_up": []},
+            event_payload=overrides.pop(
+                "event_payload", {"work_center_id": wc_id, "change_kind": "machine_order", "moved_up": []}
+            ),
+            # A negative ``hours_ago`` dates the row in the future.
             occurred_at=datetime.utcnow() - timedelta(hours=hours_ago),
         )
         db.add(event)
@@ -646,6 +658,29 @@ class TestLatestNoticesHelper:
         assert sorted(result) == sorted(ids)
         assert all(notice["updates_in_window"] == 2 for notice in result.values())
 
+    @pytest.mark.parametrize("machine_count", [1, 3])
+    def test_still_one_query_when_every_machine_must_fall_back_past_bad_rows(
+        self, db_session: Session, machine_count: int
+    ):
+        """The skip-and-fall-back is resolved inside the SAME single query (a fixed read
+        depth per machine), never a second probe per machine with a bad newest row."""
+        wcs = [make_work_center(db_session) for _ in range(machine_count)]
+        valid = {}
+        for wc in wcs:
+            valid[wc.id] = self._event(db_session, wc.id, hours_ago=2).id
+            self._event(db_session, wc.id, hours_ago=1, event_payload=MALFORMED_PAYLOAD)
+            self._event(db_session, wc.id, hours_ago=0.5, event_payload=["not", "an", "object"])
+            self._event(db_session, wc.id, hours_ago=-24)  # future-dated
+        ids = [wc.id for wc in wcs]
+        result = {}
+        assert (
+            count_statements(
+                db_session, lambda: result.update(dispatch_service.latest_dispatch_notices(db_session, COMPANY_A, ids))
+            )
+            == 1
+        )
+        assert {wc_id: notice["id"] for wc_id, notice in result.items()} == valid
+
     def test_no_machines_costs_no_query(self, db_session: Session):
         assert (
             count_statements(db_session, lambda: dispatch_service.latest_dispatch_notices(db_session, COMPANY_A, []))
@@ -686,3 +721,214 @@ class TestLatestNoticesHelper:
             return sum(1 for statement in statements if statement.lstrip().upper().startswith("SELECT"))
 
         assert selects_for(1) == selects_for(3)
+
+
+# --------------------------------------------------------------------------
+# 5. Forged and malformed notice rows (BE-1)
+# --------------------------------------------------------------------------
+
+EVENTS_URL = "/api/v1/operational-events/"
+
+
+def _insert_notice_row(db: Session, wc_id: int, payload, occurred_at: datetime) -> OperationalEvent:
+    """A ``dispatch_order_changed`` row written straight to the table -- not by the board."""
+    event = OperationalEvent(
+        company_id=COMPANY_A,
+        event_type=dispatch_service.DISPATCH_NOTICE_EVENT_TYPE,
+        source_module="dispatch",
+        entity_type="work_center",
+        entity_id=wc_id,
+        severity="info",
+        event_payload=payload,
+        occurred_at=occurred_at,
+    )
+    db.add(event)
+    db.commit()
+    return event
+
+
+def _forged_payload(wc_id: int, fake_op_id: int) -> dict:
+    return {
+        "work_center_id": wc_id,
+        "work_center_code": "FAKE",
+        "change_kind": "machine_order",
+        "actor_display": "Boss X.",
+        "next_up_before": None,
+        "next_up_after": {"operation_id": fake_op_id, "work_order_number": "WO-FAKE"},
+        "moved_up": [],
+        "queue_length": 1,
+    }
+
+
+class TestPostedNoticesAreRefused:
+    @pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.ADMIN])
+    @pytest.mark.parametrize("event_type", ["dispatch_order_changed", "  Dispatch_Order_Changed "])
+    def test_a_posted_dispatch_notice_is_refused_and_writes_nothing(
+        self, client: TestClient, db_session: Session, _no_outbox_enqueue, role, event_type
+    ):
+        from app.api.endpoints.operational_events import SERVER_ONLY_EVENT_TYPES, server_only_event_type_detail
+
+        assert dispatch_service.DISPATCH_NOTICE_EVENT_TYPE in SERVER_ONLY_EVENT_TYPES
+        user = make_user(db_session, role=role)
+        wc = make_work_center(db_session)
+        before = db_session.query(OperationalEvent).filter(OperationalEvent.company_id == COMPANY_A).count()
+
+        resp = client.post(
+            EVENTS_URL,
+            json={
+                "event_type": event_type,
+                "source_module": "dispatch",
+                "entity_type": "work_center",
+                "entity_id": wc.id,
+                "occurred_at": "2030-01-01T00:00:00Z",
+                "event_payload": _forged_payload(wc.id, 999999),
+            },
+            headers=user_headers(user),
+        )
+
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
+        assert resp.json()["detail"] == server_only_event_type_detail(event_type)
+        db_session.expire_all()
+        assert db_session.query(OperationalEvent).filter(OperationalEvent.company_id == COMPANY_A).count() == before
+        assert _notices(db_session) == []
+        assert _no_outbox_enqueue == []
+        # And nothing reached the floor.
+        assert client.get(queue_url(wc.id), headers=user_headers(user)).json()["dispatch_notice"] is None
+
+    def test_other_cataloged_event_types_are_still_accepted(self, client: TestClient, db_session: Session):
+        """Only the board's own notice type is refused: ``operation_hold`` (posted by the
+        hold-context flow and reachable through the MCP tool) still records."""
+        user = make_user(db_session)
+        wc = make_work_center(db_session)
+        wo, (op,) = make_plan_wo(db_session, [(wc, OperationStatus.ON_HOLD, 10)])
+        resp = client.post(
+            EVENTS_URL,
+            json={
+                "event_type": "operation_hold",
+                "source_module": "shop_floor",
+                "work_order_id": wo.id,
+                "operation_id": op.id,
+                "event_payload": {"category": "material"},
+            },
+            headers=user_headers(user),
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert resp.json()["event_type"] == "operation_hold"
+
+
+class TestBadRowsCannotBreakTheFloor:
+    def test_malformed_and_future_rows_neither_500_nor_outrank_a_real_notice(
+        self, client: TestClient, db_session: Session, caplog
+    ):
+        headers = user_headers(_manager(db_session))
+        operator = make_user(db_session)
+        wc = make_work_center(db_session)
+        station = make_kiosk_station(db_session, work_center=wc)
+        _, (a,) = make_plan_wo(db_session, [ready(wc)])
+        _, (b,) = make_plan_wo(db_session, [ready(wc)])
+        _clock_in(db_session, operator, a)
+
+        # A well-formed FORGED notice dated in the future, written before the real one:
+        # unbounded above, it would win every poll until 2030.
+        _insert_notice_row(db_session, wc.id, _forged_payload(wc.id, b.id), datetime(2030, 1, 1))
+        assert _column(client, headers, wc.id, [b.id, a.id]).status_code == status.HTTP_200_OK
+        (real,) = _notices(db_session)[1:]
+        assert real.event_payload["actor_display"] == "Jon W."
+        # Two malformed rows NEWER than the real notice: a schema-invalid value and a
+        # payload that is not a JSON object at all.
+        _insert_notice_row(db_session, wc.id, MALFORMED_PAYLOAD, datetime.utcnow())
+        _insert_notice_row(db_session, wc.id, ["not", "an", "object"], datetime.utcnow())
+
+        def assert_real(notice: dict) -> None:
+            assert notice["id"] == real.id
+            assert notice["actor_display"] == "Jon W."
+            assert notice["work_center_code"] == wc.code
+            # Counted: the real row and the two malformed in-window rows. Not counted:
+            # the future-dated row, which is outside the window.
+            assert notice["updates_in_window"] == 3
+
+        caplog.set_level("WARNING", logger="app.services.dispatch_service")
+        station_view = client.get(queue_url(wc.id), headers=bearer(kiosk_token_for(station)))
+        assert station_view.status_code == status.HTTP_200_OK, station_view.text
+        assert_real(station_view.json()["dispatch_notice"])
+
+        operator_queue = client.get(queue_url(wc.id), headers=user_headers(operator))
+        assert operator_queue.status_code == status.HTTP_200_OK, operator_queue.text
+        assert_real(operator_queue.json()["dispatch_notice"])
+
+        active = client.get(MY_ACTIVE_JOB_URL, headers=user_headers(operator))
+        assert active.status_code == status.HTTP_200_OK, active.text
+        (notice,) = active.json()["dispatch_notices"]
+        assert_real(notice)
+
+        filtered = client.get(OPERATIONS_URL, params={"work_center_id": wc.id}, headers=user_headers(operator))
+        assert filtered.status_code == status.HTTP_200_OK, filtered.text
+        (notice,) = filtered.json()["dispatch_notices"]
+        assert_real(notice)
+
+        assert any("dispatch notice row skipped" in record.getMessage() for record in caplog.records)
+
+    def test_a_machine_with_only_bad_rows_shows_no_notice_rather_than_a_500(
+        self, client: TestClient, db_session: Session
+    ):
+        operator = make_user(db_session)
+        wc = make_work_center(db_session)
+        _, (a,) = make_plan_wo(db_session, [ready(wc)])
+        _clock_in(db_session, operator, a)
+        _insert_notice_row(db_session, wc.id, MALFORMED_PAYLOAD, datetime.utcnow())
+        _insert_notice_row(db_session, wc.id, _forged_payload(wc.id, a.id), datetime.utcnow() + timedelta(days=30))
+
+        queue = client.get(queue_url(wc.id), headers=user_headers(operator))
+        assert queue.status_code == status.HTTP_200_OK, queue.text
+        assert queue.json()["dispatch_notice"] is None
+        active = client.get(MY_ACTIVE_JOB_URL, headers=user_headers(operator))
+        assert active.status_code == status.HTTP_200_OK, active.text
+        assert active.json()["dispatch_notices"] == []
+        filtered = client.get(OPERATIONS_URL, params={"work_center_id": wc.id}, headers=user_headers(operator))
+        assert filtered.status_code == status.HTTP_200_OK, filtered.text
+        assert filtered.json()["dispatch_notices"] == []
+
+
+class TestNoticeReaderBounds:
+    def test_a_future_dated_row_is_never_served_or_counted(self, db_session: Session):
+        wc = make_work_center(db_session)
+        real = _insert_notice_row(
+            db_session, wc.id, {"change_kind": "machine_order"}, datetime.utcnow() - timedelta(minutes=5)
+        )
+        _insert_notice_row(db_session, wc.id, {"change_kind": "machine_order"}, datetime.utcnow() + timedelta(hours=1))
+        notice = dispatch_service.latest_dispatch_notices(db_session, COMPANY_A, [wc.id])[wc.id]
+        assert notice["id"] == real.id
+        assert notice["updates_in_window"] == 1
+
+    def test_a_malformed_newest_row_falls_back_to_the_newest_valid_one(self, db_session: Session):
+        wc = make_work_center(db_session)
+        now = datetime.utcnow()
+        _insert_notice_row(db_session, wc.id, {"change_kind": "machine_order"}, now - timedelta(minutes=30))
+        newest_valid = _insert_notice_row(
+            db_session, wc.id, {"change_kind": "operation_order"}, now - timedelta(minutes=20)
+        )
+        _insert_notice_row(db_session, wc.id, MALFORMED_PAYLOAD, now - timedelta(minutes=10))
+        notice = dispatch_service.latest_dispatch_notices(db_session, COMPANY_A, [wc.id])[wc.id]
+        assert (notice["id"], notice["change_kind"]) == (newest_valid.id, "operation_order")
+
+    def test_the_fall_back_is_bounded_by_the_read_depth(self, db_session: Session):
+        """Only the newest ``DISPATCH_NOTICE_READ_DEPTH`` rows are considered: a valid row
+        buried under that many bad ones yields no notice -- never an unbounded scan."""
+        wc = make_work_center(db_session)
+        now = datetime.utcnow()
+        _insert_notice_row(db_session, wc.id, {"change_kind": "machine_order"}, now - timedelta(hours=1))
+        for minutes in range(dispatch_service.DISPATCH_NOTICE_READ_DEPTH):
+            _insert_notice_row(db_session, wc.id, MALFORMED_PAYLOAD, now - timedelta(minutes=minutes + 1))
+        assert dispatch_service.latest_dispatch_notices(db_session, COMPANY_A, [wc.id]) == {}
+
+    def test_moved_up_keeps_plain_ints_only_and_is_capped(self, db_session: Session):
+        wc = make_work_center(db_session)
+        ids = list(range(1, 40))
+        _insert_notice_row(
+            db_session,
+            wc.id,
+            {"moved_up": [True, "7", None, *ids]},
+            datetime.utcnow() - timedelta(minutes=1),
+        )
+        notice = dispatch_service.latest_dispatch_notices(db_session, COMPANY_A, [wc.id])[wc.id]
+        assert notice["moved_up"] == ids[: dispatch_service.MAX_NOTICE_MOVED_UP]

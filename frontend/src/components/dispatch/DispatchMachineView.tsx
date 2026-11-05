@@ -801,7 +801,15 @@ export default function DispatchMachineView({
           return;
         }
         showToast('success', `${label} moved to ${target.name}.`);
-        setStatusMessage(`${label} moved to ${target.name}. It is unranked at the end of that queue.`);
+        // Plan order leads every queue: a moved operation of a PLANNED work order
+        // stays inside that work order's block on the target machine — which can
+        // be the top of the queue — after the block's ranked operations (the move
+        // clears its own machine rank), not at the end of the queue.
+        setStatusMessage(
+          row.dispatch_position != null
+            ? `${label} moved to ${target.name}. It runs within ${row.work_order_number}'s plan block there, after that work order's ranked operations.`
+            : `${label} moved to ${target.name}. It is unranked at the end of that queue.`
+        );
       } catch (err) {
         const detail = serverDetail(err, 'Failed to move this job to another machine');
         showToast('error', detail);

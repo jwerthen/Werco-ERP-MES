@@ -611,6 +611,12 @@ describe('DispatchBoard', () => {
     // Non-optimistic: the board only changes after a successful re-read.
     await waitFor(() => expect(mockApi.getDispatchBoard).toHaveBeenCalledTimes(2));
     expect(mockApi.setWorkCenterRunOrder).not.toHaveBeenCalled();
+    // A work order outside the plan: the moved job lands unranked at the queue's end.
+    await waitFor(() =>
+      expect(screen.getByTestId('dispatch-status')).toHaveTextContent(
+        'WO-20260719-004 Laser Cut - nest-p002 moved to Haas VF-2. It is unranked at the end of that queue.'
+      )
+    );
   });
 
   it('surfaces a refused cross-machine move verbatim and leaves the board unchanged', async () => {
@@ -1634,6 +1640,40 @@ describe('DispatchMachineView — work-order bands (plan order wins)', () => {
     expect(await screen.findByText(PLAN_ORDER)).toBeInTheDocument();
     expect(mockApi.setWorkCenterRunOrder).not.toHaveBeenCalled();
     expect(cardOrder(12)).toEqual([501, 502, 503, 504]);
+  });
+
+  it("a planned work order's moved operation is announced at the end of its plan block, not unranked", async () => {
+    const user = userEvent.setup();
+    const withSecondBrake = (): { work_centers: DispatchBoardColumn[] } => {
+      const base = bandBoard();
+      return {
+        work_centers: [
+          ...base.work_centers,
+          {
+            id: 13,
+            name: 'Press Brake 2',
+            code: 'BRAKE-2',
+            work_center_type: 'press_brake',
+            is_active: true,
+            queue: [],
+          },
+        ],
+      };
+    };
+    mockApi.getDispatchBoard.mockResolvedValue(withSecondBrake());
+    mockApi.updateOperation.mockResolvedValue({});
+    renderBoard();
+    await findColumn('Press Brake 1');
+
+    await user.selectOptions(screen.getByLabelText('Move WO-20261103-004 Flange to another machine'), '13');
+
+    await waitFor(() => expect(mockApi.updateOperation).toHaveBeenCalledWith(501, { work_center_id: 13, version: 2 }));
+    await waitFor(() =>
+      expect(screen.getByTestId('dispatch-status')).toHaveTextContent(
+        "WO-20261103-004 Flange moved to Press Brake 2. It runs within WO-20261103-004's plan block there, after that work order's ranked operations."
+      )
+    );
+    expect(screen.getByTestId('dispatch-status')).not.toHaveTextContent('unranked');
   });
 
   it('the held filter picks the held work order’s row and dims the rest', async () => {

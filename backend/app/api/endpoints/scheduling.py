@@ -190,16 +190,41 @@ def _operation_audit_snapshot(operation: WorkOrderOperation) -> dict:
     }
 
 
-def _lock_and_snapshot_move(
+def _lock_dispatch_order_if_move_requested(
+    db: Session, company_id: int, requested_work_center_id: Optional[int]
+) -> None:
+    """Take the dispatch-order lock up front when a work-order schedule call MAY move its operation.
+
+    The two work-order schedule routes row-lock the work order and every one of its
+    operations ``FOR UPDATE`` (``load_locked_material_readiness``) before they know whether
+    the call moves anything. Every other dispatch-order writer takes the advisory lock FIRST
+    and then writes those same rows, so a schedule route taking it after its row locks
+    closes a cycle Postgres breaks by aborting one side (``DeadlockDetected``, a 500). One
+    lock order on every path: dispatch lock -> work order / operation row locks -> material
+    row locks -> audit chain lock.
+
+    Keyed on the REQUEST carrying a work center, not on the comparison with the current
+    one: that comparison needs the operation read, and the read must follow the lock. A
+    same-machine re-send therefore takes the lock too, which only serializes it briefly with
+    the planners. A call with no work center can never move the operation and takes no lock,
+    exactly as before. Call it before the work order is loaded, and exactly once: the move
+    branch then only snapshots (``_snapshot_move``).
+    """
+    if requested_work_center_id:
+        dispatch_service.acquire_dispatch_order_lock(db, company_id)
+
+
+def _snapshot_move(
     db: Session, company_id: int, old_work_center_id: Optional[int], new_work_center_id: int
 ) -> Tuple[dispatch_service.QueueSnapshot, Dict[int, DispatchChangeKind]]:
-    """Dispatch-order discipline for a machine move: lock FIRST, then snapshot both queues.
+    """Notice "before" snapshot of both queues for a machine move.
 
-    Called only when the work center really changes, and BEFORE
-    ``clear_run_order_on_move`` or any other mutation, so the notice "before"
+    The caller ALREADY HOLDS the dispatch-order lock: ``update_operation_work_center`` takes
+    it once it knows the call is a move, and the two work-order schedule routes take it before
+    their row locks (``_lock_dispatch_order_if_move_requested``). Called only when the work
+    center really changes, and BEFORE ``clear_run_order_on_move`` or any other mutation, so the
     snapshot is the queue the floor was actually looking at.
     """
-    dispatch_service.acquire_dispatch_order_lock(db, company_id)
     before = dispatch_service.snapshot_queue_orders(db, company_id, [old_work_center_id, new_work_center_id])
     kinds: Dict[int, DispatchChangeKind] = {new_work_center_id: DispatchChangeKind.MOVED_IN}
     if old_work_center_id is not None:
@@ -626,6 +651,8 @@ def schedule_work_order(
     order / schedule / status old->new diff), same as the dedicated move
     endpoints (invariant 2). A genuine no-op self-suppresses.
     """
+    # Lock order: the dispatch lock BEFORE the row locks load_locked_material_readiness takes.
+    _lock_dispatch_order_if_move_requested(db, company_id, schedule.work_center_id)
     work_order = _load_work_order_for_scheduling(db, work_order_id, company_id)
     materials = load_locked_material_readiness(
         db, company_id, [work_order], datetime.now(ZoneInfo("America/Chicago")).date()
@@ -642,9 +669,9 @@ def schedule_work_order(
     if schedule.work_center_id:
         target_work_center = _resolve_work_center(db, schedule.work_center_id, company_id)
         if schedule.work_center_id != current_op.work_center_id:
-            # A real move: serialize with every dispatch-order writer, and take the
-            # notice "before" snapshot of both machines BEFORE anything mutates.
-            dispatch_before, dispatch_change_kind = _lock_and_snapshot_move(
+            # A real move (the dispatch lock is already held): take the notice "before"
+            # snapshot of both machines BEFORE anything mutates.
+            dispatch_before, dispatch_change_kind = _snapshot_move(
                 db, company_id, current_op.work_center_id, schedule.work_center_id
             )
         # A reschedule that also moves the operation is still a move: the manual
@@ -745,6 +772,10 @@ def schedule_work_order_earliest(
     order / schedule / status old->new diff), same as the dedicated move
     endpoints (invariant 2). A genuine no-op self-suppresses.
     """
+    # Lock order: the dispatch lock BEFORE the row locks load_locked_material_readiness takes.
+    # Only a request naming a work center can move the operation (the target defaults to the
+    # current work center below), so that is exactly when the lock is needed.
+    _lock_dispatch_order_if_move_requested(db, company_id, request.work_center_id)
     work_order = _load_work_order_for_scheduling(db, work_order_id, company_id)
     materials = load_locked_material_readiness(
         db, company_id, [work_order], datetime.now(ZoneInfo("America/Chicago")).date()
@@ -764,8 +795,9 @@ def schedule_work_order_earliest(
     dispatch_before: Optional[dispatch_service.QueueSnapshot] = None
     dispatch_change_kind: Dict[int, DispatchChangeKind] = {}
     if target_work_center_id != current_op.work_center_id:
-        # A real move: lock, then snapshot both machines BEFORE anything mutates.
-        dispatch_before, dispatch_change_kind = _lock_and_snapshot_move(
+        # A real move (the dispatch lock is already held): snapshot both machines BEFORE
+        # anything mutates.
+        dispatch_before, dispatch_change_kind = _snapshot_move(
             db, company_id, current_op.work_center_id, target_work_center_id
         )
 
@@ -1025,8 +1057,11 @@ def update_operation_work_center(
     dispatch_before: Optional[dispatch_service.QueueSnapshot] = None
     dispatch_change_kind: Dict[int, DispatchChangeKind] = {}
     if update.work_center_id != operation.work_center_id:
-        # A real move: lock, then snapshot both machines BEFORE anything mutates.
-        dispatch_before, dispatch_change_kind = _lock_and_snapshot_move(
+        # A real move: lock, then snapshot both machines BEFORE anything mutates. Nothing
+        # above row-locked anything (plain reads only), so the lock still precedes every
+        # row lock this path takes.
+        dispatch_service.acquire_dispatch_order_lock(db, company_id)
+        dispatch_before, dispatch_change_kind = _snapshot_move(
             db, company_id, operation.work_center_id, update.work_center_id
         )
 

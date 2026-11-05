@@ -251,6 +251,11 @@ server returns it — the kiosk never re-sorts client-side. That order is:
 2. then jobs a manager ranked on a machine column (Dispatch Board → Machines view), in rank order;
 3. then everything unranked, by work-order priority, then due date, then operation sequence.
 
+A work order that is **on hold** keeps none of its ranks while the hold stands: its jobs drop out
+of groups 1 **and** 2 into group 3 and carry no `RUN n` chip, even when the planner had ordered its
+operations or a manager had ranked them on a machine column. The stored order is kept, so lifting
+the hold puts the jobs back where the planner left them, chips included, with nothing to redo.
+
 Jobs in groups 1 and 2 carry a `run_order` and render a **`RUN n`** chip (`KioskRunOrderChip`) on
 the queue card and the crew job card, numbered 1..N with no gaps. Unranked jobs therefore always
 sort **after** every ranked job, and carry no chip. With no work-order plan set, the order is exactly
@@ -486,6 +491,9 @@ machine's order. A notice is written per machine whose order actually changed �
 plan, a work order's operation order, a machine column rewrite, or an operation moved onto or off
 the machine. Nothing else writes one: no notice for completions, holds, priority or due-date edits,
 or a save that changed nothing (contract: `docs/API.md` → Shop Floor → "Floor dispatch notices").
+Only those planner routes can write a notice — the general `POST /operational-events/` refuses the
+notice's event type — and a stored row that is future-dated or malformed is ignored by the read
+(the machine shows its newest valid notice, or none) rather than breaking the screen's poll.
 
 **Where each screen gets it** — on the poll it already makes; the server reports only the newest
 notice per machine from the last 12 hours:
@@ -514,8 +522,10 @@ four screens; the decision logic is `hooks/useDispatchNotice.ts`):
   `updates_in_window` is a 12-hour total, not "since you checked", so it is never shown. The
   device's count covers only what it saw while polling — a screen that was off starts again at 1.
 - Times are Central (`formatCentralTime`); the planner is the "First L." form the roster uses, or
-  "the planner" when absent. The kiosks name the machine only when more than one strip is up; the
-  desktop pages always do.
+  "the planner" when absent. The crew station names the machine only when more than one strip is
+  up. The single-operator kiosk also names it whenever any strip shown is for a machine other than
+  the station's own — including a lone strip, because `my-active-job` carries notices for every
+  machine the operator has open labor on. The desktop pages always do.
 
 **"Got it" — the acknowledgement.** It hides that machine's strip (and its MOVED UP chips) until a
 newer notice arrives; nothing else changes. Who it hides it for is the load-bearing part:

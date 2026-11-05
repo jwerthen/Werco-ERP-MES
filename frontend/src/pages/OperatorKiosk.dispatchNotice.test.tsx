@@ -175,6 +175,8 @@ describe('OperatorKiosk dispatch notice', () => {
 
     expect(screen.queryByTestId('dispatch-notice')).not.toBeInTheDocument();
     expect(within(movedCard()).queryByTestId('kiosk-moved-up-chip')).not.toBeInTheDocument();
+    // Focus lands on the banner's hidden anchor where the strip was, not on <body>.
+    expect(document.activeElement).toBe(screen.getByTestId('dispatch-notice-focus-anchor'));
     // Information only: still on the queue, same URL, no clock-in confirm opened.
     expect(screen.getByTestId('kiosk-location').textContent).toBe(before);
     expect(screen.queryByRole('region', { name: /confirm clock in/i })).not.toBeInTheDocument();
@@ -222,6 +224,42 @@ describe('OperatorKiosk dispatch notice', () => {
     expect(strips[0]).toHaveTextContent('Queue order updated by Jon W. 10:34 AM — your next job is unchanged');
     expect(strips[1]).toHaveTextContent('DEBUR1');
     expect(strips[1]).toHaveTextContent('RUN NEXT: WO-RANK-0001');
+  });
+
+  it('names the machine on a lone strip for ANOTHER machine the operator is clocked in at', async () => {
+    // Open labor on a LASER-1 nest while badged in at DEBUR1; DEBUR1 has nothing
+    // new. An untagged "RUN NEXT" would read as DEBUR1's next job.
+    const laser = makeNotice({
+      id: 90240,
+      work_center_id: 9,
+      work_center_code: 'LASER-1',
+      next_up_after: {
+        operation_id: 3142,
+        work_order_number: 'WO-20261104-001',
+        unit_number: null,
+        operation_number: 'Nest 3',
+        operation_name: 'Laser Cut',
+        part_number: null,
+      },
+      moved_up: [3142],
+    });
+    mockedApi.getWorkCenterQueue.mockResolvedValue(queuePayload(null));
+    mockedApi.getMyActiveJob.mockResolvedValue(activePayload([laser]));
+    render(kioskTree());
+
+    const strip = await screen.findByTestId('dispatch-notice');
+    expect(screen.getAllByTestId('dispatch-notice')).toHaveLength(1);
+    expect(strip).toHaveTextContent(/^LASER-1\s*RUN NEXT: WO-20261104-001 · Nest 3 Laser Cut/);
+    expect(screen.getByRole('button', { name: /got it.*LASER-1/i })).toBeInTheDocument();
+  });
+
+  it("leaves a lone strip for this station's own machine untagged", async () => {
+    mockedApi.getWorkCenterQueue.mockResolvedValue(queuePayload(makeNotice()));
+    render(kioskTree());
+
+    const strip = await screen.findByTestId('dispatch-notice');
+    expect(strip).toHaveTextContent(/^RUN NEXT: WO-RANK-0001/);
+    expect(strip).not.toHaveTextContent('DEBUR1');
   });
 
   it('renders exactly as before against an older backend that sends no notice fields', async () => {

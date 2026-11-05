@@ -62,40 +62,71 @@ Idempotent and reversible
   models already built all three, every guard fires and the upgrade is a clean no-op; a
   hand-patched database holding only some of them gets exactly the missing ones.
 - The index guard is VALIDITY-aware on PostgreSQL (precedent 042/078). An interrupted
-  ``CREATE INDEX CONCURRENTLY`` -- the out-of-band build recommended below -- leaves an
-  INVALID index that ``inspector.get_indexes`` still reports, so a plain name guard
-  would skip it forever while the planner ignores it. ``_index_state`` reads
-  ``pg_index.indisvalid``; an INVALID leftover is dropped and rebuilt, a valid one is
-  left alone. On SQLite there is no such state and the probe is not run.
-- Downgrade drops both indexes (by name, guarded) and THEN the column (guarded).
-  Index-before-column matters on SQLite, whose batch-mode table rebuild would otherwise
-  carry a dangling index definition. The column drop runs in batch mode on SQLite
-  (recreates ``work_orders`` without it; precedent 063/064/065/083) and as a plain
-  ``DROP COLUMN`` on PostgreSQL. Downgrading discards the planner's work-order order --
-  advisory data, never production history; the audit rows that recorded each reorder
-  survive.
+  ``CREATE INDEX CONCURRENTLY`` -- which is how this revision builds the events index on
+  PostgreSQL, see below -- leaves an INVALID index that ``inspector.get_indexes`` still
+  reports, so a plain name guard would skip it forever while the planner ignores it.
+  ``_index_state`` reads ``pg_index.indisvalid``; an INVALID leftover is dropped and
+  rebuilt (``DROP INDEX CONCURRENTLY IF EXISTS`` then ``CREATE INDEX CONCURRENTLY IF NOT
+  EXISTS`` for the events index), a valid one is left alone. On SQLite there is no such
+  state and the probe is not run.
+- A failed concurrent build is safe to re-run: the revision is stamped only after
+  ``upgrade()`` returns, the column and the work-order index were already committed and
+  their guards skip them, and the INVALID events index is rebuilt.
+- Downgrade drops the events index first, then the work-order index, and THEN the
+  column (each guarded). Index-before-column matters on SQLite, whose batch-mode table
+  rebuild would otherwise carry a dangling index definition. The column drop runs in
+  batch mode on SQLite (recreates ``work_orders`` without it; precedent
+  063/064/065/083) and as a plain ``DROP COLUMN`` on PostgreSQL. Downgrading discards the
+  planner's work-order order -- advisory data, never production history; the audit rows
+  that recorded each reorder survive.
 
 Dialect note
 ------------
-Dialect-neutral DDL in both directions: no ``_is_postgres`` early return (precedent
-068/070/071/081/083). The only dialect branches are the Postgres validity probe and the
-SQLite batch-mode column drop.
+Dialect-neutral DDL for the column and the work-order index in both directions: no
+``_is_postgres`` early return (precedent 068/070/071/081/083). The dialect branches are
+the Postgres validity probe and ``lock_timeout``, the Postgres CONCURRENTLY build/drop of
+the events index (precedent 042/078/079), and the SQLite batch-mode column drop. SQLite
+builds and drops the events index with a plain ``CREATE`` / ``DROP INDEX``.
 
 Locking / operations note
 -------------------------
-- ``ADD COLUMN`` nullable with no default is metadata-only on PostgreSQL: a brief ACCESS
-  EXCLUSIVE lock on ``work_orders``, no rewrite, no backfill pass.
-- ``CREATE INDEX`` (non-CONCURRENT) takes a SHARE lock for the build: reads proceed,
-  WRITES to that table wait. ``work_orders`` is small (a non-event).
-  ``operational_events`` is append-heavy (every operation start/complete/ready emits a
-  row), so its build briefly blocks those emits; at this shop's volume that is expected
-  to be well under a few seconds. If it is ever not -- or to deploy mid-shift -- build it
-  out of band first and let the guard here no-op::
+``alembic/env.py`` runs every pending revision in ONE transaction, and PostgreSQL holds a
+lock until COMMIT, so what matters is which lock is held while what runs. On PostgreSQL:
+
+- In the migration transaction: ``SET LOCAL lock_timeout = '5s'``, then ``ADD COLUMN``
+  (nullable, no default: metadata-only, no rewrite, no backfill) and the small
+  ``ix_work_orders_company_dispatch_rank`` build. ``ADD COLUMN`` takes an ACCESS
+  EXCLUSIVE lock on ``work_orders`` -- reads included -- for the rest of that
+  transaction, which is only the ``ADD COLUMN`` and that small index build.
+- ``op.get_context().autocommit_block()`` then COMMITS that transaction, releasing the
+  ``work_orders`` lock, and builds ``ix_operational_events_company_entity_time`` with
+  ``CREATE INDEX CONCURRENTLY IF NOT EXISTS`` outside any transaction. A concurrent build
+  blocks neither reads nor event writes on ``operational_events`` (it only waits for
+  transactions already running to finish), so no request stalls on it however large the
+  table has grown. If it is interrupted it leaves an INVALID index that the next run
+  drops and rebuilds (above).
+- The events index is deliberately NOT built first. Built inside the transaction before
+  ``ADD COLUMN`` it would hold SHARE on ``operational_events`` while ``ADD COLUMN`` waits
+  for requests that read ``work_orders`` and then emit an event -- requests that are
+  themselves waiting on that SHARE lock: a deadlock the migration loses.
+- ``lock_timeout`` is ``SET LOCAL`` (precedent 059/060 set it for the same reason): if a
+  long transaction holds ``work_orders``, ``ADD COLUMN`` fails after 5 s instead of
+  queueing -- and queueing every later ``work_orders`` query behind it -- for as long as
+  that transaction runs. The deploy then fails fast and a re-run is safe. LOCAL scopes it
+  to the migration transaction, so it ends at the COMMIT above and never reaches the
+  concurrent build (whose waits on older transactions are expected and harmless). It is
+  also reset (``SET LOCAL lock_timeout = DEFAULT``) as soon as the work_orders DDL is
+  done, because when the events index is already valid no COMMIT follows inside this
+  revision and the same transaction carries on into any later revision in the run.
+- Pre-building the events index out of band is no longer needed; it remains harmless
+  (the guard no-ops on a valid index)::
 
       CREATE INDEX CONCURRENTLY ix_operational_events_company_entity_time
           ON operational_events (company_id, entity_type, entity_id, occurred_at);
 
-  (autocommit; if that build is interrupted, the validity-aware guard rebuilds it.)
+- Downgrade mirrors it: the events index is dropped CONCURRENTLY in an autocommit block
+  before this revision takes any lock on ``work_orders``; then, in a fresh transaction
+  under the same ``lock_timeout``, the work-order index and the column are dropped.
 - Deploy ordering: run BEFORE (or with) the app deploy that reads/writes
   ``dispatch_rank``. Old code neither selects nor writes the column, so the migration
   can land ahead of the code safely; new code against an un-migrated database would
@@ -120,17 +151,29 @@ TABLE_NAME = "work_orders"
 COLUMN_NAME = "dispatch_rank"
 
 WO_INDEX_NAME = "ix_work_orders_company_dispatch_rank"
+WO_INDEX_COLUMNS = ["company_id", COLUMN_NAME]
 EVENTS_TABLE_NAME = "operational_events"
 EVENTS_INDEX_NAME = "ix_operational_events_company_entity_time"
+EVENTS_INDEX_COLUMNS = ["company_id", "entity_type", "entity_id", "occurred_at"]
 
 # (table, index_name, columns) -- both non-unique, non-partial btree indexes, mirrored
 # byte-for-byte on the models' ``__table_args__``. The work-order index is listed first:
 # it names the column this revision adds, so it must be built after it and dropped
-# before it.
+# before it. On PostgreSQL the two are built differently (see the module docstring).
 INDEXES = [
-    (TABLE_NAME, WO_INDEX_NAME, ["company_id", COLUMN_NAME]),
-    (EVENTS_TABLE_NAME, EVENTS_INDEX_NAME, ["company_id", "entity_type", "entity_id", "occurred_at"]),
+    (TABLE_NAME, WO_INDEX_NAME, WO_INDEX_COLUMNS),
+    (EVENTS_TABLE_NAME, EVENTS_INDEX_NAME, EVENTS_INDEX_COLUMNS),
 ]
+
+# PostgreSQL only, and LOCAL: it lasts until the migration transaction ends, so it bounds
+# the wait for the work_orders locks and never reaches the concurrent build (which runs
+# after the autocommit block's COMMIT). Same value as 059/060.
+LOCK_TIMEOUT_SQL = "SET LOCAL lock_timeout = '5s'"
+# ...and handed back as soon as that DDL is done. When no COMMIT follows inside this
+# revision (the events index is already valid, e.g. pre-built out of band), the migration
+# transaction carries on into any later revision in the same ``alembic upgrade head`` run,
+# which must get its normal lock_timeout -- not this revision's 5 s bound.
+RESET_LOCK_TIMEOUT_SQL = "SET LOCAL lock_timeout = DEFAULT"
 
 _INDEX_VALIDITY_SQL = (
     "SELECT i.indisvalid "
@@ -184,41 +227,101 @@ def _index_state(table_name: str, index_name: str) -> str:
     return "invalid"
 
 
-def upgrade() -> None:
-    # 1) The column. Nullable, no default -> metadata-only on PG, no backfill pass.
-    #    Guarded so the create_all bootstrap path (model already built it) no-ops.
-    if not _has_column(TABLE_NAME, COLUMN_NAME):
-        op.add_column(TABLE_NAME, sa.Column(COLUMN_NAME, sa.Integer(), nullable=True))
+def _is_postgres() -> bool:
+    return op.get_bind().dialect.name == "postgresql"
 
-    # 2) The indexes, each guarded on its own: create_all builds both, but a
-    #    hand-patched database may hold the column without its index, or one index and
-    #    not the other. An INVALID leftover (PG only) is dropped and rebuilt.
-    for table_name, index_name, columns in INDEXES:
-        state = _index_state(table_name, index_name)
-        if state == "valid":
-            continue
-        if state == "invalid":
-            op.drop_index(index_name, table_name=table_name)
-        op.create_index(index_name, table_name, columns, unique=False)
+
+def _ensure_index_in_transaction(table_name: str, index_name: str, columns, state: str) -> None:
+    """Plain (transactional) build of one index in ``state``; an INVALID leftover is rebuilt."""
+    if state == "valid":
+        return
+    if state == "invalid":
+        op.drop_index(index_name, table_name=table_name)
+    op.create_index(index_name, table_name, columns, unique=False)
+
+
+def _ensure_index_concurrently(table_name: str, index_name: str, columns, state: str) -> None:
+    """PostgreSQL ``CONCURRENTLY`` build of one index in ``state`` (precedent 042).
+
+    Caller must already be inside ``op.get_context().autocommit_block()``: CONCURRENTLY
+    cannot run in a transaction. An INVALID leftover of an interrupted build is dropped
+    CONCURRENTLY first -- ``IF NOT EXISTS`` alone would no-op on the dead name and never
+    rebuild it.
+    """
+    if state == "valid":
+        return
+    if state == "invalid":
+        op.drop_index(index_name, table_name=table_name, postgresql_concurrently=True, if_exists=True)
+    op.create_index(index_name, table_name, columns, unique=False, postgresql_concurrently=True, if_not_exists=True)
+
+
+def upgrade() -> None:
+    postgres = _is_postgres()
+
+    # 1) The column and its small work-order index, in the migration transaction. Each is
+    #    guarded on its own: create_all builds both (the bootstrap path no-ops), but a
+    #    hand-patched database may hold the column without its index. The column is
+    #    nullable with no default -> metadata-only on PG, no backfill pass.
+    add_column = not _has_column(TABLE_NAME, COLUMN_NAME)
+    wo_index_state = _index_state(TABLE_NAME, WO_INDEX_NAME)
+    bound_lock_wait = postgres and (add_column or wo_index_state != "valid")
+    if bound_lock_wait:
+        # Bound the wait for the work_orders locks; see LOCK_TIMEOUT_SQL.
+        op.execute(LOCK_TIMEOUT_SQL)
+    if add_column:
+        op.add_column(TABLE_NAME, sa.Column(COLUMN_NAME, sa.Integer(), nullable=True))
+    _ensure_index_in_transaction(TABLE_NAME, WO_INDEX_NAME, WO_INDEX_COLUMNS, wo_index_state)
+    if bound_lock_wait:
+        op.execute(RESET_LOCK_TIMEOUT_SQL)
+
+    # 2) The events index. Nothing to do on the bootstrap path, so no early COMMIT there.
+    events_state = _index_state(EVENTS_TABLE_NAME, EVENTS_INDEX_NAME)
+    if events_state == "valid":
+        return
+    if not postgres:
+        _ensure_index_in_transaction(EVENTS_TABLE_NAME, EVENTS_INDEX_NAME, EVENTS_INDEX_COLUMNS, events_state)
+        return
+    # The autocommit block COMMITS the migration transaction first, releasing the ACCESS
+    # EXCLUSIVE lock ADD COLUMN took on work_orders, then builds CONCURRENTLY: neither
+    # work_orders reads nor operational_events reads/writes wait on this build. Do NOT move
+    # this build ahead of step 1 (see the module docstring: that order deadlocks).
+    with op.get_context().autocommit_block():
+        _ensure_index_concurrently(EVENTS_TABLE_NAME, EVENTS_INDEX_NAME, EVENTS_INDEX_COLUMNS, events_state)
 
 
 def downgrade() -> None:
-    # 1) Indexes first -- the work-order one names the column dropped below, and
-    #    SQLite's batch-mode rebuild would otherwise carry a dangling index definition.
-    #    A drop does not care whether the index is valid, so a plain name guard is
-    #    enough here.
-    for table_name, index_name, _columns in INDEXES:
-        if _has_index(table_name, index_name):
-            op.drop_index(index_name, table_name=table_name)
+    postgres = _is_postgres()
 
-    # 2) The column.
-    if not _has_column(TABLE_NAME, COLUMN_NAME):
-        return
+    # 1) The events index first: on PG dropped CONCURRENTLY in an autocommit block, before
+    #    this revision takes any lock on work_orders. A drop does not care whether the
+    #    index is valid, so a plain name guard is enough here.
+    if _has_index(EVENTS_TABLE_NAME, EVENTS_INDEX_NAME):
+        if postgres:
+            with op.get_context().autocommit_block():
+                op.drop_index(
+                    EVENTS_INDEX_NAME, table_name=EVENTS_TABLE_NAME, postgresql_concurrently=True, if_exists=True
+                )
+        else:
+            op.drop_index(EVENTS_INDEX_NAME, table_name=EVENTS_TABLE_NAME)
 
-    if op.get_bind().dialect.name == "sqlite":
-        # Batch mode recreates the table without the column (precedent 063/064/065/083)
-        # rather than relying on SQLite's version-gated ALTER ... DROP COLUMN.
-        with op.batch_alter_table(TABLE_NAME) as batch_op:
-            batch_op.drop_column(COLUMN_NAME)
-    else:
-        op.drop_column(TABLE_NAME, COLUMN_NAME)
+    # 2) The work-order index BEFORE the column it names -- SQLite's batch-mode rebuild
+    #    would otherwise carry a dangling index definition -- and then the column.
+    drop_wo_index = _has_index(TABLE_NAME, WO_INDEX_NAME)
+    drop_column = _has_column(TABLE_NAME, COLUMN_NAME)
+    bound_lock_wait = postgres and (drop_wo_index or drop_column)
+    if bound_lock_wait:
+        op.execute(LOCK_TIMEOUT_SQL)
+    if drop_wo_index:
+        op.drop_index(WO_INDEX_NAME, table_name=TABLE_NAME)
+
+    if drop_column:
+        if op.get_bind().dialect.name == "sqlite":
+            # Batch mode recreates the table without the column (precedent 063/064/065/083)
+            # rather than relying on SQLite's version-gated ALTER ... DROP COLUMN.
+            with op.batch_alter_table(TABLE_NAME) as batch_op:
+                batch_op.drop_column(COLUMN_NAME)
+        else:
+            op.drop_column(TABLE_NAME, COLUMN_NAME)
+
+    if bound_lock_wait:
+        op.execute(RESET_LOCK_TIMEOUT_SQL)

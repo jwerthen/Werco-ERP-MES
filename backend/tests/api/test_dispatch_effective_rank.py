@@ -12,6 +12,10 @@ Pinned here (spec section 2):
    work order do not float on ``/shop-floor/operations``.
 5. Two work orders sharing a rank never interleave (work-order-id tiebreak).
 6. NO N+1 -- the positions reads stay flat as the queue grows.
+7. A HELD work order's stored ``run_order`` neither sorts nor labels (the
+   ``effective_run_order_expr`` / ``effective_run_order`` twin), on the kiosk queue,
+   the machine board, ``/shop-floor/operations`` and the lanes view; lifting the hold
+   restores the stored order and its RUN chips with no write.
 """
 
 from datetime import date, timedelta
@@ -25,7 +29,16 @@ from app.models.user import UserRole
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.services import dispatch_service
 from app.services.work_order_state_service import TERMINAL_WO_STATUSES
-from tests.api.dispatch_plan_helpers import BOARD_URL, count_statements, make_plan_wo, ready
+from tests.api.dispatch_plan_helpers import (
+    BOARD_URL,
+    LANES_URL,
+    count_statements,
+    lane_for,
+    make_plan_wo,
+    operation_order_url,
+    ready,
+    run_order_url,
+)
 from tests.api.kiosk_test_helpers import COMPANY_A, make_user, make_work_center, queue_url, user_headers
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
@@ -384,3 +397,202 @@ class TestPositionsReadsStayFlat:
         cost = count_statements(db_session, lambda: dispatch_service.display_positions(operations))
         assert cost == 0
         assert list(dispatch_service.display_positions(operations).values()) == [1, 2, 3]
+
+
+# --------------------------------------------------------------------------
+# 6. A held work order's stored run_order neither sorts nor labels (BE-3)
+# --------------------------------------------------------------------------
+
+
+def _set_wo_status(client: TestClient, headers: dict, db: Session, work_order_id: int, new_status: str) -> None:
+    """Change a work order's status through the real generic PUT (the path a supervisor uses)."""
+    db.expire_all()
+    version = db.get(WorkOrder, work_order_id).version
+    resp = client.put(
+        f"/api/v1/work-orders/{work_order_id}", json={"status": new_status, "version": version}, headers=headers
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+
+def _lane_run_positions(client: TestClient, headers: dict, work_order_id: int) -> dict:
+    resp = client.get(LANES_URL, headers=headers)
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    lane = lane_for(resp.json(), work_order_id)
+    return {
+        "dispatch_position": lane["dispatch_position"],
+        **{op["operation_id"]: op["run_position"] for op in lane["operations"]},
+    }
+
+
+def _stored_run_orders(db: Session, *operation_ids: int) -> list:
+    db.expire_all()
+    return [db.get(WorkOrderOperation, op_id).run_order for op_id in operation_ids]
+
+
+class TestEffectiveRunOrderTwin:
+    def test_sql_and_python_agree_over_the_full_status_matrix(self, db_session: Session):
+        wc = make_work_center(db_session)
+        cases = []
+        for wo_status in WorkOrderStatus:
+            for op_status in OperationStatus:
+                for run_order in (2, None):
+                    _, (op,) = make_plan_wo(db_session, [(wc, op_status, 10, run_order)], status=wo_status)
+                    cases.append((wo_status, op_status, run_order, op.id))
+
+        sql_value = dict(
+            db_session.query(WorkOrderOperation.id, dispatch_service.effective_run_order_expr())
+            .join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id)
+            .filter(WorkOrderOperation.id.in_([case[3] for case in cases]))
+            .all()
+        )
+        for wo_status, op_status, run_order, op_id in cases:
+            python_value = dispatch_service.effective_run_order(db_session.get(WorkOrderOperation, op_id))
+            # The work order's hold is the ONLY gate: the operation's own status does not
+            # matter (a PENDING row's stored rank orders /shop-floor/operations as before).
+            expected = None if wo_status == WorkOrderStatus.ON_HOLD else run_order
+            assert sql_value[op_id] == python_value == expected, (wo_status, op_status, run_order)
+
+    def test_a_null_work_order_status_yields_null_on_both_sides(self, db_session: Session):
+        wc = make_work_center(db_session)
+        wo, (op,) = make_plan_wo(db_session, [ready(wc, run_order=1)])
+        wo.status = None
+        db_session.commit()
+        sql_value = (
+            db_session.query(dispatch_service.effective_run_order_expr())
+            .select_from(WorkOrderOperation)
+            .join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id)
+            .filter(WorkOrderOperation.id == op.id)
+            .scalar()
+        )
+        assert sql_value is None
+        assert dispatch_service.effective_run_order(db_session.get(WorkOrderOperation, op.id)) is None
+
+    def test_queue_rows_carry_the_stored_and_the_effective_value(self, db_session: Session):
+        wc = make_work_center(db_session)
+        _, (held,) = make_plan_wo(db_session, [ready(wc, run_order=3)], status=WorkOrderStatus.ON_HOLD)
+        _, (live,) = make_plan_wo(db_session, [ready(wc, run_order=4)])
+        rows = {row.operation_id: row for row in dispatch_service.queue_order_rows(db_session, COMPANY_A, [wc.id])}
+        assert (rows[held.id].run_order, rows[held.id].effective_run_order) == (3, None)
+        assert (rows[live.id].run_order, rows[live.id].effective_run_order) == (4, 4)
+
+
+class TestHeldWorkOrderRunOrder:
+    """The planner's operation order (or a machine-column rank) is stored on the held
+    work order's READY operations; a hold leaves both untouched. While the hold stands
+    those rows must sort and label exactly like never-ranked work on every surface, and
+    lifting the hold must bring the stored order and the RUN chips back with no write."""
+
+    @pytest.fixture(autouse=True)
+    def _no_outbox_enqueue(self, monkeypatch):
+        import app.services.notification_outbox as notification_outbox
+
+        monkeypatch.setattr(notification_outbox, "_enqueue_dispatch", lambda event_id: None)
+
+    def test_planned_held_work_order_with_an_operation_order_reads_no_run_chip_anywhere(
+        self, client: TestClient, db_session: Session
+    ):
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        headers = user_headers(manager)
+        wc = make_work_center(db_session)
+        wo_a, (a1, a2) = make_plan_wo(db_session, [ready(wc, 10), ready(wc, 20)], sequential=False, dispatch_rank=1)
+        _, (u1,) = make_plan_wo(db_session, [ready(wc)], priority=1)
+        resp = client.put(
+            operation_order_url(wo_a.id),
+            json={"operation_ids": [a2.id, a1.id], "expected_operation_ids": [a1.id, a2.id]},
+            headers=headers,
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert _stored_run_orders(db_session, a2.id, a1.id) == [1, 2]
+        assert _queue(client, wc.id, headers) == [(a2.id, 1), (a1.id, 2), (u1.id, None)]
+
+        _set_wo_status(client, headers, db_session, wo_a.id, "on_hold")
+
+        # The priority-1 unplanned job leads; the held work order's rows follow it with
+        # no RUN chip, in the priority/sequence fallback order (a1 seq 10, a2 seq 20).
+        expected = [(u1.id, None), (a1.id, None), (a2.id, None)]
+        assert _queue(client, wc.id, headers) == expected
+        column = _column(client, wc.id, headers)
+        assert [(row["operation_id"], row["run_order"]) for row in column["queue"]] == expected
+        assert all(row["dispatch_position"] is None for row in column["queue"])
+        ops = _operations(client, wc.id, headers)
+        assert [(row["id"], row["run_order"]) for row in ops] == expected
+        lane = _lane_run_positions(client, headers, wo_a.id)
+        # Still IN the plan on the lanes view (CONTRACT 1.2), but no RUN position.
+        assert lane == {"dispatch_position": 1, a1.id: None, a2.id: None}
+        # Read-side only: the hold changed no stored value.
+        assert _stored_run_orders(db_session, a2.id, a1.id) == [1, 2]
+
+        _set_wo_status(client, headers, db_session, wo_a.id, "released")
+
+        restored = [(a2.id, 1), (a1.id, 2), (u1.id, None)]
+        assert _queue(client, wc.id, headers) == restored
+        column = _column(client, wc.id, headers)
+        assert [(row["operation_id"], row["run_order"]) for row in column["queue"]] == restored
+        assert [(row["id"], row["run_order"]) for row in _operations(client, wc.id, headers)] == restored
+        assert _lane_run_positions(client, headers, wo_a.id) == {"dispatch_position": 1, a1.id: 2, a2.id: 1}
+
+    def test_unplanned_held_work_order_loses_its_machine_rank_until_the_hold_lifts(
+        self, client: TestClient, db_session: Session
+    ):
+        """No plan rank involved: the machine-column ``run_order`` alone is what is gated."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        headers = user_headers(manager)
+        wc = make_work_center(db_session)
+        wo_h, (h1,) = make_plan_wo(db_session, [ready(wc, run_order=1)], priority=9)
+        _, (u1,) = make_plan_wo(db_session, [ready(wc)], priority=1)
+        assert _queue(client, wc.id, headers) == [(h1.id, 1), (u1.id, None)]
+
+        _set_wo_status(client, headers, db_session, wo_h.id, "on_hold")
+        expected = [(u1.id, None), (h1.id, None)]
+        assert _queue(client, wc.id, headers) == expected
+        assert [(row["operation_id"], row["run_order"]) for row in _column(client, wc.id, headers)["queue"]] == (
+            expected
+        )
+        assert [(row["id"], row["run_order"]) for row in _operations(client, wc.id, headers)] == expected
+        assert _lane_run_positions(client, headers, wo_h.id) == {"dispatch_position": None, h1.id: None}
+        assert _stored_run_orders(db_session, h1.id) == [1]
+
+        _set_wo_status(client, headers, db_session, wo_h.id, "released")
+        assert _queue(client, wc.id, headers) == [(h1.id, 1), (u1.id, None)]
+        assert _lane_run_positions(client, headers, wo_h.id) == {"dispatch_position": None, h1.id: 1}
+
+    def test_a_column_rewrite_accepts_a_held_row_and_its_rank_takes_effect_on_unhold(
+        self, client: TestClient, db_session: Session
+    ):
+        """Held rows interleave with never-ranked rows by priority, so refusing "held
+        before runnable" would make the rendered column unsaveable. The held row's
+        submitted rank is stored and only counts once the hold lifts."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        headers = user_headers(manager)
+        wc = make_work_center(db_session)
+        wo_h, (h1,) = make_plan_wo(db_session, [ready(wc)], priority=1, status=WorkOrderStatus.ON_HOLD)
+        _, (u1,) = make_plan_wo(db_session, [ready(wc)], priority=5)
+        rendered = [row["operation_id"] for row in _column(client, wc.id, headers)["queue"]]
+        assert rendered == [h1.id, u1.id]
+
+        resp = client.put(
+            run_order_url(wc.id), json={"operation_ids": rendered, "expected_operation_ids": rendered}, headers=headers
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert [(row["operation_id"], row["run_order"]) for row in resp.json()["queue"]] == [
+            (u1.id, 1),
+            (h1.id, None),
+        ]
+        assert _stored_run_orders(db_session, h1.id, u1.id) == [1, 2]
+
+        _set_wo_status(client, headers, db_session, wo_h.id, "released")
+        assert _queue(client, wc.id, headers) == [(h1.id, 1), (u1.id, 2)]
+
+    def test_nothing_ranked_or_held_stays_byte_identical(self, client: TestClient, db_session: Session):
+        """The gate changes nothing unless a HELD work order carries a stored rank: a held
+        work order with no rank, and ranked work orders that are not held, sort exactly
+        as the legacy (raw run_order) sort did."""
+        manager = make_user(db_session, role=UserRole.MANAGER)
+        wc = make_work_center(db_session)
+        make_plan_wo(db_session, [ready(wc, run_order=2)], priority=9)
+        make_plan_wo(db_session, [ready(wc)], status=WorkOrderStatus.ON_HOLD, priority=1)
+        make_plan_wo(db_session, [ready(wc, run_order=1)], status=WorkOrderStatus.IN_PROGRESS)
+        make_plan_wo(db_session, [ready(wc)], priority=3)
+        legacy = _legacy_order(db_session, wc.id)
+        positions = dispatch_service._dense_positions((op_id, run_order is not None) for op_id, run_order in legacy)
+        assert _queue(client, wc.id, user_headers(manager)) == [(op_id, positions[op_id]) for op_id, _ in legacy]
