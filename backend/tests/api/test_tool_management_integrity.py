@@ -22,7 +22,15 @@ from sqlalchemy.orm import Session
 from app.models.audit_log import AuditLog
 from app.models.tool_management import Tool, ToolCheckout, ToolStatus, ToolUsageLog
 from app.models.user import UserRole
-from tests.api.kiosk_test_helpers import COMPANY_A, COMPANY_B, make_user, make_work_center, user_headers
+from tests.api.kiosk_test_helpers import (
+    COMPANY_A,
+    COMPANY_B,
+    ensure_company,
+    make_user,
+    make_wo_with_operation,
+    make_work_center,
+    user_headers,
+)
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -129,14 +137,20 @@ class TestToolLedgerWrites:
             == 1
         )
 
-    def test_negative_usage_is_422(self, client: TestClient, db_session: Session):
+    @pytest.mark.parametrize("payload", [{"usage_hours": -80}, {"usage_cycles": -5}])
+    def test_negative_usage_is_422_and_writes_nothing(self, client: TestClient, db_session: Session, payload: dict):
         tool = make_tool(db_session, max_life_hours=100, current_life_hours=90)
-        response = client.post(
-            f"{TOOLS_URL}/{tool.id}/log-usage", json={"usage_hours": -80}, headers=headers_for(db_session)
-        )
+        headers = headers_for(db_session)
+        ledger_before = ledger_counts(db_session)
+        audit_before = audit_count(db_session)
+
+        response = client.post(f"{TOOLS_URL}/{tool.id}/log-usage", json=payload, headers=headers)
+
         assert response.status_code == 422
+        assert ledger_counts(db_session) == ledger_before
+        assert audit_count(db_session) == audit_before
         db_session.refresh(tool)
-        assert tool.current_life_hours == 90
+        assert (tool.current_life_hours, tool.current_life_cycles or 0) == (90, 0)
 
     def test_create_update_retire_are_audited(self, client: TestClient, db_session: Session):
         headers = headers_for(db_session, role=UserRole.SUPERVISOR)
@@ -364,3 +378,123 @@ class TestToolTenantIsolation:
         assert ledger_counts(db_session) == ledger_before
         db_session.refresh(own_tool)
         assert own_tool.status == ToolStatus.AVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# 5. Gaps the first pass left open (test-engineer review)
+# ---------------------------------------------------------------------------
+
+
+class TestToolForeignReferences:
+    """``work_center_id`` / ``work_order_id`` on checkout AND log-usage are the caller's own, live rows.
+
+    The first pass covered only a foreign work center on checkout; the same guard on the
+    usage ledger, the work-order half, and the soft-deleted-job refusal had no test, so
+    deleting any of those lines left the suite green.
+    """
+
+    def _own_tool(self, db: Session) -> Tool:
+        return make_tool(db, company_id=COMPANY_B, max_life_hours=100, current_life_hours=10)
+
+    def _assert_untouched(self, db: Session, tool: Tool, ledger_before: tuple, audit_before: int) -> None:
+        assert ledger_counts(db) == ledger_before
+        assert audit_count(db) == audit_before
+        db.refresh(tool)
+        assert (tool.status, tool.current_life_hours, tool.current_work_center_id) == (
+            ToolStatus.AVAILABLE,
+            10,
+            None,
+        )
+
+    def test_log_usage_against_another_tenants_work_center_is_404(self, client: TestClient, db_session: Session):
+        tool = self._own_tool(db_session)
+        foreign_wc = make_work_center(db_session, company_id=COMPANY_A)
+        headers = headers_for(db_session, company_id=COMPANY_B)
+        ledger_before, audit_before = ledger_counts(db_session), audit_count(db_session)
+
+        response = client.post(
+            f"{TOOLS_URL}/{tool.id}/log-usage",
+            json={"usage_hours": 3, "work_center_id": foreign_wc.id},
+            headers=headers,
+        )
+
+        assert response.status_code == 404, response.text
+        self._assert_untouched(db_session, tool, ledger_before, audit_before)
+
+    @pytest.mark.parametrize("verb", ["checkout", "log-usage"])
+    def test_another_tenants_work_order_is_404(self, client: TestClient, db_session: Session, verb: str):
+        tool = self._own_tool(db_session)
+        foreign_wo, _ = make_wo_with_operation(
+            db_session, company_id=COMPANY_A, work_center=make_work_center(db_session, company_id=COMPANY_A)
+        )
+        headers = headers_for(db_session, company_id=COMPANY_B)
+        ledger_before, audit_before = ledger_counts(db_session), audit_count(db_session)
+
+        response = client.post(
+            f"{TOOLS_URL}/{tool.id}/{verb}", json={"usage_hours": 3, "work_order_id": foreign_wo.id}, headers=headers
+        )
+
+        assert response.status_code == 404, response.text
+        assert response.json()["detail"] == "Work order not found"
+        self._assert_untouched(db_session, tool, ledger_before, audit_before)
+
+    @pytest.mark.parametrize("verb", ["checkout", "log-usage"])
+    def test_an_own_soft_deleted_work_order_is_refused(self, client: TestClient, db_session: Session, verb: str):
+        tool = self._own_tool(db_session)
+        own_wc = make_work_center(db_session, company_id=COMPANY_B)
+        own_wo, _ = make_wo_with_operation(db_session, company_id=COMPANY_B, work_center=own_wc)
+        own_wo.soft_delete(make_user(db_session, company_id=COMPANY_B, role=UserRole.ADMIN).id)
+        db_session.commit()
+        headers = headers_for(db_session, company_id=COMPANY_B)
+        ledger_before, audit_before = ledger_counts(db_session), audit_count(db_session)
+
+        response = client.post(
+            f"{TOOLS_URL}/{tool.id}/{verb}", json={"usage_hours": 3, "work_order_id": own_wo.id}, headers=headers
+        )
+
+        assert response.status_code == 404, response.text
+        self._assert_untouched(db_session, tool, ledger_before, audit_before)
+
+    def test_an_own_live_work_order_and_work_center_are_accepted(self, client: TestClient, db_session: Session):
+        # The positive control for the three refusals above: same shapes, own live rows.
+        tool = self._own_tool(db_session)
+        own_wc = make_work_center(db_session, company_id=COMPANY_B)
+        own_wo, _ = make_wo_with_operation(db_session, company_id=COMPANY_B, work_center=own_wc)
+        headers = headers_for(db_session, company_id=COMPANY_B)
+
+        response = client.post(
+            f"{TOOLS_URL}/{tool.id}/checkout",
+            json={"work_center_id": own_wc.id, "work_order_id": own_wo.id},
+            headers=headers,
+        )
+
+        assert response.status_code == 200, response.text
+        checkout = db_session.query(ToolCheckout).filter(ToolCheckout.id == response.json()["id"]).one()
+        assert (checkout.company_id, checkout.work_center_id, checkout.work_order_id) == (
+            COMPANY_B,
+            own_wc.id,
+            own_wo.id,
+        )
+
+
+class TestToolCodeUniqueness:
+    def test_a_tool_id_another_tenant_already_uses_is_400_not_500_and_writes_nothing(
+        self, client: TestClient, db_session: Session
+    ):
+        # ``tools.tool_id`` is still GLOBALLY unique (no per-company compound yet), so the
+        # tenant-scoped probe misses it and the flush is what refuses.
+        taken = make_tool(db_session, company_id=COMPANY_A)
+        ensure_company(db_session, COMPANY_B)
+        headers = headers_for(db_session, company_id=COMPANY_B, role=UserRole.MANAGER)
+        audit_before = audit_count(db_session)
+
+        response = client.post(f"{TOOLS_URL}/", json={"tool_id": taken.tool_id, "name": "Mine"}, headers=headers)
+
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"] == "Tool ID already exists"
+        assert db_session.query(Tool).filter(Tool.company_id == COMPANY_B).count() == 0
+        assert audit_count(db_session) == audit_before
+        follow_up = client.post(
+            f"{TOOLS_URL}/", json={"tool_id": f"{taken.tool_id}-B", "name": "Mine"}, headers=headers
+        )
+        assert follow_up.status_code == 200, follow_up.text

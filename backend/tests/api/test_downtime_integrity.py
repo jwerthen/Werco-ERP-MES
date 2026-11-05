@@ -22,6 +22,7 @@ from app.models.user import UserRole
 from tests.api.kiosk_test_helpers import (
     COMPANY_A,
     COMPANY_B,
+    ensure_company,
     make_user,
     make_wo_with_operation,
     make_work_center,
@@ -125,15 +126,21 @@ class TestDowntimeWrites:
         assert single.json()["reporter"]["id"] == event.reported_by
         assert single.json()["reporter"]["username"] is None
 
-    def test_explicit_null_on_a_required_field_is_422(self, client: TestClient, db_session: Session):
+    @pytest.mark.parametrize("field", ["work_center_id", "category", "planned_type"])
+    def test_explicit_null_on_a_required_field_is_422_and_writes_nothing(
+        self, client: TestClient, db_session: Session, field: str
+    ):
         work_center = make_work_center(db_session)
         event = make_event(db_session, work_center_id=work_center.id)
-        response = client.put(
-            f"{DOWNTIME_URL}/{event.id}",
-            json={"work_center_id": None},
-            headers=headers_for(db_session, role=UserRole.MANAGER),
-        )
+        headers = headers_for(db_session, role=UserRole.MANAGER)
+        audit_before = audit_count(db_session)
+
+        response = client.put(f"{DOWNTIME_URL}/{event.id}", json={field: None}, headers=headers)
+
         assert response.status_code == 422
+        assert audit_count(db_session) == audit_before
+        db_session.refresh(event)
+        assert (event.work_center_id, event.category) == (work_center.id, DowntimeCategory.MECHANICAL)
 
     def test_reason_code_writes_are_audited(self, client: TestClient, db_session: Session):
         headers = headers_for(db_session, role=UserRole.MANAGER)
@@ -307,3 +314,183 @@ class TestDowntimeRbac:
         headers = headers_for(db_session, role=UserRole.VIEWER)
         assert client.get(f"{DOWNTIME_URL}/", headers=headers).status_code == 200
         assert client.get(f"{DOWNTIME_URL}/summary", headers=headers).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# 4. Gaps the first pass left open (test-engineer review)
+# ---------------------------------------------------------------------------
+
+
+def make_reason_code(
+    db: Session, *, company_id: int = COMPANY_A, code: str, name: str = "Spindle"
+) -> DowntimeReasonCode:
+    ensure_company(db, company_id)
+    reason = DowntimeReasonCode(code=code, name=name, category=DowntimeCategory.MECHANICAL, company_id=company_id)
+    db.add(reason)
+    db.commit()
+    db.refresh(reason)
+    return reason
+
+
+def reason_code_audit_count(db: Session) -> int:
+    return db.query(AuditLog).filter(AuditLog.resource_type == "downtime_reason_code").count()
+
+
+class TestDowntimeWorkOrderReferences:
+    """The work-order half of ``_assert_event_refs_in_company``.
+
+    Create already validated a foreign work order before this change; PUT did not, and
+    neither refused a soft-deleted job. Only the work-center half had a PUT test, so
+    the work-order branch and the ``is_deleted`` filter could be deleted with the suite green.
+    """
+
+    def test_put_cannot_repoint_an_event_at_another_tenants_work_order(self, client: TestClient, db_session: Session):
+        own_wc = make_work_center(db_session, company_id=COMPANY_B)
+        foreign_wo, _ = make_wo_with_operation(
+            db_session, company_id=COMPANY_A, work_center=make_work_center(db_session, company_id=COMPANY_A)
+        )
+        event = make_event(db_session, company_id=COMPANY_B, work_center_id=own_wc.id)
+        headers = headers_for(db_session, company_id=COMPANY_B, role=UserRole.ADMIN)
+        audit_before = audit_count(db_session)
+
+        response = client.put(f"{DOWNTIME_URL}/{event.id}", json={"work_order_id": foreign_wo.id}, headers=headers)
+
+        assert response.status_code == 404, response.text
+        assert response.json()["detail"] == "Work order not found"
+        assert audit_count(db_session) == audit_before
+        db_session.refresh(event)
+        assert event.work_order_id is None
+
+    def _soft_deleted_own_work_order(self, db: Session, work_center):
+        work_order, _ = make_wo_with_operation(db, company_id=COMPANY_A, work_center=work_center)
+        work_order.soft_delete(make_user(db, role=UserRole.ADMIN).id)
+        db.commit()
+        return work_order
+
+    def test_create_against_an_own_soft_deleted_work_order_is_refused(self, client: TestClient, db_session: Session):
+        work_center = make_work_center(db_session)
+        deleted_wo = self._soft_deleted_own_work_order(db_session, work_center)
+        headers = headers_for(db_session)
+        events_before, audit_before = event_count(db_session), audit_count(db_session)
+
+        response = client.post(
+            f"{DOWNTIME_URL}/",
+            json={"work_center_id": work_center.id, "work_order_id": deleted_wo.id},
+            headers=headers,
+        )
+
+        assert response.status_code == 404, response.text
+        assert event_count(db_session) == events_before
+        assert audit_count(db_session) == audit_before
+
+    def test_put_cannot_link_an_own_soft_deleted_work_order(self, client: TestClient, db_session: Session):
+        work_center = make_work_center(db_session)
+        deleted_wo = self._soft_deleted_own_work_order(db_session, work_center)
+        event = make_event(db_session, work_center_id=work_center.id)
+        headers = headers_for(db_session, role=UserRole.SUPERVISOR)
+        audit_before = audit_count(db_session)
+
+        response = client.put(f"{DOWNTIME_URL}/{event.id}", json={"work_order_id": deleted_wo.id}, headers=headers)
+
+        assert response.status_code == 404, response.text
+        assert audit_count(db_session) == audit_before
+        db_session.refresh(event)
+        assert event.work_order_id is None
+
+    def test_an_own_live_work_order_is_accepted_and_rendered(self, client: TestClient, db_session: Session):
+        # Positive control for the refusals above.
+        work_center = make_work_center(db_session)
+        work_order, _ = make_wo_with_operation(db_session, work_center=work_center)
+        response = client.post(
+            f"{DOWNTIME_URL}/",
+            json={"work_center_id": work_center.id, "work_order_id": work_order.id},
+            headers=headers_for(db_session),
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["work_order"]["id"] == work_order.id
+
+
+class TestReasonCodeIntegrity:
+    def test_another_tenants_reason_code_is_404_on_update_with_no_side_effects(
+        self, client: TestClient, db_session: Session
+    ):
+        foreign = make_reason_code(db_session, company_id=COMPANY_A, code="A-SECRET-01")
+        headers = headers_for(db_session, company_id=COMPANY_B, role=UserRole.ADMIN)
+        audit_before = reason_code_audit_count(db_session)
+
+        response = client.put(f"{DOWNTIME_URL}/reason-codes/{foreign.id}", json={"name": "pwned"}, headers=headers)
+
+        assert response.status_code == 404
+        assert reason_code_audit_count(db_session) == audit_before
+        db_session.refresh(foreign)
+        assert foreign.name == "Spindle"
+
+    def test_reason_code_list_is_scoped(self, client: TestClient, db_session: Session):
+        make_reason_code(db_session, company_id=COMPANY_A, code="A-SECRET-02")
+        headers = headers_for(db_session, company_id=COMPANY_B, role=UserRole.ADMIN)
+        listed = client.get(f"{DOWNTIME_URL}/reason-codes", headers=headers)
+        assert listed.status_code == 200, listed.text
+        assert listed.json() == []
+
+    def test_renaming_onto_an_existing_code_is_400_and_changes_nothing(self, client: TestClient, db_session: Session):
+        make_reason_code(db_session, code="ELEC-01")
+        target = make_reason_code(db_session, code="MECH-02")
+        headers = headers_for(db_session, role=UserRole.MANAGER)
+        audit_before = reason_code_audit_count(db_session)
+
+        response = client.put(
+            f"{DOWNTIME_URL}/reason-codes/{target.id}", json={"code": "ELEC-01", "name": "Renamed"}, headers=headers
+        )
+
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"] == "Reason code already exists"
+        assert reason_code_audit_count(db_session) == audit_before
+        db_session.refresh(target)
+        assert (target.code, target.name) == ("MECH-02", "Spindle")
+
+    def test_a_code_another_tenant_already_uses_is_400_not_500(self, client: TestClient, db_session: Session):
+        # ``downtime_reason_codes.code`` is still GLOBALLY unique, so the tenant-scoped probe
+        # misses it and the flush is what refuses.
+        make_reason_code(db_session, company_id=COMPANY_A, code="SHARED-01")
+        headers = headers_for(db_session, company_id=COMPANY_B, role=UserRole.MANAGER)
+        audit_before = reason_code_audit_count(db_session)
+
+        response = client.post(
+            f"{DOWNTIME_URL}/reason-codes",
+            json={"code": "SHARED-01", "name": "Mine", "category": "mechanical"},
+            headers=headers,
+        )
+
+        assert response.status_code == 400, response.text
+        assert db_session.query(DowntimeReasonCode).filter(DowntimeReasonCode.company_id == COMPANY_B).count() == 0
+        assert reason_code_audit_count(db_session) == audit_before
+
+    @pytest.mark.parametrize("role", [UserRole.VIEWER, UserRole.OPERATOR, UserRole.QUALITY, UserRole.SHIPPING])
+    def test_non_manage_roles_cannot_edit_a_reason_code(self, client: TestClient, db_session: Session, role: UserRole):
+        reason = make_reason_code(db_session, code=f"RBAC-{role.value}")
+        headers = headers_for(db_session, role=role)
+        audit_before = reason_code_audit_count(db_session)
+
+        response = client.put(
+            f"{DOWNTIME_URL}/reason-codes/{reason.id}", json={"name": "x", "is_active": False}, headers=headers
+        )
+
+        assert response.status_code == 403
+        assert reason_code_audit_count(db_session) == audit_before
+        db_session.refresh(reason)
+        assert (reason.name, reason.is_active) == ("Spindle", True)
+
+    @pytest.mark.parametrize("role", [UserRole.QUALITY, UserRole.SHIPPING])
+    def test_non_manage_roles_cannot_correct_an_event(self, client: TestClient, db_session: Session, role: UserRole):
+        work_center = make_work_center(db_session)
+        event = make_event(db_session, work_center_id=work_center.id)
+        audit_before = audit_count(db_session)
+
+        response = client.put(
+            f"{DOWNTIME_URL}/{event.id}", json={"description": "x"}, headers=headers_for(db_session, role=role)
+        )
+
+        assert response.status_code == 403
+        assert audit_count(db_session) == audit_before
+        db_session.refresh(event)
+        assert event.description == "Spindle alarm"

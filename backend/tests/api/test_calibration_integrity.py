@@ -29,7 +29,7 @@ from app.models.audit_log import AuditLog
 from app.models.calibration import CalibrationRecord, CalibrationStatus, Equipment
 from app.models.user import User, UserRole
 from app.services.audit_service import AuditService
-from tests.api.kiosk_test_helpers import COMPANY_A, COMPANY_B, make_user, user_headers
+from tests.api.kiosk_test_helpers import COMPANY_A, COMPANY_B, ensure_company, make_user, user_headers
 from tests.api.test_process_sheet_integrations import RECORDS_URL, _add_step, _fixture
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
@@ -367,6 +367,14 @@ class TestEquipmentStatusEdits:
         db_session.refresh(gauge)
         assert gauge.location == "Crib"
         assert gauge.status == CalibrationStatus.ACTIVE
+        # A re-sent status is not a status change: one UPDATE row, no STATUS_CHANGE row.
+        actions = [
+            row.action
+            for row in db_session.query(AuditLog).filter(
+                AuditLog.resource_type == "equipment", AuditLog.resource_id == gauge.id
+            )
+        ]
+        assert actions == ["UPDATE"]
 
     @pytest.mark.parametrize(
         "payload",
@@ -486,3 +494,220 @@ class TestCalibrationTenantIsolation:
         assert listed.status_code == 200 and due.status_code == 200
         assert gauge.id not in [row["id"] for row in listed.json()]
         assert gauge.id not in [row["id"] for row in due.json()]
+
+
+# ---------------------------------------------------------------------------
+# 6. Gaps the first pass left open (test-engineer review)
+# ---------------------------------------------------------------------------
+
+
+def _fail_audit_on(monkeypatch, *, action: str, resource_type: str) -> None:
+    """Make exactly one kind of audit write return None (what ``log_required`` treats as lost).
+
+    Every other audit write still goes through, so a row written EARLIER in the same
+    request is really flushed before the failure -- which is what makes the rollback
+    assertion mean something. Failing the very first write (as the 503 test above does)
+    leaves nothing flushed to roll back, so it cannot tell a rollback from no rollback
+    for the audit table.
+    """
+    original = AuditService.log
+
+    def flaky(self, *args, **kwargs):
+        if kwargs.get("action") == action and kwargs.get("resource_type") == resource_type:
+            return None
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(AuditService, "log", flaky)
+
+
+class TestCalibrationAtomicity:
+    def test_lost_status_change_evidence_rolls_back_the_record_and_its_already_written_create_row(
+        self, client: TestClient, db_session: Session, monkeypatch
+    ):
+        gauge = make_gauge(db_session, status=CalibrationStatus.OUT_OF_SERVICE)
+        headers = quality_headers(db_session)
+        before = audit_count(db_session)
+        _fail_audit_on(monkeypatch, action="STATUS_CHANGE", resource_type="equipment")
+
+        response = client.post(
+            calibrate_url(gauge.id),
+            json={"calibration_date": date.today().isoformat(), "result": "pass", "certificate_number": "C-ATOM"},
+            headers=headers,
+        )
+
+        assert response.status_code == 503, response.text
+        assert record_count(db_session, gauge) == 0
+        # The CREATE row for the calibration WAS flushed before the STATUS_CHANGE write
+        # failed; the rollback has to take it too, or the log claims a record that is gone.
+        assert db_session.query(AuditLog).filter(AuditLog.resource_type == "calibration").count() == 0
+        assert audit_count(db_session) == before
+        db_session.refresh(gauge)
+        assert gauge.status == CalibrationStatus.OUT_OF_SERVICE
+        assert gauge.last_calibration_date is None
+        assert gauge.next_calibration_date is None
+
+
+class TestSameDayOrdering:
+    """Two records on the same calibration date: the one entered LAST decides the gauge.
+
+    ``is_newest`` compares with ``>=``. Tightened to ``>``, a same-day FAIL entered after a
+    same-day pass would be filed as history and the failed gauge would stay ACTIVE.
+    """
+
+    def _post(self, client: TestClient, gauge: Equipment, headers: dict, result: str):
+        response = client.post(
+            calibrate_url(gauge.id),
+            json={"calibration_date": date.today().isoformat(), "result": result},
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def test_a_same_day_fail_after_a_pass_takes_the_gauge_out_of_service(self, client: TestClient, db_session: Session):
+        gauge = make_gauge(db_session, status=CalibrationStatus.OUT_OF_SERVICE)
+        headers = quality_headers(db_session)
+
+        self._post(client, gauge, headers, "pass")
+        failed = self._post(client, gauge, headers, "fail")
+
+        assert failed["applied_to_equipment"] is True
+        db_session.refresh(gauge)
+        assert gauge.status == CalibrationStatus.OUT_OF_SERVICE
+
+    def test_a_same_day_pass_after_a_fail_puts_the_gauge_back_in_service(self, client: TestClient, db_session: Session):
+        gauge = make_gauge(db_session)
+        headers = quality_headers(db_session)
+
+        self._post(client, gauge, headers, "fail")
+        passed = self._post(client, gauge, headers, "adjusted")
+
+        assert passed["applied_to_equipment"] is True
+        db_session.refresh(gauge)
+        assert gauge.status == CalibrationStatus.ACTIVE
+        assert gauge.next_calibration_date == date.today() + timedelta(days=365)
+
+
+class TestFutureDatedRecords:
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "DEFECT (reported, not fixed here): calibration_date is not bounded to today. A future-dated "
+            "pass becomes the 'newest record on file', so a real FAIL recorded today is filed as history and "
+            "the failed gauge stays ACTIVE and kiosk-usable. Fix by refusing calibration_date > today (422) "
+            "or by never letting a fail be outranked by a future date; then drop this marker."
+        ),
+    )
+    def test_a_future_dated_record_cannot_mask_a_real_failure_today(self, client: TestClient, db_session: Session):
+        gauge = make_gauge(db_session, status=CalibrationStatus.OUT_OF_SERVICE)
+        headers = quality_headers(db_session)
+
+        # A year typo on the certificate date. Accepted (200) or refused (422) -- either is a
+        # defensible fix; what must not happen is that it outranks today's real result.
+        client.post(
+            calibrate_url(gauge.id),
+            json={"calibration_date": (date.today() + timedelta(days=365)).isoformat(), "result": "pass"},
+            headers=headers,
+        )
+        failed = client.post(
+            calibrate_url(gauge.id),
+            json={"calibration_date": date.today().isoformat(), "result": "fail"},
+            headers=headers,
+        )
+
+        assert failed.status_code == 200, failed.text
+        db_session.refresh(gauge)
+        assert gauge.status == CalibrationStatus.OUT_OF_SERVICE
+
+
+class TestEquipmentWritesAudited:
+    def test_create_equipment_is_stamped_and_audited(self, client: TestClient, db_session: Session):
+        code = f"AUD-CREATE-{_next()}"
+        response = client.post(
+            EQUIPMENT_URL, json={"equipment_id": code, "name": "Height gauge"}, headers=quality_headers(db_session)
+        )
+
+        assert response.status_code == 200, response.text
+        gauge = db_session.query(Equipment).filter(Equipment.equipment_id == code).one()
+        assert gauge.company_id == COMPANY_A
+        row = (
+            db_session.query(AuditLog)
+            .filter(AuditLog.resource_type == "equipment", AuditLog.resource_id == gauge.id)
+            .one()
+        )
+        assert (row.action, row.company_id, row.resource_identifier) == ("CREATE", COMPANY_A, code)
+
+    def test_a_code_another_tenant_already_uses_is_400_not_500_and_writes_nothing(
+        self, client: TestClient, db_session: Session
+    ):
+        # ``equipment.equipment_id`` is still GLOBALLY unique (no per-company compound yet),
+        # so the tenant-scoped probe misses it and the flush is what refuses.
+        code = f"SHARED-CODE-{_next()}"
+        make_gauge(db_session, company_id=COMPANY_A).equipment_id = code
+        db_session.commit()
+        headers = quality_headers(db_session, company_id=COMPANY_B)
+        audit_before = audit_count(db_session)
+
+        response = client.post(EQUIPMENT_URL, json={"equipment_id": code, "name": "Mine"}, headers=headers)
+
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"] == "Equipment ID already exists"
+        assert db_session.query(Equipment).filter(Equipment.company_id == COMPANY_B).count() == 0
+        assert audit_count(db_session) == audit_before
+        # The refused flush must not poison the request session for the next call.
+        follow_up = client.post(EQUIPMENT_URL, json={"equipment_id": f"{code}-B", "name": "Mine"}, headers=headers)
+        assert follow_up.status_code == 200, follow_up.text
+
+
+class TestRetiredGauges:
+    def test_the_list_shows_a_retired_gauge_as_retired_not_by_its_dates(self, client: TestClient, db_session: Session):
+        # Before: only out_of_service survived the date recompute, so a retired gauge with a
+        # future due date was listed as ACTIVE.
+        gauge = make_gauge(db_session, status=CalibrationStatus.RETIRED, next_cal=date.today() + timedelta(days=200))
+        listed = client.get(EQUIPMENT_URL, params={"include_inactive": True}, headers=quality_headers(db_session))
+        assert listed.status_code == 200, listed.text
+        row = next(r for r in listed.json() if r["id"] == gauge.id)
+        assert row["status"] == "retired"
+
+    def test_a_retired_gauge_returns_to_service_only_through_out_of_service_and_a_passing_calibration(
+        self, client: TestClient, db_session: Session
+    ):
+        # RETIRED must not be a dead end, and the only way back is a calibration record.
+        gauge = make_gauge(db_session, status=CalibrationStatus.RETIRED)
+        headers = quality_headers(db_session)
+
+        refused = client.put(f"{EQUIPMENT_URL}/{gauge.id}", json={"status": "active"}, headers=headers)
+        assert refused.status_code == 409
+        parked = client.put(f"{EQUIPMENT_URL}/{gauge.id}", json={"status": "out_of_service"}, headers=headers)
+        assert parked.status_code == 200, parked.text
+        passed = client.post(
+            calibrate_url(gauge.id),
+            json={"calibration_date": date.today().isoformat(), "result": "pass"},
+            headers=headers,
+        )
+        assert passed.status_code == 200, passed.text
+        assert passed.json()["applied_to_equipment"] is True
+        db_session.refresh(gauge)
+        assert gauge.status == CalibrationStatus.ACTIVE
+
+
+class TestMisTenantedRecordsStayHidden:
+    def test_a_foreign_record_on_an_own_gauge_is_not_rendered_by_detail_or_history(
+        self, client: TestClient, db_session: Session
+    ):
+        # A legacy row tagged to company B but pointing at A's gauge: the gauge resolves for A,
+        # the record must not. Both record reads now go through tenant_query.
+        ensure_company(db_session, COMPANY_B)
+        gauge = make_gauge(db_session, company_id=COMPANY_A)
+        foreign = make_record(db_session, gauge, cal_date=date.today() - timedelta(days=10))
+        foreign.company_id = COMPANY_B
+        db_session.commit()
+        headers = quality_headers(db_session)
+
+        detail = client.get(f"{EQUIPMENT_URL}/{gauge.id}", headers=headers)
+        history = client.get(f"{EQUIPMENT_URL}/{gauge.id}/history", headers=headers)
+
+        assert detail.status_code == 200, detail.text
+        assert history.status_code == 200, history.text
+        assert detail.json()["calibration_history"] == []
+        assert history.json() == []
+        assert FOREIGN_CERT not in detail.text + history.text
