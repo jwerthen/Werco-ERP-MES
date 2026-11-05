@@ -23,15 +23,23 @@ checked too:
    * ``TRACKED_DEBT`` -- real offenders, each with the reason and the Wave 1 branch
      that fixes it. This list is the work queue: the fixing PR deletes its entries.
 
-2. **Constructor guard.** Every call under ``backend/app/`` that constructs a
-   ``TenantMixin`` model must pass ``company_id=`` (or a ``**`` splat), or bind the
-   result to a name and assign ``<name>.company_id = ...`` in the same function --
-   or be named in ``UNGUARDED_CONSTRUCTIONS``.
+   A ``GLOBAL_ROUTES`` reason that cites a principal resolver or
+   ``require_platform_admin`` must describe a route that still reaches it, a
+   ``(METHOD, path)`` registered twice is classified by its worse twin, and nothing
+   under the prefix may be a ``Mount`` or plain ``Route`` the guard cannot see into.
+
+2. **Constructor guard.** Every call under ``backend/app/`` that constructs a tenant
+   model -- a ``TenantMixin`` subclass, or a mapped class declaring its own NOT NULL
+   ``company_id`` (``User``, the workspace and runtime-metric records) -- must pass
+   ``company_id=`` (or a ``**`` splat), or bind the result to a name and assign
+   ``<name>.company_id = ...`` in the same function -- or be named in
+   ``UNGUARDED_CONSTRUCTIONS``, which excuses exactly ``occurrences`` calls per key.
 
 Both allowlists are **stale-checked**: an entry whose route now depends on
 ``get_current_company_id`` (or no longer exists / is no longer secured), or whose
-constructor now sets ``company_id`` (or is gone), fails the test with a message
-saying to delete the entry. So the lists can only shrink honestly, never rot.
+constructor now sets ``company_id`` (or is gone, or occurs fewer times), fails the
+test with a message saying to delete the entry. So the lists can only shrink
+honestly, never rot.
 
 What these guards do NOT prove -- stated so nobody leans on them for it:
 
@@ -56,15 +64,17 @@ from __future__ import annotations
 import ast
 import importlib
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Mapping, Optional, Set, Tuple
+from typing import Annotated, Any, Callable, Dict, FrozenSet, Iterable, List, Mapping, Optional, Set, Tuple
 
 import pytest
-from fastapi import APIRouter, Depends, FastAPI
+from fastapi import APIRouter, Depends, FastAPI, Security
 from fastapi.dependencies.models import Dependant
-from fastapi.routing import APIRoute
+from fastapi.routing import APIRoute, APIWebSocketRoute
+from starlette.routing import Mount, Route
 
 import app.models as _all_models  # noqa: F401  -- registers every mapper on Base
 from app.api import deps
@@ -111,6 +121,11 @@ PRINCIPAL_RESOLVERS: Tuple[Callable[..., Any], ...] = (
     deps.get_kiosk_station,
 )
 KNOWN_DOORS: Tuple[Callable[..., Any], ...] = (deps.get_current_user, *PRINCIPAL_RESOLVERS)
+# The gates a GLOBAL_ROUTES reason may cite as its justification. A reason that names one
+# must describe a route that still reaches it (``misjustified_global_routes``): an entry
+# keyed by (METHOD, path) would otherwise keep excusing the route after the dependency that
+# made it legitimately global was swapped for a plain ``get_current_user``.
+JUSTIFYING_GATES: Tuple[Callable[..., Any], ...] = (*PRINCIPAL_RESOLVERS, deps.require_platform_admin)
 
 # The Wave 1 branches that own a TRACKED_DEBT / UNGUARDED_CONSTRUCTIONS entry. Named
 # so a typo in an entry is a test failure rather than a dangling pointer.
@@ -131,6 +146,18 @@ class TrackedDebt:
 
     reason: str
     fixed_by: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class UnguardedConstruction(TrackedDebt):
+    """A known unguarded constructor site; it excuses EXACTLY ``occurrences`` calls under its key.
+
+    The key is (file, innermost function, model), so without a count a second unguarded build
+    of the same model in the same function -- or in a same-named method of another class in
+    the file -- would hide behind an existing entry.
+    """
+
+    occurrences: int = 1
 
 
 _SELF = "Self-scoped: reads/writes only current_user's own record; no tenant query."
@@ -299,25 +326,40 @@ TRACKED_DEBT: Dict[RouteKey, TrackedDebt] = {
 }
 
 
-# TenantMixin constructions under app/ that neither pass company_id nor assign it.
+# Tenant-model constructions under app/ that neither pass company_id nor assign it.
 # Keyed by (path relative to backend/, innermost enclosing function, model class name).
-UNGUARDED_CONSTRUCTIONS: Dict[ConstructionKey, TrackedDebt] = {
-    ("app/api/endpoints/calibration.py", "record_calibration", "CalibrationRecord"): TrackedDebt(
+UNGUARDED_CONSTRUCTIONS: Dict[ConstructionKey, UnguardedConstruction] = {
+    ("app/api/endpoints/calibration.py", "record_calibration", "CalibrationRecord"): UnguardedConstruction(
         "Every call 500s on the NOT NULL; set company_id from the resolved equipment.", _CAL_TOOLS
     ),
-    ("app/api/endpoints/tool_management.py", "checkout_tool", "ToolCheckout"): TrackedDebt(
+    ("app/api/endpoints/tool_management.py", "checkout_tool", "ToolCheckout"): UnguardedConstruction(
         "Every call 500s on the NOT NULL; set company_id from the resolved tool.", _CAL_TOOLS
     ),
-    ("app/api/endpoints/tool_management.py", "log_usage", "ToolUsageLog"): TrackedDebt(
+    ("app/api/endpoints/tool_management.py", "log_usage", "ToolUsageLog"): UnguardedConstruction(
         "Every call 500s on the NOT NULL; set company_id from the resolved tool.", _CAL_TOOLS
     ),
-    ("app/api/endpoints/customer_complaints.py", "create_ncr_from_complaint", "NonConformanceReport"): TrackedDebt(
+    (
+        "app/api/endpoints/customer_complaints.py",
+        "create_ncr_from_complaint",
+        "NonConformanceReport",
+    ): UnguardedConstruction(
         "Every call 500s on the NOT NULL; build through quality_numbering with the complaint's company.",
         _COMPLAINTS,
     ),
-    ("app/api/endpoints/customer_complaints.py", "create_car_from_complaint", "CorrectiveActionRequest"): TrackedDebt(
+    (
+        "app/api/endpoints/customer_complaints.py",
+        "create_car_from_complaint",
+        "CorrectiveActionRequest",
+    ): UnguardedConstruction(
         "Every call 500s on the NOT NULL; build through quality_numbering with the complaint's company.",
         _COMPLAINTS,
+    ),
+    # Not owned by a Wave 1 branch: dead code today, named so a new User(...) elsewhere still fails.
+    ("app/api/endpoints/admin_settings.py", "seed_database", "User"): UnguardedConstruction(
+        "Builds the bootstrap admin (is_superuser=True) and four sample users with no company_id, outside "
+        "user_provisioning.create_tenant_user. Unreachable: the branch is gated on db.query(User).first() and "
+        "an authenticated caller is a user row (see GLOBAL_ROUTES), so it is dead code rather than a live 500.",
+        occurrences=2,
     ),
 }
 
@@ -336,6 +378,7 @@ class RouteScope:
     authenticated: bool
     scoped: bool
     doors: Tuple[str, ...]  # names of the known doors reached, for failure messages
+    gates: FrozenSet[str] = frozenset()  # names of the JUSTIFYING_GATES reached
 
 
 def dependency_calls(dependant: Dependant) -> List[Any]:
@@ -355,7 +398,13 @@ def _reaches(calls: Iterable[Any], target: Any) -> bool:
 
 
 def route_scopes(routes: Iterable[Any], prefix: str = API_PREFIX) -> Dict[RouteKey, RouteScope]:
-    """Classify every ``(METHOD, path)`` of every ``APIRoute`` under ``prefix``."""
+    """Classify every ``(METHOD, path)`` of every ``APIRoute`` under ``prefix``.
+
+    A ``(METHOD, path)`` registered twice is merged PESSIMISTICALLY -- authenticated if
+    either registration is, scoped only if both are. Starlette serves the FIRST match, so a
+    plain "last one wins" dict would let a scoped twin registered later vouch for the
+    unscoped route that actually answers.
+    """
     scopes: Dict[RouteKey, RouteScope] = {}
     for route in routes:
         if not isinstance(route, APIRoute) or not route.path_format.startswith(prefix):
@@ -364,11 +413,63 @@ def route_scopes(routes: Iterable[Any], prefix: str = API_PREFIX) -> Dict[RouteK
         authenticated = _reaches(calls, deps.oauth2_scheme)
         scoped = _reaches(calls, SCOPE_DEPENDENCY)
         doors = tuple(door.__name__ for door in KNOWN_DOORS if _reaches(calls, door))
+        gates = frozenset(gate.__name__ for gate in JUSTIFYING_GATES if _reaches(calls, gate))
         where = f"{route.endpoint.__module__}.{route.endpoint.__name__}"
         for method in sorted(route.methods & HTTP_METHODS):
             key = (method, route.path_format)
-            scopes[key] = RouteScope(key, where, authenticated, scoped, doors)
+            earlier = scopes.get(key)
+            if earlier is None:
+                scopes[key] = RouteScope(key, where, authenticated, scoped, doors, gates)
+            else:
+                scopes[key] = RouteScope(
+                    key,
+                    f"{earlier.where} + {where} (registered twice)",
+                    earlier.authenticated or authenticated,
+                    earlier.scoped and scoped,
+                    tuple(door.__name__ for door in KNOWN_DOORS if door.__name__ in {*earlier.doors, *doors}),
+                    earlier.gates & gates,
+                )
     return scopes
+
+
+def unclassifiable_routes(routes: Iterable[Any], prefix: str = API_PREFIX) -> List[str]:
+    """Routes under ``prefix`` that ``route_scopes`` cannot see into.
+
+    ``route_scopes`` reads ``APIRoute.dependant``; a plain Starlette ``Route`` has none, and a
+    ``Mount`` hides its sub-application's routes from ``app.routes`` entirely. Either one under
+    the API prefix (or a ``Mount`` enclosing it) would be an authenticated surface the guard
+    silently skips. ``APIWebSocketRoute`` is out of scope by design (see the module docstring).
+    A route-less mount (static files at ``/``) hides nothing and is not reported.
+    """
+    found: List[str] = []
+    for route in routes:
+        if isinstance(route, (APIRoute, APIWebSocketRoute)):
+            continue
+        path = getattr(route, "path", "") or ""
+        if isinstance(route, Mount):
+            encloses = (prefix + "/").startswith(path.rstrip("/") + "/")
+            if (path.startswith(prefix) or encloses) and route.routes:
+                found.append(f"Mount {path or '/'} ({len(route.routes)} sub-route(s) the guard never classifies)")
+        elif path.startswith(prefix):
+            found.append(f"{type(route).__name__} {path}")
+    return found
+
+
+def misjustified_global_routes(
+    scopes: Mapping[RouteKey, RouteScope], global_routes: Mapping[RouteKey, str]
+) -> Dict[RouteKey, List[str]]:
+    """GLOBAL_ROUTES entries whose reason cites a JUSTIFYING_GATE the route no longer reaches."""
+    wrong: Dict[RouteKey, List[str]] = {}
+    for key, reason in global_routes.items():
+        scope = scopes.get(key)
+        if scope is None:
+            continue  # stale_route_entries reports a vanished route
+        missing = [
+            gate.__name__ for gate in JUSTIFYING_GATES if gate.__name__ in reason and gate.__name__ not in scope.gates
+        ]
+        if missing:
+            wrong[key] = missing
+    return wrong
 
 
 def unscoped_route_keys(scopes: Mapping[RouteKey, RouteScope]) -> Set[RouteKey]:
@@ -424,8 +525,21 @@ class Construction:
 
 
 def tenant_model_classes() -> FrozenSet[type]:
-    """Every mapped class that carries ``company_id`` through ``TenantMixin``."""
-    return frozenset(mapper.class_ for mapper in Base.registry.mappers if issubclass(mapper.class_, TenantMixin))
+    """Every mapped class whose rows must be born with a company.
+
+    That is every ``TenantMixin`` model, plus the few mapped classes that declare their own
+    NOT NULL ``company_id`` instead of inheriting it (``User``, the workspace records, the
+    runtime-metric rows). The NOT NULL is what turns a missing company into a 500 at flush,
+    whichever way the column was declared, and ``User`` is the one whose constructions most
+    need watching (CLAUDE.md: tenant accounts go through ``create_tenant_user``). A nullable
+    ``company_id`` (``AuditLog``: platform events carry none) is not included.
+    """
+    classes: Set[type] = set()
+    for mapper in Base.registry.mappers:
+        column = mapper.columns.get("company_id")
+        if issubclass(mapper.class_, TenantMixin) or (column is not None and not column.nullable):
+            classes.add(mapper.class_)
+    return frozenset(classes)
 
 
 _Binding = Tuple[str, Optional[str]]  # (absolute module, attribute) -- attribute None binds the module itself
@@ -612,6 +726,31 @@ def scan_app(tenant_classes: FrozenSet[type]) -> List[Construction]:
     return constructions
 
 
+def construction_drift(
+    constructions: Iterable[Construction], allowlist: Mapping[ConstructionKey, UnguardedConstruction]
+) -> Tuple[List[Construction], Dict[ConstructionKey, Tuple[int, int]]]:
+    """``(uncovered, drift)`` for the unguarded constructions in ``constructions``.
+
+    ``uncovered`` are unguarded constructions under a key the allowlist does not name.
+    ``drift`` maps each allowlisted key whose live count differs from its ``occurrences`` to
+    ``(live count, occurrences)``: more is a new offender hiding behind an old entry, fewer
+    means a fix landed and the entry must shrink or go.
+    """
+    unguarded = [c for c in constructions if not c.guarded]
+    counts = Counter(c.key for c in unguarded)
+    uncovered = [c for c in unguarded if c.key not in allowlist]
+    drift = {
+        key: (counts.get(key, 0), entry.occurrences)
+        for key, entry in allowlist.items()
+        if counts.get(key, 0) != entry.occurrences
+    }
+    return uncovered, drift
+
+
+def _site(construction: Construction) -> Tuple[str, int]:
+    return (construction.file, construction.line)
+
+
 # ===========================================================================
 # Live guards
 # ===========================================================================
@@ -662,6 +801,22 @@ class TestRouteTenantScope:
         for method, path in list(GLOBAL_ROUTES) + list(TRACKED_DEBT):
             assert method in HTTP_METHODS and path.startswith(API_PREFIX + "/"), (method, path)
 
+    def test_every_route_under_the_prefix_is_one_the_guard_can_classify(self):
+        hidden = unclassifiable_routes(fastapi_app.routes)
+        assert not hidden, (
+            "Route(s) under the API prefix that route_scopes cannot see into (it reads APIRoute.dependant):\n  "
+            + "\n  ".join(hidden)
+            + "\nRegister them through an APIRouter, or teach tests/test_route_tenant_scope_guard.py to walk them."
+        )
+
+    def test_global_reasons_cite_only_gates_the_route_still_reaches(self, live_scopes):
+        wrong = misjustified_global_routes(live_scopes, GLOBAL_ROUTES)
+        lines = [f"  {method} {path}: cites {', '.join(gates)}" for (method, path), gates in sorted(wrong.items())]
+        assert not wrong, (
+            "GLOBAL_ROUTES entr(ies) justified by a dependency the route no longer reaches -- the route is not "
+            "global for the reason given; re-classify it (likely TRACKED_DEBT, or scope it):\n" + "\n".join(lines)
+        )
+
     def test_platform_routes_are_platform_admin_gated(self):
         """The platform entries are justified by ``require_platform_admin`` -- hold them to it."""
         platform = [
@@ -685,27 +840,39 @@ class TestRouteTenantScope:
 
 class TestTenantConstructions:
     def test_every_tenant_construction_sets_company_id_or_is_named(self, live_constructions):
-        unguarded = {c.key: c for c in live_constructions if not c.guarded}
-        missing = sorted(set(unguarded) - set(UNGUARDED_CONSTRUCTIONS))
-        lines = [f"  {file}:{unguarded[(file, fn, model)].line}  {fn}() builds {model}" for file, fn, model in missing]
-        assert not missing, (
-            "TenantMixin row(s) constructed without company_id:\n"
+        uncovered, drift = construction_drift(live_constructions, UNGUARDED_CONSTRUCTIONS)
+        lines = [f"  {c.file}:{c.line}  {c.function}() builds {c.model}" for c in sorted(uncovered, key=_site)]
+        for key, (live, allowed) in sorted(drift.items()):
+            if live > allowed:
+                lines += [
+                    f"  {c.file}:{c.line}  {c.function}() builds {c.model}  "
+                    f"(UNGUARDED_CONSTRUCTIONS excuses {allowed} here, found {live})"
+                    for c in sorted(live_constructions, key=_site)
+                    if c.key == key and not c.guarded
+                ]
+        assert not lines, (
+            "Tenant row(s) constructed without company_id:\n"
             + "\n".join(lines)
             + "\nPass `company_id=` (from get_current_company_id or the already-resolved tenant parent), or bind "
-            "the row to a name and assign `<name>.company_id = ...` in the same function. TenantMixin.company_id "
-            "is NOT NULL, so an unguarded construction is a 500 at flush or a row in the wrong tenant."
+            "the row to a name and assign `<name>.company_id = ...` in the same function. company_id is NOT NULL "
+            "on every tenant model, so an unguarded construction is a 500 at flush or a row in the wrong tenant."
         )
 
     def test_no_construction_allowlist_entry_is_stale(self, live_constructions):
-        unguarded = {c.key for c in live_constructions if not c.guarded}
-        stale = sorted(set(UNGUARDED_CONSTRUCTIONS) - unguarded)
-        lines = [f"  {file} :: {fn}() :: {model}" for file, fn, model in stale]
-        assert not stale, (
+        _, drift = construction_drift(live_constructions, UNGUARDED_CONSTRUCTIONS)
+        lines = [
+            f"  {file} :: {fn}() :: {model}  (occurrences={allowed}, found {live})"
+            for (file, fn, model), (live, allowed) in sorted(drift.items())
+            if live < allowed
+        ]
+        assert not lines, (
             "Stale UNGUARDED_CONSTRUCTIONS entr(ies) in tests/test_route_tenant_scope_guard.py -- the construction "
-            "now sets company_id (or is gone); delete the entry:\n" + "\n".join(lines)
+            "now sets company_id (or is gone); delete the entry, or lower its occurrences to what remains:\n"
+            + "\n".join(lines)
         )
         for key, debt in UNGUARDED_CONSTRUCTIONS.items():
             assert debt.reason.strip() and (debt.fixed_by is None or debt.fixed_by in WAVE_1_BRANCHES), key
+            assert debt.occurrences >= 1, key
 
     def test_the_guard_is_not_vacuous_on_the_live_tree(self, tenant_classes, live_constructions):
         assert len(tenant_classes) >= 150, "TenantMixin discovery broke -- the Base registry is not populated"
@@ -821,6 +988,91 @@ class TestRouteGuardMechanics:
         )
         assert set(stale) == {("GET", "/api/v1/x/scoped"), ("GET", "/api/v1/x/public"), ("GET", "/api/v1/x/gone")}
         assert "get_current_company_id" in stale[("GET", "/api/v1/x/scoped")]
+        assert "no longer authenticated" in stale[("GET", "/api/v1/x/public")]
+        assert "no such route" in stale[("GET", "/api/v1/x/gone")]
+
+    def test_annotated_decorator_level_and_hand_rolled_bearer_forms(self):
+        synthetic = FastAPI()
+        router = APIRouter()
+
+        @router.get("/annotated")
+        def annotated(
+            company_id: Annotated[int, Depends(deps.get_current_company_id)],
+            user=Depends(deps.get_current_user),
+        ):
+            return None
+
+        @router.get("/decorator-level", dependencies=[Depends(deps.get_current_company_id)])
+        def decorator_level(user=Depends(deps.get_current_user)):
+            return None
+
+        @router.get("/hand-rolled")
+        def hand_rolled(token: str = Security(deps.oauth2_scheme)):
+            return None
+
+        synthetic.include_router(router, prefix="/api/v1/y")
+        scopes = route_scopes(synthetic.routes)
+        assert scopes[("GET", "/api/v1/y/annotated")].scoped
+        assert scopes[("GET", "/api/v1/y/decorator-level")].scoped
+        hand_rolled_scope = scopes[("GET", "/api/v1/y/hand-rolled")]
+        assert hand_rolled_scope.authenticated and not hand_rolled_scope.scoped and hand_rolled_scope.doors == ()
+        assert "unrecognized door" in _describe(hand_rolled_scope)
+
+    @pytest.mark.parametrize("unscoped_first", [True, False])
+    def test_a_twin_registration_cannot_vouch_for_the_route(self, unscoped_first):
+        """Starlette serves the first ``(METHOD, path)`` match; the guard must not trust whichever came last."""
+        synthetic = FastAPI()
+
+        def unscoped(user=Depends(deps.get_current_user)):
+            return None
+
+        def scoped(user=Depends(deps.get_current_user), company_id: int = Depends(deps.get_current_company_id)):
+            return None
+
+        for endpoint in (unscoped, scoped) if unscoped_first else (scoped, unscoped):
+            synthetic.add_api_route("/api/v1/x/twin", endpoint, methods=["GET"])
+        scopes = route_scopes(synthetic.routes)
+        assert unscoped_route_keys(scopes) == {("GET", "/api/v1/x/twin")}
+        assert "registered twice" in scopes[("GET", "/api/v1/x/twin")].where
+
+    def test_routes_the_guard_cannot_see_into_are_reported(self):
+        inner = FastAPI()
+
+        @inner.get("/hidden")
+        def hidden(user=Depends(deps.get_current_user)):
+            return None
+
+        async def plain(request):
+            return None
+
+        async def routeless_asgi(scope, receive, send):
+            return None
+
+        routes = [
+            Mount("/api/v1/sub", app=inner),  # under the prefix
+            Mount("/api", app=inner),  # encloses the prefix
+            Route("/api/v1/plain", endpoint=plain),  # no dependant to read
+            Mount("/", app=routeless_asgi),  # static-files style catch-all: hides no route
+            Mount("/static", app=inner),  # neither under nor enclosing the prefix
+            Route("/mcp", endpoint=plain),  # the MCP door shape: outside the prefix
+        ]
+        reported = unclassifiable_routes(routes)
+        assert [entry.split(" (")[0] for entry in reported] == [
+            "Mount /api/v1/sub",
+            "Mount /api",
+            "Route /api/v1/plain",
+        ]
+
+    def test_a_global_reason_must_cite_only_gates_the_route_reaches(self):
+        scopes = route_scopes(_synthetic_app().routes)
+        kiosk = ("GET", "/api/v1/x/kiosk")
+        user_only = ("GET", "/api/v1/x/user-only")
+        assert misjustified_global_routes(scopes, {kiosk: "get_kiosk_or_user: principal.company_id"}) == {}
+        assert misjustified_global_routes(scopes, {kiosk: "get_kiosk_station: the station row"}) == {
+            kiosk: ["get_kiosk_station"]
+        }
+        assert misjustified_global_routes(scopes, {user_only: _PLATFORM}) == {user_only: ["require_platform_admin"]}
+        assert misjustified_global_routes(scopes, {user_only: _SELF}) == {}, "a reason citing no gate is not checked"
 
 
 def _scan(source: str, tenant_classes: FrozenSet[type]) -> Dict[Tuple[str, str], bool]:
@@ -929,3 +1181,140 @@ def shadowed_import():
         names = {cls.__name__ for cls in tenant_classes}
         assert {"CalibrationRecord", "ToolCheckout", "ToolUsageLog", "NonConformanceReport"} <= names
         assert {"Document", "Tool"} <= names, "the spelling-collision test above depends on these being models"
+
+    def test_a_hand_declared_not_null_company_id_is_a_tenant_model_too(self, tenant_classes):
+        """``User`` declares ``company_id`` itself rather than through ``TenantMixin``; its rows still need one."""
+        from app.models.audit_log import AuditLog
+        from app.models.user import User
+
+        assert not issubclass(User, TenantMixin) and User in tenant_classes
+        assert AuditLog not in tenant_classes, "a NULLABLE company_id (platform audit events) is not a tenant row"
+        source = '''
+from app.models.audit_log import AuditLog
+from app.models.user import User
+
+
+def provision(email):
+    return User(email=email)
+
+
+def provision_scoped(email, company_id):
+    return User(email=email, company_id=company_id)
+
+
+def platform_event():
+    return AuditLog(action="LOGIN")
+'''
+        assert _scan(source, tenant_classes) == {("provision", "User"): False, ("provision_scoped", "User"): True}
+
+    def test_relative_and_dotted_module_imports_resolve(self, tenant_classes):
+        """``_absolute_module`` turns ``from .x``/``from ..x`` into the real module, for a module and a package."""
+        module_source = '''
+from .calibration import CalibrationRecord
+from ..models.tool_management import ToolCheckout
+from app import models
+import app.models.quality
+
+
+def one_dot():
+    return CalibrationRecord(equipment_id=1)
+
+
+def two_dots():
+    return ToolCheckout(tool_id=1)
+
+
+def package_attribute():
+    return models.ToolUsageLog(tool_id=1)
+
+
+def unaliased_dotted():
+    return app.models.quality.NonConformanceReport(title="x")
+'''
+        found = scan_source(
+            module_source,
+            file="app/models/synthetic.py",
+            module="app.models.synthetic",
+            is_package=False,
+            tenant_classes=tenant_classes,
+        )
+        assert {(c.function, c.model) for c in found} == {
+            ("one_dot", "CalibrationRecord"),
+            ("two_dots", "ToolCheckout"),
+            ("package_attribute", "ToolUsageLog"),
+            ("unaliased_dotted", "NonConformanceReport"),
+        }
+        package_source = '''
+from .calibration import CalibrationRecord
+
+
+def in_package_init():
+    return CalibrationRecord(equipment_id=1)
+'''
+        found = scan_source(
+            package_source,
+            file="app/models/__init__.py",
+            module="app.models",
+            is_package=True,
+            tenant_classes=tenant_classes,
+        )
+        assert [(c.function, c.model) for c in found] == [("in_package_init", "CalibrationRecord")]
+
+    def test_the_innermost_def_owns_a_construction(self, tenant_classes):
+        """Methods, nested functions and module scope each key (and guard) their own constructions."""
+        source = '''
+from app.models.calibration import CalibrationRecord
+
+MODULE_LEVEL = CalibrationRecord(equipment_id=1)
+
+
+class Service:
+    def build(self, company_id):
+        record = CalibrationRecord(equipment_id=1)
+        record.company_id = company_id
+        return record
+
+    def forget(self):
+        return CalibrationRecord(equipment_id=1)
+
+
+def outer(company_id):
+    def inner():
+        return CalibrationRecord(equipment_id=1)
+
+    record = CalibrationRecord(equipment_id=1)
+    record.company_id = company_id
+    return inner, record
+'''
+        assert _scan(source, tenant_classes) == {
+            ("<module>", "CalibrationRecord"): False,
+            ("build", "CalibrationRecord"): True,
+            ("forget", "CalibrationRecord"): False,
+            ("inner", "CalibrationRecord"): False,
+            ("outer", "CalibrationRecord"): True,
+        }
+
+
+def _construction(function: str, line: int, guarded: bool) -> Construction:
+    return Construction("app/x.py", function, "CalibrationRecord", line, guarded)
+
+
+class TestConstructionAllowlistMechanics:
+    def test_an_entry_excuses_exactly_its_occurrences(self):
+        key = ("app/x.py", "build", "CalibrationRecord")
+        allowlist = {key: UnguardedConstruction("known", occurrences=1)}
+        one = [_construction("build", 10, False), _construction("build", 20, True)]
+        assert construction_drift(one, allowlist) == ([], {})
+
+        # A second unguarded build of the same model in the same function: same key, so
+        # only the count can tell it apart from the one the entry was written for.
+        two = one + [_construction("build", 30, False)]
+        assert construction_drift(two, allowlist) == ([], {key: (2, 1)})
+
+        # The fix landed: the entry is stale.
+        assert construction_drift([_construction("build", 10, True)], allowlist) == ([], {key: (0, 1)})
+
+    def test_an_unnamed_key_is_uncovered(self):
+        stray = _construction("other", 40, False)
+        uncovered, drift = construction_drift([stray], {})
+        assert uncovered == [stray] and drift == {}
