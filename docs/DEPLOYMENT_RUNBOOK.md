@@ -215,6 +215,41 @@ statement, writes no row, and adds no environment variable, secret, cron or work
   the audit rows recording each change survive. The downgrade is not part of an ordinary rollback.
   See [API.md → Work-order dispatch plan](API.md).
 
+**Customer name and code unique per company.** Apply **115_customers_unique_per_company** after
+**114** through the normal API boot migration path. It replaces the global unique indexes
+`ix_customers_name` / `ix_customers_code` (built by `create_all`; no earlier migration touched this
+table) with plain indexes of the same names, and adds `uq_customers_company_name` /
+`uq_customers_company_code` on `(company_id, name)` / `(company_id, code)`. It also drops any named
+single-column unique constraint on either column if one exists. It creates no table and no RLS,
+revoke or role statement, writes no row, and adds no environment variable, secret, cron or worker
+job.
+
+- **The upgrade cannot fail on data.** The new keys are strictly looser than the global ones, so
+  every existing row satisfies them. No pre-flight dedup is needed.
+- **Locks.** Adding each constraint takes an ACCESS EXCLUSIVE lock on `customers` (a small table,
+  read by every customer picker). The migration first runs `SET LOCAL lock_timeout = '5s'`, so a
+  long transaction holding `customers` fails the boot after 5 seconds instead of queueing every
+  picker read behind it. The old deployment keeps serving and redeploying is safe.
+- **Order.** Safe before or after the application: old code never relied on cross-company
+  uniqueness. The boot path migrates before the new API serves.
+- **Shipped with the same release (no migration involved):** customer create and edit are now
+  Admin / Manager only. The Customers page still shows Add / Edit to every role, so tell
+  Supervisor, Operator, Quality, Shipping and Viewer users that their saves now fail with
+  `Insufficient permissions`. See [RBAC → Customers](RBAC_PERMISSIONS.md#customers).
+- **Verify after deploy:**
+  - `SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'customers';` shows
+    `ix_customers_name` and `ix_customers_code` without `UNIQUE`, plus the two `uq_customers_company_*`
+    indexes.
+  - As an Admin in a test company, create a customer with a supplied code that the company already
+    uses. Expect **400** `Customer code already exists`, and confirm a successful create leaves one
+    `customer` `CREATE` row in the Audit Log.
+- **Rollback.** On an ordinary application rollback, keep the per-company constraints; older code
+  works against them. The downgrade restores the global unique indexes only while no two customer
+  rows share a name or code. Once two companies hold the same name or code it raises before any DDL,
+  reporting how many values collide (never the values themselves). Resolving those collisions is an
+  operator data decision; the migration will not pick which company's customer to rename.
+  See [API.md → Customers](API.md#customers).
+
 ## Table of Contents
 
 1. [Quick Reference](#quick-reference)

@@ -6,7 +6,7 @@ Implemented in `codex/production-workflow-reliability`, September 7, 2026. This 
 
 Customer list/detail/update responses include all billing and shipping address fields, countries, notes, and special requirements. Editing initializes from that complete record. The browser sends only fields changed from the opened form, so a phone-only change preserves account requirements and concurrent changes to untouched fields. Explicit blank email clears the optional email. Shipping line 2 and country are also accepted by the legacy customer CSV validator/creator.
 
-`PUT /customers/{id}` locks the company-scoped, non-deleted customer and records supplied-field old/new values through `AuditService` before the same commit. Existing authenticated-user authorization is retained. Same-field concurrent editing still uses last-save-wins; this is not a new optimistic-locking contract.
+`PUT /customers/{id}` locks the company-scoped, non-deleted customer and records supplied-field old/new values through `AuditService` before the same commit. Since 2026-11-05 it requires Admin or Manager, like customer create (see [RBAC → Customers](../RBAC_PERMISSIONS.md#customers)); it previously accepted any authenticated user. Same-field concurrent editing still uses last-save-wins; this is not a new optimistic-locking contract.
 
 A real-browser regression exposed a linked customer detail reopening over its edit form while the router cleared `?id`. The detail effect now yields while the edit form is open. The mobile browser test actually presses Update and checks that its body contains only the changed phone number, then reloads and confirms shipping/requirements/notes survived.
 

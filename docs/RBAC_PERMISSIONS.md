@@ -1988,6 +1988,52 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 > read the list but cannot print badges — consistent with the Admin-only user-write posture in the
 > note directly above.
 
+### Customers
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View (list, names, detail, stats) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Create | ✓ | ✓ | | | | | |
+| Edit | ✓ | ✓ | | | | | |
+| Delete (soft or hard) / restore | ✓ | ✓ | | | | | |
+| Import (`POST /customers/import-csv`) | ✓ | ✓ | | | | | |
+
+> **Create and Edit were open to every authenticated user until this change**
+> (`POST /customers/`, `PUT /customers/{id}` depended on `get_current_user` only). They are now
+> `require_role([ADMIN, MANAGER])` (`CUSTOMER_WRITE_ROLES` in `app/api/endpoints/customers.py`),
+> matching the customer import, delete and restore routes and the vendor master's create / update.
+> A customer record carries the CoC / FAI requirements and payment terms that quotes and shipments
+> read, so it is treated as an office-controlled master. Platform Admin and superuser pass the gate
+> as everywhere else. Reads stay read-broad.
+>
+> **Known UI gap:** the Customers page shows Add and Edit to every role and the nav entry is not
+> gated, so a Supervisor, Operator, Quality, Shipping or Viewer user sees the server's **403** as an
+> error toast on save. There is no `customers:*` permission in `frontend/src/utils/permissions.ts`
+> yet to hide the buttons with.
+>
+> **Tenancy.** Every customer route is scoped to the active company. `GET /customers/{id}/stats`
+> and the hard-delete dependency check now also scope the parts and work orders they read by
+> `customer_name` (previously unscoped, so a name shared by two companies leaked the other
+> company's part numbers, work-order numbers and customer POs). Name and code are unique per
+> company (migration `115`), not globally. See `docs/API.md` → Customers.
+
+### Custom Fields
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View definitions and values | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Create / edit definitions | ✓ | ✓ | | | | | |
+| Deactivate definitions | ✓ | | | | | | |
+| Set / delete values | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+> **Value writes carry no role gate**: any authenticated user of the active company can set or
+> delete a custom-field value on any record type. That is unchanged and is the one exception in
+> this module to "writes are `require_role`-gated". What changed is tenancy and audit: the
+> `/custom-fields/values/*` routes now resolve the definition, the target record and the value row
+> in the active company only (**404** otherwise; writes require a live record), and every value
+> create, overwrite and delete writes an audit row (`custom_field_value`). Definition create, update
+> and deactivate are company-scoped but not audited. See `docs/API.md` → Custom Fields.
+
 ### Bulk Imports (Import Center / Excel Migration Kit)
 
 Recoverable `/import/batches*` history, review, correction exports and resume calls
