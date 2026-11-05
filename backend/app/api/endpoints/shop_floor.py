@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy.orm import Session, defaultload, joinedload, selectinload
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.api.deps import (
@@ -54,7 +54,12 @@ from app.models.work_order_blocker import (
 from app.schemas.dispatch import (
     DispatchBoardColumn,
     DispatchBoardResponse,
+    DispatchChangeKind,
+    DispatchWorkOrderBoardResponse,
+    DispatchWorkOrderLane,
+    OperationOrderUpdateRequest,
     RunOrderUpdateRequest,
+    WorkOrderOrderUpdateRequest,
 )
 from app.schemas.kiosk_station import (
     KioskStationCreate,
@@ -79,7 +84,13 @@ from app.schemas.process_sheet import (
 from app.schemas.shop_floor_commands import OperationHoldRequest, ProductionReportRequest
 from app.schemas.time_entry import ClockIn, ClockOut, ProductionReductionRequest, TimeEntryResponse
 from app.schemas.wallboard import WallboardResponse
-from app.services import dispatch_service, kiosk_station_service, operation_hold_view, process_sheet_service
+from app.services import (
+    dispatch_plan_service,
+    dispatch_service,
+    kiosk_station_service,
+    operation_hold_view,
+    process_sheet_service,
+)
 from app.services.audit_service import AuditService
 from app.services.completion_cost_service import (
     apply_completion_cost_rollup,
@@ -1134,6 +1145,16 @@ def get_my_active_job(
     filter below and there is no ``require_role``, so that filter is the only
     tenancy gate on this read; it is load-bearing now that work-order free text
     rides the payload.
+
+    DISPATCH NOTICES (``dispatch_notices``, Dispatch v2). The newest dispatch notice
+    (12-hour window) for each work center where the CALLER holds an open LABOR entry
+    (setup / run / rework / inspection -- never break or downtime), newest first, in
+    the ``schemas.dispatch.DispatchNotice`` shape. The work center is the operation's
+    CURRENT one, so a job the planner moved follows the operator's open entry. This
+    is the poll every operator screen already makes (the operator kiosk, the crew
+    station's badge session, ShopFloor and ShopFloorSimple), which is what lets "the
+    planner changed what runs next at your machine" reach the person clocked in
+    there. ``[]`` when nothing changed or nobody is clocked in. One indexed query.
     """
     # Eager-load operation, work_order, and work_order.part in a single
     # query so we don't issue 2*N extra SELECTs iterating active entries.
@@ -1163,7 +1184,13 @@ def get_my_active_job(
     if not active_entries:
         # server_time rides the empty payload too -- the kiosk clock keeps its
         # skew correction between jobs (same pattern as work-center-queue).
-        return {"active_jobs": [], "active_job": None, "server_time": to_utc_iso(datetime.utcnow())}
+        return {
+            "active_jobs": [],
+            "active_job": None,
+            "server_time": to_utc_iso(datetime.utcnow()),
+            # Not clocked in anywhere -> no machine of "yours" to notify about.
+            "dispatch_notices": [],
+        }
 
     # Material ties for the jobs this operator is clocked into, in ONE batched
     # read (an operator can hold several open entries). Company-scoped to the
@@ -1247,12 +1274,35 @@ def get_my_active_job(
             }
         )
 
+    # Dispatch notices for the machines this caller is clocked in at (LABOR entries
+    # only; the machine is the operation's CURRENT work center). Costs no query to
+    # resolve -- TimeEntry.operation is joinedload-ed above -- and one indexed probe
+    # for the notices themselves.
+    labor_work_center_ids = sorted(
+        {
+            entry.operation.work_center_id
+            for entry in active_entries
+            if entry.entry_type in LABOR_ENTRY_TYPES
+            and entry.operation is not None
+            and entry.operation.work_center_id is not None
+        }
+    )
+    dispatch_notices = (
+        dispatch_service.notices_newest_first(
+            dispatch_service.latest_dispatch_notices(db, company_id, labor_work_center_ids)
+        )
+        if labor_work_center_ids
+        else []
+    )
+
     return {
         "active_jobs": jobs,
         "active_job": jobs[0] if jobs else None,
         # Timer skew correction: the kiosk cycle timer/clock run on corrected
         # server time, not the tablet's (same contract as work-center-queue).
         "server_time": to_utc_iso(datetime.utcnow()),
+        # Newest dispatch notice per clocked-in machine (see the docstring).
+        "dispatch_notices": dispatch_notices,
     }
 
 
@@ -2416,6 +2466,25 @@ def get_work_center_queue(
     The operator name and the material-tie fields above remain a genuine (small)
     widening of the station's disclosure surface, in the sense that note records.
 
+    DISPATCH NOTICE (``dispatch_notice``, Dispatch v2). The newest
+    ``dispatch_order_changed`` notice for THIS work center from the last 12 hours, or
+    null: who changed the order (``actor_display``), what kind of change, the job that
+    was next up before and is next up now, which of this machine's cards moved ahead
+    (``moved_up``) and how many notices the window holds (``updates_in_window``) --
+    so the kiosk can say "RUN NEXT: ... -- moved up by Jon W." on the poll it already
+    makes. Shape: ``schemas.dispatch.DispatchNotice``, exactly those keys.
+
+    DISCLOSURE (``dispatch_notice``): a station principal reads it too. What it adds is
+    office-authored work-order / operation identity -- WO number, unit, operation
+    number and name, part number -- that this same payload already renders on the
+    queue cards, plus the PLANNER's name in the same public-screen-safe "First L."
+    form the ``roster`` uses. ``moved_up`` lists operation ids at this work center
+    only. No operator-typed free text, no customer name, no quantity or dollar figure.
+    The notice is built from its frozen event payload THROUGH the schema, so a key
+    added to the payload later cannot reach a station without changing the schema
+    (and the test that pins the station's keys). One indexed query per poll
+    (``dispatch_service.latest_dispatch_notices``); it writes nothing.
+
     Both lists are read-only, and the ``held`` read is bounded
     (``dispatch_service.MAX_HELD_OPERATIONS``, most-recently-held first).
     """
@@ -2443,9 +2512,13 @@ def get_work_center_queue(
     # start (that stays with operation_action_gates / the predecessor rules).
     queue_load_options = (
         # work_order is load-bearing for MORE than part_number now: _kiosk_job_row
-        # reads work_order.notes / .special_instructions for the guidance block, so
-        # dropping this joinedload would turn every row into an extra SELECT.
-        joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
+        # reads work_order.notes / .special_instructions for the guidance block.
+        # Both shared queries (queued_operations / held_operations) populate it
+        # from their own join (contains_eager), so this only reaches THROUGH it to
+        # the part -- defaultload, because a second strategy on the work_order path
+        # is an InvalidRequestError. Dropping the part leg would turn every row into
+        # an extra SELECT.
+        defaultload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
         # Eager-load the nest + its reference PDF so _laser_nest_payload below
         # doesn't issue per-row SELECTs (N+1) for each queued laser operation.
         joinedload(WorkOrderOperation.laser_nest).joinedload(LaserNest.document),
@@ -2591,6 +2664,15 @@ def get_work_center_queue(
         .all()
     ]
 
+    # Dispatch v2 floor notice: one indexed probe, tenant-scoped to the same company
+    # as everything above (the station's own company for a station principal). An
+    # unknown / cross-tenant work center has no notice and costs no query.
+    dispatch_notice = (
+        dispatch_service.latest_dispatch_notices(db, company_id, [work_center_id]).get(work_center_id)
+        if work_center is not None
+        else None
+    )
+
     return {
         "queue": queue,
         # ON_HOLD operations at this work center, on their OWN list. Additive:
@@ -2624,6 +2706,9 @@ def get_work_center_queue(
         ),
         # Active scrap reason codes for the crew-station scrap picker (see above).
         "scrap_reason_codes": scrap_reason_codes,
+        # The newest dispatch notice for this machine (12 h window) or null -- see
+        # the DISPATCH NOTICE / DISCLOSURE paragraphs in the docstring.
+        "dispatch_notice": dispatch_notice,
     }
 
 
@@ -2666,6 +2751,136 @@ def get_dispatch_board(
     return DispatchBoardResponse(work_centers=columns, generated_at=generated_at)
 
 
+@router.get("/dispatch-board/work-orders", response_model=DispatchWorkOrderBoardResponse)
+def get_dispatch_work_order_board(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_DISPATCH_PLANNER_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Work-order-first dispatch board: every live work order as a lane, the plan first.
+
+    The PLAN is the shop-wide order of work orders a planner sets with
+    ``PUT /shop-floor/dispatch-board/work-order-order``. Work-order order wins: every
+    machine's queue (kiosk, crew station, this board, ``/shop-floor/operations``,
+    the scheduling RUN chip) follows it, and inside a planned work order the planner
+    orders its operations. ADVISORY: it orders and labels work, it never decides
+    what may start.
+
+    ``work_orders`` lists the planned lanes in plan order (``dispatch_position``
+    1..N, gap-free) and then every other live work order -- DRAFT included -- by
+    priority, promise date (``must_ship_by`` else ``due_date``) and number.
+    ``ranked_count`` is where the unplanned section starts. Each lane carries ALL its
+    operations (pending, ready, running, held, complete) with the machine, the
+    ``RUN n`` position at that machine, whether a predecessor still blocks it (the
+    same rule promotion and clock-in use), who is clocked in (``"First L."``), the
+    nest and the material tie. ``mode`` is ``routing`` (sequenced: the routing is
+    the order, read-only), ``pool`` or ``laser`` (operation order is a dispatch
+    preference the planner may set). ``work_centers`` lists the machines for move
+    and filter controls; an inactive one appears only while a lane operation still
+    sits on it.
+
+    Operations backing a cancelled (soft-deleted) laser nest are left off.
+
+    Read-only: no reconcile, no promotion, no writes, no audit rows, no events. The
+    query count is fixed -- it does not grow with work orders or operations.
+    """
+    return dispatch_plan_service.build_work_order_board(db, company_id)
+
+
+@router.put("/dispatch-board/work-order-order", response_model=DispatchWorkOrderBoardResponse)
+def set_dispatch_work_order_order(
+    payload: WorkOrderOrderUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_DISPATCH_PLANNER_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Set the shop-wide work-order PLAN: the order every machine's queue follows.
+
+    ``work_order_ids`` is the FULL desired plan, position 1 first; the listed live
+    work orders get dense positions 1..N. Whole-list authority: every other work
+    order that was in the plan leaves it (and its operations' within-plan order is
+    cleared). An empty list clears the plan. DRAFT work orders may be planned --
+    their operations stay pending until Release, which still authorizes production.
+
+    ``expected_work_order_ids`` is the plan exactly as the client last rendered it.
+    Work orders that completed, closed, were cancelled or deleted since then are
+    ignored on both lists (that is not a conflict); any other difference from the
+    live plan is refused **409** ("The dispatch board changed while you were
+    editing..."), so two planners can never silently overwrite each other. An id
+    that is not a work order of this company is **400**; duplicates are **400**.
+
+    ADVISORY, NOT A GATE. The plan is written with Core UPDATEs, so it does NOT bump
+    any work order's ``version`` (no open edit form 409s) and does not move
+    ``updated_at``. Audited as ONE ``dispatch_board`` row (old plan -> new plan,
+    with every position change listed); a save that changes nothing writes nothing.
+
+    The response is the full work-order board (same shape as the GET), so the client
+    can reconcile in one round trip.
+    """
+    result = dispatch_plan_service.set_work_order_order(
+        db,
+        company_id,
+        current_user,
+        audit,
+        payload.work_order_ids,
+        payload.expected_work_order_ids,
+    )
+    # Projected BEFORE the commit (commit expires every loaded row); a pure read.
+    board = dispatch_plan_service.build_work_order_board(db, company_id)
+    db.commit()
+    dispatch_service.broadcast_dispatch_changes(company_id, result.changed_work_center_ids)
+    return board
+
+
+@router.put(
+    "/dispatch-board/work-orders/{work_order_id}/operation-order",
+    response_model=DispatchWorkOrderLane,
+)
+def set_dispatch_operation_order(
+    work_order_id: int,
+    payload: OperationOrderUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(_DISPATCH_PLANNER_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Order ONE planned work order's ready/in-progress operations at each machine.
+
+    ``operation_ids`` lists every READY / IN_PROGRESS operation of the work order
+    exactly once, in the desired order; only the RELATIVE order of operations that
+    share a machine matters -- at each machine they become this work order's block
+    order. Nothing else moves: other work orders' rows, held operations and
+    unplanned work keep their order.
+
+    Refused before any write: **404** for a work order that is not this company's
+    or is deleted; **409** when it is closed, when it is a sequenced routing ("This
+    work order runs in routing sequence." -- the routing is the order) or when it is
+    not in the plan ("Add this work order to the plan first."); **400** for an id
+    that is not one of its operations or a list that does not name every queued
+    operation once; **409** when ``expected_operation_ids`` (the queued operations
+    as the client last rendered the lane) no longer matches -- an operation that
+    left the queue since then is ignored on both lists.
+
+    ADVISORY: never gates a start. Core UPDATEs (no ``version`` bump, ``updated_at``
+    preserved); one ``work_order`` audit row ("Set dispatch operation order"); a
+    save that changes nothing writes nothing. The response is that work order's lane.
+    """
+    result = dispatch_plan_service.set_operation_order(
+        db,
+        company_id,
+        current_user,
+        audit,
+        work_order_id,
+        payload.operation_ids,
+        payload.expected_operation_ids,
+    )
+    lane = dispatch_plan_service.build_work_order_lane(db, company_id, work_order_id)
+    db.commit()
+    dispatch_service.broadcast_dispatch_changes(company_id, result.changed_work_center_ids)
+    return lane
+
+
 @router.put("/work-centers/{work_center_id}/run-order", response_model=DispatchBoardColumn)
 def set_work_center_run_order(
     work_center_id: int,
@@ -2686,6 +2901,20 @@ def set_work_center_run_order(
     status -- a rewrite is authoritative for the WHOLE column, so an off-queue
     (e.g. ON_HOLD) row cannot come back later carrying a stale rank.
 
+    WORK-ORDER ORDER WINS. The shop-wide work-order plan
+    (``PUT /shop-floor/dispatch-board/work-order-order``) decides which work order's
+    operations come first at every machine; this column order only orders
+    operations WITHIN a planned work order's block and across the unplanned tail.
+    A submitted order that puts an operation of a later-planned (or unplanned) work
+    order ahead of an operation of an earlier-planned one is refused **409**, naming
+    the first offending pair -- reorder the work orders instead.
+
+    Optional ``expected_operation_ids``: the column's queued operation ids as the
+    client last rendered them. When sent, a column that changed since then is
+    refused **409** ("The dispatch board changed while you were editing...");
+    operations that merely left the queue in between (completed, held, moved) are
+    ignored. Omit it for the original last-writer-wins behavior.
+
     ADVISORY, NOT A GATE: the rank sorts and labels the queue; start eligibility
     is untouched (``operation_action_gates`` and the predecessor rules own that).
     ``run_order`` is per-work-center and cross-work-order; ``sequence`` is
@@ -2705,7 +2934,11 @@ def set_work_center_run_order(
     (see the tie map built below), or a reorder would look like it untied the
     shop's material.
     """
+    # First: every writer of a machine's queue order serializes on this lock,
+    # before any read it compares against.
+    dispatch_service.acquire_dispatch_order_lock(db, company_id)
     work_center = dispatch_service.resolve_active_work_center_or_http(db, company_id, work_center_id)
+    before = dispatch_service.snapshot_queue_orders(db, company_id, [work_center.id])
 
     # The StaleDataError handler encloses the SERVICE CALL as well as the commit:
     # the versioned UPDATEs of this transaction are emitted at the service's
@@ -2713,7 +2946,7 @@ def set_work_center_run_order(
     # code and a real race would escape as a 500.
     try:
         old_order, new_order, refreshed = dispatch_service.apply_run_order_or_http(
-            db, company_id, work_center, payload.operation_ids
+            db, company_id, work_center, payload.operation_ids, payload.expected_operation_ids
         )
 
         audit.log_update(
@@ -2724,6 +2957,11 @@ def set_work_center_run_order(
             new_values={"run_order": new_order},
             description=f"Set dispatch run order for work center {work_center.code} ({len(new_order)} ranked)",
         )
+        # Floor notice for this machine (best-effort; after the audit row, before
+        # the commit, so it lands -- and notifies -- only if the reorder does).
+        changed_work_center_ids = dispatch_service.record_dispatch_change(
+            db, company_id, current_user, before, DispatchChangeKind.MACHINE_ORDER
+        )
         # Project the response BEFORE the commit: commit expires every loaded row,
         # which would re-issue the whole queue read (and its part joins) lazily.
         #
@@ -2732,14 +2970,22 @@ def set_work_center_run_order(
         # would blank every material chip the GET had just drawn -- a drag-reorder
         # would look like it untied the shop's material. Built before the commit
         # for the same expiry reason, and it is a pure read (invariant: the board
-        # projection stays write-free even though this handler commits).
+        # projection stays write-free even though this handler commits). The plan
+        # positions are required for the same reason (the work-order bands).
         tie_info = dispatch_service.material_tie_info(db, company_id, refreshed)
-        column = dispatch_service.board_column(work_center, refreshed, tie_info=tie_info)
+        plan_position_by_work_order = dispatch_service.plan_positions_for(db, company_id, refreshed)
+        column = dispatch_service.board_column(
+            work_center,
+            refreshed,
+            tie_info=tie_info,
+            plan_position_by_work_order=plan_position_by_work_order,
+        )
         db.commit()
     except StaleDataError:
         db.rollback()
         raise HTTPException(status_code=409, detail=dispatch_service.RUN_ORDER_CONFLICT_DETAIL)
 
+    dispatch_service.broadcast_dispatch_changes(company_id, changed_work_center_ids)
     return column
 
 
@@ -3351,6 +3597,13 @@ def get_all_operations(
     every caller here is an identified user session, never a crew-station
     principal -- see the inline note at the build site.
 
+    DISPATCH NOTICES (Dispatch v2). Only when the list is filtered to ONE work center
+    (``work_center_id``), the response also carries ``dispatch_notices`` -- the newest
+    dispatch notice for that machine (12-hour window) as a 0- or 1-item list in the
+    ``schemas.dispatch.DispatchNotice`` shape -- and ``server_time`` (UTC ``Z``) so the
+    client can age it. This is the poll the operator landing page (ShopFloorSimple)
+    makes. An unfiltered list carries neither key and is unchanged.
+
     Response includes pagination metadata for building UI controls.
     """
     from app.core.pagination import paginate_query
@@ -3554,7 +3807,7 @@ def get_all_operations(
             }
         )
 
-    return {
+    response = {
         "operations": result,
         "total": pagination_meta.total_count,  # Backward compatibility
         "pagination": {
@@ -3566,6 +3819,14 @@ def get_all_operations(
             "has_previous": pagination_meta.has_previous,
         },
     }
+    if work_center_id:
+        # Filtered to one machine: that machine's newest dispatch notice rides along
+        # (one indexed, tenant-scoped probe), with the server clock to age it by.
+        response["dispatch_notices"] = dispatch_service.notices_newest_first(
+            dispatch_service.latest_dispatch_notices(db, company_id, [work_center_id])
+        )
+        response["server_time"] = to_utc_iso(datetime.utcnow())
+    return response
 
 
 @router.put("/operations/{operation_id}/start")

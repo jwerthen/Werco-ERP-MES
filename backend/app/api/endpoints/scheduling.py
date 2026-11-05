@@ -21,6 +21,7 @@ from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.working_calendar import WorkingCalendar
+from app.schemas.dispatch import DispatchChangeKind
 from app.schemas.scheduling import (
     LoadChartDataPoint,
     LoadChartRequest,
@@ -187,6 +188,40 @@ def _operation_audit_snapshot(operation: WorkOrderOperation) -> dict:
         "scheduled_end": _audit_schedule_value(operation.scheduled_end),
         "status": operation.status,
     }
+
+
+def _lock_and_snapshot_move(
+    db: Session, company_id: int, old_work_center_id: Optional[int], new_work_center_id: int
+) -> Tuple[dispatch_service.QueueSnapshot, Dict[int, DispatchChangeKind]]:
+    """Dispatch-order discipline for a machine move: lock FIRST, then snapshot both queues.
+
+    Called only when the work center really changes, and BEFORE
+    ``clear_run_order_on_move`` or any other mutation, so the notice "before"
+    snapshot is the queue the floor was actually looking at.
+    """
+    dispatch_service.acquire_dispatch_order_lock(db, company_id)
+    before = dispatch_service.snapshot_queue_orders(db, company_id, [old_work_center_id, new_work_center_id])
+    kinds: Dict[int, DispatchChangeKind] = {new_work_center_id: DispatchChangeKind.MOVED_IN}
+    if old_work_center_id is not None:
+        kinds[old_work_center_id] = DispatchChangeKind.MOVED_OUT
+    return before, kinds
+
+
+def _record_move(
+    db: Session,
+    company_id: int,
+    actor: User,
+    before: Optional[dispatch_service.QueueSnapshot],
+    change_kind: Dict[int, DispatchChangeKind],
+) -> List[int]:
+    """Notice seam for a move; a no-op when the call did not move anything.
+
+    The caller has already flushed (the audit write does), so the seam's
+    after-snapshot sees the move without anything being expired.
+    """
+    if before is None:
+        return []
+    return dispatch_service.record_dispatch_change(db, company_id, actor, before, change_kind)
 
 
 def _apply_work_order_schedule(
@@ -602,8 +637,16 @@ def schedule_work_order(
     old_values = _operation_audit_snapshot(current_op)
 
     target_work_center: Optional[WorkCenter] = None
+    dispatch_before: Optional[dispatch_service.QueueSnapshot] = None
+    dispatch_change_kind: Dict[int, DispatchChangeKind] = {}
     if schedule.work_center_id:
         target_work_center = _resolve_work_center(db, schedule.work_center_id, company_id)
+        if schedule.work_center_id != current_op.work_center_id:
+            # A real move: serialize with every dispatch-order writer, and take the
+            # notice "before" snapshot of both machines BEFORE anything mutates.
+            dispatch_before, dispatch_change_kind = _lock_and_snapshot_move(
+                db, company_id, current_op.work_center_id, schedule.work_center_id
+            )
         # A reschedule that also moves the operation is still a move: the manual
         # dispatch rank belongs to the column it was dictated in, so it is dropped
         # here exactly as on the dedicated move endpoints. Without this the op
@@ -660,7 +703,9 @@ def schedule_work_order(
             "downstream_operations_scheduled": len(schedule_result["scheduled_operations"]) - 1,
         },
     )
+    dispatch_changed_wc_ids = _record_move(db, company_id, current_user, dispatch_before, dispatch_change_kind)
     db.commit()
+    dispatch_service.broadcast_dispatch_changes(company_id, dispatch_changed_wc_ids)
 
     if work_center_ids:
         SchedulingService(db, company_id).update_availability_rates(work_center_ids=work_center_ids, horizon_days=90)
@@ -715,6 +760,14 @@ def schedule_work_order_earliest(
     # Snapshot BEFORE any mutation: clear_run_order_on_move rewrites run_order and
     # _apply_work_order_schedule rewrites the schedule (and may flip status).
     old_values = _operation_audit_snapshot(current_op)
+
+    dispatch_before: Optional[dispatch_service.QueueSnapshot] = None
+    dispatch_change_kind: Dict[int, DispatchChangeKind] = {}
+    if target_work_center_id != current_op.work_center_id:
+        # A real move: lock, then snapshot both machines BEFORE anything mutates.
+        dispatch_before, dispatch_change_kind = _lock_and_snapshot_move(
+            db, company_id, current_op.work_center_id, target_work_center_id
+        )
 
     # Same rule as the explicit reschedule above: if this call actually moves the
     # operation to another work center, its manual dispatch rank is dropped (a
@@ -787,7 +840,9 @@ def schedule_work_order_earliest(
             "downstream_operations_scheduled": len(schedule_result["scheduled_operations"]) - 1,
         },
     )
+    dispatch_changed_wc_ids = _record_move(db, company_id, current_user, dispatch_before, dispatch_change_kind)
     db.commit()
+    dispatch_service.broadcast_dispatch_changes(company_id, dispatch_changed_wc_ids)
 
     if work_center_ids:
         SchedulingService(db, company_id).update_availability_rates(work_center_ids=work_center_ids, horizon_days=90)
@@ -967,6 +1022,14 @@ def update_operation_work_center(
         "run_order": operation.run_order,
     }
 
+    dispatch_before: Optional[dispatch_service.QueueSnapshot] = None
+    dispatch_change_kind: Dict[int, DispatchChangeKind] = {}
+    if update.work_center_id != operation.work_center_id:
+        # A real move: lock, then snapshot both machines BEFORE anything mutates.
+        dispatch_before, dispatch_change_kind = _lock_and_snapshot_move(
+            db, company_id, operation.work_center_id, update.work_center_id
+        )
+
     old_wc_id = operation.work_center_id
     # The manual dispatch rank is scoped to the work center it was ranked IN, so it
     # is meaningless at the destination: the shared helper clears it and the op lands
@@ -989,7 +1052,9 @@ def update_operation_work_center(
         },
         description=f"Moved operation to work center {work_center.code}",
     )
+    dispatch_changed_wc_ids = _record_move(db, company_id, current_user, dispatch_before, dispatch_change_kind)
     db.commit()
+    dispatch_service.broadcast_dispatch_changes(company_id, dispatch_changed_wc_ids)
 
     SchedulingService(db, company_id).update_availability_rates(
         work_center_ids=list({old_wc_id, update.work_center_id}), horizon_days=90

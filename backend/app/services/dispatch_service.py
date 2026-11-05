@@ -32,23 +32,69 @@ explicit boolean key ``run_order IS NULL ASC`` -- false (0, ranked) before true
 clause or a CASE expression. This replaced a single-key
 ``ORDER BY scheduled_start`` (nullable, no tiebreak) that made the operator's
 queue order effectively arbitrary and dialect-dependent.
+
+WORK-ORDER PLAN ORDER WINS (Dispatch v2, migration 114)
+-------------------------------------------------------
+``WorkOrder.dispatch_rank`` is the planner's shop-wide order of WORK ORDERS.
+Owner decision (2026-11-04): work-order order wins -- every machine's queue
+follows the plan, and ``run_order`` now orders operations WITHIN a planned work
+order's block at a machine (and, as before, across the unplanned tail). There is
+no per-machine override of the plan in v1.
+
+The rank only counts where it is EFFECTIVE: on a queued (READY/IN_PROGRESS)
+operation of a work order that is not ON_HOLD (:func:`effective_dispatch_rank_expr`
+and its Python twin :func:`effective_dispatch_rank`). Without that gate
+``GET /shop-floor/operations`` -- which also lists PENDING and ON_HOLD rows under
+this same sort -- would float blocked work of planned jobs above runnable work,
+and a held job would read "RUN 1" everywhere.
+
+Like ``run_order`` the plan is ADVISORY: it orders and labels, it never gates.
+With every ``dispatch_rank`` NULL (every pre-114 row) the queue order is
+byte-identical to what it was before the column existed.
+
+WRITERS SERIALIZE ON ONE LOCK
+-----------------------------
+Every writer of a machine's queue ORDER -- the work-order plan verb, the
+operation-order verb, the column rewrite and the four machine-move paths -- takes
+:func:`acquire_dispatch_order_lock` first, before any read it compares against.
+A transaction-scoped Postgres advisory lock, never ``SELECT ... FOR UPDATE`` on
+work-order rows (that cannot see a newly ranked row and would contend with the
+completion path's work-order writes).
 """
 
-from datetime import datetime
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
 from fastapi import HTTPException
-from sqlalchemy import and_, case, select, update
-from sqlalchemy.orm import Query, Session, joinedload
+from sqlalchemy import and_, case, func, select, update
+from sqlalchemy.orm import Query, Session, contains_eager, defaultload, joinedload
 from sqlalchemy.orm.exc import StaleDataError
 
+from app.db.locks import acquire_generator_lock
 from app.models.laser_nest import LaserNest
+from app.models.operational_event import OperationalEvent
+from app.models.part import Part
+from app.models.user import User
 from app.models.work_center import WorkCenter
-from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
-from app.schemas.dispatch import DispatchBoardColumn, DispatchMaterialTie, DispatchNestInfo, DispatchQueueRow
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
+from app.schemas.dispatch import (
+    DispatchBoardColumn,
+    DispatchChangeKind,
+    DispatchMaterialTie,
+    DispatchNestInfo,
+    DispatchNotice,
+    DispatchNoticeNextUp,
+    DispatchQueueRow,
+)
 from app.services.laser_nest_service import active_laser_nest
 from app.services.material_tie_view import MaterialTieView, tie_views_for_operations
+from app.services.notification_outbox import _PENDING_KEY as NOTIFICATION_PENDING_KEY
+from app.services.operational_event_service import OperationalEventService
+from app.services.wallboard_service import operator_display_name
 from app.services.work_order_state_service import TERMINAL_WO_STATUSES, operation_target_quantity
+
+logger = logging.getLogger(__name__)
 
 # Operation statuses that count as "on the machine's queue" -- work an operator
 # could pick up right now. PENDING (predecessors outstanding) and COMPLETE /
@@ -88,6 +134,29 @@ MAX_RUN_ORDER_IDS = 500
 # and the endpoint cannot drift from each other (or from docs/API.md).
 RUN_ORDER_CONFLICT_DETAIL = "The queue changed while you were reordering. Refresh the dispatch board and try again."
 
+# The 409 body for EVERY dispatch compare-and-swap mismatch (the work-order plan
+# verb, the operation-order verb, and the column rewrite when the client sends
+# ``expected_operation_ids``). One string so the board can recognise it and the
+# docs can quote it.
+DISPATCH_PLAN_CONFLICT_DETAIL = (
+    "The dispatch board changed while you were editing. It has been refreshed \u2014 please try again."
+)
+
+# Namespace of the advisory lock every dispatch-order writer takes (see the
+# module docstring). One constant so no writer can lock a different key.
+DISPATCH_ORDER_LOCK_NAMESPACE = "dispatch_order"
+
+
+def acquire_dispatch_order_lock(db: Session, company_id: int) -> None:
+    """Serialize every writer of a machine's queue ORDER within one company.
+
+    Transaction-scoped (released at commit/rollback) and a no-op on SQLite, via
+    ``app.db.locks.acquire_generator_lock``. Callers take it BEFORE any read they
+    compare against (the CAS state, the notice "before" snapshot), so two planners
+    -- or a planner and a machine move -- can never interleave a read and a write.
+    """
+    acquire_generator_lock(db, DISPATCH_ORDER_LOCK_NAMESPACE, company_id)
+
 
 def queue_row_load_options() -> Tuple:
     """Eager loads every :func:`dispatch_queue_row` needs -- ONE query, no N+1.
@@ -101,9 +170,14 @@ def queue_row_load_options() -> Tuple:
     shared state. ``laser_nest`` is loaded WITHOUT an is-deleted filter on
     purpose: the soft-delete decision lives in :func:`dispatch_nest_info`, which
     is the same accessor the kiosk uses (``active_laser_nest``).
+
+    ``work_order`` itself is NOT given a loader strategy here: the shared queue
+    queries populate it from the join they already make (``contains_eager``, see
+    :func:`queued_operations_query`), and a second strategy on the same path is an
+    ``InvalidRequestError``. ``defaultload`` only reaches THROUGH it to the part.
     """
     return (
-        joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
+        defaultload(WorkOrderOperation.work_order).joinedload(WorkOrder.part),
         joinedload(WorkOrderOperation.laser_nest),
         # The component part, for the LIVE component_part_number on each card.
         # Without it, every assembly card costs its own SELECT on every board poll.
@@ -111,26 +185,101 @@ def queue_row_load_options() -> Tuple:
     )
 
 
-def queue_order_by() -> List:
-    """The canonical dispatch-queue sort, as a list of ORDER BY expressions.
+def effective_dispatch_rank_expr():
+    """SQL: the work order's plan rank AS IT COUNTS FOR THIS OPERATION ROW, else NULL.
 
-    1. ``run_order`` ascending with NULLs LAST (the manager's dictated order
-       first) -- expressed as an explicit ``IS NULL`` boolean key so Postgres
-       and SQLite agree (see the module docstring).
-    2. The repo's canonical fallback for unranked work: ``WorkOrder.priority``,
-       ``WorkOrder.due_date``, ``WorkOrderOperation.sequence``.
-    3. ``WorkOrderOperation.id`` as a final deterministic tiebreak, so two rows
-       that tie on everything above still come back in a stable order.
+    ``WorkOrder.dispatch_rank`` only when the operation is QUEUED (READY /
+    IN_PROGRESS) AND its work order is not ON_HOLD. A PENDING or held operation of
+    a planned work order -- and every operation of a held work order -- carries no
+    effective rank, so it sorts in the unplanned tail instead of floating above
+    runnable work, and it never reads "RUN 1".
+
+    THE SQL TWIN of :func:`effective_dispatch_rank`. The two MUST stay identical
+    (including NULL handling: a NULL operation or work-order status yields NULL on
+    both sides). Edit them together; ``tests/api/test_dispatch_effective_rank.py``
+    holds them to each other over the full status matrix.
 
     Requires ``WorkOrder`` to be joined into the query.
     """
+    return case(
+        (
+            and_(
+                WorkOrderOperation.status.in_(QUEUE_OPERATION_STATUSES),
+                WorkOrder.status != WorkOrderStatus.ON_HOLD,
+            ),
+            WorkOrder.dispatch_rank,
+        ),
+        else_=None,
+    )
+
+
+def effective_dispatch_rank(operation: WorkOrderOperation, work_order: Optional[WorkOrder] = None) -> Optional[int]:
+    """Python twin of :func:`effective_dispatch_rank_expr` -- see it for the rule.
+
+    ``work_order`` defaults to ``operation.work_order``; the shared queue queries
+    populate that relationship from their own join, so this costs no query on
+    their rows. Must stay byte-for-byte the same rule as the SQL.
+    """
+    wo = work_order if work_order is not None else operation.work_order
+    if wo is None:
+        return None
+    if operation.status is None or operation.status not in QUEUE_OPERATION_STATUSES:
+        return None
+    # ``status != ON_HOLD`` in SQL is NULL (not true) for a NULL status, so the
+    # CASE falls through to NULL there too.
+    if wo.status is None or wo.status == WorkOrderStatus.ON_HOLD:
+        return None
+    return wo.dispatch_rank
+
+
+def queue_order_by() -> List:
+    """The canonical dispatch-queue sort, as a list of ORDER BY expressions.
+
+    1. The work order's EFFECTIVE plan rank (:func:`effective_dispatch_rank_expr`)
+       ascending with NULLs LAST -- the planner's work-order order wins.
+    2. Tiebreak inside a rank value: the work order id, so two work orders that
+       transiently share a rank (a restore, a mid-rewrite read) can never
+       interleave their operations. A constant NULL for unplanned rows, so the
+       unplanned region is untouched by this key.
+    3. ``run_order`` ascending with NULLs LAST: within a planned work order's block
+       at this machine, the planner's operation order; across the unplanned tail,
+       the machine order a manager dictated (today's behavior there).
+    4. The repo's canonical fallback for unranked work: ``WorkOrder.priority``,
+       ``WorkOrder.due_date``, ``WorkOrderOperation.sequence``.
+    5. ``WorkOrderOperation.id`` as a final deterministic tiebreak, so two rows
+       that tie on everything above still come back in a stable order.
+
+    Every NULLS-LAST key is an explicit ``IS NULL`` boolean (see the module
+    docstring). With every ``dispatch_rank`` NULL, keys 1 and 2 are constant and
+    the order is byte-identical to the pre-114 sort.
+
+    Requires ``WorkOrder`` to be joined into the query.
+    """
+    effective_rank = effective_dispatch_rank_expr()
     return [
+        effective_rank.is_(None).asc(),
+        effective_rank.asc(),
+        case((effective_rank.is_(None), None), else_=WorkOrderOperation.work_order_id).asc(),
         WorkOrderOperation.run_order.is_(None).asc(),
         WorkOrderOperation.run_order.asc(),
         WorkOrder.priority.asc(),
         WorkOrder.due_date.asc(),
         WorkOrderOperation.sequence.asc(),
         WorkOrderOperation.id.asc(),
+    ]
+
+
+def _queue_criteria(company_id: int) -> List:
+    """THE live-queue filter set, shared by the entity query and the tuple query.
+
+    Tenancy from the joined ``WorkOrder.company_id`` (never client input); parent
+    WO not soft-deleted and not terminal; operation READY/IN_PROGRESS.
+    """
+    return [
+        WorkOrder.company_id == company_id,
+        WorkOrder.is_deleted == False,  # noqa: E712
+        WorkOrder.status.not_in(TERMINAL_WO_STATUSES),
+        WorkOrderOperation.status.in_(QUEUE_OPERATION_STATUSES),
     ]
 
 
@@ -149,25 +298,71 @@ def queued_operations_query(
 
     ``work_center_ids=None`` means "every work center" (the caller narrows it);
     an EMPTY sequence is honoured literally and matches nothing.
+
+    ``operation.work_order`` is POPULATED FROM THE JOIN (``contains_eager``):
+    :func:`display_positions` reads the work order's plan rank on every row, and
+    the positions callers (``/shop-floor/operations``, ``/scheduling/work-orders``)
+    pass no load options -- a lazy load there would be one SELECT per queued row.
+    Callers that want deeper relationships reach through it with ``defaultload``
+    (see :func:`queue_row_load_options`), never a second strategy on the path.
     """
     query = db.query(WorkOrderOperation)
-    if load_options:
-        query = query.options(*load_options)
     # Onclause pinned on purpose: work_order_operations and work_orders carry TWO
     # FK paths since migration 080 restored fk_work_orders_current_operation
     # (work_orders.current_operation_id), so an implicit ``join(WorkOrder)`` can
     # no longer infer one and raises AmbiguousForeignKeysError.
-    query = query.join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id).filter(
-        and_(
-            WorkOrder.company_id == company_id,
-            WorkOrder.is_deleted == False,  # noqa: E712
-            WorkOrder.status.not_in(TERMINAL_WO_STATUSES),
-            WorkOrderOperation.status.in_(QUEUE_OPERATION_STATUSES),
-        )
+    query = query.join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id).options(
+        contains_eager(WorkOrderOperation.work_order)
     )
+    if load_options:
+        query = query.options(*load_options)
+    query = query.filter(and_(*_queue_criteria(company_id)))
     if work_center_ids is not None:
         query = query.filter(WorkOrderOperation.work_center_id.in_(list(work_center_ids)))
     return query.order_by(*queue_order_by())
+
+
+class QueueOrderRow(NamedTuple):
+    """One live-queue row as plain column values, in canonical queue order.
+
+    The CAS reads, the notice snapshot and the lanes' RUN positions read the queue
+    through this rather than as entities: column tuples cannot be served stale by
+    the identity map after a Core UPDATE, and they cost no hydration.
+    """
+
+    operation_id: int
+    work_center_id: int
+    work_order_id: int
+    work_order_number: str
+    effective_rank: Optional[int]
+    run_order: Optional[int]
+    status: OperationStatus
+
+
+def queue_order_rows(
+    db: Session, company_id: int, work_center_ids: Optional[Sequence[int]] = None
+) -> List[QueueOrderRow]:
+    """The live queue as :class:`QueueOrderRow` tuples, SAME filter and SAME sort.
+
+    The column-tuple twin of :func:`queued_operations_query` -- one filter set
+    (:func:`_queue_criteria`) and one sort (:func:`queue_order_by`), so it can
+    never disagree with what the kiosk shows. Rows of several work centers come
+    back interleaved; bucket them per work center (stable) before reading
+    positions -- the sort keys never involve the work center.
+    """
+    query = db.query(
+        WorkOrderOperation.id,
+        WorkOrderOperation.work_center_id,
+        WorkOrderOperation.work_order_id,
+        WorkOrder.work_order_number,
+        effective_dispatch_rank_expr(),
+        WorkOrderOperation.run_order,
+        WorkOrderOperation.status,
+    ).join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id)
+    query = query.filter(and_(*_queue_criteria(company_id)))
+    if work_center_ids is not None:
+        query = query.filter(WorkOrderOperation.work_center_id.in_(list(work_center_ids)))
+    return [QueueOrderRow(*row) for row in query.order_by(*queue_order_by()).all()]
 
 
 def queued_operations(
@@ -271,14 +466,20 @@ def held_operations_query(
     key -- the same portability trick :func:`queue_order_by` uses.
     """
     query = db.query(WorkOrderOperation)
-    if load_options:
-        query = query.options(*load_options)
     # A cancelled (soft-deleted) nest's backing operation is a tombstone, not a
     # hold -- see the docstring. Correlated against the outer operation row.
     cancelled_nest = cancelled_nest_exists(company_id)
     # Onclause pinned for the same reason as queued_operations_query: two FK
-    # paths exist between the two tables since migration 080.
-    query = query.join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id).filter(
+    # paths exist between the two tables since migration 080. ``work_order`` is
+    # populated from this join exactly as in queued_operations_query, because the
+    # kiosk hands BOTH queries one load-option tuple (which therefore reaches the
+    # work order's part with ``defaultload``, not ``joinedload``).
+    query = query.join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id).options(
+        contains_eager(WorkOrderOperation.work_order)
+    )
+    if load_options:
+        query = query.options(*load_options)
+    query = query.filter(
         and_(
             WorkOrder.company_id == company_id,
             WorkOrder.is_deleted == False,  # noqa: E712
@@ -324,6 +525,19 @@ def held_operations(
     return materialized, False
 
 
+def _dense_positions(rows: Iterable[Tuple[int, bool]]) -> Dict[int, Optional[int]]:
+    """``(operation_id, is_ranked)`` pairs, in queue order -> gap-free 1..N, None for unranked."""
+    positions: Dict[int, Optional[int]] = {}
+    position = 0
+    for operation_id, is_ranked in rows:
+        if not is_ranked:
+            positions[operation_id] = None
+            continue
+        position += 1
+        positions[operation_id] = position
+    return positions
+
+
 def display_positions(operations: Iterable[WorkOrderOperation]) -> Dict[int, Optional[int]]:
     """Map operation id -> the rank the SHOP should see, or None when unranked.
 
@@ -334,22 +548,75 @@ def display_positions(operations: Iterable[WorkOrderOperation]) -> Dict[int, Opt
     number on screen is the position within the (already ordered) queue instead:
     always 1..N with no gaps, whatever the stored values drifted to.
 
-    Positions count ranked operations only; unranked ones map to None and stay
-    chip-less at the tail. Duplicate stored ranks (transient, and allowed by
-    design -- no unique constraint) resolve deterministically here too, because
-    position follows the query's total ordering rather than the raw value.
+    A row is RANKED (gets "RUN n") when its work order's EFFECTIVE plan rank is set
+    (:func:`effective_dispatch_rank`) OR it carries a ``run_order``. Under the
+    queue sort those rows are always a PREFIX of the queue -- planned work-order
+    blocks first, then the manager-ordered part of the unplanned tail -- so the
+    numbering stays gap-free. Unranked rows map to None and stay chip-less at the
+    tail. Duplicate stored ranks (transient, and allowed by design -- no unique
+    constraint) resolve deterministically here too, because position follows the
+    query's total ordering rather than the raw value.
 
-    ``operations`` MUST already be in queue order (see :func:`queue_order_by`).
+    Reads ``operation.work_order``: the shared queue queries populate it from their
+    join, so this issues no query on their rows.
+
+    ``operations`` MUST already be in queue order (see :func:`queue_order_by`) and
+    belong to ONE work center.
     """
+    return _dense_positions(
+        (operation.id, effective_dispatch_rank(operation) is not None or operation.run_order is not None)
+        for operation in operations
+    )
+
+
+def queue_row_positions(rows: Iterable[QueueOrderRow]) -> Dict[int, Optional[int]]:
+    """:func:`display_positions` for :class:`QueueOrderRow` tuples -- the same rule.
+
+    Rows may span several work centers (as :func:`queue_order_rows` returns them);
+    they are bucketed per work center here, stably, so each machine is numbered
+    over its own queue.
+    """
+    by_work_center: Dict[int, List[QueueOrderRow]] = {}
+    for row in rows:
+        by_work_center.setdefault(row.work_center_id, []).append(row)
     positions: Dict[int, Optional[int]] = {}
-    position = 0
-    for operation in operations:
-        if operation.run_order is None:
-            positions[operation.id] = None
-            continue
-        position += 1
-        positions[operation.id] = position
+    for bucket in by_work_center.values():
+        positions.update(
+            _dense_positions(
+                (row.operation_id, row.effective_rank is not None or row.run_order is not None) for row in bucket
+            )
+        )
     return positions
+
+
+def live_work_order_criteria(company_id: int) -> List:
+    """A work order that can be PLANNED: same company, not deleted, not terminal.
+
+    DRAFT is live (and rankable -- its operations simply stay PENDING; Release is
+    still the step that authorizes production). ``not_in`` excludes a NULL status,
+    exactly as :func:`queued_operations_query` does.
+    """
+    return [
+        WorkOrder.company_id == company_id,
+        WorkOrder.is_deleted == False,  # noqa: E712
+        WorkOrder.status.not_in(TERMINAL_WO_STATUSES),
+    ]
+
+
+def plan_positions(db: Session, company_id: int) -> Dict[int, int]:
+    """``{work_order_id: plan position}``: gap-free 1..N over every LIVE ranked work order.
+
+    Ordered by ``(dispatch_rank, id)`` -- the same order the queue sort and the
+    plan verb's compare-and-swap use -- so a stored rank that went sparse (a planned
+    job completed) still numbers 1..N with no gaps. One column-tuple query.
+    """
+    rows = (
+        db.query(WorkOrder.id)
+        .filter(*live_work_order_criteria(company_id), WorkOrder.dispatch_rank.is_not(None))
+        .order_by(WorkOrder.dispatch_rank.asc(), WorkOrder.id.asc())
+        .all()
+    )
+    return {row[0]: position for position, row in enumerate(rows, start=1)}
 
 
 def material_tie_info(
@@ -456,6 +723,7 @@ def dispatch_queue_row(
     display_position: Optional[int] = None,
     *,
     ties: Optional[Sequence[MaterialTieView]] = None,
+    plan_position_by_work_order: Optional[Mapping[int, int]] = None,
 ) -> DispatchQueueRow:
     """Project one queued operation onto the board/kiosk row shape.
 
@@ -466,6 +734,11 @@ def dispatch_queue_row(
     ``ties`` is this operation's already-fetched material ties (from
     :func:`material_tie_info`), passed IN rather than looked up here.
 
+    ``plan_position_by_work_order`` is :func:`plan_positions`, passed IN for the
+    same reason. The row's ``dispatch_position`` is the work order's plan position
+    only when this row's EFFECTIVE rank is set -- a held work order's row sorts in
+    the unplanned tail and must not carry a plan number it is not sorted by.
+
     THIS FUNCTION MUST STAY DB-FREE. It runs once per card across the whole
     shop's queue and is asserted to issue ZERO SELECTs
     (``tests/api/test_dispatch_nest_details.py::test_nest_is_eager_loaded_by_the_shared_load_options``);
@@ -475,6 +748,10 @@ def dispatch_queue_row(
     work_order = operation.work_order
     part = work_order.part if work_order else None
     status = operation.status
+    dispatch_position = None
+    if plan_position_by_work_order and effective_dispatch_rank(operation, work_order) is not None:
+        dispatch_position = plan_position_by_work_order.get(operation.work_order_id)
+    work_order_status = work_order.status if work_order else None
     return DispatchQueueRow(
         operation_id=operation.id,
         run_order=display_position if display_position is not None else operation.run_order,
@@ -499,6 +776,9 @@ def dispatch_queue_row(
         run_time_hours=float(operation.run_time_hours or 0.0),
         laser_nest=dispatch_nest_info(operation),
         material_tie=dispatch_material_tie(ties),
+        dispatch_position=dispatch_position,
+        sequence=operation.sequence,
+        work_order_status=(work_order_status.value if hasattr(work_order_status, "value") else work_order_status),
     )
 
 
@@ -507,6 +787,7 @@ def board_column(
     operations: Iterable[WorkOrderOperation],
     *,
     tie_info: Optional[Dict[int, List[MaterialTieView]]] = None,
+    plan_position_by_work_order: Optional[Mapping[int, int]] = None,
 ) -> DispatchBoardColumn:
     """One board column: a work center plus its (already-ordered) queue rows.
 
@@ -520,10 +801,23 @@ def board_column(
     board: omitting it there would strip every tie chip on a drag-reorder and
     read as "reordering untied my material". Omitting it is a no-tie column, not
     an error, so nothing fails loudly; that is why this note is here.
+
+    ``plan_position_by_work_order`` (:func:`plan_positions_for`) feeds each row's
+    ``dispatch_position`` -- the work-order bands the board draws. The same rule
+    applies: every caller whose column a client renders passes it.
     """
     ordered = list(operations)
     positions = display_positions(ordered)
     ties = tie_info or {}
+    queue = [
+        dispatch_queue_row(
+            op,
+            positions.get(op.id),
+            ties=ties.get(op.id),
+            plan_position_by_work_order=plan_position_by_work_order,
+        )
+        for op in ordered
+    ]
     return DispatchBoardColumn(
         id=work_center.id,
         code=work_center.code,
@@ -531,8 +825,22 @@ def board_column(
         work_center_type=work_center.work_center_type,
         current_status=work_center.current_status,
         is_active=bool(work_center.is_active),
-        queue=[dispatch_queue_row(op, positions.get(op.id), ties=ties.get(op.id)) for op in ordered],
+        queue=queue,
+        queued_hours=round(sum(row.setup_time_hours + row.run_time_hours for row in queue), 4),
     )
+
+
+def plan_positions_for(db: Session, company_id: int, operations: Iterable[WorkOrderOperation]) -> Dict[int, int]:
+    """:func:`plan_positions`, but only paid for when some row is actually planned.
+
+    A board on which no operation carries an effective plan rank needs no plan
+    positions, so it issues no query -- which keeps a shop that has never used the
+    plan at exactly its pre-114 query cost. ``operations`` must have
+    ``work_order`` loaded (the shared queue queries do).
+    """
+    if any(effective_dispatch_rank(op) is not None for op in operations):
+        return plan_positions(db, company_id)
+    return {}
 
 
 def active_work_centers(db: Session, company_id: int) -> List[WorkCenter]:
@@ -641,7 +949,20 @@ def build_dispatch_board(db: Session, company_id: int) -> Tuple[List[DispatchBoa
         # count), and the flat-in-cards property above is what makes the board
         # usable on a 24-machine shop.
         tie_info = material_tie_info(db, company_id, operations)
-    columns = [board_column(wc, by_work_center[wc.id], tie_info=tie_info) for wc in work_centers]
+        # Plan positions for the work-order bands: ONE query for the whole board,
+        # and none at all when nothing on it is planned.
+        plan_position_by_work_order = plan_positions_for(db, company_id, operations)
+    else:
+        plan_position_by_work_order = {}
+    columns = [
+        board_column(
+            wc,
+            by_work_center[wc.id],
+            tie_info=tie_info,
+            plan_position_by_work_order=plan_position_by_work_order,
+        )
+        for wc in work_centers
+    ]
     return columns, datetime.utcnow()
 
 
@@ -728,6 +1049,12 @@ def _write_run_order(db: Session, company_id: int, work_center_id: int, ids: Seq
     live queued ones. An off-queue row (ON_HOLD, PENDING) that kept a stale rank
     would re-enter the column on resume ahead of jobs the manager ranked later.
 
+    ``updated_at`` IS PRESERVED (Dispatch v2): a Core UPDATE still fires the
+    column's Python ``onupdate``, so each statement sets ``updated_at`` to itself.
+    A display rank is not a change to the operation -- bumping it moved the held
+    list's most-recently-held order (:func:`held_operations_query`) and the period
+    rollups that anchor on ``updated_at`` (reports, the Tier-3 yield anchor).
+
     Tenant scoping is doubly explicit -- the caller resolved ``work_center_id``
     inside the company, and every statement also filters ``company_id``.
     """
@@ -738,7 +1065,11 @@ def _write_run_order(db: Session, company_id: int, work_center_id: int, ids: Seq
     )
     if ids:
         reset = reset.where(WorkOrderOperation.id.not_in(list(ids)))
-    db.execute(reset.values(run_order=None).execution_options(synchronize_session=False))
+    db.execute(
+        reset.values(run_order=None, updated_at=WorkOrderOperation.updated_at).execution_options(
+            synchronize_session=False
+        )
+    )
 
     if not ids:
         return
@@ -752,9 +1083,49 @@ def _write_run_order(db: Session, company_id: int, work_center_id: int, ids: Seq
             WorkOrderOperation.work_center_id == work_center_id,
             WorkOrderOperation.id.in_(list(ids)),
         )
-        .values(run_order=ranks)
+        .values(run_order=ranks, updated_at=WorkOrderOperation.updated_at)
         .execution_options(synchronize_session=False)
     )
+
+
+def _reject_duplicates(ids: Sequence[int], label: str) -> None:
+    seen: set = set()
+    for item_id in ids:
+        if item_id in seen:
+            raise HTTPException(status_code=400, detail=f"Duplicate {label} id: {item_id}")
+        seen.add(item_id)
+
+
+def _precedence_key(row: QueueOrderRow) -> Tuple[int, int, int]:
+    """Sortable form of the queue's first three keys: plan rank (NULLS LAST), then WO id."""
+    if row.effective_rank is None:
+        return (1, 0, 0)
+    return (0, int(row.effective_rank), int(row.work_order_id))
+
+
+def assert_respects_work_order_precedence_or_http(ids: Sequence[int], rows_by_id: Mapping[int, QueueOrderRow]) -> None:
+    """409 when a submitted machine order contradicts the work-order plan.
+
+    Work-order order wins (owner decision, 2026-11-04): an operation of a work order
+    later in the plan -- or not in the plan at all -- may not be placed ahead of an
+    operation of an earlier planned work order. The submitted ids must therefore be
+    non-decreasing in ``(effective rank IS NULL, effective rank, work order id)``,
+    exactly the queue sort's leading keys. Without this the server would silently
+    re-sort the column and the response would not be what the planner submitted.
+    """
+    previous: Optional[QueueOrderRow] = None
+    for operation_id in ids:
+        row = rows_by_id[operation_id]
+        if previous is not None and _precedence_key(row) < _precedence_key(previous):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Operation {previous.operation_id} ({previous.work_order_number}) cannot run before operation "
+                    f"{row.operation_id} ({row.work_order_number}): work orders run in plan order. "
+                    "Reorder the work orders to change this."
+                ),
+            )
+        previous = row
 
 
 def apply_run_order_or_http(
@@ -762,6 +1133,7 @@ def apply_run_order_or_http(
     company_id: int,
     work_center: WorkCenter,
     operation_ids: Sequence[int],
+    expected_operation_ids: Optional[Sequence[int]] = None,
 ) -> Tuple[List[int], List[int], List[WorkOrderOperation]]:
     """Rewrite a work center's manual run order to exactly ``operation_ids``.
 
@@ -772,10 +1144,23 @@ def apply_run_order_or_http(
       filter set the kiosk queue uses); anything else is a 400 naming the id,
       because it means the manager's board is stale and should be refreshed;
     - duplicate ids are a 400 (an ambiguous rank request);
+    - the order must respect the work-order plan (409 naming the first offending
+      pair, :func:`assert_respects_work_order_precedence_or_http`);
     - the listed ids get dense ranks ``1..N`` in the given order, and every
       OTHER operation in the column is set back to unranked (NULL) so the
       column ends up exactly as submitted, with no leftover drift;
     - an empty list is valid and clears the whole column.
+
+    COMPARE-AND-SWAP (optional). ``expected_operation_ids`` is the column as the
+    client rendered it. When given, it is compared with the LIVE queue (not with
+    :func:`ranked_operation_ids`, which includes off-queue rows the client never
+    sees) after ids that have since left the queue are dropped from both sides --
+    a job completing between render and save is not a conflict. Any remaining
+    difference is a 409 (:data:`DISPATCH_PLAN_CONFLICT_DETAIL`). With CAS on, a
+    submitted id that was on the rendered column but has since left the queue is
+    dropped rather than refused; any other non-live id is still a 400. An expected
+    id that is not an operation of this company at all is a 400. Absent = the
+    pre-v2 contract, unchanged.
 
     A REWRITE IS AUTHORITATIVE FOR THE WHOLE COLUMN, NOT JUST ITS LIVE ROWS.
     The submitted ids must be live queued operations (a manager can only rank
@@ -788,9 +1173,10 @@ def apply_run_order_or_http(
     because a display-only reorder must never invalidate an operator's in-flight
     edit on a running job.
 
-    Flushes (does not commit) so the caller can commit the change and its audit
-    row atomically, in one transaction. Transient duplicate ranks mid-rewrite
-    are harmless -- ``run_order`` carries no unique constraint by design.
+    The caller holds :func:`acquire_dispatch_order_lock`. Flushes (does not
+    commit) so the caller can commit the change and its audit row atomically, in
+    one transaction. Transient duplicate ranks mid-rewrite are harmless --
+    ``run_order`` carries no unique constraint by design.
 
     Returns ``(old_order, new_order, refreshed_queue)``.
     """
@@ -806,10 +1192,39 @@ def apply_run_order_or_http(
             raise HTTPException(status_code=400, detail=f"Duplicate operation id in run order: {operation_id}")
         seen.add(operation_id)
 
-    queue = queued_operations(db, company_id, [work_center.id])
-    by_id = {op.id: op for op in queue}
+    # The live column as COLUMN TUPLES in queue order: the CAS state, the
+    # validation set and the precedence keys, all from one read.
+    rows = queue_order_rows(db, company_id, [work_center.id])
+    rows_by_id = {row.operation_id: row for row in rows}
+
+    if expected_operation_ids is not None:
+        expected = list(expected_operation_ids)
+        if len(expected) > MAX_RUN_ORDER_IDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Too many operations in expected run order (max {MAX_RUN_ORDER_IDS})",
+            )
+        _reject_duplicates(expected, "expected operation")
+        dead_expected = [operation_id for operation_id in expected if operation_id not in rows_by_id]
+        if dead_expected:
+            known = {
+                row[0]
+                for row in db.query(WorkOrderOperation.id)
+                .filter(WorkOrderOperation.company_id == company_id, WorkOrderOperation.id.in_(dead_expected))
+                .all()
+            }
+            for operation_id in dead_expected:
+                if operation_id not in known:
+                    raise HTTPException(status_code=400, detail=f"Unknown operation id: {operation_id}")
+        live_expected = [operation_id for operation_id in expected if operation_id in rows_by_id]
+        if live_expected != [row.operation_id for row in rows]:
+            raise HTTPException(status_code=409, detail=DISPATCH_PLAN_CONFLICT_DETAIL)
+        rendered = set(expected)
+        # Rendered on this column but gone since: not a conflict, just drop it.
+        ids = [operation_id for operation_id in ids if operation_id in rows_by_id or operation_id not in rendered]
+
     for operation_id in ids:
-        if operation_id not in by_id:
+        if operation_id not in rows_by_id:
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -817,6 +1232,8 @@ def apply_run_order_or_http(
                     f"{work_center.code}. Refresh the dispatch board and try again."
                 ),
             )
+
+    assert_respects_work_order_precedence_or_http(ids, rows_by_id)
 
     old_order = ranked_operation_ids(db, company_id, work_center.id)
 
@@ -844,3 +1261,448 @@ def apply_run_order_or_http(
         load_options=queue_row_load_options(),
     )
     return old_order, ids, refreshed
+
+
+def clear_run_order_for_work_orders(db: Session, company_id: int, work_order_ids: Sequence[int]) -> None:
+    """Unrank (``run_order = NULL``) every operation of these work orders. Core UPDATE.
+
+    Used when a work order LEAVES the plan (the plan verb, a restore): its
+    operations' ``run_order`` values were its within-block order, and left behind
+    they would compete in the unplanned tail -- where ``run_order`` still sorts
+    ahead of the priority fallback -- as if a manager had ranked them there.
+
+    Same write form as :func:`_write_run_order`: no ``version`` bump, ``updated_at``
+    preserved, only rows that actually carry a rank, tenant-scoped.
+    """
+    if not work_order_ids:
+        return
+    db.execute(
+        update(WorkOrderOperation)
+        .where(
+            WorkOrderOperation.company_id == company_id,
+            WorkOrderOperation.work_order_id.in_(list(work_order_ids)),
+            WorkOrderOperation.run_order.is_not(None),
+        )
+        .values(run_order=None, updated_at=WorkOrderOperation.updated_at)
+        .execution_options(synchronize_session=False)
+    )
+
+
+# --------------------------------------------------------------------------
+# Floor notices (spec 3g / 4c): "the planner changed this machine's order".
+#
+# Every dispatch-order writer takes a "before" snapshot under the dispatch lock,
+# writes, flushes, writes its audit row, then calls :func:`record_dispatch_change`
+# BEFORE commit, and :func:`broadcast_dispatch_changes` AFTER it. The notice is an
+# OperationalEvent per work center whose ordered queue actually changed: the
+# kiosk / shop-floor polls read the latest one back (:func:`latest_dispatch_notices`)
+# and the notification outbox fans it out to the operators clocked in there
+# (catalog ``dispatch.changed``). Telemetry, not audit: the audit row is the
+# record of the change, and a notice failure never fails the write.
+# --------------------------------------------------------------------------
+
+QueueSnapshot = Dict[int, List[int]]
+ChangeKindArg = Union[DispatchChangeKind, Mapping[int, DispatchChangeKind]]
+
+DISPATCH_NOTICE_EVENT_TYPE = "dispatch_order_changed"
+DISPATCH_NOTICE_SOURCE_MODULE = "dispatch"
+DISPATCH_NOTICE_ENTITY_TYPE = "work_center"
+# How far back a floor read looks for a notice. A shift and a half: long enough
+# that the operator who starts the next shift still sees a change made late in
+# the last one, short enough that the probe stays a narrow index range scan.
+DISPATCH_NOTICE_WINDOW_HOURS = 12
+# Cap on the ``moved_up`` ids one notice carries (a whole-plan rewrite can move
+# every card at a machine; the banner only needs to badge the first few).
+MAX_NOTICE_MOVED_UP = 10
+
+
+def snapshot_queue_orders(db: Session, company_id: int, work_center_ids: Iterable[Optional[int]]) -> QueueSnapshot:
+    """``{work_center_id: [operation_id, ...]}`` -- each machine's live queue, in order.
+
+    ONE bucketed :func:`queue_order_rows` query however many work centers are
+    asked for. Every requested work center gets a key, an empty queue included,
+    so a before/after diff sees a queue that appeared or drained.
+
+    Column tuples, never entities, and never ``expire_all()``: the machine-move
+    paths call this AFTER flushing un-committed ORM writes (the move itself), and
+    expiring would silently discard them. Flush first; this then sees the move.
+    """
+    wanted = sorted({int(wc_id) for wc_id in work_center_ids if wc_id is not None})
+    snapshot: QueueSnapshot = {wc_id: [] for wc_id in wanted}
+    if not wanted:
+        return snapshot
+    for row in queue_order_rows(db, company_id, wanted):
+        snapshot[row.work_center_id].append(row.operation_id)
+    return snapshot
+
+
+def queued_work_center_ids_for_work_orders(db: Session, company_id: int, work_order_ids: Sequence[int]) -> List[int]:
+    """Work centers holding a QUEUED operation of any of these (live) work orders.
+
+    The notice candidates for a plan change: only machines where one of the
+    re-ranked work orders actually has queued work can have changed order.
+    """
+    if not work_order_ids:
+        return []
+    rows = (
+        db.query(WorkOrderOperation.work_center_id)
+        .join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id)
+        .filter(
+            and_(*_queue_criteria(company_id)),
+            WorkOrderOperation.work_order_id.in_(list(work_order_ids)),
+        )
+        .distinct()
+        .all()
+    )
+    return sorted(row[0] for row in rows if row[0] is not None)
+
+
+def _kind_for(change_kind: ChangeKindArg, work_center_id: int) -> DispatchChangeKind:
+    if isinstance(change_kind, DispatchChangeKind):
+        return change_kind
+    # A map names every machine a move touched; anything else is a column rewrite.
+    return change_kind.get(work_center_id, DispatchChangeKind.MACHINE_ORDER)
+
+
+def _moved_up(before: Sequence[int], after: Sequence[int]) -> List[int]:
+    """Operations that moved AHEAD of work they used to follow, in queue order (capped).
+
+    Positions are compared over the operations present in BOTH snapshots only, so an
+    arrival or a departure on its own -- which shifts every card below it by one --
+    marks nobody as "moved up": only a change in RELATIVE order does.
+    """
+    common = set(before) & set(after)
+    before_position = {op_id: index for index, op_id in enumerate(op for op in before if op in common)}
+    moved: List[int] = []
+    for index, op_id in enumerate(op for op in after if op in common):
+        if index < before_position[op_id]:
+            moved.append(op_id)
+            if len(moved) >= MAX_NOTICE_MOVED_UP:
+                break
+    return moved
+
+
+def _next_up_id(queue: Sequence[int], statuses: Mapping[int, OperationStatus]) -> Optional[int]:
+    """The job the queue says to run next: the first READY row, else the first row.
+
+    The head of a queue is often work already running (IN_PROGRESS); "what do I run
+    next" is the first job nobody has started.
+    """
+    for op_id in queue:
+        if statuses.get(op_id) == OperationStatus.READY:
+            return op_id
+    return queue[0] if queue else None
+
+
+def _dispatch_notice_payloads(
+    db: Session,
+    company_id: int,
+    actor_user: Optional[User],
+    before: QueueSnapshot,
+    after: QueueSnapshot,
+    change_kind: ChangeKindArg,
+    changed: Sequence[int],
+) -> Dict[int, dict]:
+    """Build every changed machine's notice payload NOW -- two queries, never re-read later.
+
+    One query for the machines' codes and one for the identity of every operation on
+    either snapshot of a changed machine (status, numbers, names, part). The payload is
+    frozen at write time on purpose: the notification dispatcher and the floor reads
+    render it as written and never re-query, so a later edit cannot rewrite history.
+
+    No key may contain a ``redact_event_payload`` substring (``token``, ``cui``, ...):
+    ``tests/api/test_dispatch_notices.py`` holds the payload to that.
+    """
+    codes = {
+        wc_id: code
+        for wc_id, code in db.query(WorkCenter.id, WorkCenter.code)
+        .filter(WorkCenter.company_id == company_id, WorkCenter.id.in_(list(changed)))
+        .all()
+    }
+    op_ids = sorted({op_id for wc_id in changed for op_id in (*before.get(wc_id, []), *after.get(wc_id, []))})
+    details: Dict[int, dict] = {}
+    statuses: Dict[int, OperationStatus] = {}
+    if op_ids:
+        rows = (
+            db.query(
+                WorkOrderOperation.id,
+                WorkOrderOperation.status,
+                WorkOrderOperation.operation_number,
+                WorkOrderOperation.name,
+                WorkOrder.work_order_number,
+                WorkOrder.unit_number,
+                Part.part_number,
+            )
+            .join(WorkOrder, WorkOrderOperation.work_order_id == WorkOrder.id)
+            .outerjoin(Part, and_(WorkOrder.part_id == Part.id, Part.company_id == company_id))
+            .filter(
+                WorkOrderOperation.company_id == company_id,
+                WorkOrder.company_id == company_id,
+                WorkOrderOperation.id.in_(op_ids),
+            )
+            .all()
+        )
+        for op_id, status, operation_number, name, wo_number, unit_number, part_number in rows:
+            statuses[op_id] = status
+            details[op_id] = {
+                "operation_id": op_id,
+                "work_order_number": wo_number,
+                "unit_number": unit_number,
+                "operation_number": operation_number,
+                "operation_name": name,
+                "part_number": part_number,
+            }
+
+    def next_up(queue: Sequence[int]) -> Optional[dict]:
+        op_id = _next_up_id(queue, statuses)
+        return details.get(op_id) if op_id is not None else None
+
+    actor_display = operator_display_name(actor_user.first_name, actor_user.last_name) if actor_user else None
+    payloads: Dict[int, dict] = {}
+    for wc_id in changed:
+        old, new = before.get(wc_id, []), after.get(wc_id, [])
+        payloads[wc_id] = {
+            "work_center_id": wc_id,
+            "work_center_code": codes.get(wc_id),
+            "change_kind": _kind_for(change_kind, wc_id).value,
+            "actor_display": actor_display,
+            "next_up_before": next_up(old),
+            "next_up_after": next_up(new),
+            "moved_up": _moved_up(old, new),
+            "queue_length": len(new),
+        }
+    return payloads
+
+
+def emit_dispatch_notices(
+    db: Session,
+    company_id: int,
+    actor_user: Optional[User],
+    before: QueueSnapshot,
+    after: QueueSnapshot,
+    change_kind: ChangeKindArg,
+) -> List[int]:
+    """One ``dispatch_order_changed`` event per machine whose ordered queue changed.
+
+    Returns the changed work-center ids (sorted) -- empty for a no-op write, which
+    emits nothing and issues no query.
+
+    BEST-EFFORT, IN ONE SAVEPOINT. The payload reads and every emit run inside
+    ``db.begin_nested()``; any failure -- a query, the event INSERT's flush, a bug --
+    rolls back only the savepoint and returns ``[]``, so a notice can never 500 (or,
+    via a poisoned outer transaction, silently undo) the reorder it describes. This is
+    the residue ``OperationalEventService.emit_best_effort``'s docstring says the
+    savepoint closes.
+
+    THE OUTBOX LIST IS SHIELDED FROM THE SAVEPOINT, BOTH WAYS. SQLAlchemy fires the
+    session's ``after_commit`` on a SAVEPOINT release and its rollback events on a
+    savepoint rollback, and the notification outbox listens to exactly those
+    (``services/notification_outbox.py``). Unshielded, releasing this savepoint would
+    enqueue the notices' fan-out BEFORE the request commits -- the worker could load an
+    event that is not committed yet (and lose it), or one whose transaction later rolls
+    back -- and a rollback would drop ids the still-live outer transaction owns. So the
+    pending list is lifted off the session across the release and put back after it
+    (the outer commit enqueues it, as the outbox intends), and on failure the ids that
+    were pending BEFORE the savepoint are restored.
+
+    NEVER ``expire_all()``: the machine-move callers hold flushed-but-uncommitted ORM
+    state. Callers flush before calling (:func:`record_dispatch_change` does), so
+    ``begin_nested``'s own autoflush has nothing to send.
+
+    The events are flushed, not committed: the caller's commit makes them durable
+    together with the reorder (and only then does the outbox enqueue fan-out), and a
+    rollback of the caller's transaction discards them -- a write that never happened
+    never notifies.
+    """
+    changed = sorted(
+        wc_id for wc_id in set(before) | set(after) if list(before.get(wc_id, [])) != list(after.get(wc_id, []))
+    )
+    if not changed:
+        return []
+
+    pending_before = list(db.info.get(NOTIFICATION_PENDING_KEY) or [])
+    savepoint = db.begin_nested()
+    try:
+        payloads = _dispatch_notice_payloads(db, company_id, actor_user, before, after, change_kind, changed)
+        events = OperationalEventService(db)
+        for wc_id in changed:
+            event = events.emit_best_effort(
+                company_id=company_id,
+                event_type=DISPATCH_NOTICE_EVENT_TYPE,
+                source_module=DISPATCH_NOTICE_SOURCE_MODULE,
+                entity_type=DISPATCH_NOTICE_ENTITY_TYPE,
+                entity_id=wc_id,
+                # Deliberately no work_order_id / operation_id: the notice is about a
+                # MACHINE's queue (and work_order_id would hijack the notification link).
+                user_id=actor_user.id if actor_user is not None else None,
+                severity="info",
+                event_payload=payloads[wc_id],
+            )
+            if event is None:
+                raise RuntimeError(f"dispatch notice emit failed for work center {wc_id}")
+        # Lift the outbox list off the session across the release: the release fires
+        # ``after_commit``, which would enqueue these events before the real commit.
+        pending_now = db.info.pop(NOTIFICATION_PENDING_KEY, None)
+        try:
+            savepoint.commit()
+        finally:
+            if pending_now:
+                db.info[NOTIFICATION_PENDING_KEY] = pending_now
+        return changed
+    except Exception:  # noqa: BLE001 - a notice must never fail the reorder it describes
+        logger.warning(
+            "dispatch notice skipped (best-effort): company_id=%s work_centers=%s",
+            company_id,
+            changed,
+            exc_info=True,
+        )
+        try:
+            savepoint.rollback()
+        except Exception:  # noqa: BLE001 - already failing; the outer transaction decides
+            logger.warning("dispatch notice savepoint rollback failed", exc_info=True)
+        if pending_before:
+            db.info[NOTIFICATION_PENDING_KEY] = pending_before
+        else:
+            db.info.pop(NOTIFICATION_PENDING_KEY, None)
+        return []
+
+
+def record_dispatch_change(
+    db: Session,
+    company_id: int,
+    actor_user: Optional[User],
+    before: QueueSnapshot,
+    change_kind: ChangeKindArg,
+) -> List[int]:
+    """Emit the floor notices for a dispatch-order write; return the machines that changed.
+
+    Called by every dispatch-order writer AFTER its rank/move writes are flushed
+    and its audit row is written, BEFORE commit, with the ``before`` snapshot
+    (:func:`snapshot_queue_orders`) it took under :func:`acquire_dispatch_order_lock`
+    before mutating anything. ``change_kind`` is one :class:`DispatchChangeKind`
+    for the whole write, or a ``{work_center_id: kind}`` map (a machine move is
+    ``moved_out`` at the old machine and ``moved_in`` at the new one).
+
+    The "after" order is re-read over the SAME machines with the same column-tuple
+    query -- never by re-sorting in Python (``due_date`` is nullable and sorts by
+    dialect) -- and never through ``expire_all()`` (the move paths hold
+    flushed-but-uncommitted ORM writes). The flush here is deliberately OUTSIDE the
+    notice's best-effort guard: a real conflict in the caller's own pending writes
+    (``StaleDataError``) must surface exactly as it would at commit, not be
+    swallowed as a notice failure.
+
+    Returns the work-center ids whose order actually changed (``[]`` when nothing
+    did, or when the best-effort notice failed); the caller passes them to
+    :func:`broadcast_dispatch_changes` AFTER its commit.
+    """
+    if not before:
+        return []
+    db.flush()
+    after = snapshot_queue_orders(db, company_id, before.keys())
+    return emit_dispatch_notices(db, company_id, actor_user, before, after, change_kind)
+
+
+def broadcast_dispatch_changes(company_id: int, work_center_ids: Sequence[int]) -> None:
+    """After-commit websocket nudge, one per changed work center. Best-effort.
+
+    ``company_id`` is passed EXPLICITLY: ``broadcast_shop_floor_update`` without it
+    fans out to every tenant's sockets. An accelerator only -- broadcasts reach the
+    sockets of the one API process that handled the request, and crew-station
+    tokens cannot open a socket at all -- so the floor's poll of the notice
+    (:func:`latest_dispatch_notices`) is the delivery guarantee. Never raises.
+    """
+    if not work_center_ids:
+        return
+    # Imported here: the realtime layer is an API-process concern this service
+    # module should not drag into every importer (the worker, scripts).
+    from app.core.realtime import safe_broadcast
+    from app.core.websocket import broadcast_shop_floor_update
+
+    for wc_id in work_center_ids:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            wc_id,
+            {"type": DISPATCH_NOTICE_EVENT_TYPE, "event": DISPATCH_NOTICE_EVENT_TYPE},
+            company_id=company_id,
+        )
+
+
+def _notice_next_up(value) -> Optional[DispatchNoticeNextUp]:
+    if not isinstance(value, dict) or value.get("operation_id") is None:
+        return None
+    try:
+        return DispatchNoticeNextUp.model_validate(value)
+    except ValueError:
+        return None
+
+
+def latest_dispatch_notices(
+    db: Session,
+    company_id: int,
+    work_center_ids: Iterable[Optional[int]],
+    since_hours: int = DISPATCH_NOTICE_WINDOW_HOURS,
+) -> Dict[int, dict]:
+    """``{work_center_id: notice}`` -- the newest dispatch notice per machine in the window.
+
+    ONE query, whatever the number of machines: a window function picks each machine's
+    newest row (``occurred_at`` then ``id``, descending) and counts its rows in the
+    window (``updates_in_window``). It probes
+    ``ix_operational_events_company_entity_time (company_id, entity_type, entity_id,
+    occurred_at)`` (migration 114) -- a narrow range per machine, polled by every
+    station every 10-15 s. The bound is tz-aware UTC (``occurred_at`` is timestamptz).
+
+    Tenant-scoped on ``company_id`` (never client input): a machine id from another
+    company finds nothing. Machines with no notice in the window get no key.
+
+    Each value is the :class:`DispatchNotice` wire shape (``model_dump(mode="json")``,
+    so ``occurred_at`` is UTC ``Z``). Built ONLY from the event row and its frozen
+    payload, through the schema -- so a payload key added later can never reach a crew
+    station without a schema change (and the test that pins the station's keys).
+    """
+    wanted = sorted({int(wc_id) for wc_id in work_center_ids if wc_id is not None})
+    if not wanted:
+        return {}
+    since = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+    newest_first = (OperationalEvent.occurred_at.desc(), OperationalEvent.id.desc())
+    ranked = (
+        select(
+            OperationalEvent.id.label("id"),
+            OperationalEvent.entity_id.label("work_center_id"),
+            OperationalEvent.occurred_at.label("occurred_at"),
+            OperationalEvent.event_payload.label("event_payload"),
+            func.row_number().over(partition_by=OperationalEvent.entity_id, order_by=newest_first).label("newest_rank"),
+            func.count(OperationalEvent.id).over(partition_by=OperationalEvent.entity_id).label("updates_in_window"),
+        )
+        .where(
+            OperationalEvent.company_id == company_id,
+            OperationalEvent.entity_type == DISPATCH_NOTICE_ENTITY_TYPE,
+            OperationalEvent.entity_id.in_(wanted),
+            OperationalEvent.occurred_at >= since,
+            OperationalEvent.event_type == DISPATCH_NOTICE_EVENT_TYPE,
+        )
+        .subquery()
+    )
+    rows = db.execute(select(ranked).where(ranked.c.newest_rank == 1)).all()
+    notices: Dict[int, dict] = {}
+    for row in rows:
+        payload = row.event_payload if isinstance(row.event_payload, dict) else {}
+        moved_up = payload.get("moved_up")
+        notice = DispatchNotice(
+            id=row.id,
+            occurred_at=row.occurred_at,
+            work_center_id=row.work_center_id,
+            work_center_code=payload.get("work_center_code"),
+            change_kind=payload.get("change_kind"),
+            actor_display=payload.get("actor_display"),
+            next_up_before=_notice_next_up(payload.get("next_up_before")),
+            next_up_after=_notice_next_up(payload.get("next_up_after")),
+            moved_up=[op_id for op_id in moved_up if isinstance(op_id, int)] if isinstance(moved_up, list) else [],
+            updates_in_window=int(row.updates_in_window or 1),
+        )
+        notices[row.work_center_id] = notice.model_dump(mode="json")
+    return notices
+
+
+def notices_newest_first(notices: Mapping[int, dict]) -> List[dict]:
+    """The values of :func:`latest_dispatch_notices` as a list, newest notice first."""
+    return sorted(notices.values(), key=lambda notice: notice["id"], reverse=True)

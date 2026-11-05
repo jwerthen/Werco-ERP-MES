@@ -15,6 +15,12 @@ class OperationalEvent(Base, TenantMixin):
         Index("ix_operational_events_company_module_time", "company_id", "source_module", "occurred_at"),
         Index("ix_operational_events_company_type_time", "company_id", "event_type", "occurred_at"),
         Index("ix_operational_events_company_entity", "company_id", "entity_type", "entity_id"),
+        # Lock-step with migration 114_wo_dispatch_rank. Serves the "latest dispatch
+        # notice for these work centers" probe every kiosk / shop-floor poll runs
+        # (entity_type='work_center', entity_id IN (...), occurred_at in a recent
+        # window, newest first). The 3-column index above is its prefix and is left in
+        # place: dropping an index is a separate, deliberate decision.
+        Index("ix_operational_events_company_entity_time", "company_id", "entity_type", "entity_id", "occurred_at"),
         Index("ix_operational_events_company_work_order", "company_id", "work_order_id", "occurred_at"),
         # Supports the notification relay sweeper's cross-company scan
         # (event_type IN (...) AND notified_at IS NULL AND created_at < ...), §3.1.

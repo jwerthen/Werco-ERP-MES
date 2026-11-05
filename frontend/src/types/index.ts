@@ -1632,6 +1632,11 @@ export interface WorkCenterQueueResponse {
   held_truncated?: boolean;
   /** UTC ISO server clock at response time. */
   server_time?: string;
+  /**
+   * Dispatch v2: this work center's newest dispatch notice from the last 12
+   * hours, or null. Optional so a pre-v2 backend payload still typechecks.
+   */
+  dispatch_notice?: DispatchNotice | null;
 }
 
 /**
@@ -1751,6 +1756,19 @@ export interface DispatchBoardRow {
    * Optional so pre-feature payloads and existing fixtures still typecheck.
    */
   material_tie?: DispatchMaterialTie | null;
+  /**
+   * Dispatch v2: the parent work order's gap-free position in the shop-wide
+   * PLAN (1..N over live planned work orders), or null when the work order is
+   * not in the plan — AND null when the work order is ON_HOLD (a held work order
+   * sinks out of its plan block at every machine, so its row must not claim a
+   * position it is not sorted by). The machine view draws its work-order bands
+   * from this. Optional: absent on a pre-v2 payload and on existing fixtures.
+   */
+  dispatch_position?: number | null;
+  /** Dispatch v2: routing step within the work order (10 before 20). */
+  sequence?: number | null;
+  /** Dispatch v2: the parent work order's status (`released`, `on_hold`, ...). */
+  work_order_status?: WorkOrderStatus | null;
 }
 
 /** One work center column on the Dispatch Board. */
@@ -1759,13 +1777,22 @@ export interface DispatchBoardColumn {
   name: string;
   code: string;
   work_center_type: WorkCenterType;
+  /** Machine status (`available`, `in_use`, `maintenance`, `offline`). Always sent; optional for old fixtures. */
+  current_status?: string | null;
   /** false = deactivated WC that still has queued work; read-only on the board. */
   is_active: boolean;
   queue: DispatchBoardRow[];
+  /**
+   * Dispatch v2: Σ (setup_time_hours + run_time_hours) over `queue` — PLANNED
+   * (not remaining) hours waiting at this machine. A load cue, not capacity.
+   */
+  queued_hours?: number;
 }
 
 export interface DispatchBoardResponse {
   work_centers: DispatchBoardColumn[];
+  /** UTC ISO (`Z`) time the board was built. Always sent; optional for old fixtures. */
+  generated_at?: string;
 }
 
 /**
@@ -1777,6 +1804,270 @@ export type RunOrderUpdateResponse =
   | DispatchBoardRow[]
   | { queue: DispatchBoardRow[] }
   | DispatchBoardColumn;
+
+/**
+ * Body of PUT /shop-floor/work-centers/{id}/run-order (the machine-column
+ * rewrite). `operation_ids` is the FULL desired column order, rank 1 first.
+ *
+ * Dispatch v2 adds the optional compare-and-swap guard `expected_operation_ids`:
+ * the column's queued operation ids exactly as the client last rendered them,
+ * top to bottom. Omit it for the pre-v2 last-writer-wins behavior. Either way the
+ * server now refuses 409 an order that puts a later-planned (or unplanned) work
+ * order's operation ahead of an earlier-planned one.
+ */
+export interface RunOrderUpdateRequest {
+  operation_ids: number[];
+  expected_operation_ids?: number[] | null;
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch Board v2 — the work-order-first PLAN (migration 114).
+//
+// One shop-wide order of work orders (`dispatch_position`) that every machine
+// queue follows; inside a planned work order the planner orders that work
+// order's operations. ADVISORY everywhere: it orders and labels work, it never
+// decides what may start. Server schemas: backend/app/schemas/dispatch.py.
+// ---------------------------------------------------------------------------
+
+/**
+ * What the planner may do with a lane's operation order.
+ * - `routing`: a sequenced routing — the routing IS the order; read-only (the
+ *   operation-order PUT refuses 409 "This work order runs in routing sequence.").
+ * - `pool`: operations at a machine are mutually startable; their order is a
+ *   dispatch preference the planner may set.
+ * - `laser`: a nest package — a pool with no predecessor gating at all.
+ *
+ * Decide from `mode` (or `is_laser`), never from `sequential_operations`: the
+ * column is inert on a laser work order.
+ */
+export type DispatchLaneMode = 'routing' | 'pool' | 'laser';
+
+/**
+ * Why a machine's queue order changed (closed vocabulary, server
+ * `DispatchChangeKind`). A machine move is `moved_out` at the old machine and
+ * `moved_in` at the new one.
+ */
+export type DispatchChangeKind =
+  | 'work_order_order'
+  | 'operation_order'
+  | 'machine_order'
+  | 'moved_in'
+  | 'moved_out';
+
+/** One person clocked into an operation right now (an open LABOR time entry). */
+export interface DispatchCrewMember {
+  user_id: number;
+  /** Public-screen-safe "First L." form ("Maria L."), the same one the kiosk roster uses. */
+  display_name: string | null;
+}
+
+/**
+ * One operation of a work-order lane (server `DispatchLaneOperation`).
+ *
+ * Unlike the machine view, a lane carries EVERY live status — pending, ready,
+ * in_progress, on_hold, complete — so a planner can see where the job is.
+ * Operations backing a cancelled (soft-deleted) laser nest are left off.
+ */
+export interface DispatchLaneOp {
+  operation_id: number;
+  /** Optimistic-lock counter — required by the machine-move PUT (`updateOperation`). */
+  version: number;
+  sequence: number;
+  /** Bare identifier ("10"); render with `formatOperationLabel`, never prefix by hand. */
+  operation_number: string | null;
+  operation_name: string;
+  status: OperationStatus;
+  work_center_id: number | null;
+  work_center_code: string | null;
+  /**
+   * "RUN n" at its machine: the gap-free position in that machine's LIVE queue,
+   * identical to the kiosk RUN chip and the machine view's `run_order`. Null for
+   * an off-queue (pending / on_hold / complete) operation, and for a queued one
+   * that is neither in a planned (non-held) work order nor manually ranked.
+   */
+  run_position: number | null;
+  /**
+   * PENDING only: a lower-sequence operation still has to finish first (the same
+   * predecessor rule promotion and clock-in use). Always false on a laser lane.
+   */
+  blocked_by_predecessor: boolean;
+  on_hold: boolean;
+  /** Who is clocked in right now (open setup/run/rework/inspection entries). `[]` when nobody. */
+  crew: DispatchCrewMember[];
+  quantity_complete: number;
+  /** The operation's piece target (component quantity for a BOM item, else the WO quantity). */
+  quantity_target: number;
+  setup_time_hours: number;
+  run_time_hours: number;
+  component_part_number: string | null;
+  /** Nest details for a laser-nest operation; null for every other operation. */
+  laser_nest: DispatchNestInfo | null;
+  /** Open operation-scoped material tie; null when untied (render nothing) and always null on COMPLETE operations. */
+  material_tie: DispatchMaterialTie | null;
+}
+
+/**
+ * One live work order on the work-order-first board (server `DispatchWorkOrderLane`).
+ * "Live" = not deleted and not complete / closed / cancelled — DRAFT included.
+ */
+export interface DispatchLane {
+  work_order_id: number;
+  work_order_number: string;
+  /** The work order's optimistic-lock counter. The plan verbs do NOT bump it. */
+  version: number;
+  unit_number: string | null;
+  /** Always a live status: `draft` | `released` | `in_progress` | `on_hold`. */
+  status: WorkOrderStatus;
+  /** `production` | `laser_cutting`. */
+  work_order_type: string | null;
+  /** Inert on a laser work order — read `mode` instead. */
+  sequential_operations: boolean;
+  is_laser: boolean;
+  mode: DispatchLaneMode;
+  /** Gap-free 1..N over every live planned work order; null = "Not in plan". */
+  dispatch_position: number | null;
+  /** 1 = highest, 10 = lowest. */
+  priority: number | null;
+  /** Date-only `YYYY-MM-DD` — format via centralTime, never `new Date()`. */
+  due_date: string | null;
+  /** Date-only `YYYY-MM-DD` ("Must Leave By"). */
+  must_ship_by: string | null;
+  /** The promise the shop is held to: `must_ship_by` when set, else `due_date`. Date-only. */
+  promise_date: string | null;
+  customer_name: string | null;
+  /** Null on a part-less (standalone laser) work order. */
+  part_number: string | null;
+  part_name: string | null;
+  quantity_ordered: number;
+  quantity_complete: number;
+  /** Operations shown on the lane (cancelled-nest tombstones excluded). */
+  ops_total: number;
+  ops_complete: number;
+  /** Unresolved (open or acknowledged) blockers on this work order. */
+  open_blocker_count: number;
+  /** True when any operation's open material tie is short. */
+  any_material_short: boolean;
+  /**
+   * `routing`: by (sequence, id). `pool` / `laser`: grouped by machine (work
+   * center code), queued operations first in that machine's live queue order,
+   * then off-queue ones by sequence. The operation-order PUT's
+   * `expected_operation_ids` is the QUEUED (ready / in_progress) subset, in this order.
+   */
+  operations: DispatchLaneOp[];
+}
+
+/** A work center the client may label a lane operation with or move one to. */
+export interface DispatchWorkCenterOption {
+  id: number;
+  code: string;
+  name: string;
+  work_center_type: WorkCenterType | null;
+  /** false = deactivated; listed only because a live operation still sits there. NEVER a move target. */
+  is_active: boolean;
+  current_status: string | null;
+}
+
+/**
+ * GET /shop-floor/dispatch-board/work-orders, and the response of
+ * PUT /shop-floor/dispatch-board/work-order-order.
+ *
+ * `work_orders` is the plan first (`dispatch_position` 1..N, in order), then
+ * every other live work order ("Not in plan") by priority, promise date (nulls
+ * last) and number — so `ranked_count` is also the index where the unplanned
+ * section starts.
+ */
+export interface DispatchWorkOrderBoardResponse {
+  /** UTC ISO (`Z`). */
+  generated_at: string;
+  work_orders: DispatchLane[];
+  ranked_count: number;
+  unranked_count: number;
+  /** Every active work center (code order), plus any inactive one a lane operation still sits on. */
+  work_centers: DispatchWorkCenterOption[];
+}
+
+/**
+ * Body of PUT /shop-floor/dispatch-board/work-order-order. Both lists are
+ * REQUIRED (≤ 500 ids each; a missing key is a 422).
+ */
+export interface WorkOrderOrderUpdateRequest {
+  /** The FULL desired plan, position 1 first. Omitted work orders leave the plan. `[]` clears it. */
+  work_order_ids: number[];
+  /** CAS guard: the planned work order ids exactly as last rendered (lanes with a `dispatch_position`, in order). */
+  expected_work_order_ids: number[];
+}
+
+/**
+ * Body of PUT /shop-floor/dispatch-board/work-orders/{id}/operation-order. Both
+ * lists are REQUIRED (≤ 500 ids each).
+ */
+export interface OperationOrderUpdateRequest {
+  /** Every READY / IN_PROGRESS operation of the work order, exactly once, in the desired order. */
+  operation_ids: number[];
+  /** CAS guard: the lane's ready / in_progress operation ids exactly as last rendered, in lane order. */
+  expected_operation_ids: number[];
+}
+
+/**
+ * The job a machine's queue said to run next, frozen when the notice was
+ * written: the first READY operation of the queue (the head may be work already
+ * running), else the first row. Never re-read, so a later edit cannot change
+ * what a notice said.
+ */
+export interface DispatchNoticeNextUp {
+  operation_id: number;
+  work_order_number: string | null;
+  unit_number: string | null;
+  /** Bare identifier ("20"); render with `formatOperationLabel`. */
+  operation_number: string | null;
+  operation_name: string | null;
+  part_number: string | null;
+}
+
+/**
+ * The newest "the planner changed this machine's order" notice for ONE work
+ * center (server `DispatchNotice`), from the last 12 hours.
+ *
+ * Rides the floor polls: `dispatch_notice` on the work-center queue,
+ * `dispatch_notices` on my-active-job, and `dispatch_notices` on
+ * /shop-floor/operations when filtered to one work center. `id` strictly
+ * increases with every notice, so acknowledge by remembering the last id shown.
+ * Exactly these keys reach an unattended crew station — nothing operator-typed.
+ */
+export interface DispatchNotice {
+  id: number;
+  /** UTC ISO (`Z`) — age it against the same payload's `server_time`; display in Central. */
+  occurred_at: string;
+  work_center_id: number;
+  work_center_code: string | null;
+  change_kind: DispatchChangeKind | null;
+  /** The planner, "First L." ("Jon W."). */
+  actor_display: string | null;
+  next_up_before: DispatchNoticeNextUp | null;
+  next_up_after: DispatchNoticeNextUp | null;
+  /**
+   * Operation ids AT THIS WORK CENTER that moved ahead of work they used to
+   * follow, in queue order, at most 10. Relative only: an arrival or departure
+   * alone moves nobody up (so a machine move usually carries `[]`).
+   */
+  moved_up: number[];
+  /**
+   * How many dispatch notices this work center received in the whole 12-hour
+   * window (≥ 1) — NOT "since your last acknowledgement".
+   */
+  updates_in_window: number;
+}
+
+/**
+ * The keys GET /shop-floor/operations adds ONLY when filtered to one work center
+ * (`work_center_id`). An unfiltered list carries neither key.
+ */
+export interface ShopFloorOperationsDispatchFields {
+  /** 0- or 1-item list: that machine's newest notice in the 12-hour window. */
+  dispatch_notices?: DispatchNotice[];
+  /** UTC ISO (`Z`) server clock — the age anchor for the notice. */
+  server_time?: string;
+}
 
 // ---------------------------------------------------------------------------
 // Kiosk shop-floor payload blocks (Kiosk Foundry Redesign, backend B1–B8).
@@ -2083,6 +2374,14 @@ export interface MyActiveJobResponse {
   active_job?: ActiveJob | null;
   /** UTC ISO server clock at response time. */
   server_time?: string;
+  /**
+   * Dispatch v2: the newest dispatch notice (12-hour window) for each work
+   * center where the CALLER holds an open LABOR entry (setup / run / rework /
+   * inspection — never break or downtime), resolved through the operation's
+   * CURRENT work center; newest first. `[]` when clocked in nowhere or nothing
+   * changed. Optional so a pre-v2 backend payload still typechecks.
+   */
+  dispatch_notices?: DispatchNotice[];
 }
 
 // ---------------------------------------------------------------------------

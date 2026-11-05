@@ -11,7 +11,7 @@
  */
 
 import type { KioskCrewQueueItem } from '../components/kiosk/kioskConstants';
-import type { KioskQueueWorkCenter } from './index';
+import type { DispatchNotice, KioskQueueWorkCenter } from './index';
 import type { ScrapReasonCodeOption } from './scrapReason';
 
 // ---- Station tier (PIN → 24h scoped station token) ----
@@ -82,6 +82,13 @@ export interface KioskCrewQueueResponse {
    * kiosk top bar. Optional so pre-redesign payloads still typecheck.
    */
   work_center?: KioskQueueWorkCenter | null;
+  /**
+   * Dispatch v2: this work center's newest dispatch notice from the last 12
+   * hours, or null. The station token reads it (exactly the `DispatchNotice`
+   * keys — office-authored identity and the planner's "First L." only). Optional
+   * so a pre-v2 backend payload still typechecks.
+   */
+  dispatch_notice?: DispatchNotice | null;
 }
 
 // ---- Operator tier (badge → 5-minute scope:"kiosk" access token) ----

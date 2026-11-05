@@ -648,8 +648,13 @@ def _copy_header(
     ``actual_end``, ``actual_hours``, ``actual_cost``, ``lot_number``,
     ``serial_numbers``, ``unit_number``, ``released_by``, ``released_at``,
     ``current_operation_id``, ``scheduled_start``, ``scheduled_end``, ``version``,
-    ``parent_work_order_id``, ``must_ship_by`` — see the module docstring for the
-    three that are judgement calls.
+    ``parent_work_order_id``, ``must_ship_by``, ``dispatch_rank`` — see the module
+    docstring for the three that are judgement calls.
+
+    ``dispatch_rank`` (114) is the planner's position for THIS job in the shop-wide
+    dispatch plan, the work-order twin of the operation-level ``run_order`` the
+    module docstring explains: a decision about the source job, not part of its plan.
+    A duplicate is a new job nobody has placed yet, so it lands outside the plan.
 
     ``unit_number`` (083) is the one omission that is about IDENTITY rather than
     about production history: a duplicate is the NEXT unit, not the same one, so

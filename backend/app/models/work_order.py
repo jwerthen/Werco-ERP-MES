@@ -61,6 +61,11 @@ class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
         Index("ix_work_orders_company_status", "company_id", "status"),
         Index("ix_work_orders_company_live_priority_due", "company_id", "is_deleted", "priority", "due_date", "id"),
         Index("ix_work_orders_company_due_date", "company_id", "due_date"),
+        # Lock-step with migration 114_wo_dispatch_rank: the dispatch board's
+        # "ranked work orders of this company, in plan order" read. A NAMED index,
+        # deliberately not ``index=True`` on the column -- every dispatch read is
+        # tenant-led, so a bare ``(dispatch_rank)`` index would be the wrong shape.
+        Index("ix_work_orders_company_dispatch_rank", "company_id", "dispatch_rank"),
         # Lock-step with migration 080_restore_stamped_over_con (originally
         # migration 003, which the create_all+stamp bootstrap skipped). Names
         # and predicate text must stay byte-identical to the migration.
@@ -107,6 +112,22 @@ class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
     # Status tracking
     status = Column(SQLEnum(WorkOrderStatus), default=WorkOrderStatus.DRAFT, index=True)
     priority = Column(Integer, default=5, index=True)  # 1=highest, 10=lowest
+
+    # The planner's shop-wide WORK-ORDER order on the dispatch board (migration 114).
+    # Dense 1..N per company over the work orders in the plan; NULL = not in the plan,
+    # which is every pre-114 row and every new work order -- no default, no backfill,
+    # because inventing a rank would assert a dispatch decision nobody made.
+    #
+    # DISTINCT from ``WorkOrderOperation.run_order`` (068), which orders operations at
+    # ONE machine, and from ``priority``. Like ``run_order`` it is ADVISORY: it changes
+    # the order operators see, never what they are permitted to start, clock into or
+    # complete. Deliberately NOT unique-constrained -- the plan is rewritten wholesale
+    # in one transaction, so transient duplicates exist mid-rewrite.
+    #
+    # Written only by the dispatch-board order verb; never on a Create/Update request
+    # schema, never carried by ``work_order_duplicate_service._copy_header`` (a
+    # duplicate is a new job the planner has not placed yet).
+    dispatch_rank = Column(Integer, nullable=True)
 
     # Scheduling
     scheduled_start = Column(DateTime, nullable=True)

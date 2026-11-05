@@ -160,6 +160,13 @@ def test_downtime_event_lands_record_less_on_the_downtime_list():
 # ---------------------------------------------------------------------------
 
 
+def test_work_center_lands_record_less_on_the_shop_floor_operations_page():
+    """``dispatch.changed`` (Dispatch v2): a notice about a machine's run order lands on the
+    operations page, record-less -- it needs no id to honour, and every role can open it."""
+    assert _link_for_event(_event(entity_type="work_center", entity_id=12)) == links.SHOP_FLOOR_OPERATIONS
+    assert _link_for_event(_event(entity_type="work_center")) == "/shop-floor/operations"
+
+
 def test_shipment_entity_emits_no_link():
     """REGRESSION FENCE for the removed ``/shipping/{id}`` branch. shipments.work_order_id
     is nullable=False, so a real shipment event always takes the work_order_id branch above
@@ -199,6 +206,7 @@ def test_every_emitted_link_is_a_registry_value():
         _link_for_event(_event(entity_type="ncr")),
         _link_for_event(_event(entity_type="car")),
         _link_for_event(_event(entity_type="downtime_event")),
+        _link_for_event(_event(entity_type="work_center", entity_id=1)),
     }
     expected = {
         links.work_order_detail(1),
@@ -207,6 +215,7 @@ def test_every_emitted_link_is_a_registry_value():
         links.QUALITY_NCR_LIST,
         links.QUALITY_CAR_LIST,
         links.DOWNTIME_LIST,
+        links.SHOP_FLOOR_OPERATIONS,
     }
     assert produced == expected
 

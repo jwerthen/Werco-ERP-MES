@@ -51,6 +51,7 @@ from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus, WorkOrderType
 from app.models.work_order_template import WorkOrderTemplate
+from app.schemas.dispatch import DispatchChangeKind
 from app.schemas.import_kit import WorkOrderImportResponse
 from app.schemas.time_entry import ProductionReductionRequest
 from app.schemas.work_order import (
@@ -4200,6 +4201,18 @@ def restore_work_order(
 
     work_order.restore()
 
+    # "A restore returns the RECORD, not the permission" (invariant 3): a work
+    # order deleted while it sat in the dispatch plan comes back NOT in the plan,
+    # so it cannot silently reclaim a position -- or share one with a live job and
+    # interleave with it -- that the planner never gave it back. Leaving the plan
+    # also clears its operations' within-plan order (Core UPDATE: no version bump,
+    # updated_at preserved), exactly as the plan verb does for a work order it
+    # drops, so that stale order cannot float its operations up the unplanned tail.
+    restored_from_plan_rank = work_order.dispatch_rank
+    if restored_from_plan_rank is not None:
+        work_order.dispatch_rank = None
+        dispatch_service.clear_run_order_for_work_orders(db, company_id, [work_order.id])
+
     # Symmetry with the soft delete, which auto-CANCELLED every OPEN tie: put back
     # exactly those, so restored work keeps depleting its tied material. Leaving them
     # cancelled means the work order completes and material silently never moves — and
@@ -4219,12 +4232,17 @@ def restore_work_order(
     # Audit BEFORE the terminal commit so the audit row commits atomically with the
     # restore — AuditService.log() only flushes and the session never commits on teardown.
     db.flush()
+    restore_old_values: dict = {"is_deleted": True}
+    restore_new_values: dict = {"is_deleted": False}
+    if restored_from_plan_rank is not None:
+        restore_old_values["dispatch_rank"] = restored_from_plan_rank
+        restore_new_values["dispatch_rank"] = None
     audit.log_update(
         "work_order",
         work_order.id,
         work_order.work_order_number,
-        old_values={"is_deleted": True},
-        new_values={"is_deleted": False},
+        old_values=restore_old_values,
+        new_values=restore_new_values,
         action="restore",
         # Both lists unconditionally, the duplicate path's convention: an empty
         # `skipped_material_allocations` is a positive statement that nothing was dropped,
@@ -5048,7 +5066,13 @@ def update_operation(
     # centers). Validated BEFORE the blind setattr loop so a bad target mutates
     # nothing. An explicit null is ignored: work_center_id is NOT NULL on the model.
     new_work_center_id = update_data.pop("work_center_id", None)
+    dispatch_before = None
+    dispatch_change_kind: dict = {}
     if new_work_center_id is not None and new_work_center_id != operation.work_center_id:
+        # A move rewrites two machines' queue order, so it serializes with every
+        # other dispatch-order writer (the plan verbs, the column rewrite) BEFORE
+        # any read the notice snapshot compares against.
+        dispatch_service.acquire_dispatch_order_lock(db, company_id)
         # Active time sessions are bound to the old work center's queue, so the op
         # must be idle before it moves: refuse while IN_PROGRESS or while ANY open
         # time session exists (belt and braces -- an open entry can outlive an
@@ -5087,11 +5111,20 @@ def update_operation(
         if not new_work_center:
             raise HTTPException(status_code=404, detail="Work center not found")
         old_work_center_id = operation.work_center_id
+        # Notice "before" snapshot of both machines, taken BEFORE anything mutates.
+        dispatch_before = dispatch_service.snapshot_queue_orders(
+            db, company_id, [old_work_center_id, new_work_center.id]
+        )
+        dispatch_change_kind = {
+            old_work_center_id: DispatchChangeKind.MOVED_OUT,
+            new_work_center.id: DispatchChangeKind.MOVED_IN,
+        }
         # The manual dispatch rank is scoped to the work center it was ranked IN,
         # so it is meaningless at the destination: the shared helper clears it and
         # the op lands unranked at the tail of the new column (a manager re-ranks
-        # it there). Called BEFORE the reassignment -- it compares against the
-        # operation's current work center. run_order is in the full-row audit
+        # it there) -- under the work-order plan, at the bottom of its own work
+        # order's block there. Called BEFORE the reassignment -- it compares against
+        # the operation's current work center. run_order is in the full-row audit
         # snapshot above, so the clear shows up in this endpoint's old->new diff.
         dispatch_service.clear_run_order_on_move(operation, new_work_center.id)
         operation.work_center_id = new_work_center.id
@@ -5123,9 +5156,18 @@ def update_operation(
         old_values=old_values,
         new_values=operation,
     )
+    dispatch_changed_wc_ids: list = []
+    if dispatch_before is not None:
+        # Notice seam: AFTER the flush above (so the after-snapshot sees the move)
+        # and never with expire_all (it would discard nothing here, but the seam is
+        # shared with paths that still hold un-flushed ORM writes).
+        dispatch_changed_wc_ids = dispatch_service.record_dispatch_change(
+            db, company_id, current_user, dispatch_before, dispatch_change_kind
+        )
 
     db.commit()
     db.refresh(operation)
+    dispatch_service.broadcast_dispatch_changes(company_id, dispatch_changed_wc_ids)
 
     if availability_refresh_wc_ids:
         SchedulingService(db, company_id).update_availability_rates(

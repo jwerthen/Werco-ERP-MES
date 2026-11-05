@@ -121,6 +121,11 @@ _IDENTIFIER_KEYS = (
     "quote_number",
     "equipment_id",
     "blocker_id",
+    # LAST on purpose (Dispatch v2, 2026-11-04 -- docs/NOTIFICATIONS.md section 11.1): the
+    # machine code titles a dispatch.changed row ("Dispatch order changed: BRAKE-1").
+    # Appended after every record key so no existing event's title can change; inert for
+    # them (no other emitted payload carries it).
+    "work_center_code",
 )
 
 # Payload keys whose value may appear as the SMS classifier. This is the FIRST of
@@ -315,6 +320,11 @@ def _link_for_event(event) -> Optional[str]:
         return links.QUALITY_CAR_LIST
     if entity_type == "downtime_event":
         return links.DOWNTIME_LIST
+    # A dispatch notice is about a MACHINE's queue. Record-less on purpose: the shop-floor
+    # operations page is where its recipients (operators clocked in there; every role
+    # holds work_orders:view) see the new order, and it needs no id to honour the link.
+    if entity_type == "work_center":
+        return links.SHOP_FLOOR_OPERATIONS
     # entity_type == "shipment" is deliberately absent: shipments.work_order_id is
     # nullable=False (models/shipping.py), so the work_order_id branch above always wins
     # first and the old /shipping/{id} branch was unreachable dead code. Do not "restore" it.
