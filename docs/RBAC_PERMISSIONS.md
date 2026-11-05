@@ -1739,7 +1739,7 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 | Calibration | ✓ | ✓ | | | ✓ | | |
 | Manage scrap reason codes | ✓ | ✓ | | | ✓ | | |
 | Void / restore NCR | ✓ | ✓ | | | ✓ | | |
-| Void CAR | ✓ | ✓ | | | ✓ | | |
+| Void / restore CAR | ✓ | ✓ | | | ✓ | | |
 
 > **Inspect — endpoint mapping.** The shop-floor inspection sign-off
 > `POST /api/v1/shop-floor/operations/{operation_id}/inspection` (which records
@@ -1777,15 +1777,20 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > gained `SoftDeleteMixin` (migration `071_soft_delete_purchasing_ncr`); a void is a soft delete
 > (invariant #3) that also moves the NCR to the existing `VOID` status, requires a **non-blank
 > `reason`**, and is **refused (400)** while the NCR still actively gates a work order (an
-> `OPEN`/`ACKNOWLEDGED` `WorkOrderBlocker` references it). Restore reopens it to `OPEN`. Both are
+> `OPEN`/`ACKNOWLEDGED` `WorkOrderBlocker` references it). Restore reopens it to `OPEN` (clearing any
+> closure fields an NCR voided while CLOSED still carries). Both are
 > required-audited in the same transaction (**503** with rollback on audit loss): the void writes a
 > status-change **and** a delete row, restore a `RESTORE` row. See `docs/API.md` → Quality.
 >
-> **Void CAR — endpoint mapping.** `POST /quality/car/{car_id}/void` is enforced **in code** to the
-> **Void CAR** row above via the same `quality_record_service.WRITE_ROLES`; Operator, Supervisor and
-> Viewer get **403**. It requires a **non-blank `reason`** (**422** otherwise), refuses a CLOSED or
-> already-void CAR (**409**), and records the reason on a required `STATUS_CHANGE` audit row. `VOID`
-> is the CAR's tombstone: the CAR stays readable and there is no restore verb.
+> **Void / restore CAR — endpoint mapping.** `POST /quality/car/{car_id}/void` and
+> `POST /quality/car/{car_id}/restore` are enforced **in code** to the **Void / restore CAR** row above
+> via the same `quality_record_service.WRITE_ROLES`; Operator, Supervisor and Viewer get **403**. Void
+> requires a **non-blank `reason`** (**422** otherwise), refuses a CLOSED or already-void CAR
+> (**409**), and records the reason on a required `STATUS_CHANGE` audit row. The CLOSED refusal stops
+> a one-step void only: the same roles can reopen a CLOSED CAR with a status-only `PUT` (no reason
+> captured yet) and then void it, with both steps on the audit trail. `VOID` is the CAR's tombstone:
+> the CAR stays readable. Restore reopens a void CAR to `open` (**409** when it is not void) on a
+> required `RESTORE` audit row.
 >
 > **NCR / CAR edits — endpoint mapping (the Approve row).** `PUT /quality/ncr/{ncr_id}` (edit,
 > disposition, close, reopen, assign, CAR link), `PUT /quality/car/{car_id}` (edit, verification,

@@ -6671,6 +6671,7 @@ the caller's most recent closed unapproved session.)
 | GET | `/quality/car/{car_id}` | Get a CAR | Yes |
 | PUT | `/quality/car/{car_id}` | Edit, verify, close, reopen, or assign a CAR. See "NCR / CAR writes" | Admin / Manager / Quality |
 | POST | `/quality/car/{car_id}/void` | **Void** a CAR; body `{ "reason": "<non-blank>" }`; returns the CAR with `status: "void"`. See note | Admin / Manager / Quality |
+| POST | `/quality/car/{car_id}/restore` | Restore a voided CAR — reopens it to `open`; **409** when the CAR is not void. See note | Admin / Manager / Quality |
 
 > **Scrap reason codes (Lean Phase 1).** The tenant's structured scrap vocabulary, referenced by the
 > optional `scrap_reason_code_id` accepted on the three scrap write paths —
@@ -6693,19 +6694,25 @@ the caller's most recent closed unapproved session.)
 > with 400** while the NCR still **actively gates a work order** — an `OPEN`/`ACKNOWLEDGED`
 > `WorkOrderBlocker` references it — resolve the blocker first; a re-void returns **400** ("already
 > voided"). `POST /quality/ncr/{ncr_id}/restore` clears the soft-delete and reopens the NCR to
-> **`OPEN`** (the pre-void status is not preserved — a safe reset). Both actions are **required-audited**
-> (see "NCR / CAR writes" below): the void writes a `STATUS_CHANGE` row (→ `void`, reason in the
-> description and `extra_data.reason`) **and** a `DELETE` row (`soft_delete=true`, reason in
-> `extra_data`); restore writes a `RESTORE` row (old/new `is_deleted` and `status`). Another
-> company's `ncr_id` is **404** with nothing changed.
+> **`OPEN`** (the pre-void status is not preserved — a safe reset). An NCR voided while CLOSED comes
+> back OPEN without its closure: restore clears `closed_date` / `closed_by`, as a reopen does. Both
+> actions are **required-audited** (see "NCR / CAR writes" below): the void writes a `STATUS_CHANGE`
+> row (→ `void`, reason in the description and `extra_data.reason`) **and** a `DELETE` row
+> (`soft_delete=true`, reason in `extra_data`); restore writes a `RESTORE` row (old/new `is_deleted`
+> and `status`, plus `closed_date` / `closed_by` when it cleared them). Another company's `ncr_id` is
+> **404** with nothing changed.
 
-> **NCR / CAR writes (`services/quality_record_service.py`).** Every NCR and CAR write — create,
-> `PUT` (including disposition, closure, reopen and CAR verification), `create-car`, NCR void /
-> restore, and CAR void — commits together with a **required** `audit_log` row in one transaction.
+> **NCR / CAR writes (`services/quality_record_service.py`).** Every NCR and CAR write behind
+> `/quality/ncr` and `/quality/car` — create, `PUT` (including disposition, closure, reopen and CAR
+> verification), `create-car`, NCR void / restore, and CAR void / restore — commits together with a
+> **required** `audit_log` row in one transaction.
 > If that row cannot be written, the change is rolled back and the route answers **503**
 > (`"Unable to save audit record"`), the same posture as FAI and job costing. The `ncr_*` / `car_*`
 > operational events are still emitted, but as notification / timeline telemetry, not as the audit
-> record.
+> record. NCRs and CARs created elsewhere do not go through this service yet: the receiving
+> rejection, the shop-floor scrap → NCR, the process-sheet out-of-tolerance → NCR and the AI action
+> applier write their creation row best-effort, and the customer-complaint NCR / CAR verbs write
+> none.
 >
 > - **One audit row per request** (resource type `ncr` / `car`), holding every changed field old → new
 >   plus `extra_data.changes` in the `log_update` diff shape. The action is `STATUS_CHANGE` when
@@ -6730,33 +6737,47 @@ the caller's most recent closed unapproved session.)
 >   record).
 > - **CLOSED and VOID are final.** A `PUT` to a CLOSED NCR or CAR is **409** unless its **only**
 >   change is moving `status` to an open state. That is the reopen: it clears `closed_date` /
->   `closed_by`, and the audit row keeps the cleared values. A reopen combined with a content edit is
->   **409**; reopen first, then edit in a second save. A VOID CAR (or a legacy NCR in `void` status
->   that is not soft-deleted) refuses every change with **409**; a voided NCR is soft-deleted, so its
->   `PUT` is **404**. `status: "void"` through `PUT` is **422**; use the void verbs. *Known defect:
->   a CLOSED CAR reopened straight to `verification` keeps `closed_date` / `closed_by` (pinned by a
->   strict `xfail` in `tests/api/test_ncr_car_audit_chain.py`).*
+>   `closed_by`, and the audit row keeps the cleared values. A CAR reopened straight to
+>   `verification` also records its verifier on the same row (`extra_data` carries both `reopen` and
+>   `verification`). A reopen combined with a content edit is **409**; reopen first, then edit in a
+>   second save. The reopen captures **no reason** yet: the audit row records who and when, not why.
+>   A VOID CAR (or a legacy NCR in `void` status that is not soft-deleted) refuses every change with
+>   **409**; a voided NCR is soft-deleted, so its `PUT` is **404**. `status: "void"` through `PUT` is
+>   **422**; use the void verbs.
 > - **Other `PUT` refusals.** An explicit `null` on NCR `status` / `disposition` / `car_required` /
->   `quantity_rejected` or CAR `status` / `priority` is **422** (`"<field> cannot be null"`). Closing
->   a CAR requires root cause, corrective action, verification method and verification results
->   (**422** naming the missing ones). An `expected_updated_at` that no longer matches the record is
->   **409** (`"This record changed since you opened it. …"`).
+>   `quantity_rejected` / `estimated_cost` / `actual_cost` or CAR `status` / `priority` is **422**
+>   (`"<field> cannot be null"`). Closing a CAR requires root cause, corrective action, verification
+>   method and verification results (**422** naming the missing ones). An `expected_updated_at` that
+>   no longer matches the record is **409** (`"This record changed since you opened it. …"`). That
+>   is the only conflict check: the required `version` field is **ignored** (NCRs and CARs carry no
+>   version column), so a client that omits `expected_updated_at` gets last-writer-wins on the fields
+>   it changes.
 > - **`create-car` is idempotent.** It locks the NCR first. When the NCR already links a CAR that is
 >   not void, it answers **409** (`"NCR … already has corrective action CAR-… (id N). Open that CAR
 >   instead of creating another."`) rather than minting a second CAR and relinking. Once the linked
 >   CAR is voided, a fresh one may be raised and the link moves to it. It is allowed on a CLOSED NCR,
 >   because it changes only `car_required` / `car_id`.
 
-> **CAR void (`POST /quality/car/{car_id}/void`).** Retires a duplicate CAR or one raised in error.
-> Body `CARVoidRequest` `{ "reason": "..." }`: required and trimmed; blank or whitespace-only is
-> **422**. Gate **Admin / Manager / Quality**. A CLOSED CAR (a completed corrective action) or an
-> already-void one is **409**. `VOID` is the CAR's tombstone (`CorrectiveActionRequest` has no
-> `SoftDeleteMixin`, and there is no restore): the CAR stays in `GET /quality/car` and
+> **CAR void + restore (`POST /quality/car/{car_id}/void`, `POST /quality/car/{car_id}/restore`).**
+> Void retires a duplicate CAR or one raised in error. Body `CARVoidRequest` `{ "reason": "..." }`:
+> required and trimmed; blank or whitespace-only is **422**. Gate **Admin / Manager / Quality** for
+> both verbs. An already-void CAR is **409**. A CLOSED CAR is **409** too, so a completed corrective
+> action is never voided in one step, but this is not a control against the same roles: they can
+> reopen it with a status-only `PUT` (no reason captured yet) and then void it. Both steps are
+> required-audited, so the reopen is on the record either way. `VOID` is the CAR's tombstone
+> (`CorrectiveActionRequest` has no `SoftDeleteMixin`): the CAR stays in `GET /quality/car` and
 > `GET /quality/car/{car_id}` with `status: "void"`, drops out of the `open_cars` count on
-> `GET /quality/summary`, and refuses every later edit. The reason is stored only on the
+> `GET /quality/summary`, and refuses every `PUT` until restored. The reason is stored only on the
 > `STATUS_CHANGE` audit row (`extra_data.reason`), since `cars` has no reason column. A linked NCR
-> keeps its `car_id` until a new CAR is raised from it. Emits `car_updated`. The Quality page has no
-> Void CAR action yet; the route is reachable through the API and MCP.
+> keeps its `car_id` until a new CAR is raised from it.
+>
+> Restore takes no body and reopens the CAR to **`open`**; the pre-void status is not preserved, the
+> same safe reset as the NCR restore. A CAR that is not void is **409** (`"CAR … is not void"`). It
+> writes a required `RESTORE` audit row (old/new `status`, plus `closed_date` / `closed_by` when a
+> legacy void row still carried a closure and restore cleared it). The CAR is not relinked: an NCR
+> that raised a fresh CAR after the void keeps pointing at the fresh one. Both verbs emit
+> `car_updated`. The Quality page has no Void or Restore CAR action yet; the routes are reachable
+> through the API and MCP.
 
 #### First article inspections (FAI)
 

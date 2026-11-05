@@ -23,7 +23,10 @@ Rules every writer here keeps:
   a request whose ONLY change is moving a CLOSED record's ``status`` to an open state
   -- the reopen. Reopening clears ``closed_date`` / ``closed_by`` (the record is no
   longer closed); the audit row keeps the values it cleared. Content edits happen after
-  the reopen, as their own audited save. A VOID record has no way back through ``PUT``.
+  the reopen, as their own audited save. A VOID record has no way back through ``PUT``;
+  :func:`restore_ncr` / :func:`restore_car` return it to OPEN, and clear any closure
+  fields it still carries for the same reason. The reopen captures no reason yet (who
+  and when are on the audit row; why is not) -- a reasoned reopen is a follow-up.
 * **Only real changes are written.** The detail screen re-sends every field on save, so
   each requested value is compared with the stored one (``""`` equals ``None``,
   ``Decimal`` equals the stored float) and only the fields that actually differ are
@@ -35,8 +38,8 @@ Rules every writer here keeps:
   disposition change is always on it.
 * **Creating a CAR from an NCR is idempotent**: an NCR already linked to a CAR that is
   not void answers 409 naming that CAR instead of minting a second one and silently
-  relinking. A CAR is retired with the reasoned :func:`void_car`, after which the NCR may
-  raise a fresh one.
+  relinking. A CAR is retired with the reasoned :func:`void_car` (undone by
+  :func:`restore_car`), after which the NCR may raise a fresh one.
 
 Lock order: every row lock (``SELECT ... FOR UPDATE``) and number-generator advisory
 lock is taken BEFORE the first audit row, because the audit chain lock is global.
@@ -86,8 +89,17 @@ REFERENCE_NOT_FOUND = {
 }
 
 # Columns a request may never null out (each has a model default and readers that
-# assume a value). ``quantity_rejected`` is also refused by ``NCRUpdate`` itself.
-_NCR_NON_NULLABLE = ("status", "disposition", "car_required", "quantity_rejected")
+# assume a value). ``quantity_rejected`` is also refused by ``NCRUpdate`` itself, and
+# ``estimated_cost`` / ``actual_cost`` are non-optional on ``NCRResponse`` -- a stored
+# NULL there would 500 the PUT and every later list read of the company's NCRs.
+_NCR_NON_NULLABLE = (
+    "status",
+    "disposition",
+    "car_required",
+    "quantity_rejected",
+    "estimated_cost",
+    "actual_cost",
+)
 _CAR_NON_NULLABLE = ("status", "priority")
 
 
@@ -175,6 +187,16 @@ def _diff(old: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Dict[str, Any]]
     return {key: {"old": old.get(key), "new": new.get(key)} for key in new if old.get(key) != new.get(key)}
 
 
+def _clear_closure(row: Any, old: Dict[str, Any], new: Dict[str, Any]) -> None:
+    """Clear a reopened / restored record's closure fields, recording them when set."""
+    if row.closed_date is None and row.closed_by is None:
+        return
+    old.update(closed_date=_value(row.closed_date), closed_by=row.closed_by)
+    new.update(closed_date=None, closed_by=None)
+    row.closed_date = None
+    row.closed_by = None
+
+
 def _guard_final_record(status: Any, changes: Dict[str, Any], label: str, closed_status: Any, void_status: Any) -> bool:
     """Refuse changes to a CLOSED / VOID record; return True when the request is a reopen."""
     if status == void_status:
@@ -222,7 +244,15 @@ def _assignable_user_or_404(db: Session, company_id: int, user_id: int) -> User:
 
 
 def _linkable_car_or_404(db: Session, company_id: int, car_id: int) -> CorrectiveActionRequest:
-    car = tenant_query(db, CorrectiveActionRequest, company_id).filter(CorrectiveActionRequest.id == car_id).first()
+    """A non-void CAR of the company, row-locked so a concurrent ``void_car`` cannot land
+    between this check and the NCR's commit. Lock order is NCR then CAR; every CAR-only
+    writer (``update_car`` / ``void_car`` / ``restore_car``) takes the CAR lock alone."""
+    car = (
+        tenant_query(db, CorrectiveActionRequest, company_id)
+        .filter(CorrectiveActionRequest.id == car_id)
+        .with_for_update()
+        .first()
+    )
     if car is None:
         raise HTTPException(status_code=404, detail=REFERENCE_NOT_FOUND["car_id"])
     if car.status == CARStatus.VOID:
@@ -489,15 +519,20 @@ def void_ncr(db: Session, company_id: int, ncr_id: int, reason: str, user: User,
 
 
 def restore_ncr(db: Session, company_id: int, ncr_id: int, audit: AuditService) -> str:
-    """Restore a voided NCR. The pre-void status is not preserved: it reopens to OPEN."""
+    """Restore a voided NCR. The pre-void status is not preserved: it reopens to OPEN.
+
+    An NCR voided while CLOSED comes back OPEN, so -- as with a reopen -- it stops naming
+    a closer: ``closed_date`` / ``closed_by`` are cleared and the RESTORE row keeps them.
+    """
     with quality_record_transaction(db):
         ncr = _ncr_any_state_for_update_or_404(db, company_id, ncr_id)
         if not ncr.is_deleted:
             raise HTTPException(status_code=400, detail="NCR is not voided")
+        old: Dict[str, Any] = {"is_deleted": True, "status": NCRStatus.VOID.value}
+        new: Dict[str, Any] = {"is_deleted": False, "status": NCRStatus.OPEN.value}
+        _clear_closure(ncr, old, new)
         ncr.restore()
         ncr.status = NCRStatus.OPEN
-        old = {"is_deleted": True, "status": NCRStatus.VOID.value}
-        new = {"is_deleted": False, "status": NCRStatus.OPEN.value}
         _audit(
             audit,
             "RESTORE",
@@ -717,11 +752,12 @@ def _write_car_changes(
     if changes.get("assigned_to") is not None:
         _assignable_user_or_404(db, company_id, changes["assigned_to"])
 
-    side_fields: List[str] = []
-    if verifying:
-        side_fields = ["verified_by"]
-    elif closing or reopening:
-        side_fields = ["closed_date", "closed_by"]
+    # Independent side effects: a CLOSED CAR reopened straight into VERIFICATION both
+    # records its verifier AND stops naming a closer. (closing and verifying cannot both
+    # hold; closing and reopening cannot either -- a reopen leaves CLOSED.)
+    side_fields: List[str] = (["verified_by"] if verifying else []) + (
+        ["closed_date", "closed_by"] if closing or reopening else []
+    )
     tracked = list(changes) + side_fields
     old = {field: _value(getattr(car, field)) for field in tracked}
     previous_status = car.status
@@ -729,7 +765,7 @@ def _write_car_changes(
         setattr(car, field, value)
     if verifying:
         car.verified_by = user.id
-    elif closing:
+    if closing:
         car.closed_date = date.today()
         car.closed_by = user.id
     elif reopening:
@@ -784,10 +820,13 @@ def void_car(
     """Retire a CAR -- a duplicate, or one raised in error -- with a recorded reason.
 
     ``VOID`` is the CAR's tombstone (it has no ``SoftDeleteMixin``): the row stays
-    listed and readable, leaves the open-CAR count, and refuses every later ``PUT``.
-    A CLOSED CAR is a completed corrective action and is refused (409): voiding it would
-    rewrite verified evidence. An NCR linked to a voided CAR keeps the link (history) and
-    may raise a fresh CAR through ``create_car_from_ncr``.
+    listed and readable, leaves the open-CAR count, and refuses every later ``PUT``;
+    :func:`restore_car` undoes it. A CLOSED CAR is refused (409) so a completed corrective
+    action is never voided in one step -- but this is a speed bump, not a control: the
+    same roles can reopen it with a status-only ``PUT`` (no reason captured yet) and then
+    void it. Both steps are required-audited, so the reopen is on the record either way.
+    An NCR linked to a voided CAR keeps the link (history) and may raise a fresh CAR
+    through ``create_car_from_ncr``.
     """
     with quality_record_transaction(db):
         car = _car_for_update_or_404(db, company_id, car_id)
@@ -824,6 +863,53 @@ def void_car(
                 "changed_fields": ["status"],
                 "previous_status": _value(previous_status),
                 "status": CARStatus.VOID.value,
+                "priority": car.priority,
+            },
+        )
+    return get_car(db, company_id, car_id)
+
+
+def restore_car(db: Session, company_id: int, car_id: int, user: User, audit: AuditService) -> CorrectiveActionRequest:
+    """Undo a CAR void. The pre-void status is not preserved: it reopens to OPEN.
+
+    The NCR restore posture (a safe reset; the void's audit row still says what the
+    status was). Closure fields a legacy VOID row may carry -- a pre-validation ``PUT``
+    could move a CLOSED CAR straight to void -- are cleared and recorded, since an OPEN
+    CAR names no closer. An NCR that raised a fresh CAR after the void keeps that link;
+    the restored CAR is not relinked.
+    """
+    with quality_record_transaction(db):
+        car = _car_for_update_or_404(db, company_id, car_id)
+        if car.status != CARStatus.VOID:
+            raise HTTPException(status_code=409, detail=f"CAR {car.car_number} is not void")
+        old: Dict[str, Any] = {"status": CARStatus.VOID.value}
+        new: Dict[str, Any] = {"status": CARStatus.OPEN.value}
+        _clear_closure(car, old, new)
+        car.status = CARStatus.OPEN
+        _audit(
+            audit,
+            "RESTORE",
+            CAR_RESOURCE,
+            car,
+            car.car_number,
+            description=f"Restored CAR {car.car_number}",
+            old=old,
+            new=new,
+            extra={"changes": _diff(old, new)},
+        )
+        OperationalEventService(db).emit_best_effort(
+            company_id=company_id,
+            event_type="car_updated",
+            source_module="quality",
+            entity_type="car",
+            entity_id=car.id,
+            user_id=user.id,
+            severity="medium",
+            event_payload={
+                "car_number": car.car_number,
+                "changed_fields": sorted(new),
+                "previous_status": CARStatus.VOID.value,
+                "status": CARStatus.OPEN.value,
                 "priority": car.priority,
             },
         )

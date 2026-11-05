@@ -711,6 +711,7 @@ VERBS = [
     "create_car",
     "update_car",
     "void_car",
+    "restore_car",
 ]
 
 
@@ -741,6 +742,9 @@ def _perform(client, db_session, headers, verb):
             headers=headers,
             json={"title": "Audit loss corrective action", "problem_description": "Audit loss rolls this back."},
         )
+    if verb == "restore_car":
+        voided = _make_car(db_session, status=CARStatus.VOID)
+        return lambda: client.post(f"{BASE}/car/{voided.id}/restore", headers=headers)
     car = _closeable_car(db_session)
     if verb == "update_car":
         return lambda: client.put(f"{BASE}/car/{car.id}", headers=headers, json={"version": 0, "status": "closed"})
@@ -894,14 +898,18 @@ class TestReviewNCRUpdate:
         rows = _committed("ncr", ncr.id)
         assert rows[0]["old_values"] == {"assigned_to": assignee.id} and rows[0]["new_values"] == {"assigned_to": None}
 
-    @pytest.mark.parametrize("field", ["disposition", "car_required"])
+    @pytest.mark.parametrize("field", ["disposition", "car_required", "estimated_cost", "actual_cost"])
     def test_explicit_null_on_required_ncr_field_is_refused(self, client, db_session, field):
+        # estimated_cost / actual_cost are non-optional on NCRResponse: a stored NULL used
+        # to commit, then 500 the PUT and every later GET /quality/ncr for the company.
         _, headers = _headers(db_session)
         ncr = _make_ncr(db_session)
         before = _snapshot(db_session)
         resp = client.put(f"{BASE}/ncr/{ncr.id}", headers=headers, json={"version": 0, field: None})
         assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"] == f"{field} cannot be null"
         assert _snapshot(db_session) == before
+        assert client.get(f"{BASE}/ncr", headers=headers).status_code == 200
 
     def test_stale_expected_updated_at_is_409_without_changes(self, client, db_session):
         _, headers = _headers(db_session)
@@ -1061,26 +1069,32 @@ class TestReviewCAR:
         assert rows[0]["new_values"] == {"status": "corrective_action", "closed_date": None, "closed_by": None}
         assert rows[0]["extra_data"]["reopen"] is True
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "DEFECT: _write_car_changes checks `verifying` before `reopening`, so a CLOSED CAR "
-            "reopened straight to VERIFICATION keeps closed_date/closed_by and the audit row "
-            "omits them. Remove this marker when fixed."
-        ),
-    )
     def test_closed_car_reopened_into_verification_clears_closure(self, client, db_session):
+        # Reopening and verifying are independent side effects: a CLOSED CAR reopened
+        # straight to VERIFICATION records the verifier AND stops naming a closer.
         closer = make_user(db_session, role=UserRole.QUALITY)
         user, headers = _headers(db_session)
         car = _closeable_car(db_session, status=CARStatus.CLOSED, closed_date=date(2026, 10, 2), closed_by=closer.id)
         resp = client.put(f"{BASE}/car/{car.id}", headers=headers, json={"version": 0, "status": "verification"})
         assert resp.status_code == 200, resp.text
-        assert resp.json()["status"] == "verification"
+        assert resp.json()["status"] == "verification" and resp.json()["closed_date"] is None
         db_session.refresh(car)
-        assert car.closed_date is None and car.closed_by is None
-        row = _committed("car", car.id)[0]
-        assert row["extra_data"]["reopen"] is True
-        assert row["old_values"]["closed_date"] == "2026-10-02" and row["new_values"]["closed_date"] is None
+        assert car.closed_date is None and car.closed_by is None and car.verified_by == user.id
+        rows = _committed("car", car.id)
+        assert [row["action"] for row in rows] == ["STATUS_CHANGE"]
+        assert rows[0]["old_values"] == {
+            "status": "closed",
+            "verified_by": None,
+            "closed_date": "2026-10-02",
+            "closed_by": closer.id,
+        }
+        assert rows[0]["new_values"] == {
+            "status": "verification",
+            "verified_by": user.id,
+            "closed_date": None,
+            "closed_by": None,
+        }
+        assert rows[0]["extra_data"]["reopen"] is True and rows[0]["extra_data"]["verification"] is True
 
     def test_closed_car_reopen_combined_with_content_edit_is_refused(self, client, db_session):
         _, headers = _headers(db_session)
@@ -1196,3 +1210,111 @@ class TestReviewCrossTenantVoidRestore:
         assert rows[0]["extra_data"]["reason"] == "Raised in error"
         assert rows[1]["extra_data"]["reason"] == "Raised in error"
         assert rows[2]["new_values"] == {"is_deleted": False, "status": "open"}
+
+
+# ================================================================ second review pass
+#
+# Restore verbs: undoing a void returns the record to OPEN, and an OPEN record names no
+# closer. A CAR void is reversible (like the NCR void) rather than a one-way door.
+
+
+class TestRestoreClearsClosure:
+    def test_restoring_a_voided_closed_ncr_clears_its_closure(self, client, db_session):
+        closer = make_user(db_session, role=UserRole.QUALITY)
+        _, headers = _headers(db_session)
+        ncr = _make_ncr(
+            db_session,
+            status=NCRStatus.CLOSED,
+            disposition=NCRDisposition.SCRAP,
+            root_cause=ROOT_CAUSE,
+            closed_date=date(2026, 10, 1),
+            closed_by=closer.id,
+        )
+        voided = client.request("DELETE", f"{BASE}/ncr/{ncr.id}", headers=headers, json={"reason": "Raised in error"})
+        assert voided.status_code == 200, voided.text
+        restored = client.post(f"{BASE}/ncr/{ncr.id}/restore", headers=headers)
+        assert restored.status_code == 200, restored.text
+
+        record = client.get(f"{BASE}/ncr/{ncr.id}", headers=headers).json()
+        assert record["status"] == "open" and record["closed_date"] is None
+        db_session.refresh(ncr)
+        assert ncr.closed_by is None
+        restore_row = _committed("ncr", ncr.id)[-1]
+        assert restore_row["action"] == "RESTORE"
+        assert restore_row["old_values"] == {
+            "is_deleted": True,
+            "status": "void",
+            "closed_date": "2026-10-01",
+            "closed_by": closer.id,
+        }
+        assert restore_row["new_values"] == {
+            "is_deleted": False,
+            "status": "open",
+            "closed_date": None,
+            "closed_by": None,
+        }
+        assert set(restore_row["extra_data"]["changes"]) == {"is_deleted", "status", "closed_date", "closed_by"}
+
+
+class TestRestoreCAR:
+    def test_restore_reopens_to_open_and_is_audited(self, client, db_session):
+        user, headers = _headers(db_session)
+        car = _make_car(db_session, status=CARStatus.ROOT_CAUSE_ANALYSIS)
+        voided = client.post(f"{BASE}/car/{car.id}/void", headers=headers, json={"reason": "Raised in error"})
+        assert voided.status_code == 200, voided.text
+        assert client.get(f"{BASE}/summary", headers=headers).json()["open_cars"] == 0
+
+        resp = client.post(f"{BASE}/car/{car.id}/restore", headers=headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "open"
+        assert client.get(f"{BASE}/summary", headers=headers).json()["open_cars"] == 1
+        rows = _committed("car", car.id)
+        assert [row["action"] for row in rows] == ["STATUS_CHANGE", "RESTORE"]
+        assert rows[1]["user_id"] == user.id and rows[1]["company_id"] == 1
+        assert rows[1]["old_values"] == {"status": "void"}
+        assert rows[1]["new_values"] == {"status": "open"}
+        assert rows[1]["extra_data"]["changes"] == {"status": {"old": "void", "new": "open"}}
+
+        # Restored means editable again, through the ordinary audited PUT.
+        edit = client.put(f"{BASE}/car/{car.id}", headers=headers, json={"version": 0, "priority": 1})
+        assert edit.status_code == 200, edit.text
+
+    def test_legacy_void_car_with_closure_restores_without_it(self, client, db_session):
+        # Before this PR a blind-setattr PUT could move a CLOSED CAR straight to void,
+        # keeping its closure fields. Restoring it to OPEN must not keep naming a closer.
+        closer = make_user(db_session, role=UserRole.QUALITY)
+        _, headers = _headers(db_session)
+        car = _closeable_car(db_session, status=CARStatus.VOID, closed_date=date(2026, 10, 2), closed_by=closer.id)
+        resp = client.post(f"{BASE}/car/{car.id}/restore", headers=headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "open" and resp.json()["closed_date"] is None
+        row = _committed("car", car.id)[0]
+        assert row["old_values"] == {"status": "void", "closed_date": "2026-10-02", "closed_by": closer.id}
+        assert row["new_values"] == {"status": "open", "closed_date": None, "closed_by": None}
+
+    @pytest.mark.parametrize("status_", [CARStatus.OPEN, CARStatus.VERIFICATION, CARStatus.CLOSED])
+    def test_car_that_is_not_void_is_refused(self, client, db_session, status_):
+        _, headers = _headers(db_session)
+        car = _make_car(db_session, status=status_)
+        before = _snapshot(db_session)
+        resp = client.post(f"{BASE}/car/{car.id}/restore", headers=headers)
+        assert resp.status_code == 409, resp.text
+        assert "not void" in resp.json()["detail"]
+        assert _snapshot(db_session) == before
+
+    @pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.SUPERVISOR, UserRole.VIEWER])
+    def test_roles_outside_admin_manager_quality_are_forbidden(self, client, db_session, role):
+        _, headers = _headers(db_session, role=role)
+        car = _make_car(db_session, status=CARStatus.VOID)
+        before = _snapshot(db_session)
+        resp = client.post(f"{BASE}/car/{car.id}/restore", headers=headers)
+        assert resp.status_code == 403, resp.text
+        assert _snapshot(db_session) == before
+
+    def test_foreign_tenant_car_is_404(self, client, db_session):
+        _, headers = _headers(db_session)
+        foreign = _make_car(db_session, company_id=2, status=CARStatus.VOID)
+        before = _snapshot(db_session)
+        resp = client.post(f"{BASE}/car/{foreign.id}/restore", headers=headers)
+        assert resp.status_code == 404, resp.text
+        assert _snapshot(db_session) == before

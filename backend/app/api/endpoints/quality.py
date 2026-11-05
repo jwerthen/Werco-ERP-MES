@@ -53,7 +53,10 @@ def generate_ncr_number(db: Session, company_id: int = None) -> str:
     return _generate_ncr_number(db, company_id, lock=acquire_generator_lock)
 
 
-# CAR numbering moved into the service with the CAR writers; kept importable here.
+# CAR numbering moved into the service with the CAR writers. The router-level name is
+# kept on purpose: it is where this function lived on main, so a concurrent branch (the
+# customer-complaints CAR path numbers CARs too) may still import it from here. New
+# callers import ``quality_record_service.generate_car_number`` directly.
 generate_car_number = quality_record_service.generate_car_number
 
 
@@ -253,10 +256,27 @@ def void_car(
     """Void a CAR (a duplicate, or one raised in error) with a required reason.
 
     The CAR stays readable with status ``void``, leaves the open-CAR count, and refuses
-    every later edit. A CLOSED or already-void CAR is refused (409). The reason is
-    recorded on the status-change audit row, written in the same transaction.
+    every later edit until restored (``POST /quality/car/{id}/restore``). A CLOSED or
+    already-void CAR is refused (409). The reason is recorded on the status-change audit
+    row, written in the same transaction.
     """
     return quality_record_service.void_car(db, company_id, car_id, void_in.reason, current_user, audit)
+
+
+@router.post("/car/{car_id}/restore", response_model=CARResponse)
+def restore_car(
+    car_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(quality_record_service.WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Undo a CAR void: the CAR reopens to ``open`` (its pre-void status is not preserved).
+
+    A CAR that is not void is refused (409). Any closure fields a legacy void row still
+    carries are cleared. The RESTORE audit row is written in the same transaction.
+    """
+    return quality_record_service.restore_car(db, company_id, car_id, current_user, audit)
 
 
 # ============== FAI Endpoints ==============
