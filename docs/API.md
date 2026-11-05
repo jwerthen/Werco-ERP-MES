@@ -1528,6 +1528,22 @@ a deleted record. Customer pickers independently exclude tombstoned rows.
 >   is queue state, not a production record); traceability for the flip is the tenant-scoped
 >   `operation_ready` OperationalEvent, which is what the Lean queue-time metric reads.
 >
+> **A failed reconcile side effect is absorbed, and reported (since 2026-11-05).** When a reconciling
+> read drives an operation or work order to COMPLETE, the handler then runs six side-effect legs over
+> those transitions before it commits: `audit`, `events`, `parent_advance`, `scheduling`,
+> `inventory_effects` and `cost_rollup`. Each leg absorbs its own exception, so the GET still returns
+> **200**, and that leg's remaining writes are skipped. The failure used to be swallowed with no trace
+> (`except Exception: pass`). It is now an **ERROR** log line with the traceback, carrying
+> `reconcile_step`, `company_id`, `user_id`, `work_order_ids` and `operation_ids`. With `SENTRY_DSN`
+> set it is also a Sentry event tagged `reconcile_step`, `company_id` and, where known, `user_id`.
+> Transaction behaviour is unchanged. A **database** error that poisons the session makes the handler's
+> commit fail, which rolls the status flips back together with their audit rows, and the next read
+> retries. A **non-database** error does not: the commit goes ahead without whatever the failed leg had
+> not yet written. On the `audit` leg that means a status flip can commit with some or all of its
+> status-change audit rows missing. This is a known gap, tracked as a follow-up (a savepoint per leg,
+> with an audit failure aborting the reconcile). Until that lands, the ERROR line and the Sentry event
+> are the only record that it happened.
+>
 > **`PUT /scheduling/work-orders/{id}/unschedule` no longer demotes durably.** That endpoint clears
 > the schedule and flips each non-COMPLETE READY operation back to PENDING. On a released work order
 > that demotion is now **transient**: the next reconciling read re-promotes every operation whose
@@ -10271,6 +10287,31 @@ display; the web UI renders them in shop-local Central time.
 }
 ```
 
+### Internal Server Error (500)
+```json
+{
+  "detail": "Internal server error (reference: 3f9a1c2e)",
+  "correlation_id": "3f9a1c2e"
+}
+```
+
+An unhandled exception returns this body. The response also carries an `X-Correlation-ID` header
+with the same value. The value is the request's correlation id: the caller's own `X-Correlation-ID`
+request header if it sent one, otherwise an 8-character id the server generates. If the request
+failed before the correlation middleware ran, a fresh id is minted, and body, header and log line
+still agree. The id also appears on the server's ERROR log line that carries the traceback
+(`correlation_id=<id>`). When `SENTRY_DSN` is set it is the `correlation_id` tag on the Sentry
+event, so a quoted reference finds the traceback.
+
+The reference is repeated inside `detail` so that the web UI, which shows `detail` verbatim, displays
+it with no client change. Nothing else about the exception (type, message, traceback) reaches the
+client. For an allowed origin the 500 carries CORS headers and exposes `X-Correlation-ID` (see
+[CORS](#cors)).
+
+Until 2026-11-05 the body was `{"detail": "Internal server error"}` with no reference and no header.
+The handler runs in Starlette's `ServerErrorMiddleware`, outside the correlation middleware, and
+never saw the id. It now reads the id from `request.state`.
+
 ## Pagination
 
 List endpoints page in one of three shapes. There is no `sort` / `order` query parameter anywhere in
@@ -10478,6 +10519,22 @@ used to resolve the client-supplied `userId` to a user row and write an audit ro
 forge tamper-evident audit-chain entries attributed to a named employee in a named company. The
 body is additionally capped at **50 entries** with per-field length limits (**422** over either).
 
+**`POST /errors/log` reads its JSON body under either `application/json` or `text/plain`** (the
+`text/plain` label may carry parameters, e.g. `text/plain;charset=UTF-8`, which is what a string
+`navigator.sendBeacon` body is sent as). A `text/plain` request is relabelled as JSON before FastAPI
+parses it, so it gets the same parse, the same `ErrorLogRequest` validation and caps, and the same
+**422** shape, and the OpenAPI `requestBody` is unchanged. No other content type is relabelled: an
+`application/octet-stream` body, for example, is still a **422**. The relabel applies to this router
+only, and `text/plain` is not parsed as JSON on any other path. The `MAX_JSON_BODY_BYTES` cap
+(**413**) covers the `text/plain` label on this path (see [Request Size Limits](#request-size-limits)).
+
+Why: until 2026-11-05 the SPA sent its unload/crash beacon as a string. The beacon went out as
+`text/plain`, and FastAPI does not parse that as JSON, so every global-boundary crash report was
+rejected **422** and never reached a log line or Sentry. The current client sends an
+`application/json` Blob instead. If `sendBeacon` is unavailable, returns `false` or throws, it falls
+back to a `fetch` with `keepalive: true`, and a failed send is re-queued. The `text/plain` acceptance
+is for tabs still running an older bundle, which keep sending the old shape until they reload.
+
 An over-limit request returns **HTTP 429** with a `Retry-After` header (seconds until the window
 resets) and body:
 ```json
@@ -10527,6 +10584,12 @@ buffers and parses. Over the cap the request is **rejected**:
 
 Returned as **HTTP 413**. The check is applied to the declared `Content-Length` before the body
 is read, and again to the bytes actually received (chunked encoding, or a header that lies).
+
+**One non-JSON label is capped as well:** a `text/plain` body on `POST /errors/log`. That route
+parses `text/plain` as JSON (it is the label a string `navigator.sendBeacon` body carries; see
+[Rate Limiting](#rate-limiting)), so without the cap the relabel would open an uncapped,
+unauthenticated JSON parse. Both gates apply to it. On every other path `text/plain` is neither
+parsed as JSON nor capped by this middleware.
 
 **Not affected:** `multipart/form-data` uploads, which keep their own per-endpoint caps (20 MB
 for QMS standard uploads, 50 MB `LASER_UPLOAD_MAX_BYTES` for laser-nest ZIP/PDF — those also
@@ -10679,6 +10742,25 @@ Cross-Origin Resource Sharing is configured to allow requests from:
 - Development: `http://localhost:3000`, `http://localhost:8000`
 - Production: Your configured frontend domain
 
+**Exposed response headers.** Responses send `Access-Control-Expose-Headers: X-Correlation-ID,
+Content-Disposition, ETag`, so cross-origin JavaScript can read those three headers. This applies when
+the SPA and the API are on different origins, as in the production Vercel → Railway deployment.
+- `X-Correlation-ID` is the reference for a failed request (see
+  [Internal Server Error (500)](#internal-server-error-500)).
+- `Content-Disposition` carries the server-chosen filename of a CSV/XLSX/PDF download.
+- `ETag` is the key the client's conditional-request cache uses.
+
+The shared CORS helper (`add_cors_headers` in `main.py`) sets the same expose list. The app uses that
+helper on the 500, which never passes back through `CORSMiddleware`, and on its middleware
+short-circuits and exception handlers: the 413 body-size refusal, the CSRF 403s, the 429s, and the
+`StaleDataError` 409, `HTTPException` and validation 422 handlers. The helper adds the list only for an
+allowed origin. A disallowed origin never gets `Access-Control-Allow-Origin`, so none of these headers
+is readable to it, whatever the expose list says.
+
+Before 2026-11-05 no headers were exposed, so a cross-origin SPA could read none of these three.
+Downloads fell back to the client's hard-coded filenames, and the ETag cache never stored an entry.
+Expect more **304**s once the cache starts working.
+
 ## Trusted Hosts
 
 When `ALLOWED_HOSTS` is configured (production), a request whose HTTP `Host`
@@ -10743,7 +10825,7 @@ log. `unconfigured` means every enqueue will fail and no background job or cron 
 | 413 | Content Too Large — a JSON body over `MAX_JSON_BODY_BYTES` (default 256 KB, rejected by middleware before the route runs), or a file upload over its endpoint's own cap (e.g. 50 MB `LASER_UPLOAD_MAX_BYTES`). See [Request Size Limits](#request-size-limits) |
 | 422 | Validation Error — including a paging or window parameter outside its range (`limit`, `skip`/`offset`, `days`, `max_levels`), and a free-text `/exports/*` filter over its `max_length` (`warehouse` 50, `customer` 255, `transaction_type` 40); see [Bounds on paging and window parameters](#bounds-on-paging-and-window-parameters) |
 | 429 | Too Many Requests |
-| 500 | Internal Server Error |
+| 500 | Internal Server Error — the body (`correlation_id`, and inside `detail`) and the `X-Correlation-ID` header carry a reference to quote; see [Internal Server Error (500)](#internal-server-error-500) |
 | 502 | Bad Gateway — upstream AI-service failure on an AI endpoint (e.g. `/copilot/chat?stream=false`) |
 | 503 | Service Unavailable — an AI endpoint was called but the AI features are not configured (`ANTHROPIC_API_KEY` unset) |
 

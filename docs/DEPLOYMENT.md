@@ -523,7 +523,17 @@ Create `/etc/logrotate.d/werco-erp`:
 - **Sentry** for error tracking (configured via `SENTRY_DSN`). Performance transactions
   are sampled at `SENTRY_TRACES_SAMPLE_RATE` (default `0.1`) — that knob governs traces
   **only**, never error capture; every exception is reported at any value. Events are
-  tagged with `APP_RELEASE`, the commit SHA CI stamps into the artifact. See
+  tagged with `APP_RELEASE`, the commit SHA CI stamps into the artifact.
+  - Every request's events are also tagged `correlation_id`. This is the `X-Correlation-ID` value,
+    which is also the `reference` a user quotes from a 500 (see
+    [API.md → Internal Server Error (500)](API.md#internal-server-error-500)).
+  - Once a user or API token authenticates through `get_current_user`, the events also carry
+    `company_id` (the **active** company, which differs from the home company for a platform admin
+    who switched context), `user_id` and `role`. These are ids and the role only, never a name or an
+    email.
+  - A reconcile-on-read side-effect failure is reported tagged `reconcile_step`.
+
+  See
   [ENVIRONMENT_VARIABLES.md → Monitoring & Error Tracking](ENVIRONMENT_VARIABLES.md#monitoring--error-tracking)
 - **Prometheus + Grafana** for metrics monitoring
 - **Health checks**: `GET /health`; `GET /health/detailed` additionally reports the
