@@ -82,6 +82,12 @@ class NCRVoidRequest(BaseModel):
         return value.strip()
 
 
+class CARVoidRequest(NCRVoidRequest):
+    """Why a CAR is being voided (a duplicate, or raised in error) -- recorded on its audit row."""
+
+    reason: str = Field(..., min_length=1, description="Why this CAR is being voided")
+
+
 class PartSummary(BaseModel):
     id: int
     part_number: str

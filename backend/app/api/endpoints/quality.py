@@ -1,9 +1,9 @@
-from datetime import date, datetime
+from datetime import date
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
@@ -13,17 +13,15 @@ from app.models.quality import (
     CorrectiveActionRequest,
     FAIStatus,
     FirstArticleInspection,
-    NCRSource,
     NCRStatus,
     NonConformanceReport,
 )
-from app.models.user import User, UserRole
-from app.models.work_order import WorkOrder
-from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
+from app.models.user import User
 from app.schemas.quality import (
     CARCreate,
     CARResponse,
     CARUpdate,
+    CARVoidRequest,
     FAICharacteristicCreate,
     FAICharacteristicResponse,
     FAICharacteristicUpdate,
@@ -36,31 +34,27 @@ from app.schemas.quality import (
     NCRUpdate,
     NCRVoidRequest,
 )
-from app.services import fai_service, process_sheet_service
+from app.services import fai_service, process_sheet_service, quality_record_service
 from app.services.audit_service import AuditService
-from app.services.operational_event_service import OperationalEventService
 from app.services.quality_numbering import generate_ncr_number as _generate_ncr_number
 
 router = APIRouter()
 
 
 # ============== NCR Endpoints ==============
+#
+# Every NCR / CAR write delegates to ``app.services.quality_record_service``, which
+# resolves each tenant reference, refuses edits to CLOSED / VOID records, and commits
+# the change together with its required audit row (503 + rollback when that row cannot
+# be written). See that module's docstring for the rules.
 
 
 def generate_ncr_number(db: Session, company_id: int = None) -> str:
     return _generate_ncr_number(db, company_id, lock=acquire_generator_lock)
 
 
-def _enum_value(value):
-    return value.value if hasattr(value, "value") else value
-
-
-def _validate_work_order_reference(db: Session, company_id: int, work_order_id: Optional[int]) -> None:
-    if work_order_id is None:
-        return
-    exists = db.query(WorkOrder.id).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
-    if not exists:
-        raise HTTPException(status_code=404, detail="Work order not found")
+# CAR numbering moved into the service with the CAR writers; kept importable here.
+generate_car_number = quality_record_service.generate_car_number
 
 
 @router.get("/ncr", response_model=List[NCRResponse])
@@ -74,14 +68,7 @@ def list_ncrs(
     company_id: int = Depends(get_current_company_id),
 ):
     """List all NCRs"""
-    query = (
-        db.query(NonConformanceReport)
-        .filter(
-            NonConformanceReport.company_id == company_id,
-            NonConformanceReport.is_deleted == False,  # noqa: E712
-        )
-        .options(joinedload(NonConformanceReport.part))
-    )
+    query = quality_record_service.ncr_query(db, company_id)
 
     if status:
         query = query.filter(NonConformanceReport.status == status)
@@ -97,44 +84,14 @@ def create_ncr(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new NCR"""
-    _validate_work_order_reference(db, company_id, ncr_in.work_order_id)
-    # detected_date is a field on NCRCreate, so it is already in model_dump() — resolve
-    # its default in place rather than passing it a second time (which raised
-    # "got multiple values for keyword argument 'detected_date'").
-    ncr_data = ncr_in.model_dump()
-    ncr_data["detected_date"] = ncr_data.get("detected_date") or date.today()
-    ncr = NonConformanceReport(
-        ncr_number=generate_ncr_number(db, company_id),
-        **ncr_data,
-        detected_by=current_user.id,
-    )
-    ncr.company_id = company_id
-    db.add(ncr)
-    db.flush()
-    OperationalEventService(db).emit_best_effort(
-        company_id=company_id,
-        event_type="ncr_created",
-        source_module="quality",
-        entity_type="ncr",
-        entity_id=ncr.id,
-        work_order_id=ncr.work_order_id,
-        user_id=current_user.id,
-        severity="high" if ncr.source == NCRSource.CUSTOMER_RETURN else "medium",
-        event_payload={
-            "ncr_number": ncr.ncr_number,
-            "title": ncr.title,
-            "source": _enum_value(ncr.source),
-            "status": _enum_value(ncr.status),
-            "disposition": _enum_value(ncr.disposition),
-            "part_id": ncr.part_id,
-            "quantity_affected": float(ncr.quantity_affected or 0),
-        },
-    )
-    db.commit()
-    db.refresh(ncr)
-    return ncr
+    """Create a new NCR.
+
+    ``part_id`` and ``work_order_id`` must name live records of the active company (404
+    otherwise). The NCR and its CREATE audit row commit together.
+    """
+    return quality_record_service.create_ncr(db, company_id, ncr_in, current_user, audit)
 
 
 @router.get("/ncr/{ncr_id}", response_model=NCRResponse)
@@ -145,20 +102,7 @@ def get_ncr(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get NCR details"""
-    ncr = (
-        db.query(NonConformanceReport)
-        .options(joinedload(NonConformanceReport.part))
-        .filter(
-            NonConformanceReport.id == ncr_id,
-            NonConformanceReport.company_id == company_id,
-            NonConformanceReport.is_deleted == False,  # noqa: E712
-        )
-        .first()
-    )
-
-    if not ncr:
-        raise HTTPException(status_code=404, detail="NCR not found")
-    return ncr
+    return quality_record_service.get_ncr(db, company_id, ncr_id)
 
 
 @router.put("/ncr/{ncr_id}", response_model=NCRResponse)
@@ -166,245 +110,74 @@ def update_ncr(
     ncr_id: int,
     ncr_in: NCRUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    current_user: User = Depends(require_role(quality_record_service.WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update an NCR"""
-    ncr = (
-        db.query(NonConformanceReport)
-        .filter(
-            NonConformanceReport.id == ncr_id,
-            NonConformanceReport.company_id == company_id,
-            NonConformanceReport.is_deleted == False,  # noqa: E712
-        )
-        .with_for_update()
-        .first()
-    )
-    if not ncr:
-        raise HTTPException(status_code=404, detail="NCR not found")
+    """Update an NCR: content, disposition, status (incl. closure), assignment or CAR link.
 
-    previous_status = ncr.status
-    previous_disposition = ncr.disposition
-    update_data = ncr_in.model_dump(exclude_unset=True)
-    expected = update_data.pop("expected_updated_at", None)
-    update_data.pop("version", None)  # legacy schema field; models use updated_at for conflict detection
-    if expected and ncr.updated_at and expected.replace(tzinfo=None) != ncr.updated_at.replace(tzinfo=None):
-        raise HTTPException(status_code=409, detail="This record changed since you opened it. Reload it before saving.")
-    if update_data.get("status") == NCRStatus.VOID:
-        raise HTTPException(status_code=422, detail="Use the reasoned void action to void a quality record")
-    if update_data.get("quantity_rejected", ncr.quantity_rejected or 0) > ncr.quantity_affected:
-        raise HTTPException(status_code=422, detail="Rejected quantity cannot exceed affected quantity")
-
-    # Handle status transitions
-    if "status" in update_data and update_data["status"] == NCRStatus.CLOSED:
-        ncr.closed_date = date.today()
-        ncr.closed_by = current_user.id
-
-    for field, value in update_data.items():
-        setattr(ncr, field, value)
-
-    OperationalEventService(db).emit_best_effort(
-        company_id=company_id,
-        event_type="ncr_updated",
-        source_module="quality",
-        entity_type="ncr",
-        entity_id=ncr.id,
-        work_order_id=ncr.work_order_id,
-        user_id=current_user.id,
-        severity="info" if ncr.status == previous_status else "medium",
-        event_payload={
-            "ncr_number": ncr.ncr_number,
-            "changed_fields": [field for field in update_data.keys() if field != "version"],
-            "previous_status": _enum_value(previous_status),
-            "status": _enum_value(ncr.status),
-            "previous_disposition": _enum_value(previous_disposition),
-            "disposition": _enum_value(ncr.disposition),
-        },
-    )
-    db.commit()
-    db.refresh(ncr)
-    return ncr
+    Only fields whose value actually changes are written, on one audit row (old -> new).
+    A CLOSED NCR refuses every change (409) except a status-only reopen. ``assigned_to``
+    must be an active user of the company and ``car_id`` a non-void CAR of it (404 / 409).
+    Voiding goes through ``DELETE /quality/ncr/{id}``, never this route.
+    """
+    return quality_record_service.update_ncr(db, company_id, ncr_id, ncr_in, current_user, audit)
 
 
 @router.delete("/ncr/{ncr_id}")
 def void_ncr(
     ncr_id: int,
     void_in: NCRVoidRequest,
-    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    current_user: User = Depends(require_role(quality_record_service.WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Void (soft-delete) an NCR.
 
     Voiding is the quality-record form of a soft delete: the NCR is retained for the
     tamper-evident audit trail and AS9100D traceability, but marked ``is_deleted`` and
     moved to ``VOID`` status. Refused while the NCR still actively gates a work order.
+    The void writes a status-change and a delete audit row carrying the reason, in the
+    same transaction as the void.
     """
-    ncr = (
-        db.query(NonConformanceReport)
-        .filter(NonConformanceReport.id == ncr_id, NonConformanceReport.company_id == company_id)
-        .first()
-    )
-    if not ncr:
-        raise HTTPException(status_code=404, detail="NCR not found")
-    if ncr.is_deleted:
-        raise HTTPException(status_code=400, detail="NCR is already voided")
-
-    # GUARDRAIL: refuse to void an NCR that is still actively gating a work order. An
-    # "active" blocker is OPEN or ACKNOWLEDGED (RESOLVED/DISMISSED are terminal) — the
-    # same condition used everywhere else (quality_gate_service, scheduling_service, ...).
-    active_blocker = (
-        db.query(WorkOrderBlocker.id)
-        .filter(
-            WorkOrderBlocker.ncr_id == ncr.id,
-            WorkOrderBlocker.company_id == company_id,
-            WorkOrderBlocker.status.in_([WorkOrderBlockerStatus.OPEN.value, WorkOrderBlockerStatus.ACKNOWLEDGED.value]),
-        )
-        .first()
-    )
-    if active_blocker:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot void NCR {ncr.ncr_number}: it is blocking work order(s). Resolve the blocker first.",
-        )
-
-    reason = void_in.reason
-    old_status = ncr.status
-    ncr.soft_delete(current_user.id)
-    ncr.status = NCRStatus.VOID
-
-    # This void path MUST audit (unlike update_ncr, which only emits an OperationalEvent).
-    # Both rows are written BEFORE the single terminal commit so they persist atomically
-    # with the void — AuditService.log() only flushes; get_db never commits on teardown.
-    audit = AuditService(db, current_user, request)
-    audit.log_status_change(
-        "ncr",
-        ncr.id,
-        ncr.ncr_number,
-        old_status=_enum_value(old_status),
-        new_status=NCRStatus.VOID.value,
-        description=f"Voided NCR: {reason}",
-    )
-    audit.log_delete("ncr", ncr.id, ncr.ncr_number, soft_delete=True, extra_data={"reason": reason})
-    db.commit()
-
-    return {"message": f"NCR {ncr.ncr_number} voided", "can_restore": True}
+    number = quality_record_service.void_ncr(db, company_id, ncr_id, void_in.reason, current_user, audit)
+    return {"message": f"NCR {number} voided", "can_restore": True}
 
 
 @router.post("/ncr/{ncr_id}/restore", summary="Restore a voided NCR")
 def restore_ncr(
     ncr_id: int,
-    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    current_user: User = Depends(require_role(quality_record_service.WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """Restore a voided NCR.
 
     The pre-void status is not preserved, so the NCR reopens to ``OPEN`` (the safe reset).
     """
-    ncr = (
-        db.query(NonConformanceReport)
-        .filter(NonConformanceReport.id == ncr_id, NonConformanceReport.company_id == company_id)
-        .first()
-    )
-    if not ncr:
-        raise HTTPException(status_code=404, detail="NCR not found")
-    if not ncr.is_deleted:
-        raise HTTPException(status_code=400, detail="NCR is not voided")
-
-    ncr.restore()
-    ncr.status = NCRStatus.OPEN
-
-    # Audit BEFORE the terminal commit so the row persists atomically with the restore —
-    # AuditService.log() only flushes; get_db never commits on teardown.
-    audit = AuditService(db, current_user, request)
-    audit.log_update(
-        "ncr",
-        ncr.id,
-        ncr.ncr_number,
-        old_values={"is_deleted": True, "status": "void"},
-        new_values={"is_deleted": False, "status": "open"},
-        action="restore",
-    )
-    db.commit()
-
-    return {"message": f"NCR {ncr.ncr_number} restored"}
+    number = quality_record_service.restore_ncr(db, company_id, ncr_id, audit)
+    return {"message": f"NCR {number} restored"}
 
 
 @router.post("/ncr/{ncr_id}/create-car", response_model=CARResponse)
 def create_car_from_ncr(
     ncr_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    current_user: User = Depends(require_role(quality_record_service.WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a CAR from an NCR"""
-    ncr = (
-        db.query(NonConformanceReport)
-        .filter(
-            NonConformanceReport.id == ncr_id,
-            NonConformanceReport.company_id == company_id,
-            NonConformanceReport.is_deleted == False,  # noqa: E712
-        )
-        .first()
-    )
-    if not ncr:
-        raise HTTPException(status_code=404, detail="NCR not found")
+    """Create a CAR from an NCR and link it.
 
-    car = CorrectiveActionRequest(
-        car_number=generate_car_number(db, company_id),
-        title=f"CAR for {ncr.ncr_number}: {ncr.title}",
-        problem_description=ncr.description,
-        initiated_by=current_user.id,
-    )
-    car.company_id = company_id
-    db.add(car)
-    db.flush()
-
-    ncr.car_required = True
-    ncr.car_id = car.id
-
-    OperationalEventService(db).emit_best_effort(
-        company_id=company_id,
-        event_type="car_created_from_ncr",
-        source_module="quality",
-        entity_type="car",
-        entity_id=car.id,
-        work_order_id=ncr.work_order_id,
-        user_id=current_user.id,
-        severity="medium",
-        event_payload={
-            "car_number": car.car_number,
-            "ncr_id": ncr.id,
-            "ncr_number": ncr.ncr_number,
-            "title": car.title,
-            "priority": car.priority,
-        },
-    )
-    db.commit()
-    db.refresh(car)
-    return car
+    Idempotent: when the NCR already links a CAR that is not void, answers 409 naming
+    that CAR instead of creating a second one.
+    """
+    return quality_record_service.create_car_from_ncr(db, company_id, ncr_id, current_user, audit)
 
 
 # ============== CAR Endpoints ==============
-
-
-def generate_car_number(db: Session, company_id: int = None) -> str:
-    acquire_generator_lock(db, "car_number", company_id)
-    today = datetime.now().strftime("%Y%m%d")
-    prefix = f"CAR-{today}-"
-    query = db.query(CorrectiveActionRequest).filter(CorrectiveActionRequest.car_number.like(f"{prefix}%"))
-    if company_id is not None:
-        query = query.filter(CorrectiveActionRequest.company_id == company_id)
-    last = query.order_by(CorrectiveActionRequest.car_number.desc()).first()
-
-    if last:
-        num = int(last.car_number.split("-")[-1]) + 1
-    else:
-        num = 1
-    return f"{prefix}{num:03d}"
 
 
 @router.get("/car", response_model=List[CARResponse])
@@ -431,34 +204,10 @@ def create_car(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new CAR"""
-    car = CorrectiveActionRequest(
-        car_number=generate_car_number(db, company_id), **car_in.model_dump(), initiated_by=current_user.id
-    )
-    car.company_id = company_id
-    db.add(car)
-    db.flush()
-    OperationalEventService(db).emit_best_effort(
-        company_id=company_id,
-        event_type="car_created",
-        source_module="quality",
-        entity_type="car",
-        entity_id=car.id,
-        user_id=current_user.id,
-        severity="high" if car.priority <= 2 else "medium",
-        event_payload={
-            "car_number": car.car_number,
-            "title": car.title,
-            "car_type": _enum_value(car.car_type),
-            "status": _enum_value(car.status),
-            "priority": car.priority,
-            "due_date": car.due_date.isoformat() if car.due_date else None,
-        },
-    )
-    db.commit()
-    db.refresh(car)
-    return car
+    """Create a new CAR (its CREATE audit row commits with it)."""
+    return quality_record_service.create_car(db, company_id, car_in, current_user, audit)
 
 
 @router.get("/car/{car_id}", response_model=CARResponse)
@@ -469,14 +218,7 @@ def get_car(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get CAR details"""
-    car = (
-        db.query(CorrectiveActionRequest)
-        .filter(CorrectiveActionRequest.id == car_id, CorrectiveActionRequest.company_id == company_id)
-        .first()
-    )
-    if not car:
-        raise HTTPException(status_code=404, detail="CAR not found")
-    return car
+    return quality_record_service.get_car(db, company_id, car_id)
 
 
 @router.put("/car/{car_id}", response_model=CARResponse)
@@ -484,65 +226,37 @@ def update_car(
     car_id: int,
     car_in: CARUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    current_user: User = Depends(require_role(quality_record_service.WRITE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a CAR"""
-    car = (
-        db.query(CorrectiveActionRequest)
-        .filter(CorrectiveActionRequest.id == car_id, CorrectiveActionRequest.company_id == company_id)
-        .with_for_update()
-        .first()
-    )
-    if not car:
-        raise HTTPException(status_code=404, detail="CAR not found")
+    """Update a CAR: analysis, actions, verification, status (incl. closure) or assignment.
 
-    previous_status = car.status
-    update_data = car_in.model_dump(exclude_unset=True)
-    expected = update_data.pop("expected_updated_at", None)
-    update_data.pop("version", None)  # legacy schema field; models use updated_at for conflict detection
-    if expected and car.updated_at and expected.replace(tzinfo=None) != car.updated_at.replace(tzinfo=None):
-        raise HTTPException(status_code=409, detail="This record changed since you opened it. Reload it before saving.")
-    if update_data.get("status") == CARStatus.VOID:
-        raise HTTPException(status_code=422, detail="Use the reasoned void action to void a quality record")
-    if update_data.get("status") == CARStatus.CLOSED:
-        missing = [
-            field.replace("_", " ")
-            for field in ("root_cause", "corrective_action", "verification_method", "verification_results")
-            if not str(update_data.get(field, getattr(car, field)) or "").strip()
-        ]
-        if missing:
-            raise HTTPException(status_code=422, detail="Closure requires " + ", ".join(missing))
+    Only fields whose value actually changes are written, on one audit row (old -> new).
+    Moving to ``verification`` records the verifier; closing requires root cause,
+    corrective action, verification method and results. A CLOSED CAR refuses every change
+    (409) except a status-only reopen; a VOID CAR refuses all. Voiding goes through
+    ``POST /quality/car/{id}/void``.
+    """
+    return quality_record_service.update_car(db, company_id, car_id, car_in, current_user, audit)
 
-    if "status" in update_data:
-        if update_data["status"] == CARStatus.VERIFICATION:
-            car.verified_by = current_user.id
-        elif update_data["status"] == CARStatus.CLOSED:
-            car.closed_date = date.today()
-            car.closed_by = current_user.id
 
-    for field, value in update_data.items():
-        setattr(car, field, value)
+@router.post("/car/{car_id}/void", response_model=CARResponse)
+def void_car(
+    car_id: int,
+    void_in: CARVoidRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(quality_record_service.WRITE_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Void a CAR (a duplicate, or one raised in error) with a required reason.
 
-    OperationalEventService(db).emit_best_effort(
-        company_id=company_id,
-        event_type="car_updated",
-        source_module="quality",
-        entity_type="car",
-        entity_id=car.id,
-        user_id=current_user.id,
-        severity="info" if car.status == previous_status else "medium",
-        event_payload={
-            "car_number": car.car_number,
-            "changed_fields": [field for field in update_data.keys() if field != "version"],
-            "previous_status": _enum_value(previous_status),
-            "status": _enum_value(car.status),
-            "priority": car.priority,
-        },
-    )
-    db.commit()
-    db.refresh(car)
-    return car
+    The CAR stays readable with status ``void``, leaves the open-CAR count, and refuses
+    every later edit. A CLOSED or already-void CAR is refused (409). The reason is
+    recorded on the status-change audit row, written in the same transaction.
+    """
+    return quality_record_service.void_car(db, company_id, car_id, void_in.reason, current_user, audit)
 
 
 # ============== FAI Endpoints ==============
