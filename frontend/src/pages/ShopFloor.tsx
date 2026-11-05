@@ -2,7 +2,11 @@ import { getPriorityClasses, getPriorityLabel } from '../utils/priority';
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
-import { WorkCenter, QueueItem, HeldQueueItem, WorkCenterQueueResponse, ActiveJob } from '../types';
+import { WorkCenter, QueueItem, HeldQueueItem, WorkCenterQueueResponse, ActiveJob, MyActiveJobResponse } from '../types';
+import { useAuth } from '../context/AuthContext';
+import DispatchNoticeBanner from '../components/kiosk/DispatchNoticeBanner';
+import { useDispatchNotice } from '../hooks/useDispatchNotice';
+import type { DispatchNoticeSource } from '../hooks/useDispatchNotice';
 import { usePermissions } from '../hooks/usePermissions';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { buildWsUrl, getAccessToken } from '../services/realtime';
@@ -73,6 +77,7 @@ const DEFAULT_MATERIAL_BLOCKER_NOTE = 'Operator reported material is not availab
 
 export default function ShopFloor() {
   const { can } = usePermissions();
+  const { user } = useAuth();
   const { showToast } = useToast();
   const navigate = useNavigate();
   const location = useLocation();
@@ -92,6 +97,14 @@ export default function ShopFloor() {
   const [held, setHeld] = useState<HeldQueueItem[]>([]);
   const [heldTruncated, setHeldTruncated] = useState(false);
   const [activeJobs, setActiveJobs] = useState<ActiveJob[]>([]);
+  // "The planner changed this machine's order" for every machine the user is
+  // clocked in at — rides the 10s my-active-job poll. Acknowledged per (user,
+  // work center). Absent on an older backend → no banner.
+  const [activeJobNotices, setActiveJobNotices] = useState<DispatchNoticeSource>({});
+  const dispatchNotice = useDispatchNotice({
+    sources: [activeJobNotices],
+    scope: user?.id != null ? { kind: 'user', userId: user.id } : null,
+  });
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [initialError, setInitialError] = useState(false);
@@ -162,12 +175,13 @@ export default function ShopFloor() {
   const loadInitialData = useCallback(async () => {
     setInitialError(false);
     try {
-      const [wcResponse, activeResponse] = await Promise.all([
+      const [wcResponse, activeResponse]: [WorkCenter[], MyActiveJobResponse] = await Promise.all([
         api.getWorkCenters(),
         api.getMyActiveJob()
       ]);
       setWorkCenters(wcResponse);
       setActiveJobs(activeResponse.active_jobs || (activeResponse.active_job ? [activeResponse.active_job] : []));
+      setActiveJobNotices({ notices: activeResponse.dispatch_notices, serverTime: activeResponse.server_time ?? null });
       if (wcResponse.length > 0) {
         const deptMatch = kioskParams.dept?.toLowerCase() || null;
         const matched = wcResponse.find((wc) => {
@@ -197,8 +211,9 @@ export default function ShopFloor() {
 
   const checkActiveJob = useCallback(async () => {
     try {
-      const response = await api.getMyActiveJob();
+      const response: MyActiveJobResponse = await api.getMyActiveJob();
       setActiveJobs(response.active_jobs || (response.active_job ? [response.active_job] : []));
+      setActiveJobNotices({ notices: response.dispatch_notices, serverTime: response.server_time ?? null });
     } catch (err) {
       console.error('Failed to check active job:', err);
     }
@@ -571,6 +586,13 @@ export default function ShopFloor() {
           onRetry={loadInitialData}
         />
       )}
+
+      {/* Dispatch notice — the machines this user is clocked in at. */}
+      <DispatchNoticeBanner
+        showWorkCenter
+        notices={dispatchNotice.active}
+        onAcknowledge={dispatchNotice.acknowledge}
+      />
 
       {/* Active Job Banner */}
       {activeJobs.length > 0 && (

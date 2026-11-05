@@ -148,3 +148,19 @@ describe('KioskCrewJobCard accessible name', () => {
     expect(nameFor('Op 20', 'Weld')).toBe('Work order WO-2026-0142, operation Weld, 2 clocked in');
   });
 });
+
+describe('KioskCrewJobCard moved-up chip (Dispatch v2)', () => {
+  it('renders the chip and names it in the card accessible name when movedUp', () => {
+    render(<KioskCrewJobCard item={ITEM} nowMs={NOW_MS} onSelect={jest.fn()} movedUp />);
+    expect(screen.getByTestId('kiosk-moved-up-chip')).toHaveTextContent(/moved up/i);
+    expect(screen.getByRole('button')).toHaveAccessibleName(
+      'Work order WO-2026-0142, operation Weld, 2 clocked in, moved up'
+    );
+  });
+
+  it('renders no chip by default', () => {
+    render(<KioskCrewJobCard item={ITEM} nowMs={NOW_MS} onSelect={jest.fn()} />);
+    expect(screen.queryByTestId('kiosk-moved-up-chip')).not.toBeInTheDocument();
+    expect(screen.getByRole('button')).toHaveAccessibleName('Work order WO-2026-0142, operation Weld, 2 clocked in');
+  });
+});

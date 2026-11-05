@@ -1,0 +1,1848 @@
+/**
+ * Dispatch Board — the MACHINE view (`/dispatch?view=machines`).
+ *
+ * One column per work center; each card is a queued operation. Managers dictate
+ * the order operators should run work in by dragging a card up/down within a
+ * column (run order) or across columns (move to another machine).
+ *
+ * Dispatch v2 (work-order order wins): every machine queue follows the shop-wide
+ * PLAN of work orders, and each planned work order's operations sit together as
+ * a contiguous block. The column therefore draws a BAND (plan position + work
+ * order number) wherever the block changes, and a card may only be re-ranked
+ * inside its own band — inside one work order's block, or anywhere in the
+ * unplanned tail. A drag or Move up/down across a band is refused here with the
+ * explanation (`PLAN_ORDER_EXPLANATION`); the server's 409 is the backstop. A
+ * pre-v2 payload carries no `dispatch_position`, so no band is drawn and nothing
+ * is constrained. Each column write also sends the rendered queue as its
+ * compare-and-swap list, so a column another planner changed since this render
+ * is refused (409) and re-read instead of silently overwritten.
+ *
+ * Product posture: the run order is ADVISORY. The kiosks sort by it and show the
+ * rank, but any job can still be started — the board never blocks the floor.
+ *
+ * Laser nests: a nest card carries the data an order is actually chosen by —
+ * material, thickness, sheet size, sheets left — and each boundary where the
+ * material or thickness changes is marked between the cards, with the count
+ * summarised in the column header. That makes the COST of an ordering visible
+ * (six changeovers vs two) without the board ever reordering anything itself:
+ * auto-batching is deliberately out of scope.
+ *
+ * Material ties: a card whose operation is tied to stock material carries one
+ * more chip — how much is ESTIMATED to leave stock, and whether stock covers it.
+ * Two things it deliberately does not do. It never says material is being
+ * deducted now: consumption fires when EACH OPERATION completes — a laser child
+ * WO carries one operation per nest, so finishing nest 1 of 3 deducts nest 1's
+ * sheets right then — and never per reported run. `utils/materialTie.ts` owns
+ * that copy and the timing rules behind it; change wording there, not here. And
+ * it never gates anything: a shortage drives the lot negative and is flagged
+ * for purchasing, because refusing would train planners to untie material. An
+ * UNTIED operation renders no chip at all.
+ *
+ * Optimistic vs server-gated (CLAUDE.md convention):
+ *  - Reordering WITHIN a column is rarely rejected -> optimistic via
+ *    `useOptimisticMutation`, rolling back with the server's verbatim `detail`.
+ *  - Moving ACROSS machines exists precisely because the server may refuse it
+ *    (409 while the operation is running/complete, 404 on an inactive work
+ *    center) -> NON-optimistic: loading state on the card, and the board only
+ *    changes to reflect what the server actually returned.
+ *
+ * Scale (24 work centers, 14 queued jobs — the real shop):
+ *  - the board renders MACHINES WITH WORK first and hides the idle ones behind a
+ *    disclosure, because in code order the alphabetically-early idle machines
+ *    filled the first screen and pushed every actual job off to the right;
+ *  - the horizontal scroll is made explicit — an always-visible styled scrollbar,
+ *    Scroll left / Scroll right buttons, and a right-edge fade while more columns
+ *    exist — because the macOS overlay scrollbar made 7,680px of board read as
+ *    "I cannot reach my other work centers".
+ * Hiding idle machines costs nothing operationally: each card's machine <select>
+ * still lists every ACTIVE machine, so a job can be sent to a quiet one without
+ * showing its column (the disclosure says so).
+ *
+ * Deactivated machines: a column arrives with `is_active: false` only when the
+ * work center was deactivated while it still had queued work (the server never
+ * sends a deactivated machine with an empty queue). Those columns render FIRST —
+ * they are the anomaly demanding action — flagged DEACTIVATED and read-only:
+ * their cards can't be re-ranked or dragged, the column is not a drop target,
+ * and no card anywhere lists a deactivated machine as a move target. The ONE
+ * affordance a stranded card keeps is "Move to machine…" (active targets only),
+ * because moving the work out is the remedy.
+ *
+ * Accessibility: drag is a pointer-only enhancement. Every card also carries real
+ * <button> Move up / Move down controls and a labeled machine <select> — the
+ * accessible equivalent of both drag axes — and every resulting position is
+ * announced through the board's aria-live status line. Because that IS the
+ * accessible path, it also has to survive its own success: a move that disables
+ * the pressed button re-homes focus inside the moved card rather than letting the
+ * browser drop it on <body> (see the focus layout effect), and in-flight gating
+ * uses `aria-disabled` instead of `disabled` so no control the user is standing
+ * on ever vanishes underneath them.
+ */
+
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  ArrowDownIcon,
+  ArrowPathIcon,
+  ArrowUpIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  QueueListIcon,
+} from '@heroicons/react/24/outline';
+import api from '../../services/api';
+import { usePermissions } from '../../hooks/usePermissions';
+import { useOptimisticMutation } from '../../hooks/useOptimisticMutation';
+import { Button, EmptyState, ErrorState, StatusBadge, UnitBadge, useToast } from '../ui';
+import {
+  formatCentralDate,
+  formatCentralTime,
+  isDateBeforeTodayInCentral,
+  isDateTodayInCentral,
+} from '../../utils/centralTime';
+import {
+  changeoverLabel,
+  nestChangeover,
+  nestDetailSegments,
+  nestQueueSummary,
+  type NestChangeover,
+} from '../../utils/nestChangeover';
+import { countShortTies, materialTieChip, type MaterialTieTone } from '../../utils/materialTie';
+import { formatOperationLabel, hasOperationNumber } from '../../utils/operationLabel';
+import {
+  bandKey,
+  columnHasBands,
+  crossesBand,
+  DISPATCH_POLL_MS,
+  formatQueuedHours,
+  hasItemFilters,
+  NO_DISPATCH_FILTERS,
+  PLAN_ORDER_EXPLANATION,
+  rowMatchesFilters,
+  type DispatchFilters,
+} from '../../utils/dispatchPlan';
+import type { DispatchBoardColumn, DispatchBoardRow, RunOrderUpdateResponse } from '../../types';
+import type { DispatchMachineOption } from './DispatchFilterBar';
+
+/**
+ * Material-tie chip ramp — the due-date chip's three tiers, same class shape.
+ * Advisory only: a shortage NEVER blocks production (the server drives the lot
+ * negative and writes an `ALLOCATION_SHORTAGE` audit row), so the red tier is a
+ * heads-up for purchasing, not a gate on the floor.
+ */
+export const TIE_TONE_CLASS: Record<MaterialTieTone, string> = {
+  short: 'border-red-500/60 text-red-300',
+  warn: 'border-amber-500/60 text-amber-300',
+  ok: 'border-fd-line text-slate-400',
+};
+
+/**
+ * The "N short on material" rollup's sentence — shared by a machine column and a
+ * work-order lane, so the two views word the same advisory the same way.
+ */
+export const MATERIAL_SHORT_ROLLUP_TITLE =
+  'Estimated material shortage as these operations complete. Advisory — a shortage never blocks production.';
+
+/** Surface the backend's message verbatim (a refusal must not be reworded). */
+function serverDetail(err: unknown, fallback: string): string {
+  const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  const message = (err as { message?: unknown })?.message;
+  if (typeof message === 'string' && message.trim()) return message;
+  return fallback;
+}
+
+/**
+ * The run-order PUT answers with that work center's refreshed queue. Accept the
+ * bare row array or a wrapped {queue}/column envelope so a shape change on the
+ * server can't blank the column we just reordered.
+ */
+export function extractDispatchQueue(response: RunOrderUpdateResponse | undefined | null): DispatchBoardRow[] | null {
+  if (Array.isArray(response)) return response;
+  const queue = (response as { queue?: unknown } | null | undefined)?.queue;
+  return Array.isArray(queue) ? (queue as DispatchBoardRow[]) : null;
+}
+
+/** Pure list move: take the row at `from` and insert it at `to`. */
+export function reorderRows(rows: DispatchBoardRow[], from: number, to: number): DispatchBoardRow[] {
+  const next = [...rows];
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved);
+  return next;
+}
+
+/** Every row in a column we just ordered becomes ranked 1..N (what the PUT does). */
+const withRanks = (rows: DispatchBoardRow[]): DispatchBoardRow[] =>
+  rows.map((row, index) => ({ ...row, run_order: index + 1 }));
+
+const replaceQueue = (
+  columns: DispatchBoardColumn[],
+  workCenterId: number,
+  queue: DispatchBoardRow[]
+): DispatchBoardColumn[] => columns.map(column => (column.id === workCenterId ? { ...column, queue } : column));
+
+const isRunning = (row: DispatchBoardRow) => String(row.status).toLowerCase() === 'in_progress';
+
+/** "WO-20260720-001 Nest 1" — how a job is named in labels and announcements. */
+export function jobLabel(row: DispatchBoardRow): string {
+  // `hasOperationNumber`, not `!= null`: a stored empty string passed the old
+  // check and announced a bare "Op ". The word "Operation" stays the fallback
+  // here rather than the em-dash — this string is read aloud in the drag
+  // announcements and used as an aria-label.
+  const operation =
+    row.operation_name ||
+    (hasOperationNumber(row.operation_number) ? formatOperationLabel(row.operation_number) : 'Operation');
+  return `${row.work_order_number} ${operation}`.trim();
+}
+
+/**
+ * What is actually true of a running job (a tooltip must not claim more than is
+ * enforced):
+ *  - the SERVER refuses to move an in-progress operation to another work center
+ *    (409 "Clock out before moving the operation to another work center");
+ *  - the server does NOT refuse to re-rank it — the run-order rewrite accepts a
+ *    running operation, and a neighbour's Move up/down really does change a
+ *    running job's displayed position;
+ *  - so the board's own rule is the weaker one: it won't let YOU pick a running
+ *    card up, but the card still shifts as the work around it is reordered.
+ */
+export const RUNNING_PIN_REASON =
+  "This job is running, so the board won't pick it up. Its position still shifts as the jobs around it are reordered.";
+
+export const RUNNING_MOVE_REASON =
+  'This job is running. The server refuses to move an in-progress operation — clock out first.';
+
+/**
+ * Why a card on a deactivated machine can't be re-ranked. Ordering work on a
+ * machine that can't run it is planning theatre; the run-order PUT would 404 the
+ * inactive work center anyway. Moving OUT stays available — that's the remedy.
+ */
+const DEACTIVATED_PIN_REASON =
+  'This machine is deactivated — its run order is read-only. Move this work to an active machine.';
+
+export const ROLE_PIN_REASON = 'Your role cannot change the run order.';
+
+export const SAVING_REASON = 'Waiting for the last change to save…';
+
+/** The disclosure's region — `aria-controls` must name a real element id. */
+const IDLE_REGION_ID = 'dispatch-idle-machines';
+
+/**
+ * Hiding the idle columns must not hide the ABILITY to move work to a quiet
+ * machine, so the disclosure states where that affordance still lives.
+ */
+const IDLE_HELP =
+  'Idle machines have no queued work. You can still send a job to one without showing them — every card’s “Move to machine…” list includes every active machine.';
+
+// One column is `w-80` (320px) with a `gap-3` (12px) gutter; a press of the
+// scroll buttons moves two columns, which is a deliberate step rather than a
+// nudge on a 7,680px board.
+const COLUMN_STEP_PX = (320 + 12) * 2;
+
+// The board is capped at the bottom of the WINDOW rather than allowed to run off
+// the end of the page. A 20-job column used to push the board's own horizontal
+// scrollbar hundreds of pixels below the fold, so panning sideways meant first
+// scrolling the page all the way down to reach the bar. Capped, the bar — and the
+// header's Scroll left/right buttons — stay on screen wherever the board is.
+/** Breathing room under the board so the scrollbar isn't flush with the window edge. */
+const BOARD_BOTTOM_GUTTER_PX = 16;
+/** Never squeeze the board below this, however little room the viewport leaves. */
+const BOARD_MIN_HEIGHT_PX = 320;
+/** Firefox reports wheel deltas in LINES (`deltaMode === 1`); one line ≈ this many px. */
+const WHEEL_LINE_PX = 16;
+
+interface DragSource {
+  operationId: number;
+  fromWorkCenterId: number;
+}
+
+interface DropSlot {
+  workCenterId: number;
+  /** Insertion index: the card this drop would land BEFORE (queue.length = end). */
+  index: number;
+  /**
+   * False when releasing here would carry a card across a work-order band —
+   * the drop line turns red and the drop is refused with the explanation.
+   */
+  allowed: boolean;
+}
+
+/** Insertion index -> final index within the same column (removing the row first shifts later slots). */
+const finalIndexFromInsertion = (insertIndex: number, fromIndex: number) =>
+  insertIndex > fromIndex ? insertIndex - 1 : insertIndex;
+
+/**
+ * Insertion index from pointer geometry: the first card whose vertical midpoint
+ * is below the pointer, else the tail. Pure so it is unit-testable — jsdom
+ * reports zero-size rects, so the geometry can only be exercised directly.
+ *
+ * This is what stops the gap between two cards from meaning "append to the end
+ * of the column": the pointer's position decides the slot, and the tail is only
+ * chosen when the pointer really is past the last card's midpoint.
+ */
+export function insertionIndexFromPointer(rects: Array<{ top: number; bottom: number }>, clientY: number): number {
+  for (let index = 0; index < rects.length; index += 1) {
+    const { top, bottom } = rects[index];
+    if (clientY < (top + bottom) / 2) return index;
+  }
+  return rects.length;
+}
+
+/** Insertion index for a drag event over a column's card list. */
+function columnInsertionIndex(container: HTMLElement, clientY: number): number {
+  const rects = Array.from(container.querySelectorAll<HTMLElement>('[data-dispatch-card]')).map(card =>
+    card.getBoundingClientRect()
+  );
+  return insertionIndexFromPointer(rects, clientY);
+}
+
+/** Insertion index for a drag event over one card: before it, or after it. */
+function cardInsertionIndex(card: HTMLElement, index: number, clientY: number): number {
+  const rect = card.getBoundingClientRect();
+  return insertionIndexFromPointer([rect], clientY) === 0 ? index : index + 1;
+}
+
+interface ReorderCtx {
+  /**
+   * Monotonic id WITHIN one work center: a late response from a superseded
+   * reorder of THIS column must not win. Deliberately per column — a board-wide
+   * counter let a reorder of column B discard column A's authoritative
+   * reconcile, leaving A on client-side ranks and stale `version`s.
+   */
+  seq: number;
+  workCenterId: number;
+  prevQueue: DispatchBoardRow[];
+  nextQueue: DispatchBoardRow[];
+  label: string;
+  fromPosition: number;
+  toPosition: number;
+  workCenterName: string;
+}
+
+export interface DispatchMachineViewProps {
+  /** Search + chips from the page's URL params. The machine filter picks columns; the rest dim cards. */
+  filters?: DispatchFilters;
+  /** Reports the machines on the board, for the page's machine filter select. */
+  onMachineOptions?: (options: DispatchMachineOption[]) => void;
+}
+
+export default function DispatchMachineView({
+  filters = NO_DISPATCH_FILTERS,
+  onMachineOptions,
+}: DispatchMachineViewProps = {}) {
+  const { can } = usePermissions();
+  const { showToast } = useToast();
+  const canEdit = can('work_orders:edit');
+
+  const [columns, setColumns] = useState<DispatchBoardColumn[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // A re-read that did not land: the board on screen may not be what the server
+  // (and the kiosks) have, so say so instead of looking authoritative.
+  const [staleNotice, setStaleNotice] = useState<string | null>(null);
+  const [lastRefreshed, setLastRefreshed] = useState<string | null>(null);
+  const [updatesDeferred, setUpdatesDeferred] = useState(false);
+  const interactionRef = useRef(false);
+  const interactionEpochRef = useRef(0);
+  const boardRequestRef = useRef(0);
+  const [statusMessage, setStatusMessage] = useState('');
+  const [dragSource, setDragSource] = useState<DragSource | null>(null);
+  const [dropSlot, setDropSlot] = useState<DropSlot | null>(null);
+  // Cross-machine moves are server-gated -> the card shows in-flight state and
+  // the board waits for the server before changing.
+  const [movingOperationId, setMovingOperationId] = useState<number | null>(null);
+  // Work centers with a reorder in flight: a second reorder of the same column
+  // can't stack on an unresolved one.
+  const [reorderingColumnIds, setReorderingColumnIds] = useState<readonly number[]>([]);
+  // PER WORK CENTER monotonic counter — guards reconcile AND rollback against an
+  // out-of-order response, without one column's reorder invalidating another's.
+  const reorderSeqRef = useRef<Map<number, number>>(new Map());
+  // Where focus must land once a keyboard reorder commits (the pressed button
+  // can be disabled by the move itself — see focusAfterReorder below).
+  const pendingFocusRef = useRef<{ operationId: number; direction: 'up' | 'down' } | null>(null);
+  // The horizontally scrolling board element: both the card-focus lookup and the
+  // Scroll left/right buttons operate on it.
+  const boardRef = useRef<HTMLDivElement | null>(null);
+  // Idle machines are collapsed by DEFAULT and deliberately not persisted: the
+  // board's job on open is to show the work.
+  const [showIdle, setShowIdle] = useState(false);
+  const [glanceMode, setGlanceMode] = useState(false);
+  const idleHelp = glanceMode
+    ? 'Idle machines have no queued work. Switch to Planner view to move or reorder jobs.'
+    : IDLE_HELP;
+  // Whether the board is scrolled to each end — drives the scroll buttons and the
+  // "there is more over here" edge fade.
+  const [scrollEdges, setScrollEdges] = useState({ atStart: true, atEnd: true });
+  // How tall the board is allowed to get before it scrolls internally, measured
+  // from where it sits to the bottom of the window. Null until first measured.
+  const [boardMaxHeight, setBoardMaxHeight] = useState<number | null>(null);
+
+  interactionRef.current = !!dragSource || movingOperationId !== null || reorderingColumnIds.length > 0;
+  useEffect(() => {
+    interactionEpochRef.current += 1;
+  }, [dragSource, movingOperationId, reorderingColumnIds]);
+
+  const nextReorderSeq = useCallback((workCenterId: number) => {
+    const seq = (reorderSeqRef.current.get(workCenterId) || 0) + 1;
+    reorderSeqRef.current.set(workCenterId, seq);
+    return seq;
+  }, []);
+
+  const isCurrentReorder = useCallback(
+    (ctx: ReorderCtx) => reorderSeqRef.current.get(ctx.workCenterId) === ctx.seq,
+    []
+  );
+
+  /** Resolves false when the re-read failed — callers must not report success then. */
+  const load = useCallback(async (options?: { silent?: boolean; background?: boolean }): Promise<boolean> => {
+    if (options?.background && interactionRef.current) {
+      setUpdatesDeferred(true);
+      return false;
+    }
+    const requestId = ++boardRequestRef.current;
+    const epoch = interactionEpochRef.current;
+    if (options?.silent) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
+    try {
+      const data = await api.getDispatchBoard();
+      if (requestId !== boardRequestRef.current) return false;
+      if (options?.background && (interactionRef.current || epoch !== interactionEpochRef.current)) {
+        setUpdatesDeferred(true);
+        return false;
+      }
+      setLastRefreshed(new Date().toISOString());
+      setUpdatesDeferred(false);
+      setColumns(data?.work_centers || []);
+      setError(null);
+      setStaleNotice(null);
+      return true;
+    } catch (err) {
+      if (requestId !== boardRequestRef.current) return false;
+      const detail = serverDetail(err, 'Could not load the dispatch board.');
+      setError(detail);
+      setStaleNotice(detail);
+      return false;
+    } finally {
+      if (requestId === boardRequestRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  useEffect(() => {
+    const refreshVisible = () => {
+      if (document.visibilityState === 'visible') void load({ silent: true, background: true });
+    };
+    // Background polls replace the board silently: nothing here is announced
+    // (aria-live is reserved for the user's own actions, conflicts and failures).
+    const interval = window.setInterval(refreshVisible, DISPATCH_POLL_MS);
+    window.addEventListener('focus', refreshVisible);
+    document.addEventListener('visibilitychange', refreshVisible);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', refreshVisible);
+      document.removeEventListener('visibilitychange', refreshVisible);
+    };
+  }, [load]);
+
+  useEffect(() => {
+    if (updatesDeferred && !interactionRef.current) void load({ silent: true, background: true });
+  }, [updatesDeferred, dragSource, movingOperationId, reorderingColumnIds, load]);
+
+  /**
+   * Anomalies first, then work. Deactivated machines that still hold queued
+   * work render before everything else — they exist only to be emptied — then
+   * the active machines with work, then the idle disclosure. The server returns
+   * work centers in code order, which put the alphabetically-early IDLE machines
+   * on the first screen and the actual jobs off the right edge. The partition is
+   * purely a frontend concern — order WITHIN each group is still the server's
+   * code order.
+   */
+  const itemFiltered = hasItemFilters(filters);
+  /**
+   * Filters never REMOVE a card from a column — a column's run-order PUT is the
+   * full column, and its keyboard/drag arithmetic reads the full queue — so a
+   * non-matching card is dimmed instead. They do pick which columns render: the
+   * machine filter shows that one machine, and the item filters hide machines
+   * with no matching card at all.
+   */
+  const matchesRow = useCallback((row: DispatchBoardRow) => rowMatchesFilters(row, filters), [filters]);
+  const { deactivatedColumns, busyColumns, idleColumns } = useMemo(() => {
+    const all = (columns || []).filter(
+      column =>
+        (filters.machine == null || column.id === filters.machine) && (!itemFiltered || column.queue.some(matchesRow))
+    );
+    const active = all.filter(column => column.is_active !== false);
+    return {
+      deactivatedColumns: all.filter(column => column.is_active === false),
+      busyColumns: active.filter(column => column.queue.length > 0),
+      idleColumns: active.filter(column => column.queue.length === 0),
+    };
+  }, [columns, filters.machine, itemFiltered, matchesRow]);
+
+  const filterSummary = useMemo(() => {
+    if (!itemFiltered && filters.machine == null) return null;
+    const visible = deactivatedColumns.length + busyColumns.length + idleColumns.length;
+    const total = columns?.length ?? 0;
+    const rows = [...deactivatedColumns, ...busyColumns].flatMap(column => column.queue);
+    const matching = itemFiltered ? rows.filter(matchesRow).length : rows.length;
+    return `Showing ${visible} of ${total} machine${total === 1 ? '' : 's'}${
+      itemFiltered
+        ? ` · ${matching} matching job${matching === 1 ? '' : 's'}. Jobs that don't match are dimmed, not hidden, so each machine's run order stays complete.`
+        : '.'
+    }`;
+  }, [busyColumns, columns, deactivatedColumns, filters.machine, idleColumns, itemFiltered, matchesRow]);
+
+  // The page's machine filter lists every machine this view knows about.
+  useEffect(() => {
+    if (!onMachineOptions || !columns) return;
+    onMachineOptions(
+      columns.map(column => ({
+        id: column.id,
+        code: column.code,
+        name: column.name,
+        isActive: column.is_active !== false,
+      }))
+    );
+  }, [columns, onMachineOptions]);
+
+  // A board of nothing but idle machines must not collapse to nothing: with no
+  // busy (or deactivated) columns there is no disclosure and the idle machines
+  // simply render.
+  const idleCollapsible = busyColumns.length + deactivatedColumns.length > 0 && idleColumns.length > 0;
+  const idleVisible = !idleCollapsible || showIdle;
+  // Whether the scrolling board element is on screen at all (the empty state
+  // replaces it — including "no machines match these filters"), which is what
+  // the wheel listener has to re-attach to.
+  const visibleColumnCount = deactivatedColumns.length + busyColumns.length + idleColumns.length;
+  const hasBoard = visibleColumnCount > 0;
+
+  const totals = useMemo(() => {
+    const all = columns || [];
+    const rows = all.flatMap(column => column.queue);
+    const active = all.filter(column => column.is_active !== false);
+    return {
+      machines: all.length,
+      busy: active.filter(column => column.queue.length > 0).length,
+      // Only ACTIVE machines can be idle — a deactivated one is neither "with
+      // work" nor "idle"; it gets its own callout in the header.
+      idle: active.filter(column => column.queue.length === 0).length,
+      deactivated: all.length - active.length,
+      jobs: rows.length,
+      ranked: rows.filter(row => row.run_order != null).length,
+    };
+  }, [columns]);
+
+  /**
+   * Recompute which ends of the board are reached. Bails out when nothing
+   * changed, so it is safe to call from the layout effect that runs after EVERY
+   * render (columns arriving, the disclosure opening, and a reorder all change
+   * the board's width).
+   */
+  const syncScrollEdges = useCallback(() => {
+    const el = boardRef.current;
+    const max = el ? el.scrollWidth - el.clientWidth : 0;
+    const left = el ? el.scrollLeft : 0;
+    // 1px slack: fractional layout means scrollLeft rarely equals max exactly.
+    const next = { atStart: left <= 1, atEnd: left >= max - 1 };
+    setScrollEdges(prev => (prev.atStart === next.atStart && prev.atEnd === next.atEnd ? prev : next));
+  }, []);
+
+  /**
+   * Cap the board's height at the bottom of the window, so its horizontal
+   * scrollbar sits on screen instead of at the foot of a page-length column.
+   *
+   * The top is measured DOCUMENT-relative (`rect.top + scrollY`), which is
+   * invariant under page scroll — shrinking the board can clamp `window.scrollY`,
+   * and a viewport-relative measurement would feed that back in and oscillate.
+   */
+  const syncBoardHeight = useCallback(() => {
+    const el = boardRef.current;
+    if (!el) return;
+    const top = el.getBoundingClientRect().top + window.scrollY;
+    const room = Math.round(window.innerHeight - top - BOARD_BOTTOM_GUTTER_PX);
+    const next = Math.max(BOARD_MIN_HEIGHT_PX, room);
+    setBoardMaxHeight(prev => (prev === next ? prev : next));
+  }, []);
+
+  const syncBoardMetrics = useCallback(() => {
+    syncScrollEdges();
+    syncBoardHeight();
+  }, [syncScrollEdges, syncBoardHeight]);
+
+  useLayoutEffect(syncBoardMetrics);
+
+  useEffect(() => {
+    window.addEventListener('resize', syncBoardMetrics);
+    return () => window.removeEventListener('resize', syncBoardMetrics);
+  }, [syncBoardMetrics]);
+
+  /**
+   * Re-measure when the page reflows WITHOUT this component re-rendering — the
+   * read-only banner arriving, a font landing, the header wrapping. Those move
+   * the board down without a resize and without a render of our own, and the cap
+   * would otherwise stay at its old value and put the scrollbar back below the
+   * fold. Feature-detected: jsdom has no ResizeObserver, and the render-time and
+   * resize-time measurements already cover the tests.
+   */
+  useEffect(() => {
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(syncBoardMetrics);
+    observer.observe(document.body);
+    return () => observer.disconnect();
+  }, [syncBoardMetrics]);
+
+  /**
+   * Pan the board with the WHEEL and with trackpad swipes, not only by dragging
+   * the scrollbar. Rules, in order:
+   *   • a horizontal delta (two-finger swipe, tilt wheel) is already going the
+   *     right way — leave it to the browser;
+   *   • Shift+wheel is the platform's "scroll sideways" gesture — always pans;
+   *   • a plain wheel pans sideways only when the board has nothing left to
+   *     scroll vertically, so a tall board still scrolls DOWN under the pointer.
+   * `preventDefault` runs only when the board actually moved, so at either end
+   * the gesture chains to the page instead of feeling stuck.
+   *
+   * Registered by hand because React's `onWheel` is attached passively at the
+   * root: `preventDefault()` from a React handler is a no-op and the page would
+   * scroll as well.
+   */
+  useEffect(() => {
+    const el = boardRef.current;
+    if (!el) return undefined;
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaX !== 0) return;
+      if (el.scrollWidth <= el.clientWidth + 1) return;
+      const scrollsVertically = el.scrollHeight > el.clientHeight + 1;
+      if (!event.shiftKey && scrollsVertically) return;
+      const step = event.deltaMode === 1 ? event.deltaY * WHEEL_LINE_PX : event.deltaY;
+      if (step === 0) return;
+      const before = el.scrollLeft;
+      el.scrollLeft = before + step;
+      if (el.scrollLeft === before) return;
+      event.preventDefault();
+      syncScrollEdges();
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+    // The board element is unmounted with the empty state, so re-attach when the
+    // columns come back.
+  }, [syncScrollEdges, hasBoard]);
+
+  const scrollBoard = useCallback(
+    (direction: -1 | 1) => {
+      const el = boardRef.current;
+      if (!el) return;
+      const left = direction * COLUMN_STEP_PX;
+      if (typeof el.scrollBy === 'function') {
+        el.scrollBy({ left, behavior: 'smooth' });
+      } else {
+        el.scrollLeft += left; // environments without scrollBy (jsdom)
+      }
+      syncScrollEdges();
+    },
+    [syncScrollEdges]
+  );
+
+  // --- Reorder within a column (OPTIMISTIC) ---------------------------------
+  const { run: runReorder } = useOptimisticMutation<RunOrderUpdateResponse, ReorderCtx>({
+    applyOptimistic: ctx => {
+      setColumns(prev => (prev ? replaceQueue(prev, ctx.workCenterId, ctx.nextQueue) : prev));
+      setStatusMessage(
+        `${ctx.label} moved to position ${ctx.toPosition} of ${ctx.nextQueue.length} on ${ctx.workCenterName}`
+      );
+    },
+    rollback: ctx => {
+      // Guarded like reconcile: a newer reorder of THIS column owns the state now.
+      if (isCurrentReorder(ctx)) {
+        setColumns(prev => (prev ? replaceQueue(prev, ctx.workCenterId, ctx.prevQueue) : prev));
+        setStatusMessage(
+          `Run order change refused. ${ctx.label} is back at position ${ctx.fromPosition} on ${ctx.workCenterName}. Re-reading the board.`
+        );
+      }
+      // The snapshot we just restored is a CLIENT guess and may itself be stale
+      // (the refusal often means the board no longer matches the server). Re-read
+      // rather than sit on it; a failed re-read raises the stale banner.
+      void load({ silent: true });
+    },
+    // The rendered column rides along as the compare-and-swap list: a column
+    // another planner (or a plan change) reordered since this render is refused
+    // 409 and re-read by the rollback, never silently overwritten.
+    mutate: ctx =>
+      api.setWorkCenterRunOrder(
+        ctx.workCenterId,
+        ctx.nextQueue.map(row => row.operation_id),
+        ctx.prevQueue.map(row => row.operation_id)
+      ),
+    reconcile: (result, ctx) => {
+      if (!isCurrentReorder(ctx)) return; // superseded by a newer reorder OF THIS COLUMN
+      const queue = extractDispatchQueue(result);
+      if (queue) setColumns(prev => (prev ? replaceQueue(prev, ctx.workCenterId, queue) : prev));
+    },
+    errorFallback: 'Failed to save the run order',
+  });
+
+  const reorderingColumn = useCallback(
+    (workCenterId: number) => reorderingColumnIds.includes(workCenterId),
+    [reorderingColumnIds]
+  );
+
+  /**
+   * Move a card to `toIndex` (a final position, not an insertion point).
+   *
+   * `direction` is set only by the keyboard controls — it tells the focus effect
+   * which button the user pressed, so focus can be placed deliberately once the
+   * move commits instead of being dropped on `document.body`.
+   */
+  const moveWithinColumn = useCallback(
+    (workCenterId: number, operationId: number, toIndex: number, direction?: 'up' | 'down') => {
+      if (!canEdit || !columns) return;
+      // One unresolved reorder per column: stacking a second one would race the
+      // first's reconcile and rollback against each other.
+      if (reorderingColumn(workCenterId) || movingOperationId != null) return;
+      const column = columns.find(candidate => candidate.id === workCenterId);
+      // A deactivated column's run order is read-only (the server would 404 the
+      // rewrite on an inactive work center anyway).
+      if (!column || column.is_active === false) return;
+      const fromIndex = column.queue.findIndex(row => row.operation_id === operationId);
+      if (fromIndex < 0) return;
+      const row = column.queue[fromIndex];
+      if (isRunning(row)) {
+        showToast('error', RUNNING_PIN_REASON);
+        return;
+      }
+      const clamped = Math.max(0, Math.min(column.queue.length - 1, toIndex));
+      if (clamped === fromIndex) return;
+      // Work-order order wins: a card can be re-ranked inside its own work
+      // order's block (or within the unplanned tail), never past another band.
+      // Refused here with the reason; the server would 409 it anyway.
+      if (crossesBand(column.queue, fromIndex, clamped)) {
+        showToast('error', PLAN_ORDER_EXPLANATION);
+        setStatusMessage(`${jobLabel(row)} was not moved. ${PLAN_ORDER_EXPLANATION}.`);
+        return;
+      }
+
+      if (direction) pendingFocusRef.current = { operationId, direction };
+      setReorderingColumnIds(prev => (prev.includes(workCenterId) ? prev : [...prev, workCenterId]));
+      void runReorder({
+        seq: nextReorderSeq(workCenterId),
+        workCenterId,
+        workCenterName: column.name,
+        prevQueue: column.queue,
+        nextQueue: withRanks(reorderRows(column.queue, fromIndex, clamped)),
+        label: jobLabel(row),
+        fromPosition: fromIndex + 1,
+        toPosition: clamped + 1,
+      }).finally(() => {
+        setReorderingColumnIds(prev => prev.filter(id => id !== workCenterId));
+      });
+    },
+    [canEdit, columns, movingOperationId, nextReorderSeq, reorderingColumn, runReorder, showToast]
+  );
+
+  /**
+   * Keep focus inside the card the user just moved.
+   *
+   * Moving a card to the first/last position disables the very button that was
+   * pressed, and a browser blurs a control the moment it becomes disabled — the
+   * keyboard user would land on `<body>`, at the top of the page, mid-task. So
+   * after every committed keyboard reorder focus is placed explicitly: the same
+   * control if it survived, otherwise its sibling, otherwise the card itself
+   * (which carries `tabIndex={-1}` for exactly this).
+   */
+  useLayoutEffect(() => {
+    const pending = pendingFocusRef.current;
+    if (!pending) return;
+    pendingFocusRef.current = null;
+    const card = boardRef.current?.querySelector<HTMLElement>(`[data-dispatch-card="${pending.operationId}"]`);
+    if (!card) return;
+    const button = (which: 'up' | 'down') => card.querySelector<HTMLButtonElement>(`[data-move="${which}"]`);
+    const pressed = button(pending.direction);
+    const sibling = button(pending.direction === 'up' ? 'down' : 'up');
+    const target = pressed && !pressed.disabled ? pressed : sibling && !sibling.disabled ? sibling : card;
+    target.focus();
+  }, [columns]);
+
+  // --- Move across machines (NON-optimistic: the server may refuse) ---------
+  const moveToWorkCenter = useCallback(
+    async (row: DispatchBoardRow, targetWorkCenterId: number) => {
+      if (!canEdit || movingOperationId != null) return;
+      const target = (columns || []).find(column => column.id === targetWorkCenterId);
+      // A deactivated machine is never a move TARGET (the server would 404 it);
+      // the selects don't list one, this is the belt to that suspender.
+      if (!target || target.is_active === false) return;
+      const label = jobLabel(row);
+
+      setMovingOperationId(row.operation_id);
+      try {
+        await api.updateOperation(row.operation_id, {
+          work_center_id: targetWorkCenterId,
+          version: row.version,
+        });
+        // Only now does the board change — re-read the authoritative board. The
+        // move succeeded server-side, but until the re-read lands the card is
+        // still drawn in its old column: reporting success then would describe a
+        // board the user is not looking at.
+        const refreshed = await load({ silent: true });
+        if (!refreshed) {
+          showToast(
+            'error',
+            `${label} moved to ${target.name} on the server, but the board could not be re-read. Refresh to see where it is.`
+          );
+          setStatusMessage(
+            `${label} moved to ${target.name}, but the board could not be re-read and may be out of date.`
+          );
+          return;
+        }
+        showToast('success', `${label} moved to ${target.name}.`);
+        // Plan order leads every queue: a moved operation of a PLANNED work order
+        // stays inside that work order's block on the target machine — which can
+        // be the top of the queue — after the block's ranked operations (the move
+        // clears its own machine rank), not at the end of the queue.
+        setStatusMessage(
+          row.dispatch_position != null
+            ? `${label} moved to ${target.name}. It runs within ${row.work_order_number}'s plan block there, after that work order's ranked operations.`
+            : `${label} moved to ${target.name}. It is unranked at the end of that queue.`
+        );
+      } catch (err) {
+        const detail = serverDetail(err, 'Failed to move this job to another machine');
+        showToast('error', detail);
+        setStatusMessage(`${label} was not moved. ${detail}`);
+      } finally {
+        setMovingOperationId(null);
+      }
+    },
+    [canEdit, columns, load, movingOperationId, showToast]
+  );
+
+  // --- Drag (pointer-only enhancement) -------------------------------------
+  const handleDragStart = (e: React.DragEvent, row: DispatchBoardRow, workCenterId: number) => {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(row.operation_id));
+    setDragSource({ operationId: row.operation_id, fromWorkCenterId: workCenterId });
+  };
+
+  const handleDragEnd = () => {
+    setDragSource(null);
+    setDropSlot(null);
+  };
+
+  /** Would dropping the dragged card at this insertion slot cross a work-order band? */
+  const slotAllowed = (workCenterId: number, index: number): boolean => {
+    if (!dragSource || dragSource.fromWorkCenterId !== workCenterId) return true; // a machine move
+    const column = (columns || []).find(candidate => candidate.id === workCenterId);
+    if (!column) return true;
+    const fromIndex = column.queue.findIndex(row => row.operation_id === dragSource.operationId);
+    if (fromIndex < 0) return true;
+    return !crossesBand(column.queue, fromIndex, finalIndexFromInsertion(index, fromIndex));
+  };
+
+  const markDropSlot = (workCenterId: number, index: number) => {
+    if (!dropSlot || dropSlot.workCenterId !== workCenterId || dropSlot.index !== index) {
+      setDropSlot({ workCenterId, index, allowed: slotAllowed(workCenterId, index) });
+    }
+  };
+
+  /**
+   * Dragging over a CARD: the slot is decided by which half of the card the
+   * pointer is in — above the midpoint inserts before it, below inserts after.
+   */
+  const handleCardDragOver = (e: React.DragEvent, workCenterId: number, index: number) => {
+    if (!dragSource) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+    markDropSlot(workCenterId, cardInsertionIndex(e.currentTarget as HTMLElement, index, e.clientY));
+  };
+
+  /**
+   * Dragging over the COLUMN's surface — the 8px gaps between cards and the
+   * padding around them. This used to hard-code "append to the end", so a
+   * manager aiming between card 1 and card 2 and releasing in the gap silently
+   * sent the job to the bottom. The slot now comes from pointer geometry, so the
+   * tail is only chosen when the pointer really is past the last card.
+   */
+  const handleColumnDragOver = (e: React.DragEvent, workCenterId: number) => {
+    if (!dragSource) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    markDropSlot(workCenterId, columnInsertionIndex(e.currentTarget as HTMLElement, e.clientY));
+  };
+
+  // Only clear when the pointer leaves the zone entirely — entering a child
+  // would otherwise flicker the highlight off (Scheduling.tsx precedent).
+  const handleDragLeave = (e: React.DragEvent) => {
+    const related = e.relatedTarget as Node | null;
+    if (!related || !e.currentTarget.contains(related)) {
+      setDropSlot(null);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent, workCenterId: number, insertIndex: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const source = dragSource;
+    setDragSource(null);
+    setDropSlot(null);
+    if (!source) return;
+
+    if (source.fromWorkCenterId === workCenterId) {
+      const column = (columns || []).find(candidate => candidate.id === workCenterId);
+      if (!column) return;
+      const fromIndex = column.queue.findIndex(row => row.operation_id === source.operationId);
+      if (fromIndex < 0) return;
+      // Insertion index -> final index: removing the row first shifts later
+      // slots. A slot across a band is refused inside moveWithinColumn.
+      moveWithinColumn(workCenterId, source.operationId, finalIndexFromInsertion(insertIndex, fromIndex));
+      return;
+    }
+
+    const sourceColumn = (columns || []).find(candidate => candidate.id === source.fromWorkCenterId);
+    const row = sourceColumn?.queue.find(candidate => candidate.operation_id === source.operationId);
+    if (row) moveToWorkCenter(row, workCenterId);
+  };
+
+  // Both drops recompute the slot from the release point rather than trusting the
+  // last `dragover` state, so what lands is what the drop line showed.
+  const handleCardDrop = (e: React.DragEvent, workCenterId: number, index: number) =>
+    handleDrop(e, workCenterId, cardInsertionIndex(e.currentTarget as HTMLElement, index, e.clientY));
+
+  const handleColumnDrop = (e: React.DragEvent, workCenterId: number) =>
+    handleDrop(e, workCenterId, columnInsertionIndex(e.currentTarget as HTMLElement, e.clientY));
+
+  if (loading && !columns) {
+    return (
+      <div className="space-y-3" data-testid="dispatch-loading">
+        <div className="skeleton-title w-56" />
+        <div className="flex gap-3">
+          {Array.from({ length: 3 }).map((_, index) => (
+            <div key={index} className="skeleton h-80 w-80" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (error && !columns) {
+    return (
+      <div className="space-y-3">
+        <BoardHeader
+          totals={totals}
+          statusMessage={statusMessage}
+          onRefresh={() => load({ silent: true })}
+          refreshing={refreshing}
+          canEdit={canEdit}
+          // The full ErrorState below already owns the failure here.
+          staleNotice={null}
+          // Nothing to scroll: there is no board on screen.
+          scroll={null}
+        />
+        <ErrorState title="Couldn't load the dispatch board" message={error} onRetry={() => load()} />
+      </div>
+    );
+  }
+
+  const boardColumns = columns || [];
+
+  /**
+   * One work-center column. Shared by the busy group and the idle disclosure, so
+   * a machine looks and behaves identically on either side of the partition — a
+   * revealed idle column is a full drop target, not a summary.
+   */
+  const renderColumn = (column: DispatchBoardColumn) => {
+    const empty = column.queue.length === 0;
+    // Deactivated = the WC was turned off while work was still queued on it.
+    // The column is read-only: never a drop target, cards can't be re-ranked;
+    // the only live affordance is each card's move-out select.
+    const deactivated = column.is_active === false;
+    const columnTargeted = !deactivated && dropSlot?.workCenterId === column.id;
+    // Recomputed from the queue on every render, so an optimistic reorder
+    // updates the cost of the order at the same moment the cards move — that
+    // immediacy is the whole feedback loop.
+    const nestSummary = nestQueueSummary(column.queue);
+    // Same "recompute from the queue" rule as the changeover count, for the same
+    // reason: an optimistic reorder must not leave a stale rollup behind. Zero
+    // on a column with no tied work, so an untied board shows nothing new.
+    const shortTies = countShortTies(column.queue);
+    // Dispatch v2 load cue: PLANNED setup + run hours of this queue (server
+    // `queued_hours`; absent on a pre-v2 payload, so nothing renders then).
+    const queuedHours = formatQueuedHours(column.queued_hours);
+    const bands = columnHasBands(column.queue);
+    return (
+      <section
+        key={column.id}
+        aria-label={`${column.name} run order`}
+        className={`flex ${glanceMode ? 'w-96' : 'w-80'} shrink-0 flex-col rounded-sm border ${
+          deactivated
+            ? 'border-red-500/60 bg-fd-panel'
+            : empty
+              ? 'border-slate-800/80 bg-fd-panel/40'
+              : 'border-fd-line bg-fd-panel'
+        } ${columnTargeted ? 'ring-1 ring-blue-400/70' : ''}`}
+      >
+        <header
+          className={`flex items-center justify-between gap-2 border-b px-3 py-2 ${
+            deactivated ? 'border-red-500/40' : 'border-fd-line'
+          }`}
+        >
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <p
+                className={`${glanceMode ? 'critical-text text-xl' : 'truncate text-sm'} font-semibold ${empty ? 'text-slate-400' : 'text-slate-100'}`}
+              >
+                {column.name}
+              </p>
+              {/* NOT aria-hidden: the section keeps its "{name} run order"
+                  label, so this badge is what tells a screen-reader user the
+                  machine is deactivated. */}
+              {deactivated && (
+                <span
+                  data-testid={`dispatch-deactivated-${column.id}`}
+                  className="shrink-0 rounded border border-red-500/60 bg-red-500/10 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-widest text-red-300"
+                >
+                  Deactivated
+                </span>
+              )}
+            </div>
+            <p className="truncate font-mono text-[11px] uppercase tracking-widest text-slate-500">
+              {column.code}
+              {column.work_center_type ? ` · ${String(column.work_center_type).replace(/_/g, ' ')}` : ''}
+            </p>
+            {nestSummary.nests > 0 && (
+              <p
+                data-testid={`dispatch-changeovers-${column.id}`}
+                className="truncate font-mono text-[11px] text-slate-400"
+              >
+                {nestSummary.nests} nest{nestSummary.nests === 1 ? '' : 's'} · {nestSummary.changeovers} changeover
+                {nestSummary.changeovers === 1 ? '' : 's'}
+              </p>
+            )}
+            {/* Advisory rollup: how many queued jobs on this machine estimate a
+                material shortage as their operations complete. Never a gate. */}
+            {shortTies > 0 && (
+              <p
+                data-testid={`dispatch-tie-short-${column.id}`}
+                title={MATERIAL_SHORT_ROLLUP_TITLE}
+                className="truncate font-mono text-[11px] text-red-300"
+              >
+                {shortTies} short on material
+              </p>
+            )}
+            {queuedHours && !empty && (
+              <p
+                data-testid={`dispatch-queued-hours-${column.id}`}
+                title="Planned setup + run hours of the queued work — not remaining hours."
+                className="truncate font-mono text-[11px] text-slate-400"
+              >
+                {queuedHours}
+              </p>
+            )}
+          </div>
+          <span
+            className={`shrink-0 rounded border px-2 py-0.5 font-mono text-xs ${
+              deactivated
+                ? 'border-red-500/60 text-red-300'
+                : empty
+                  ? 'border-slate-800 text-slate-500'
+                  : 'border-fd-line text-slate-300'
+            }`}
+          >
+            {column.queue.length}
+          </span>
+        </header>
+
+        {deactivated && (
+          <p
+            data-testid={`dispatch-deactivated-remedy-${column.id}`}
+            className="border-b border-red-500/40 bg-red-500/5 px-3 py-1.5 text-[11px] text-red-300"
+          >
+            Move this work to an active machine.
+          </p>
+        )}
+
+        {/* Drop surface. Plain div: the accessible equivalent of dropping
+            here is each card's Move up/down buttons + machine select, so
+            the surface itself is presentational (POUpload.tsx precedent).
+            A deactivated column gets no drag handlers at all — nothing can
+            land on a machine that can't run it. */}
+        <div
+          role="presentation"
+          data-testid={`dispatch-column-${column.id}`}
+          className="flex min-h-[7rem] flex-1 flex-col gap-2 p-2"
+          onDragOver={deactivated || glanceMode ? undefined : e => handleColumnDragOver(e, column.id)}
+          onDragLeave={deactivated || glanceMode ? undefined : handleDragLeave}
+          onDrop={deactivated || glanceMode ? undefined : e => handleColumnDrop(e, column.id)}
+        >
+          {empty ? (
+            <p className="px-1 py-6 text-center text-xs text-slate-500">
+              {deactivated
+                ? 'Deactivated — no queued work remains.'
+                : "Idle — no queued work. Drag a job here (or use a card's machine select) to move it to this machine."}
+            </p>
+          ) : (
+            <>
+              {column.queue.map((row, index) => (
+                <React.Fragment key={row.operation_id}>
+                  <DropLine columnId={column.id} index={index} dropSlot={dropSlot} />
+                  {/* A band opens each work order's block in the plan, and the
+                      unplanned tail after it. Drawn only when the column holds
+                      planned work, so a pre-v2 / unplanned board is unchanged. */}
+                  {bands && (index === 0 || bandKey(column.queue[index - 1]) !== bandKey(row)) && (
+                    <PlanBand columnId={column.id} index={index} row={row} />
+                  )}
+                  <ChangeoverMarker
+                    operationId={row.operation_id}
+                    // Only a nest-to-nest boundary is a changeover; the
+                    // helper returns null for the first card and for any
+                    // pair where either side isn't a nest.
+                    kind={index === 0 ? null : nestChangeover(column.queue[index - 1].laser_nest, row.laser_nest)}
+                  />
+                  <DispatchCard
+                    glanceMode={glanceMode}
+                    row={row}
+                    index={index}
+                    column={column}
+                    // Every ACTIVE machine, busy or idle, stays in the card's
+                    // move list — that is what makes hiding the idle columns
+                    // cost-free. Deactivated machines are filtered out inside
+                    // the card: they can't accept work.
+                    columns={boardColumns}
+                    canEdit={canEdit}
+                    moving={movingOperationId === row.operation_id}
+                    moveDisabled={movingOperationId != null}
+                    reorderBusy={reorderingColumn(column.id)}
+                    dragging={dragSource?.operationId === row.operation_id}
+                    bandEdgeUp={index > 0 && bandKey(column.queue[index - 1]) !== bandKey(row)}
+                    bandEdgeDown={index < column.queue.length - 1 && bandKey(column.queue[index + 1]) !== bandKey(row)}
+                    dimmed={itemFiltered && !matchesRow(row)}
+                    onDragStart={handleDragStart}
+                    onDragEnd={handleDragEnd}
+                    onDragOver={handleCardDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleCardDrop}
+                    onMove={moveWithinColumn}
+                    onMoveToWorkCenter={moveToWorkCenter}
+                  />
+                </React.Fragment>
+              ))}
+              {/* The tail slot gets a line of its own — "goes to the
+                  bottom" must be something the manager SEES before
+                  releasing, never a silent consequence of the gap. */}
+              <DropLine columnId={column.id} index={column.queue.length} dropSlot={dropSlot} />
+            </>
+          )}
+        </div>
+      </section>
+    );
+  };
+
+  return (
+    <div className="space-y-3">
+      {/* Deliberately NOT aria-live: a background poll every 10 s must not
+          interrupt a screen reader. The status line below announces the
+          user's own actions, refusals and failures only. */}
+      <p className="text-xs text-slate-400" data-testid="dispatch-freshness">
+        {lastRefreshed
+          ? `Updated ${formatCentralTime(lastRefreshed)} CT · refreshes every ${DISPATCH_POLL_MS / 1000} seconds while visible`
+          : 'Waiting for current dispatch data'}
+        {updatesDeferred ? ' · Updates deferred until the current interaction finishes' : ''}
+      </p>
+      <BoardHeader
+        totals={totals}
+        statusMessage={statusMessage}
+        onRefresh={() => load({ silent: true })}
+        refreshing={refreshing}
+        canEdit={canEdit}
+        staleNotice={staleNotice}
+        viewControl={
+          <Button
+            variant="secondary"
+            size="sm"
+            aria-pressed={glanceMode}
+            onClick={() => {
+              setGlanceMode(value => !value);
+              setDragSource(null);
+              setDropSlot(null);
+            }}
+          >
+            {glanceMode ? 'Planner view' : 'TV glance'}
+          </Button>
+        }
+        scroll={
+          !hasBoard
+            ? null
+            : {
+                atStart: scrollEdges.atStart,
+                atEnd: scrollEdges.atEnd,
+                onScrollLeft: () => scrollBoard(-1),
+                onScrollRight: () => scrollBoard(1),
+              }
+        }
+      />
+
+      {totals.jobs > 0 && totals.ranked === 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-sm border border-amber-500/40 bg-amber-500/10 p-4">
+          <div>
+            <h2 className="font-semibold text-amber-200">No advisory run order set</h2>
+            <p className="mt-1 max-w-3xl text-sm text-slate-200">
+              {glanceMode && canEdit
+                ? 'These queued jobs have no ranks yet. Switch to Planner view to set the manual run order. Operators can still start available work.'
+                : canEdit
+                  ? 'These queued jobs have no ranks yet. Set the run order manually with each card’s Move up / Move down controls or drag jobs within a machine. Operators can still start available work.'
+                  : 'These queued jobs have no ranks yet. Ask a planner to set the manual run order; operators can still start available work.'}
+            </p>
+          </div>
+          <Button
+            onClick={() => {
+              const card = boardRef.current?.querySelector<HTMLElement>('[data-dispatch-card]');
+              card?.focus({ preventScroll: true });
+              card?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+            }}
+          >
+            Review queued jobs
+          </Button>
+        </div>
+      )}
+
+      {filterSummary && (
+        <p className="text-xs text-slate-400" data-testid="dispatch-filter-summary">
+          {filterSummary}
+        </p>
+      )}
+
+      {boardColumns.length === 0 ? (
+        <EmptyState
+          icon={QueueListIcon}
+          title="No machines to dispatch"
+          description="Released work assigned to an active work center shows up here as a run-order column."
+        />
+      ) : visibleColumnCount === 0 ? (
+        <EmptyState
+          icon={QueueListIcon}
+          title="No machines match these filters"
+          description="Clear a filter or change the search to see more of the board."
+        />
+      ) : (
+        <>
+          {idleCollapsible && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                data-testid="dispatch-idle-toggle"
+                aria-expanded={showIdle}
+                aria-controls={IDLE_REGION_ID}
+                title={idleHelp}
+                onClick={() => setShowIdle(shown => !shown)}
+              >
+                {showIdle
+                  ? 'Hide idle machines'
+                  : `Show ${idleColumns.length} idle machine${idleColumns.length === 1 ? '' : 's'}`}
+              </Button>
+              <span className="text-xs text-slate-500">{idleHelp}</span>
+            </div>
+          )}
+
+          {/* The BOARD scrolls — sideways AND down — never the page body. Capping
+              it at the window bottom is what keeps its horizontal scrollbar
+              reachable without scrolling the page to the foot of the tallest
+              column first. */}
+          <div className="relative">
+            <div
+              className="board-scroll-x overflow-auto pb-2"
+              data-testid="dispatch-board-scroll"
+              ref={boardRef}
+              style={boardMaxHeight == null ? undefined : { maxHeight: boardMaxHeight }}
+              onScroll={syncScrollEdges}
+            >
+              <div className="flex min-w-max items-start gap-3">
+                {deactivatedColumns.map(renderColumn)}
+                {busyColumns.map(renderColumn)}
+                {idleColumns.length > 0 && (
+                  // Always in the DOM so `aria-controls` names a real element;
+                  // the columns themselves are only rendered when revealed.
+                  <div id={IDLE_REGION_ID} className={idleVisible ? 'flex items-start gap-3' : 'hidden'}>
+                    {idleVisible ? idleColumns.map(renderColumn) : null}
+                  </div>
+                )}
+              </div>
+            </div>
+            {/* "The board continues over here" — the affordance the hidden macOS
+                overlay scrollbar never gave. Gone at the end of the scroll. */}
+            {!scrollEdges.atEnd && (
+              <div
+                aria-hidden="true"
+                data-testid="dispatch-board-more"
+                // Inset by the 10px scrollbar gutter on both edges: the fade is a
+                // sibling painted OVER the board, and at `right-0`/`bottom-0` it
+                // would sit on top of the board's own scrollbars.
+                className="pointer-events-none absolute bottom-3 right-2.5 top-0 w-16 bg-gradient-to-l from-fd-canvas via-fd-canvas/80 to-transparent"
+              />
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The visible landing slot. Rendered between cards (and after the last one) so
+ * the drop target — including the tail — is always shown before release.
+ */
+function DropLine({ columnId, index, dropSlot }: { columnId: number; index: number; dropSlot: DropSlot | null }) {
+  const active = dropSlot?.workCenterId === columnId && dropSlot.index === index;
+  // A slot across a work-order band shows RED before release: dropping there is
+  // refused with the explanation, so the planner sees the refusal coming.
+  const refused = active && !dropSlot?.allowed;
+  return (
+    <div
+      aria-hidden="true"
+      data-testid={active ? `dispatch-drop-line-${columnId}-${index}` : undefined}
+      data-refused={refused || undefined}
+      className={`-my-1 h-0.5 rounded-sm ${refused ? 'bg-red-500' : active ? 'bg-blue-400' : 'bg-transparent'}`}
+    />
+  );
+}
+
+/**
+ * A work-order band: where one planned work order's block starts in this
+ * machine's queue (plan position + work order number), or where the unplanned
+ * tail begins. Presentational — the plan itself is reordered in the Work orders
+ * view, which is what the band's title says.
+ */
+function PlanBand({ columnId, index, row }: { columnId: number; index: number; row: DispatchBoardRow }) {
+  const planned = row.dispatch_position != null;
+  return (
+    <div
+      data-testid={`dispatch-band-${columnId}-${index}`}
+      title={
+        planned
+          ? `Plan position ${row.dispatch_position}: ${row.work_order_number}'s operations run together, in plan order. Reorder work orders in the Work orders view.`
+          : 'Work orders not in the plan, and planned work orders on hold, run after every planned work order.'
+      }
+      className="flex items-center gap-1.5 px-0.5 pt-0.5"
+    >
+      <span
+        className={`whitespace-nowrap font-mono text-[10px] font-semibold uppercase tracking-wider ${
+          planned ? 'text-blue-300' : 'text-slate-500'
+        }`}
+      >
+        {planned ? `Plan ${row.dispatch_position} · ${row.work_order_number}` : 'Not in plan'}
+      </span>
+      <span aria-hidden="true" className={`h-px flex-1 ${planned ? 'bg-blue-400/30' : 'bg-slate-700'}`} />
+    </div>
+  );
+}
+
+/**
+ * The setup a boundary costs, drawn between the two cards that cause it.
+ *
+ * Purely presentational: the glyph and the rule are `aria-hidden`, but the words
+ * stay in the accessible name of the column's content so a screen-reader user
+ * hears "material change" in position between the two jobs. It is deliberately
+ * not focusable and carries no interactive role — there is nothing to activate;
+ * the fix for a changeover is to reorder the cards around it.
+ */
+function ChangeoverMarker({ operationId, kind }: { operationId: number; kind: NestChangeover | null }) {
+  if (!kind) return null;
+  return (
+    <div data-testid={`dispatch-changeover-marker-${operationId}`} className="-my-0.5 flex items-center gap-1.5 px-1">
+      <span aria-hidden="true" className="font-mono text-[10px] leading-none text-amber-400/80">
+        ▸
+      </span>
+      <span className="whitespace-nowrap font-mono text-[10px] uppercase tracking-wider text-amber-300/90">
+        {changeoverLabel(kind)}
+      </span>
+      <span aria-hidden="true" className="h-px flex-1 bg-amber-400/30" />
+    </div>
+  );
+}
+
+/** Board-panning controls; null when there is no board to pan. */
+interface BoardScroll {
+  atStart: boolean;
+  atEnd: boolean;
+  onScrollLeft: () => void;
+  onScrollRight: () => void;
+}
+
+interface BoardHeaderProps {
+  totals: { machines: number; busy: number; idle: number; deactivated: number; jobs: number; ranked: number };
+  statusMessage: string;
+  onRefresh: () => void;
+  refreshing: boolean;
+  canEdit: boolean;
+  /** Set when a re-read failed: what's on screen may not be what the server has. */
+  staleNotice: string | null;
+  scroll: BoardScroll | null;
+  viewControl?: React.ReactNode;
+}
+
+function BoardHeader({
+  totals,
+  statusMessage,
+  onRefresh,
+  refreshing,
+  canEdit,
+  staleNotice,
+  scroll,
+  viewControl,
+}: BoardHeaderProps) {
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          {/* The page title lives in the page shell (pages/DispatchBoard.tsx). */}
+          <p className="text-sm text-slate-400" data-testid="dispatch-totals">
+            {/* The totals describe the SHOP, not what happens to be rendered —
+                the busy/idle split is what says why the board looks shorter. */}
+            {totals.jobs} queued job{totals.jobs === 1 ? '' : 's'} across {totals.machines} machine
+            {totals.machines === 1 ? '' : 's'} · {totals.ranked} ranked
+            {totals.machines > 0 && (
+              <>
+                {' '}
+                · {totals.busy} machine{totals.busy === 1 ? '' : 's'} with work, {totals.idle} idle
+              </>
+            )}
+            {totals.deactivated > 0 && (
+              <>
+                {' '}
+                ·{' '}
+                <span className="font-semibold text-red-300" data-testid="dispatch-deactivated-total">
+                  {totals.deactivated} deactivated machine{totals.deactivated === 1 ? '' : 's'} still{' '}
+                  {totals.deactivated === 1 ? 'has' : 'have'} work
+                </span>
+              </>
+            )}{' '}
+            ·{' '}
+            <span className="text-slate-500">
+              run order is advisory — operators see the rank but can still start any job
+            </span>
+          </p>
+        </div>
+        <div className="flex items-center gap-1">
+          {viewControl}
+          {scroll && (
+            // End-of-travel gating is `aria-disabled` + an inert click, not
+            // `disabled`: a keyboard user panning to the end must not have the
+            // control blurred out from under them onto <body> (same rule the
+            // card controls follow).
+            <>
+              <Button
+                variant="secondary"
+                size="sm"
+                data-testid="dispatch-scroll-left"
+                aria-label="Scroll board left"
+                title={scroll.atStart ? 'Already at the first machine' : 'Scroll left'}
+                aria-disabled={scroll.atStart || undefined}
+                className={scroll.atStart ? 'opacity-40' : undefined}
+                onClick={() => {
+                  if (scroll.atStart) return;
+                  scroll.onScrollLeft();
+                }}
+              >
+                <ChevronLeftIcon className="h-4 w-4" aria-hidden="true" />
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                data-testid="dispatch-scroll-right"
+                aria-label="Scroll board right"
+                title={scroll.atEnd ? 'Already at the last machine' : 'Scroll right'}
+                aria-disabled={scroll.atEnd || undefined}
+                className={scroll.atEnd ? 'opacity-40' : undefined}
+                onClick={() => {
+                  if (scroll.atEnd) return;
+                  scroll.onScrollRight();
+                }}
+              >
+                <ChevronRightIcon className="h-4 w-4" aria-hidden="true" />
+              </Button>
+            </>
+          )}
+          <Button variant="secondary" size="sm" onClick={onRefresh} disabled={refreshing}>
+            <ArrowPathIcon className={`mr-1.5 inline h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} aria-hidden="true" />
+            {refreshing ? 'Refreshing…' : 'Refresh'}
+          </Button>
+        </div>
+      </div>
+      {!canEdit && (
+        <p className="rounded-sm border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-300">
+          You can view the run order but not change it.
+        </p>
+      )}
+      {staleNotice && (
+        <div
+          role="alert"
+          data-testid="dispatch-stale-notice"
+          className="flex flex-wrap items-center gap-2 rounded-sm border border-red-500/40 bg-red-500/5 px-3 py-2 text-xs text-red-300"
+        >
+          <span>This board may be out of date — the last refresh didn&apos;t land. {staleNotice}</span>
+          <Button variant="secondary" size="sm" onClick={onRefresh} disabled={refreshing}>
+            Retry refresh
+          </Button>
+        </div>
+      )}
+      <p
+        role="status"
+        aria-live="polite"
+        data-testid="dispatch-status"
+        className="min-h-[1.25rem] font-mono text-xs text-slate-400"
+      >
+        {statusMessage}
+      </p>
+    </div>
+  );
+}
+
+interface DispatchCardProps {
+  glanceMode?: boolean;
+  row: DispatchBoardRow;
+  index: number;
+  column: DispatchBoardColumn;
+  columns: DispatchBoardColumn[];
+  canEdit: boolean;
+  moving: boolean;
+  moveDisabled: boolean;
+  /** A reorder of THIS column is unresolved — don't let another one stack on it. */
+  reorderBusy: boolean;
+  dragging: boolean;
+  /** The card above belongs to another work-order band: Move up would cross the plan. */
+  bandEdgeUp?: boolean;
+  /** The card below belongs to another work-order band: Move down would cross the plan. */
+  bandEdgeDown?: boolean;
+  /** Filtered out by the page's search/chips — dimmed, never removed (the column order must stay whole). */
+  dimmed?: boolean;
+  onDragStart: (e: React.DragEvent, row: DispatchBoardRow, workCenterId: number) => void;
+  onDragEnd: () => void;
+  onDragOver: (e: React.DragEvent, workCenterId: number, index: number) => void;
+  onDragLeave: (e: React.DragEvent) => void;
+  onDrop: (e: React.DragEvent, workCenterId: number, index: number) => void;
+  onMove: (workCenterId: number, operationId: number, toIndex: number, direction?: 'up' | 'down') => void;
+  onMoveToWorkCenter: (row: DispatchBoardRow, workCenterId: number) => void;
+}
+
+function DispatchCard({
+  glanceMode,
+  row,
+  index,
+  column,
+  columns,
+  canEdit,
+  moving,
+  moveDisabled,
+  reorderBusy,
+  dragging,
+  bandEdgeUp = false,
+  bandEdgeDown = false,
+  dimmed = false,
+  onDragStart,
+  onDragEnd,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  onMove,
+  onMoveToWorkCenter,
+}: DispatchCardProps) {
+  const running = isRunning(row);
+  const label = jobLabel(row);
+  // A deactivated column's cards are pinned like running ones: no drag, no
+  // re-rank. The machine select stays live — moving OUT is the remedy.
+  const columnDeactivated = column.is_active === false;
+  const pinned = running || !canEdit || columnDeactivated;
+  // In-flight gating is `aria-disabled`, NOT `disabled`: a control that becomes
+  // `disabled` under the user's finger is blurred by the browser, which is how a
+  // keyboard reorder used to throw focus to <body>. The click handler no-ops
+  // instead, so a second reorder still can't stack on an unresolved one.
+  const busy = reorderBusy || moveDisabled;
+  const disabledReason = running
+    ? RUNNING_PIN_REASON
+    : columnDeactivated
+      ? DEACTIVATED_PIN_REASON
+      : !canEdit
+        ? ROLE_PIN_REASON
+        : busy
+          ? SAVING_REASON
+          : undefined;
+  // The select's own gate: a deactivated COLUMN does not block it (that select
+  // is the one live control on such a column), so it must not inherit `pinned`.
+  const moveReason = running ? RUNNING_MOVE_REASON : !canEdit ? ROLE_PIN_REASON : busy ? SAVING_REASON : undefined;
+  const pastDue = row.due_date ? isDateBeforeTodayInCentral(row.due_date) : false;
+  const dueToday = row.due_date ? isDateTodayInCentral(row.due_date) : false;
+  // Move targets are ACTIVE machines only — the server 404s a move to a
+  // deactivated work center, so the board must never offer one.
+  const otherMachines = columns.filter(candidate => candidate.id !== column.id && candidate.is_active !== false);
+  const nestSegments = nestDetailSegments(row.laser_nest);
+  // `null` for an UNTIED operation — nothing renders at all (no placeholder, no
+  // "not tied" nag): an untied work order stays byte-identical to its
+  // pre-feature self.
+  const tieChip = materialTieChip(row);
+
+  if (glanceMode) {
+    return (
+      <div
+        data-testid={`dispatch-card-${row.operation_id}`}
+        data-dispatch-card={row.operation_id}
+        tabIndex={-1}
+        data-filter-match={dimmed ? 'false' : undefined}
+        className={`rounded-sm border p-4 outline-none focus-visible:ring-1 focus-visible:ring-blue-400 ${running ? 'border-blue-400/60 bg-blue-500/5' : 'border-fd-line bg-fd-sunken'} ${dimmed ? 'opacity-40' : ''}`}
+      >
+        <div className="flex items-start gap-3">
+          <span
+            data-testid={`dispatch-rank-${row.operation_id}`}
+            className="w-9 shrink-0 text-center font-mono text-3xl font-bold text-white"
+            title={row.run_order == null ? 'Unranked' : `Run order ${row.run_order}`}
+          >
+            {row.run_order ?? '–'}
+          </span>
+          <div className="min-w-0 flex-1 space-y-2">
+            <a
+              href={`/work-orders/${row.work_order_id}`}
+              className="critical-text font-mono text-xl font-bold text-white"
+              aria-label={`Open work order ${row.work_order_number}`}
+            >
+              {row.work_order_number}
+            </a>
+            <p className="critical-text text-lg text-slate-200">
+              {hasOperationNumber(row.operation_number) ? `${formatOperationLabel(row.operation_number)} · ` : ''}
+              {row.operation_name || 'Operation'}
+            </p>
+            <p className="critical-text font-mono text-sm text-slate-300">
+              {row.component_part_number || row.part_number}
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <StatusBadge status={row.status} />
+              <UnitBadge unitNumber={row.unit_number} size="sm" />
+              <span className="font-mono text-base text-slate-200">
+                {row.quantity_complete}/{row.quantity_ordered} pcs
+              </span>
+            </div>
+            {row.due_date && (
+              <p
+                className={`text-base font-semibold ${pastDue ? 'text-red-300' : dueToday ? 'text-amber-300' : 'text-slate-300'}`}
+              >
+                {pastDue ? 'Past due ' : dueToday ? 'Due today' : 'Due '}
+                {dueToday ? '' : formatCentralDate(row.due_date)}
+              </p>
+            )}
+            {tieChip && tieChip.tone !== 'ok' && (
+              <p className={`critical-text text-sm ${TIE_TONE_CLASS[tieChip.tone]}`} title={tieChip.title}>
+                {tieChip.text}
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      role="presentation"
+      data-testid={`dispatch-card-${row.operation_id}`}
+      data-dispatch-card={row.operation_id}
+      // Focus fallback for the reorder focus effect: if BOTH move buttons end up
+      // disabled by the move, focus lands on the card rather than on <body>.
+      tabIndex={-1}
+      draggable={!pinned && !busy}
+      onDragStart={e => onDragStart(e, row, column.id)}
+      onDragEnd={onDragEnd}
+      // On a deactivated column the card is not a drop surface either — no
+      // handlers, so a dragged card can't slot between stranded ones.
+      onDragOver={columnDeactivated ? undefined : e => onDragOver(e, column.id, index)}
+      onDragLeave={columnDeactivated ? undefined : onDragLeave}
+      onDrop={columnDeactivated ? undefined : e => onDrop(e, column.id, index)}
+      data-filter-match={dimmed ? 'false' : undefined}
+      className={`rounded-sm border px-2.5 py-2 outline-none transition-colors focus-visible:ring-1 focus-visible:ring-blue-400 ${
+        running ? 'border-blue-400/60 bg-blue-500/5' : 'border-fd-line bg-fd-sunken'
+      } ${dragging ? 'opacity-50' : ''} ${moving ? 'opacity-60' : ''} ${dimmed && !dragging && !moving ? 'opacity-40' : ''}`}
+    >
+      <div className="flex items-start gap-2">
+        <span
+          data-testid={`dispatch-rank-${row.operation_id}`}
+          className={`mt-0.5 w-7 shrink-0 text-center font-mono text-xl font-bold leading-none tabular-nums ${
+            row.run_order == null ? 'text-slate-600' : 'text-white'
+          }`}
+          title={row.run_order == null ? 'Unranked — runs after every ranked job' : `Run order ${row.run_order}`}
+        >
+          {row.run_order == null ? '–' : row.run_order}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <a
+              href={`/work-orders/${row.work_order_id}`}
+              className="font-mono text-sm font-semibold text-slate-100 underline decoration-slate-600 underline-offset-2"
+              aria-label={`Open work order ${row.work_order_number}`}
+            >
+              {row.work_order_number}
+            </a>
+            <UnitBadge unitNumber={row.unit_number} size="sm" />
+            {running ? (
+              <span className="rounded border border-blue-400/60 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-widest text-blue-300">
+                Running
+              </span>
+            ) : (
+              <StatusBadge status={row.status} />
+            )}
+          </div>
+          <p className="truncate text-xs text-slate-300">
+            {hasOperationNumber(row.operation_number) ? `${formatOperationLabel(row.operation_number)} · ` : ''}
+            {row.operation_name || 'Operation'}
+          </p>
+          {row.part_number && (
+            <p className="truncate font-mono text-[11px] text-slate-400">
+              {row.part_number}
+              {row.part_name ? <span className="font-sans"> · {row.part_name}</span> : null}
+            </p>
+          )}
+          {/* The COMPONENT this operation builds, when it is not the work order's own
+              part — on a BOM-exploded assembly the line above is the ASSEMBLY's, which
+              is not what gets made at this station. Read LIVE from the part, unlike the
+              copy baked into operation_name when the work order was raised: a renumber
+              deliberately leaves released operation names alone, so the baked prefix can
+              go stale while this stays correct. */}
+          {row.component_part_number && (
+            <p className="truncate font-mono text-[11px] text-slate-400">
+              <span className="font-sans text-slate-500">Component </span>
+              {row.component_part_number}
+              {row.component_part_name ? <span className="font-sans"> · {row.component_part_name}</span> : null}
+            </p>
+          )}
+          {/* One dense line — material and thickness carry the sequencing weight,
+              so they read brighter than the sheet size and the sheets left. The
+              card must stay short enough that a column still shows a queue. */}
+          {nestSegments.length > 0 && (
+            <p data-testid={`dispatch-nest-${row.operation_id}`} className="truncate font-mono text-[11px]">
+              {nestSegments.map((segment, segmentIndex) => (
+                <React.Fragment key={segment.key}>
+                  {segmentIndex > 0 && <span className="text-slate-600"> · </span>}
+                  <span
+                    className={
+                      segment.key === 'material' || segment.key === 'thickness' ? 'text-slate-200' : 'text-slate-400'
+                    }
+                  >
+                    {segment.text}
+                  </span>
+                </React.Fragment>
+              ))}
+            </p>
+          )}
+          <div className="mt-1 flex flex-wrap items-center gap-1.5">
+            {row.due_date && (
+              <span
+                className={`rounded border px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider ${
+                  pastDue
+                    ? 'border-red-500/60 text-red-300'
+                    : dueToday
+                      ? 'border-amber-500/60 text-amber-300'
+                      : 'border-fd-line text-slate-400'
+                }`}
+              >
+                {pastDue ? 'Past due ' : dueToday ? 'Due today' : 'Due '}
+                {dueToday ? '' : formatCentralDate(row.due_date)}
+              </span>
+            )}
+            {/* Material tie — an ESTIMATE of what leaves stock when THIS
+                OPERATION completes (a card is an operation row), never a
+                guarantee and never "deducting now": consumption is
+                reconcile-to-target, and nothing posts until the operation flips
+                COMPLETE. The full sentence lives in the title. */}
+            {tieChip && (
+              <span
+                data-testid={`dispatch-tie-${row.operation_id}`}
+                title={tieChip.title}
+                className={`max-w-full truncate rounded border px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider ${TIE_TONE_CLASS[tieChip.tone]}`}
+              >
+                {tieChip.text}
+              </span>
+            )}
+            <span className="font-mono text-[10px] uppercase tracking-wider text-slate-500">
+              {Number(row.quantity_complete || 0)}/{Number(row.quantity_ordered || 0)} pcs
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-2 flex items-center gap-1 border-t border-fd-line pt-2">
+        {/* At a work-order band edge the button stays focusable but inert
+            (`aria-disabled`): pressing it explains WHY the card can't cross,
+            which a plain `disabled` button could never tell a keyboard user. */}
+        <Button
+          variant="ghost"
+          size="sm"
+          data-move="up"
+          aria-label={`Move ${label} up`}
+          title={disabledReason || (bandEdgeUp ? PLAN_ORDER_EXPLANATION : 'Move up one position')}
+          disabled={pinned || index === 0}
+          aria-disabled={busy || bandEdgeUp || undefined}
+          className={busy || bandEdgeUp ? 'opacity-40' : undefined}
+          onClick={() => {
+            if (busy) return;
+            onMove(column.id, row.operation_id, index - 1, 'up');
+          }}
+        >
+          <ArrowUpIcon className="h-4 w-4" aria-hidden="true" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          data-move="down"
+          aria-label={`Move ${label} down`}
+          title={disabledReason || (bandEdgeDown ? PLAN_ORDER_EXPLANATION : 'Move down one position')}
+          disabled={pinned || index === column.queue.length - 1}
+          aria-disabled={busy || bandEdgeDown || undefined}
+          className={busy || bandEdgeDown ? 'opacity-40' : undefined}
+          onClick={() => {
+            if (busy) return;
+            onMove(column.id, row.operation_id, index + 1, 'down');
+          }}
+        >
+          <ArrowDownIcon className="h-4 w-4" aria-hidden="true" />
+        </Button>
+        <select
+          aria-label={`Move ${label} to another machine`}
+          title={
+            moveReason ||
+            (columnDeactivated ? 'Move this job to an active machine' : 'Move this job to another machine')
+          }
+          // Structural reasons (running job, no permission, nowhere to move it)
+          // really are `disabled`; the in-flight gate is `aria-disabled` + a
+          // no-op, so a keyboard user holding this control isn't blurred to
+          // <body> the instant their own move starts -- same rule as the Move
+          // buttons. Deliberately NOT `pinned`: a deactivated column pins the
+          // card but this select is the way OUT, so it stays live there.
+          disabled={running || !canEdit || otherMachines.length === 0}
+          aria-disabled={busy || undefined}
+          value=""
+          onChange={e => {
+            const targetId = Number(e.target.value);
+            e.target.value = '';
+            if (busy) return;
+            if (Number.isFinite(targetId) && targetId > 0) onMoveToWorkCenter(row, targetId);
+          }}
+          className="ml-auto min-w-0 flex-1 rounded-sm border border-fd-line bg-transparent px-1.5 py-1 text-xs text-slate-300 disabled:opacity-40 aria-disabled:opacity-40"
+        >
+          <option value="">Move to machine…</option>
+          {otherMachines.map(machine => (
+            <option key={machine.id} value={machine.id}>
+              {machine.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {(running || moving) && (
+        <p className="mt-1 text-[10px] uppercase tracking-wider text-slate-500">
+          {moving ? 'Moving…' : 'Held in place while running'}
+        </p>
+      )}
+    </div>
+  );
+}

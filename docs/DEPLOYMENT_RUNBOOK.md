@@ -151,6 +151,70 @@ deliberate no-op that never re-grants. Applied revision `093` also gained role-e
 checks in place; a database that already ran it is unaffected. See
 [SUPABASE_SECURITY.md → Data API revoke parity](SUPABASE_SECURITY.md#data-api-revoke-parity-migration-113).
 
+**Work-order dispatch plan (Dispatch Board v2).** Apply additive **114_wo_dispatch_rank**
+after **113** through the normal API boot migration path (`start.sh` / `Dockerfile.prod` run
+`alembic upgrade head` before the server starts). It adds the nullable
+`work_orders.dispatch_rank` (no default, no backfill — metadata-only on PostgreSQL) and two
+indexes, `ix_work_orders_company_dispatch_rank` and
+`ix_operational_events_company_entity_time`. It creates no table and no RLS, revoke or role
+statement, writes no row, and adds no environment variable, secret, cron or worker job.
+
+- **The migration ships with the code, never after it.** The new API reads and writes
+  `dispatch_rank`, so it must never serve against an un-migrated database. The old API never
+  touches the column, so the migration may land ahead of it. The boot path already gives this
+  order: the new image migrates before it serves. The worker loads the same models, so deploy it
+  after the API, which is the order CI already uses.
+- **What the migration locks, and for how long.** Alembic runs every pending revision in one
+  transaction, and PostgreSQL holds each lock until that transaction commits. 114 splits its work
+  around a commit so the expensive step locks nothing:
+  - Inside the transaction, `ADD COLUMN` takes an ACCESS EXCLUSIVE lock on `work_orders`. That
+    lock blocks reads as well as writes, but it covers only the `ADD COLUMN` and the small
+    `ix_work_orders_company_dispatch_rank` build, both quick. The migration first runs
+    `SET LOCAL lock_timeout = '5s'`. If a long transaction is holding `work_orders`, the
+    migration fails after 5 seconds instead of making every `work_orders` query queue behind it.
+    The new container then fails to start, the old deployment keeps serving, and redeploying is
+    safe.
+  - The migration then commits, which releases the `work_orders` lock. It builds
+    `ix_operational_events_company_entity_time` with `CREATE INDEX CONCURRENTLY IF NOT EXISTS`,
+    outside any transaction. A concurrent build blocks neither reads nor operational-event writes,
+    however large the table has grown. It does wait for transactions that were already running
+    to finish, so a long-running transaction delays the boot rather than the floor.
+  - An interrupted concurrent build (a failed statement, or the boot killed by its health-check
+    timeout) leaves an INVALID index. 114 is recorded as applied only after the build succeeds, so
+    the next boot runs it again: the column and the `work_orders` index are already there and are
+    skipped, and the migration checks `pg_index.indisvalid`, drops the INVALID index concurrently
+    and builds it again.
+  - Building the events index out of band first is no longer needed, even mid-shift. It is still
+    harmless, because the migration skips a valid index:
+
+    ```sql
+    -- optional; autocommit: CONCURRENTLY cannot run inside a transaction block
+    CREATE INDEX CONCURRENTLY ix_operational_events_company_entity_time
+        ON operational_events (company_id, entity_type, entity_id, occurred_at);
+    ```
+- **Old and new versions overlap briefly.** The Vercel frontend can reach the old API for a short
+  time after merge. During that window:
+  - the Dispatch Board's Work orders view shows a retryable error, because the old API returns 404
+    for it (the Machines view keeps working);
+  - floor screens show no dispatch strip, because the notice fields are absent;
+  - the old run-order schema ignores the new optional `expected_operation_ids`.
+- **Verify after deploy:**
+  - In a test company, add a released work order to the plan on `/dispatch`.
+  - Confirm its jobs move to the front of each machine queue on the kiosk and in the Machines view.
+  - Reorder the plan. A kiosk at an affected machine should show the RUN NEXT strip within one
+    poll.
+  - Check that the Audit Log shows one `dispatch_board` row for the save.
+- **Rollback.** On an ordinary application rollback, keep the column and both indexes. Older code
+  ignores `dispatch_rank`, so the queues fall back to the pre-plan order. Two things carry over:
+  - Operations ordered inside a planned work order keep their `run_order` values, and the old sort
+    reads those as machine ranks.
+  - Redeploying the feature restores the stored plan. Clear the plan on the board first if it is no
+    longer wanted.
+
+  Downgrading 114 drops the column and both indexes and discards the plan. That is advisory data;
+  the audit rows recording each change survive. The downgrade is not part of an ordinary rollback.
+  See [API.md → Work-order dispatch plan](API.md).
+
 ## Table of Contents
 
 1. [Quick Reference](#quick-reference)

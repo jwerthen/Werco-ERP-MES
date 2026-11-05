@@ -1000,6 +1000,39 @@ class TestTheProductionRecordIsLeftBehind:
         db_session.refresh(ranked)
         assert ranked.run_order == 7
 
+    def test_the_work_orders_plan_position_does_not_come_along(self, client: TestClient, db_session: Session):
+        """``dispatch_rank`` (114) is the planner's shop-wide position for ONE work order.
+
+        ``_copy_header`` is a whitelist, so the column is dropped by omission — and only
+        this test notices if someone adds it. A duplicate carrying its source's rank would
+        put two work orders at the same plan position the instant it was created, ahead
+        of every job the planner had actually placed, without anyone placing it: the
+        duplicate deciding something only the planner gets to decide.
+        """
+        admin = make_user(db_session)
+        wc = make_work_center(db_session, wc_type="machining")
+        source = make_work_order(
+            db_session,
+            part=make_part(db_session),
+            quantity_ordered=10.0,
+            status_value=WorkOrderStatus.RELEASED,
+            dispatch_rank=3,
+            customer_name="Miratech",
+        )
+        add_operation(db_session, source, wc, sequence=10)
+
+        resp = duplicate(client, headers_for(admin), source.id, quantity=10)
+        assert resp.status_code == status.HTTP_201_CREATED, resp.text
+
+        new_wo = created_work_order(db_session, resp)
+        assert new_wo.dispatch_rank is None
+        # Non-vacuity: neighbouring header plan fields on the same source DO carry.
+        assert new_wo.customer_name == "Miratech"
+        assert new_wo.priority == source.priority
+        # The source keeps its place in the plan.
+        db_session.refresh(source)
+        assert source.dispatch_rank == 3
+
     def test_nests_start_with_zero_completed_runs(self, client: TestClient, db_session: Session):
         admin = make_user(db_session)
         wc = make_work_center(db_session, wc_type="laser")

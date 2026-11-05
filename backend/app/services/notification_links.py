@@ -80,6 +80,11 @@ DOWNTIME_LIST = "/downtime"
 INVENTORY_LIST = "/inventory"
 MRP_LIST = "/mrp"
 SCHEDULING_LIST = "/scheduling"
+# Record-less: a dispatch notice names a work center, and the operations page shows that
+# machine's queue in dispatch order. Reachable by every role (``/shop-floor`` requires
+# ``work_orders:view``, which all roles hold), so rule 4 holds for the clocked-in operators
+# ``dispatch.changed`` reaches.
+SHOP_FLOOR_OPERATIONS = "/shop-floor/operations"
 VISITOR_LOG = "/visitor-log"
 
 ALL_LINK_TEMPLATES: tuple[str, ...] = (
@@ -97,6 +102,7 @@ ALL_LINK_TEMPLATES: tuple[str, ...] = (
     INVENTORY_LIST,
     MRP_LIST,
     SCHEDULING_LIST,
+    SHOP_FLOOR_OPERATIONS,
     VISITOR_LOG,
 )
 

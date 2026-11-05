@@ -3,7 +3,15 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../services/api';
 import { usePermissions } from '../hooks/usePermissions';
-import { ActiveJob, LaserNestInfo, OperationHold, User } from '../types';
+import {
+  ActiveJob,
+  LaserNestInfo,
+  MyActiveJobResponse,
+  OperationHold,
+  ShopFloorOperationsDispatchFields,
+  User,
+  WorkCenterQueueResponse,
+} from '../types';
 import {
   formatCentralDate,
   formatCentralDateTime,
@@ -55,6 +63,9 @@ import MobileCurrentWork from '../components/shopfloor/MobileCurrentWork';
 import ShopFloorCameraScanner from '../components/shopfloor/ShopFloorCameraScanner';
 import KioskDocViewer, { KioskDocTab, KioskDocTransport } from '../components/kiosk/KioskDocViewer';
 import KioskJobNotes from '../components/kiosk/KioskJobNotes';
+import DispatchNoticeBanner from '../components/kiosk/DispatchNoticeBanner';
+import { useDispatchNotice } from '../hooks/useDispatchNotice';
+import type { DispatchNoticeSource } from '../hooks/useDispatchNotice';
 
 interface Operation {
   id: number;
@@ -200,6 +211,16 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
   // it with an inline ErrorState until a refresh succeeds.
   const [operationsError, setOperationsError] = useState(false);
   const [activeJobsStale, setActiveJobsStale] = useState(false);
+  // Dispatch notices ("the planner changed this machine's order"): one source
+  // per payload, each with its own server_time. my-active-job carries the
+  // machines the operator is clocked in at; the operations list carries the one
+  // machine it is filtered to (and nothing when showing All).
+  const [activeJobNotices, setActiveJobNotices] = useState<DispatchNoticeSource>({});
+  const [stationNotices, setStationNotices] = useState<DispatchNoticeSource>({});
+  const dispatchNotice = useDispatchNotice({
+    sources: [activeJobNotices, stationNotices],
+    scope: user?.id != null ? { kind: 'user', userId: user.id } : null,
+  });
 
   // Filters
   const [workCenterId, _setWorkCenterId] = useState<number | ''>(() => workspace.workCenterId || '');
@@ -343,9 +364,18 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       
       const response = await api.getShopFloorOperations(params);
       let nextOperations = response.operations || [];
+      // Present only when filtered to one work center (older backend: absent).
+      const dispatchFields: ShopFloorOperationsDispatchFields = response || {};
+      let nextStationNotices: DispatchNoticeSource = workCenterId
+        ? { notices: dispatchFields.dispatch_notices, serverTime: dispatchFields.server_time ?? null }
+        : {};
 
       if (workCenterId && !statusFilter && !dueTodayOnly && !debouncedSearch && nextOperations.length === 0) {
-        const queueResponse = await api.getWorkCenterQueue(workCenterId);
+        const queueResponse: WorkCenterQueueResponse = await api.getWorkCenterQueue(workCenterId);
+        nextStationNotices = {
+          notices: [...(nextStationNotices.notices || []), queueResponse.dispatch_notice],
+          serverTime: queueResponse.server_time ?? nextStationNotices.serverTime ?? null,
+        };
         nextOperations = (queueResponse.queue || []).map((item: any) => ({
           id: item.operation_id,
           work_order_id: item.work_order_id,
@@ -383,6 +413,7 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       if (requestId !== operationsRequestRef.current) return;
       loadedOperationsQueryRef.current = operationsQueryKey;
       setOperations(nextOperations);
+      setStationNotices(nextStationNotices);
       setLastUpdated(Date.now());
       setOperationsError(false);
       lastLoadFailedRef.current.operations = false;
@@ -427,8 +458,9 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
 
   const loadActiveJobs = useCallback(async () => {
     try {
-      const response = await api.getMyActiveJob();
+      const response: MyActiveJobResponse = await api.getMyActiveJob();
       setActiveJobs(response.active_jobs || (response.active_job ? [response.active_job] : []));
+      setActiveJobNotices({ notices: response.dispatch_notices, serverTime: response.server_time ?? null });
       setActiveJobsStale(false);
       lastLoadFailedRef.current.activeJobs = false;
       return response.active_jobs || (response.active_job ? [response.active_job] : []);
@@ -1367,6 +1399,13 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       <ProductionSaveNotice phase={productionSave.phase} message={productionSave.message} online={productionSave.online}
         unconfirmed={productionSave.unconfirmed} onRetry={() => void retryOriginalProduction()}
         unconfirmedCorrection={productionSave.unconfirmedCorrection} onReviewCorrection={() => void openCorrectionReview()} />
+
+      {/* Dispatch notice — below the unsaved-production notice, never in its place. */}
+      <DispatchNoticeBanner
+        showWorkCenter
+        notices={dispatchNotice.active}
+        onAcknowledge={dispatchNotice.acknowledge}
+      />
 
       {phone && (
         <div className={`space-y-4 ${mobileView === 'my-work' && selectedActiveJob ? 'pb-28' : ''}`}>

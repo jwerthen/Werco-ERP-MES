@@ -20,6 +20,7 @@
  */
 
 import {
+  DispatchNotice,
   KioskJobInstructions,
   KioskLastReport,
   KioskMaterialTie,
@@ -198,6 +199,12 @@ export interface KioskWorkCenterQueueResponse {
   server_time?: string;
   /** The queue's work center (backend B3) — feeds the kiosk top bar. */
   work_center?: KioskQueueWorkCenter | null;
+  /**
+   * Dispatch v2: this work center's newest dispatch notice from the last 12
+   * hours, or null — the source of the floor "RUN NEXT" banner. Optional so a
+   * pre-v2 backend payload still typechecks.
+   */
+  dispatch_notice?: DispatchNotice | null;
 }
 
 /**

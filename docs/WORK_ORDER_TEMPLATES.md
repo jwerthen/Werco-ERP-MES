@@ -214,6 +214,7 @@ Not copied, as decisions rather than oversights:
 | `parent_work_order_id` | The result is an **independent** work order. Re-attaching it to the source's assembly parent would add a second laser child against demand the first already satisfied, and the parent's rollup would count both. |
 | `must_ship_by` | The original order's promise; it outranks `due_date` in OTD/OTIF. Carrying it would silently override the due date just supplied. |
 | `run_order` | A manager's dispatch ranking for one machine's board, not part of the plan. A 40-nest template arriving pre-ranked would displace the sequence already set at that laser. |
+| `dispatch_rank` | The source job's place in the shop-wide work-order dispatch plan (migration `114`) — a planner's decision about that job, not part of its plan. Every draft a template produces lands **outside** the plan until a planner places it. |
 | `scheduled_start` / `scheduled_end` | `SchedulingService` output for the *source's* dates; release reschedules anyway. |
 | Lot **pins** on copied ties | Every tie lands inert (`qty_consumed = 0`, `status = open`) with its pinned lot and pinned inventory item **cleared**. A pin says "consume from *this* lot", and the lot the source job pinned was very likely consumed by the source job. |
 

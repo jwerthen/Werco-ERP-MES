@@ -10,7 +10,7 @@ import {
   operationNumberText,
 } from './kioskConstants';
 import { UnitBadge } from '../ui';
-import { KioskRunOrderChip, KioskStepsChip } from './KioskQueueCard';
+import { KioskMovedUpChip, KioskRunOrderChip, KioskStepsChip } from './KioskQueueCard';
 
 interface KioskCrewJobCardProps {
   item: KioskCrewQueueItem;
@@ -18,6 +18,8 @@ interface KioskCrewJobCardProps {
   nowMs: number;
   onSelect: (item: KioskCrewQueueItem) => void;
   disabled?: boolean;
+  /** The planner moved this job up and the station has not said "Got it" yet. */
+  movedUp?: boolean;
 }
 
 /**
@@ -27,7 +29,7 @@ interface KioskCrewJobCardProps {
  * The chip strip is deliberately NON-interactive (a labeled list, not buttons):
  * joining/leaving goes through the job screen's badge scan.
  */
-export default function KioskCrewJobCard({ item, nowMs, onSelect, disabled = false }: KioskCrewJobCardProps) {
+export default function KioskCrewJobCard({ item, nowMs, onSelect, disabled = false, movedUp = false }: KioskCrewJobCardProps) {
   const pastDue = item.due_date ? isDateBeforeTodayInCentral(item.due_date) : false;
   const dueToday = item.due_date ? isDateTodayInCentral(item.due_date) : false;
   const inProgress = String(item.status).toLowerCase() === 'in_progress';
@@ -42,7 +44,7 @@ export default function KioskCrewJobCard({ item, nowMs, onSelect, disabled = fal
       // row announced "operation Op 10" beside a new row's "operation 10".
       aria-label={`Work order ${item.work_order_number}, operation ${
         item.operation_name || operationNumberText(item.operation_number) || ''
-      }, ${roster.length} clocked in`}
+      }, ${roster.length} clocked in${movedUp ? ', moved up' : ''}`}
       className={`grid w-full grid-cols-[1fr_auto] items-center gap-4 rounded border px-5 py-5 text-left transition-colors active:translate-y-px disabled:opacity-40 ${
         pastDue
           ? 'border-fd-red/60 bg-fd-red/5 hover:border-fd-red'
@@ -54,6 +56,7 @@ export default function KioskCrewJobCard({ item, nowMs, onSelect, disabled = fal
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-3">
           <KioskRunOrderChip item={item} />
+          {movedUp && <KioskMovedUpChip size="crew" />}
           <span className="font-mono text-3xl font-bold tracking-tight text-fd-ink">{item.work_order_number}</span>
           <UnitBadge unitNumber={item.unit_number} size="md" />
           <span

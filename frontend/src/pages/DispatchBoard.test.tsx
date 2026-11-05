@@ -52,11 +52,11 @@
 import React from 'react';
 import { act, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import DispatchBoard, { insertionIndexFromPointer } from './DispatchBoard';
 import api from '../services/api';
 import { ToastProvider } from '../components/ui';
-import type { DispatchBoardColumn, DispatchBoardRow } from '../types';
+import type { DispatchBoardColumn, DispatchBoardRow, DispatchWorkOrderBoardResponse } from '../types';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -64,6 +64,10 @@ jest.mock('../services/api', () => ({
     getDispatchBoard: jest.fn(),
     setWorkCenterRunOrder: jest.fn(),
     updateOperation: jest.fn(),
+    // Work-order view (the default) — used by the shell tests below.
+    getDispatchWorkOrderBoard: jest.fn(),
+    setDispatchWorkOrderOrder: jest.fn(),
+    setDispatchOperationOrder: jest.fn(),
   },
 }));
 
@@ -414,7 +418,9 @@ const stubCardGeometry = (workCenterId: number) => {
 
 const renderBoard = () =>
   render(
-    <MemoryRouter>
+    // The column board is the MACHINES view; the page now opens on the
+    // work-order plan by default, so these suites ask for the machine view.
+    <MemoryRouter initialEntries={['/dispatch?view=machines']}>
       <ToastProvider>
         <DispatchBoard />
       </ToastProvider>
@@ -472,7 +478,8 @@ describe('DispatchBoard', () => {
 
     // The PUT carries the FULL new id order for that work center.
     expect(mockApi.setWorkCenterRunOrder).toHaveBeenCalledTimes(1);
-    expect(mockApi.setWorkCenterRunOrder).toHaveBeenCalledWith(2, [9, 11, 14]);
+    // ...plus the column exactly as rendered, as the compare-and-swap guard.
+    expect(mockApi.setWorkCenterRunOrder).toHaveBeenCalledWith(2, [9, 11, 14], [11, 9, 14]);
 
     // The server's refreshed queue reconciles the optimistic guess.
     const refreshed = [
@@ -604,6 +611,12 @@ describe('DispatchBoard', () => {
     // Non-optimistic: the board only changes after a successful re-read.
     await waitFor(() => expect(mockApi.getDispatchBoard).toHaveBeenCalledTimes(2));
     expect(mockApi.setWorkCenterRunOrder).not.toHaveBeenCalled();
+    // A work order outside the plan: the moved job lands unranked at the queue's end.
+    await waitFor(() =>
+      expect(screen.getByTestId('dispatch-status')).toHaveTextContent(
+        'WO-20260719-004 Laser Cut - nest-p002 moved to Haas VF-2. It is unranked at the end of that queue.'
+      )
+    );
   });
 
   it('surfaces a refused cross-machine move verbatim and leaves the board unchanged', async () => {
@@ -667,7 +680,7 @@ describe('DispatchBoard', () => {
     fireDrag('dragOver', target, 20);
     fireDrag('drop', target, 20);
 
-    await waitFor(() => expect(mockApi.setWorkCenterRunOrder).toHaveBeenCalledWith(2, [14, 11, 9]));
+    await waitFor(() => expect(mockApi.setWorkCenterRunOrder).toHaveBeenCalledWith(2, [14, 11, 9], [11, 9, 14]));
   });
 
   it('dropping in the GAP between two cards inserts between them, not at the end of the column', async () => {
@@ -686,7 +699,7 @@ describe('DispatchBoard', () => {
     expect(screen.getByTestId('dispatch-drop-line-2-1')).toBeInTheDocument();
 
     fireDrag('drop', surface, 95);
-    await waitFor(() => expect(mockApi.setWorkCenterRunOrder).toHaveBeenCalledWith(2, [11, 14, 9]));
+    await waitFor(() => expect(mockApi.setWorkCenterRunOrder).toHaveBeenCalledWith(2, [11, 14, 9], [11, 9, 14]));
   });
 
   it('dropping below the last card is what appends to the end of the column', async () => {
@@ -702,7 +715,7 @@ describe('DispatchBoard', () => {
     expect(screen.getByTestId('dispatch-drop-line-2-3')).toBeInTheDocument(); // the tail slot
 
     fireDrag('drop', surface, 400);
-    await waitFor(() => expect(mockApi.setWorkCenterRunOrder).toHaveBeenCalledWith(2, [9, 14, 11]));
+    await waitFor(() => expect(mockApi.setWorkCenterRunOrder).toHaveBeenCalledWith(2, [9, 14, 11], [11, 9, 14]));
   });
 
   it('drag onto another column performs the server-gated cross-machine move', async () => {
@@ -1323,7 +1336,7 @@ describe('Dispatch freshness', () => {
     expect(screen.getByRole('link', { name: `Open work order ${LASER_ROWS[0].work_order_number}` })).toHaveAttribute('href', `/work-orders/${LASER_ROWS[0].work_order_id}`);
     fireEvent(window, new Event('focus'));
     await waitFor(() => expect(mockApi.getDispatchBoard).toHaveBeenCalledTimes(2));
-    expect(screen.getByText(/refreshes every 30 seconds while visible/)).toBeInTheDocument();
+    expect(screen.getByText(/refreshes every 10 seconds while visible/)).toBeInTheDocument();
   });
   it('defers a focus refresh while a card is dragged and reconciles when the drag ends', async () => {
     renderBoard();
@@ -1371,4 +1384,309 @@ test('TV glance preserves identity, ranks and urgency while removing edit contro
   expect(mockApi.setWorkCenterRunOrder).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: 'Planner view' }));
   expect(screen.getByRole('button', { name: /Move WO-20260720-001.*down/ })).toBeEnabled();
+});
+
+// ---------------------------------------------------------------------------
+// Dispatch v2 — the page shell (view switch + URL-param filters) and the
+// machine view's work-order bands.
+// ---------------------------------------------------------------------------
+
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location">{location.search}</output>;
+}
+
+const renderAt = (path: string) =>
+  render(
+    <MemoryRouter initialEntries={[path]}>
+      <ToastProvider>
+        <DispatchBoard />
+        <LocationProbe />
+      </ToastProvider>
+    </MemoryRouter>
+  );
+
+const emptyLanes = (): DispatchWorkOrderBoardResponse => ({
+  generated_at: '2026-11-04T16:34:12Z',
+  work_orders: [],
+  ranked_count: 0,
+  unranked_count: 0,
+  work_centers: [],
+});
+
+describe('DispatchBoard shell — view + filters live in the URL', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockApi.getDispatchBoard.mockResolvedValue(board());
+    mockApi.getDispatchWorkOrderBoard.mockResolvedValue(emptyLanes());
+  });
+
+  it('opens on the work-order plan by default and switches views through `view`', async () => {
+    const user = userEvent.setup();
+    renderAt('/dispatch');
+
+    // The work-order view's own empty state (no open work orders in this fixture).
+    expect(await screen.findByText('No open work orders')).toBeInTheDocument();
+    expect(mockApi.getDispatchWorkOrderBoard).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Work orders' })).toHaveAttribute('aria-pressed', 'true');
+    // Only the ACTIVE view loads (and polls).
+    expect(mockApi.getDispatchBoard).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'Machines' }));
+    expect(screen.getByTestId('location')).toHaveTextContent('?view=machines');
+    expect(await findColumn('Ermaksan Fiber Laser')).toBeInTheDocument();
+    expect(mockApi.getDispatchBoard).toHaveBeenCalledTimes(1);
+
+    // The default view keeps a clean URL.
+    await user.click(screen.getByRole('button', { name: 'Work orders' }));
+    expect(screen.getByTestId('location')).toHaveTextContent(/^$/);
+  });
+
+  it('writes the chips, machine filter and search to URL params, and clears them together', async () => {
+    const user = userEvent.setup();
+    renderAt('/dispatch?view=machines');
+    await findColumn('Ermaksan Fiber Laser');
+
+    await user.click(screen.getByRole('button', { name: 'Late' }));
+    expect(screen.getByRole('button', { name: 'Late' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('location')).toHaveTextContent('late=1');
+
+    // The machine filter lists the machines the view knows about.
+    await user.selectOptions(screen.getByLabelText('Machine'), '5');
+    expect(screen.getByTestId('location')).toHaveTextContent('machine=5');
+
+    await user.type(screen.getByLabelText('Search work orders'), 'WO-2026');
+    expect(screen.getByTestId('location')).toHaveTextContent('q=WO-2026');
+
+    await user.click(screen.getByRole('button', { name: 'Clear filters' }));
+    expect(screen.getByTestId('location')).toHaveTextContent('?view=machines');
+    expect(screen.getByTestId('location')).not.toHaveTextContent('late');
+  });
+
+  it('machine view polls ITS endpoint every 10 seconds; the work-order view is not polled behind it', async () => {
+    jest.useFakeTimers();
+    try {
+      renderAt('/dispatch?view=machines');
+      await act(async () => {});
+      expect(mockApi.getDispatchBoard).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        jest.advanceTimersByTime(9_999);
+      });
+      expect(mockApi.getDispatchBoard).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        jest.advanceTimersByTime(1);
+      });
+      expect(mockApi.getDispatchBoard).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        jest.advanceTimersByTime(10_000);
+      });
+      expect(mockApi.getDispatchBoard).toHaveBeenCalledTimes(3);
+      expect(mockApi.getDispatchWorkOrderBoard).not.toHaveBeenCalled();
+    } finally {
+      act(() => {
+        jest.runOnlyPendingTimers();
+      });
+      jest.useRealTimers();
+    }
+  });
+
+  it('machine view: the machine filter shows that column only', async () => {
+    renderAt('/dispatch?view=machines&machine=5');
+    expect(await findColumn('Haas VF-2')).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Ermaksan Fiber Laser run order' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('dispatch-filter-summary')).toHaveTextContent('Showing 1 of 3 machines');
+  });
+
+  it('machine view: search DIMS non-matching cards (the column order stays whole) and hides machines with no match', async () => {
+    renderAt('/dispatch?view=machines&q=WO-20260719');
+    await findColumn('Ermaksan Fiber Laser');
+
+    // Every card stays in the column — a reorder still PUTs the full column.
+    expect(cardOrder(2)).toEqual([11, 9, 14]);
+    expect(screen.getByTestId('dispatch-card-9')).not.toHaveAttribute('data-filter-match');
+    expect(screen.getByTestId('dispatch-card-11')).toHaveAttribute('data-filter-match', 'false');
+    expect(screen.queryByRole('region', { name: 'Haas VF-2 run order' })).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * One press brake whose queue holds two planned work orders and the unplanned
+ * tail: WO …-004 is plan 1 (two ops), WO …-002 is plan 2, and a HELD work
+ * order's row sits in the tail with no position (a held work order sinks).
+ */
+const bandBoard = (): { work_centers: DispatchBoardColumn[] } => ({
+  work_centers: [
+    {
+      id: 12,
+      name: 'Press Brake 1',
+      code: 'BRAKE-1',
+      work_center_type: 'press_brake',
+      is_active: true,
+      queued_hours: 7.5,
+      queue: [
+        makeRow({
+          operation_id: 501,
+          run_order: 1,
+          version: 2,
+          work_order_id: 412,
+          work_order_number: 'WO-20261103-004',
+          operation_name: 'Flange',
+          dispatch_position: 1,
+          sequence: 10,
+          work_order_status: 'released',
+        }),
+        makeRow({
+          operation_id: 502,
+          run_order: 2,
+          work_order_id: 412,
+          work_order_number: 'WO-20261103-004',
+          operation_number: '20',
+          operation_name: 'Gusset',
+          dispatch_position: 1,
+          sequence: 20,
+          work_order_status: 'released',
+        }),
+        makeRow({
+          operation_id: 503,
+          run_order: 3,
+          work_order_id: 398,
+          work_order_number: 'WO-20261030-002',
+          operation_name: 'Brake form',
+          dispatch_position: 2,
+          work_order_status: 'in_progress',
+        }),
+        makeRow({
+          operation_id: 504,
+          work_order_id: 419,
+          work_order_number: 'WO-20261103-009',
+          operation_name: 'Tab',
+          dispatch_position: null,
+          work_order_status: 'on_hold',
+        }),
+      ],
+    },
+  ],
+});
+
+const PLAN_ORDER = 'Work orders run in plan order — reorder work orders to change this';
+
+describe('DispatchMachineView — work-order bands (plan order wins)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockApi.getDispatchBoard.mockResolvedValue(bandBoard());
+  });
+
+  it('draws a band where each planned block starts and where the unplanned tail begins, plus queued hours', async () => {
+    renderBoard();
+    await findColumn('Press Brake 1');
+
+    expect(screen.getByTestId('dispatch-band-12-0')).toHaveTextContent('Plan 1 · WO-20261103-004');
+    // No band inside a work order's own block.
+    expect(screen.queryByTestId('dispatch-band-12-1')).not.toBeInTheDocument();
+    expect(screen.getByTestId('dispatch-band-12-2')).toHaveTextContent('Plan 2 · WO-20261030-002');
+    expect(screen.getByTestId('dispatch-band-12-3')).toHaveTextContent('Not in plan');
+    expect(screen.getByTestId('dispatch-queued-hours-12')).toHaveTextContent('7.5 h queued');
+  });
+
+  it('draws no band at all on a board with no planned work (pre-v2 payload)', async () => {
+    mockApi.getDispatchBoard.mockResolvedValue(board());
+    renderBoard();
+    await findColumn('Ermaksan Fiber Laser');
+    expect(document.querySelector('[data-testid^="dispatch-band-"]')).toBeNull();
+    expect(screen.queryByTestId('dispatch-queued-hours-2')).not.toBeInTheDocument();
+  });
+
+  it('refuses Move up across a band with the explanation, and sends nothing', async () => {
+    const user = userEvent.setup();
+    renderBoard();
+    await findColumn('Press Brake 1');
+
+    const up = screen.getByLabelText('Move WO-20261030-002 Brake form up');
+    // Focusable but inert, and the reason is on the control before it is pressed.
+    expect(up).toBeEnabled();
+    expect(up).toHaveAttribute('aria-disabled', 'true');
+    expect(up).toHaveAttribute('title', PLAN_ORDER);
+
+    await user.click(up);
+    expect(await screen.findByText(PLAN_ORDER)).toBeInTheDocument();
+    expect(screen.getByTestId('dispatch-status')).toHaveTextContent('WO-20261030-002 Brake form was not moved.');
+    expect(mockApi.setWorkCenterRunOrder).not.toHaveBeenCalled();
+    expect(cardOrder(12)).toEqual([501, 502, 503, 504]);
+  });
+
+  it('allows a move inside one work order block, with the rendered column as CAS', async () => {
+    const user = userEvent.setup();
+    mockApi.setWorkCenterRunOrder.mockReturnValue(new Promise(() => undefined));
+    renderBoard();
+    await findColumn('Press Brake 1');
+
+    await user.click(screen.getByLabelText('Move WO-20261103-004 Flange down'));
+    expect(mockApi.setWorkCenterRunOrder).toHaveBeenCalledWith(12, [502, 501, 503, 504], [501, 502, 503, 504]);
+    expect(cardOrder(12)).toEqual([502, 501, 503, 504]);
+  });
+
+  it('shows a refused drop slot before release and refuses a drag across a band', async () => {
+    renderBoard();
+    await findColumn('Press Brake 1');
+    stubCardGeometry(12);
+
+    // The held/unplanned tail row dragged above plan 1.
+    fireDrag('dragStart', screen.getByTestId('dispatch-card-504'));
+    fireDrag('dragOver', screen.getByTestId('dispatch-card-501'), 20);
+    expect(screen.getByTestId('dispatch-drop-line-12-0')).toHaveAttribute('data-refused', 'true');
+    fireDrag('drop', screen.getByTestId('dispatch-card-501'), 20);
+
+    expect(await screen.findByText(PLAN_ORDER)).toBeInTheDocument();
+    expect(mockApi.setWorkCenterRunOrder).not.toHaveBeenCalled();
+    expect(cardOrder(12)).toEqual([501, 502, 503, 504]);
+  });
+
+  it("a planned work order's moved operation is announced at the end of its plan block, not unranked", async () => {
+    const user = userEvent.setup();
+    const withSecondBrake = (): { work_centers: DispatchBoardColumn[] } => {
+      const base = bandBoard();
+      return {
+        work_centers: [
+          ...base.work_centers,
+          {
+            id: 13,
+            name: 'Press Brake 2',
+            code: 'BRAKE-2',
+            work_center_type: 'press_brake',
+            is_active: true,
+            queue: [],
+          },
+        ],
+      };
+    };
+    mockApi.getDispatchBoard.mockResolvedValue(withSecondBrake());
+    mockApi.updateOperation.mockResolvedValue({});
+    renderBoard();
+    await findColumn('Press Brake 1');
+
+    await user.selectOptions(screen.getByLabelText('Move WO-20261103-004 Flange to another machine'), '13');
+
+    await waitFor(() => expect(mockApi.updateOperation).toHaveBeenCalledWith(501, { work_center_id: 13, version: 2 }));
+    await waitFor(() =>
+      expect(screen.getByTestId('dispatch-status')).toHaveTextContent(
+        "WO-20261103-004 Flange moved to Press Brake 2. It runs within WO-20261103-004's plan block there, after that work order's ranked operations."
+      )
+    );
+    expect(screen.getByTestId('dispatch-status')).not.toHaveTextContent('unranked');
+  });
+
+  it('the held filter picks the held work order’s row and dims the rest', async () => {
+    renderAt('/dispatch?view=machines&held=1');
+    await findColumn('Press Brake 1');
+    expect(screen.getByTestId('dispatch-card-504')).not.toHaveAttribute('data-filter-match');
+    expect(screen.getByTestId('dispatch-card-501')).toHaveAttribute('data-filter-match', 'false');
+  });
+
+  it('keeps the freshness line out of aria-live and polls every 10 seconds', async () => {
+    renderBoard();
+    await findColumn('Press Brake 1');
+    expect(screen.getByTestId('dispatch-freshness')).not.toHaveAttribute('aria-live');
+    expect(screen.getByTestId('dispatch-freshness')).toHaveTextContent('refreshes every 10 seconds while visible');
+  });
 });

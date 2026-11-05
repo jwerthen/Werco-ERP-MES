@@ -137,7 +137,8 @@ the emitted `OperationalEvent.event_type` strings that map to this key.
   push channels) are **suppressed while an unread row for the same `(event_key, related_type,
   related_id, user_id)` exists** — the digest still accrues. So a WO late for two weeks is one inbox
   row + the digest, not 14 emails. Recurring in PR 1: `wo.late`, `stock.low`, `calibration.due`,
-  `quote.expiring`, `cert.expiring`, `maintenance.overdue`.
+  `quote.expiring`, `cert.expiring`, `maintenance.overdue`. Added since: `dispatch.changed` (Dispatch
+  v2), keyed per machine.
 
 ### Hank personal follow-ups
 
@@ -172,7 +173,41 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 `shipment.shipped`,
 `coc.generation_failed`, `downtime.started`, `downtime.resolved`, `material.allocation_shortage`,
 `material.backflush_shortage`, `material.allocation_consumption_failed`, `material.backflush_failed`,
-`material.backflush_demand_refused`.
+`material.backflush_demand_refused`, `dispatch.changed`.
+
+> **`dispatch.changed` — added with Dispatch Board v2 (2026-11-04).** The planner changed the run
+> order at a machine; the people clocked in there are told.
+>
+> | Field | Value |
+> |-------|-------|
+> | `event_key` | `dispatch.changed` |
+> | `label` | Dispatch order changed |
+> | `category` | **Production** |
+> | `severity` | **info** |
+> | `default_channels` | `in_app` only |
+> | `mandatory_channel` | none |
+> | `sms_eligible` | `false` — owner decision: the floor banner plus the inbox, no SMS |
+> | `recurring` | `true` — one unread row per (machine, operator); a planner dragging cards does not stack a row per drag |
+> | Recipients | resolver `resolve_clocked_in_operators`: **active** users of the event's company holding an **open labor** `TimeEntry` (setup / run / rework / inspection — never break or downtime) on an operation whose **current** `work_center_id` is the event's `entity_id`; the planner is excluded by `_fan_out` |
+> | `source_event_types` | `("dispatch_order_changed",)` — outbox-driven |
+>
+> **What emits it.** Every dispatch-order writer (`dispatch_service.record_dispatch_change`): the
+> work-order plan `PUT`, the operation-order `PUT`, the machine run-order `PUT`, and the four
+> operation move paths — one event per machine whose queue order actually changed, `entity_type =
+> "work_center"`, deliberately with **no** `work_order_id`. The emit is best-effort inside a savepoint
+> that is shielded from the outbox's session listeners, so the fan-out is enqueued only by the
+> request's real commit and a rolled-back reorder notifies nobody.
+>
+> **The body is the catalog description, on purpose** ("The planner changed the run order at a
+> machine you are clocked in at. Check the shop floor for what runs next."), and the title is the
+> label plus the machine code ("Dispatch order changed: BRAKE-1" — see the `_IDENTIFIER_KEYS` note in
+> §11.1). Recurring suppression keeps the first unread row's text, so a "next up" line in the body
+> would go stale; the live detail is the floor banner (`docs/KIOSK.md` → "Dispatch notice (RUN NEXT
+> strip)"). Link: the record-less `/shop-floor/operations`.
+>
+> **Known gap, by design of "clocked in".** Recipients are resolved when the worker dispatches
+> (seconds after the commit). An operator between jobs — the kiosk clocks out before completing —
+> holds no open entry and is not found; the banner on the queue read is what reaches them.
 
 **Direct-dispatch** (crons / MRP / scheduling call `dispatch_direct`):
 `calibration.due`, `wo.late`, `stock.low`, `quote.expiring` (the four recurring crons in
@@ -513,6 +548,7 @@ pattern is an existing list page plus a param that page already reads (`pages/Pu
 | `entity_type="ncr"`, no work order | `/quality?tab=ncr` — **record-less on purpose** | There is **no NCR detail view** in the app, so an id in the URL would be a promise the page can't keep. The tab is newest-first. |
 | `entity_type="car"`, no work order | `/quality?tab=car` — record-less | Same: no CAR detail view. Previously `None`. |
 | `entity_type="downtime_event"`, no work order (the normal case — downtime is reported against a work center) | `/downtime` — record-less | No per-event detail view. Previously `None`. |
+| `entity_type="work_center"` — `dispatch.changed` (Dispatch v2), which deliberately carries no `work_order_id` | `/shop-floor/operations` — record-less | The shop-floor operations list, in dispatch order. Its recipients are operators clocked in at the machine; `/shop-floor` needs `work_orders:view`, which every role holds (rule 4). |
 | `calibration.due` — both the 7-day and 1-day cron windows | `/calibration` — record-less and **deliberately unfiltered** | `?filter=due` reads as more helpful and is provably empty: the cron selects `Equipment.status == ACTIVE`, while `GET /calibration/equipment?status=due` filters the **persisted** status column *before* `update_equipment_status` recomputes it — so the rows that trigger the notification are exactly the rows that filter excludes. The unfiltered list sorts by `next_calibration_date` ascending (due item first) and repairs the stale status for every row it returns. |
 | `quote.expiring` (cron) | `/quotes?id={id}` | `Quotes.tsx` selects the quote with a `GET /quotes/{id}` fallback — needed because the list excludes `CONVERTED`/`EXPIRED`, i.e. exactly the quote you were warned about. |
 | `wo.late`, `stock.low`, `mrp.completed` / `mrp.review_needed`, `capacity.overload`, `mrp.expedite_required`, `visitor.check_in` (all `dispatch_direct`) | `/work-orders/{id}`, `/inventory`, `/mrp`, `/scheduling`, `/parts/{id}`, `/visitor-log` — **values unchanged** | Already resolved; moved into the registry so the guard test covers them and the no-inline-literal grep can be total. |
@@ -804,6 +840,21 @@ not substitute the PO's cumulative quantity or list unreceived order lines. The 
 reads this explicit event snapshot without querying current part or inventory data.
 Older events without the snapshot retain the generic email. This deliberately extends
 the email content rule for receiving; SMS content, recipients and preferences are unchanged.
+
+**Dispatch notices — `work_center_code` joins `_IDENTIFIER_KEYS` (2026-11-04, Dispatch v2).**
+`dispatch.changed` (in-app only, `sms_eligible=False`, `recurring=True`) is titled with the
+machine's code — "Dispatch order changed: BRAKE-1" — so `work_center_code` is appended as the
+**last** `_IDENTIFIER_KEYS` entry. Appended last so no existing event's title can change (no
+other emitted payload carries the key today). A work-center code is shop-internal equipment
+identity, the same category as the `equipment_id` key already on the list. Deliberately **not**
+added to `_DETAIL_KEYS` (or `_SMS_DETAIL_KEYS`): the notice payload's `next_up_before` /
+`next_up_after`, `moved_up` and `actor_display`. Operation names embed component part numbers,
+which this section keeps out of email, and an operator's name never goes on SMS. The body
+stays the catalog's static description for a second reason too: recurring suppression keeps the
+first unread row, so a "next up" line in it would go stale. That detail lives on the floor
+banner, which reads the frozen payload through `schemas.dispatch.DispatchNotice`. The link is
+the record-less `/shop-floor/operations` (`links.SHOP_FLOOR_OPERATIONS`), which every role can
+open.
 
 ### Terse SMS body rule (plan §3.4 / §11.1) — **narrowly relaxed 2026-07-29**
 

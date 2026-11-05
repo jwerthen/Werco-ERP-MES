@@ -32,6 +32,11 @@ import {
   SheetMatchProvenance,
   DispatchBoardResponse,
   RunOrderUpdateResponse,
+  RunOrderUpdateRequest,
+  DispatchWorkOrderBoardResponse,
+  DispatchLane,
+  WorkOrderOrderUpdateRequest,
+  OperationOrderUpdateRequest,
   OperationDocumentsResponse,
   MaterialAllocation,
   MaterialAllocationCreatePayload,
@@ -1934,8 +1939,11 @@ class ApiService {
   }
 
   // --- Dispatch Board (manager-controlled run order) ------------------------
-  // The board is one column per work center; rows arrive server-sorted (ranked
-  // work first by run_order, then unranked by priority -> due date -> sequence).
+  // The board is one column per work center; rows arrive server-sorted (planned
+  // work orders first in plan order, then by run_order within / below them, then
+  // priority -> due date -> sequence). Every write here is ADVISORY (it orders,
+  // never gates) and SERVER-GATED by compare-and-swap, so a 409 means "re-read
+  // the board", not "retry the same body".
 
   async getDispatchBoard(): Promise<DispatchBoardResponse> {
     const response = await this.api.get<DispatchBoardResponse>('/shop-floor/dispatch-board');
@@ -1945,18 +1953,97 @@ class ApiService {
   /**
    * Assign run-order ranks 1..N at one work center, in the order given.
    * Operations omitted stay unranked (`run_order: null`) and sort after.
-   * Returns that work center's refreshed queue.
+   * Returns that work center's refreshed column.
+   *
+   * `expectedOperationIds` (Dispatch v2, optional) is the column's queued
+   * operation ids exactly as last rendered, top to bottom: the server refuses
+   * 409 when the live column differs. Omitted -> the body carries only
+   * `operation_ids` (the pre-v2 last-writer-wins contract, byte-identical).
    */
-  async setWorkCenterRunOrder(workCenterId: number, operationIds: number[]): Promise<RunOrderUpdateResponse> {
+  async setWorkCenterRunOrder(
+    workCenterId: number,
+    operationIds: number[],
+    expectedOperationIds?: number[]
+  ): Promise<RunOrderUpdateResponse> {
+    const body: RunOrderUpdateRequest =
+      expectedOperationIds === undefined
+        ? { operation_ids: operationIds }
+        : { operation_ids: operationIds, expected_operation_ids: expectedOperationIds };
     const response = await this.api.put<RunOrderUpdateResponse>(
       `/shop-floor/work-centers/${workCenterId}/run-order`,
-      { operation_ids: operationIds }
+      body
     );
-    // The board reads through the same shop-floor surface the kiosks do; drop the
-    // cached queue/dashboard bodies so the next fetch revalidates instead of 304ing.
+    this.invalidateDispatchCaches();
+    return response.data;
+  }
+
+  /**
+   * GET /shop-floor/dispatch-board/work-orders — the work-order-first board:
+   * every live work order as a lane, the plan first. Pure read (no reconcile).
+   */
+  async getDispatchWorkOrderBoard(): Promise<DispatchWorkOrderBoardResponse> {
+    const response = await this.api.get<DispatchWorkOrderBoardResponse>('/shop-floor/dispatch-board/work-orders');
+    return response.data;
+  }
+
+  /**
+   * PUT /shop-floor/dispatch-board/work-order-order — replace the shop-wide plan.
+   *
+   * `workOrderIds` is the FULL desired plan (position 1 first; omitted work orders
+   * leave the plan; `[]` clears it). `expectedWorkOrderIds` is the plan exactly as
+   * last rendered (the lanes carrying a `dispatch_position`, in order) — the
+   * compare-and-swap guard; a mismatch is 409. Returns the whole refreshed board.
+   */
+  async setDispatchWorkOrderOrder(
+    workOrderIds: number[],
+    expectedWorkOrderIds: number[]
+  ): Promise<DispatchWorkOrderBoardResponse> {
+    const body: WorkOrderOrderUpdateRequest = {
+      work_order_ids: workOrderIds,
+      expected_work_order_ids: expectedWorkOrderIds,
+    };
+    const response = await this.api.put<DispatchWorkOrderBoardResponse>(
+      '/shop-floor/dispatch-board/work-order-order',
+      body
+    );
+    this.invalidateDispatchCaches();
+    return response.data;
+  }
+
+  /**
+   * PUT /shop-floor/dispatch-board/work-orders/{id}/operation-order — order ONE
+   * planned pool/laser work order's ready/in-progress operations at each machine.
+   *
+   * `operationIds` must name every READY / IN_PROGRESS operation of the work order
+   * exactly once; `expectedOperationIds` is that same queued subset exactly as last
+   * rendered, in lane order (the CAS guard). Returns the refreshed lane.
+   */
+  async setDispatchOperationOrder(
+    workOrderId: number,
+    operationIds: number[],
+    expectedOperationIds: number[]
+  ): Promise<DispatchLane> {
+    const body: OperationOrderUpdateRequest = {
+      operation_ids: operationIds,
+      expected_operation_ids: expectedOperationIds,
+    };
+    const response = await this.api.put<DispatchLane>(
+      `/shop-floor/dispatch-board/work-orders/${workOrderId}/operation-order`,
+      body
+    );
+    this.invalidateDispatchCaches();
+    return response.data;
+  }
+
+  /**
+   * Drop cached bodies a dispatch-order write invalidates. The board reads
+   * through the same shop-floor surface the kiosks do, so drop the cached
+   * board (both views — prefix match) and dashboard bodies so the next fetch
+   * revalidates instead of 304ing.
+   */
+  private invalidateDispatchCaches() {
     this.invalidateCache('/shop-floor/dispatch-board');
     this.invalidateDashboardCache();
-    return response.data;
   }
 
   async getSetupHealth() {

@@ -105,3 +105,31 @@ describe('KioskQueueCard accessible name', () => {
     expect(card).not.toHaveTextContent(/Op\s*Nest/);
   });
 });
+
+/**
+ * Dispatch v2 "MOVED UP" chip — the planner moved this job ahead of work it used
+ * to follow and the operator has not acknowledged the notice yet. The page owns
+ * the acknowledgement; the card only renders what it is handed.
+ */
+describe('KioskQueueCard moved-up chip', () => {
+  it('renders the chip and names it in the card accessible name when movedUp', () => {
+    render(<KioskQueueCard onSelect={jest.fn()} item={{ ...baseItem, run_order: 1 }} movedUp />);
+    const card = screen.getByRole('button', { name: /WO-1001.*moved up/ });
+    expect(screen.getByTestId('kiosk-moved-up-chip')).toHaveTextContent(/moved up/i);
+    // It sits beside the run chip — information, never a second rank.
+    expect(card).toContainElement(screen.getByTestId('kiosk-run-order-chip'));
+  });
+
+  it('renders no chip by default (and keeps the pre-v2 accessible name)', () => {
+    render(<KioskQueueCard onSelect={jest.fn()} item={baseItem} />);
+    expect(screen.queryByTestId('kiosk-moved-up-chip')).not.toBeInTheDocument();
+    expect(screen.getByRole('button')).toHaveAccessibleName('Work order WO-1001, operation Laser cut');
+  });
+
+  it('stays an ordinary tap target — the chip changes nothing about starting the job', () => {
+    const onSelect = jest.fn();
+    render(<KioskQueueCard onSelect={onSelect} item={baseItem} movedUp />);
+    screen.getByRole('button').click();
+    expect(onSelect).toHaveBeenCalledWith(baseItem);
+  });
+});

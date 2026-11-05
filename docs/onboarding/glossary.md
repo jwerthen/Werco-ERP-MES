@@ -26,7 +26,7 @@ Plain-language definitions for the terms you'll run into while using the Werco s
 | **QMS (quality management system)** | The set of standards, procedures, and records that keep quality consistent and auditable (AS9100D / ISO 9001). The **QMS Standards** screen is your in-system reference for it. |
 | **Quote / RFQ** | An **RFQ** (request for quote) is a customer asking what a job would cost; a **quote** is the priced answer you send back. |
 | **Routing** | The ordered list of operations and work centers that defines how a part is made from start to finish. |
-| **Run order (`RUN 1`, `RUN 2`, …)** | The running order a manager sets per machine on the Dispatch Board. Jobs with a RUN number sit at the top of that machine's queue in that order; unranked jobs follow, sorted by priority and due date. It's a recommendation — it never blocks starting a job. |
+| **Run order (`RUN 1`, `RUN 2`, …)** | The running order a manager sets on the Dispatch Board — the shop-wide order of work orders, plus any order set on a machine's column. Jobs with a RUN number sit at the top of that machine's queue in that order; unranked jobs follow, sorted by priority and due date. It's a recommendation — it never blocks starting a job. |
 | **SPC (statistical process control)** | Tracking measurements over time on charts to spot when a process is drifting out of spec before it makes bad parts. |
 | **Traceability** | The ability to follow a part's full history — what material (lot/serial) went into it, which jobs and operations it passed through, and where it shipped. |
 | **Traveler** | The printed routing packet that travels with a job through the shop, listing the operations, instructions, and sign-offs for that work order. |

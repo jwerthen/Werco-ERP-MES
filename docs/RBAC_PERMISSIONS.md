@@ -489,6 +489,41 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > supervisor) rather than the read-only `work_orders:view` that `/scheduling` uses. See
 > `docs/API.md` → Shop Floor → "Dispatch run order" and [docs/KIOSK.md](KIOSK.md).
 
+> **Work-order dispatch plan (Dispatch v2) — endpoint mapping.** Ordering the shop's **work
+> orders** is the same planner act, on the same gate — `require_role([ADMIN, MANAGER,
+> SUPERVISOR])` (`_DISPATCH_PLANNER_ROLES` in `shop_floor.py`; platform admins / superusers pass as
+> they do on every `require_role`), tenant-scoped through `get_current_company_id`, work-order reads
+> filtered `is_deleted == False`. Operator, Quality, Shipping and Viewer get **403**. Three routes:
+>
+> | Route | Effect | Audit |
+> |---|---|---|
+> | `GET /api/v1/shop-floor/dispatch-board/work-orders` | Every live work order as a lane (the planner's Work orders view) | none — a **zero-write read** |
+> | `PUT /api/v1/shop-floor/dispatch-board/work-order-order` | Set the shop-wide work-order plan (whole-list authority, compare-and-swap) | **one** `dispatch_board` `log_update` per save (old → new plan, every position change listed in `extra_data.changed`) |
+> | `PUT /api/v1/shop-floor/dispatch-board/work-orders/{work_order_id}/operation-order` | Order one planned pool/laser work order's queued operations at each machine | **one** `work_order` `log_update` ("Set dispatch operation order") |
+>
+> A save that changes nothing writes no audit row. The plan verbs bump no `version` and move no
+> `updated_at` (Core `UPDATE`s on display metadata), so they never 409 an open edit form. Like
+> `run_order`, the plan is **advisory** and adds **no** gate: it orders what operators see and
+> never decides what may start, clock in or complete. Operators **consume** it — the reordered queue
+> and the planner's floor notice — through reads they already hold
+> (`GET /shop-floor/work-center-queue/{id}`, `GET /shop-floor/my-active-job`,
+> `GET /shop-floor/operations`), and can never set it.
+>
+> **Kiosk fence.** All three routes sit under `/api/v1/shop-floor/dispatch-board`, a **prefix** in
+> `KIOSK_TOKEN_DENIED_PREFIXES` (`app/api/deps.py`), so a badge-minted `scope="kiosk"` token is
+> **403** on every one of them whatever role the scanned badge holds — pinned by a fence test per
+> route. A crew-station token cannot authenticate on them at all (**401** — `require_role` runs
+> through `get_current_user`, which accepts only access JWTs). The route gate in the UI is
+> unchanged: `/dispatch` → `work_orders:edit`.
+>
+> **Every writer of a machine's queue order shares one per-company lock**: the two plan verbs, the
+> run-order `PUT`, and the four operation move paths (`PUT /work-orders/operations/{id}` with a new
+> `work_center_id`, `PUT /scheduling/operations/{id}/work-center`,
+> `PUT /scheduling/work-orders/{id}/schedule` and `POST /scheduling/work-orders/{id}/schedule-earliest`
+> when they change the work center) — all Admin / Manager / Supervisor, all unchanged. No role or
+> permission changed on any existing route. See `docs/API.md` → Shop Floor → "Work-order dispatch
+> plan" and "Floor dispatch notices".
+
 > **Scanner resolve-action is read-only and open to any authenticated user (A0.4).**
 > `POST /api/v1/scanner/resolve-action` (the QR traveler / badge scan resolver,
 > `app/api/endpoints/scanner.py`) carries no role gate (`get_current_user` only) — it mirrors the
@@ -2326,10 +2361,14 @@ and writes an `EXPORT` audit row through `AuditService`:
 >
 > - The **station token** (`type="kiosk"`, PIN-minted via the public rate-limited
 >   `POST /shop-floor/kiosk-stations/station-login`) carries no user identity and is honored by
->   exactly two things — the roster-enriched work-center-queue read (its own bound work center
->   only, via the dedicated `get_kiosk_or_user` dependency) and the badge-token mint. Every other
->   endpoint rejects it with **401**; tenant scope and revocation come from the authoritative
->   `kiosk_stations` row, never the client `cid`.
+>   exactly four routes — the roster-enriched work-center-queue read (its own bound work center
+>   only, via the dedicated `get_kiosk_or_user` dependency; since Dispatch v2 it also carries the
+>   planner's `dispatch_notice` for that machine, see `docs/API.md` → "Floor dispatch notices"),
+>   the badge-token mint, and the station's own workstation pair
+>   (`GET /shop-floor/kiosk-stations/work-centers`, `PUT /shop-floor/kiosk-stations/work-center` —
+>   list its company's active work centers and re-bind itself to one, audited as a `kiosk_station`
+>   update), all three via `get_kiosk_station`. Every other endpoint rejects it with **401**; tenant
+>   scope and revocation come from the authoritative `kiosk_stations` row, never the client `cid`.
 > - The **badge-minted operator token** (`POST /auth/kiosk-badge-token`, station-token-gated) is
 >   a 5-minute `scope="kiosk"` access token for the badge-identified user — on the allowed paths
 >   the operator IS `current_user`, so the shop-floor endpoints' existing role/tenant/audit rules

@@ -25,6 +25,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
+from sqlalchemy import select
+
 from app.models.user import UserRole
 
 # ---------------------------------------------------------------------------
@@ -142,6 +144,54 @@ def resolve_po_creator(db, event, company_id: int) -> List:
         return []
     user = _active_user(db, getattr(po, "created_by", None), company_id)
     return [user] if user else []
+
+
+def resolve_clocked_in_operators(db, event, company_id: int) -> List:
+    """Who is clocked in at the work center a dispatch notice is about (tenant-scoped, active).
+
+    Active users of the event's company holding an OPEN LABOR ``TimeEntry``
+    (``clock_out IS NULL``; setup / run / rework / inspection -- the wallboard's
+    ``LABOR_ENTRY_TYPES``, so an open break or downtime row never counts) on an
+    operation whose CURRENT ``work_center_id`` is the event's ``entity_id``. The
+    operation's current machine, not the entry's stamped one, so a job the planner
+    moved still reaches the person running it. The actor is excluded later by
+    ``_fan_out``.
+
+    Resolved when the worker dispatches (seconds after the commit), not at the moment
+    of the change. Known gap, by design of "clocked in": an operator between jobs (the
+    kiosk clocks out before completing) holds no open entry and is not found here --
+    the floor banner on the queue read is what reaches them.
+    """
+    if (getattr(event, "entity_type", None) or "").lower() != "work_center" or event.entity_id is None:
+        return []
+    from app.models.time_entry import TimeEntry
+    from app.models.user import User
+    from app.models.work_order import WorkOrderOperation
+    from app.services.wallboard_service import LABOR_ENTRY_TYPES
+
+    # A subquery of ids rather than a DISTINCT over the user entity: one row per user
+    # however many entries they hold open, without asking Postgres to DISTINCT a row.
+    clocked_in_user_ids = (
+        select(TimeEntry.user_id)
+        .join(WorkOrderOperation, TimeEntry.operation_id == WorkOrderOperation.id)
+        .where(
+            TimeEntry.company_id == company_id,
+            TimeEntry.clock_out.is_(None),
+            TimeEntry.entry_type.in_(LABOR_ENTRY_TYPES),
+            WorkOrderOperation.company_id == company_id,
+            WorkOrderOperation.work_center_id == event.entity_id,
+        )
+    )
+    return (
+        db.query(User)
+        .filter(
+            User.company_id == company_id,
+            User.is_active.is_(True),
+            User.id.in_(clocked_in_user_ids),
+        )
+        .order_by(User.id)
+        .all()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +394,26 @@ _ENTRIES: List[CatalogEntry] = [
         severity="info",
         default_channels=frozenset(),  # off by default (available)
         source_event_types=("operation_ready",),
+    ),
+    CatalogEntry(
+        event_key="dispatch.changed",
+        label="Dispatch order changed",
+        description=(
+            "The planner changed the run order at a machine you are clocked in at. "
+            "Check the shop floor for what runs next."
+        ),
+        category=Category.PRODUCTION,
+        severity="info",
+        default_channels=frozenset({CHANNEL_IN_APP}),
+        # Owner decision (2026-11-04): the floor banner plus the in-app inbox; no SMS.
+        sms_eligible=False,
+        # One unread row per (machine, operator) at a time: a planner dragging cards
+        # around must not stack a row per drag. The body is therefore deliberately
+        # GENERIC -- suppression freezes the first unread row's text, so a "next up"
+        # line in it would go stale; the live detail is on the floor banner.
+        recurring=True,
+        source_event_types=("dispatch_order_changed",),
+        resolver=resolve_clocked_in_operators,
     ),
     CatalogEntry(
         event_key="scrap.recorded",

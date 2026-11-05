@@ -201,9 +201,10 @@ describe('DispatchBoard renders the operation number through the shared label he
     jest.clearAllMocks();
   });
 
+  // The column board is the Machines view; the page defaults to the work-order plan.
   const renderBoard = () =>
     render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={['/dispatch?view=machines']}>
         <ToastProvider>
           <DispatchBoard />
         </ToastProvider>

@@ -21,7 +21,7 @@
  *    the station token really is dead the next 10s queue poll 401s and locks.
  */
 
-import type { OperationDocumentsResponse, ResumeOperationResult } from '../types';
+import type { DispatchNotice, OperationDocumentsResponse, ResumeOperationResult } from '../types';
 import type {
   KioskBadgeTokenResponse,
   KioskClosedTimeEntry,
@@ -285,6 +285,13 @@ export async function getMyActiveJob(operatorToken: string): Promise<{
     operation_name?: string;
     clock_in?: string;
   }>;
+  /** UTC ISO server clock at response time. */
+  server_time?: string;
+  /**
+   * Dispatch v2: newest dispatch notice per work center where THIS operator holds
+   * an open LABOR entry, newest first. `[]` when none. Optional for pre-v2 payloads.
+   */
+  dispatch_notices?: DispatchNotice[];
 }> {
   return operatorFetch(operatorToken, 'GET', '/shop-floor/my-active-job');
 }
