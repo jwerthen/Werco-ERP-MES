@@ -2,18 +2,63 @@ from datetime import date, datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Query as OrmQuery
+from sqlalchemy.orm import Session, joinedload, with_loader_criteria
 
-from app.api.deps import get_current_company_id, get_current_user
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
+from app.db.tenant_filter import tenant_filter, tenant_query
 from app.models.downtime import DowntimeCategory, DowntimeEvent, DowntimePlannedType, DowntimeReasonCode
-from app.models.user import User
+from app.models.user import User, UserRole
+from app.models.work_center import WorkCenter
 from app.models.work_order import WorkOrder
+from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
 
 router = APIRouter()
+
+# Who may write downtime. Until this change every handler here was a bare
+# ``get_current_user``, so a VIEWER could start, edit and close downtime events --
+# the OEE availability input -- with no audit trail.
+#
+# Reporting verbs (start / resolve an event) stay open to every role that works on
+# the floor; the Downtime page is route-gated on ``work_orders:view`` (every role) and
+# operators log machine stoppages from it, so only the read-only Viewer loses them.
+# Correcting an event after the fact (``PUT``) and managing the reason-code vocabulary
+# match the OEE write roles (``oee.OEE_WRITE_ROLES``: Admin / Manager / Supervisor),
+# because both rewrite what the OEE availability figure is computed from.
+# ``require_role`` always admits PLATFORM_ADMIN and superusers. Reads stay open.
+DOWNTIME_REPORT_ROLES = [
+    UserRole.ADMIN,
+    UserRole.MANAGER,
+    UserRole.SUPERVISOR,
+    UserRole.OPERATOR,
+    UserRole.QUALITY,
+    UserRole.SHIPPING,
+]
+DOWNTIME_MANAGE_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]
+
+# Fields ``PUT /downtime/{id}`` and ``PUT /downtime/reason-codes/{id}`` may write,
+# applied explicitly -- never a blind setattr over the request body.
+_EVENT_EDITABLE_FIELDS = (
+    "work_center_id",
+    "work_order_id",
+    "category",
+    "planned_type",
+    "reason_code",
+    "description",
+    "resolution",
+)
+_REASON_CODE_EDITABLE_FIELDS = ("code", "name", "category", "description", "is_active", "display_order")
+
+
+def _refuse_nulls(model: BaseModel, fields: tuple) -> None:
+    nulled = [field for field in fields if field in model.model_fields_set and getattr(model, field) is None]
+    if nulled:
+        raise ValueError(f"{', '.join(nulled)} cannot be null")
 
 
 # ============== Pydantic Schemas ==============
@@ -38,6 +83,12 @@ class DowntimeEventUpdate(BaseModel):
     description: Optional[str] = None
     resolution: Optional[str] = None
 
+    @model_validator(mode="after")
+    def _refuse_explicit_nulls(self) -> "DowntimeEventUpdate":
+        # NOT NULL columns: an explicit null would otherwise reach the INSERT as a 500.
+        _refuse_nulls(self, ("work_center_id", "category", "planned_type"))
+        return self
+
 
 class DowntimeResolve(BaseModel):
     end_time: Optional[datetime] = None
@@ -54,12 +105,17 @@ class ReasonCodeCreate(BaseModel):
 
 
 class ReasonCodeUpdate(BaseModel):
-    code: Optional[str] = None
-    name: Optional[str] = None
+    code: Optional[str] = Field(None, max_length=50)
+    name: Optional[str] = Field(None, max_length=255)
     category: Optional[DowntimeCategory] = None
     description: Optional[str] = None
     is_active: Optional[bool] = None
     display_order: Optional[int] = None
+
+    @model_validator(mode="after")
+    def _refuse_explicit_nulls(self) -> "ReasonCodeUpdate":
+        _refuse_nulls(self, ("code", "name", "category", "is_active", "display_order"))
+        return self
 
 
 class WorkCenterInfo(BaseModel):
@@ -73,7 +129,11 @@ class WorkCenterInfo(BaseModel):
 
 class UserInfo(BaseModel):
     id: int
-    username: str
+    # ``User`` has no ``username`` column. As a required field this failed response
+    # validation for every event (``reported_by`` is NOT NULL), so each create, list,
+    # get and resolve 500'd -- the create AFTER committing. Kept, always null, so the
+    # response shape the client declares does not change.
+    username: Optional[str] = None
     full_name: Optional[str] = None
 
     class Config:
@@ -146,6 +206,71 @@ class WorkCenterDowntime(BaseModel):
     event_count: int
 
 
+# ============== Helpers ==============
+
+
+def _event_query(db: Session, company_id: int) -> OrmQuery:
+    """Tenant-scoped downtime events with the response's relationships eager-loaded.
+
+    The loader criteria close EGRESS: a legacy row written before ``work_center_id`` was
+    validated is owned by the caller and passes the ``company_id`` filter, yet its
+    relationship would render another tenant's machine / job. Such a relation now reads
+    as absent rather than leaking. (The reporter / resolver are deliberately not
+    criteria'd: a context-switched platform admin's home company is not the active one.)
+    """
+    return (
+        tenant_query(db, DowntimeEvent, company_id)
+        .options(
+            joinedload(DowntimeEvent.work_center),
+            joinedload(DowntimeEvent.reporter),
+            joinedload(DowntimeEvent.resolver),
+            joinedload(DowntimeEvent.work_order),
+            with_loader_criteria(WorkCenter, WorkCenter.company_id == company_id),
+            with_loader_criteria(WorkOrder, WorkOrder.company_id == company_id),
+        )
+        .populate_existing()
+    )
+
+
+def _event_or_404(db: Session, event_id: int, company_id: int) -> DowntimeEvent:
+    event = tenant_query(db, DowntimeEvent, company_id).filter(DowntimeEvent.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Downtime event not found")
+    return event
+
+
+def _assert_event_refs_in_company(
+    db: Session, company_id: int, *, work_center_id: Optional[int], work_order_id: Optional[int]
+) -> None:
+    """Refuse a work center / work order that is not the caller's (flat 404, never 403).
+
+    Unvalidated, a caller could log downtime against another tenant's machine -- and the
+    response renders ``work_center.name`` straight back, so the write doubled as a read.
+    Deliberately does NOT require the work center to be active: downtime is exactly what
+    you record against a machine that is down. A work order link is a new SELECTION, so
+    a soft-deleted one is refused (invariant 3).
+    """
+    if work_center_id is not None:
+        if not tenant_query(db, WorkCenter, company_id).filter(WorkCenter.id == work_center_id).first():
+            raise HTTPException(status_code=404, detail="Work center not found")
+    if work_order_id is not None:
+        live = (
+            tenant_query(db, WorkOrder, company_id)
+            .filter(WorkOrder.id == work_order_id, WorkOrder.is_deleted == False)  # noqa: E712
+            .first()
+        )
+        if not live:
+            raise HTTPException(status_code=404, detail="Work order not found")
+
+
+def _event_identifier(event: DowntimeEvent) -> str:
+    return f"DT-{event.id}"
+
+
+def _event_audit_values(event: DowntimeEvent) -> dict:
+    return {field: getattr(event, field) for field in _EVENT_EDITABLE_FIELDS}
+
+
 # ============== Downtime Event Endpoints ==============
 
 
@@ -157,14 +282,8 @@ def get_active_downtime(
 ):
     """Get all currently active (ongoing) downtime events"""
     events = (
-        db.query(DowntimeEvent)
-        .options(
-            joinedload(DowntimeEvent.work_center),
-            joinedload(DowntimeEvent.reporter),
-            joinedload(DowntimeEvent.resolver),
-            joinedload(DowntimeEvent.work_order),
-        )
-        .filter(DowntimeEvent.company_id == company_id, DowntimeEvent.end_time.is_(None))
+        _event_query(db, company_id)
+        .filter(DowntimeEvent.end_time.is_(None))
         .order_by(DowntimeEvent.start_time.desc())
         .all()
     )
@@ -181,7 +300,7 @@ def get_downtime_summary(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get summary statistics for downtime events"""
-    query = db.query(DowntimeEvent).filter(DowntimeEvent.company_id == company_id, DowntimeEvent.end_time.isnot(None))
+    query = tenant_query(db, DowntimeEvent, company_id).filter(DowntimeEvent.end_time.isnot(None))
 
     if date_from:
         query = query.filter(DowntimeEvent.start_time >= datetime.combine(date_from, datetime.min.time()))
@@ -241,8 +360,6 @@ def get_downtime_by_work_center(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get downtime hours grouped by work center"""
-    from app.models.work_center import WorkCenter
-
     query = (
         db.query(
             DowntimeEvent.work_center_id,
@@ -252,8 +369,11 @@ def get_downtime_by_work_center(
             func.count(DowntimeEvent.id).label("event_count"),
         )
         .join(WorkCenter, DowntimeEvent.work_center_id == WorkCenter.id)
-        .filter(DowntimeEvent.company_id == company_id, DowntimeEvent.end_time.isnot(None))
+        .filter(DowntimeEvent.end_time.isnot(None))
     )
+    # Both sides of the join: a legacy event pointing at another tenant's machine must
+    # not render that machine's code and name.
+    query = tenant_filter(tenant_filter(query, DowntimeEvent, company_id), WorkCenter, company_id)
 
     if date_from:
         query = query.filter(DowntimeEvent.start_time >= datetime.combine(date_from, datetime.min.time()))
@@ -299,21 +419,26 @@ def list_reason_codes(
 def create_reason_code(
     data: ReasonCodeCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(DOWNTIME_MANAGE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new downtime reason code"""
-    existing = (
-        db.query(DowntimeReasonCode)
-        .filter(DowntimeReasonCode.code == data.code, DowntimeReasonCode.company_id == company_id)
-        .first()
-    )
+    """Create a new downtime reason code. **Role: ADMIN / MANAGER / SUPERVISOR.**"""
+    existing = tenant_query(db, DowntimeReasonCode, company_id).filter(DowntimeReasonCode.code == data.code).first()
     if existing:
         raise HTTPException(status_code=400, detail="Reason code already exists")
 
     reason_code = DowntimeReasonCode(**data.model_dump())
     reason_code.company_id = company_id
     db.add(reason_code)
+    try:
+        db.flush()
+    except IntegrityError:
+        # ``downtime_reason_codes.code`` still carries a GLOBAL unique constraint, so a
+        # code another tenant already uses fails here rather than in the probe above.
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Reason code already exists")
+    audit.log_create("downtime_reason_code", reason_code.id, reason_code.code, new_values=reason_code)
     db.commit()
     db.refresh(reason_code)
     return reason_code
@@ -324,22 +449,45 @@ def update_reason_code(
     reason_code_id: int,
     data: ReasonCodeUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(DOWNTIME_MANAGE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a downtime reason code"""
+    """Update a downtime reason code. **Role: ADMIN / MANAGER / SUPERVISOR.**"""
     reason_code = (
-        db.query(DowntimeReasonCode)
-        .filter(DowntimeReasonCode.id == reason_code_id, DowntimeReasonCode.company_id == company_id)
-        .first()
+        tenant_query(db, DowntimeReasonCode, company_id).filter(DowntimeReasonCode.id == reason_code_id).first()
     )
     if not reason_code:
         raise HTTPException(status_code=404, detail="Reason code not found")
 
     update_data = data.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(reason_code, field, value)
+    new_code = update_data.get("code")
+    if new_code is not None and new_code != reason_code.code:
+        duplicate = (
+            tenant_query(db, DowntimeReasonCode, company_id)
+            .filter(DowntimeReasonCode.code == new_code, DowntimeReasonCode.id != reason_code.id)
+            .first()
+        )
+        if duplicate:
+            raise HTTPException(status_code=400, detail="Reason code already exists")
 
+    old_values = {field: getattr(reason_code, field) for field in _REASON_CODE_EDITABLE_FIELDS}
+    for field in _REASON_CODE_EDITABLE_FIELDS:
+        if field in update_data:
+            setattr(reason_code, field, update_data[field])
+
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Reason code already exists")
+    audit.log_update(
+        "downtime_reason_code",
+        reason_code.id,
+        reason_code.code,
+        old_values=old_values,
+        new_values={field: getattr(reason_code, field) for field in _REASON_CODE_EDITABLE_FIELDS},
+    )
     db.commit()
     db.refresh(reason_code)
     return reason_code
@@ -360,16 +508,7 @@ def list_downtime_events(
     company_id: int = Depends(get_current_company_id),
 ):
     """List downtime events with optional filters"""
-    query = (
-        db.query(DowntimeEvent)
-        .filter(DowntimeEvent.company_id == company_id)
-        .options(
-            joinedload(DowntimeEvent.work_center),
-            joinedload(DowntimeEvent.reporter),
-            joinedload(DowntimeEvent.resolver),
-            joinedload(DowntimeEvent.work_order),
-        )
-    )
+    query = _event_query(db, company_id)
 
     if work_center_id:
         query = query.filter(DowntimeEvent.work_center_id == work_center_id)
@@ -395,17 +534,7 @@ def get_downtime_event(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get a single downtime event by ID"""
-    event = (
-        db.query(DowntimeEvent)
-        .options(
-            joinedload(DowntimeEvent.work_center),
-            joinedload(DowntimeEvent.reporter),
-            joinedload(DowntimeEvent.resolver),
-            joinedload(DowntimeEvent.work_order),
-        )
-        .filter(DowntimeEvent.id == event_id, DowntimeEvent.company_id == company_id)
-        .first()
-    )
+    event = _event_query(db, company_id).filter(DowntimeEvent.id == event_id).first()
 
     if not event:
         raise HTTPException(status_code=404, detail="Downtime event not found")
@@ -416,18 +545,15 @@ def get_downtime_event(
 def create_downtime_event(
     data: DowntimeEventCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(DOWNTIME_REPORT_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Start a new downtime event"""
-    if data.work_order_id:
-        work_order_exists = (
-            db.query(WorkOrder.id)
-            .filter(WorkOrder.id == data.work_order_id, WorkOrder.company_id == company_id)
-            .first()
-        )
-        if not work_order_exists:
-            raise HTTPException(status_code=404, detail="Work order not found")
+    """Start a new downtime event. **Role: any tenant role except VIEWER.**
+
+    ``work_center_id`` and ``work_order_id`` must belong to the active company (404).
+    """
+    _assert_event_refs_in_company(db, company_id, work_center_id=data.work_center_id, work_order_id=data.work_order_id)
     event = DowntimeEvent(
         work_center_id=data.work_center_id,
         work_order_id=data.work_order_id,
@@ -457,23 +583,11 @@ def create_downtime_event(
             "reason_code": data.reason_code,
         },
     )
+    audit.log_create("downtime_event", event.id, _event_identifier(event), new_values=event)
     db.commit()
-    db.refresh(event)
 
     # Reload with relationships
-    event = (
-        db.query(DowntimeEvent)
-        .options(
-            joinedload(DowntimeEvent.work_center),
-            joinedload(DowntimeEvent.reporter),
-            joinedload(DowntimeEvent.resolver),
-            joinedload(DowntimeEvent.work_order),
-        )
-        .filter(DowntimeEvent.id == event.id)
-        .first()
-    )
-
-    return event
+    return _event_query(db, company_id).filter(DowntimeEvent.id == event.id).first()
 
 
 @router.put("/{event_id}", response_model=DowntimeEventResponse)
@@ -481,34 +595,40 @@ def update_downtime_event(
     event_id: int,
     data: DowntimeEventUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(DOWNTIME_MANAGE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a downtime event"""
-    event = db.query(DowntimeEvent).filter(DowntimeEvent.id == event_id, DowntimeEvent.company_id == company_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Downtime event not found")
+    """Correct a downtime event. **Role: ADMIN / MANAGER / SUPERVISOR.**
+
+    A re-pointed ``work_center_id`` / ``work_order_id`` must belong to the active company (404).
+    """
+    event = _event_or_404(db, event_id, company_id)
 
     update_data = data.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(event, field, value)
-
-    db.commit()
-    db.refresh(event)
-
-    event = (
-        db.query(DowntimeEvent)
-        .options(
-            joinedload(DowntimeEvent.work_center),
-            joinedload(DowntimeEvent.reporter),
-            joinedload(DowntimeEvent.resolver),
-            joinedload(DowntimeEvent.work_order),
-        )
-        .filter(DowntimeEvent.id == event.id)
-        .first()
+    _assert_event_refs_in_company(
+        db,
+        company_id,
+        work_center_id=update_data.get("work_center_id"),
+        work_order_id=update_data.get("work_order_id"),
     )
 
-    return event
+    old_values = _event_audit_values(event)
+    for field in _EVENT_EDITABLE_FIELDS:
+        if field in update_data:
+            setattr(event, field, update_data[field])
+
+    db.flush()
+    audit.log_update(
+        "downtime_event",
+        event.id,
+        _event_identifier(event),
+        old_values=old_values,
+        new_values=_event_audit_values(event),
+    )
+    db.commit()
+
+    return _event_query(db, company_id).filter(DowntimeEvent.id == event.id).first()
 
 
 @router.post("/{event_id}/resolve", response_model=DowntimeEventResponse)
@@ -516,13 +636,15 @@ def resolve_downtime_event(
     event_id: int,
     data: DowntimeResolve,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(DOWNTIME_REPORT_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """End/resolve a downtime event - sets end_time and calculates duration"""
-    event = db.query(DowntimeEvent).filter(DowntimeEvent.id == event_id, DowntimeEvent.company_id == company_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Downtime event not found")
+    """End/resolve a downtime event - sets end_time and calculates duration.
+
+    **Role: any tenant role except VIEWER.**
+    """
+    event = _event_or_404(db, event_id, company_id)
 
     if event.end_time is not None:
         raise HTTPException(status_code=400, detail="Downtime event is already resolved")
@@ -552,19 +674,19 @@ def resolve_downtime_event(
             "resolution": event.resolution,
         },
     )
-    db.commit()
-    db.refresh(event)
-
-    event = (
-        db.query(DowntimeEvent)
-        .options(
-            joinedload(DowntimeEvent.work_center),
-            joinedload(DowntimeEvent.reporter),
-            joinedload(DowntimeEvent.resolver),
-            joinedload(DowntimeEvent.work_order),
-        )
-        .filter(DowntimeEvent.id == event.id)
-        .first()
+    audit.log_status_change(
+        "downtime_event",
+        event.id,
+        _event_identifier(event),
+        old_status="active",
+        new_status="resolved",
+        description=f"Resolved downtime event {_event_identifier(event)}",
+        extra_data={
+            "end_time": end_time.isoformat(),
+            "duration_minutes": event.duration_minutes,
+            "resolution": event.resolution,
+        },
     )
+    db.commit()
 
-    return event
+    return _event_query(db, company_id).filter(DowntimeEvent.id == event.id).first()

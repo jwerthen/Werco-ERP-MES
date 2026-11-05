@@ -1,17 +1,67 @@
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator, model_validator
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_company_id, get_current_user
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
+from app.db.tenant_filter import tenant_query
 from app.models.tool_management import Tool, ToolCheckout, ToolStatus, ToolType, ToolUsageLog
-from app.models.user import User
+from app.models.user import User, UserRole
+from app.models.work_center import WorkCenter
+from app.models.work_order import WorkOrder
+from app.services.audit_service import AuditService
 
 router = APIRouter()
+
+# Who may change the tool crib. Until this change every handler here was a bare
+# ``get_current_user``, so a VIEWER could create, edit and retire tools.
+#
+# Planning verbs (create / edit / retire a tool record) match the inventory stock
+# mutators (``inventory.STOCK_MUTATOR_ROLES``: Admin / Manager / Supervisor) -- a tool
+# is crib inventory. Using a tool (check out / check in / log usage) stays open to
+# every role that works on the floor; only the read-only Viewer loses it, so no
+# operator, inspector or shipper who checks tools out today is cut off.
+# ``require_role`` always admits PLATFORM_ADMIN and superusers. Reads stay open.
+TOOL_PLANNING_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]
+TOOL_USE_ROLES = [
+    UserRole.ADMIN,
+    UserRole.MANAGER,
+    UserRole.SUPERVISOR,
+    UserRole.OPERATOR,
+    UserRole.QUALITY,
+    UserRole.SHIPPING,
+]
+
+# Fields ``PUT /tools/{id}`` may write, applied explicitly -- never a blind setattr
+# over the request body. ``status`` is handled separately (see ``update_tool``).
+_TOOL_EDITABLE_FIELDS = (
+    "name",
+    "tool_type",
+    "description",
+    "manufacturer",
+    "model_number",
+    "serial_number",
+    "location",
+    "max_life_hours",
+    "max_life_cycles",
+    "purchase_date",
+    "purchase_cost",
+    "inspection_interval_days",
+    "last_inspection_date",
+    "next_inspection_date",
+    "notes",
+    "is_active",
+)
+_TOOL_NON_NULLABLE_UPDATE_FIELDS = ("name", "tool_type", "status", "is_active")
+
+
+def _normalize_lower(value: Any) -> Any:
+    return value.strip().lower() if isinstance(value, str) else value
 
 
 # ── Pydantic Schemas ──────────────────────────────────────────────────────────
@@ -20,7 +70,7 @@ router = APIRouter()
 class ToolCreate(BaseModel):
     tool_id: str
     name: str
-    tool_type: str = "other"
+    tool_type: ToolType = ToolType.OTHER
     description: Optional[str] = None
     manufacturer: Optional[str] = None
     model_number: Optional[str] = None
@@ -30,28 +80,49 @@ class ToolCreate(BaseModel):
     max_life_cycles: Optional[int] = None
     purchase_date: Optional[date] = None
     purchase_cost: float = 0
-    inspection_interval_days: Optional[int] = None
+    inspection_interval_days: Optional[int] = Field(None, ge=1, le=3650)
     notes: Optional[str] = None
+
+    @field_validator("tool_type", mode="before")
+    @classmethod
+    def _normalize_tool_type(cls, value: Any) -> Any:
+        return _normalize_lower(value)
 
 
 class ToolUpdate(BaseModel):
     name: Optional[str] = None
-    tool_type: Optional[str] = None
+    tool_type: Optional[ToolType] = None
     description: Optional[str] = None
     manufacturer: Optional[str] = None
     model_number: Optional[str] = None
     serial_number: Optional[str] = None
     location: Optional[str] = None
-    status: Optional[str] = None
+    status: Optional[ToolStatus] = None
     max_life_hours: Optional[float] = None
     max_life_cycles: Optional[int] = None
     purchase_date: Optional[date] = None
     purchase_cost: Optional[float] = None
-    inspection_interval_days: Optional[int] = None
+    inspection_interval_days: Optional[int] = Field(None, ge=1, le=3650)
     last_inspection_date: Optional[date] = None
     next_inspection_date: Optional[date] = None
     notes: Optional[str] = None
     is_active: Optional[bool] = None
+
+    @field_validator("tool_type", "status", mode="before")
+    @classmethod
+    def _normalize_enums(cls, value: Any) -> Any:
+        return _normalize_lower(value)
+
+    @model_validator(mode="after")
+    def _refuse_explicit_nulls(self) -> "ToolUpdate":
+        nulled = [
+            field
+            for field in _TOOL_NON_NULLABLE_UPDATE_FIELDS
+            if field in self.model_fields_set and getattr(self, field) is None
+        ]
+        if nulled:
+            raise ValueError(f"{', '.join(nulled)} cannot be null")
+        return self
 
 
 class CheckoutRequest(BaseModel):
@@ -67,8 +138,10 @@ class CheckinRequest(BaseModel):
 
 
 class UsageLogRequest(BaseModel):
-    usage_hours: float = 0
-    usage_cycles: int = 0
+    # Non-negative: a negative entry would silently rewind a tool's accumulated life
+    # and hide it from the replacement-due list.
+    usage_hours: float = Field(0, ge=0)
+    usage_cycles: int = Field(0, ge=0)
     work_order_id: Optional[int] = None
     work_center_id: Optional[int] = None
     usage_date: Optional[date] = None
@@ -108,6 +181,44 @@ class ToolResponse(BaseModel):
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def _status_value(status: Any) -> Optional[str]:
+    return status.value if hasattr(status, "value") else status
+
+
+def _tool_or_404(db: Session, tool_id: int, company_id: int) -> Tool:
+    """Resolve a tool inside the caller's tenant, or a flat 404 (never 403).
+
+    A foreign tool must be indistinguishable from a nonexistent one, so the status
+    code cannot be used as an existence oracle over another tenant's crib.
+    """
+    tool = tenant_query(db, Tool, company_id).filter(Tool.id == tool_id).first()
+    if not tool:
+        raise HTTPException(status_code=404, detail="Tool not found")
+    return tool
+
+
+def _assert_refs_in_company(
+    db: Session, company_id: int, *, work_center_id: Optional[int], work_order_id: Optional[int]
+) -> None:
+    """Refuse a work center / work order that is not the caller's (flat 404).
+
+    These ids are stored on the checkout / usage row and drive ``current_work_center_id``;
+    unvalidated, a caller could tie its tool record to another tenant's machine or job.
+    A new link is a SELECTION, so a soft-deleted work order is refused too (invariant 3).
+    """
+    if work_center_id is not None:
+        if not tenant_query(db, WorkCenter, company_id).filter(WorkCenter.id == work_center_id).first():
+            raise HTTPException(status_code=404, detail="Work center not found")
+    if work_order_id is not None:
+        live = (
+            tenant_query(db, WorkOrder, company_id)
+            .filter(WorkOrder.id == work_order_id, WorkOrder.is_deleted == False)  # noqa: E712
+            .first()
+        )
+        if not live:
+            raise HTTPException(status_code=404, detail="Work order not found")
 
 
 def _calc_life_remaining(tool: Tool) -> Optional[float]:
@@ -198,9 +309,10 @@ def _usage_to_dict(ul: ToolUsageLog) -> dict:
 def get_dashboard(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Summary stats for tools dashboard"""
-    tools = db.query(Tool).filter(Tool.is_active == True).all()
+    tools = tenant_query(db, Tool, company_id).filter(Tool.is_active == True).all()
     total = len(tools)
     checked_out = sum(1 for t in tools if t.status == ToolStatus.IN_USE)
 
@@ -238,10 +350,11 @@ def get_dashboard(
 def list_checked_out(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """List all currently checked-out tools"""
     tools = (
-        db.query(Tool)
+        tenant_query(db, Tool, company_id)
         .filter(
             Tool.is_active == True,
             Tool.status == ToolStatus.IN_USE,
@@ -255,9 +368,10 @@ def list_checked_out(
 def list_replacement_due(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Tools with <=20% life remaining"""
-    tools = db.query(Tool).filter(Tool.is_active == True).all()
+    tools = tenant_query(db, Tool, company_id).filter(Tool.is_active == True).all()
     result = []
     for t in tools:
         pct = _calc_life_remaining(t)
@@ -270,11 +384,12 @@ def list_replacement_due(
 def list_inspection_due(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
     """Tools overdue or due for inspection"""
     today = date.today()
     tools = (
-        db.query(Tool)
+        tenant_query(db, Tool, company_id)
         .filter(
             Tool.is_active == True,
             Tool.next_inspection_date != None,
@@ -300,7 +415,7 @@ def list_tools(
     company_id: int = Depends(get_current_company_id),
 ):
     """List tools with optional filters"""
-    query = db.query(Tool).filter(Tool.company_id == company_id)
+    query = tenant_query(db, Tool, company_id)
     if not include_inactive:
         query = query.filter(Tool.is_active == True)
     if status:
@@ -327,26 +442,22 @@ def get_tool(
     company_id: int = Depends(get_current_company_id),
 ):
     """Get single tool by primary key"""
-    tool = db.query(Tool).filter(Tool.id == tool_id, Tool.company_id == company_id).first()
-    if not tool:
-        raise HTTPException(status_code=404, detail="Tool not found")
-    return _tool_to_dict(tool)
+    return _tool_to_dict(_tool_or_404(db, tool_id, company_id))
 
 
 @router.post("/tools/")
 def create_tool(
     tool_in: ToolCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(TOOL_PLANNING_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new tool"""
-    if db.query(Tool).filter(Tool.tool_id == tool_in.tool_id, Tool.company_id == company_id).first():
+    """Create a new tool. **Role: ADMIN / MANAGER / SUPERVISOR.**"""
+    if tenant_query(db, Tool, company_id).filter(Tool.tool_id == tool_in.tool_id).first():
         raise HTTPException(status_code=400, detail="Tool ID already exists")
 
     data = tool_in.model_dump()
-    if data.get("tool_type"):
-        data["tool_type"] = ToolType(data["tool_type"])
 
     # Calculate initial next_inspection_date
     if data.get("inspection_interval_days"):
@@ -357,6 +468,15 @@ def create_tool(
     tool.company_id = company_id
     tool.life_remaining_pct = _calc_life_remaining(tool)
     db.add(tool)
+    try:
+        db.flush()
+    except IntegrityError:
+        # ``tools.tool_id`` still carries a GLOBAL unique constraint (no per-company
+        # compound yet), so a code another tenant already uses fails here rather than
+        # in the tenant-scoped probe above. Same answer as the probe.
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Tool ID already exists")
+    audit.log_create("tool", tool.id, tool.tool_id, new_values=tool)
     db.commit()
     db.refresh(tool)
     return _tool_to_dict(tool)
@@ -367,24 +487,53 @@ def update_tool(
     tool_id: int,
     tool_in: ToolUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(TOOL_PLANNING_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a tool"""
-    tool = db.query(Tool).filter(Tool.id == tool_id, Tool.company_id == company_id).first()
-    if not tool:
-        raise HTTPException(status_code=404, detail="Tool not found")
+    """Update a tool. **Role: ADMIN / MANAGER / SUPERVISOR.**
+
+    ``in_use`` is entered only by ``POST /tools/{id}/checkout`` and left only by
+    ``POST /tools/{id}/checkin``, so the checkout ledger and the tool's status cannot
+    drift apart: setting ``status: in_use`` here, or changing the status of a tool that
+    is checked out, is **409**.
+    """
+    tool = _tool_or_404(db, tool_id, company_id)
 
     update_data = tool_in.model_dump(exclude_unset=True)
-    if "status" in update_data:
-        update_data["status"] = ToolStatus(update_data["status"])
-    if "tool_type" in update_data:
-        update_data["tool_type"] = ToolType(update_data["tool_type"])
+    old_status = tool.status
+    new_status = update_data.pop("status", None)
+    status_changes = new_status is not None and new_status != old_status
+    if status_changes and new_status == ToolStatus.IN_USE:
+        raise HTTPException(
+            status_code=409, detail=f"A tool is marked in use only by checking it out: POST /tools/{tool.id}/checkout"
+        )
+    if status_changes and old_status == ToolStatus.IN_USE:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Tool {tool.tool_id} is checked out. Check it in first: POST /tools/{tool.id}/checkin",
+        )
 
-    for field, value in update_data.items():
-        setattr(tool, field, value)
+    old_values = {field: getattr(tool, field) for field in _TOOL_EDITABLE_FIELDS}
+    for field in _TOOL_EDITABLE_FIELDS:
+        if field in update_data:
+            setattr(tool, field, update_data[field])
+    if status_changes:
+        tool.status = new_status
 
     tool.life_remaining_pct = _calc_life_remaining(tool)
+    db.flush()
+    audit.log_update(
+        "tool",
+        tool.id,
+        tool.tool_id,
+        old_values=old_values,
+        new_values={field: getattr(tool, field) for field in _TOOL_EDITABLE_FIELDS},
+    )
+    if status_changes:
+        audit.log_status_change(
+            "tool", tool.id, tool.tool_id, old_status=_status_value(old_status), new_status=_status_value(new_status)
+        )
     db.commit()
     db.refresh(tool)
     return _tool_to_dict(tool)
@@ -394,15 +543,36 @@ def update_tool(
 def retire_tool(
     tool_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(TOOL_PLANNING_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Retire a tool (soft delete)"""
-    tool = db.query(Tool).filter(Tool.id == tool_id, Tool.company_id == company_id).first()
-    if not tool:
-        raise HTTPException(status_code=404, detail="Tool not found")
+    """Retire a tool. **Role: ADMIN / MANAGER / SUPERVISOR.**
+
+    Not a delete: the row, its checkout ledger and usage history are kept; the tool
+    moves to RETIRED and drops off the active lists. A checked-out tool is **409** --
+    check it in first, so no open checkout is left behind.
+    """
+    tool = _tool_or_404(db, tool_id, company_id)
+    if tool.status == ToolStatus.IN_USE:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Tool {tool.tool_id} is checked out. Check it in first: POST /tools/{tool.id}/checkin",
+        )
+    old_status = tool.status
+    old_active = tool.is_active
     tool.status = ToolStatus.RETIRED
     tool.is_active = False
+    db.flush()
+    audit.log_status_change(
+        "tool",
+        tool.id,
+        tool.tool_id,
+        old_status=_status_value(old_status),
+        new_status=_status_value(ToolStatus.RETIRED),
+        description=f"Retired tool {tool.tool_id}",
+        extra_data={"is_active": {"old": old_active, "new": False}},
+    )
     db.commit()
     return {"message": f"Tool {tool.tool_id} retired"}
 
@@ -415,18 +585,19 @@ def checkout_tool(
     tool_id: int,
     req: CheckoutRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(TOOL_USE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Check out a tool"""
-    tool = db.query(Tool).filter(Tool.id == tool_id, Tool.company_id == company_id).first()
-    if not tool:
-        raise HTTPException(status_code=404, detail="Tool not found")
+    """Check out a tool. **Role: any tenant role except VIEWER.**"""
+    tool = _tool_or_404(db, tool_id, company_id)
     if tool.status == ToolStatus.IN_USE:
         raise HTTPException(status_code=400, detail="Tool is already checked out")
     if tool.status in (ToolStatus.RETIRED, ToolStatus.LOST, ToolStatus.DAMAGED):
         raise HTTPException(status_code=400, detail=f"Cannot check out a {tool.status.value} tool")
+    _assert_refs_in_company(db, company_id, work_center_id=req.work_center_id, work_order_id=req.work_order_id)
 
+    old_status = tool.status
     checkout = ToolCheckout(
         tool_id=tool.id,
         checked_out_by=current_user.id,
@@ -436,12 +607,28 @@ def checkout_tool(
         condition_out=req.condition_out,
         notes=req.notes,
     )
+    checkout.company_id = tool.company_id
     db.add(checkout)
 
     tool.status = ToolStatus.IN_USE
     tool.current_user_id = current_user.id
     tool.current_work_center_id = req.work_center_id
 
+    db.flush()
+    audit.log_status_change(
+        "tool",
+        tool.id,
+        tool.tool_id,
+        old_status=_status_value(old_status),
+        new_status=_status_value(ToolStatus.IN_USE),
+        description=f"Checked out tool {tool.tool_id}",
+        extra_data={
+            "checkout_id": checkout.id,
+            "work_center_id": req.work_center_id,
+            "work_order_id": req.work_order_id,
+            "condition_out": req.condition_out,
+        },
+    )
     db.commit()
     db.refresh(checkout)
     return _checkout_to_dict(checkout)
@@ -452,19 +639,18 @@ def checkin_tool(
     tool_id: int,
     req: CheckinRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(TOOL_USE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Check in a tool"""
-    tool = db.query(Tool).filter(Tool.id == tool_id, Tool.company_id == company_id).first()
-    if not tool:
-        raise HTTPException(status_code=404, detail="Tool not found")
+    """Check in a tool. **Role: any tenant role except VIEWER.**"""
+    tool = _tool_or_404(db, tool_id, company_id)
     if tool.status != ToolStatus.IN_USE:
         raise HTTPException(status_code=400, detail="Tool is not currently checked out")
 
     # Find the open checkout record
     checkout = (
-        db.query(ToolCheckout)
+        tenant_query(db, ToolCheckout, company_id)
         .filter(
             ToolCheckout.tool_id == tool.id,
             ToolCheckout.checked_in_at == None,
@@ -479,6 +665,7 @@ def checkin_tool(
         if req.notes:
             checkout.notes = (checkout.notes or "") + ("\n" if checkout.notes else "") + req.notes
 
+    old_status = tool.status
     # Update tool status based on condition
     if req.condition_in == "damaged":
         tool.status = ToolStatus.DAMAGED
@@ -490,6 +677,16 @@ def checkin_tool(
     tool.current_user_id = None
     tool.current_work_center_id = None
 
+    db.flush()
+    audit.log_status_change(
+        "tool",
+        tool.id,
+        tool.tool_id,
+        old_status=_status_value(old_status),
+        new_status=_status_value(tool.status),
+        description=f"Checked in tool {tool.tool_id}",
+        extra_data={"checkout_id": checkout.id if checkout else None, "condition_in": req.condition_in},
+    )
     db.commit()
     return {"message": "Tool checked in", "new_status": tool.status.value}
 
@@ -502,13 +699,13 @@ def log_usage(
     tool_id: int,
     req: UsageLogRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(TOOL_USE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Log usage hours/cycles for a tool"""
-    tool = db.query(Tool).filter(Tool.id == tool_id, Tool.company_id == company_id).first()
-    if not tool:
-        raise HTTPException(status_code=404, detail="Tool not found")
+    """Log usage hours/cycles for a tool. **Role: any tenant role except VIEWER.**"""
+    tool = _tool_or_404(db, tool_id, company_id)
+    _assert_refs_in_company(db, company_id, work_center_id=req.work_center_id, work_order_id=req.work_order_id)
 
     log = ToolUsageLog(
         tool_id=tool.id,
@@ -520,6 +717,7 @@ def log_usage(
         recorded_by=current_user.id,
         notes=req.notes,
     )
+    log.company_id = tool.company_id
     db.add(log)
 
     # Update cumulative totals
@@ -527,6 +725,18 @@ def log_usage(
     tool.current_life_cycles = (tool.current_life_cycles or 0) + req.usage_cycles
     tool.life_remaining_pct = _calc_life_remaining(tool)
 
+    db.flush()
+    audit.log_create(
+        "tool_usage_log",
+        log.id,
+        tool.tool_id,
+        new_values=log,
+        extra_data={
+            "tool_id": tool.id,
+            "current_life_hours": tool.current_life_hours,
+            "current_life_cycles": tool.current_life_cycles,
+        },
+    )
     db.commit()
     db.refresh(log)
     return _usage_to_dict(log)
@@ -540,21 +750,23 @@ def get_tool_history(
     tool_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
 ):
-    """Get checkout and usage history for a tool"""
-    tool = db.query(Tool).filter(Tool.id == tool_id).first()
-    if not tool:
-        raise HTTPException(status_code=404, detail="Tool not found")
+    """Get checkout and usage history for a tool (404 for another tenant's tool)."""
+    tool = _tool_or_404(db, tool_id, company_id)
 
     checkouts = (
-        db.query(ToolCheckout)
-        .filter(ToolCheckout.tool_id == tool_id)
+        tenant_query(db, ToolCheckout, company_id)
+        .filter(ToolCheckout.tool_id == tool.id)
         .order_by(ToolCheckout.checked_out_at.desc())
         .all()
     )
 
     usage_logs = (
-        db.query(ToolUsageLog).filter(ToolUsageLog.tool_id == tool_id).order_by(ToolUsageLog.usage_date.desc()).all()
+        tenant_query(db, ToolUsageLog, company_id)
+        .filter(ToolUsageLog.tool_id == tool.id)
+        .order_by(ToolUsageLog.usage_date.desc())
+        .all()
     )
 
     return {

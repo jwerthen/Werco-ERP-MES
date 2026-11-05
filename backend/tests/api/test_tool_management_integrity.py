@@ -1,0 +1,366 @@
+"""The tool crib saves its ledger rows, stays inside the caller's tenant, is role-gated and audited.
+
+``api/endpoints/tool_management.py`` had the same root cause as the calibration router:
+
+* **Checkout and usage logging could not save.** ``ToolCheckout`` / ``ToolUsageLog`` carry
+  ``TenantMixin.company_id`` (NOT NULL) and both handlers built rows without it -- every
+  checkout from the Tool Management page was a 500.
+* **Five reads were cross-tenant.** ``/tools/{id}/history`` resolved the tool by bare id, and
+  the dashboard / checked-out / replacement-due / inspection-due lists took no company at all.
+* **No role gate, no audit.** A Viewer could create, edit (blind setattr, incl. ``status``) and
+  retire tools, and nothing recorded who checked a tool out or back in.
+
+Write cases assert the STORED rows and the audit-row count, not just the status code.
+"""
+
+from datetime import date, timedelta
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
+
+from app.models.audit_log import AuditLog
+from app.models.tool_management import Tool, ToolCheckout, ToolStatus, ToolUsageLog
+from app.models.user import UserRole
+from tests.api.kiosk_test_helpers import COMPANY_A, COMPANY_B, make_user, make_work_center, user_headers
+
+pytestmark = [pytest.mark.api, pytest.mark.requires_db]
+
+TOOLS_URL = "/api/v1/tool-management/tools"
+FOREIGN_TOOL_NAME = "ACME-SECRET 5-axis trunnion fixture"
+
+_seq = {"n": 0}
+
+
+def _next() -> int:
+    _seq["n"] += 1
+    return _seq["n"]
+
+
+def make_tool(
+    db: Session,
+    *,
+    company_id: int = COMPANY_A,
+    status: ToolStatus = ToolStatus.AVAILABLE,
+    name: str = "Shell mill",
+    max_life_hours: float = None,
+    current_life_hours: float = 0,
+) -> Tool:
+    tool = Tool(
+        tool_id=f"TL-INT-{_next():05d}",
+        name=name,
+        status=status,
+        max_life_hours=max_life_hours,
+        current_life_hours=current_life_hours,
+        is_active=True,
+        company_id=company_id,
+    )
+    db.add(tool)
+    db.commit()
+    db.refresh(tool)
+    return tool
+
+
+def headers_for(db: Session, *, company_id: int = COMPANY_A, role: UserRole = UserRole.OPERATOR) -> dict:
+    return user_headers(make_user(db, company_id=company_id, role=role))
+
+
+def audit_count(db: Session) -> int:
+    return db.query(AuditLog).count()
+
+
+def ledger_counts(db: Session) -> tuple:
+    return db.query(ToolCheckout).count(), db.query(ToolUsageLog).count()
+
+
+# ---------------------------------------------------------------------------
+# 1. The ledger rows save, stamped with the tool's company, and are audited
+# ---------------------------------------------------------------------------
+
+
+class TestToolLedgerWrites:
+    def test_checkout_then_checkin_saves_a_scoped_ledger_and_audits_both(self, client: TestClient, db_session: Session):
+        tool = make_tool(db_session)
+        work_center = make_work_center(db_session)
+        headers = headers_for(db_session)
+
+        out = client.post(f"{TOOLS_URL}/{tool.id}/checkout", json={"work_center_id": work_center.id}, headers=headers)
+        # Was a NOT NULL 500 before company_id was stamped.
+        assert out.status_code == 200, out.text
+        checkout = db_session.query(ToolCheckout).filter(ToolCheckout.id == out.json()["id"]).one()
+        assert checkout.company_id == COMPANY_A
+        db_session.refresh(tool)
+        assert tool.status == ToolStatus.IN_USE
+        assert tool.current_work_center_id == work_center.id
+
+        back = client.post(f"{TOOLS_URL}/{tool.id}/checkin", json={"condition_in": "damaged"}, headers=headers)
+        assert back.status_code == 200, back.text
+        db_session.refresh(checkout)
+        assert checkout.checked_in_at is not None
+        db_session.refresh(tool)
+        assert tool.status == ToolStatus.DAMAGED
+
+        rows = (
+            db_session.query(AuditLog)
+            .filter(AuditLog.resource_type == "tool", AuditLog.resource_id == tool.id)
+            .order_by(AuditLog.id)
+            .all()
+        )
+        assert [(r.action, r.old_values, r.new_values) for r in rows] == [
+            ("STATUS_CHANGE", {"status": "available"}, {"status": "in_use"}),
+            ("STATUS_CHANGE", {"status": "in_use"}, {"status": "damaged"}),
+        ]
+        assert all(r.company_id == COMPANY_A for r in rows)
+
+    def test_usage_log_saves_scoped_and_audits(self, client: TestClient, db_session: Session):
+        tool = make_tool(db_session, max_life_hours=100)
+        response = client.post(
+            f"{TOOLS_URL}/{tool.id}/log-usage", json={"usage_hours": 12.5}, headers=headers_for(db_session)
+        )
+        assert response.status_code == 200, response.text
+        log = db_session.query(ToolUsageLog).filter(ToolUsageLog.id == response.json()["id"]).one()
+        assert log.company_id == COMPANY_A
+        db_session.refresh(tool)
+        assert tool.current_life_hours == 12.5
+        assert (
+            db_session.query(AuditLog)
+            .filter(AuditLog.resource_type == "tool_usage_log", AuditLog.resource_id == log.id)
+            .count()
+            == 1
+        )
+
+    def test_negative_usage_is_422(self, client: TestClient, db_session: Session):
+        tool = make_tool(db_session, max_life_hours=100, current_life_hours=90)
+        response = client.post(
+            f"{TOOLS_URL}/{tool.id}/log-usage", json={"usage_hours": -80}, headers=headers_for(db_session)
+        )
+        assert response.status_code == 422
+        db_session.refresh(tool)
+        assert tool.current_life_hours == 90
+
+    def test_create_update_retire_are_audited(self, client: TestClient, db_session: Session):
+        headers = headers_for(db_session, role=UserRole.SUPERVISOR)
+        created = client.post(
+            f"{TOOLS_URL}/", json={"tool_id": f"NEW-{_next()}", "name": "Boring bar"}, headers=headers
+        )
+        assert created.status_code == 200, created.text
+        tool_id = created.json()["id"]
+        assert db_session.query(Tool).filter(Tool.id == tool_id).one().company_id == COMPANY_A
+
+        updated = client.put(
+            f"{TOOLS_URL}/{tool_id}", json={"location": "Crib B", "status": "maintenance"}, headers=headers
+        )
+        assert updated.status_code == 200, updated.text
+        retired = client.delete(f"{TOOLS_URL}/{tool_id}", headers=headers)
+        assert retired.status_code == 200, retired.text
+
+        actions = [
+            row.action
+            for row in db_session.query(AuditLog)
+            .filter(AuditLog.resource_type == "tool", AuditLog.resource_id == tool_id)
+            .order_by(AuditLog.id)
+        ]
+        assert actions == ["CREATE", "UPDATE", "STATUS_CHANGE", "STATUS_CHANGE"]
+        tool = db_session.query(Tool).filter(Tool.id == tool_id).one()
+        assert tool.status == ToolStatus.RETIRED
+        assert tool.is_active is False
+
+
+# ---------------------------------------------------------------------------
+# 2. PUT is an explicit field update; IN_USE is reachable only by checkout/checkin
+# ---------------------------------------------------------------------------
+
+
+class TestToolExplicitUpdate:
+    def test_put_cannot_mark_a_tool_in_use(self, client: TestClient, db_session: Session):
+        tool = make_tool(db_session)
+        before = audit_count(db_session)
+        response = client.put(
+            f"{TOOLS_URL}/{tool.id}", json={"status": "in_use"}, headers=headers_for(db_session, role=UserRole.MANAGER)
+        )
+        assert response.status_code == 409
+        db_session.refresh(tool)
+        assert tool.status == ToolStatus.AVAILABLE
+        assert audit_count(db_session) == before
+
+    def test_a_checked_out_tool_cannot_change_status_or_retire(self, client: TestClient, db_session: Session):
+        tool = make_tool(db_session, status=ToolStatus.IN_USE)
+        headers = headers_for(db_session, role=UserRole.MANAGER)
+        before = audit_count(db_session)
+
+        put = client.put(f"{TOOLS_URL}/{tool.id}", json={"status": "available"}, headers=headers)
+        retire = client.delete(f"{TOOLS_URL}/{tool.id}", headers=headers)
+
+        assert (put.status_code, retire.status_code) == (409, 409)
+        assert "checkin" in put.json()["detail"]
+        db_session.refresh(tool)
+        assert tool.status == ToolStatus.IN_USE
+        assert tool.is_active is True
+        assert audit_count(db_session) == before
+
+    def test_fields_outside_the_schema_are_never_written(self, client: TestClient, db_session: Session):
+        tool = make_tool(db_session, max_life_hours=100, current_life_hours=40)
+        response = client.put(
+            f"{TOOLS_URL}/{tool.id}",
+            json={"current_life_hours": 0, "company_id": COMPANY_B, "current_user_id": 1, "name": "Renamed"},
+            headers=headers_for(db_session, role=UserRole.MANAGER),
+        )
+        assert response.status_code == 200, response.text
+        db_session.refresh(tool)
+        assert tool.name == "Renamed"
+        assert tool.current_life_hours == 40
+        assert tool.company_id == COMPANY_A
+        assert tool.current_user_id is None
+
+    @pytest.mark.parametrize("payload", [{"status": "bogus"}, {"tool_type": "laser"}, {"name": None}])
+    def test_invalid_edits_are_422(self, client: TestClient, db_session: Session, payload: dict):
+        tool = make_tool(db_session)
+        response = client.put(
+            f"{TOOLS_URL}/{tool.id}", json=payload, headers=headers_for(db_session, role=UserRole.MANAGER)
+        )
+        assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# 3. RBAC: Viewer refused everywhere; Operator keeps checkout/checkin/usage
+# ---------------------------------------------------------------------------
+
+
+class TestToolRbac:
+    def test_viewer_is_refused_on_every_write_with_no_side_effects(self, client: TestClient, db_session: Session):
+        available = make_tool(db_session)
+        in_use = make_tool(db_session, status=ToolStatus.IN_USE)
+        headers = headers_for(db_session, role=UserRole.VIEWER)
+        tools_before = db_session.query(Tool).count()
+        ledger_before = ledger_counts(db_session)
+        audit_before = audit_count(db_session)
+
+        statuses = [
+            client.post(f"{TOOLS_URL}/", json={"tool_id": f"V-{_next()}", "name": "x"}, headers=headers).status_code,
+            client.put(f"{TOOLS_URL}/{available.id}", json={"name": "y"}, headers=headers).status_code,
+            client.delete(f"{TOOLS_URL}/{available.id}", headers=headers).status_code,
+            client.post(f"{TOOLS_URL}/{available.id}/checkout", json={}, headers=headers).status_code,
+            client.post(f"{TOOLS_URL}/{in_use.id}/checkin", json={}, headers=headers).status_code,
+            client.post(f"{TOOLS_URL}/{available.id}/log-usage", json={"usage_hours": 1}, headers=headers).status_code,
+        ]
+
+        assert statuses == [403] * 6
+        assert db_session.query(Tool).count() == tools_before
+        assert ledger_counts(db_session) == ledger_before
+        assert audit_count(db_session) == audit_before
+        db_session.refresh(available)
+        db_session.refresh(in_use)
+        assert (available.name, available.status) == ("Shell mill", ToolStatus.AVAILABLE)
+        assert in_use.status == ToolStatus.IN_USE
+
+    def test_operator_cannot_manage_tool_records(self, client: TestClient, db_session: Session):
+        tool = make_tool(db_session)
+        headers = headers_for(db_session, role=UserRole.OPERATOR)
+        audit_before = audit_count(db_session)
+        assert (
+            client.post(f"{TOOLS_URL}/", json={"tool_id": f"O-{_next()}", "name": "x"}, headers=headers).status_code
+            == 403
+        )
+        assert client.put(f"{TOOLS_URL}/{tool.id}", json={"name": "y"}, headers=headers).status_code == 403
+        assert client.delete(f"{TOOLS_URL}/{tool.id}", headers=headers).status_code == 403
+        assert audit_count(db_session) == audit_before
+
+    @pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.QUALITY, UserRole.SHIPPING])
+    def test_floor_roles_keep_checkout_and_checkin(self, client: TestClient, db_session: Session, role: UserRole):
+        tool = make_tool(db_session)
+        headers = headers_for(db_session, role=role)
+        assert client.post(f"{TOOLS_URL}/{tool.id}/checkout", json={}, headers=headers).status_code == 200
+        assert client.post(f"{TOOLS_URL}/{tool.id}/checkin", json={}, headers=headers).status_code == 200
+
+    def test_reads_stay_open_to_a_viewer(self, client: TestClient, db_session: Session):
+        tool = make_tool(db_session)
+        headers = headers_for(db_session, role=UserRole.VIEWER)
+        assert client.get(f"{TOOLS_URL}/", headers=headers).status_code == 200
+        assert client.get(f"{TOOLS_URL}/{tool.id}/history", headers=headers).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# 4. Tenant isolation: another company's tool is a flat 404; lists never show it
+# ---------------------------------------------------------------------------
+
+
+class TestToolTenantIsolation:
+    def _victim(self, db: Session) -> Tool:
+        # Low life + checked out + inspection overdue: on every list endpoint at once.
+        tool = make_tool(
+            db,
+            company_id=COMPANY_A,
+            status=ToolStatus.IN_USE,
+            name=FOREIGN_TOOL_NAME,
+            max_life_hours=100,
+            current_life_hours=95,
+        )
+        tool.next_inspection_date = date.today() - timedelta(days=3)
+        db.add(ToolCheckout(tool_id=tool.id, checked_out_by=make_user(db).id, company_id=COMPANY_A))
+        db.commit()
+        db.refresh(tool)
+        return tool
+
+    def test_history_of_another_tenants_tool_is_404_and_leaks_nothing(self, client: TestClient, db_session: Session):
+        tool = self._victim(db_session)
+        headers = headers_for(db_session, company_id=COMPANY_B, role=UserRole.ADMIN)
+
+        history = client.get(f"{TOOLS_URL}/{tool.id}/history", headers=headers)
+        missing = client.get(f"{TOOLS_URL}/999999/history", headers=headers)
+
+        assert history.status_code == 404
+        assert history.json() == missing.json()
+        assert FOREIGN_TOOL_NAME not in history.text
+
+    def test_writes_against_another_tenants_tool_are_404_with_no_side_effects(
+        self, client: TestClient, db_session: Session
+    ):
+        tool = self._victim(db_session)
+        headers = headers_for(db_session, company_id=COMPANY_B, role=UserRole.ADMIN)
+        ledger_before = ledger_counts(db_session)
+        audit_before = audit_count(db_session)
+
+        statuses = [
+            client.put(f"{TOOLS_URL}/{tool.id}", json={"name": "pwned"}, headers=headers).status_code,
+            client.delete(f"{TOOLS_URL}/{tool.id}", headers=headers).status_code,
+            client.post(f"{TOOLS_URL}/{tool.id}/checkout", json={}, headers=headers).status_code,
+            client.post(f"{TOOLS_URL}/{tool.id}/checkin", json={}, headers=headers).status_code,
+            client.post(f"{TOOLS_URL}/{tool.id}/log-usage", json={"usage_hours": 1}, headers=headers).status_code,
+        ]
+
+        assert statuses == [404] * 5
+        assert ledger_counts(db_session) == ledger_before
+        assert audit_count(db_session) == audit_before
+        db_session.refresh(tool)
+        assert (tool.name, tool.status, tool.is_active, tool.current_life_hours) == (
+            FOREIGN_TOOL_NAME,
+            ToolStatus.IN_USE,
+            True,
+            95,
+        )
+
+    def test_lists_never_show_another_tenants_tools(self, client: TestClient, db_session: Session):
+        tool = self._victim(db_session)
+        headers = headers_for(db_session, company_id=COMPANY_B, role=UserRole.ADMIN)
+
+        for path in ("/", "/checked-out", "/replacement-due", "/inspection-due"):
+            response = client.get(f"{TOOLS_URL}{path}", headers=headers)
+            assert response.status_code == 200, path
+            assert tool.id not in [row["id"] for row in response.json()], path
+        dashboard = client.get(f"{TOOLS_URL}/dashboard", headers=headers).json()
+        assert (dashboard["total_tools"], dashboard["checked_out"]) == (0, 0)
+
+    def test_checkout_against_another_tenants_work_center_is_404(self, client: TestClient, db_session: Session):
+        own_tool = make_tool(db_session, company_id=COMPANY_B)
+        foreign_wc = make_work_center(db_session, company_id=COMPANY_A)
+        headers = headers_for(db_session, company_id=COMPANY_B)
+        ledger_before = ledger_counts(db_session)
+
+        response = client.post(
+            f"{TOOLS_URL}/{own_tool.id}/checkout", json={"work_center_id": foreign_wc.id}, headers=headers
+        )
+
+        assert response.status_code == 404
+        assert ledger_counts(db_session) == ledger_before
+        db_session.refresh(own_tool)
+        assert own_tool.status == ToolStatus.AVAILABLE
