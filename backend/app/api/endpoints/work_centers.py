@@ -511,6 +511,8 @@ def update_work_center_status(
     # be dropped or the board keeps serving the old status.
     invalidate_work_centers_cache(work_center_id)
 
+    # Scoped to the active company: without ``company_id`` these went to every
+    # tenant's sockets and refetched other companies' Dashboard and Scheduling screens.
     safe_broadcast(
         broadcast_shop_floor_update,
         work_center_id,
@@ -519,6 +521,7 @@ def update_work_center_status(
             "work_center_id": work_center_id,
             "status": status,
         },
+        company_id=company_id,
     )
     safe_broadcast(
         broadcast_dashboard_update,
@@ -527,5 +530,6 @@ def update_work_center_status(
             "work_center_id": work_center_id,
             "status": status,
         },
+        company_id=company_id,
     )
     return {"message": f"Work center status updated to {status}"}
