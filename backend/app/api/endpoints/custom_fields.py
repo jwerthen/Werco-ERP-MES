@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -22,6 +22,16 @@ from app.services import custom_field_values
 from app.services.audit_service import AuditService
 
 router = APIRouter()
+
+# Audit resource type for definition writes. A definition decides how every stored
+# value under it is read (field_type / options) and whether it is shown at all
+# (is_active hides its values from every read), so who changed one is evidence.
+DEFINITION_RESOURCE_TYPE = "custom_field_definition"
+
+
+def _definition_identifier(field: CustomFieldDefinition) -> str:
+    entity_type = field.entity_type.value if isinstance(field.entity_type, EntityType) else str(field.entity_type)
+    return f"{entity_type}:{field.field_key}"
 
 
 # Field Definition endpoints
@@ -51,8 +61,9 @@ def create_field_definition(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new custom field definition"""
+    """Create a new custom field definition. Writes an audit ``CREATE`` row in the same transaction."""
     # Check if field_key already exists for this entity type
     existing = (
         db.query(CustomFieldDefinition)
@@ -74,6 +85,10 @@ def create_field_definition(
     field = CustomFieldDefinition(**field_in.model_dump(), created_by=current_user.id)
     field.company_id = company_id
     db.add(field)
+    # Flush for the id and column defaults, and log BEFORE the commit so the audit
+    # row commits atomically with the definition.
+    db.flush()
+    audit.log_create(DEFINITION_RESOURCE_TYPE, field.id, _definition_identifier(field), new_values=field)
     db.commit()
     db.refresh(field)
     return field
@@ -104,8 +119,9 @@ def update_field_definition(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a field definition"""
+    """Update a field definition. Writes an audit ``UPDATE`` row (supplied fields, old and new)."""
     field = (
         db.query(CustomFieldDefinition)
         .filter(CustomFieldDefinition.id == field_id, CustomFieldDefinition.company_id == company_id)
@@ -115,9 +131,20 @@ def update_field_definition(
         raise HTTPException(status_code=404, detail="Field definition not found")
 
     update_data = field_in.model_dump(exclude_unset=True)
+    previous = {key: getattr(field, key) for key in update_data}
     for key, value in update_data.items():
         setattr(field, key, value)
 
+    # Flush first so a database refusal surfaces here rather than inside the
+    # best-effort audit call's autoflush; log before the commit (same transaction).
+    db.flush()
+    audit.log_update(
+        DEFINITION_RESOURCE_TYPE,
+        field.id,
+        _definition_identifier(field),
+        old_values=previous,
+        new_values=update_data,
+    )
     db.commit()
     db.refresh(field)
     return field
@@ -129,8 +156,14 @@ def delete_field_definition(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Soft delete (deactivate) a field definition"""
+    """Soft delete (deactivate) a field definition.
+
+    Writes an audit ``STATUS_CHANGE`` row (``active`` -> ``inactive``) when the
+    definition was active; deactivating an already-inactive one changes and records
+    nothing.
+    """
     field = (
         db.query(CustomFieldDefinition)
         .filter(CustomFieldDefinition.id == field_id, CustomFieldDefinition.company_id == company_id)
@@ -139,8 +172,17 @@ def delete_field_definition(
     if not field:
         raise HTTPException(status_code=404, detail="Field definition not found")
 
-    field.is_active = False
-    db.commit()
+    if field.is_active is not False:
+        field.is_active = False
+        db.flush()
+        audit.log_status_change(
+            DEFINITION_RESOURCE_TYPE,
+            field.id,
+            _definition_identifier(field),
+            old_status="active",
+            new_status="inactive",
+        )
+        db.commit()
     return {"message": "Field definition deactivated"}
 
 
@@ -169,8 +211,13 @@ def parse_value(value: Any, field_type: FieldType) -> Dict[str, Any]:
     elif field_type in [FieldType.DATE, FieldType.DATETIME]:
         if isinstance(value, str):
             result["value_date"] = datetime.fromisoformat(value.replace('Z', '+00:00'))
-        else:
+        elif isinstance(value, (datetime, date)):
             result["value_date"] = value
+        else:
+            # A JSON number / bool / object / array is not a date. Refuse it HERE so the
+            # caller maps it to 400; passed through, it fails only at flush time (a 500,
+            # and on an overwrite inside the best-effort audit call's autoflush).
+            raise TypeError(f"{field_type.value} value must be an ISO-8601 string, not {type(value).__name__}")
     elif field_type == FieldType.MULTISELECT:
         result["value_json"] = value if isinstance(value, list) else [value]
     else:

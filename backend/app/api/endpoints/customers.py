@@ -29,12 +29,21 @@ router = APIRouter()
 # table. ``/customers/names`` shares it because it feeds every picker.
 MAX_CUSTOMER_ROWS = 5_000
 
-# Who may write the customer master. Matches every other customer write in this
+# Who may EDIT the customer master. Matches every other customer write in this
 # router (import, delete, restore) and the vendor master's create/update gate --
 # a customer record carries the CoC/FAI requirements and the payment terms every
 # quote and shipment reads, so it is an office-controlled master, not a floor
-# record. Reads stay read-broad (docs/RBAC_PERMISSIONS.md -> Access enforcement).
-CUSTOMER_WRITE_ROLES = [UserRole.ADMIN, UserRole.MANAGER]
+# record. Reads stay read-broad (docs/RBAC_PERMISSIONS.md -> Customers).
+CUSTOMER_UPDATE_ROLES = [UserRole.ADMIN, UserRole.MANAGER]
+
+# Who may CREATE a customer: the edit roles plus Supervisor -- exactly the roles
+# ``POST /work-orders/`` admits. New Work Order (WorkOrderNew.tsx) creates the
+# customer inline (``api.createCustomer({name})``) when the typed name is not in
+# the master yet, and abandons the work-order submit if that create is refused, so
+# a create gate narrower than the work-order gate would take "open a work order for
+# a new customer" away from a role that may open work orders. Changing an EXISTING
+# record (its CoC/FAI requirements, terms, name) stays ``CUSTOMER_UPDATE_ROLES``.
+CUSTOMER_CREATE_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]
 
 
 class CustomerCreate(BaseModel):
@@ -544,11 +553,14 @@ def get_customer_stats(
 def create_customer(
     customer_in: CustomerCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(CUSTOMER_WRITE_ROLES)),
+    current_user: User = Depends(require_role(CUSTOMER_CREATE_ROLES)),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a customer in the active company. Admin / Manager only.
+    """Create a customer in the active company. Admin / Manager / Supervisor.
+
+    Supervisor is admitted because New Work Order creates the customer inline when
+    the typed name is new, and Supervisor may create work orders.
 
     ``name`` and ``code`` must each be unique within the company (400 "Customer
     name already exists" / "Customer code already exists"); another company's
@@ -587,7 +599,7 @@ def update_customer(
     customer_id: int,
     customer_in: CustomerUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(CUSTOMER_WRITE_ROLES)),
+    current_user: User = Depends(require_role(CUSTOMER_UPDATE_ROLES)),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
@@ -617,9 +629,14 @@ def update_customer(
     for field, value in update_data.items():
         setattr(customer, field, value)
 
-    audit.log_update("customer", customer.id, customer.name, old_values=previous, new_values=update_data)
-
     try:
+        # Flush BEFORE the audit call, inside the try. AuditService.log autoflushes on
+        # its chain-tail read and swallows any exception as best-effort, so a pending
+        # rename that hits uq_customers_company_name there would be eaten and the
+        # commit would raise PendingRollbackError (500), not IntegrityError. Flushing
+        # here surfaces the constraint violation to this handler first.
+        db.flush()
+        audit.log_update("customer", customer.id, customer.name, old_values=previous, new_values=update_data)
         db.commit()
     except IntegrityError as exc:
         # TOCTOU backstop for a concurrent rename onto the same name.
@@ -638,10 +655,22 @@ def delete_customer(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Soft delete or permanently delete a customer."""
+    """Soft delete or permanently delete a customer.
+
+    A second soft delete of an already soft-deleted customer is refused **400**;
+    ``hard_delete=true`` on a tombstone is still allowed.
+    """
+    # Deliberately NOT filtered on is_deleted: delete must see the tombstone, both to
+    # refuse a double soft delete below and to let hard_delete remove one.
     customer = db.query(Customer).filter(Customer.id == customer_id, Customer.company_id == company_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
+
+    if customer.is_deleted and not hard_delete:
+        # A re-delete would overwrite deleted_at/deleted_by and write a DELETE row
+        # claiming the customer was live -- falsifying the only record of the
+        # is_active value it had before the first delete.
+        raise HTTPException(status_code=400, detail="Customer is already deleted")
 
     audit = AuditService(db, current_user, request)
 

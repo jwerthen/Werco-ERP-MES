@@ -23,7 +23,7 @@ Nothing here commits: the router owns the transaction.
 from typing import Any, Dict, Optional, Tuple, Type
 
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, contains_eager
 
 from app.db.tenant_filter import tenant_query
 from app.models.bom import BOM
@@ -98,10 +98,15 @@ def find_value(
 
 
 def entity_values(db: Session, company_id: int, entity_type: EntityType, entity_id: int) -> list:
-    """Value rows of ACTIVE definitions on one entity, both sides tenant-scoped."""
+    """Value rows of ACTIVE definitions on one entity, both sides tenant-scoped.
+
+    ``field_definition`` is populated from the join (``contains_eager``), so a caller
+    reading ``value.field_definition`` issues no per-row lazy load.
+    """
     return (
         tenant_query(db, CustomFieldValue, company_id)
-        .join(CustomFieldDefinition, CustomFieldValue.field_definition_id == CustomFieldDefinition.id)
+        .join(CustomFieldValue.field_definition)
+        .options(contains_eager(CustomFieldValue.field_definition))
         .filter(
             CustomFieldDefinition.company_id == company_id,
             CustomFieldDefinition.is_active == True,  # noqa: E712

@@ -18,7 +18,10 @@ Pinned here:
 * ``ENTITY_MODELS`` maps every ``EntityType`` so no type can skip the existence check.
 """
 
+from datetime import datetime
+
 import pytest
+import sqlalchemy as sa
 from fastapi import status
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -562,3 +565,220 @@ class TestCustomFieldValuesGapCoverage:
         updates = _value_audits(db_session, "UPDATE")
         assert [(u.old_values["value_text"], u.new_values["value_text"]) for u in updates] == [("first", "second")]
         assert _value_audits(db_session, "CREATE") == []
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups: non-string dates, definition audit, no per-row lazy load
+# ---------------------------------------------------------------------------
+
+NON_STRING_DATES = [5, True, {"year": 2026}, [2026, 11, 5]]
+
+
+class TestDateValuesMustBeStrings:
+    """A DATE / DATETIME value arrives over JSON; only an ISO-8601 string can be one.
+
+    Checked: with ``parse_value`` passing a non-string straight into ``value_date`` (the old
+    ``else`` branch) the create is a 500 at ``upsert_value``'s flush, the overwrite a 500 from
+    ``PendingRollbackError`` after the audit call's autoflush swallowed the failure, and the
+    bulk request dies whole instead of reporting one key's error.
+    """
+
+    @pytest.mark.parametrize("raw", NON_STRING_DATES)
+    def test_create_with_a_non_string_date_is_400(self, client: TestClient, db_session: Session, raw):
+        user = _make_user(db_session, company_id=COMPANY_A)
+        part = _part(db_session, company_id=COMPANY_A)
+        _definition(db_session, company_id=COMPANY_A, field_key="cert_date", field_type=FieldType.DATE)
+
+        before = _counts(db_session)
+        resp = client.post(
+            f"/api/v1/custom-fields/values/part/{part.id}",
+            headers=_headers(user),
+            json={"field_key": "cert_date", "value": raw},
+        )
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
+        assert resp.json()["detail"] == "Invalid value for 'cert_date' (date)"
+        assert _counts(db_session) == before
+
+    @pytest.mark.parametrize("raw", NON_STRING_DATES)
+    def test_overwrite_with_a_non_string_datetime_is_400_and_keeps_the_value(
+        self, client: TestClient, db_session: Session, raw
+    ):
+        user = _make_user(db_session, company_id=COMPANY_A)
+        part = _part(db_session, company_id=COMPANY_A)
+        field = _definition(db_session, company_id=COMPANY_A, field_key="shipped_at", field_type=FieldType.DATETIME)
+        original = datetime(2026, 11, 1, 14, 30)
+        db_session.add(
+            CustomFieldValue(
+                field_definition_id=field.id,
+                entity_type=EntityType.PART,
+                entity_id=part.id,
+                value_date=original,
+                company_id=COMPANY_A,
+            )
+        )
+        db_session.commit()
+
+        before = _counts(db_session)
+        resp = client.post(
+            f"/api/v1/custom-fields/values/part/{part.id}",
+            headers=_headers(user),
+            json={"field_key": "shipped_at", "value": raw},
+        )
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
+        assert _counts(db_session) == before
+        assert db_session.query(CustomFieldValue).one().value_date == original
+
+    def test_bulk_reports_a_non_string_date_per_key_and_applies_the_rest(self, client: TestClient, db_session: Session):
+        user = _make_user(db_session, company_id=COMPANY_A)
+        part = _part(db_session, company_id=COMPANY_A)
+        _definition(db_session, company_id=COMPANY_A)
+        _definition(db_session, company_id=COMPANY_A, field_key="cert_date", field_type=FieldType.DATE)
+
+        resp = client.post(
+            "/api/v1/custom-fields/values/bulk",
+            headers=_headers(user),
+            json={
+                "entity_type": "part",
+                "entity_id": part.id,
+                "values": {FIELD_KEY: "AMS 2770", "cert_date": 20261105},
+            },
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        by_key = {r["field_key"]: r["status"] for r in resp.json()["results"]}
+        assert by_key == {FIELD_KEY: "success", "cert_date": "error"}
+        db_session.expire_all()
+        assert [(r.value_text, r.value_date) for r in db_session.query(CustomFieldValue).all()] == [("AMS 2770", None)]
+        assert len(_value_audits(db_session, "CREATE")) == 1
+
+    def test_an_iso_string_still_round_trips(self, client: TestClient, db_session: Session):
+        user = _make_user(db_session, company_id=COMPANY_A)
+        part = _part(db_session, company_id=COMPANY_A)
+        _definition(db_session, company_id=COMPANY_A, field_key="cert_date", field_type=FieldType.DATE)
+        url = f"/api/v1/custom-fields/values/part/{part.id}"
+
+        resp = client.post(url, headers=_headers(user), json={"field_key": "cert_date", "value": "2026-11-05"})
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert client.get(url, headers=_headers(user)).json()["fields"]["cert_date"].startswith("2026-11-05")
+
+
+DEFINITION_RESOURCE_TYPE = "custom_field_definition"
+
+
+def _definition_audits(db: Session, action: str) -> list:
+    db.rollback()  # only COMMITTED audit rows survive this
+    db.expire_all()
+    return (
+        db.query(AuditLog)
+        .filter(AuditLog.resource_type == DEFINITION_RESOURCE_TYPE, AuditLog.action == action)
+        .order_by(AuditLog.sequence_number)
+        .all()
+    )
+
+
+class TestDefinitionWritesAreAudited:
+    """Deactivating a definition hides every value under it; editing one changes how they read.
+
+    Checked: removing any one of the three ``audit.log_*`` calls fails the matching assertion.
+    """
+
+    def test_create_update_and_deactivate_each_write_a_committed_row(self, client: TestClient, db_session: Session):
+        manager = _make_user(db_session, company_id=COMPANY_A, role=UserRole.MANAGER)
+        admin = _make_user(db_session, company_id=COMPANY_A, role=UserRole.ADMIN)
+
+        created = client.post(
+            "/api/v1/custom-fields/definitions",
+            headers=_headers(manager),
+            json={
+                "field_key": "coating",
+                "display_name": "Coating",
+                "entity_type": "part",
+                "field_type": "select",
+                "options": ["Zinc", "Black oxide"],
+            },
+        )
+        assert created.status_code == status.HTTP_200_OK, created.text
+        field_id = created.json()["id"]
+
+        creates = _definition_audits(db_session, "CREATE")
+        assert [(a.resource_id, a.resource_identifier, a.company_id, a.user_id) for a in creates] == [
+            (field_id, "part:coating", COMPANY_A, manager.id)
+        ]
+        assert creates[0].new_values["options"] == ["Zinc", "Black oxide"]
+        assert creates[0].new_values["company_id"] == COMPANY_A
+
+        updated = client.put(
+            f"/api/v1/custom-fields/definitions/{field_id}",
+            headers=_headers(manager),
+            json={"options": ["Zinc", "Black oxide", "Passivate"], "display_name": "Coating"},
+        )
+        assert updated.status_code == status.HTTP_200_OK, updated.text
+        updates = _definition_audits(db_session, "UPDATE")
+        assert len(updates) == 1
+        assert updates[0].user_id == manager.id
+        # display_name was supplied unchanged; only the real change is in ``changes``.
+        assert set(updates[0].extra_data["changes"]) == {"options"}
+        assert updates[0].old_values["options"] == ["Zinc", "Black oxide"]
+        assert updates[0].new_values["options"] == ["Zinc", "Black oxide", "Passivate"]
+
+        deactivated = client.delete(f"/api/v1/custom-fields/definitions/{field_id}", headers=_headers(admin))
+        assert deactivated.status_code == status.HTTP_200_OK, deactivated.text
+        again = client.delete(f"/api/v1/custom-fields/definitions/{field_id}", headers=_headers(admin))
+        assert again.status_code == status.HTTP_200_OK, again.text
+
+        changes = _definition_audits(db_session, "STATUS_CHANGE")
+        # The repeat deactivation changed nothing and recorded nothing.
+        assert [(a.user_id, a.old_values, a.new_values) for a in changes] == [
+            (admin.id, {"status": "active"}, {"status": "inactive"})
+        ]
+        assert (
+            db_session.query(CustomFieldDefinition).filter(CustomFieldDefinition.id == field_id).one().is_active
+            is False
+        )
+
+    def test_wrong_tenant_definition_writes_are_404_with_no_audit(self, client: TestClient, db_session: Session):
+        admin_a = _make_user(db_session, company_id=COMPANY_A, role=UserRole.ADMIN)
+        theirs = _definition(db_session, company_id=COMPANY_B)
+
+        before = _counts(db_session)
+        put = client.put(
+            f"/api/v1/custom-fields/definitions/{theirs.id}", headers=_headers(admin_a), json={"display_name": "Mine"}
+        )
+        assert put.status_code == status.HTTP_404_NOT_FOUND
+        delete = client.delete(f"/api/v1/custom-fields/definitions/{theirs.id}", headers=_headers(admin_a))
+        assert delete.status_code == status.HTTP_404_NOT_FOUND
+        assert _counts(db_session) == before
+        row = db_session.query(CustomFieldDefinition).filter(CustomFieldDefinition.id == theirs.id).one()
+        assert (row.display_name, row.is_active) == ("Heat Treat Spec", True)
+
+
+def test_entity_read_loads_definitions_from_the_join_not_per_row(client: TestClient, db_session: Session):
+    """``entity_values`` joins the definition already; ``contains_eager`` makes the GET use it.
+
+    Checked: without ``contains_eager`` this GET lazy-loads each value row's definition with its
+    own ``custom_field_definitions`` SELECT, and the assertion below fails.
+    """
+    user = _make_user(db_session, company_id=COMPANY_A)
+    part = _part(db_session, company_id=COMPANY_A)
+    for key in ("finish", "coating", "heat_lot"):
+        field = _definition(db_session, company_id=COMPANY_A, field_key=key)
+        _value(db_session, company_id=COMPANY_A, field=field, part=part, text=key.upper())
+    headers = _headers(user)
+    part_id = part.id
+    db_session.expunge_all()  # nothing left in the identity map to satisfy a lazy load silently
+
+    statements: list = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(" ".join(statement.split()))
+
+    engine = db_session.get_bind()
+    sa.event.listen(engine, "before_cursor_execute", _record)
+    try:
+        resp = client.get(f"/api/v1/custom-fields/values/part/{part_id}", headers=headers)
+    finally:
+        sa.event.remove(engine, "before_cursor_execute", _record)
+
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert resp.json()["fields"] == {"finish": "FINISH", "coating": "COATING", "heat_lot": "HEAT_LOT"}
+    lazy_loads = [s for s in statements if "FROM custom_field_definitions WHERE" in s]
+    assert lazy_loads == []

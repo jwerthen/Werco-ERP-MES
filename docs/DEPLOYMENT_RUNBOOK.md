@@ -232,10 +232,12 @@ job.
   picker read behind it. The old deployment keeps serving and redeploying is safe.
 - **Order.** Safe before or after the application: old code never relied on cross-company
   uniqueness. The boot path migrates before the new API serves.
-- **Shipped with the same release (no migration involved):** customer create and edit are now
-  Admin / Manager only. The Customers page still shows Add / Edit to every role, so tell
-  Supervisor, Operator, Quality, Shipping and Viewer users that their saves now fail with
-  `Insufficient permissions`. See [RBAC → Customers](RBAC_PERMISSIONS.md#customers).
+- **Shipped with the same release (no migration involved):** customer edit is now Admin / Manager
+  only, and customer create is Admin / Manager / Supervisor (the work-order create roles, so New
+  Work Order's inline customer create keeps working for Supervisors). The Customers page still
+  shows Add / Edit to every role, so tell Operator, Quality, Shipping and Viewer users that saving
+  a new customer now fails with `Insufficient permissions`, and Supervisors that editing an
+  existing customer does. See [RBAC → Customers](RBAC_PERMISSIONS.md#customers).
 - **Verify after deploy:**
   - `SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'customers';` shows
     `ix_customers_name` and `ix_customers_code` without `UNIQUE`, plus the two `uq_customers_company_*`

@@ -1993,23 +1993,35 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
 |------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
 | View (list, names, detail, stats) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Create | ✓ | ✓ | | | | | |
+| Create | ✓ | ✓ | ✓ | | | | |
 | Edit | ✓ | ✓ | | | | | |
 | Delete (soft or hard) / restore | ✓ | ✓ | | | | | |
 | Import (`POST /customers/import-csv`) | ✓ | ✓ | | | | | |
 
 > **Create and Edit were open to every authenticated user until this change**
-> (`POST /customers/`, `PUT /customers/{id}` depended on `get_current_user` only). They are now
-> `require_role([ADMIN, MANAGER])` (`CUSTOMER_WRITE_ROLES` in `app/api/endpoints/customers.py`),
-> matching the customer import, delete and restore routes and the vendor master's create / update.
-> A customer record carries the CoC / FAI requirements and payment terms that quotes and shipments
-> read, so it is treated as an office-controlled master. Platform Admin and superuser pass the gate
-> as everywhere else. Reads stay read-broad.
+> (`POST /customers/`, `PUT /customers/{id}` depended on `get_current_user` only). Both are now
+> role-gated in `app/api/endpoints/customers.py`, with two different role sets:
+>
+> - **Edit** is `require_role([ADMIN, MANAGER])` (`CUSTOMER_UPDATE_ROLES`), matching the customer
+>   import, delete and restore routes and the vendor master's create / update. Changing an
+>   existing customer changes the CoC / FAI requirements and payment terms that quotes and
+>   shipments read, so it is treated as an office-controlled master.
+> - **Create** is `require_role([ADMIN, MANAGER, SUPERVISOR])` (`CUSTOMER_CREATE_ROLES`): exactly
+>   the roles `POST /work-orders/` admits. New Work Order (`WorkOrderNew.tsx`) creates the customer
+>   inline when the typed name is not in the master yet, and abandons the work-order submit if that
+>   create is refused. A create gate narrower than the work-order gate would stop a Supervisor from
+>   opening a work order for a new customer. A test holds the two role sets equal
+>   (`test_customer_create_gate_admits_exactly_the_work_order_create_roles`). A Supervisor create
+>   accepts the full create body (requirements and terms included), as it did before this change.
+>
+> Platform Admin and superuser pass both gates as everywhere else. Reads stay read-broad.
 >
 > **Known UI gap:** the Customers page shows Add and Edit to every role and the nav entry is not
-> gated, so a Supervisor, Operator, Quality, Shipping or Viewer user sees the server's **403** as an
-> error toast on save. There is no `customers:*` permission in `frontend/src/utils/permissions.ts`
-> yet to hide the buttons with.
+> gated. An Operator, Quality, Shipping or Viewer user who saves a new customer, and anyone below
+> Manager (Supervisor included) who saves an edit, sees the server's **403** as an error toast.
+> There is no `customers:*` permission in `frontend/src/utils/permissions.ts` yet to hide the
+> buttons with. New Work Order is not affected: only roles that may create work orders reach its
+> inline create, and all of them may create a customer.
 >
 > **Tenancy.** Every customer route is scoped to the active company. `GET /customers/{id}/stats`
 > and the hard-delete dependency check now also scope the parts and work orders they read by
@@ -2024,15 +2036,21 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 | View definitions and values | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Create / edit definitions | ✓ | ✓ | | | | | |
 | Deactivate definitions | ✓ | | | | | | |
-| Set / delete values | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Set / delete values (**ungated, known gap; see note**) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-> **Value writes carry no role gate**: any authenticated user of the active company can set or
-> delete a custom-field value on any record type. That is unchanged and is the one exception in
-> this module to "writes are `require_role`-gated". What changed is tenancy and audit: the
-> `/custom-fields/values/*` routes now resolve the definition, the target record and the value row
-> in the active company only (**404** otherwise; writes require a live record), and every value
-> create, overwrite and delete writes an audit row (`custom_field_value`). Definition create, update
-> and deactivate are company-scoped but not audited. See `docs/API.md` → Custom Fields.
+> **Known gap, not intended policy: value writes carry no role gate.** Any authenticated user of
+> the active company, Viewer included, can set or delete a custom-field value on any record type.
+> That contradicts Viewer's read-only definition at the top of this document. It predates this
+> change and is tracked as a follow-up: gate value writes, at minimum excluding Viewer, preferably
+> mirroring the edit roles of each target record type. No page in the SPA calls the value-write
+> routes today; they are reachable through the API and the MCP catalog.
+>
+> What changed is tenancy and audit. The `/custom-fields/values/*` routes now resolve the
+> definition, the target record and the value row in the active company only (**404** otherwise;
+> writes require a live record), and every value create, overwrite and delete writes an audit row
+> (`custom_field_value`). Definition create, update and deactivate also write audit rows now
+> (`custom_field_definition`: `CREATE`, `UPDATE`, and a `STATUS_CHANGE` `active` → `inactive`).
+> See `docs/API.md` → Custom Fields.
 
 ### Bulk Imports (Import Center / Excel Migration Kit)
 

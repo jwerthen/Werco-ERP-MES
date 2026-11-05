@@ -14,7 +14,11 @@ What this file pins, each against the defect it closes:
   per-company). A second tenant creating "Acme" -- or getting the generated code
   ``ACM001`` -- hit the other tenant's row.
 * Every wrong-tenant call is a 404 with no row delta and no audit delta.
-* ``POST`` / ``PUT`` are Admin / Manager only and ``POST`` writes a committed CREATE row.
+* ``POST`` is Admin / Manager / Supervisor (the ``POST /work-orders/`` roles -- New Work
+  Order creates the customer inline), ``PUT`` is Admin / Manager, and ``POST`` writes a
+  committed CREATE row.
+* A concurrent rename that races past the duplicate probe is a 400, not a 500.
+* A second soft delete is refused rather than overwriting the first one's evidence.
 
 AuditLog rows are produced only by the endpoints and read back here (tamper-evident
 chain -- never inserted directly).
@@ -357,10 +361,10 @@ class TestCustomerWriteAuditAndRoles:
         assert rows[0].new_values["code"] == "AUD001"
         assert rows[0].new_values["requires_fai"] is True
 
-    @pytest.mark.parametrize(
-        "role", [UserRole.SUPERVISOR, UserRole.OPERATOR, UserRole.QUALITY, UserRole.SHIPPING, UserRole.VIEWER]
-    )
-    def test_non_office_roles_cannot_create_or_update(self, client: TestClient, db_session: Session, role: UserRole):
+    @pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.QUALITY, UserRole.SHIPPING, UserRole.VIEWER])
+    def test_roles_outside_the_work_order_create_gate_cannot_create_or_update(
+        self, client: TestClient, db_session: Session, role: UserRole
+    ):
         user = _make_user(db_session, company_id=COMPANY_A, role=role)
         existing = _customer(db_session, company_id=COMPANY_A, name="Gated Co", code="GAT001", phone="111")
 
@@ -373,6 +377,38 @@ class TestCustomerWriteAuditAndRoles:
 
         db_session.expire_all()
         assert db_session.query(Customer).filter(Customer.id == existing.id).one().phone == "111"
+
+    def test_supervisor_can_create_but_not_edit(self, client: TestClient, db_session: Session):
+        """New Work Order mints the customer inline (``api.createCustomer({name})``) when the typed
+        name is new, and drops the whole work-order submit if that create is refused. Supervisor may
+        create work orders, so Supervisor must be able to create the customer -- but editing an
+        existing record (its CoC/FAI requirements, terms, name) stays Admin / Manager.
+
+        Checked: with the create gate back at ``[ADMIN, MANAGER]`` the POST here is a 403.
+        """
+        supervisor = _make_user(db_session, company_id=COMPANY_A, role=UserRole.SUPERVISOR)
+        headers = _headers(supervisor)
+
+        created = client.post("/api/v1/customers/", headers=headers, json={"name": "Walk-In Fab Co"})
+        assert created.status_code == status.HTTP_200_OK, created.text
+        new_id = created.json()["id"]
+        rows = _committed_customer_audits(db_session, resource_id=new_id, action="CREATE")
+        assert [(r.user_id, r.company_id, r.new_values["name"]) for r in rows] == [
+            (supervisor.id, COMPANY_A, "Walk-In Fab Co")
+        ]
+
+        before = _counts(db_session)
+        edited = client.put(f"/api/v1/customers/{new_id}", headers=headers, json={"requires_coc": False})
+        assert edited.status_code == status.HTTP_403_FORBIDDEN
+        assert _counts(db_session) == before
+        db_session.expire_all()
+        assert db_session.query(Customer).filter(Customer.id == new_id).one().requires_coc is True
+
+    def test_customer_create_gate_admits_exactly_the_work_order_create_roles(self):
+        """Lock-step guard: if ``POST /work-orders/`` ever gains or loses a role, the inline customer
+        create on New Work Order must follow, or that role's work-order submit dies on a 403."""
+        assert _route_roles("/api/v1/customers/", "POST") == _route_roles("/api/v1/work-orders/", "POST")
+        assert _route_roles("/api/v1/customers/{customer_id}", "PUT") == {UserRole.ADMIN, UserRole.MANAGER}
 
     def test_reads_stay_open_to_every_role(self, client: TestClient, db_session: Session):
         operator = _make_user(db_session, company_id=COMPANY_A, role=UserRole.OPERATOR)
@@ -387,6 +423,21 @@ class TestCustomerWriteAuditAndRoles:
 # ---------------------------------------------------------------------------
 # Gaps closed by the test pass (each names the mutation it was checked against)
 # ---------------------------------------------------------------------------
+
+
+def _route_roles(path: str, method: str) -> set:
+    """The role set a route's ``require_role([...])`` dependency admits, read from its closure."""
+    from app.main import app
+
+    for route in app.routes:
+        if getattr(route, "path", None) != path or method not in getattr(route, "methods", set()):
+            continue
+        for dep in route.dependant.dependencies:
+            call = dep.call
+            if getattr(call, "__name__", "") == "role_checker" and call.__closure__:
+                cells = dict(zip(call.__code__.co_freevars, call.__closure__))
+                return set(cells["allowed_roles"].cell_contents)
+    raise AssertionError(f"{method} {path} has no require_role dependency")
 
 
 def _committed_customer_audits(db: Session, *, resource_id: int, action: str) -> list:
@@ -589,18 +640,13 @@ class TestCustomerUniqueConstraintBackstop:
         assert ok.status_code == status.HTTP_200_OK, ok.text
         assert len(_committed_customer_audits(db_session, resource_id=ok.json()["id"], action="CREATE")) == 1
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=sa.exc.PendingRollbackError,
-        reason=(
-            "KNOWN DEFECT: update_customer's IntegrityError backstop is unreachable. The rename is "
-            "pending when audit.log_update runs; AuditService.log's chain-tail query autoflushes it, "
-            "the IntegrityError is swallowed by log()'s best-effort except, and db.commit() then raises "
-            "PendingRollbackError (500), which `except IntegrityError` does not catch. Fix: db.flush() "
-            "inside the try BEFORE audit.log_update, as create_customer does. Remove this marker then."
-        ),
-    )
     def test_rename_race_is_400_with_no_change_or_audit(self, client: TestClient, db_session: Session, monkeypatch):
+        """The handler flushes the rename INSIDE its try, before ``audit.log_update``.
+
+        Checked: with the flush removed (the audit call first), ``AuditService.log``'s chain-tail
+        read autoflushes the rename, its best-effort ``except`` swallows the IntegrityError, and the
+        commit raises ``PendingRollbackError`` -- a 500 that ``except IntegrityError`` never sees.
+        """
         admin_a = _make_user(db_session, company_id=COMPANY_A)
         _customer(db_session, company_id=COMPANY_A, name=SHARED_NAME, code="ACM001")
         mine = _customer(db_session, company_id=COMPANY_A, name="Current Name", code="CUR1")
@@ -612,3 +658,57 @@ class TestCustomerUniqueConstraintBackstop:
         assert resp.json()["detail"] == "Customer name already exists"
         assert _counts(db_session) == before
         assert db_session.query(Customer).filter(Customer.id == mine.id).one().name == "Current Name"
+
+        # The rollback left the request session usable: the next edit commits with its audit row.
+        ok = client.put(f"/api/v1/customers/{mine.id}", headers=_headers(admin_a), json={"phone": "555-0142"})
+        assert ok.status_code == status.HTTP_200_OK, ok.text
+        rows = _committed_customer_audits(db_session, resource_id=mine.id, action="UPDATE")
+        assert [r.new_values for r in rows] == [{"phone": "555-0142"}]
+
+
+class TestCustomerDoubleSoftDelete:
+    def test_second_soft_delete_is_400_and_leaves_the_first_ones_evidence(
+        self, client: TestClient, db_session: Session
+    ):
+        """Delete sees the tombstone on purpose -- to refuse a re-delete, not to repeat it.
+
+        Checked: without the refusal the second call returns 200, overwrites ``deleted_by`` with the
+        second actor, and writes a second DELETE row claiming ``is_deleted: false``.
+        """
+        first = _make_user(db_session, company_id=COMPANY_A)
+        second = _make_user(db_session, company_id=COMPANY_A, role=UserRole.MANAGER)
+        mine = _customer(db_session, company_id=COMPANY_A)
+        mine.is_active = False  # deliberately switched off before the delete
+        db_session.commit()
+
+        resp = client.delete(f"/api/v1/customers/{mine.id}", headers=_headers(first))
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        db_session.expire_all()
+        deleted_at = db_session.query(Customer).filter(Customer.id == mine.id).one().deleted_at
+
+        before = _counts(db_session)
+        again = client.delete(f"/api/v1/customers/{mine.id}", headers=_headers(second))
+        assert again.status_code == status.HTTP_400_BAD_REQUEST
+        assert again.json()["detail"] == "Customer is already deleted"
+        assert _counts(db_session) == before
+
+        db_session.expire_all()
+        row = db_session.query(Customer).filter(Customer.id == mine.id).one()
+        assert (row.is_deleted, row.deleted_by, row.deleted_at) == (True, first.id, deleted_at)
+        audits = _committed_customer_audits(db_session, resource_id=mine.id, action="DELETE")
+        assert [(a.user_id, a.old_values) for a in audits] == [(first.id, {"is_deleted": False, "is_active": False})]
+
+    def test_hard_delete_of_a_tombstone_is_still_allowed(self, client: TestClient, db_session: Session):
+        admin_a = _make_user(db_session, company_id=COMPANY_A)
+        mine = _customer(db_session, company_id=COMPANY_A)
+        mine.soft_delete(admin_a.id)
+        mine.is_active = False
+        db_session.commit()
+        mine_id = mine.id
+
+        resp = client.delete(f"/api/v1/customers/{mine_id}", params={"hard_delete": True}, headers=_headers(admin_a))
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        db_session.expire_all()
+        assert db_session.query(Customer).filter(Customer.id == mine_id).first() is None
+        audits = _committed_customer_audits(db_session, resource_id=mine_id, action="DELETE")
+        assert len(audits) == 1 and audits[0].old_values["is_deleted"] is True
