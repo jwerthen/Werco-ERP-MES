@@ -757,3 +757,442 @@ def test_lost_audit_row_rolls_the_write_back(client, db_session, monkeypatch, ve
     assert resp.status_code == 503, resp.text
     assert resp.json() == {"detail": "Unable to save audit record"}
     assert _snapshot(db_session) == before
+
+
+# ================================================================ review additions
+#
+# Gaps found reviewing the first cut of this file: the UI's full-payload save path,
+# reopen-plus-edit in ONE request, every closed-record content field (not just one),
+# the positive side of each reference check, the write-response leak path, the
+# remaining explicit nulls, cross-tenant void / restore, and a closed CAR reopened
+# straight into VERIFICATION.
+
+CAR_TEXT_FIELDS = (
+    "containment_action",
+    "root_cause_analysis",
+    "root_cause",
+    "corrective_action",
+    "preventive_action",
+    "verification_method",
+    "verification_results",
+    "effectiveness_check",
+)
+
+
+def _ui_car_payload(record, **overrides):
+    """What QualityRecordDetail sends for a CAR: every field, blank text as '', blank dates as null."""
+    payload = {
+        "version": record.get("version") or 0,
+        "expected_updated_at": record["updated_at"],
+        "status": record["status"],
+        "priority": record["priority"],
+        "due_date": record["due_date"] or None,
+        "verification_due": record["verification_due"] or None,
+    }
+    payload.update({field: record[field] or "" for field in CAR_TEXT_FIELDS})
+    payload.update(overrides)
+    return payload
+
+
+def _committed_events(event_type, entity_id):
+    """Committed OperationalEvent payloads for one entity, read on a separate connection."""
+    with fresh_session() as verify:
+        rows = (
+            verify.query(OperationalEvent)
+            .filter(OperationalEvent.event_type == event_type, OperationalEvent.entity_id == entity_id)
+            .order_by(OperationalEvent.id)
+            .all()
+        )
+        return [dict(row.event_payload or {}) for row in rows]
+
+
+class TestReviewNCRUpdate:
+    def test_full_ui_payload_audits_and_reports_only_the_real_change(self, client, db_session):
+        # The detail screen re-sends every field (and expected_updated_at). Only the one
+        # field the user actually changed may land on the audit row and the event --
+        # the old handler listed every key it was sent.
+        _, headers = _headers(db_session)
+        ncr = _make_ncr(db_session, containment_action="Tagged lot", root_cause=ROOT_CAUSE)
+        record = client.get(f"{BASE}/ncr/{ncr.id}", headers=headers).json()
+        payload = _ui_ncr_payload(
+            record, containment_action="Quarantined lot", expected_updated_at=record["updated_at"]
+        )
+        resp = client.put(f"{BASE}/ncr/{ncr.id}", headers=headers, json=payload)
+        assert resp.status_code == 200, resp.text
+
+        rows = _committed("ncr", ncr.id)
+        assert [row["action"] for row in rows] == ["UPDATE"]
+        assert rows[0]["old_values"] == {"containment_action": "Tagged lot"}
+        assert rows[0]["new_values"] == {"containment_action": "Quarantined lot"}
+        assert set(rows[0]["extra_data"]["changes"]) == {"containment_action"}
+        events = _committed_events("ncr_updated", ncr.id)
+        assert [event["changed_fields"] for event in events] == [["containment_action"]]
+
+    def test_closed_ncr_reopen_combined_with_content_edit_is_refused(self, client, db_session):
+        # The reopen exception is "status is the ONLY change". A request that reopens
+        # AND rewrites the record in one go must not slip through as a reopen.
+        _, headers = _headers(db_session)
+        ncr = _make_ncr(
+            db_session,
+            status=NCRStatus.CLOSED,
+            disposition=NCRDisposition.SCRAP,
+            root_cause=ROOT_CAUSE,
+            closed_date=date(2026, 10, 1),
+        )
+        record = client.get(f"{BASE}/ncr/{ncr.id}", headers=headers).json()
+        before = _snapshot(db_session)
+        resp = client.put(
+            f"{BASE}/ncr/{ncr.id}",
+            headers=headers,
+            json=_ui_ncr_payload(record, status="open", containment_action="Rewritten while reopening"),
+        )
+        assert resp.status_code == 409, resp.text
+        assert _snapshot(db_session) == before
+
+    @pytest.mark.parametrize(
+        "field",
+        ["disposition", "quantity_rejected", "root_cause", "estimated_cost", "car_required", "assigned_to", "car_id"],
+    )
+    def test_closed_ncr_refuses_each_content_field(self, client, db_session, field):
+        _, headers = _headers(db_session)
+        values = {
+            "disposition": "rework",
+            "quantity_rejected": 2,
+            "root_cause": "A different root cause written after closure.",
+            "estimated_cost": 125.5,
+            "car_required": True,
+            # Valid references: the refusal must come from the closed-record rule,
+            # not from a reference check.
+            "assigned_to": lambda: make_user(db_session, role=UserRole.QUALITY).id,
+            "car_id": lambda: _make_car(db_session).id,
+        }
+        value = values[field]() if callable(values[field]) else values[field]
+        ncr = _make_ncr(db_session, status=NCRStatus.CLOSED, disposition=NCRDisposition.SCRAP, root_cause=ROOT_CAUSE)
+        before = _snapshot(db_session)
+        resp = client.put(f"{BASE}/ncr/{ncr.id}", headers=headers, json={"version": 0, field: value})
+        assert resp.status_code == 409, resp.text
+        assert _snapshot(db_session) == before
+
+    def test_own_car_link_is_stored_and_audited(self, client, db_session):
+        _, headers = _headers(db_session)
+        car = _make_car(db_session)
+        ncr = _make_ncr(db_session)
+        resp = client.put(f"{BASE}/ncr/{ncr.id}", headers=headers, json={"version": 0, "car_id": car.id})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["car_id"] == car.id
+        rows = _committed("ncr", ncr.id)
+        assert [row["action"] for row in rows] == ["UPDATE"]
+        assert rows[0]["old_values"] == {"car_id": None} and rows[0]["new_values"] == {"car_id": car.id}
+
+    def test_explicit_null_assignee_unassigns_and_is_audited(self, client, db_session):
+        # assigned_to is nullable: clearing it is a legitimate change, not a reference to check.
+        _, headers = _headers(db_session)
+        assignee = make_user(db_session, role=UserRole.QUALITY)
+        ncr = _make_ncr(db_session, assigned_to=assignee.id)
+        resp = client.put(f"{BASE}/ncr/{ncr.id}", headers=headers, json={"version": 0, "assigned_to": None})
+        assert resp.status_code == 200, resp.text
+        rows = _committed("ncr", ncr.id)
+        assert rows[0]["old_values"] == {"assigned_to": assignee.id} and rows[0]["new_values"] == {"assigned_to": None}
+
+    @pytest.mark.parametrize("field", ["disposition", "car_required"])
+    def test_explicit_null_on_required_ncr_field_is_refused(self, client, db_session, field):
+        _, headers = _headers(db_session)
+        ncr = _make_ncr(db_session)
+        before = _snapshot(db_session)
+        resp = client.put(f"{BASE}/ncr/{ncr.id}", headers=headers, json={"version": 0, field: None})
+        assert resp.status_code == 422, resp.text
+        assert _snapshot(db_session) == before
+
+    def test_stale_expected_updated_at_is_409_without_changes(self, client, db_session):
+        _, headers = _headers(db_session)
+        ncr = _make_ncr(db_session)
+        record = client.get(f"{BASE}/ncr/{ncr.id}", headers=headers).json()
+        stale = "2020-01-01T00:00:00Z"
+        assert record["updated_at"] != stale
+        before = _snapshot(db_session)
+        resp = client.put(
+            f"{BASE}/ncr/{ncr.id}",
+            headers=headers,
+            json=_ui_ncr_payload(record, disposition="rework", expected_updated_at=stale),
+        )
+        assert resp.status_code == 409, resp.text
+        assert _snapshot(db_session) == before
+
+    def test_write_response_does_not_echo_legacy_foreign_part(self, client, db_session):
+        # The PUT response is serialized from the same NCR -- it must go through the
+        # tenant-scoped part loader too, not an unscoped lazy load.
+        foreign_part = _make_part(db_session, company_id=2)
+        ncr = _make_ncr(db_session, part_id=foreign_part.id)
+        _, headers = _headers(db_session)
+        resp = client.put(f"{BASE}/ncr/{ncr.id}", headers=headers, json={"version": 0, "disposition": "rework"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["part"] is None
+        assert foreign_part.part_number not in resp.text
+
+    def test_same_company_soft_deleted_part_is_still_named(self, client, db_session):
+        # An NCR is a historical record: it keeps naming the part it named after that
+        # part is deleted. Only another TENANT's part is hidden.
+        part = _make_part(db_session)
+        ncr = _make_ncr(db_session, part_id=part.id)
+        part.is_deleted = True
+        db_session.commit()
+        _, headers = _headers(db_session, role=UserRole.VIEWER)
+        resp = client.get(f"{BASE}/ncr/{ncr.id}", headers=headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["part"]["part_number"] == part.part_number
+
+
+class TestReviewCreateNCR:
+    def test_own_live_work_order_is_stored_and_audited(self, client, db_session):
+        _, headers = _headers(db_session, role=UserRole.OPERATOR)
+        wo = _make_work_order(db_session)
+        resp = client.post(
+            f"{BASE}/ncr",
+            headers=headers,
+            json={
+                "work_order_id": wo.id,
+                "part_id": wo.part_id,
+                "source": "in_process",
+                "title": "Edge burr on bracket",
+                "description": "Burr found on the outside edge at final inspection.",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["work_order_id"] == wo.id
+        row = _committed("ncr", resp.json()["id"])[0]
+        assert row["new_values"]["work_order_id"] == wo.id and row["new_values"]["part_id"] == wo.part_id
+
+    def test_missing_work_order_is_404_without_changes(self, client, db_session):
+        _, headers = _headers(db_session)
+        before = _snapshot(db_session)
+        resp = client.post(
+            f"{BASE}/ncr",
+            headers=headers,
+            json={
+                "work_order_id": 999999,
+                "source": "in_process",
+                "title": "Missing work order NCR",
+                "description": "Should never be stored against a work order that does not exist.",
+            },
+        )
+        assert resp.status_code == 404, resp.text
+        assert resp.json()["detail"] == "Work order not found"
+        assert _snapshot(db_session) == before
+
+
+class TestReviewCreateCARFromNCR:
+    def test_link_rows_record_the_prior_link_and_the_tenant(self, client, db_session):
+        _, headers = _headers(db_session)
+        ncr = _make_ncr(db_session)
+        resp = client.post(f"{BASE}/ncr/{ncr.id}/create-car", headers=headers)
+        assert resp.status_code == 200, resp.text
+        car = resp.json()
+        car_row = _committed("car", car["id"])[0]
+        ncr_row = _committed("ncr", ncr.id)[0]
+        assert car_row["company_id"] == 1 and ncr_row["company_id"] == 1
+        assert car_row["resource_identifier"] == car["car_number"]
+        assert car_row["extra_data"]["ncr_number"] == ncr.ncr_number
+        assert ncr_row["old_values"] == {"car_required": False, "car_id": None}
+
+    def test_conflict_names_the_existing_car_id(self, client, db_session):
+        _, headers = _headers(db_session)
+        ncr = _make_ncr(db_session)
+        first = client.post(f"{BASE}/ncr/{ncr.id}/create-car", headers=headers).json()
+        second = client.post(f"{BASE}/ncr/{ncr.id}/create-car", headers=headers)
+        assert second.status_code == 409, second.text
+        assert f"id {first['id']}" in second.json()["detail"]
+        db_session.expire_all()
+        assert [c.id for c in db_session.query(CorrectiveActionRequest).all()] == [first["id"]]
+        assert _committed("car") == _committed("car", first["id"])
+
+    def test_voided_ncr_is_404_without_a_car(self, client, db_session):
+        _, headers = _headers(db_session)
+        ncr = _make_ncr(db_session, status=NCRStatus.VOID, is_deleted=True)
+        before = _snapshot(db_session)
+        resp = client.post(f"{BASE}/ncr/{ncr.id}/create-car", headers=headers)
+        assert resp.status_code == 404, resp.text
+        assert _snapshot(db_session) == before
+
+
+class TestReviewCAR:
+    def test_content_edit_commits_update_row_with_old_and_new(self, client, db_session):
+        user, headers = _headers(db_session)
+        car = _make_car(db_session, status=CARStatus.ROOT_CAUSE_ANALYSIS, root_cause_analysis="5-why started")
+        record = client.get(f"{BASE}/car/{car.id}", headers=headers).json()
+        resp = client.put(
+            f"{BASE}/car/{car.id}",
+            headers=headers,
+            json=_ui_car_payload(record, root_cause_analysis="5-why complete: fixture wear"),
+        )
+        assert resp.status_code == 200, resp.text
+        rows = _committed("car", car.id)
+        assert [row["action"] for row in rows] == ["UPDATE"]
+        assert rows[0]["user_id"] == user.id and rows[0]["company_id"] == 1
+        assert rows[0]["old_values"] == {"root_cause_analysis": "5-why started"}
+        assert rows[0]["new_values"] == {"root_cause_analysis": "5-why complete: fixture wear"}
+        assert [event["changed_fields"] for event in _committed_events("car_updated", car.id)] == [
+            ["root_cause_analysis"]
+        ]
+
+    def test_unchanged_ui_resave_writes_nothing(self, client, db_session):
+        _, headers = _headers(db_session)
+        car = _make_car(db_session, due_date=date(2030, 1, 15))
+        record = client.get(f"{BASE}/car/{car.id}", headers=headers).json()
+        before = _snapshot(db_session)
+        resp = client.put(f"{BASE}/car/{car.id}", headers=headers, json=_ui_car_payload(record))
+        assert resp.status_code == 200, resp.text
+        assert _snapshot(db_session) == before
+
+    def test_closed_car_ui_status_only_reopen_clears_closure(self, client, db_session):
+        # The real screen re-sends every CAR field (blank text as ''). Only the status
+        # differs, so it must be accepted as the reopen, not refused as an edit.
+        closer = make_user(db_session, role=UserRole.QUALITY)
+        _, headers = _headers(db_session)
+        car = _closeable_car(db_session, status=CARStatus.CLOSED, closed_date=date(2026, 10, 2), closed_by=closer.id)
+        record = client.get(f"{BASE}/car/{car.id}", headers=headers).json()
+        resp = client.put(
+            f"{BASE}/car/{car.id}", headers=headers, json=_ui_car_payload(record, status="corrective_action")
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "corrective_action" and resp.json()["closed_date"] is None
+        rows = _committed("car", car.id)
+        assert [row["action"] for row in rows] == ["STATUS_CHANGE"]
+        assert rows[0]["old_values"] == {"status": "closed", "closed_date": "2026-10-02", "closed_by": closer.id}
+        assert rows[0]["new_values"] == {"status": "corrective_action", "closed_date": None, "closed_by": None}
+        assert rows[0]["extra_data"]["reopen"] is True
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "DEFECT: _write_car_changes checks `verifying` before `reopening`, so a CLOSED CAR "
+            "reopened straight to VERIFICATION keeps closed_date/closed_by and the audit row "
+            "omits them. Remove this marker when fixed."
+        ),
+    )
+    def test_closed_car_reopened_into_verification_clears_closure(self, client, db_session):
+        closer = make_user(db_session, role=UserRole.QUALITY)
+        user, headers = _headers(db_session)
+        car = _closeable_car(db_session, status=CARStatus.CLOSED, closed_date=date(2026, 10, 2), closed_by=closer.id)
+        resp = client.put(f"{BASE}/car/{car.id}", headers=headers, json={"version": 0, "status": "verification"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "verification"
+        db_session.refresh(car)
+        assert car.closed_date is None and car.closed_by is None
+        row = _committed("car", car.id)[0]
+        assert row["extra_data"]["reopen"] is True
+        assert row["old_values"]["closed_date"] == "2026-10-02" and row["new_values"]["closed_date"] is None
+
+    def test_closed_car_reopen_combined_with_content_edit_is_refused(self, client, db_session):
+        _, headers = _headers(db_session)
+        car = _closeable_car(db_session, status=CARStatus.CLOSED, closed_date=date(2026, 10, 2))
+        record = client.get(f"{BASE}/car/{car.id}", headers=headers).json()
+        before = _snapshot(db_session)
+        resp = client.put(
+            f"{BASE}/car/{car.id}",
+            headers=headers,
+            json=_ui_car_payload(record, status="corrective_action", corrective_action="Rewritten while reopening"),
+        )
+        assert resp.status_code == 409, resp.text
+        assert _snapshot(db_session) == before
+
+    @pytest.mark.parametrize("field", ["priority", "due_date", "verification_results", "assigned_to"])
+    def test_closed_car_refuses_each_content_field(self, client, db_session, field):
+        _, headers = _headers(db_session)
+        values = {
+            "priority": 1,
+            "due_date": "2030-01-15",
+            "verification_results": "Rewritten after closure.",
+            "assigned_to": lambda: make_user(db_session, role=UserRole.QUALITY).id,
+        }
+        value = values[field]() if callable(values[field]) else values[field]
+        car = _closeable_car(db_session, status=CARStatus.CLOSED, closed_date=date(2026, 10, 2))
+        before = _snapshot(db_session)
+        resp = client.put(f"{BASE}/car/{car.id}", headers=headers, json={"version": 0, field: value})
+        assert resp.status_code == 409, resp.text
+        assert _snapshot(db_session) == before
+
+    def test_own_active_assignee_is_stored_and_audited(self, client, db_session):
+        _, headers = _headers(db_session)
+        assignee = make_user(db_session, role=UserRole.QUALITY)
+        car = _make_car(db_session)
+        resp = client.put(f"{BASE}/car/{car.id}", headers=headers, json={"version": 0, "assigned_to": assignee.id})
+        assert resp.status_code == 200, resp.text
+        db_session.refresh(car)
+        assert car.assigned_to == assignee.id
+        assert _committed("car", car.id)[0]["new_values"] == {"assigned_to": assignee.id}
+
+    def test_missing_assignee_is_404_without_changes(self, client, db_session):
+        _, headers = _headers(db_session)
+        car = _make_car(db_session)
+        before = _snapshot(db_session)
+        resp = client.put(f"{BASE}/car/{car.id}", headers=headers, json={"version": 0, "assigned_to": 999999})
+        assert resp.status_code == 404, resp.text
+        assert resp.json()["detail"] == "Assigned user not found"
+        assert _snapshot(db_session) == before
+
+    @pytest.mark.parametrize("field", ["status", "priority"])
+    def test_explicit_null_on_required_car_field_is_refused(self, client, db_session, field):
+        _, headers = _headers(db_session)
+        car = _make_car(db_session)
+        before = _snapshot(db_session)
+        resp = client.put(f"{BASE}/car/{car.id}", headers=headers, json={"version": 0, field: None})
+        assert resp.status_code == 422, resp.text
+        assert _snapshot(db_session) == before
+
+    def test_status_void_through_put_is_refused(self, client, db_session):
+        _, headers = _headers(db_session)
+        car = _make_car(db_session)
+        before = _snapshot(db_session)
+        resp = client.put(f"{BASE}/car/{car.id}", headers=headers, json={"version": 0, "status": "void"})
+        assert resp.status_code == 422, resp.text
+        assert _snapshot(db_session) == before
+
+    @pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.SUPERVISOR, UserRole.VIEWER])
+    def test_roles_outside_admin_manager_quality_cannot_update(self, client, db_session, role):
+        _, headers = _headers(db_session, role=role)
+        car = _make_car(db_session)
+        ncr = _make_ncr(db_session)
+        before = _snapshot(db_session)
+        assert (
+            client.put(f"{BASE}/car/{car.id}", headers=headers, json={"version": 0, "priority": 1}).status_code == 403
+        )
+        assert (
+            client.put(
+                f"{BASE}/ncr/{ncr.id}", headers=headers, json={"version": 0, "disposition": "rework"}
+            ).status_code
+            == 403
+        )
+        assert _snapshot(db_session) == before
+
+
+class TestReviewCrossTenantVoidRestore:
+    def test_foreign_tenant_ncr_cannot_be_voided(self, client, db_session):
+        _, headers = _headers(db_session)
+        foreign = _make_ncr(db_session, company_id=2)
+        before = _snapshot(db_session)
+        resp = client.request("DELETE", f"{BASE}/ncr/{foreign.id}", headers=headers, json={"reason": "Not mine"})
+        assert resp.status_code == 404, resp.text
+        assert _snapshot(db_session) == before
+
+    def test_foreign_tenant_ncr_cannot_be_restored(self, client, db_session):
+        _, headers = _headers(db_session)
+        foreign = _make_ncr(db_session, company_id=2, status=NCRStatus.VOID, is_deleted=True)
+        before = _snapshot(db_session)
+        resp = client.post(f"{BASE}/ncr/{foreign.id}/restore", headers=headers)
+        assert resp.status_code == 404, resp.text
+        assert _snapshot(db_session) == before
+
+    def test_void_and_restore_rows_are_committed_with_the_reason(self, client, db_session):
+        # test_ncr_void_restore reads audit rows on the shared session, which also sees
+        # an uncommitted flush; this pins that both rows actually COMMIT.
+        _, headers = _headers(db_session)
+        ncr = _make_ncr(db_session)
+        voided = client.request("DELETE", f"{BASE}/ncr/{ncr.id}", headers=headers, json={"reason": "Raised in error"})
+        assert voided.status_code == 200, voided.text
+        restored = client.post(f"{BASE}/ncr/{ncr.id}/restore", headers=headers)
+        assert restored.status_code == 200, restored.text
+        rows = _committed("ncr", ncr.id)
+        assert [row["action"] for row in rows] == ["STATUS_CHANGE", "DELETE", "RESTORE"]
+        assert rows[0]["extra_data"]["reason"] == "Raised in error"
+        assert rows[1]["extra_data"]["reason"] == "Raised in error"
+        assert rows[2]["new_values"] == {"is_deleted": False, "status": "open"}
