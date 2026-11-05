@@ -72,6 +72,7 @@ from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStat
 from app.schemas.quality import CARCreate, CARUpdate, NCRCreate, NCRUpdate
 from app.services.audit_service import AuditService, AuditWriteError
 from app.services.operational_event_service import OperationalEventService
+from app.services.quality_numbering import generate_car_number as _generate_car_number
 from app.services.quality_numbering import generate_ncr_number
 
 # Who may edit, disposition, close, link, void or restore an NCR / CAR. Filing an NCR
@@ -552,15 +553,10 @@ def restore_ncr(db: Session, company_id: int, ncr_id: int, audit: AuditService) 
 
 
 def generate_car_number(db: Session, company_id: Optional[int] = None) -> str:
-    acquire_generator_lock(db, "car_number", company_id)
-    today = datetime.now().strftime("%Y%m%d")
-    prefix = f"CAR-{today}-"
-    query = db.query(CorrectiveActionRequest).filter(CorrectiveActionRequest.car_number.like(f"{prefix}%"))
-    if company_id is not None:
-        query = query.filter(CorrectiveActionRequest.company_id == company_id)
-    last = query.order_by(CorrectiveActionRequest.car_number.desc()).first()
-    num = int(last.car_number.split("-")[-1]) + 1 if last else 1
-    return f"{prefix}{num:03d}"
+    # One numbering rule for every CAR writer (this service, the complaint escalation verb):
+    # ``app.services.quality_numbering``. The lock is handed in from this module so the
+    # generator lock stays spy-able here.
+    return _generate_car_number(db, company_id, lock=acquire_generator_lock)
 
 
 def get_car(db: Session, company_id: int, car_id: int) -> CorrectiveActionRequest:

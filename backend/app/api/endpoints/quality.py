@@ -53,13 +53,6 @@ def generate_ncr_number(db: Session, company_id: int = None) -> str:
     return _generate_ncr_number(db, company_id, lock=acquire_generator_lock)
 
 
-# CAR numbering moved into the service with the CAR writers. The router-level name is
-# kept on purpose: it is where this function lived on main, so a concurrent branch (the
-# customer-complaints CAR path numbers CARs too) may still import it from here. New
-# callers import ``quality_record_service.generate_car_number`` directly.
-generate_car_number = quality_record_service.generate_car_number
-
-
 @router.get("/ncr", response_model=List[NCRResponse])
 def list_ncrs(
     skip: int = Query(0, ge=0),
