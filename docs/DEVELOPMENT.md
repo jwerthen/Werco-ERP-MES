@@ -355,7 +355,9 @@ Backend Tests job with the rest of the suite.
   - `GLOBAL_ROUTES`, with a reason. It is only for routes that really don't read tenant data
     by the active company: self-only routes, static catalogs, `require_platform_admin` routes,
     and the station/display principal routes, whose company comes from the principal's own row.
-  - `TRACKED_DEBT`, for known offenders. Each entry names the branch that fixes it.
+  - `TRACKED_DEBT`, for known offenders. Each entry names the branch that fixes it, or has
+    `fixed_by=None` for an unowned follow-up whose reason names the fix (today: the dead
+    write branch of `POST /admin/settings/seed-database`).
 
   The same file also fails when:
   - a `GLOBAL_ROUTES` reason cites a resolver or `require_platform_admin` that the route no
@@ -366,11 +368,14 @@ Backend Tests job with the rest of the suite.
 
   A `(METHOD, path)` registered twice is judged by its worse twin.
 - **Constructor guard.** Code under `backend/app/` may construct a tenant model only if the
-  call passes `company_id=` (or a `**` splat), or binds the row to a name and assigns
-  `<name>.company_id` in the same function. Tenant models are `TenantMixin` subclasses plus
-  mapped classes that declare their own NOT NULL `company_id`, such as `User`. Any other
-  construction must be named in `UNGUARDED_CONSTRUCTIONS`, which excuses exactly
-  `occurrences` calls per (file, function, model) key.
+  call passes `company_id=` (or a `**{...}` dict literal with a `"company_id"` key), or binds
+  the row to a name and assigns `<name>.company_id` in the same function. A `**` splat of any
+  other mapping (`**parsed`, `**payload.model_dump()`) counts for nothing: the guard can't see
+  what it holds, and that is the shape that hid `CustomFieldValue(..., **parsed)`. Tenant
+  models are `TenantMixin` subclasses plus mapped classes that declare their own NOT NULL
+  `company_id`, such as `User`. Any other construction must be named in
+  `UNGUARDED_CONSTRUCTIONS`, which excuses exactly `occurrences` calls per (file, function,
+  model) key.
 - **Stale entries fail too.** The guard fails on an entry whose route now reaches
   `get_current_company_id`, is gone, or is no longer authenticated. It also fails on a
   construction that now sets `company_id`, is gone, or occurs fewer times. The failure message
@@ -384,13 +389,21 @@ What the guards do **not** prove:
   tests (`tests/api/*tenant_isolation*`) cover use.
 - WebSocket routes authenticate inside the handler through `services/access_identity.py` and
   are out of scope.
+- Unauthenticated routes (`PUBLIC_OPERATIONS` in `tests/test_mcp_coverage.py`) are out of
+  scope by construction. A public route that derives a company from its own credential (a
+  carrier HMAC webhook, a station login, a display-token claim) must scope by that credential,
+  and is reviewed by hand.
+- `company_id=` is checked for presence, not provenance. A value taken from request input
+  (`company_id=payload.company_id`) or `company_id=None` still passes.
 - The constructor guard can't see a model reached dynamically (`cls(...)`, a class held in a
-  variable). It also can't see `company_id` set through another object or a later helper.
+  variable). It also can't see `company_id` set through another object or a later helper. The
+  `company=` relationship form isn't recognized either; it fails loudly, so write
+  `company_id=company.id`.
 
 The lists were seeded from the 2026-11-05 audit: 25 unscoped routes (complaint/RMA by-id
 verbs and the complaints dashboard, custom-field value routes, calibration history, the tool
-crib) and five live constructors that omit `company_id`. The file is the current list, not this
-paragraph.
+crib) and seven live constructor calls that omit `company_id` (five verbs plus both
+custom-field value writes). The file is the current list, not this paragraph.
 
 ### Frontend Testing
 

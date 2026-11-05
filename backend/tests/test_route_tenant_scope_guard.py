@@ -6,10 +6,10 @@ enforced it structurally: the MCP coverage guard (``tests/test_mcp_coverage.py``
 proves every ``/api/v1`` route is either secured or named in ``PUBLIC_OPERATIONS``,
 but "secured and *untenanted*" passed every gate, and each instance was found only
 by audit -- the 2026-11-05 deep dive found 25 such routes (complaints/RMA by id,
-custom-field values, calibration history, the tool crib) plus five verbs that build
-a ``TenantMixin`` row with no ``company_id`` and so 500 on the NOT NULL. This file
-holds two structural guards, so tomorrow's route and tomorrow's constructor are
-checked too:
+custom-field values, calibration history, the tool crib) plus seven live call sites
+that build a ``TenantMixin`` row with no ``company_id`` and so 500 on the NOT NULL
+(five verbs, and both custom-field value writes). This file holds two structural
+guards, so tomorrow's route and tomorrow's constructor are checked too:
 
 1. **Route guard.** Every ``APIRoute`` under ``settings.API_V1_PREFIX`` whose
    dependency tree authenticates (reaches ``deps.oauth2_scheme``) must also reach
@@ -21,7 +21,8 @@ checked too:
      explicit id under ``require_platform_admin``, and the four station/display
      principal resolvers, whose ``company_id`` comes from their own DB row.
    * ``TRACKED_DEBT`` -- real offenders, each with the reason and the Wave 1 branch
-     that fixes it. This list is the work queue: the fixing PR deletes its entries.
+     that fixes it (``fixed_by=None`` for an unowned follow-up, whose reason names the
+     fix). This list is the work queue: the fixing PR deletes its entries.
 
    A ``GLOBAL_ROUTES`` reason that cites a principal resolver or
    ``require_platform_admin`` must describe a route that still reaches it, a
@@ -31,9 +32,12 @@ checked too:
 2. **Constructor guard.** Every call under ``backend/app/`` that constructs a tenant
    model -- a ``TenantMixin`` subclass, or a mapped class declaring its own NOT NULL
    ``company_id`` (``User``, the workspace and runtime-metric records) -- must pass
-   ``company_id=`` (or a ``**`` splat), or bind the result to a name and assign
-   ``<name>.company_id = ...`` in the same function -- or be named in
-   ``UNGUARDED_CONSTRUCTIONS``, which excuses exactly ``occurrences`` calls per key.
+   ``company_id=`` (or a ``**{...}`` dict literal with a ``"company_id"`` key), or
+   bind the result to a name and assign ``<name>.company_id = ...`` in the same
+   function -- or be named in ``UNGUARDED_CONSTRUCTIONS``, which excuses exactly
+   ``occurrences`` calls per key. A ``**`` splat of any other mapping
+   (``**parsed``, ``**payload.model_dump()``) counts for nothing: the guard cannot see
+   what it holds, and that shape is what hid the two custom-field value writes.
 
 Both allowlists are **stale-checked**: an entry whose route now depends on
 ``get_current_company_id`` (or no longer exists / is no longer secured), or whose
@@ -49,10 +53,19 @@ What these guards do NOT prove -- stated so nobody leans on them for it:
   tenant-isolation tests (``tests/api/*tenant_isolation*``) cover use.
 * WebSocket routes (``APIWebSocketRoute``) authenticate inside the handler through
   ``services/access_identity.py`` and are out of scope here.
+* Unauthenticated routes (``PUBLIC_OPERATIONS`` in ``tests/test_mcp_coverage.py``)
+  are out of scope by construction. A public route that derives a company from its
+  own credential (a carrier HMAC webhook, a station login, a display-token claim)
+  must scope by that credential, and is reviewed by hand.
+* ``company_id=`` is checked for PRESENCE, not provenance: a value taken from
+  request input (``company_id=payload.company_id``) or ``company_id=None`` still
+  passes. Every live use is server-derived today; that is review's job to keep.
 * The constructor guard resolves model names through the module's own imports. A
   model reached dynamically (``cls(...)``, a class held in a variable, ``getattr``)
   is invisible to it; ``company_id`` set through some other object
-  (``setattr(other, ...)``, a helper that mutates the row later) does not count.
+  (``setattr(other, ...)``, a helper that mutates the row later) does not count, and
+  neither does the ``company=`` relationship form -- that one fails loudly (write
+  ``company_id=company.id``, the house convention) rather than passing silently.
 
 Both guards are pure introspection -- no database, no requests -- and the
 ``Test*Mechanics`` classes prove each classifier on synthetic input, so an empty
@@ -198,10 +211,6 @@ GLOBAL_ROUTES: Dict[RouteKey, str] = {
         "non-platform Admin is fenced by hand on current_user._active_company_id -- the value "
         "get_current_company_id returns -- and gets the same 404 for a foreign record."
     ),
-    ("POST", "/api/v1/admin/settings/seed-database"): (
-        "Whole-install bootstrap gated on db.query(User).first(): an authenticated caller implies a user "
-        "row, so it can only answer already_seeded and never writes."
-    ),
     # -- station / display principals: company_id comes from the principal's own DB row ------
     ("GET", "/api/v1/shop-floor/wallboard"): (
         "get_display_or_user: scoped by principal.company_id (display_tokens row, or the user's active "
@@ -233,6 +242,17 @@ GLOBAL_ROUTES: Dict[RouteKey, str] = {
 _COMPLAINTS = "fix/complaints-rma-tenant-audit"
 _CUSTOM_FIELDS = "fix/customers-custom-fields-tenant"
 _CAL_TOOLS = "fix/calibration-tools-downtime-tenant"
+
+
+# The one entry pair no Wave 1 branch owns. Its write branch is unreachable only while the
+# unscoped ``db.query(User).first()`` existence gate holds -- nothing machine-checks that -- so it
+# is filed as debt with a named fix rather than excused as global.
+_SEED_DATABASE = (
+    "Unowned follow-up: seed_database's write branch builds an is_superuser=True User plus four sample users "
+    "with no company_id and no audit row, outside user_provisioning.create_tenant_user, gated only on an "
+    "unscoped db.query(User).first(). Fix: delete the write branch (empty-install bootstrap has its own "
+    "server-selected flow), then re-classify or remove the route."
+)
 
 
 def _by_id(model: str, verb: str) -> str:
@@ -294,11 +314,13 @@ TRACKED_DEBT: Dict[RouteKey, TrackedDebt] = {
         "Reads CustomFieldValue rows joined to definitions with no company filter.", _CUSTOM_FIELDS
     ),
     ("POST", "/api/v1/custom-fields/values/{entity_type}/{entity_id}"): TrackedDebt(
-        "Resolves the CustomFieldDefinition by field_key with no company filter, then writes the value.",
+        "Resolves the CustomFieldDefinition by field_key with no company filter, then writes the value. A new "
+        "value is also built without company_id (see UNGUARDED_CONSTRUCTIONS).",
         _CUSTOM_FIELDS,
     ),
     ("POST", "/api/v1/custom-fields/values/bulk"): TrackedDebt(
-        "Resolves each CustomFieldDefinition by field_key with no company filter, then writes values.",
+        "Resolves each CustomFieldDefinition by field_key with no company filter, then writes values. A new "
+        "value is also built without company_id (see UNGUARDED_CONSTRUCTIONS).",
         _CUSTOM_FIELDS,
     ),
     ("DELETE", "/api/v1/custom-fields/values/{entity_type}/{entity_id}/{field_key}"): TrackedDebt(
@@ -322,6 +344,10 @@ TRACKED_DEBT: Dict[RouteKey, TrackedDebt] = {
     ),
     ("GET", "/api/v1/tool-management/tools/{tool_id}/history"): TrackedDebt(
         _by_id("Tool", "read the checkout/usage history of"), _CAL_TOOLS
+    ),
+    # -- unowned follow-up (no Wave 1 branch): debt, NOT an approved global exception -----------
+    ("POST", "/api/v1/admin/settings/seed-database"): TrackedDebt(
+        _SEED_DATABASE + " Today an authenticated caller is a user row, so it only answers already_seeded.",
     ),
 }
 
@@ -354,11 +380,18 @@ UNGUARDED_CONSTRUCTIONS: Dict[ConstructionKey, UnguardedConstruction] = {
         "Every call 500s on the NOT NULL; build through quality_numbering with the complaint's company.",
         _COMPLAINTS,
     ),
-    # Not owned by a Wave 1 branch: dead code today, named so a new User(...) elsewhere still fails.
+    ("app/api/endpoints/custom_fields.py", "set_custom_field_value", "CustomFieldValue"): UnguardedConstruction(
+        "Every create 500s on the NOT NULL: the **parsed splat is parse_value()'s value_* keys only, no company_id.",
+        _CUSTOM_FIELDS,
+    ),
+    ("app/api/endpoints/custom_fields.py", "set_bulk_custom_fields", "CustomFieldValue"): UnguardedConstruction(
+        "Every create 500s on the NOT NULL: the **parsed splat is parse_value()'s value_* keys only, no company_id.",
+        _CUSTOM_FIELDS,
+    ),
+    # Unowned follow-up, paired with the seed-database TRACKED_DEBT row; named so a new User(...)
+    # elsewhere still fails.
     ("app/api/endpoints/admin_settings.py", "seed_database", "User"): UnguardedConstruction(
-        "Builds the bootstrap admin (is_superuser=True) and four sample users with no company_id, outside "
-        "user_provisioning.create_tenant_user. Unreachable: the branch is gated on db.query(User).first() and "
-        "an authenticated caller is a user row (see GLOBAL_ROUTES), so it is dead code rather than a live 500.",
+        _SEED_DATABASE + " Dead code today rather than a live 500.",
         occurrences=2,
     ),
 }
@@ -658,6 +691,21 @@ def _assigns_company_id(scope: ast.AST, name: str) -> bool:
     return False
 
 
+def _keyword_sets_company_id(keyword: ast.keyword) -> bool:
+    """``company_id=...``, or a ``**{...}`` dict LITERAL with a ``"company_id"`` key.
+
+    A splat of anything else (``**parsed``, ``**payload.model_dump()``) proves nothing: the
+    guard cannot see what the mapping holds, and that is exactly the shape that hid
+    ``CustomFieldValue(..., **parsed)`` -- ``parse_value`` returns only the ``value_*`` keys.
+    Such a construction is guarded only by the bound-name ``<name>.company_id = ...`` check.
+    """
+    if keyword.arg is not None:
+        return keyword.arg == "company_id"
+    return isinstance(keyword.value, ast.Dict) and any(
+        isinstance(key, ast.Constant) and key.value == "company_id" for key in keyword.value.keys
+    )
+
+
 def scan_source(
     source: str, *, file: str, module: str, is_package: bool, tenant_classes: FrozenSet[type]
 ) -> List[Construction]:
@@ -691,7 +739,7 @@ def scan_source(
         if not isinstance(callee, type) or callee not in tenant_classes:
             continue
 
-        guarded = any(keyword.arg is None or keyword.arg == "company_id" for keyword in node.keywords)
+        guarded = any(_keyword_sets_company_id(keyword) for keyword in node.keywords)
         if not guarded:
             parent = parents.get(node)
             bound: Optional[str] = None
@@ -1098,6 +1146,24 @@ def splat(data):
     return CalibrationRecord(**data)
 
 
+def splat_then_assigned(data, company_id):
+    record = CalibrationRecord(**data)
+    record.company_id = company_id
+    return record
+
+
+def splat_literal(company_id):
+    return CalibrationRecord(**{"equipment_id": 1, "company_id": company_id})
+
+
+def splat_literal_without(company_id):
+    return CalibrationRecord(**{"equipment_id": 1, "owner_id": company_id})
+
+
+def splat_nested(data):
+    return CalibrationRecord(**{**data, "equipment_id": 1})
+
+
 def assigned(company_id):
     record = CalibrationRecord(equipment_id=1)
     record.company_id = company_id
@@ -1135,7 +1201,13 @@ def other_variable(company_id):
 '''
         assert _scan(source, tenant_classes) == {
             ("kw", "CalibrationRecord"): True,
-            ("splat", "CalibrationRecord"): True,
+            # A splat of an opaque mapping proves nothing (the CustomFieldValue(**parsed) shape) ...
+            ("splat", "CalibrationRecord"): False,
+            ("splat_nested", "CalibrationRecord"): False,
+            ("splat_literal_without", "CalibrationRecord"): False,
+            # ... unless the row is then assigned a company, or the literal visibly carries one.
+            ("splat_then_assigned", "CalibrationRecord"): True,
+            ("splat_literal", "CalibrationRecord"): True,
             ("assigned", "CalibrationRecord"): True,
             ("annotated", "CalibrationRecord"): True,
             ("missing", "CalibrationRecord"): False,
