@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import event, func
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -24,6 +24,7 @@ from app.api.deps import require_role
 from app.db.tenant_filter import tenant_query
 from app.models.import_batch import ImportBatch, ImportBatchRow
 from app.models.user import UserRole
+from app.services import notification_outbox
 from app.services.audit_service import AuditService
 from app.services.export_safety import sanitize_csv_row
 from app.services.import_service import ImportFileError, parse_import_file
@@ -101,14 +102,11 @@ async def _invoke(db, user, company_id, request, entity, headers, rows, dry_run,
     }
     pending_events = []
     with Session(bind=_connection(db), join_transaction_mode='create_savepoint') as inner:
-        # The global outbox listener runs after every Session commit. Move its
-        # pending IDs before it runs; only the enclosing durable commit dispatches.
-        def forward_outbox(session):
-            pending = session.info.pop('pending_notification_event_ids', [])
-            if pending:
-                pending_events.extend(pending)
-
-        event.listen(inner, 'before_commit', forward_outbox)
+        # ``inner``'s commits are savepoints of ``db``'s transaction, not durable commits,
+        # so the outbox hands the event ids they commit to ``pending_events`` instead of
+        # enqueuing them. ``commit_batch`` re-attaches them to ``db`` once the row's unit
+        # lands; only the enclosing durable commit dispatches.
+        inner.info[notification_outbox.FORWARD_TO_KEY] = pending_events
         kwargs = dict(
             file=UploadFile(filename='review.csv', file=io.BytesIO(_encode(headers, rows))),
             dry_run=dry_run,

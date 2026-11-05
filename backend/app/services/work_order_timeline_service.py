@@ -291,6 +291,11 @@ def list_work_order_timeline(
             OperationalEvent.work_order_id == wo.id,
             OperationalEvent.source_module == "quality",
             OperationalEvent.event_type.in_(["ncr_updated", "fai_updated"]),
+            # A future-dated row would sit at the top of the history until its date
+            # passed. Only the server writes these types (POST /operational-events
+            # refuses them), so this bounds rows from any other writer. Naive UTC, the
+            # form OperationalEventService.emit writes.
+            OperationalEvent.occurred_at <= datetime.utcnow(),
             or_(
                 and_(OperationalEvent.entity_type == "ncr", OperationalEvent.entity_id.in_(ncr_ids)),
                 and_(OperationalEvent.entity_type == "fai", OperationalEvent.entity_id.in_(fai_ids)),

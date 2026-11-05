@@ -9150,23 +9150,47 @@ writes to the `audit_log` hash chain. Both routes scope to the caller's active c
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/operational-events/` | Read the stream, newest first; filters `source_module`, `event_type`, `work_order_id`, `limit` (1–250, default 100) | Yes |
-| POST | `/operational-events/` | Record an event (`event_type`, `source_module`, optional `entity_type` / `entity_id` / `work_order_id` / `operation_id` / `severity` / `event_payload` / `occurred_at`). A `work_order_id` or `operation_id` that is not this company's is **404**. **400** for a server-only event type (below) | Yes |
+| GET | `/operational-events/` | Read the stream, newest first; filters `source_module`, `event_type`, `work_order_id`, `limit` (1–250, default 100). The raw store: deliberately **not** bounded by `occurred_at` (below) | Yes |
+| POST | `/operational-events/` | Record a **custom** event as context for AI assistants (`event_type`, `source_module`, optional `entity_type` / `entity_id` / `work_order_id` / `operation_id` / `severity` / `event_payload` / `occurred_at`). A future `occurred_at` is stored as now. A `work_order_id` or `operation_id` that is not this company's is **404**. **400** for any event type the system records itself (below). Never sends a notification | Yes |
 
-> **Server-only event types are refused (400).** `operational_events.SERVER_ONLY_EVENT_TYPES` names
-> the event types the system writes itself and a floor screen trusts as "the system said this". Today
-> it holds one: **`dispatch_order_changed`**, the Dispatch Board's "the planner changed this
-> machine's order" notice. Its rows are read back on every kiosk, crew-station, my-active-job and
-> filtered `/shop-floor/operations` poll at that machine as the RUN NEXT banner, and they fan out the
-> `dispatch.changed` notification to the operators clocked in there, so a posted one would let any
-> signed-in user (or API token) put a fake planner instruction on a machine. Matched after trimming,
-> case-insensitively. Exact detail: `Event type '{event_type}' is recorded by the system itself and
-> cannot be posted. To change a machine's run order, use the Dispatch Board.` Nothing is written and
-> no notification is queued. **Every other event type is accepted as before** (the hold-context flow
-> posts `operation_hold` here), and a client-supplied `occurred_at` is still taken as given for them.
-> To add another server-written type a reader trusts, extend that one set rather than adding a second
-> check. The dispatch-notice reader is also robust against rows written any other way — see
-> "Floor dispatch notices" under Shop Floor.
+> **Server-recorded event types are refused (400).** A client-posted row is indistinguishable from
+> one the server wrote, so `operational_events.SERVER_ONLY_EVENT_TYPES` refuses the union of:
+> - **every notification source type** — each key of `notification_catalog.SOURCE_EVENT_TYPE_TO_KEY`
+>   (work order released / started / completed / closed, operation completed / ready / hold, NCR /
+>   CAR / FAI, receipts, shipments, purchase orders, downtime, backflush and material shortages,
+>   dispatch order changes, …). Derived, so a newly cataloged type is refused with no route change.
+>   `emit` tags those rows for the outbox, so a posted one used to fan real in-app / email / SMS
+>   notifications out to other users, and any signed-in principal (OPERATOR, VIEWER, an API token)
+>   could post one.
+> - **`READER_TRUSTED_EVENT_TYPES`** — the types a reader selects by name and presents as fact:
+>   `dispatch_order_changed` (the RUN NEXT banner, `dispatch_service.latest_dispatch_notices`),
+>   `operation_hold` (who / when held, `operation_hold_view`), `operation_ready` (the flow-metrics
+>   queue-time anchor), `operation_completed` (the adoption-metrics digital-completion share), and
+>   `ncr_updated` / `fai_updated` (quality rows on the work-order timeline). Listed on their own so a
+>   type dropped from the catalog stays refused while a reader still trusts it.
+>
+> Matched after trimming, case-insensitively. Nothing is written and no notification is queued; the
+> attempt is logged at WARNING (`operational event post refused …` with company, user and type). Exact
+> detail: `Event type '{event_type}' is recorded by the system itself and cannot be posted. Perform the
+> action through its own screen or endpoint; the system records the event when it happens.` — for
+> `dispatch_order_changed` followed by ` To change a machine's run order, use the Dispatch Board.` To
+> make one of these events happen, call the endpoint that performs the action. **Adding a reader that
+> filters `OperationalEvent.event_type` on a server-written type means adding that type to
+> `READER_TRUSTED_EVENT_TYPES`** — `tests/api/test_operational_event_forgery.py` scans `app/` and fails
+> on a filter naming a type missing from that set. A custom type (e.g. `agent_observation`) still
+> records and never notifies: only cataloged types are tagged for the outbox, and all are refused. The
+> generated MCP tool `record_operational_event` is this route and carries the same refusal.
+>
+> **`occurred_at` is clamped.** A value later than the server's now is stored as now; a past value is
+> kept (normalized to UTC, same instant, and stored naive like every server-written row); omitted, the
+> server stamps it. An instant outside the representable range (e.g. `0001-01-01T00:00:00+05:00`) is
+> **422**. The readers that trust
+> `occurred_at` also ignore rows dated after now, whoever wrote them — hold context, the AI work-order
+> context (the copilot's `recent_events`), the timeline's quality telemetry, adoption metrics and flow
+> metrics — and adoption metrics treats a non-object payload as an unreported source rather than
+> failing. `GET /operational-events/` is deliberately **not** bounded: it is the raw store, so a bad
+> row stays visible to whoever investigates it. The dispatch-notice reader is bounded on both sides —
+> see "Floor dispatch notices" under Shop Floor.
 
 ### AI Usage Telemetry
 

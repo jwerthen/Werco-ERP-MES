@@ -31,6 +31,7 @@ from typing import List
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 import app.core.realtime as realtime
@@ -51,6 +52,7 @@ from tests.api.dispatch_plan_helpers import (
     ready,
     run_order_url,
 )
+from tests.api.export_audit_helpers import fresh_session
 from tests.api.kiosk_test_helpers import (
     COMPANY_A,
     COMPANY_B,
@@ -385,8 +387,8 @@ class TestBestEffort:
             db_session, COMPANY_A, manager, before, dispatch_service.DispatchChangeKind.MACHINE_ORDER
         )
         assert changed == []
-        # The savepoint rollback fired the session's rollback events (which drop the
-        # list); the id that belonged to the still-live outer transaction is back.
+        # The savepoint rollback dropped only what was emitted inside it; the id that
+        # belongs to the still-live outer transaction is still pending.
         assert db_session.info[notification_outbox._PENDING_KEY] == [424242]
         # ... and the outer transaction is still usable.
         assert db_session.get(WorkOrderOperation, b.id).run_order == 1
@@ -429,8 +431,9 @@ class TestBestEffort:
     def test_the_outbox_enqueues_at_the_real_commit_not_at_the_savepoint_release(
         self, db_session: Session, _no_outbox_enqueue
     ):
-        """SQLAlchemy fires ``after_commit`` on a SAVEPOINT release too. Unshielded, the
-        notice's own savepoint would enqueue fan-out before the request commits."""
+        """SQLAlchemy fires ``after_commit`` on a SAVEPOINT release too. The notice's own
+        savepoint is released inside ``record_dispatch_change``, with no shield around it;
+        the outbox must still wait for the outer commit to enqueue the fan-out."""
         manager = _manager(db_session)
         wc = make_work_center(db_session)
         _, (a,) = make_plan_wo(db_session, [ready(wc)])
@@ -450,13 +453,37 @@ class TestBestEffort:
         db_session.commit()
         assert _no_outbox_enqueue == pending
 
-    def test_a_committed_notice_reaches_the_outbox(self, client: TestClient, db_session: Session, _no_outbox_enqueue):
+    def test_a_committed_notice_reaches_the_outbox(self, client: TestClient, db_session: Session, monkeypatch):
+        """Once, and only after the request's COMMIT. The run-order PUT audits first
+        (``AuditService`` leaves its savepoint open) and then emits inside the notice's
+        own savepoint, so ``db.commit()`` releases two savepoints before the real COMMIT;
+        an enqueue at either release hands the worker an event it cannot load yet. The
+        probe reads the event on a SEPARATE connection at the moment of the enqueue,
+        which can only see committed rows."""
         headers = user_headers(_manager(db_session))
         wc = make_work_center(db_session)
         _, (a,) = make_plan_wo(db_session, [ready(wc)])
         _, (b,) = make_plan_wo(db_session, [ready(wc)])
+        enqueued = []
+
+        def _probe(event_id: int) -> None:
+            try:
+                with fresh_session() as verify:
+                    committed = verify.get(OperationalEvent, event_id) is not None
+            except OperationalError:  # shared-cache table lock: the writer has not committed
+                committed = False
+            enqueued.append((event_id, committed))
+
+        monkeypatch.setattr(notification_outbox, "_enqueue_dispatch", _probe)
+
         assert _column(client, headers, wc.id, [b.id, a.id]).status_code == status.HTTP_200_OK
-        assert _no_outbox_enqueue == [event.id for event in _notices(db_session)]
+
+        (notice,) = _notices(db_session)
+        assert enqueued == [(notice.id, True)]
+        audit_rows = db_session.query(AuditLog).filter(
+            AuditLog.resource_type == "work_center", AuditLog.resource_id == wc.id
+        )
+        assert audit_rows.count() == 1
 
 
 class TestBroadcast:
@@ -795,16 +822,17 @@ class TestPostedNoticesAreRefused:
         # And nothing reached the floor.
         assert client.get(queue_url(wc.id), headers=user_headers(user)).json()["dispatch_notice"] is None
 
-    def test_other_cataloged_event_types_are_still_accepted(self, client: TestClient, db_session: Session):
-        """Only the board's own notice type is refused: ``operation_hold`` (posted by the
-        hold-context flow and reachable through the MCP tool) still records."""
+    def test_a_custom_event_type_is_still_accepted(self, client: TestClient, db_session: Session):
+        """The refusal is for server-recorded types (every cataloged and reader-trusted
+        type -- see ``test_operational_event_forgery.py``), not the route: a client's own
+        event type still records."""
         user = make_user(db_session)
         wc = make_work_center(db_session)
         wo, (op,) = make_plan_wo(db_session, [(wc, OperationStatus.ON_HOLD, 10)])
         resp = client.post(
             EVENTS_URL,
             json={
-                "event_type": "operation_hold",
+                "event_type": "agent_observation",
                 "source_module": "shop_floor",
                 "work_order_id": wo.id,
                 "operation_id": op.id,
@@ -813,7 +841,7 @@ class TestPostedNoticesAreRefused:
             headers=user_headers(user),
         )
         assert resp.status_code == status.HTTP_200_OK, resp.text
-        assert resp.json()["event_type"] == "operation_hold"
+        assert resp.json()["event_type"] == "agent_observation"
 
 
 class TestBadRowsCannotBreakTheFloor:
