@@ -11,6 +11,7 @@ static guard at the bottom holds every ``app/`` call site to passing ``company_i
 import ast
 import asyncio
 import functools
+import inspect
 import logging
 from pathlib import Path
 
@@ -183,13 +184,16 @@ async def test_safe_broadcast_without_company_id_reaches_nobody(monkeypatch, cap
     company_a = await _connect(manager, user_id="1", company_id=10)
     company_b = await _connect(manager, user_id="2", company_id=20)
 
+    secret = {"event": "y", "blocker_id": 4242, "note": "tenant-a-secret"}
     with caplog.at_level(logging.WARNING, logger="app.core.realtime"):
-        await anyio.to_thread.run_sync(functools.partial(safe_broadcast, broadcast_dashboard_update, {"event": "y"}))
+        await anyio.to_thread.run_sync(functools.partial(safe_broadcast, broadcast_dashboard_update, secret))
         await drain_broadcasts()
 
     assert company_a.sent == []
     assert company_b.sent == []
     assert any("broadcast_dashboard_update" in r.getMessage() for r in caplog.records)
+    # The warning names the coroutine and the error -- never the tenant payload.
+    assert not any("tenant-a-secret" in r.getMessage() or "4242" in r.getMessage() for r in caplog.records)
 
 
 def test_safe_broadcast_failure_is_logged_at_warning(caplog):
@@ -251,6 +255,65 @@ async def test_delivery_failure_is_logged_not_raised(caplog):
         await drain_broadcasts()
 
     assert any("broken_helper" in r.getMessage() and "RuntimeError" in r.getMessage() for r in caplog.records)
+
+
+def _in_flight_on_this_loop() -> list:
+    loop = asyncio.get_running_loop()
+    return [task for task in list(realtime._in_flight) if task.get_loop() is loop]
+
+
+async def test_pending_broadcast_is_strongly_held_then_released():
+    """The loop keeps only a WEAK reference to a task, so a fire-and-forget broadcast with
+    no other owner can be garbage-collected before it runs (a silent drop). ``_in_flight``
+    must hold it while it is pending -- that is also what lets a caller drain it -- and let
+    go once it finishes, or every broadcast the process ever sends is retained forever."""
+    release = asyncio.Event()
+
+    async def slow_helper(message, *, company_id):
+        await release.wait()
+
+    await anyio.to_thread.run_sync(functools.partial(safe_broadcast, slow_helper, {"event": "x"}, company_id=10))
+
+    pending = _in_flight_on_this_loop()
+    assert len(pending) == 1 and not pending[0].done()
+
+    release.set()
+    await drain_broadcasts()
+    await asyncio.sleep(0)  # let the done-callback run
+
+    assert pending[0].done()
+    assert _in_flight_on_this_loop() == []
+
+
+async def test_cancelled_broadcast_is_released_quietly(caplog):
+    """A broadcast still pending at shutdown is cancelled with the loop. That is not a
+    delivery failure: no WARNING, no 'Exception in callback' from asyncio (reading
+    ``task.exception()`` on a cancelled task raises inside the done-callback), and the
+    task leaves ``_in_flight``."""
+    loop = asyncio.get_running_loop()
+    loop_errors: list = []
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    started = asyncio.Event()
+
+    async def stuck_helper(message, *, company_id):
+        started.set()
+        await asyncio.Event().wait()
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="app.core.realtime"):
+            safe_broadcast(stuck_helper, {"event": "x"}, company_id=10)
+            await asyncio.wait_for(started.wait(), timeout=2)
+            (task,) = _in_flight_on_this_loop()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(None)
+
+    assert task.cancelled()
+    assert _in_flight_on_this_loop() == []
+    assert loop_errors == []
+    assert [r for r in caplog.records if r.name == "app.core.realtime"] == []
 
 
 async def test_disconnect_cleans_up_company_registry():
@@ -367,3 +430,236 @@ def test_every_broadcast_call_site_passes_company_id():
     ``app/`` must pass ``company_id=`` -- the work-order blocker router and the
     work-center status route omitted it and broadcast tenant data to every company."""
     assert _unscoped_broadcast_calls() == []
+
+
+def test_tenant_helper_set_is_every_public_broadcast_helper():
+    """The two guards above only inspect calls to the helpers named in ``_TENANT_HELPERS``.
+    A new ``broadcast_*`` helper added to ``app.core.websocket`` would be invisible to them,
+    so the set is pinned to the module's actual public helpers -- and every one of them must
+    take ``company_id`` keyword-only with no default, like the three that exist today."""
+    public = {
+        name
+        for name, fn in vars(ws_module).items()
+        if name.startswith("broadcast_") and inspect.iscoroutinefunction(fn)
+    }
+    assert public == _TENANT_HELPERS
+    for name in public:
+        param = inspect.signature(getattr(ws_module, name)).parameters["company_id"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY, name
+        assert param.default is inspect.Parameter.empty, name
+
+
+def test_every_safe_broadcast_targets_a_tenant_helper():
+    """``safe_broadcast(<anything else>, ...)`` -- a lambda, a new private coroutine, a
+    manager method -- would escape the ``company_id`` guard entirely."""
+    unknown = [
+        f"{path.relative_to(_APP_ROOT.parent)}:{node.lineno} {ast.unparse(node.args[0]) if node.args else '<none>'}"
+        for path, node in _calls("safe_broadcast")
+        if not node.args or _call_name(node.args[0]) not in _TENANT_HELPERS
+    ]
+    assert unknown == []
+
+
+# --- Static guard: the tenant is the ACTIVE company (``get_current_company_id``) -----------
+#
+# Passing ``company_id=`` is not enough: ``company_id=current_user.company_id`` passes the
+# guard above and sends a switched-in platform admin's writes to their HOME company's
+# sockets, and ``company_id=None`` passes it and is dropped. CLAUDE.md: derive the company
+# from ``get_current_company_id``, never ``current_user.company_id``. So every broadcast's
+# ``company_id`` must be a parameter declared ``Depends(get_current_company_id)`` --
+# directly, or through a private wrapper (``_broadcast_blocker``, ``broadcast_dispatch_changes``,
+# ...) whose EVERY caller passes such a parameter. Extend this deliberately if a genuine
+# non-request broadcaster (e.g. a background job) ever appears; don't loosen it to "any name".
+
+_ACTIVE_COMPANY_DEPENDENCY = "Depends(get_current_company_id)"
+_MAX_WRAPPER_DEPTH = 4
+
+
+@functools.lru_cache(maxsize=1)
+def _all_app_modules() -> tuple:
+    """(path, source) for every ``app/`` module -- wrappers can be called from anywhere."""
+    return tuple((path, path.read_text()) for path in sorted(_APP_ROOT.rglob("*.py")))
+
+
+@functools.lru_cache(maxsize=None)
+def _parsed(path: Path) -> tuple:
+    tree = ast.parse(path.read_text())
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    return tree, parents
+
+
+def _function_chain(path: Path, node: ast.AST) -> list:
+    """Enclosing function defs of ``node``, innermost first."""
+    _, parents = _parsed(path)
+    chain, cursor = [], parents.get(node)
+    while cursor is not None:
+        if isinstance(cursor, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            chain.append(cursor)
+        cursor = parents.get(cursor)
+    return chain
+
+
+def _params_with_sources(fn) -> dict:
+    args = fn.args
+    positional = args.posonlyargs + args.args
+    defaults = [None] * (len(positional) - len(args.defaults)) + list(args.defaults)
+    pairs = list(zip(positional, defaults)) + list(zip(args.kwonlyargs, args.kw_defaults))
+    return {arg.arg: (arg, default) for arg, default in pairs}
+
+
+def _rebinds(fn, name: str) -> bool:
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor, ast.NamedExpr)):
+            targets = [node.target]
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            return True
+    return False
+
+
+def _calls_in(modules, name: str):
+    for path, source in modules:
+        if name not in source:
+            continue
+        tree, _ = _parsed(path)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and _call_name(node.func) == name:
+                yield path, node
+
+
+def _bound_argument(call: ast.Call, fn, param: str):
+    for kw in call.keywords:
+        if kw.arg == param:
+            return kw.value
+    positional = [a.arg for a in fn.args.posonlyargs + fn.args.args]
+    if param in positional and positional.index(param) < len(call.args):
+        return call.args[positional.index(param)]
+    return None
+
+
+def _tenant_problems(modules, path: Path, value, at: ast.AST, depth: int = 0) -> list:
+    where = f"{path.name}:{getattr(at, 'lineno', '?')}"
+    if not isinstance(value, ast.Name):
+        shown = ast.unparse(value) if value is not None else "<missing>"
+        return [f"{where} company_id={shown} is not the get_current_company_id parameter"]
+    for fn in _function_chain(path, at):
+        params = _params_with_sources(fn)
+        if value.id not in params:
+            if _rebinds(fn, value.id):
+                return [f"{where} {value.id} is bound locally in {fn.name}(), not by the dependency"]
+            continue  # a closure: look in the next enclosing function
+        if _rebinds(fn, value.id):
+            return [f"{where} parameter {value.id} is reassigned inside {fn.name}()"]
+        arg, default = params[value.id]
+        declared = " ".join(ast.unparse(x) for x in (default, arg.annotation) if x is not None)
+        if _ACTIVE_COMPANY_DEPENDENCY in declared:
+            return []
+        if default is not None:
+            return [f"{where} {fn.name}({value.id}={ast.unparse(default)}) is not the active-company dependency"]
+        if depth >= _MAX_WRAPPER_DEPTH:
+            return [f"{where} {fn.name}() wrapper chain too deep to trace"]
+        # A private wrapper: EVERY caller must hand it the active company.
+        callers = list(_calls_in(modules, fn.name))
+        if not callers:
+            return [f"{where} {fn.name}() receives {value.id} but has no caller to trace"]
+        problems: list = []
+        for caller_path, call in callers:
+            bound = _bound_argument(call, fn, value.id)
+            problems += _tenant_problems(modules, caller_path, bound, call, depth + 1)
+        return problems
+    return [f"{where} {value.id} is not a parameter of any enclosing function"]
+
+
+def _broadcast_tenant_problems(modules) -> tuple:
+    """(problems, number of broadcast call sites examined)."""
+    problems, examined = [], 0
+    for path, _source in modules:
+        tree, _ = _parsed(path)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _call_name(node.func)
+            is_safe = name == "safe_broadcast" and node.args and _call_name(node.args[0]) in _TENANT_HELPERS
+            if not (is_safe or name in _TENANT_HELPERS):
+                continue
+            examined += 1
+            value = next((kw.value for kw in node.keywords if kw.arg == "company_id"), None)
+            problems += _tenant_problems(modules, path, value, node)
+    return problems, examined
+
+
+def test_every_broadcast_tenant_is_the_active_company_dependency():
+    problems, examined = _broadcast_tenant_problems(_all_app_modules())
+    assert examined >= 50  # it is looking at the real call sites, not an empty set
+    assert problems == []
+
+
+_PROBE = '''
+from fastapi import Depends
+
+def route_ok(company_id: int = Depends(get_current_company_id)):
+    safe_broadcast(broadcast_dashboard_update, {}, company_id=company_id)
+
+def route_home_company(current_user=Depends(get_current_user)):
+    safe_broadcast(broadcast_dashboard_update, {}, company_id=current_user.company_id)
+
+def route_none():
+    safe_broadcast(broadcast_dashboard_update, {}, company_id=None)
+
+def route_rebound(work_order, company_id: int = Depends(get_current_company_id)):
+    company_id = work_order.company_id
+    safe_broadcast(broadcast_dashboard_update, {}, company_id=company_id)
+
+def route_wrong_dependency(company_id: int = Depends(get_home_company_id)):
+    safe_broadcast(broadcast_dashboard_update, {}, company_id=company_id)
+
+def _wrapper(event, company_id):
+    safe_broadcast(broadcast_dashboard_update, {"event": event}, company_id=company_id)
+
+def route_wrapped_ok(company_id: int = Depends(get_current_company_id)):
+    _wrapper("ok", company_id=company_id)
+
+def route_wrapped_positional_ok(company_id: int = Depends(get_current_company_id)):
+    _wrapper("ok", company_id)
+
+def route_wrapped_home(current_user=Depends(get_current_user)):
+    _wrapper("bad", current_user.company_id)
+'''
+
+
+def test_active_company_guard_rejects_the_wrong_tenant_sources(tmp_path):
+    """Keep the guard above honest: it must refuse each shape it exists to catch, accept a
+    direct dependency and a wrapper fed by one (by keyword or position), and blame only the
+    bad wrapper CALLER -- or an empty problem list over app/ proves nothing."""
+    module = tmp_path / "probe.py"
+    module.write_text(_PROBE)
+    modules = ((module, _PROBE),)
+    problems, examined = _broadcast_tenant_problems(modules)
+    assert examined == 6  # five routes plus the wrapper; wrapper CALLS are traced, not counted
+
+    def flagged(fn_name: str) -> bool:
+        return any(f"probe.py:{line}" in p for p in problems for line in _call_lines(module, fn_name))
+
+    assert not flagged("route_ok")
+    assert flagged("route_home_company")
+    assert flagged("route_none")
+    assert flagged("route_rebound")
+    assert flagged("route_wrong_dependency")
+    assert not flagged("route_wrapped_ok")
+    assert not flagged("route_wrapped_positional_ok")
+    assert flagged("route_wrapped_home")
+    # Exactly the five bad shapes, each reported once -- nothing else.
+    assert len(problems) == 5, problems
+
+
+def _probe_functions(module: Path) -> dict:
+    tree, _ = _parsed(module)
+    return {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+
+
+def _call_lines(module: Path, fn_name: str) -> list:
+    fn = _probe_functions(module)[fn_name]
+    return [node.lineno for node in ast.walk(fn) if isinstance(node, ast.Call) and node.func is not None]
