@@ -1823,6 +1823,57 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > `user_id` / `work_center_id` that does not belong to the active company with **422** before insert
 > (cross-tenant FK-injection guard). See `docs/API.md` and `docs/WORK_ORDER_COMPLETION_REMEDIATION.md`.
 
+### Customer Complaints & RMA
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View (dashboard, lists, detail, 8D report) | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ |
+| Record / edit a complaint, record an investigation | ✓ | ✓ | ✓ | | ✓ | | |
+| Open / edit an RMA, receive and inspect returned material | ✓ | ✓ | ✓ | | ✓ | | |
+| Resolve / close a complaint | ✓ | ✓ | | | ✓ | | |
+| Raise an NCR / CAR from a complaint | ✓ | ✓ | | | ✓ | | |
+| Approve / deny / dispose / complete an RMA | ✓ | ✓ | | | ✓ | | |
+
+> **Endpoint mapping (enforced in code, 2026-11-05).** The router
+> (`app/api/endpoints/customer_complaints.py`, mounted at `/api/v1/complaints`) uses two role sets
+> defined in `app/services/customer_complaint_service.py`. They mirror the **Inspect** and
+> **Approve** rows of the [Quality](#quality) matrix:
+> - **`AUTHOR_ROLES` = Admin / Manager / Supervisor / Quality** (the `quality:inspect` tier):
+>   `POST /complaints/complaints/`, `PUT /complaints/complaints/{id}`, `POST …/{id}/investigate`,
+>   `POST /complaints/rma/`, `PUT /complaints/rma/{id}`, `POST /complaints/rma/{id}/receive` and
+>   `POST /complaints/rma/{id}/inspect`.
+> - **`APPROVER_ROLES` = Admin / Manager / Quality** (the `quality:approve` tier):
+>   `POST …/{id}/resolve`, `…/close`, `…/create-ncr`, `…/create-car`, and
+>   `POST /complaints/rma/{id}/approve`, `…/deny`, `…/dispose` and `…/complete`.
+>
+> Any other authenticated role receives **403** with nothing written. Superuser and Platform Admin
+> pass `require_role` as everywhere else, but stay bound to the active company.
+>
+> **What changed.** Before this fix only `create-ncr`, `create-car` and the RMA `approve` / `deny`
+> / `dispose` / `complete` verbs were gated, all to Admin / Manager / Quality, and those keep the
+> same set. Every other write, `resolve` and `close` included, was open to **any** authenticated
+> user. As a result:
+> - Operator, Viewer and Shipping lose every write they had: complaint create, edit, investigate,
+>   resolve and close, and RMA create, edit, receive and inspect.
+> - Supervisor loses `resolve` and `close` but keeps every author-tier verb.
+>
+> The page hides **New Complaint** (header and empty state) and **Create RMA** for roles without
+> `quality:inspect`, so Operator and Viewer no longer see controls the server would refuse.
+>
+> **Reads stay read-broad, scoped to the tenant.** The dashboard, both lists, complaint and RMA
+> detail and the 8D report depend on `get_current_user` only. The **View** row above is the UI's
+> `quality:view` gate on `/customer-complaints`, the same as the Quality View row. On the server,
+> every route (read or write) resolves through the active company: another tenant's id returns
+> **404** before anything is read or changed, the dashboard aggregates only the active company,
+> and part / customer / RMA expansions never cross tenants.
+>
+> **Writes are audited.** Resource types are `customer_complaint`, `rma`, `ncr` and `car`. `resolve`,
+> `close`, RMA `dispose` and RMA `complete` write their audit row with `log_required`: if the row
+> cannot be saved the request returns **503** and nothing commits. The other writes use the
+> best-effort helpers. Status moves only through the workflow verbs, which return **400** from the
+> wrong state. The update schemas no longer accept `status` (complaint) or `disposition` (RMA).
+> See [API: Customer Complaints & RMA](API.md#customer-complaints--rma).
+
 ### Engineering Change Orders (ECO)
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
