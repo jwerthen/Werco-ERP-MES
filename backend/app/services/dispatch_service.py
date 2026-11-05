@@ -93,7 +93,6 @@ from app.schemas.dispatch import (
 )
 from app.services.laser_nest_service import active_laser_nest
 from app.services.material_tie_view import MaterialTieView, tie_views_for_operations
-from app.services.notification_outbox import _PENDING_KEY as NOTIFICATION_PENDING_KEY
 from app.services.operational_event_service import OperationalEventService
 from app.services.wallboard_service import operator_display_name
 from app.services.work_order_state_service import TERMINAL_WO_STATUSES, operation_target_quantity
@@ -1579,16 +1578,14 @@ def emit_dispatch_notices(
     the residue ``OperationalEventService.emit_best_effort``'s docstring says the
     savepoint closes.
 
-    THE OUTBOX LIST IS SHIELDED FROM THE SAVEPOINT, BOTH WAYS. SQLAlchemy fires the
-    session's ``after_commit`` on a SAVEPOINT release and its rollback events on a
-    savepoint rollback, and the notification outbox listens to exactly those
-    (``services/notification_outbox.py``). Unshielded, releasing this savepoint would
-    enqueue the notices' fan-out BEFORE the request commits -- the worker could load an
-    event that is not committed yet (and lose it), or one whose transaction later rolls
-    back -- and a rollback would drop ids the still-live outer transaction owns. So the
-    pending list is lifted off the session across the release and put back after it
-    (the outer commit enqueues it, as the outbox intends), and on failure the ids that
-    were pending BEFORE the savepoint are restored.
+    THE SAVEPOINT NEEDS NO OUTBOX HANDLING OF ITS OWN. SQLAlchemy fires the session's
+    ``after_commit`` on a SAVEPOINT release too, but the notification outbox
+    (``services/notification_outbox.py``) acts only on the OUTERMOST transaction: a
+    release hands these notices' ids to the enclosing transaction (whose real commit
+    enqueues the fan-out), and a rollback drops exactly the ids emitted inside the
+    savepoint while keeping the ones the still-live outer transaction already owns.
+    This function used to lift the pending list off the session around its savepoint
+    to get that; don't reintroduce the shield.
 
     NEVER ``expire_all()``: the machine-move callers hold flushed-but-uncommitted ORM
     state. Callers flush before calling (:func:`record_dispatch_change` does), so
@@ -1605,7 +1602,6 @@ def emit_dispatch_notices(
     if not changed:
         return []
 
-    pending_before = list(db.info.get(NOTIFICATION_PENDING_KEY) or [])
     savepoint = db.begin_nested()
     try:
         payloads = _dispatch_notice_payloads(db, company_id, actor_user, before, after, change_kind, changed)
@@ -1625,14 +1621,7 @@ def emit_dispatch_notices(
             )
             if event is None:
                 raise RuntimeError(f"dispatch notice emit failed for work center {wc_id}")
-        # Lift the outbox list off the session across the release: the release fires
-        # ``after_commit``, which would enqueue these events before the real commit.
-        pending_now = db.info.pop(NOTIFICATION_PENDING_KEY, None)
-        try:
-            savepoint.commit()
-        finally:
-            if pending_now:
-                db.info[NOTIFICATION_PENDING_KEY] = pending_now
+        savepoint.commit()
         return changed
     except Exception:  # noqa: BLE001 - a notice must never fail the reorder it describes
         logger.warning(
@@ -1645,10 +1634,6 @@ def emit_dispatch_notices(
             savepoint.rollback()
         except Exception:  # noqa: BLE001 - already failing; the outer transaction decides
             logger.warning("dispatch notice savepoint rollback failed", exc_info=True)
-        if pending_before:
-            db.info[NOTIFICATION_PENDING_KEY] = pending_before
-        else:
-            db.info.pop(NOTIFICATION_PENDING_KEY, None)
         return []
 
 
