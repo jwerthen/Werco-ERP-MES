@@ -10248,7 +10248,8 @@ order they were broadcast. Three limits keep the queue from backing up:
   logged at WARNING (`Realtime broadcast ... dropped`).
 - A single send to one socket is bounded at **5 seconds**. A socket that does not accept the send in
   time is dropped from delivery, like any socket whose send fails.
-- `REALTIME_BROADCAST_ENABLED=false` turns every push off without a code change
+- Pushes **ship off**: nothing is queued unless `REALTIME_BROADCAST_ENABLED=true` is set on the
+  deploy, and setting it back to `false` turns every push off again without a code change
   (`docs/ENVIRONMENT_VARIABLES.md` → Realtime WebSocket pushes).
 
 `ConnectionManager.send_to_user` follows the same tenant rule as the broadcasts: it takes
@@ -10263,9 +10264,10 @@ A platform admin can hold sockets in several companies at once. Nothing in `app/
 > forwarded `company_id=` to `anyio.from_thread.run`, which takes positional arguments only. Every
 > tenant-scoped broadcast therefore raised `TypeError`, which was logged at DEBUG and dropped, so no
 > tenant-scoped push had reached a socket since scoping shipped (2026-06-07). Broadcasts from `async`
-> routes (both laser-nest-package imports) were also dropped. Since the fix, the Dashboard, Shop
-> Floor, Scheduling, Work Orders, Work Order Detail and Analytics screens receive their own company's
-> pushes and refetch on them. Guards:
+> routes (both laser-nest-package imports) were also dropped. With pushes turned on
+> (`REALTIME_BROADCAST_ENABLED=true`; they ship off), the Dashboard, Shop Floor, Scheduling, Work
+> Orders, Work Order Detail and Analytics screens receive their own company's pushes and refetch on
+> them. The cross-tenant leak is closed either way. Guards:
 > `backend/tests/test_websocket_tenant_isolation.py` statically requires every broadcast call in
 > `app/` to pass `company_id=` traced to `Depends(get_current_company_id)`, and
 > `backend/tests/api/test_realtime_broadcast_tenant_scope.py` checks the blocker and work-center

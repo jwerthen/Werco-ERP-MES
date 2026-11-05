@@ -53,6 +53,10 @@ os.environ["SECRET_KEY"] = "test-secret-key-abcdefghijklmnopqrstuvwxyz123456"
 os.environ["REFRESH_TOKEN_SECRET_KEY"] = "test-refresh-secret-key-abcdefghijklmnopqrstuvwxyz123456"
 os.environ["ENVIRONMENT"] = "test"
 os.environ["SENTRY_DSN"] = ""
+# Realtime pushes ship dark (``Settings.REALTIME_BROADCAST_ENABLED`` defaults to False);
+# the suite runs with them ON so delivery and tenant scoping stay exercised.
+# ``test_realtime_pushes_ship_dark`` pins the shipped default separately.
+os.environ["REALTIME_BROADCAST_ENABLED"] = "true"
 
 import app.core.security as _security
 from app.core.security import create_access_token, get_password_hash

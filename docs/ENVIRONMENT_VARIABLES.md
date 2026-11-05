@@ -411,14 +411,17 @@ refetches on a push. This switch turns all pushes off without a code change.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `REALTIME_BROADCAST_ENABLED` | No | `true` | Kill switch for every realtime push (`app.core.realtime.safe_broadcast`). When `false`, no write queues a push. Dashboard, Work Orders and Work Order Detail keep refreshing on their 30-second timers; Scheduling and Analytics refresh only on load. Writes are unaffected. |
+| `REALTIME_BROADCAST_ENABLED` | No | `false` | Arms every realtime push (`app.core.realtime.safe_broadcast`). Ships **off**; set `true` on the deploy to turn pushes on. When `false`, no write queues a push. Dashboard, Work Orders and Work Order Detail keep refreshing on their 30-second timers; Scheduling and Analytics refresh only on load. Writes are unaffected. |
 
-> **Why it exists.** Until 2026-11-05 a defect dropped every company-scoped push, so production ran
-> with no pushes from 2026-06-07. The fix turned about 85 call sites back on at once, and the
-> refetch load they cause was never measured. Setting `false` returns to that known state. Changing
-> a Railway variable restarts the service but needs no code deploy. After a deploy, watch DB CPU,
-> pool checkouts, p95 latency, and the `Realtime broadcast ... dropped` / `... failed` and
-> `WebSocket delivery authorization unavailable` WARNING lines.
+> **Why it ships off.** Until 2026-11-05 a defect dropped every company-scoped push, so production ran
+> with no pushes from 2026-06-07. The fix makes about 85 call sites deliverable again, and the
+> refetch load they cause has never been measured, so the fix deploys dark: with the default `false`,
+> production keeps running exactly as it has since June, minus the cross-tenant leak (which is closed
+> whether pushes are on or off). **To turn pushes on**, set `REALTIME_BROADCAST_ENABLED=true` on the
+> Railway API service at a time someone can watch it. Changing a Railway variable restarts the
+> service but needs no code deploy, and setting it back to `false` is the rollback. While it is on,
+> watch DB CPU, pool checkouts, p95 latency, and the `Realtime broadcast ... dropped` /
+> `... failed` and `WebSocket delivery authorization unavailable` WARNING lines.
 
 ### Redis (cache, rate limiting, AND the ARQ job queue)
 

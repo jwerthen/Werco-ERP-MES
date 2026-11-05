@@ -21,7 +21,7 @@ import pytest
 
 from app.core import realtime
 from app.core import websocket as ws_module
-from app.core.config import settings
+from app.core.config import Settings, settings
 from app.core.realtime import safe_broadcast
 from app.core.websocket import (
     ConnectionManager,
@@ -467,6 +467,17 @@ async def test_kill_switch_schedules_nothing(monkeypatch):
     safe_broadcast(broadcast_dashboard_update, {"event": "z"}, company_id=10)
     await drain_broadcasts()
     assert len(sock.sent) == 1
+
+
+def test_realtime_pushes_ship_dark(monkeypatch):
+    """Pushes ship OFF: arming them is a deliberate deploy setting, never a side effect of a
+    merge. Restoring delivery made ~85 dormant call sites live, and every push triggers
+    refetches on every listening tab -- an unmeasured load on the API the kiosks share.
+    The suite itself runs with pushes ON (tests/conftest.py), so this pins the shipped
+    default from the field declaration and from a Settings built without the variable."""
+    assert Settings.model_fields["REALTIME_BROADCAST_ENABLED"].default is False
+    monkeypatch.delenv("REALTIME_BROADCAST_ENABLED", raising=False)
+    assert Settings().REALTIME_BROADCAST_ENABLED is False
 
 
 class StalledSocket(FakeSocket):
