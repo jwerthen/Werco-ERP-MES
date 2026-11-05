@@ -121,7 +121,12 @@ def _excluded_backfill_hours(db: Session, company_id: int, start_dt: datetime, e
 
 
 def _ready_times_by_operation(db: Session, company_id: int, operation_ids: List[int]) -> Dict[int, datetime]:
-    """Earliest operation_ready event time per operation id (tenant-scoped)."""
+    """Earliest operation_ready event time per operation id (tenant-scoped).
+
+    Rows dated in the future are ignored: an operation cannot have become ready after
+    now, and such a row as the only one for an operation would zero its queue time
+    instead of falling back to the predecessor / release anchor.
+    """
     if not operation_ids:
         return {}
     rows = (
@@ -130,6 +135,7 @@ def _ready_times_by_operation(db: Session, company_id: int, operation_ids: List[
             OperationalEvent.company_id == company_id,
             OperationalEvent.event_type == "operation_ready",
             OperationalEvent.operation_id.in_(operation_ids),
+            OperationalEvent.occurred_at <= datetime.utcnow(),
         )
         .group_by(OperationalEvent.operation_id)
         .all()

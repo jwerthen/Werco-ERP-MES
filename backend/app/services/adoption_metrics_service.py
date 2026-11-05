@@ -79,13 +79,17 @@ def get_adoption_metrics(db: Session, company_id: int, start: date, end: date) -
     end_dt = datetime.combine(end, datetime.max.time())
 
     # ── Digital completion % from operation_completed events ───────────────────
+    # The event window is also capped at now: a completion dated in the future has not
+    # happened, and counting it would inflate every window that reaches today. (Only
+    # the server writes this type -- POST /operational-events refuses it -- so a
+    # future-dated row can only come from some other writer.)
     events = (
         db.query(OperationalEvent.occurred_at, OperationalEvent.event_payload)
         .filter(
             OperationalEvent.company_id == company_id,
             OperationalEvent.event_type == "operation_completed",
             OperationalEvent.occurred_at >= start_dt,
-            OperationalEvent.occurred_at <= end_dt,
+            OperationalEvent.occurred_at <= min(end_dt, datetime.utcnow()),
         )
         .all()
     )
@@ -108,7 +112,9 @@ def get_adoption_metrics(db: Session, company_id: int, start: date, end: date) -
         )
 
     for occurred_at, payload in events:
-        source = (payload or {}).get("source")
+        # A payload that is not a JSON object counts as an unreported source rather than
+        # failing the whole report.
+        source = payload.get("source") if isinstance(payload, dict) else None
         bucket = _week_bucket(occurred_at.date())
         bucket["completions"] += 1
         if source in LIVE_CAPTURE_SOURCES:

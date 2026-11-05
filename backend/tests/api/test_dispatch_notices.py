@@ -795,16 +795,17 @@ class TestPostedNoticesAreRefused:
         # And nothing reached the floor.
         assert client.get(queue_url(wc.id), headers=user_headers(user)).json()["dispatch_notice"] is None
 
-    def test_other_cataloged_event_types_are_still_accepted(self, client: TestClient, db_session: Session):
-        """Only the board's own notice type is refused: ``operation_hold`` (posted by the
-        hold-context flow and reachable through the MCP tool) still records."""
+    def test_a_custom_event_type_is_still_accepted(self, client: TestClient, db_session: Session):
+        """The refusal is for server-recorded types (every cataloged and reader-trusted
+        type -- see ``test_operational_event_forgery.py``), not the route: a client's own
+        event type still records."""
         user = make_user(db_session)
         wc = make_work_center(db_session)
         wo, (op,) = make_plan_wo(db_session, [(wc, OperationStatus.ON_HOLD, 10)])
         resp = client.post(
             EVENTS_URL,
             json={
-                "event_type": "operation_hold",
+                "event_type": "agent_observation",
                 "source_module": "shop_floor",
                 "work_order_id": wo.id,
                 "operation_id": op.id,
@@ -813,7 +814,7 @@ class TestPostedNoticesAreRefused:
             headers=user_headers(user),
         )
         assert resp.status_code == status.HTTP_200_OK, resp.text
-        assert resp.json()["event_type"] == "operation_hold"
+        assert resp.json()["event_type"] == "agent_observation"
 
 
 class TestBadRowsCannotBreakTheFloor:

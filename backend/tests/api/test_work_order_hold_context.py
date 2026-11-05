@@ -210,8 +210,12 @@ def make_hold_event(
     user_id: int,
     company_id: int = COMPANY_A,
     occurred_at: datetime = None,
+    event_payload=None,
 ) -> OperationalEvent:
-    """The record a BARE hold leaves (no note, category OTHER) -- the accident case."""
+    """The record a BARE hold leaves (no note, category OTHER) -- the accident case.
+
+    ``event_payload`` overrides the empty reason, e.g. to seed a malformed one.
+    """
     event = OperationalEvent(
         company_id=company_id,
         event_type="operation_hold",
@@ -223,7 +227,7 @@ def make_hold_event(
         user_id=user_id,
         severity="medium",
         occurred_at=occurred_at or datetime.utcnow(),
-        event_payload={},
+        event_payload={} if event_payload is None else event_payload,
     )
     db.add(event)
     db.commit()
@@ -294,21 +298,13 @@ class TestHoldProvenanceOnTheWorkOrderPage:
         ],
     )
     def test_malformed_optional_event_reason_does_not_break_hold_reads(self, client, db_session, reason):
+        """The row is seeded directly: ``POST /operational-events`` refuses ``operation_hold``
+        (only the hold verbs write it), but a row written before that refusal -- or by any
+        other writer -- can still carry a malformed reason, and the read must survive it."""
         user = make_user(db_session)
         wc = make_work_center(db_session)
         wo, ops = make_wo(db_session, work_center=wc, statuses=[OperationStatus.ON_HOLD])
-        response = client.post(
-            "/api/v1/operational-events/",
-            headers=headers_for(user),
-            json={
-                "event_type": "operation_hold",
-                "source_module": "shop_floor",
-                "work_order_id": wo.id,
-                "operation_id": ops[0].id,
-                "event_payload": reason,
-            },
-        )
-        assert response.status_code == 200, response.text
+        make_hold_event(db_session, operation=ops[0], user_id=user.id, event_payload=reason)
 
         context = operation_by_id(get_work_order(client, user, wo.id), ops[0].id)["hold_context"]
 
