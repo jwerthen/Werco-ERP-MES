@@ -25,10 +25,16 @@ from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token
 from app.models.audit_log import AuditLog
+from app.models.bom import BOM
 from app.models.company import Company
 from app.models.custom_field import CustomFieldDefinition, CustomFieldValue, EntityType, FieldType
+from app.models.customer import Customer
+from app.models.inventory import InventoryItem
 from app.models.part import Part
+from app.models.purchasing import Vendor
 from app.models.user import User, UserRole
+from app.models.work_center import WorkCenter
+from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.services.custom_field_values import ENTITY_MODELS, RESOURCE_TYPE
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
@@ -94,13 +100,18 @@ def _part(db: Session, *, company_id: int, is_deleted: bool = False) -> Part:
 
 
 def _definition(
-    db: Session, *, company_id: int, field_key: str = FIELD_KEY, field_type: FieldType = FieldType.TEXT
+    db: Session,
+    *,
+    company_id: int,
+    field_key: str = FIELD_KEY,
+    field_type: FieldType = FieldType.TEXT,
+    entity_type: EntityType = EntityType.PART,
 ) -> CustomFieldDefinition:
     _ensure_company(db, company_id)
     field = CustomFieldDefinition(
         field_key=field_key,
         display_name=field_key.replace("_", " ").title(),
-        entity_type=EntityType.PART,
+        entity_type=entity_type,
         field_type=field_type,
         is_active=True,
         company_id=company_id,
@@ -357,3 +368,197 @@ class TestCustomFieldValuesWrongTenant:
         read = client.get(f"/api/v1/custom-fields/values/part/{part_a.id}", headers=_headers(user_a))
         assert read.status_code == status.HTTP_200_OK
         assert read.json()["fields"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Gaps closed by the test pass (each names the mutation it was checked against)
+# ---------------------------------------------------------------------------
+
+# An id no other mapped table holds in a fresh per-test database (dependency rows get
+# low auto ids), so a mis-mapped EntityType cannot be rescued by an id collision.
+TARGET_ID = 9001
+
+
+def _entity_row(db: Session, entity_type: EntityType, *, company_id: int, row_id: int) -> None:
+    """One row of ``entity_type``'s real table, with an explicit id."""
+    _ensure_company(db, company_id)
+    if entity_type is EntityType.PART:
+        row = Part(
+            id=row_id,
+            part_number=f"CFV-T-{row_id}",
+            name="Target",
+            part_type="manufactured",
+            unit_of_measure="each",
+            company_id=company_id,
+        )
+    elif entity_type is EntityType.CUSTOMER:
+        row = Customer(id=row_id, name=f"CFV Customer {row_id}", code=f"CFVC{row_id}", company_id=company_id)
+    elif entity_type is EntityType.SUPPLIER:
+        row = Vendor(id=row_id, name=f"CFV Vendor {row_id}", code=f"CFVV{row_id}", company_id=company_id)
+    elif entity_type is EntityType.WORK_CENTER:
+        row = WorkCenter(
+            id=row_id, code=f"CFVW{row_id}", name="Target WC", work_center_type="fabrication", company_id=company_id
+        )
+    else:
+        dependency = _part(db, company_id=company_id)
+        if entity_type is EntityType.WORK_ORDER:
+            row = WorkOrder(
+                id=row_id,
+                work_order_number=f"CFV-WO-{row_id}",
+                part_id=dependency.id,
+                quantity_ordered=1,
+                status=WorkOrderStatus.DRAFT,
+                company_id=company_id,
+            )
+        elif entity_type is EntityType.INVENTORY:
+            row = InventoryItem(id=row_id, part_id=dependency.id, location="A-01", company_id=company_id)
+        elif entity_type is EntityType.BOM:
+            row = BOM(id=row_id, part_id=dependency.id, company_id=company_id)
+        else:  # pragma: no cover - test_entity_models_cover_every_entity_type keeps this unreachable
+            raise AssertionError(f"no fixture for {entity_type}")
+    db.add(row)
+    db.commit()
+
+
+@pytest.mark.parametrize("entity_type", list(EntityType), ids=lambda e: e.value)
+def test_every_entity_type_resolves_its_own_table_and_refuses_another_tenant(
+    client: TestClient, db_session: Session, entity_type: EntityType
+):
+    """``ENTITY_MODELS`` is the whole existence check, so exercise every entry over HTTP.
+
+    The original wrong-tenant class only ever targets ``part``. Checked: mapping
+    ``supplier`` to ``Customer`` (or ``inventory`` to ``Part``) fails company A's own write
+    here, because the explicit ``TARGET_ID`` exists only in the right table.
+    """
+    _entity_row(db_session, entity_type, company_id=COMPANY_A, row_id=TARGET_ID)
+    _definition(db_session, company_id=COMPANY_A, entity_type=entity_type)
+    _definition(db_session, company_id=COMPANY_B, entity_type=entity_type)  # B defines the same key
+    headers_a = _headers(_make_user(db_session, company_id=COMPANY_A))
+    headers_b = _headers(_make_user(db_session, company_id=COMPANY_B))
+    url = f"/api/v1/custom-fields/values/{entity_type.value}/{TARGET_ID}"
+
+    before = _counts(db_session)
+    assert client.get(url, headers=headers_b).status_code == status.HTTP_404_NOT_FOUND
+    assert (
+        client.post(url, headers=headers_b, json={"field_key": FIELD_KEY, "value": "B"}).status_code
+        == status.HTTP_404_NOT_FOUND
+    )
+    bulk = client.post(
+        "/api/v1/custom-fields/values/bulk",
+        headers=headers_b,
+        json={"entity_type": entity_type.value, "entity_id": TARGET_ID, "values": {FIELD_KEY: "B"}},
+    )
+    assert bulk.status_code == status.HTTP_404_NOT_FOUND
+    assert client.delete(f"{url}/{FIELD_KEY}", headers=headers_b).status_code == status.HTTP_404_NOT_FOUND
+    assert _counts(db_session) == before
+
+    own = client.post(url, headers=headers_a, json={"field_key": FIELD_KEY, "value": "A-OWN"})
+    assert own.status_code == status.HTTP_200_OK, own.text
+    assert client.get(url, headers=headers_a).json()["fields"] == {FIELD_KEY: "A-OWN"}
+    row = db_session.query(CustomFieldValue).one()
+    assert (row.company_id, row.entity_type, row.entity_id) == (COMPANY_A, entity_type, TARGET_ID)
+
+
+class TestCustomFieldValuesGapCoverage:
+    def test_another_tenants_definition_is_never_used(self, client: TestClient, db_session: Session):
+        """Only company A defines the key; company B writes to its OWN live part.
+
+        In the wrong-tenant class B also defines the key, so a definition lookup that lost
+        its tenant scope still found a definition. Checked: replacing ``tenant_query`` with
+        ``db.query`` in ``find_definition`` makes B's write create a row on A's definition and
+        fails this test.
+        """
+        _definition(db_session, company_id=COMPANY_A)
+        user_b = _make_user(db_session, company_id=COMPANY_B)
+        part_b = _part(db_session, company_id=COMPANY_B)
+        headers_b = _headers(user_b)
+        url = f"/api/v1/custom-fields/values/part/{part_b.id}"
+
+        before = _counts(db_session)
+        single = client.post(url, headers=headers_b, json={"field_key": FIELD_KEY, "value": "x"})
+        assert single.status_code == status.HTTP_404_NOT_FOUND
+        assert single.json()["detail"] == f"Field '{FIELD_KEY}' not found for part"
+
+        bulk = client.post(
+            "/api/v1/custom-fields/values/bulk",
+            headers=headers_b,
+            json={"entity_type": "part", "entity_id": part_b.id, "values": {FIELD_KEY: "x"}},
+        )
+        assert bulk.status_code == status.HTTP_200_OK
+        assert bulk.json()["results"] == [{"field_key": FIELD_KEY, "status": "error", "message": "Field not found"}]
+
+        deleted = client.delete(f"{url}/{FIELD_KEY}", headers=headers_b)
+        assert deleted.status_code == status.HTTP_404_NOT_FOUND
+        assert deleted.json()["detail"] == "Field not found"
+        assert _counts(db_session) == before
+
+    def test_delete_checks_the_entity_before_the_value(self, client: TestClient, db_session: Session):
+        """A stray value row of company B's own on company A's part id is still a 404 for B.
+
+        The wrong-tenant ``test_delete_is_404`` is stopped by the tenant-scoped definition and
+        value lookups alone. Checked: deleting ``require_entity`` from the DELETE route leaves
+        that test green, but this one fails (B deletes the row through A's entity id).
+        """
+        part_a = _part(db_session, company_id=COMPANY_A)
+        field_b = _definition(db_session, company_id=COMPANY_B)
+        stray = CustomFieldValue(
+            field_definition_id=field_b.id,
+            entity_type=EntityType.PART,
+            entity_id=part_a.id,
+            value_text="STRAY",
+            company_id=COMPANY_B,
+        )
+        db_session.add(stray)
+        db_session.commit()
+        stray_id = stray.id
+        headers_b = _headers(_make_user(db_session, company_id=COMPANY_B))
+
+        before = _counts(db_session)
+        url = f"/api/v1/custom-fields/values/part/{part_a.id}"
+        assert client.delete(f"{url}/{FIELD_KEY}", headers=headers_b).status_code == status.HTTP_404_NOT_FOUND
+        assert client.get(url, headers=headers_b).status_code == status.HTTP_404_NOT_FOUND
+        assert _counts(db_session) == before
+        assert db_session.query(CustomFieldValue).filter(CustomFieldValue.id == stray_id).one().value_text == "STRAY"
+
+    def test_deactivated_field_value_is_hidden_unwritable_but_still_deletable(
+        self, client: TestClient, db_session: Session
+    ):
+        """Checked: passing ``active_only=True`` to the DELETE route's lookup fails this test."""
+        user = _make_user(db_session, company_id=COMPANY_A)
+        part = _part(db_session, company_id=COMPANY_A)
+        field = _definition(db_session, company_id=COMPANY_A)
+        _value(db_session, company_id=COMPANY_A, field=field, part=part, text="retired")
+        field.is_active = False
+        db_session.commit()
+        headers = _headers(user)
+        url = f"/api/v1/custom-fields/values/part/{part.id}"
+
+        assert client.get(url, headers=headers).json()["fields"] == {}
+        before = _counts(db_session)
+        write = client.post(url, headers=headers, json={"field_key": FIELD_KEY, "value": "new"})
+        assert write.status_code == status.HTTP_404_NOT_FOUND
+        assert _counts(db_session) == before
+
+        deleted = client.delete(f"{url}/{FIELD_KEY}", headers=headers)
+        assert deleted.status_code == status.HTTP_200_OK, deleted.text
+        assert _counts(db_session)[0] == 0
+        audits = _value_audits(db_session, "DELETE")
+        assert [(a.company_id, a.old_values["value_text"]) for a in audits] == [(COMPANY_A, "retired")]
+
+    def test_bulk_overwrite_is_audited_as_an_update(self, client: TestClient, db_session: Session):
+        user = _make_user(db_session, company_id=COMPANY_A)
+        part = _part(db_session, company_id=COMPANY_A)
+        field = _definition(db_session, company_id=COMPANY_A)
+        _value(db_session, company_id=COMPANY_A, field=field, part=part, text="first")
+
+        resp = client.post(
+            "/api/v1/custom-fields/values/bulk",
+            headers=_headers(user),
+            json={"entity_type": "part", "entity_id": part.id, "values": {FIELD_KEY: "second"}},
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        db_session.expire_all()
+        assert [r.value_text for r in db_session.query(CustomFieldValue).all()] == ["second"]
+        updates = _value_audits(db_session, "UPDATE")
+        assert [(u.old_values["value_text"], u.new_values["value_text"]) for u in updates] == [("first", "second")]
+        assert _value_audits(db_session, "CREATE") == []

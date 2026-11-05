@@ -20,11 +20,15 @@ AuditLog rows are produced only by the endpoints and read back here (tamper-evid
 chain -- never inserted directly).
 """
 
+from io import BytesIO
+
 import pytest
+import sqlalchemy as sa
 from fastapi import status
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.api.endpoints import customers as customers_endpoint
 from app.core.security import create_access_token
 from app.models.audit_log import AuditLog
 from app.models.company import Company
@@ -378,3 +382,233 @@ class TestCustomerWriteAuditAndRoles:
         assert client.get("/api/v1/customers/names", headers=headers).status_code == status.HTTP_200_OK
         assert client.get(f"/api/v1/customers/{mine.id}", headers=headers).status_code == status.HTTP_200_OK
         assert client.get(f"/api/v1/customers/{mine.id}/stats", headers=headers).status_code == status.HTTP_200_OK
+
+
+# ---------------------------------------------------------------------------
+# Gaps closed by the test pass (each names the mutation it was checked against)
+# ---------------------------------------------------------------------------
+
+
+def _committed_customer_audits(db: Session, *, resource_id: int, action: str) -> list:
+    db.rollback()  # only a COMMITTED audit row survives this
+    db.expire_all()
+    return (
+        db.query(AuditLog)
+        .filter(AuditLog.resource_type == "customer", AuditLog.resource_id == resource_id, AuditLog.action == action)
+        .all()
+    )
+
+
+def _blind_customer_probes(monkeypatch) -> None:
+    """Make the router's duplicate probes miss, as a concurrent writer racing past them would.
+
+    Only ``Customer`` reads through the router module's ``tenant_query`` are blinded, so the
+    write reaches the per-company unique constraint -- the TOCTOU backstop the router claims.
+    """
+    real = customers_endpoint.tenant_query
+
+    def blind(db, model, company_id):
+        query = real(db, model, company_id)
+        return query.filter(sa.false()) if model is Customer else query
+
+    monkeypatch.setattr(customers_endpoint, "tenant_query", blind)
+
+
+class TestCustomerStatsNameOnlyBranch:
+    def test_name_only_branch_is_tenant_scoped(self, client: TestClient, db_session: Session):
+        """A customer with no parts of its own takes the ``customer_name``-only branch.
+
+        The original stats test always has an own part, so it only ever exercises the
+        ``part_id IN (...) OR customer_name`` branch. Checked: reverting the work-order
+        ``tenant_query`` to ``db.query(WorkOrder)`` fails this test.
+        """
+        user_a = _make_user(db_session, company_id=COMPANY_A)
+        mine = _customer(db_session, company_id=COMPANY_A)
+        _customer(db_session, company_id=COMPANY_B)
+
+        unrelated_a = _part(db_session, company_id=COMPANY_A, part_number="A-UNREL", customer_name="Someone Else")
+        my_wo = _work_order(
+            db_session,
+            company_id=COMPANY_A,
+            number="WO-A-BYNAME",
+            part=unrelated_a,
+            status_=WorkOrderStatus.RELEASED,
+            customer_name=SHARED_NAME,
+        )
+        unrelated_b = _part(db_session, company_id=COMPANY_B, part_number="B-UNREL", customer_name="Someone Else")
+        _work_order(
+            db_session,
+            company_id=COMPANY_B,
+            number="WO-B-SECRET",
+            part=unrelated_b,
+            status_=WorkOrderStatus.RELEASED,
+            customer_name=SHARED_NAME,
+            customer_po="PO-B-SECRET",
+        )
+        db_session.commit()
+
+        resp = client.get(f"/api/v1/customers/{mine.id}/stats", headers=_headers(user_a))
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        data = resp.json()
+        assert data["part_count"] == 0
+        assert data["work_order_counts"] == {"total": 1, "by_status": {"released": 1}}
+        assert [wo["id"] for wo in data["current_work_orders"]] == [my_wo.id]
+        assert "SECRET" not in resp.text
+
+
+class TestCustomerListsWithASharedName:
+    def test_list_search_and_names_return_only_the_active_companys_customer(
+        self, client: TestClient, db_session: Session
+    ):
+        """Now that two companies may hold the same name and code, every list must still split them."""
+        mine = _customer(db_session, company_id=COMPANY_A, name=SHARED_NAME, code="ACM001")
+        _customer(db_session, company_id=COMPANY_B, name=SHARED_NAME, code="ACM001", city="Secretville")
+        headers = _headers(_make_user(db_session, company_id=COMPANY_A, role=UserRole.OPERATOR))
+
+        listed = client.get("/api/v1/customers/", headers=headers)
+        assert [c["id"] for c in listed.json()] == [mine.id]
+        searched = client.get("/api/v1/customers/", headers=headers, params={"search": "acm"})
+        assert [c["id"] for c in searched.json()] == [mine.id]
+        by_city = client.get("/api/v1/customers/", headers=headers, params={"search": "Secretville"})
+        assert by_city.json() == []
+        names = client.get("/api/v1/customers/names", headers=headers)
+        assert names.json() == [{"id": mine.id, "name": SHARED_NAME}]
+
+
+class TestCustomerCodeGenerationEdges:
+    def test_generated_code_never_reuses_a_soft_deleted_customers_code(self, client: TestClient, db_session: Session):
+        """The generator must count tombstones: the per-company constraint has no partial predicate.
+
+        Checked: adding ``is_deleted == False`` to ``generate_customer_code``'s probe mints
+        ``ACM001`` again, the constraint refuses it, and this test fails.
+        """
+        admin_a = _make_user(db_session, company_id=COMPANY_A)
+        old = _customer(db_session, company_id=COMPANY_A, name="Acme Old", code="ACM001")
+        old.soft_delete(admin_a.id)
+        db_session.commit()
+
+        resp = client.post("/api/v1/customers/", headers=_headers(admin_a), json={"name": "Acme New"})
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert resp.json()["code"] == "ACM002"
+
+
+class TestCustomerImportIsPerCompany:
+    def test_second_company_imports_the_same_name_and_code(self, client: TestClient, db_session: Session):
+        """The CSV import shares the per-company constraint and the per-company generator.
+
+        Against the old global ``unique=True`` columns both rows came back as error rows.
+        """
+        _customer(db_session, company_id=COMPANY_A, name=SHARED_NAME, code="ACM001")
+        _customer(db_session, company_id=COMPANY_A, name="Beta Co", code="BETA-1")
+        admin_b = _make_user(db_session, company_id=COMPANY_B)
+
+        before_audits = _counts(db_session)[1]
+        csv = f"name,code\n{SHARED_NAME},\nBeta Co,BETA-1\n".encode("utf-8")
+        resp = client.post(
+            "/api/v1/customers/import-csv",
+            headers=_headers(admin_b),
+            files={"file": ("customers.csv", BytesIO(csv), "text/csv")},
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        body = resp.json()
+        assert (body["imported_count"], body["errors"]) == (2, [])
+
+        db_session.expire_all()
+        rows_b = db_session.query(Customer).filter(Customer.company_id == COMPANY_B).all()
+        assert sorted((r.name, r.code) for r in rows_b) == [(SHARED_NAME, "ACM001"), ("Beta Co", "BETA-1")]
+        assert _counts(db_session)[1] == before_audits + 2
+
+    def test_import_still_refuses_a_duplicate_within_the_company(self, client: TestClient, db_session: Session):
+        _customer(db_session, company_id=COMPANY_A, name=SHARED_NAME, code="ACM001")
+        _customer(db_session, company_id=COMPANY_B, name="Only In B", code="ONLYB")
+        admin_a = _make_user(db_session, company_id=COMPANY_A)
+
+        before = _counts(db_session)
+        csv = f"name,code\n{SHARED_NAME},NEW-1\nFresh Co,ACM001\n".encode("utf-8")
+        resp = client.post(
+            "/api/v1/customers/import-csv",
+            headers=_headers(admin_a),
+            files={"file": ("customers.csv", BytesIO(csv), "text/csv")},
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        body = resp.json()
+        assert body["imported_count"] == 0
+        assert [e["reason"] for e in body["errors"]] == ["Customer name already exists", "Customer code already exists"]
+        assert _counts(db_session) == before
+
+
+class TestCustomerWriteRolesPositive:
+    def test_manager_can_update_and_the_update_is_audited(self, client: TestClient, db_session: Session):
+        """The write gate is Admin + Manager; pin the Manager half so it cannot silently tighten."""
+        manager_a = _make_user(db_session, company_id=COMPANY_A, role=UserRole.MANAGER)
+        mine = _customer(db_session, company_id=COMPANY_A, phone="111")
+
+        resp = client.put(f"/api/v1/customers/{mine.id}", headers=_headers(manager_a), json={"phone": "222"})
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        rows = _committed_customer_audits(db_session, resource_id=mine.id, action="UPDATE")
+        assert [(r.user_id, r.old_values, r.new_values) for r in rows] == [
+            (manager_a.id, {"phone": "111"}, {"phone": "222"})
+        ]
+
+    def test_rename_onto_a_same_company_tombstones_name_is_refused(self, client: TestClient, db_session: Session):
+        admin_a = _make_user(db_session, company_id=COMPANY_A)
+        gone = _customer(db_session, company_id=COMPANY_A, name=SHARED_NAME, code="OLD1")
+        gone.soft_delete(admin_a.id)
+        mine = _customer(db_session, company_id=COMPANY_A, name="Current Name", code="CUR1")
+        db_session.commit()
+
+        before = _counts(db_session)
+        resp = client.put(f"/api/v1/customers/{mine.id}", headers=_headers(admin_a), json={"name": SHARED_NAME})
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert resp.json()["detail"] == "Customer name already exists"
+        assert _counts(db_session) == before
+        assert db_session.query(Customer).filter(Customer.id == mine.id).one().name == "Current Name"
+
+
+class TestCustomerUniqueConstraintBackstop:
+    """A concurrent writer can pass the duplicate probes; the per-company constraint must refuse
+    it with a 400 and leave neither the row nor an audit row behind."""
+
+    def test_create_race_is_400_with_no_row_or_audit_and_the_session_stays_usable(
+        self, client: TestClient, db_session: Session, monkeypatch
+    ):
+        admin_a = _make_user(db_session, company_id=COMPANY_A)
+        _customer(db_session, company_id=COMPANY_A, name=SHARED_NAME, code="ACM001")
+        _blind_customer_probes(monkeypatch)
+
+        before = _counts(db_session)
+        resp = client.post(
+            "/api/v1/customers/", headers=_headers(admin_a), json={"name": SHARED_NAME, "code": "OTHER-1"}
+        )
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
+        assert resp.json()["detail"] == "Customer name or code already exists"
+        assert _counts(db_session) == before
+
+        # The rollback left the request session usable: the next create commits with its audit.
+        ok = client.post("/api/v1/customers/", headers=_headers(admin_a), json={"name": "Fresh Co", "code": "FRS1"})
+        assert ok.status_code == status.HTTP_200_OK, ok.text
+        assert len(_committed_customer_audits(db_session, resource_id=ok.json()["id"], action="CREATE")) == 1
+
+    @pytest.mark.xfail(
+        strict=True,
+        raises=sa.exc.PendingRollbackError,
+        reason=(
+            "KNOWN DEFECT: update_customer's IntegrityError backstop is unreachable. The rename is "
+            "pending when audit.log_update runs; AuditService.log's chain-tail query autoflushes it, "
+            "the IntegrityError is swallowed by log()'s best-effort except, and db.commit() then raises "
+            "PendingRollbackError (500), which `except IntegrityError` does not catch. Fix: db.flush() "
+            "inside the try BEFORE audit.log_update, as create_customer does. Remove this marker then."
+        ),
+    )
+    def test_rename_race_is_400_with_no_change_or_audit(self, client: TestClient, db_session: Session, monkeypatch):
+        admin_a = _make_user(db_session, company_id=COMPANY_A)
+        _customer(db_session, company_id=COMPANY_A, name=SHARED_NAME, code="ACM001")
+        mine = _customer(db_session, company_id=COMPANY_A, name="Current Name", code="CUR1")
+        _blind_customer_probes(monkeypatch)
+
+        before = _counts(db_session)
+        resp = client.put(f"/api/v1/customers/{mine.id}", headers=_headers(admin_a), json={"name": SHARED_NAME})
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST, resp.text
+        assert resp.json()["detail"] == "Customer name already exists"
+        assert _counts(db_session) == before
+        assert db_session.query(Customer).filter(Customer.id == mine.id).one().name == "Current Name"
