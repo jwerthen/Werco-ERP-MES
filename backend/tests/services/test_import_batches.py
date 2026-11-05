@@ -198,7 +198,11 @@ async def test_outbox_waits_for_receipt_commit_and_is_dropped_on_rollback(
 
     review = await prepare(db_session, admin_user, b'name\nOutbox Account\n')
     enqueued = []
-    monkeypatch.setattr(outbox, '_enqueue_dispatch', enqueued.append)
+    # A savepoint still open at the enqueue means it fired at a RELEASE -- here the
+    # receipt audit's, which db.commit() releases just before the durable COMMIT.
+    monkeypatch.setattr(
+        outbox, '_enqueue_dispatch', lambda event_id: enqueued.append((event_id, db_session.in_nested_transaction()))
+    )
     original_import = customers.import_customers_csv
 
     async def emit_during_import(**kwargs):
@@ -230,7 +234,7 @@ async def test_outbox_waits_for_receipt_commit_and_is_dropped_on_rollback(
         return
     receipt = await batches.commit_batch(db_session, admin_user, 1, REQUEST, review['id'], review['version'])
     assert receipt['counts'] == {'created': 1}
-    assert len(enqueued) == 1
+    assert [savepoint_open for _, savepoint_open in enqueued] == [False]
 
 
 async def test_partial_group_validation_marks_all_po_lines_correctable():

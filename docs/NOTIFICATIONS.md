@@ -58,8 +58,10 @@ domain code ──► OperationalEventService.emit(...)         (flush; id assig
                     │  if event_type is catalog-mapped, append event.id to
                     │  Session.info["pending_notification_event_ids"]
                     ▼
-              [transaction commits]  ── after_commit ──►  enqueue dispatch_notification_job(event_id)
-              [transaction rolls back] ─ after_rollback ─► drop the pending list  (NO ghost)
+              [OUTERMOST transaction commits] ── after_commit ──► enqueue dispatch_notification_job(event_id)
+              [it rolls back / is closed]  ── after_transaction_end ──► drop the pending list  (NO ghost)
+              [a SAVEPOINT releases]   ── nothing enqueued; its ids pass to the enclosing transaction
+              [a SAVEPOINT rolls back] ── drop only the ids emitted inside it
                     │
               ARQ worker: dispatch_notification_job(event_id)
                  1. load the committed OperationalEvent; return if notified_at is already set
@@ -80,12 +82,44 @@ for transitions that never committed, and the worker could race the commit and l
 row. Post-commit enqueue by durable event id solves both; the `notified_at` marker + the sweeper make
 delivery **at-least-once with idempotent re-dispatch**.
 
+### Savepoints are not commits
+
+SQLAlchemy fires the session's `after_commit` when a `begin_nested()` savepoint is **released**, and
+its rollback events when one is rolled back — not only at the real COMMIT / ROLLBACK. `AuditService`
+writes every audit row inside a savepoint (and leaves it for `Session.commit()` to release a moment
+before the COMMIT), and many services open their own, so the listeners act on the **outermost**
+transaction only:
+
+- a savepoint **release** enqueues nothing — its ids pass to the enclosing transaction, whose real
+  commit enqueues them;
+- a savepoint **rollback** drops exactly the ids emitted inside it (and inside any savepoint nested in
+  it), restoring the pending list to a snapshot taken when the savepoint opened — the ids the
+  still-live outer transaction owns survive;
+- the outermost transaction ending any way but a commit (rollback, or a session close with it still
+  open) drops whatever is pending.
+
+Until 2026-11 the listeners took every commit/rollback event at face value. A release enqueued the
+event before the request committed: a worker that looked the event up before the COMMIT landed found
+no row and dropped the job (`event_not_found`), and an event whose transaction later rolled back was
+never real. A savepoint rollback discarded the outer transaction's ids. Both depended on the sweeper
+for recovery. No call site needs to guard a savepoint for the outbox's sake any more.
+
+The one boundary the listeners cannot see across is the session itself. A **`Session` bound to a
+connection whose transaction someone else owns** — `import_batch_service` joins one into the request
+session's transaction with `join_transaction_mode="create_savepoint"` — commits its root while the
+durable commit still lies ahead. Such a session sets `session.info[notification_outbox.FORWARD_TO_KEY]`
+to a list it owns; its root commit then appends the committed ids there instead of enqueuing, and the
+owner re-attaches them to the enclosing session once its own unit of work lands. Savepoint snapshots
+and drop-on-rollback/close apply inside that session as everywhere else. (It replaced a
+`before_commit` hook that also fired on the inner session's savepoint releases, so it could forward
+ids a later savepoint rollback discarded.)
+
 ### The pieces
 
 | Component | File | Role |
 |---|---|---|
 | Outbox marker | `services/operational_event_service.py` | `emit` appends the flushed event id to `Session.info["pending_notification_event_ids"]` iff `event_type` is in the catalog reverse index. Wrapped so the marker can never fail an emit. |
-| Session listeners | `services/notification_outbox.py` | Module-level `after_commit` / `after_rollback` / `after_soft_rollback` listeners on the SQLAlchemy `Session`. `after_commit` routes the enqueue; the rollback listeners drop the pending list (ghost prevention). Imported at both API startup (`app.main`) and worker startup (`app.worker`) so the tee is active in every process that commits events. |
+| Session listeners | `services/notification_outbox.py` | Module-level `after_transaction_create` / `after_commit` / `after_transaction_end` listeners on the SQLAlchemy `Session`, acting on the **outermost** transaction only (see *Savepoints are not commits*). The root's `after_commit` routes the enqueue; the root's `after_transaction_end` drops anything left (ghost prevention); a savepoint's release hands its ids to its parent and its rollback drops only its own. Imported at both API startup (`app.main`) and worker startup (`app.worker`) so the tee is active in every process that commits events. |
 | Dispatch job | `jobs/notification_jobs.py::dispatch_notification_task` + `worker.py::dispatch_notification_job` | Loads the event, no-ops if missing or already dispatched (`notified_at` set), else fans out and commits rows + `notified_at` in one transaction. A crash before commit leaves `notified_at IS NULL` for the sweeper to re-pick. |
 | Relay sweeper | `jobs/notification_jobs.py::relay_pending_notifications_task` + `relay_pending_notifications_job` cron | Every 5 min: bounded scan (LIMIT 500) of cataloged event types with `notified_at IS NULL` and `created_at < now − 2 min`; re-enqueues the dispatch job. |
 | Fan-out core | `services/notification_dispatch.py` | `_fan_out` (shared), `dispatch_for_event` (outbox path), `dispatch_direct` (cron/MRP path). |
@@ -194,9 +228,9 @@ but **only entries whose source is wired today actually fire**; the rest are **d
 > **What emits it.** Every dispatch-order writer (`dispatch_service.record_dispatch_change`): the
 > work-order plan `PUT`, the operation-order `PUT`, the machine run-order `PUT`, and the four
 > operation move paths — one event per machine whose queue order actually changed, `entity_type =
-> "work_center"`, deliberately with **no** `work_order_id`. The emit is best-effort inside a savepoint
-> that is shielded from the outbox's session listeners, so the fan-out is enqueued only by the
-> request's real commit and a rolled-back reorder notifies nobody.
+> "work_center"`, deliberately with **no** `work_order_id`. The emit is best-effort inside a savepoint;
+> the outbox enqueues only at the request's outermost commit (see *Savepoints are not commits*), so
+> the fan-out waits for the real commit and a rolled-back reorder notifies nobody.
 >
 > **The body is the catalog description, on purpose** ("The planner changed the run order at a
 > machine you are clocked in at. Check the shop floor for what runs next."), and the title is the
