@@ -18,3 +18,6 @@ export const canPublishDocuments = (actor: Actor): boolean => hasWriteRole(actor
 export const canDeleteDocuments = (actor: Actor): boolean => hasWriteRole(actor, ['admin', 'manager']);
 export const canEditFAIs = (actor: Actor): boolean =>
   hasWriteRole(actor, ['admin', 'manager', 'supervisor', 'quality']);
+// Customer quote writes (edit terms / accept / reject / expire, mark sent, convert to work
+// orders) — mirrors QUOTE_WRITE_ROLES in backend/app/api/endpoints/quotes.py.
+export const canWriteQuotes = (actor: Actor): boolean => hasWriteRole(actor, ['admin', 'manager', 'supervisor']);

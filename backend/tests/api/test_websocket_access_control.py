@@ -4,6 +4,7 @@ Synthetic JWTs and fixture database sessions only. Manager sends execute on the
 TestClient portal's server event loop, including the before-delivery authorizer.
 """
 
+import functools
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -209,7 +210,7 @@ def test_platform_principal_can_use_active_tenant_switch(client, db_session, res
     assert_empty_presence(socket_sessions)
 
 
-@pytest.mark.parametrize('delivery', ['company', 'global', 'user'])
+@pytest.mark.parametrize('delivery', ['company', 'helper', 'user'])
 @pytest.mark.parametrize(
     'revoked', ['disabled', 'moved', 'inactive_company', 'expired', 'deleted_work_order', 'foreign_center']
 )
@@ -249,10 +250,12 @@ def test_live_revocation_prevents_delivery_and_cleans_presence(
         secret_payload = {'private': 'must never reach a revoked socket'}
         if delivery == 'company':
             client.portal.call(manager.broadcast_to_company, 1, secret_payload)
-        elif delivery == 'global':
-            client.portal.call(manager.broadcast, secret_payload)
+        elif delivery == 'helper':
+            # The module-level helper every route reaches through ``safe_broadcast``.
+            # (There is no all-tenants ``manager.broadcast`` any more to exercise.)
+            client.portal.call(functools.partial(ws_core.broadcast_dashboard_update, secret_payload, company_id=1))
         else:
-            client.portal.call(manager.send_to_user, user_id, secret_payload)
+            client.portal.call(functools.partial(manager.send_to_user, user_id, secret_payload, company_id=1))
         # Receiving CLOSE next proves no final business payload preceded it.
         assert_policy_close(socket)
         assert_empty_presence(manager)
@@ -309,7 +312,12 @@ def test_resource_revocation_keeps_users_other_authorized_socket(
             resources[1].is_deleted = True
             db_session.commit()
             client.portal.call(
-                socket_sessions.send_to_user, str(test_user.id), {'visible': 'authorized general channel'}
+                functools.partial(
+                    socket_sessions.send_to_user,
+                    str(test_user.id),
+                    {'visible': 'authorized general channel'},
+                    company_id=1,
+                )
             )
             assert_policy_close(specific)
             assert json.loads(receive_message(general)['text'])['data']['visible'] == 'authorized general channel'

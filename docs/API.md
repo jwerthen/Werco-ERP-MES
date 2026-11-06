@@ -1608,7 +1608,9 @@ company-scoped.
 > the completion evidence has landed, so a stranded work order repairs itself the next time anyone
 > loads it. No new endpoint, no data migration, no owner action.
 > - **Which reads heal.** `GET /work-orders`, `GET /work-orders/{id}`, `GET /shop-floor/dashboard`
->   (bounded to the most-recently-touched open WOs by `SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT`),
+>   (bounded to the most-recently-touched open WOs by `SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT`, and only
+>   on a **200**: its `ETag` **304** returns before the reconcile, which a cross-origin SPA now
+>   actually receives — see [CORS](#cors)),
 >   `GET /shop-floor/operations`, and `GET /shop-floor/operations/{id}`. `POST /work-orders/` also
 >   reconciles, but a brand-new WO is DRAFT, so the DRAFT carve-out below makes it the no-op it has
 >   always been — **six** handlers call the reconcile, five of which can actually promote.
@@ -1637,6 +1639,33 @@ company-scoped.
 > - **Still unaudited, as at the other two seams.** PENDING → READY writes no `audit_log` row (READY
 >   is queue state, not a production record); traceability for the flip is the tenant-scoped
 >   `operation_ready` OperationalEvent, which is what the Lean queue-time metric reads.
+>
+> **A failed reconcile side effect is absorbed, and reported (since 2026-11-05).** When a reconciling
+> read drives an operation or work order to COMPLETE, the handler then runs six side-effect legs over
+> those transitions before it commits: `audit`, `events`, `parent_advance`, `scheduling`,
+> `inventory_effects` and `cost_rollup`. Each leg absorbs its own exception, so the GET still returns
+> **200**, and that leg's remaining writes are skipped. The failure used to be swallowed with no trace
+> (`except Exception: pass`). It is now an **ERROR** log line with the traceback, carrying
+> `reconcile_step`, `company_id`, `user_id`, `work_order_ids` and `operation_ids`. With `SENTRY_DSN`
+> set it is also a Sentry event tagged `reconcile_step`, `company_id` and, where known, `user_id`.
+> The `audit` leg also reports, the same way, any status-change audit row that `AuditService` failed
+> to write and absorbed (it returns nothing rather than raising), naming the transitions left
+> unaudited.
+>
+> Once a database error has left the session unusable, every later leg that touches it fails with
+> `PendingRollbackError`. Those echoes are logged at **WARNING**, quoting the original error, with no
+> Sentry event: the cause was already reported where it happened, and the handler's commit will fail
+> and roll the whole reconcile back, so the next read retries.
+>
+> Transaction behaviour is unchanged. Only a failure that leaves the session unusable makes the
+> handler's commit fail, which rolls the status flips back together with their audit rows. Everything
+> else commits without whatever the failed leg did not write. On the `audit` leg that is a **known
+> gap** (invariant 2): a status flip can commit with its status-change audit row missing, either
+> because `AuditService` absorbed the write failure (it writes each row under a savepoint, so a
+> `sequence_number` collision that outlasts its retries leaves the session usable) or because a
+> non-database error ended the leg early. It is tracked as a follow-up: write these rows with
+> `AuditService.log_required` inside a savepoint and let an audit failure abort the reconcile. Until
+> that lands, the ERROR line and the Sentry event are the only record that it happened.
 >
 > **`PUT /scheduling/work-orders/{id}/unschedule` no longer demotes durably.** That endpoint clears
 > the schedule and flips each non-COMPLETE READY operation back to PENDING. On a released work order
@@ -4122,6 +4151,11 @@ environment variable or deployment configuration change is needed.
 > Do **not** add `is_active` or `status` to `PartUpdate`: `PUT /parts/{id}` and `PUT /materials/{id}`
 > are blind `setattr` loops whose lookups do not filter `is_deleted`, so exposing the flag there would
 > hand every Supervisor a way to clear a soft-delete mask through an ordinary form save.
+> **Until 2026-11-05 this was not actually true:** `PartUpdate` still declared `is_active` and a
+> free-text `status`, so both doors could write them. Both fields are now gone from the schema
+> (guarded by `tests/test_part_update_activation_fields.py`). A client that still sends either key
+> gets **200** with the key silently dropped (the schema ignores unknown keys): the row and the
+> `part` UPDATE audit diff are untouched.
 >
 > **Role: ADMIN / MANAGER — deliberately not the Supervisor edit tier**, matching the Combine verb
 > these shipped with and the renumber/revision identity tier. See `docs/RBAC_PERMISSIONS.md` → Parts.
@@ -5094,17 +5128,40 @@ uploads go through text extraction + LLM. See
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/routing/` | List all routings | Yes |
-| POST | `/routing/` | Create routing | Yes |
+| POST | `/routing/` | Create routing. **404** on another tenant's or a soft-deleted part | Yes |
 | GET | `/routing/{id}` | Get routing by ID | Yes |
 | PUT | `/routing/{id}` | Update routing | Yes |
 | POST | `/routing/{id}/release` | Release a draft routing for production (status → `released`, stamps `approved_by`/`approved_at`/`effective_date`) | Admin / Manager |
-| POST | `/routing/{id}/copy` | Copy a routing to a target part or new revision as a new **draft** — query params `target_part_id` (required) and `new_revision` (default `A`); copies all operations incl. `process_sheet_id`; **404** if the source routing or target part isn't found; writes one tamper-evident `audit_log` CREATE for the new routing (`extra_data.copied_from` = source routing id) | Admin / Manager |
+| POST | `/routing/{id}/copy` | Copy a routing to a target part or new revision as a new **draft** — query params `target_part_id` (required) and `new_revision` (default `A`); copies all operations incl. `process_sheet_id`; **404** if the source routing isn't found or the target part isn't a live part of this company (a soft-deleted target is refused); writes one tamper-evident `audit_log` CREATE for the new routing (`extra_data.copied_from` = source routing id) | Admin / Manager |
 | POST | `/routing/{id}/operations` | Add an operation (**400** on a released routing) | Admin / Manager / Supervisor |
 | PUT | `/routing/{id}/operations/{operation_id}` | Update an operation — draft: all fields; released: **time standards only** (see note) | Admin / Manager / Supervisor (released-routing edits: Admin / Manager) |
 | DELETE | `/routing/{id}/operations/{operation_id}` | Delete an operation (**400** on a released routing) | Admin / Manager / Supervisor |
 | POST | `/routing/{id}/operations/reorder` | Reorder operations (**400** on a released routing, **422** on a malformed body). **Also rewrites each listed operation's `operation_number` from its new `sequence`** — see the `operation_number` note below | Admin / Manager / Supervisor |
 | POST | `/routing/import/preview` | Upload a routing CSV/XLSX (multipart `file`), preview it WITHOUT writing (dry-run, fully rolled back) | Admin / Manager / Supervisor |
 | POST | `/routing/import/commit` | Commit a routing CSV/XLSX import — one draft routing per part, with one `audit_log` CREATE per routing | Admin / Manager / Supervisor |
+| POST | `/routing/generate-from-drawing` | AI step 1: upload a drawing (multipart `file` + `part_id`) and get a **proposed** routing for review — creates no routing. **404** on a soft-deleted part | Admin / Manager / Supervisor |
+| POST | `/routing/create-from-generation` | AI step 2: create the reviewed/edited proposal as a **draft** routing, writing one tamper-evident `audit_log` CREATE (see note). **404** on a soft-deleted part or an unknown generation session | Admin / Manager / Supervisor |
+
+> **AI routing generation — the accept step is the audited record (2026-11-05).**
+> `POST /routing/create-from-generation` is where a named person accepts an AI proposal, so it writes
+> the routing's `audit_log` CREATE (`resource_type="routing"`, identifier `"<part_number> Rev
+> <revision>"`) — the same row `POST /routing/` writes — with `extra_data`: `source`
+> (`ai_routing_generation`, or `create_from_generation` when no `generation_session_id` was sent),
+> `generation_session_id`, `model`, `prompt_version`, `extraction_confidence`, `correction_count` (human
+> edits to the proposal), `operation_count`, `operations` (one compact entry per accepted operation:
+> `sequence`, `operation_number` as stored, `name`, `work_center_id`, `setup_hours`, `run_hours_per_unit`,
+> `is_inspection_point`, `is_outside_operation` — *what* the person accepted, since these operations get
+> no per-operation `routing_operation` rows on this path) and `approved_by`. Before this, the step wrote only the
+> AI-learning interaction event, which is telemetry, not audit. `model` / `prompt_version` are
+> recorded on the generation session by `generate-from-drawing` **at proposal time** (the prompt can be
+> bumped between proposal and approval), and are `null` for a session generated before 2026-11-05 or
+> with no LLM call. The same change fixed the AI-learning event's `model_version`, which was always
+> `null` because nothing wrote the key it read, and made its `prompt_version` read the same
+> generation-time value as the audit row (falling back to the live prompt constant only for a session
+> generated before the version was recorded). Every door that attaches a new routing to a part —
+> both AI steps, manual `POST /routing/` and the `/{id}/copy` target — resolves it through one
+> live-part helper (`is_deleted == false`), so none spends a model call on, or attaches a routing to,
+> a soft-deleted part (**404**).
 
 > **Editing a RELEASED routing's operations — time standards only (`feat/routing-editable-time-standards`).**
 > A released routing's manufacturing **process** is frozen on release: `PUT /routing/{id}/operations/{operation_id}`
@@ -6849,8 +6906,19 @@ the caller's most recent closed unapproved session.)
 | GET | `/quality/scrap-reason-codes` | List scrap reason codes (active only by default; `category` / `include_inactive` filters) | Yes |
 | POST | `/quality/scrap-reason-codes` | Create a scrap reason code | Admin / Manager / Quality |
 | PUT | `/quality/scrap-reason-codes/{reason_code_id}` | Update a scrap reason code (deactivate via `is_active: false`) | Admin / Manager / Quality |
+| GET | `/quality/ncr` | List live NCRs, newest first (`status` / `part_id` filters) | Yes |
+| POST | `/quality/ncr` | File an NCR; `part_id` / `work_order_id`, when given, must be live records of the active company (**404** otherwise). See "NCR / CAR writes" | Yes |
+| GET | `/quality/ncr/{ncr_id}` | Get a live NCR | Yes |
+| PUT | `/quality/ncr/{ncr_id}` | Edit, disposition, close, reopen, assign, or link a CAR. See "NCR / CAR writes" | Admin / Manager / Quality |
 | DELETE | `/quality/ncr/{ncr_id}` | **Void** an NCR (soft-delete + status → `void`); body `{ "reason": "<non-blank>" }`. Guarded, see note | Admin / Manager / Quality |
 | POST | `/quality/ncr/{ncr_id}/restore` | Restore a voided NCR — reopens it to `open` | Admin / Manager / Quality |
+| POST | `/quality/ncr/{ncr_id}/create-car` | Raise a CAR from the NCR and link it; **409** naming the CAR when one that is not void is already linked | Admin / Manager / Quality |
+| GET | `/quality/car` | List CARs, void ones included (`status` filter) | Yes |
+| POST | `/quality/car` | Open a CAR | Yes |
+| GET | `/quality/car/{car_id}` | Get a CAR | Yes |
+| PUT | `/quality/car/{car_id}` | Edit, verify, close, reopen, or assign a CAR. See "NCR / CAR writes" | Admin / Manager / Quality |
+| POST | `/quality/car/{car_id}/void` | **Void** a CAR; body `{ "reason": "<non-blank>" }`; returns the CAR with `status: "void"`. See note | Admin / Manager / Quality |
+| POST | `/quality/car/{car_id}/restore` | Restore a voided CAR — reopens it to `open`; **409** when the CAR is not void. See note | Admin / Manager / Quality |
 
 > **Scrap reason codes (Lean Phase 1).** The tenant's structured scrap vocabulary, referenced by the
 > optional `scrap_reason_code_id` accepted on the three scrap write paths —
@@ -6873,11 +6941,91 @@ the caller's most recent closed unapproved session.)
 > with 400** while the NCR still **actively gates a work order** — an `OPEN`/`ACKNOWLEDGED`
 > `WorkOrderBlocker` references it — resolve the blocker first; a re-void returns **400** ("already
 > voided"). `POST /quality/ncr/{ncr_id}/restore` clears the soft-delete and reopens the NCR to
-> **`OPEN`** (the pre-void status is not preserved — a safe reset). Both actions are **fully audited**:
-> the void writes a `log_status_change` (→ `void`, reason in the description) **and** a `log_delete`
-> (`soft_delete=true`, reason in `extra_data`); restore writes a `log_update` (`action="restore"`).
-> This closes a prior gap where the ordinary `PUT /quality/ncr/{ncr_id}` update path emitted only an
-> operational event and **no** `audit_log` row.
+> **`OPEN`** (the pre-void status is not preserved — a safe reset). An NCR voided while CLOSED comes
+> back OPEN without its closure: restore clears `closed_date` / `closed_by`, as a reopen does. Both
+> actions are **required-audited** (see "NCR / CAR writes" below): the void writes a `STATUS_CHANGE`
+> row (→ `void`, reason in the description and `extra_data.reason`) **and** a `DELETE` row
+> (`soft_delete=true`, reason in `extra_data`); restore writes a `RESTORE` row (old/new `is_deleted`
+> and `status`, plus `closed_date` / `closed_by` when it cleared them). Another company's `ncr_id` is
+> **404** with nothing changed.
+
+> **NCR / CAR writes (`services/quality_record_service.py`).** Every NCR and CAR write behind
+> `/quality/ncr` and `/quality/car` — create, `PUT` (including disposition, closure, reopen and CAR
+> verification), `create-car`, NCR void / restore, and CAR void / restore — commits together with a
+> **required** `audit_log` row in one transaction.
+> If that row cannot be written, the change is rolled back and the route answers **503**
+> (`"Unable to save audit record"`), the same posture as FAI and job costing. The `ncr_*` / `car_*`
+> operational events are still emitted, but as notification / timeline telemetry, not as the audit
+> record. NCRs and CARs created elsewhere do not go through this service yet. The receiving
+> rejection, the shop-floor scrap → NCR, the process-sheet out-of-tolerance → NCR and the AI action
+> applier write their creation row best-effort. The customer-complaint `create-ncr` / `create-car`
+> verbs are required-audited in their own service (`services/customer_complaint_service.py`; see
+> **Customer Complaints & RMA**).
+>
+> - **One audit row per request** (resource type `ncr` / `car`), holding every changed field old → new
+>   plus `extra_data.changes` in the `log_update` diff shape. The action is `STATUS_CHANGE` when
+>   `status` moved and `UPDATE` otherwise; `extra_data` flags `closure`, `reopen`,
+>   `disposition_change` (NCR) and `verification` (CAR). Create writes a `CREATE` row with the new
+>   record. `create-car` writes a CAR `CREATE` row (`extra_data.ncr_id` / `ncr_number`) **and** an NCR
+>   `UPDATE` row recording the `car_required` / `car_id` link.
+> - **Only real changes are written.** Each requested value is compared with the stored one (`""`
+>   equals `null`, a decimal equals the stored number, enums compare by value), and unchanged fields
+>   are dropped. A `PUT` that changes nothing writes no audit row, emits no event and returns **200**,
+>   so re-saving the detail screen's full payload is safe. The `changed_fields` on
+>   `ncr_updated` / `car_updated` lists only the fields that actually changed.
+> - **References are tenant-validated before anything is written** (**404**, nothing changed). On
+>   create, `part_id` must be a live part and `work_order_id` a live (not soft-deleted) work order of
+>   the active company (`"Part not found"` / `"Work order not found"`; a soft-deleted work order used
+>   to be accepted). On `PUT`, `assigned_to` must be an **active** user of the company
+>   (`"Assigned user not found"`) and an NCR's `car_id` one of its CARs (`"CAR not found"`; a void CAR
+>   is **409**).
+> - **Reads never expand another tenant's part.** NCR list / get and every NCR write response load
+>   `part` only when it belongs to the active company, so a legacy row whose `part_id` names another
+>   tenant's part shows `part: null`. A same-company soft-deleted part is still named (historical
+>   record).
+> - **CLOSED and VOID are final.** A `PUT` to a CLOSED NCR or CAR is **409** unless its **only**
+>   change is moving `status` to an open state. That is the reopen: it clears `closed_date` /
+>   `closed_by`, and the audit row keeps the cleared values. A CAR reopened straight to
+>   `verification` also records its verifier on the same row (`extra_data` carries both `reopen` and
+>   `verification`). A reopen combined with a content edit is **409**; reopen first, then edit in a
+>   second save. The reopen captures **no reason** yet: the audit row records who and when, not why.
+>   A VOID CAR (or a legacy NCR in `void` status that is not soft-deleted) refuses every change with
+>   **409**; a voided NCR is soft-deleted, so its `PUT` is **404**. `status: "void"` through `PUT` is
+>   **422**; use the void verbs.
+> - **Other `PUT` refusals.** An explicit `null` on NCR `status` / `disposition` / `car_required` /
+>   `quantity_rejected` / `estimated_cost` / `actual_cost` or CAR `status` / `priority` is **422**
+>   (`"<field> cannot be null"`). Closing a CAR requires root cause, corrective action, verification
+>   method and verification results (**422** naming the missing ones). An `expected_updated_at` that
+>   no longer matches the record is **409** (`"This record changed since you opened it. …"`). That
+>   is the only conflict check: the required `version` field is **ignored** (NCRs and CARs carry no
+>   version column), so a client that omits `expected_updated_at` gets last-writer-wins on the fields
+>   it changes.
+> - **`create-car` is idempotent.** It locks the NCR first. When the NCR already links a CAR that is
+>   not void, it answers **409** (`"NCR … already has corrective action CAR-… (id N). Open that CAR
+>   instead of creating another."`) rather than minting a second CAR and relinking. Once the linked
+>   CAR is voided, a fresh one may be raised and the link moves to it. It is allowed on a CLOSED NCR,
+>   because it changes only `car_required` / `car_id`.
+
+> **CAR void + restore (`POST /quality/car/{car_id}/void`, `POST /quality/car/{car_id}/restore`).**
+> Void retires a duplicate CAR or one raised in error. Body `CARVoidRequest` `{ "reason": "..." }`:
+> required and trimmed; blank or whitespace-only is **422**. Gate **Admin / Manager / Quality** for
+> both verbs. An already-void CAR is **409**. A CLOSED CAR is **409** too, so a completed corrective
+> action is never voided in one step, but this is not a control against the same roles: they can
+> reopen it with a status-only `PUT` (no reason captured yet) and then void it. Both steps are
+> required-audited, so the reopen is on the record either way. `VOID` is the CAR's tombstone
+> (`CorrectiveActionRequest` has no `SoftDeleteMixin`): the CAR stays in `GET /quality/car` and
+> `GET /quality/car/{car_id}` with `status: "void"`, drops out of the `open_cars` count on
+> `GET /quality/summary`, and refuses every `PUT` until restored. The reason is stored only on the
+> `STATUS_CHANGE` audit row (`extra_data.reason`), since `cars` has no reason column. A linked NCR
+> keeps its `car_id` until a new CAR is raised from it.
+>
+> Restore takes no body and reopens the CAR to **`open`**; the pre-void status is not preserved, the
+> same safe reset as the NCR restore. A CAR that is not void is **409** (`"CAR … is not void"`). It
+> writes a required `RESTORE` audit row (old/new `status`, plus `closed_date` / `closed_by` when a
+> legacy void row still carried a closure and restore cleared it). The CAR is not relinked: an NCR
+> that raised a fresh CAR after the void keeps pointing at the fresh one. Both verbs emit
+> `car_updated`. The Quality page has no Void or Restore CAR action yet; the routes are reachable
+> through the API and MCP.
 
 #### First article inspections (FAI)
 
@@ -7310,7 +7458,10 @@ Admin / Manager / Quality (see [RBAC](RBAC_PERMISSIONS.md#customer-complaints--r
 > - Each verb emits the same `ncr_created` / `car_created` event, so the `ncr.created` /
 >   `car.created` notifications fire. The event payload also carries `complaint_id` and
 >   `complaint_number`.
-> - **400** if the complaint already has a linked NCR (or CAR).
+> - **400** if the complaint already links a live NCR (or a CAR that is not `void`). A voided link
+>   no longer blocks: a fresh NCR / CAR is raised and the link moves to it, the same rule
+>   `POST /quality/ncr/{id}/create-car` follows. The complaint's required UPDATE row records the
+>   old → new id.
 > - `create-ncr` returns **409** if the complaint's stored part or work order belongs to another
 >   company (legacy rows only). A soft-deleted part or work order of the caller's own company is
 >   accepted, because the NCR records what the complaint named.
@@ -7402,6 +7553,56 @@ the public paths are `/eco/eco/…`.
 > plus task create/update and approval create — write to the tamper-evident `audit_log` (`GET /audit/`),
 > so the engineering-change lifecycle is fully traceable for AS9100D.
 
+### Quotes
+
+Customer quotes (`app/api/endpoints/quotes.py`). There is no create endpoint: an ERP quote is created
+when an estimate is approved and handed off in Fabrication Quoting (`/fabrication-quotes`).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/quotes/` | List quotes, newest first. `status` (`all` = full history; omitted excludes `converted` / `expired`; unknown value **422**), `customer`, `search`, `limit` 1–5000 (default 100), `offset` | Yes |
+| GET | `/quotes/{quote_id}` | Get a quote | Yes |
+| PUT | `/quotes/{quote_id}` | Edit a draft/pending quote's commercial terms, or set its status (accept / reject / expire). Refusals in the note below | Admin / Manager / Supervisor |
+| POST | `/quotes/{quote_id}/send` | Mark the quote sent. Records the status only; no message is dispatched. **409** unless `draft` / `pending` / `sent` (re-sending a `sent` quote is an idempotent 200) | Admin / Manager / Supervisor |
+| GET | `/quotes/{quote_id}/conversion-plan` | Per line: whether it can become a work order, and why not | Yes |
+| POST | `/quotes/{quote_id}/convert` | Convert the reviewed lines (`line_ids`; default all eligible) into **DRAFT** work orders, one per line, in one transaction. **400** unless `sent` / `accepted`; **422** on an ineligible line, or on unlinked quote-only lines without `acknowledge_unlinked` | Admin / Manager / Supervisor |
+| POST | `/quotes/{quote_id}/generate-pdf` | Customer-ready quote PDF | Yes |
+
+> **Quote writes are role-gated and audited (2026-11-05).** `PUT`, `/send` and `/convert` share one
+> role set, `QUOTE_WRITE_ROLES` = Admin / Manager / Supervisor (superuser and Platform Admin pass, as
+> with every `require_role`). Until this change `PUT` and `/send` were open to any authenticated user,
+> so a Viewer could accept, reject, expire or mark sent a customer quote. Operator, Quality, Shipping
+> and Viewer now get **403**; reads are unchanged (read-broad, see `docs/RBAC_PERMISSIONS.md` →
+> Quotes). Audit rows, all written before the single terminal commit:
+>
+> - **Status moves** write one `quote` STATUS_CHANGE row each, with `extra_data.source`: `send`
+>   (`draft` / `pending` → `sent`, plus `customer_message_dispatched: false`), `status_update` (a `PUT`
+>   that sets the status), `edit` (the reset to `draft` that a content edit forces, which also clears
+>   the approval stamp) or `conversion`. A `PUT` that echoes the current status, and a re-send of a
+>   `sent` quote, write nothing.
+> - **A content edit** writes one `quote` UPDATE row with the field diff (`status` excluded, so each
+>   transition is exactly one row) and `extra_data.edited_fields`.
+> - **`/convert`** writes one `work_order` CREATE per work order minted — the same row `POST
+>   /work-orders/` writes, with `extra_data.source = "quote_conversion"`, `quote_id`, `quote_number`,
+>   `quote_line_id`, `quote_line_number`, `part_id` and `quantity` — plus one row on the quote: a
+>   STATUS_CHANGE to `accepted` (lines remain) or `converted`, carrying the created `work_orders` and
+>   `remaining_line_ids`, or, when the status does not move (a second partial conversion of an
+>   `accepted` quote), an UPDATE carrying the line → work-order links.
+>
+> These are best-effort, like `POST /work-orders/`: a failed audit write is logged and does not refuse
+> the change. Refusals are raised before the first field is written and write nothing.
+>
+> **`PUT` refusals.** **409** when `expected_updated_at` is stale; **409** on a content edit, or a move
+> back to `draft` / `pending`, once any line is linked to a work order; **409** on a content edit of a
+> quote that is not `draft` / `pending`; **409** when `lines` is sent (customer quote prices and lines
+> are frozen — revise the estimate in Fabrication Quoting); **409** on any status change to a
+> `converted` quote; **422** on `status: "converted"` (use `/convert`). Status transitions through
+> `PUT` are otherwise not whitelisted: for example `expired` → `sent` is still accepted, and audited.
+>
+> **UI.** The Quotes page shows **Edit draft**, **Send** and **Convert** only to the same role set
+> (`canWriteQuotes` in `frontend/src/utils/recordWriteAccess.ts`), so a hidden control and a refused
+> call agree. The server stays the enforcement.
+
 ### Purchasing
 
 | Method | Endpoint | Description | Auth Required |
@@ -7416,7 +7617,7 @@ the public paths are `/eco/eco/…`.
 | POST | `/purchasing/purchase-orders` | Create purchase order with its lines | Admin / Manager / Supervisor |
 | GET | `/purchasing/purchase-orders/{po_id}` | Get PO by ID | Yes |
 | PUT | `/purchasing/purchase-orders/{po_id}/supplier-confirmation` | Record acknowledgment, supplier-confirmed date and follow-up owner/due date on sent/partial POs; requires current `expected_updated_at`, stale returns 409. Requested dates remain unchanged | Admin / Manager / Supervisor, plus purchasing view/create permission |
-| PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order. **404** on a soft-deleted PO; **400** on a `status` change to anything but `closed`/`cancelled` while the vendor is soft-deleted (see note) | Admin / Manager / Supervisor |
+| PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order. **404** on a soft-deleted PO; a `status` is held to a transition whitelist — **409** naming the verb that owns the move, **422** on an unknown value or an explicit `null` (see *PO status edits* below); **400** on a `status` change to anything but `closed`/`cancelled` while the vendor is soft-deleted (see note) | Admin / Manager / Supervisor |
 | POST | `/purchasing/purchase-orders/{po_id}/send` | Issue a PO to the vendor — status → `sent`, stamps `order_date`; only `draft`/`approved` POs (else **400**). **404** on a soft-deleted PO | Admin / Manager |
 | POST | `/purchasing/purchase-orders/{po_id}/lines` | Add a line to a `draft` PO (else **400**) and roll the PO subtotal/total. **404** on a soft-deleted PO | Admin / Manager / Supervisor |
 | DELETE | `/purchasing/purchase-orders/{po_id}` | Soft-delete a purchase order — guarded, see note below | Admin / Manager |
@@ -7453,6 +7654,37 @@ the public paths are `/eco/eco/…`.
 > the PO recording the subtotal/total roll (`extra_data.cause = "po_line_added"`). Audit rows are
 > flushed before the terminal commit so they commit atomically with the change. (These endpoints
 > were RBAC-gated but unaudited prior to 2026-07-12; the import loader was already per-row audited.)
+>
+> **PO status edits — `PUT` may only make these moves (2026-11-05).** `PUT
+> /purchasing/purchase-orders/{po_id}` used to `setattr` any `POStatus` member, so a caller at the edit
+> tier could mark a PO `sent` without the Admin/Manager send verb or its `order_date` stamp, declare it
+> `received` with nothing received, or reopen a `closed` one. `POUpdate.status` is now typed as the enum
+> (an unknown value, or an explicit `"status": null`, is **422**; it used to be a **500**), and
+> `assert_po_status_edit_allowed` checks the move **before the first field is written**, so a refused
+> status rejects the whole body and leaves the row untouched (and writes no audit row):
+>
+> | Current status | `PUT` may set |
+> |---|---|
+> | `draft` / `pending_approval` / `approved` | each other, or `cancelled` |
+> | `sent` | `cancelled` (nothing received yet) |
+> | `partial` / `received` | `closed` (short-close / close-out) |
+> | `closed` / `cancelled` | nothing — terminal |
+>
+> Re-sending the **current** status is always allowed (a client echoing the record back). Everything
+> else is **409** with a `detail` naming the verb that owns the move: `sent` from `draft` / `approved` →
+> use `POST .../{po_id}/send`; from `pending_approval` → approve it first, then Send (Send accepts only
+> `draft` / `approved`); from `partial` / `received` → refused, a received PO returns to `sent` only when
+> its receipts are voided (`POST /receiving/receipt/{id}/void`); `partial` / `received` → set by receiving (`POST /receiving/receive`); out of
+> `closed` / `cancelled` → *"…closed and cancelled purchase orders are final… Raise a new purchase order
+> instead."*; `closed` with nothing received → cancel it instead; `cancelled` after material was
+> received → close it, or void the receipts first; back to a pre-send status once sent → cancel and
+> raise a new PO. The Purchasing UI never sends `status` on this route, so only API and MCP callers see
+> these refusals.
+>
+> **Not decided here: who may approve.** `pending_approval` / `approved` stay reachable through this
+> `PUT` at its Admin / Manager / Supervisor tier, exactly as before, with no `approved_by` /
+> `approved_at` stamp. A dedicated approve verb is an open follow-up — see `docs/RBAC_PERMISSIONS.md`
+> → Purchasing.
 >
 > **Vendor / PO soft-delete + restore (`Vendor`, `PurchaseOrder` now `SoftDeleteMixin`).** Both
 > `DELETE` endpoints are **soft** deletes (compliance invariant #3 — never a physical `DELETE`):
@@ -7493,7 +7725,7 @@ the public paths are `/eco/eco/…`.
 > |---|---|---|
 > | `PUT /purchasing/vendors/{id}` | **200** — and its blind `setattr` loop accepts `is_active`, so one call could leave a vendor `is_deleted=true` **and** `is_active=true`, bypassing `/restore` and its `action="restore"` audit row | **404** |
 > | `POST /po-upload/create-from-upload` (`vendor_id`) | created a live, receivable PO against the removed supplier — the PO Upload table below already promised this refusal, but only the *part* half of it was enforced | **400** "Vendor not found" |
-> | `PUT /purchasing/purchase-orders/{id}` (`status`) | flipped a **closed** PO back to `sent`, making it live and receivable against the removed supplier — this endpoint validates no transition at all, it only checks enum membership | **400** *"…its vendor X is deleted. Restore the vendor first."*, for any target status other than `closed`/`cancelled` |
+> | `PUT /purchasing/purchase-orders/{id}` (`status`) | flipped a **closed** PO back to `sent`, making it live and receivable against the removed supplier — this endpoint validated no transition at all, it only checked enum membership | Since 2026-11-05 the status whitelist (see *PO status edits* above) refuses every move out of `closed`/`cancelled` first: **409** *"…closed and cancelled purchase orders are final…"*. The vendor guard stays behind it as defense in depth and still answers **400** *"…its vendor X is deleted. Restore the vendor first."* for an allowed pre-send move (e.g. `draft` → `approved`) against a removed vendor |
 > | `POST /scanner/mappings` (`vendor_id`) | created the mapping | **404** "Vendor not found" |
 > | `POST /supplier-scorecards/approved-suppliers/` and `PUT .../approved-suppliers/{asl_id}` | entered / re-approved the removed supplier on the ASL | **409** *"…has been removed and cannot be approved…"* (see the next section) |
 > | `POST /purchasing/purchase-orders/import` (`vendor_code`) | imported the PO silently | row error naming the restore verb (see the Excel-migration section) |
@@ -9554,16 +9786,40 @@ roles). See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/admin/settings` | Get system settings | Admin |
-| PUT | `/admin/settings` | Update system settings | Admin |
 | GET | `/admin/settings/audit-log` | Settings/quote-config change history (filterable, up to 1yr) | Admin |
+| GET | `/admin/settings/email-recipients` | Email types, selections, missing defaults and the company's user directory | Admin |
+| PUT | `/admin/settings/email-recipients/{event_key}` | Set one email type's recipients (`{"user_ids": [...]}`; `null` restores the default). **400** on an unknown email type, or on a user who is not an active user of this company with a deliverable address | Admin |
+| GET | `/admin/settings/work-center-rates` | Work centers with their hourly rates (`include_inactive` default false) | Admin |
+| PUT | `/admin/settings/work-center-rates/{work_center_id}` | Set a work center's hourly (labor costing) rate. **404** on another company's work center | Admin |
+| GET | `/admin/settings/work-center-types` | Allowed work-center types, plus the ones in use | Admin |
+| PUT | `/admin/settings/work-center-types` | Replace the allowed work-center types. **400** if it would remove a type still in use | Admin |
+| GET | `/admin/settings/role-permissions` | Every role's effective permissions (company override or default), plus the permission catalog | Admin |
+| GET | `/admin/settings/role-permissions/{role}` | One role's effective permissions and `is_customized` | Admin |
+| PUT | `/admin/settings/role-permissions/{role}` | Replace a role's permissions with a company override (body: JSON array of permission keys). **400** on an unknown role or permission; **503** if its required audit row cannot be written (see note) | Admin |
+| POST | `/admin/settings/role-permissions/{role}/reset` | Drop the company override so the role reverts to its defaults; a role with no override is a no-op. **503** as above | Admin |
 
 > **Settings-audit tenancy:** `GET /admin/settings/audit-log` reads the `SettingsAuditLog` trail
 > (admin / quote-config changes) and is **scoped to the caller's active company**
 > (`get_current_company_id`). Writes to this trail are tagged with that same active company, so a
 > platform admin's changes attribute to the company they have switched into — matching the
 > `/audit/*` (`AuditLog`) attribution. This is a separate trail from `/audit/*` and is **not** part
-> of the tamper-evident hash chain.
+> of the tamper-evident hash chain: it is the Admin page's settings-history display table, a plain
+> mutable tenant table.
+>
+> **Admin-settings writes are on the tamper-evident chain too (2026-11-05).** Every write that adds a
+> `SettingsAuditLog` row now also writes the authoritative `audit_log` row (`GET /audit/`) in the same
+> transaction:
+>
+> | Write | `audit_log` row | Failure posture |
+> |---|---|---|
+> | `PUT /role-permissions/{role}`, `POST /role-permissions/{role}/reset` | `role_permission` UPDATE, identifier = the role; old/new `permissions` + `is_customized`; `extra_data` `action` (`update` / `reset`), `granted`, `revoked` | **Required** — `log_required` inside `atomic_security_write`. If the audit row cannot be written the RBAC change is rolled back and the caller gets **503** `"Unable to save audit record"`, the same posture as account administration |
+> | `PUT /work-center-rates/{work_center_id}` | `work_center` UPDATE (the resource type `PUT /work-centers/{id}` writes), identifier = the work-center code, `extra_data.source = "admin_settings"` | Best-effort |
+> | `PUT /email-recipients/{event_key}` | `notification_email_recipients` UPDATE, identifier = the event key; old/new `user_ids` are the **effective** audience before and after (a `null` request records the default it restores, never `null`) + `uses_default` (a default audience is not an explicit selection). A save that changes neither writes no row, here or in the settings history | Best-effort |
+> | `PUT /work-center-types` | `work_center_types` UPDATE; old/new `types` | Best-effort |
+>
+> Refusals (bad role, unknown permission, foreign work center or user, unknown email type, removing an
+> in-use type) write neither row. A first customization of a role's permissions now records the new
+> override's real id in both records; the settings history used to log `entity_id` `0` for it.
 
 > **`POST /admin/settings/seed-database` ships no default credentials (Admin-only).** The one-time
 > bootstrap seed **no-ops once any user exists** (returns `{"status": "already_seeded"}`); on an
@@ -10728,13 +10984,69 @@ database session **before each event delivery**, after incoming messages, and af
 of idle time**. Expiry, account disablement/reassignment, company deactivation, loss of platform
 authority for a switched context, or loss of access to the parent resource closes the connection
 before further event delivery. Database-check failure also refuses delivery. Domain broadcasts
-remain tenant-scoped; a read-only company context can receive these read-only channels but cannot
-use them to mutate records. HTTP logout/switch/platform recovery exceptions do not apply here.
+are tenant-scoped (see **Event delivery** below); a read-only company context can receive these
+read-only channels but cannot use them to mutate records. HTTP logout/switch/platform recovery
+exceptions do not apply here.
 
 This is live identity/resource validation, not a token revocation list. Logout does **not** revoke
 an unexpired access JWT, and no server-side refresh revocation is introduced. The crew-station
 kiosk remains poll-only. Client-side controls reflect these policies; the API and socket checks
 remain authoritative.
+
+**Event delivery.** Writes push three message types, each as `{"type", "data", "timestamp"}`:
+`work_order_update` (`data.work_order_id`), `shop_floor_update` (`data.work_center_id`) and
+`dashboard_update`. Each goes **only** to sockets admitted under the company the write was made
+in: the request's active company from `get_current_company_id`, so a platform admin switched into
+another company broadcasts to that company, not their home one. There is **no all-tenant fan-out**:
+`ConnectionManager` has no send-to-every-socket method, and the three `broadcast_*` helpers in
+`app/core/websocket.py` take `company_id` as a required keyword. A call that passes `None` is
+dropped and logged at WARNING (message type and event name only, never the payload). Within a
+company the socket's path does not narrow delivery: every socket in the company receives every one
+of that company's events, and clients filter on `type` and the id in `data`.
+
+Delivery is **best-effort and supplementary; a fetch is the guarantee.** Dashboard, Work Orders
+and Work Order Detail also refresh every 30 seconds; Scheduling and Analytics refresh only on load.
+Handlers call `safe_broadcast` after the write commits; it queues the broadcast as a background task
+on the event loop and returns at once, from sync and `async` routes alike. The HTTP response does not
+wait for the per-socket authorization recheck, and a failed broadcast never fails the write: it is
+logged at WARNING with the helper name and exception, never the payload. Connections are held in
+memory per API process, so a socket held by a different API worker process does not receive the
+event.
+
+Queued broadcasts are delivered **one at a time per API process, in call order**. Each delivery
+rechecks every recipient socket against the database on a worker thread with its own session, and
+those threads and connections are shared with every HTTP request. Serializing keeps realtime to at
+most one worker thread and one pooled connection per process, and each socket receives events in the
+order they were broadcast. Three limits keep the queue from backing up:
+
+- At most **1000** broadcasts may wait per process. Past that, a new broadcast is dropped and
+  logged at WARNING (`Realtime broadcast ... dropped`).
+- A single send to one socket is bounded at **5 seconds**. A socket that does not accept the send in
+  time is dropped from delivery, like any socket whose send fails.
+- Pushes **ship off**: nothing is queued unless `REALTIME_BROADCAST_ENABLED=true` is set on the
+  deploy, and setting it back to `false` turns every push off again without a code change
+  (`docs/ENVIRONMENT_VARIABLES.md` → Realtime WebSocket pushes).
+
+`ConnectionManager.send_to_user` follows the same tenant rule as the broadcasts: it takes
+`company_id` as a required keyword and sends only to that user's sockets admitted under that company.
+A platform admin can hold sockets in several companies at once. Nothing in `app/` calls it today.
+
+> **Fixed 2026-11-05: two defects in this path.** (1) Blocker create/update/resolve
+> (`POST /work-order-blockers/work-orders/{work_order_id}`, `PUT /work-order-blockers/{id}`,
+> `POST /work-order-blockers/{id}/resolve`) and `POST /work-centers/{id}/status` broadcast without a
+> company. Their events (blocker id, category and status; work-center id and status) reached
+> **every** company's sockets and triggered refetches on other tenants' screens. (2) `safe_broadcast`
+> forwarded `company_id=` to `anyio.from_thread.run`, which takes positional arguments only. Every
+> tenant-scoped broadcast therefore raised `TypeError`, which was logged at DEBUG and dropped, so no
+> tenant-scoped push had reached a socket since scoping shipped (2026-06-07). Broadcasts from `async`
+> routes (both laser-nest-package imports) were also dropped. With pushes turned on
+> (`REALTIME_BROADCAST_ENABLED=true`; they ship off), the Dashboard, Shop Floor, Scheduling, Work
+> Orders, Work Order Detail and Analytics screens receive their own company's pushes and refetch on
+> them. The cross-tenant leak is closed either way. Guards:
+> `backend/tests/test_websocket_tenant_isolation.py` statically requires every broadcast call in
+> `app/` to pass `company_id=` traced to `Depends(get_current_company_id)`, and
+> `backend/tests/api/test_realtime_broadcast_tenant_scope.py` checks the blocker and work-center
+> routes end to end.
 
 ## Common Response Formats
 
@@ -10776,6 +11088,12 @@ display; the web UI renders them in shop-local Central time.
 }
 ```
 
+Each error also carries the offending `input`. When the route did not parse the body (it was sent
+under a non-JSON `Content-Type`), `input` is the raw body as text. Bytes that are not valid UTF-8 are
+rendered with replacement characters (`U+FFFD`). Until 2026-11-05 such a body made the 422 handler
+itself fail, so the caller got a **500** instead of the **422**, on any JSON route and without
+authentication.
+
 ### Not Found error (404)
 ```json
 {
@@ -10789,6 +11107,34 @@ display; the web UI renders them in shop-local Central time.
   "detail": "Could not validate credentials"
 }
 ```
+
+### Internal Server Error (500)
+```json
+{
+  "detail": "Internal server error (reference: 3f9a1c2e)",
+  "correlation_id": "3f9a1c2e"
+}
+```
+
+An unhandled exception returns this body. The response also carries an `X-Correlation-ID` header
+with the same value. The value is the request's correlation id: the caller's own `X-Correlation-ID`
+request header if it sent one of 1–64 characters drawn from `A–Z a–z 0–9 . _ -`, otherwise an
+8-character id the server generates. A caller's value in any other shape (too long, spaces,
+punctuation, non-ASCII) is replaced, never trimmed or echoed, because the id is repeated in the
+response header, in `detail` and on the log line. The same rule applies to every response's
+`X-Correlation-ID`, not only the 500. If the request failed before the correlation middleware ran, a
+fresh id is minted, and body, header and log line still agree. The id also appears on the server's ERROR log line that carries the traceback
+(`correlation_id=<id>`). When `SENTRY_DSN` is set it is the `correlation_id` tag on the Sentry
+event, so a quoted reference finds the traceback.
+
+The reference is repeated inside `detail` so that the web UI, which shows `detail` verbatim, displays
+it with no client change. Nothing else about the exception (type, message, traceback) reaches the
+client. For an allowed origin the 500 carries CORS headers and exposes `X-Correlation-ID` (see
+[CORS](#cors)).
+
+Until 2026-11-05 the body was `{"detail": "Internal server error"}` with no reference and no header.
+The handler runs in Starlette's `ServerErrorMiddleware`, outside the correlation middleware, and
+never saw the id. It now reads the id from `request.state`.
 
 ## Pagination
 
@@ -10997,6 +11343,37 @@ used to resolve the client-supplied `userId` to a user row and write an audit ro
 forge tamper-evident audit-chain entries attributed to a named employee in a named company. The
 body is additionally capped at **50 entries** with per-field length limits (**422** over either).
 
+**`POST /errors/log` reads its JSON body under either `application/json` or `text/plain`** (the
+`text/plain` label may carry parameters, e.g. `text/plain;charset=UTF-8`). A `text/plain` request is
+relabelled as JSON before FastAPI parses it, so it gets the same parse, the same `ErrorLogRequest`
+validation and caps, and the same **422** shape, and the OpenAPI `requestBody` is unchanged. No other
+content type is relabelled: an `application/octet-stream` body, for example, is still a **422**. The
+relabel is installed on this one route only (not on the errors router, and not app-wide), and
+`text/plain` is not parsed as JSON on any other path. The `MAX_JSON_BODY_BYTES` cap (**413**) covers
+the `text/plain` label on this path (see [Request Size Limits](#request-size-limits)).
+
+**`text/plain` is the supported beacon contract, not a legacy shim — do not remove it.** The SPA
+(`frontend/src/services/errorLogging.ts`) sends its crash and unload reports with
+`navigator.sendBeacon` and a `text/plain;charset=UTF-8` Blob on purpose. That label is
+CORS-safelisted, so the beacon is a simple request: no preflight, and it works cross-origin, which
+production is (Vercel → Railway). An `application/json` Blob is not safelisted, and Chromium refuses
+that beacon outright. If `sendBeacon` is unavailable, returns `false` or throws, the client falls back
+to a `fetch` with `keepalive: true` and `Content-Type: application/json`; the periodic flush is an
+ordinary JSON `fetch`.
+
+The client also guards the batch against the server's own refusals, because one bad entry fails the
+whole batch:
+- every field is clamped to the server's `ErrorLogEntry` cap (`url` 2,000, `message` 4,000, `stack`
+  20,000, …) instead of being sent over it and drawing a **422**;
+- a form boundary's preserved form contents (`metadata.preservedData`) are not sent at all; the server
+  never read them, and they could push the batch past the beacon's keepalive quota or the body cap;
+- a batch answered **429** or **5xx**, or lost to a network error, is re-queued for the next flush. A
+  **413** or **422** is not, since the same batch would be refused again.
+
+Why: until 2026-11-05 the SPA sent the beacon as a bare string. That is also labelled `text/plain`,
+and FastAPI does not parse `text/plain` as JSON, so every global-boundary crash report was rejected
+**422** and never reached a log line or Sentry.
+
 An over-limit request returns **HTTP 429** with a `Retry-After` header (seconds until the window
 resets) and body:
 ```json
@@ -11036,9 +11413,14 @@ an admin reset. Both key on a caller-supplied IP while `--forwarded-allow-ips=*`
 
 **JSON request bodies are capped at 256 KB** (`MAX_JSON_BODY_BYTES`, env-overridable; the
 pre-rename `MAX_SANITIZED_JSON_BODY_BYTES` is still honored as a deprecated alias). Every
-`application/json` `POST`/`PUT`/`PATCH` body is size-checked by middleware before the route
-runs — ahead of route auth, so an unauthenticated caller cannot choose how many bytes the app
-buffers and parses. Over the cap the request is **rejected**:
+JSON `POST`/`PUT`/`PATCH` body is size-checked by middleware before the route runs — ahead of
+route auth, so an unauthenticated caller cannot choose how many bytes the app buffers and parses.
+"JSON" means every label FastAPI itself parses as JSON: `application/json` and any
+`application/*+json` (`application/merge-patch+json`, `application/vnd.api+json`, …), matched
+case-insensitively with parameters ignored. Until 2026-11-05 the middleware matched only a
+literal `application/json…` prefix, so `Application/JSON` or a `+json` label was parsed by the
+route but never capped, and a non-JSON label such as `application/jsonx` was capped though never
+parsed. Over the cap the request is **rejected**:
 
 ```json
 { "detail": "Request body too large: 300000 bytes exceeds the 262144-byte limit for JSON requests." }
@@ -11046,6 +11428,12 @@ buffers and parses. Over the cap the request is **rejected**:
 
 Returned as **HTTP 413**. The check is applied to the declared `Content-Length` before the body
 is read, and again to the bytes actually received (chunked encoding, or a header that lies).
+
+**One non-JSON label is capped as well:** a `text/plain` body on `POST /errors/log`. That route
+parses `text/plain` as JSON (it is the label the SPA's `navigator.sendBeacon` body carries; see
+[Rate Limiting](#rate-limiting)), so without the cap the relabel would open an uncapped,
+unauthenticated JSON parse. Both gates apply to it. On every other path `text/plain` is neither
+parsed as JSON nor capped by this middleware.
 
 **Not affected:** `multipart/form-data` uploads, which keep their own per-endpoint caps (20 MB
 for QMS standard uploads, 50 MB `LASER_UPLOAD_MAX_BYTES` for laser-nest ZIP/PDF — those also
@@ -11198,6 +11586,29 @@ Cross-Origin Resource Sharing is configured to allow requests from:
 - Development: `http://localhost:3000`, `http://localhost:8000`
 - Production: Your configured frontend domain
 
+**Exposed response headers.** Responses send `Access-Control-Expose-Headers: X-Correlation-ID,
+Content-Disposition, ETag`, so cross-origin JavaScript can read those three headers. This applies when
+the SPA and the API are on different origins, as in the production Vercel → Railway deployment.
+- `X-Correlation-ID` is the reference for a failed request (see
+  [Internal Server Error (500)](#internal-server-error-500)).
+- `Content-Disposition` carries the server-chosen filename of a CSV/XLSX/PDF download.
+- `ETag` is the key the client's conditional-request cache uses.
+
+The shared CORS helper (`add_cors_headers` in `main.py`) sets the same expose list. The app uses that
+helper on the 500, which never passes back through `CORSMiddleware`, and on its middleware
+short-circuits and exception handlers: the 413 body-size refusal, the CSRF 403s, the 429s, and the
+`StaleDataError` 409, `HTTPException` and validation 422 handlers. The helper adds the list only for an
+allowed origin. A disallowed origin never gets `Access-Control-Allow-Origin`, so none of these headers
+is readable to it, whatever the expose list says.
+
+Before 2026-11-05 no headers were exposed, so a cross-origin SPA could read none of these three.
+Downloads fell back to the client's hard-coded filenames, and the ETag cache never stored an entry.
+Expect more **304**s once the cache starts working. `GET /shop-floor/dashboard` is the one route that
+emits an `ETag`, and its **304** returns before that read's reconcile runs, so the dashboard heals a
+stranded work order only on a read that returns **200** (the first load, or any read after the
+company's data changes). The other reconciling reads (`GET /work-orders`, `GET /work-orders/{id}`,
+`GET /shop-floor/operations…`) emit no `ETag` and still heal on every read.
+
 ## Trusted Hosts
 
 When `ALLOWED_HOSTS` is configured (production), a request whose HTTP `Host`
@@ -11262,7 +11673,7 @@ log. `unconfigured` means every enqueue will fail and no background job or cron 
 | 413 | Content Too Large — a JSON body over `MAX_JSON_BODY_BYTES` (default 256 KB, rejected by middleware before the route runs), or a file upload over its endpoint's own cap (e.g. 50 MB `LASER_UPLOAD_MAX_BYTES`). See [Request Size Limits](#request-size-limits) |
 | 422 | Validation Error — including a paging or window parameter outside its range (`limit`, `skip`/`offset`, `days`, `max_levels`), and a free-text `/exports/*` filter over its `max_length` (`warehouse` 50, `customer` 255, `transaction_type` 40); see [Bounds on paging and window parameters](#bounds-on-paging-and-window-parameters) |
 | 429 | Too Many Requests |
-| 500 | Internal Server Error |
+| 500 | Internal Server Error — the body (`correlation_id`, and inside `detail`) and the `X-Correlation-ID` header carry a reference to quote; see [Internal Server Error (500)](#internal-server-error-500) |
 | 502 | Bad Gateway — upstream AI-service failure on an AI endpoint (e.g. `/copilot/chat?stream=false`) |
 | 503 | Service Unavailable — an AI endpoint was called but the AI features are not configured (`ANTHROPIC_API_KEY` unset) |
 

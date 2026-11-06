@@ -36,19 +36,91 @@ unauthenticated call can make the app parse and log; ``MAX_JSON_BODY_BYTES``
 (413) is the outer bound on the body itself, and main.py's ENDPOINT_RATE_LIMITS
 entry bounds call frequency. ``MAX_GLOBAL_ALERTS_PER_REQUEST`` bounds the one
 remaining outbound side-effect (Sentry).
+
+``POST /errors/log`` accepts its JSON body labelled either ``application/json`` or
+``text/plain`` -- the second is the client's beacon contract; see ``_BeaconBodyRoute``
+for why it exists and why it is safe. The body cap covers both labels on this path
+(main.py's ``limit_json_body_size``).
 """
 
 import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Callable, Coroutine, List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, Request, Response
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
+from starlette.datastructures import Headers
 
+from app.core.media_types import is_text_plain_media_type
 from app.core.time_utils import to_utc_iso
 
-router = APIRouter(prefix="/errors", tags=["errors"])
 logger = logging.getLogger(__name__)
+
+
+class _TextPlainAsJsonRequest(Request):
+    """The same request (same scope, same body stream) with its Content-Type read as JSON.
+
+    Only the ``headers`` view changes: the scope is shared, not copied, so anything a
+    dependency or exception handler writes to ``request.scope`` / ``request.state``
+    still lands where the rest of the stack can see it.
+    """
+
+    @property
+    def headers(self) -> Headers:
+        if not hasattr(self, "_json_relabelled_headers"):
+            raw = [(key, value) for key, value in self.scope["headers"] if key.lower() != b"content-type"]
+            raw.append((b"content-type", b"application/json"))
+            self._json_relabelled_headers = Headers(raw=raw)
+        return self._json_relabelled_headers
+
+
+class _BeaconBodyRoute(APIRoute):
+    """Read a ``text/plain`` request body on ``POST /errors/log`` as the JSON it is.
+
+    THIS IS THE SUPPORTED BEACON CONTRACT, NOT A LEGACY SHIM -- do not remove it. The SPA
+    sends its crash/unload report with ``navigator.sendBeacon`` and labels the body
+    ``text/plain;charset=UTF-8`` on purpose: that is a CORS-safelisted type, so the beacon
+    is a "simple" request that needs no preflight and works cross-origin in every browser
+    (production is cross-origin: Vercel SPA -> Railway API). An ``application/json`` Blob
+    is not safelisted, and Chromium has long refused such a beacon outright (it throws;
+    crbug.com/490015), so a JSON label is not an option for the one report that has to
+    survive an unloading page. The current client and every bundle deployed before
+    2026-11-05 (which sent a bare string, labelled the same way) depend on this.
+
+    FastAPI parses a body as JSON only when it is labelled ``application/json`` (or
+    ``application/*+json``), so before this existed every one of those beacons -- the
+    white-screen crashes, the report we most needed -- was rejected 422 and never reached
+    a log line or Sentry.
+
+    So a ``text/plain`` request is relabelled ``application/json`` before FastAPI reads
+    it, and from there it takes exactly the path a JSON-labelled request takes: the same
+    ``json.loads``, the same ``ErrorLogRequest`` validation with the same caps, the same
+    422 shape on a bad body, and an unchanged OpenAPI contract. No other content type is
+    relabelled. This is safe because the label is not a trust boundary here: the route is
+    unauthenticated and CSRF-exempt by design, a ``text/plain`` cross-origin POST was
+    always a "simple" request any page could send, and what it can do is still bounded by
+    validation, the per-request alert cap, the rate limit and the body cap.
+
+    Applied to the ``/log`` route ONLY (``route_class_override`` below), never to the
+    whole router: main.py's ``limit_json_body_size`` caps ``text/plain`` on exactly that
+    path (``_ERROR_BEACON_PATH``), so a route added to this router later must not inherit
+    the relabel without the cap. The two are tied together by
+    ``tests/api/test_error_logging_endpoint.py``.
+    """
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        original_handler = super().get_route_handler()
+
+        async def handler(request: Request) -> Response:
+            if is_text_plain_media_type(request.headers.get("content-type")):
+                request = _TextPlainAsJsonRequest(request.scope, request.receive)
+            return await original_handler(request)
+
+        return handler
+
+
+router = APIRouter(prefix="/errors", tags=["errors"])
 
 # Matches ``maxQueueSize`` in frontend/src/services/errorLogging.ts — the client
 # never batches more than this, so a larger batch is not a real SPA tab.
@@ -100,7 +172,6 @@ class ErrorLogResponse(BaseModel):
     count: int
 
 
-@router.post("/log", response_model=ErrorLogResponse)
 async def log_errors(request: ErrorLogRequest, background_tasks: BackgroundTasks, http_request: Request):
     """
     Log frontend errors for monitoring and debugging.
@@ -110,6 +181,9 @@ async def log_errors(request: ErrorLogRequest, background_tasks: BackgroundTasks
 
     Unauthenticated and CSRF-exempt by necessity (sendBeacon). Nothing is
     persisted — see the module docstring for why the audit write was removed.
+
+    The JSON body may be labelled ``application/json`` or ``text/plain`` (what the
+    client's ``sendBeacon`` body carries); both are parsed and validated identically.
     """
     # Get client IP for additional context
     client_ip = http_request.client.host if http_request.client else "unknown"
@@ -118,6 +192,18 @@ async def log_errors(request: ErrorLogRequest, background_tasks: BackgroundTasks
     background_tasks.add_task(process_error_logs, request.errors, client_ip)
 
     return ErrorLogResponse(status="queued", count=len(request.errors))
+
+
+# Registered explicitly (not ``@router.post``) because only ``add_api_route`` takes a
+# per-route class: the ``text/plain`` relabel belongs to this one route -- see
+# ``_BeaconBodyRoute`` for why it must not cover the whole router.
+router.add_api_route(
+    "/log",
+    log_errors,
+    methods=["POST"],
+    response_model=ErrorLogResponse,
+    route_class_override=_BeaconBodyRoute,
+)
 
 
 async def process_error_logs(errors: List[ErrorLogEntry], client_ip: str):

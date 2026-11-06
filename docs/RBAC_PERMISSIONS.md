@@ -782,7 +782,10 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > through an ordinary blind-`setattr` form save on `PUT /parts/{id}` or `PUT /materials/{id}`, neither
 > of which filters `is_deleted` on its lookup. That is the 2026-08-16 `Vendor` trap invariant 3
 > records. Both verbs additionally **404 a soft-deleted part** (*"restore it first"*) for the same
-> reason.
+> reason. **Until 2026-11-05 the schema did not match this paragraph:** `PartUpdate` still declared
+> `is_active` and `status`, so a Supervisor could write both through either `PUT`. Both fields are
+> now removed (`tests/test_part_update_activation_fields.py`); a `PUT` that still sends either key has
+> it dropped and changes nothing.
 >
 > **A restore returns the RECORD, not the permission (behaviour change).**
 > `POST /parts/{id}/restore` used to hard-code `is_active = True`. It now returns the part to the
@@ -920,6 +923,13 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > endpoint writes a tamper-evident `audit_log` CREATE with `extra_data.copied_from` (the source
 > routing id) — see `docs/API.md` → Routing and the
 > [CMMC change log](CMMC_LEVEL_2_COMPLIANCE.md) entry dated 2026-07-06.
+>
+> **The AI accept step names who accepted (2026-11-05).** `create-from-generation` is the step where a
+> named person at that role set accepts an AI proposal; nothing is created by `generate-from-drawing`
+> alone. It now writes the routing's `audit_log` CREATE with `extra_data.approved_by`, the generation
+> session, model and prompt version, and the count of human corrections. Before this the step wrote
+> only AI-learning telemetry, so an AI-originated routing had no audit row attributing its creation.
+> See `docs/API.md` → Routing → *AI routing generation*.
 
 ### Work Centers
 
@@ -1340,6 +1350,20 @@ Follow-up owners must be active users in the same company with purchasing access
 > restriction. Only the write/approve actions (Create, Approve, send, line edits) are
 > role-gated. Receiving (below) follows the same read-broad / write-restricted pattern.
 
+> **PO status edits: a state rule landed, and the Approve row is still not enforced on `PUT`
+> (2026-11-05).** `PUT /purchasing/purchase-orders/{id}` is `require_role([ADMIN, MANAGER,
+> SUPERVISOR])` and used to write any status, so a Supervisor could mark a PO `sent` without the
+> Admin / Manager `POST .../send`, declare it `received`, or reopen a closed one. A transition
+> whitelist now refuses those moves (**409** naming the verb that owns each one). That makes the send
+> gate real: `sent` is reachable only through the Admin / Manager send verb. The whitelist is a
+> **state** rule, not a role rule, and it deliberately leaves one gap open. `pending_approval` and
+> `approved` are still settable through that `PUT`, so **a Supervisor can still move a PO to
+> `approved`**, and nothing stamps `approved_by` / `approved_at`. The **Approve** row above (Admin /
+> Manager) is therefore **not server-enforced** on this path. A dedicated Admin / Manager approve verb
+> is an open follow-up. Until it ships, read an `approved` status as "set by someone at the PO edit
+> tier", and find who in the PO's `purchase_order` UPDATE audit row. See `docs/API.md` → Purchasing →
+> *PO status edits*.
+
 > **Vendor / PO soft-delete + restore — endpoint mapping.** `DELETE /purchasing/vendors/{id}`,
 > `POST /purchasing/vendors/{id}/restore`, `DELETE /purchasing/purchase-orders/{id}`, and
 > `POST /purchasing/purchase-orders/{id}/restore` (`app/api/endpoints/purchasing.py`) are enforced **in
@@ -1443,6 +1467,35 @@ Follow-up owners must be active users in the same company with purchasing access
 > (`purchasing:approve` — the same Admin / Manager set the `PUT` enforces), not `canRestoreVendor`:
 > the button calls the update endpoint, so it must match the update endpoint. See `docs/API.md` →
 > Purchasing → *Restoring a vendor returns the record, not the approval*.
+
+### Quotes
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View (list, detail, conversion plan, quote PDF) | ✓ | ✓ | ✓ | | | | ✓ |
+| Edit terms / accept / reject / expire (`PUT /quotes/{id}`) | ✓ | ✓ | ✓ | | | | |
+| Mark sent (`POST /quotes/{id}/send`) | ✓ | ✓ | ✓ | | | | |
+| Convert to work orders (`POST /quotes/{id}/convert`) | ✓ | ✓ | ✓ | | | | |
+
+> **Endpoint mapping (2026-11-05).** The three write verbs share one constant, `QUOTE_WRITE_ROLES =
+> [ADMIN, MANAGER, SUPERVISOR]` in `app/api/endpoints/quotes.py`, enforced with `require_role`
+> (superuser and Platform Admin pass, as elsewhere). It is a fixed role gate: company role-permission
+> overrides neither grant nor remove it. The set is the one `convert` was already gated to, and the
+> roles that hold `purchasing:create` by default, which Fabrication Quoting requires to approve the
+> estimate that becomes the ERP quote. Until this change `PUT` and `/send` used `get_current_user`, so
+> any authenticated user, a Viewer included, could accept, reject, expire, re-word or mark sent a
+> customer quote. Each write is now also audited on the tamper-evident chain (see `docs/API.md` →
+> Quotes).
+>
+> **Reads stay read-broad.** Per the [Access enforcement model](#access-enforcement-model), the list,
+> detail, conversion-plan and PDF routes are tenant-scoped but not role-restricted; the **View** row is
+> the intended UI. In the UI, `/quotes` requires `purchasing:view` (`frontend/src/utils/routeAccess.ts`),
+> so Operator / Quality / Shipping cannot open the page, and a Viewer who can open it no longer sees
+> **Edit draft**, **Send** or **Convert** (`canWriteQuotes` in
+> `frontend/src/utils/recordWriteAccess.ts`, which mirrors `QUOTE_WRITE_ROLES`). The **Email** action
+> uses the same helper: quote email delivery (`DocumentDeliveryService.authorize`) admits the same
+> Admin / Manager / Supervisor set plus superuser and Platform Admin, which the page's old inline role
+> list left out.
 
 ### Material Nesting
 
@@ -1771,6 +1824,7 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 | Calibration | ✓ | ✓ | | | ✓ | | |
 | Manage scrap reason codes | ✓ | ✓ | | | ✓ | | |
 | Void / restore NCR | ✓ | ✓ | | | ✓ | | |
+| Void / restore CAR | ✓ | ✓ | | | ✓ | | |
 
 > **Inspect — endpoint mapping.** The shop-floor inspection sign-off
 > `POST /api/v1/shop-floor/operations/{operation_id}/inspection` (which records
@@ -1803,14 +1857,38 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 >
 > **Void / restore NCR — endpoint mapping.** `DELETE /quality/ncr/{ncr_id}` (void) and
 > `POST /quality/ncr/{ncr_id}/restore` (`app/api/endpoints/quality.py`) are enforced **in code** to the
-> **Void / restore NCR** row above — `require_role([ADMIN, MANAGER, QUALITY])`. `NonConformanceReport`
+> **Void / restore NCR** row above — `require_role(quality_record_service.WRITE_ROLES)`, i.e.
+> `[ADMIN, MANAGER, QUALITY]`. `NonConformanceReport`
 > gained `SoftDeleteMixin` (migration `071_soft_delete_purchasing_ncr`); a void is a soft delete
 > (invariant #3) that also moves the NCR to the existing `VOID` status, requires a **non-blank
 > `reason`**, and is **refused (400)** while the NCR still actively gates a work order (an
-> `OPEN`/`ACKNOWLEDGED` `WorkOrderBlocker` references it). Restore reopens it to `OPEN`. Both are
-> tamper-evidently audited — the void writes a status-change **and** a delete row, closing a prior gap
-> where the `PUT /quality/ncr/{id}` update path wrote no `audit_log` row at all. See `docs/API.md` →
-> Quality.
+> `OPEN`/`ACKNOWLEDGED` `WorkOrderBlocker` references it). Restore reopens it to `OPEN` (clearing any
+> closure fields an NCR voided while CLOSED still carries). Both are
+> required-audited in the same transaction (**503** with rollback on audit loss): the void writes a
+> status-change **and** a delete row, restore a `RESTORE` row. See `docs/API.md` → Quality.
+>
+> **Void / restore CAR — endpoint mapping.** `POST /quality/car/{car_id}/void` and
+> `POST /quality/car/{car_id}/restore` are enforced **in code** to the **Void / restore CAR** row above
+> via the same `quality_record_service.WRITE_ROLES`; Operator, Supervisor and Viewer get **403**. Void
+> requires a **non-blank `reason`** (**422** otherwise), refuses a CLOSED or already-void CAR
+> (**409**), and records the reason on a required `STATUS_CHANGE` audit row. The CLOSED refusal stops
+> a one-step void only: the same roles can reopen a CLOSED CAR with a status-only `PUT` (no reason
+> captured yet) and then void it, with both steps on the audit trail. `VOID` is the CAR's tombstone:
+> the CAR stays readable. Restore reopens a void CAR to `open` (**409** when it is not void) on a
+> required `RESTORE` audit row.
+>
+> **NCR / CAR edits — endpoint mapping (the Approve row).** `PUT /quality/ncr/{ncr_id}` (edit,
+> disposition, close, reopen, assign, CAR link), `PUT /quality/car/{car_id}` (edit, verification,
+> close, reopen, assign) and `POST /quality/ncr/{ncr_id}/create-car` are enforced **in code** via
+> `require_role(quality_record_service.WRITE_ROLES)` = **Admin / Manager / Quality**, the **Approve**
+> row (the frontend detail screen gates on `quality:approve`, which the same three roles hold).
+> Filing an NCR (`POST /quality/ncr`), opening a CAR (`POST /quality/car`) and all NCR / CAR reads
+> depend on `get_current_user` only, so any authenticated user of the company can file one
+> (Operators included). Every one of these writes commits with a required audit row (**503** with
+> rollback on audit loss) and validates `part_id` / `work_order_id` / `assigned_to` / `car_id`
+> against the active company before writing (**404**). A CLOSED NCR or CAR refuses every change
+> except a status-only reopen (**409**), for every role. See `docs/API.md` → Quality → "NCR / CAR
+> writes".
 
 > **Calibration — endpoint mapping (now enforced in code).** `POST /api/v1/calibration/equipment`,
 > `PUT /calibration/equipment/{id}` and `POST /calibration/equipment/{id}/calibrate` are enforced to
@@ -2608,6 +2686,19 @@ and writes an `EXPORT` audit row through `AuditService`:
 | Visitor sign-in stations (`/visitor-logs/stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
 | Crew kiosk stations (`/shop-floor/kiosk-stations` create/list/revoke/reset-pin) | ✓ | ✓ | | | | | |
 | System | ✓ | | | | | | |
+
+> **Changing a role's permissions is an audited RBAC change that fails closed (2026-11-05).** The
+> **Settings** row covers every `/admin/settings/*` route in `app/api/endpoints/admin_settings.py`
+> (`admin_only = require_role([ADMIN])`). Of those, the company role-permission overrides — `PUT
+> /admin/settings/role-permissions/{role}` and `POST /admin/settings/role-permissions/{role}/reset` —
+> now require their evidence: a `role_permission` UPDATE row (old/new permissions, `granted`,
+> `revoked`, `action`) written through `AuditService.log_required` inside
+> `user_provisioning.atomic_security_write`. If that row cannot be written, the permission change is
+> rolled back and the caller gets **503**, the same posture as account administration. The other
+> admin-settings writes (work-center rates, email recipients, work-center types) now also write
+> best-effort rows to the tamper-evident `audit_log`. Before this change all of them wrote only to
+> `SettingsAuditLog`, the Admin page's mutable history table, which is outside the hash chain and
+> still written for display. See `docs/API.md` → Admin Settings.
 
 > **Integrations (carrier-account credentials + shipping profile) — endpoint mapping.** The
 > carrier-integration admin console — `app/api/endpoints/integrations.py`, mounted under

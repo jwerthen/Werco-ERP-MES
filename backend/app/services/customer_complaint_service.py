@@ -69,7 +69,7 @@ from app.models.customer_complaint import (
     RMAStatus,
 )
 from app.models.part import Part
-from app.models.quality import CorrectiveActionRequest, NCRSource, NonConformanceReport
+from app.models.quality import CARStatus, CorrectiveActionRequest, NCRSource, NonConformanceReport
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
 from app.services.audit_service import AuditService, AuditWriteError
@@ -672,12 +672,32 @@ def _link_record(db: Session, complaint: CustomerComplaint, field: str, record_i
     _audit_transition(audit, COMPLAINT_RESOURCE, complaint, complaint.complaint_number, before, required=True)
 
 
+def _linked_live(db: Session, company_id: int, model: Any, record_id: int) -> bool:
+    """Whether a complaint's linked NCR / CAR still counts as its live link.
+
+    An NCR is retired by soft delete (void sets ``is_deleted``); a CAR has no soft delete and
+    is retired by ``status == VOID``. A link to a row this company cannot see (a legacy
+    cross-tenant id) is not a live link either.
+    """
+    query = tenant_query(db, model, company_id).filter(model.id == record_id)
+    if model is NonConformanceReport:
+        query = query.filter(NonConformanceReport.is_deleted == False)  # noqa: E712
+    else:
+        query = query.filter(CorrectiveActionRequest.status != CARStatus.VOID)
+    return query.with_entities(model.id).first() is not None
+
+
 def create_ncr_from_complaint(
     db: Session, company_id: int, complaint_id: int, user: User, audit: AuditService
 ) -> CustomerComplaint:
-    """Raise a customer-return NCR from a complaint; same numbering, event and tenant as ``POST /quality/ncr``."""
+    """Raise a customer-return NCR from a complaint; same numbering, event and tenant as ``POST /quality/ncr``.
+
+    Refused while the complaint links a LIVE NCR. A voided NCR (``DELETE /quality/ncr/{id}``)
+    no longer blocks: a fresh one is raised and the link moves to it, the complaint's
+    required UPDATE row recording the old -> new ``ncr_id``.
+    """
     complaint = _locked_complaint(db, company_id, complaint_id)
-    if complaint.ncr_id:
+    if complaint.ncr_id and _linked_live(db, company_id, NonConformanceReport, complaint.ncr_id):
         raise HTTPException(status_code=400, detail="Complaint already has a linked NCR")
     _require_owned(db, company_id, Part, complaint.part_id, "part")
     _require_owned(db, company_id, WorkOrder, complaint.work_order_id, "work order")
@@ -728,9 +748,15 @@ def create_ncr_from_complaint(
 def create_car_from_complaint(
     db: Session, company_id: int, complaint_id: int, user: User, audit: AuditService
 ) -> CustomerComplaint:
-    """Raise a CAR from a complaint; same numbering, event and tenant as ``POST /quality/car``."""
+    """Raise a CAR from a complaint; same numbering, event and tenant as ``POST /quality/car``.
+
+    Refused while the complaint links a non-VOID CAR. A CAR voided through
+    ``POST /quality/car/{id}/void`` no longer blocks: a fresh one is raised and the link
+    moves to it, the same rule ``POST /quality/ncr/{id}/create-car`` follows, with the
+    complaint's required UPDATE row recording the old -> new ``car_id``.
+    """
     complaint = _locked_complaint(db, company_id, complaint_id)
-    if complaint.car_id:
+    if complaint.car_id and _linked_live(db, company_id, CorrectiveActionRequest, complaint.car_id):
         raise HTTPException(status_code=400, detail="Complaint already has a linked CAR")
 
     car = CorrectiveActionRequest(

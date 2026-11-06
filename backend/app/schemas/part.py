@@ -128,8 +128,15 @@ class PartUpdate(BaseModel):
     customer_name: Optional[str] = Field(None, max_length=255)
     customer_part_number: Optional[str] = Field(None, max_length=100)
     drawing_number: Optional[str] = Field(None, max_length=100)
-    is_active: Optional[bool] = None
-    status: Optional[str] = Field(None, max_length=50)
+    # **``is_active`` and ``status`` are DELIBERATELY ABSENT.** ``POST /parts/{id}/deactivate``
+    # and ``/activate`` are the only non-delete writers of those columns (reasoned, audited,
+    # Admin/Manager, and refusing a soft-deleted part). ``PUT /parts/{id}`` and
+    # ``PUT /materials/{id}`` are blind ``setattr`` loops at the Supervisor tier whose lookups
+    # do not filter ``is_deleted``, and ``is_active`` doubles as the soft-delete MASK -- so a
+    # field here would let an ordinary form save un-retire a part or clear a delete mask
+    # (invariant 3's ``Vendor`` trap). A client that still sends either key has it dropped
+    # (this model ignores unknown keys), which leaves the row untouched. Guarded by
+    # ``tests/test_part_update_activation_fields.py``.
 
     @field_validator('revision', mode='before')
     @classmethod

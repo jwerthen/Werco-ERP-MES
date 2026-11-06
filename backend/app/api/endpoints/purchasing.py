@@ -978,6 +978,121 @@ def get_purchase_order(
     return po
 
 
+# PO status classes for the ``PUT`` transition whitelist below.
+_PO_PRE_SEND_STATUSES = (POStatus.DRAFT, POStatus.PENDING_APPROVAL, POStatus.APPROVED)
+_PO_RECEIVING_STATUSES = (POStatus.PARTIAL, POStatus.RECEIVED)
+_PO_TERMINAL_STATUSES = (POStatus.CLOSED, POStatus.CANCELLED)
+
+
+def _po_sent_refusal(po: PurchaseOrder, current: POStatus) -> str:
+    """The 409 text for an edit asking for SENT -- pointing at a verb that will actually take it.
+
+    ``POST .../send`` accepts DRAFT / APPROVED only (400 otherwise), so it is named only there.
+    """
+    send_verb = f"POST /purchasing/purchase-orders/{po.id}/send"
+    if current in (POStatus.DRAFT, POStatus.APPROVED):
+        return (
+            f"Use Send ({send_verb}) to mark purchase order {po.po_number} as sent; it records the order date, "
+            "which an edit does not."
+        )
+    if current == POStatus.PENDING_APPROVAL:
+        return (
+            f"Purchase order {po.po_number} is pending approval. Approve it first (status 'approved'), then use "
+            f"Send ({send_verb}); Send records the order date, which an edit does not."
+        )
+    # PARTIAL / RECEIVED: material is on record against it.
+    return (
+        f"Purchase order {po.po_number} has material received against it ({current.value}) and cannot be set back "
+        "to 'sent' by an edit. It returns to 'sent' only when its receipts are voided "
+        "(POST /receiving/receipt/{id}/void)."
+    )
+
+
+def assert_po_status_edit_allowed(po: PurchaseOrder, target: POStatus) -> None:
+    """Refuse (409) a ``status`` that ``PUT /purchase-orders/{id}`` may not write.
+
+    ``PUT`` used to ``setattr`` any enum member, so a Supervisor (or an agent) could mark a PO
+    SENT without the Admin/Manager send verb or its ``order_date`` stamp, declare it RECEIVED
+    with nothing received, or reopen a CLOSED one. The status column now moves through the
+    verb that owns each transition, and an edit may only make the moves below. Everything not
+    listed is refused with a message naming the verb that does own it:
+
+    =========================================  ==========================================
+    From                                       PUT may set
+    =========================================  ==========================================
+    DRAFT / PENDING_APPROVAL / APPROVED        each other, or CANCELLED
+    SENT                                       CANCELLED (nothing received yet)
+    PARTIAL / RECEIVED                         CLOSED (short-close / close-out)
+    CLOSED / CANCELLED                         nothing -- terminal
+    =========================================  ==========================================
+
+    * SENT is only ever set by ``POST /purchase-orders/{id}/send`` (DRAFT / APPROVED only), the
+      reviewed-import path, and an accepted emailed delivery
+      (``document_delivery_service.update_accepted_source``, Admin/Manager) -- each of which
+      stamps ``order_date``. The refusal names Send only where Send would accept the PO.
+    * PARTIAL / RECEIVED are only ever derived by receiving (and its void, which can walk a
+      PO back to SENT).
+    * CLOSED means material was received; a PO nothing was received against is CANCELLED.
+      CANCELLED is refused once material has been received -- close it, or void the receipts.
+
+    Re-sending the CURRENT status is always allowed (a client echoing the record back), and
+    this is called before the first ``setattr``, so a refusal leaves the row untouched.
+    Deliberately NOT decided here: who may APPROVE. PENDING_APPROVAL/APPROVED stay reachable at
+    the edit tier exactly as before; giving approval its own Admin/Manager verb (with an
+    ``approved_by``/``approved_at`` stamp) is a separate change.
+    """
+    current = POStatus(po.status)
+    if target == current:
+        return
+    if current in _PO_TERMINAL_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Purchase order {po.po_number} is {current.value}; closed and cancelled purchase orders are final "
+                f"and an edit cannot move one to '{target.value}'. Raise a new purchase order instead."
+            ),
+        )
+    if target == POStatus.SENT:
+        raise HTTPException(status_code=409, detail=_po_sent_refusal(po, current))
+    if target in _PO_RECEIVING_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"'{target.value}' is set by receiving, not by an edit. Record the receipt "
+                f"(POST /receiving/receive) and purchase order {po.po_number} updates itself."
+            ),
+        )
+    if target == POStatus.CLOSED:
+        if current not in _PO_RECEIVING_STATUSES:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Purchase order {po.po_number} is {current.value} with nothing received against it, so it "
+                    "cannot be closed. Cancel it instead (status 'cancelled')."
+                ),
+            )
+        return
+    if target == POStatus.CANCELLED:
+        if current in _PO_RECEIVING_STATUSES:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Purchase order {po.po_number} has material received against it ({current.value}). Close it "
+                    "(status 'closed') instead, or void its receipts first (POST /receiving/receipt/{id}/void)."
+                ),
+            )
+        return
+    # ``target`` is a pre-send status (DRAFT / PENDING_APPROVAL / APPROVED).
+    if current not in _PO_PRE_SEND_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Purchase order {po.po_number} is already {current.value} and cannot return to "
+                f"'{target.value}'. Cancel it and raise a new purchase order if the order must change."
+            ),
+        )
+
+
 @router.put("/purchase-orders/{po_id}", response_model=POResponse)
 def update_purchase_order(
     po_id: int,
@@ -990,28 +1105,35 @@ def update_purchase_order(
     """Update a purchase order. Writes a tamper-evident audit_log UPDATE row with the
     changes diff (a status change shows up in the diff; no row when nothing changed).
 
-    404s on a soft-deleted PO -- see ``_live_po_or_404``. Also refuses (400) a ``status``
-    change that would make the order LIVE again while its vendor is soft-deleted -- see the
-    guard below."""
+    404s on a soft-deleted PO -- see ``_live_po_or_404``. A ``status`` is held to the
+    transition whitelist in ``assert_po_status_edit_allowed`` (409 naming the verb that owns
+    the move: Send, receiving, or "raise a new PO"). Also refuses (400) a ``status`` change
+    that would make the order LIVE again while its vendor is soft-deleted -- see the guard
+    below."""
     db.query(PurchaseOrder.id).filter(
         PurchaseOrder.id == po_id, PurchaseOrder.company_id == company_id
     ).with_for_update().first()
     po = _live_po_or_404(db, po_id, company_id)
 
+    # The transition whitelist runs FIRST, before the first setattr, so every refusal leaves
+    # the row untouched -- and so a refused revival names the rule that actually blocks it
+    # (a CLOSED PO cannot be reopened by an edit at all) rather than "restore the vendor",
+    # which would not make the edit succeed.
+    new_status = po_in.model_dump(exclude_unset=True).get("status")
+    if new_status is not None:
+        assert_po_status_edit_allowed(po, POStatus(new_status))
+
     # The third door into "a live PO against a removed supplier". ``create_purchase_order``
     # and ``create_po_from_upload`` both refuse to CREATE that state, and
-    # ``restore_purchase_order`` refuses to bring it back -- but this verb can REVIVE it, and
-    # nothing here validates the transition at all: ``POStatus(value)`` only checks enum
-    # membership, so a CLOSED PO takes ``{"status": "sent"}`` and lands straight back in
-    # ``GET /receiving/open-pos`` (which filters status and PO is_deleted, and deliberately
-    # never checks the vendor). ``delete_vendor``'s "no live POs" check is point-in-time:
-    # it passed when every PO was closed, and nothing re-evaluates it afterwards.
+    # ``restore_purchase_order`` refuses to bring it back. This verb used to REVIVE it (a
+    # CLOSED PO took ``{"status": "sent"}`` and landed back in ``GET /receiving/open-pos``);
+    # the whitelist above now refuses every move out of CLOSED/CANCELLED, and
+    # ``delete_vendor`` refuses while any non-terminal PO exists, so this guard is
+    # defense in depth -- it keeps holding if the whitelist is ever widened.
     #
     # Only revivals are refused. CLOSED/CANCELLED are terminal, so moving a PO INTO one of
     # them stays allowed -- closing out a removed supplier's paperwork must never be blocked.
-    # Message mirrors ``restore_purchase_order`` so the two read identically, and it is
-    # raised before the first setattr so a refusal leaves the row untouched.
-    new_status = po_in.model_dump(exclude_unset=True).get("status")
+    # Message mirrors ``restore_purchase_order`` so the two read identically.
     if new_status is not None and POStatus(new_status) not in (POStatus.CLOSED, POStatus.CANCELLED):
         if po.vendor is not None and po.vendor.is_deleted:
             raise HTTPException(

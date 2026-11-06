@@ -523,7 +523,23 @@ Create `/etc/logrotate.d/werco-erp`:
 - **Sentry** for error tracking (configured via `SENTRY_DSN`). Performance transactions
   are sampled at `SENTRY_TRACES_SAMPLE_RATE` (default `0.1`) — that knob governs traces
   **only**, never error capture; every exception is reported at any value. Events are
-  tagged with `APP_RELEASE`, the commit SHA CI stamps into the artifact. See
+  tagged with `APP_RELEASE`, the commit SHA CI stamps into the artifact.
+  - Every request's events are also tagged `correlation_id`. This is the `X-Correlation-ID` value,
+    which is also the `reference` a user quotes from a 500 (see
+    [API.md → Internal Server Error (500)](API.md#internal-server-error-500)). A caller-supplied
+    `X-Correlation-ID` is adopted only if it is 1–64 characters of `A–Z a–z 0–9 . _ -`; anything
+    else is replaced by a server-generated id. An unhandled 500 currently produces **two** events,
+    both tagged with the same `correlation_id`: the handler's own and one from the request-logging
+    middleware's log line, which Sentry's dedupe does not catch across that middleware's task.
+  - Once a user or API token authenticates through `get_current_user`, the events also carry
+    `company_id` (the **active** company, which differs from the home company for a platform admin
+    who switched context), `user_id` and `role`. These are ids and the role only, never a name or an
+    email.
+  - A reconcile-on-read side-effect failure is reported tagged `reconcile_step`. A leg that only
+    hit a session an earlier failure had already broken (`PendingRollbackError`) logs a WARNING and
+    sends no event, so one broken reconcile is one event, not one per leg.
+
+  See
   [ENVIRONMENT_VARIABLES.md → Monitoring & Error Tracking](ENVIRONMENT_VARIABLES.md#monitoring--error-tracking)
 - **Prometheus + Grafana** for metrics monitoring
 - **Health checks**: `GET /health`; `GET /health/detailed` additionally reports the

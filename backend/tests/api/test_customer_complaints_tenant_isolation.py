@@ -1555,6 +1555,69 @@ class TestEscalation:
         assert _state(db_session, CustomerComplaint, complaint.id)["ncr_id"] is None
         assert _side_effect_counts(db_session) == before_counts
 
+    def test_create_car_after_the_linked_car_is_voided_raises_a_fresh_one(
+        self, client: TestClient, db_session: Session, quality_a
+    ):
+        # POST /quality/car/{id}/void retires a CAR, and an NCR may then raise a fresh one.
+        # A complaint follows the same rule instead of being stuck on the voided CAR forever.
+        complaint = make_complaint(db_session, company_id=COMPANY_A)
+        headers = headers_for(quality_a)
+        first = client.post(f"{API}/complaints/{complaint.id}/create-car", headers=headers)
+        assert first.status_code == 200, first.text
+        voided_id = first.json()["car_id"]
+
+        still_live = client.post(f"{API}/complaints/{complaint.id}/create-car", headers=headers)
+        assert still_live.status_code == 400, still_live.text
+
+        void = client.post(
+            f"/api/v1/quality/car/{voided_id}/void", json={"reason": "Duplicate of an open CAR"}, headers=headers
+        )
+        assert void.status_code == 200, void.text
+
+        again = client.post(f"{API}/complaints/{complaint.id}/create-car", headers=headers)
+
+        assert again.status_code == 200, again.text
+        fresh_id = again.json()["car_id"]
+        assert fresh_id not in (None, voided_id)
+        fresh = db_session.get(CorrectiveActionRequest, fresh_id)
+        assert fresh.company_id == COMPANY_A
+        link_rows = [
+            row.extra_data["changes"]["car_id"]
+            for row in _audit_rows(db_session, "customer_complaint", complaint.id)
+            if "car_id" in (row.extra_data or {}).get("changes", {})
+        ]
+        assert link_rows[-1] == {"old": voided_id, "new": fresh_id}
+
+    def test_create_ncr_after_the_linked_ncr_is_voided_raises_a_fresh_one(
+        self, client: TestClient, db_session: Session, quality_a
+    ):
+        complaint = make_complaint(db_session, company_id=COMPANY_A)
+        headers = headers_for(quality_a)
+        first = client.post(f"{API}/complaints/{complaint.id}/create-ncr", headers=headers)
+        assert first.status_code == 200, first.text
+        voided_id = first.json()["ncr_id"]
+
+        void = client.request(
+            "DELETE",
+            f"/api/v1/quality/ncr/{voided_id}",
+            json={"reason": "Raised against the wrong lot"},
+            headers=headers,
+        )
+        assert void.status_code == 200, void.text
+
+        again = client.post(f"{API}/complaints/{complaint.id}/create-ncr", headers=headers)
+
+        assert again.status_code == 200, again.text
+        fresh_id = again.json()["ncr_id"]
+        assert fresh_id not in (None, voided_id)
+        assert db_session.get(NonConformanceReport, fresh_id).is_deleted is False
+        link_rows = [
+            row.extra_data["changes"]["ncr_id"]
+            for row in _audit_rows(db_session, "customer_complaint", complaint.id)
+            if "ncr_id" in (row.extra_data or {}).get("changes", {})
+        ]
+        assert link_rows[-1] == {"old": voided_id, "new": fresh_id}
+
     # quality_numbering allocates NCR / CAR numbers PER COMPANY, and since migration 116
     # ncrs.ncr_number and cars.car_number are unique per company, as (company_id, number).
     # Before that both were GLOBALLY unique, so the first same-day NCR/CAR of a second

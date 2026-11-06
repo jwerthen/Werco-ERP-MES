@@ -42,6 +42,9 @@ export default function QualityRecordDetail({
   const [attempt, setAttempt] = useState(0);
   const { can } = usePermissions();
   const editable = can('quality:approve') && record?.status !== 'void';
+  // A closed record is final: the server refuses (409) every change to it except a
+  // status-only reopen, so only the status control stays live until it is reopened.
+  const closedRecord = record?.status === 'closed';
   const { confirmDiscard, markSaved } = useUnsavedChanges(!!record && JSON.stringify(form) !== original);
   useEffect(() => {
     let active = true;
@@ -171,84 +174,92 @@ export default function QualityRecordDetail({
                 </select>
               )}
             </FormField>
-            {kind === 'ncr' && (
-              <div className="grid grid-cols-2 gap-3">
-                <FormField label="Disposition">
-                  {field => (
-                    <select
-                      {...field}
-                      className="input"
-                      value={form.disposition}
-                      onChange={e => setForm(f => ({ ...f, disposition: e.target.value }))}
-                    >
-                      {['pending', 'use_as_is', 'rework', 'repair', 'scrap', 'return_to_vendor'].map(value => (
-                        <option key={value} value={value}>
-                          {label(value)}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                </FormField>
-                <FormField label="Quantity rejected">
-                  {field => (
-                    <input
-                      {...field}
-                      type="number"
-                      className="input"
-                      min="0"
-                      max={record.quantity_affected}
-                      step="any"
-                      value={form.quantity_rejected}
-                      onChange={e => setForm(f => ({ ...f, quantity_rejected: Number(e.target.value) }))}
-                    />
-                  )}
-                </FormField>
-              </div>
+            {closedRecord && editable && (
+              <p className="text-sm text-slate-400">
+                This record is closed and read-only. To change it, set the status back to an open state and save, then
+                edit it.
+              </p>
             )}
-            {kind === 'car' && (
-              <div className="grid grid-cols-3 gap-3">
-                <FormField label="Priority (1 highest)">
-                  {field => (
-                    <input
-                      {...field}
-                      className="input"
-                      type="number"
-                      min="1"
-                      max="10"
-                      value={form.priority}
-                      onChange={e => setForm(f => ({ ...f, priority: Number(e.target.value) }))}
-                    />
-                  )}
-                </FormField>
-                {['due_date', 'verification_due'].map(key => (
-                  <FormField key={key} label={label(key)}>
+            <fieldset disabled={closedRecord} className="space-y-4">
+              {kind === 'ncr' && (
+                <div className="grid grid-cols-2 gap-3">
+                  <FormField label="Disposition">
+                    {field => (
+                      <select
+                        {...field}
+                        className="input"
+                        value={form.disposition}
+                        onChange={e => setForm(f => ({ ...f, disposition: e.target.value }))}
+                      >
+                        {['pending', 'use_as_is', 'rework', 'repair', 'scrap', 'return_to_vendor'].map(value => (
+                          <option key={value} value={value}>
+                            {label(value)}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </FormField>
+                  <FormField label="Quantity rejected">
                     {field => (
                       <input
                         {...field}
-                        type="date"
+                        type="number"
                         className="input"
-                        value={form[key]}
-                        onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))}
+                        min="0"
+                        max={record.quantity_affected}
+                        step="any"
+                        value={form.quantity_rejected}
+                        onChange={e => setForm(f => ({ ...f, quantity_rejected: Number(e.target.value) }))}
                       />
                     )}
                   </FormField>
-                ))}
-              </div>
-            )}
-            {(kind === 'ncr' ? ncrFields : carFields).map(key => (
-              <FormField key={key} label={label(key)}>
-                {field => (
-                  <textarea
-                    {...field}
-                    className="input"
-                    rows={3}
-                    maxLength={2000}
-                    value={form[key] || ''}
-                    onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))}
-                  />
-                )}
-              </FormField>
-            ))}
+                </div>
+              )}
+              {kind === 'car' && (
+                <div className="grid grid-cols-3 gap-3">
+                  <FormField label="Priority (1 highest)">
+                    {field => (
+                      <input
+                        {...field}
+                        className="input"
+                        type="number"
+                        min="1"
+                        max="10"
+                        value={form.priority}
+                        onChange={e => setForm(f => ({ ...f, priority: Number(e.target.value) }))}
+                      />
+                    )}
+                  </FormField>
+                  {['due_date', 'verification_due'].map(key => (
+                    <FormField key={key} label={label(key)}>
+                      {field => (
+                        <input
+                          {...field}
+                          type="date"
+                          className="input"
+                          value={form[key]}
+                          onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))}
+                        />
+                      )}
+                    </FormField>
+                  ))}
+                </div>
+              )}
+              {(kind === 'ncr' ? ncrFields : carFields).map(key => (
+                <FormField key={key} label={label(key)}>
+                  {field => (
+                    <textarea
+                      {...field}
+                      className="input"
+                      rows={3}
+                      maxLength={2000}
+                      value={form[key] || ''}
+                      onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))}
+                    />
+                  )}
+                </FormField>
+              ))}
+            </fieldset>
           </fieldset>
           {form.status === 'closed' && (
             <p className="text-sm text-slate-400">
