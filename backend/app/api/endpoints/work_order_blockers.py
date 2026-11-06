@@ -101,7 +101,14 @@ def _operation_outcome(resume: Optional[BlockerResumeOutcome]) -> Optional[Block
     )
 
 
-def _broadcast_blocker(blocker: WorkOrderBlocker, event: str) -> None:
+def _broadcast_blocker(blocker: WorkOrderBlocker, event: str, *, company_id: int) -> None:
+    """After-commit realtime nudge for a blocker write, scoped to the ACTIVE company.
+
+    ``company_id`` is the caller's ``get_current_company_id`` value and is required:
+    without it these three broadcasts went to every tenant's sockets (blocker ids,
+    categories and statuses included), and refetched other companies' Dashboard,
+    Scheduling and Shop Floor screens.
+    """
     safe_broadcast(
         broadcast_work_order_update,
         blocker.work_order_id,
@@ -113,6 +120,7 @@ def _broadcast_blocker(blocker: WorkOrderBlocker, event: str) -> None:
             "category": blocker.category,
             "status": blocker.status,
         },
+        company_id=company_id,
     )
     safe_broadcast(
         broadcast_dashboard_update,
@@ -124,6 +132,7 @@ def _broadcast_blocker(blocker: WorkOrderBlocker, event: str) -> None:
             "category": blocker.category,
             "status": blocker.status,
         },
+        company_id=company_id,
     )
     if blocker.operation and blocker.operation.work_center_id:
         safe_broadcast(
@@ -135,6 +144,7 @@ def _broadcast_blocker(blocker: WorkOrderBlocker, event: str) -> None:
                 "operation_id": blocker.operation_id,
                 "blocker_id": blocker.id,
             },
+            company_id=company_id,
         )
 
 
@@ -176,7 +186,7 @@ def create_work_order_blocker(
         )
         db.commit()
         db.refresh(blocker)
-        _broadcast_blocker(blocker, "work_order_blocker_created")
+        _broadcast_blocker(blocker, "work_order_blocker_created", company_id=company_id)
         return _to_response(blocker)
     except ValueError as exc:
         db.rollback()
@@ -209,7 +219,7 @@ def update_work_order_blocker(
         outcome = _operation_outcome(resume)
         db.commit()
         db.refresh(blocker)
-        _broadcast_blocker(blocker, "work_order_blocker_updated")
+        _broadcast_blocker(blocker, "work_order_blocker_updated", company_id=company_id)
         return _to_write_response(blocker, outcome)
     except ValueError as exc:
         db.rollback()
@@ -249,7 +259,7 @@ def resolve_work_order_blocker(
         outcome = _operation_outcome(resume)
         db.commit()
         db.refresh(blocker)
-        _broadcast_blocker(blocker, "work_order_blocker_resolved")
+        _broadcast_blocker(blocker, "work_order_blocker_resolved", company_id=company_id)
         return _to_write_response(blocker, outcome)
     except ValueError as exc:
         db.rollback()

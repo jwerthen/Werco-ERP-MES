@@ -1675,8 +1675,8 @@ def record_dispatch_change(
 def broadcast_dispatch_changes(company_id: int, work_center_ids: Sequence[int]) -> None:
     """After-commit websocket nudge, one per changed work center. Best-effort.
 
-    ``company_id`` is passed EXPLICITLY: ``broadcast_shop_floor_update`` without it
-    fans out to every tenant's sockets. An accelerator only -- broadcasts reach the
+    ``company_id`` is passed EXPLICITLY: ``broadcast_shop_floor_update`` requires it
+    and drops (logs, never fans out) a ``None``. An accelerator only -- broadcasts reach the
     sockets of the one API process that handled the request, and crew-station
     tokens cannot open a socket at all -- so the floor's poll of the notice
     (:func:`latest_dispatch_notices`) is the delivery guarantee. Never raises.

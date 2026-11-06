@@ -64,7 +64,8 @@ export interface PartUpdate {
   standard_cost?: number;
   is_critical?: boolean;
   requires_inspection?: boolean;
-  is_active?: boolean;
+  // No `is_active` / `status`: the server's PartUpdate does not carry them. Retiring or
+  // re-activating a part is POST /parts/{id}/deactivate | /activate (PartActivationDialog).
   customer_name?: string;
   customer_part_number?: string;
   drawing_number?: string;

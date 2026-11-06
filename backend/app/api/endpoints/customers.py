@@ -5,11 +5,13 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, EmailStr, ValidationError, field_validator
 from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.time_utils import to_utc_iso
 from app.db.database import get_db
+from app.db.tenant_filter import tenant_query
 from app.models.customer import Customer
 from app.models.part import Part, PartType
 from app.models.user import User, UserRole
@@ -26,6 +28,22 @@ router = APIRouter()
 # caller sees changes; it exists so a pathological request cannot read the whole
 # table. ``/customers/names`` shares it because it feeds every picker.
 MAX_CUSTOMER_ROWS = 5_000
+
+# Who may EDIT the customer master. Matches every other customer write in this
+# router (import, delete, restore) and the vendor master's create/update gate --
+# a customer record carries the CoC/FAI requirements and the payment terms every
+# quote and shipment reads, so it is an office-controlled master, not a floor
+# record. Reads stay read-broad (docs/RBAC_PERMISSIONS.md -> Customers).
+CUSTOMER_UPDATE_ROLES = [UserRole.ADMIN, UserRole.MANAGER]
+
+# Who may CREATE a customer: the edit roles plus Supervisor -- exactly the roles
+# ``POST /work-orders/`` admits. New Work Order (WorkOrderNew.tsx) creates the
+# customer inline (``api.createCustomer({name})``) when the typed name is not in
+# the master yet, and abandons the work-order submit if that create is refused, so
+# a create gate narrower than the work-order gate would take "open a work order for
+# a new customer" away from a role that may open work orders. Changing an EXISTING
+# record (its CoC/FAI requirements, terms, name) stays ``CUSTOMER_UPDATE_ROLES``.
+CUSTOMER_CREATE_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR]
 
 
 class CustomerCreate(BaseModel):
@@ -149,19 +167,34 @@ def _parse_bool(value: str, default: bool = False) -> bool:
     raise ValueError(f"Invalid boolean value '{value}'")
 
 
-def generate_customer_code(db: Session, name: str, company_id: Optional[int] = None) -> str:
-    """Generate a customer code from name"""
+def generate_customer_code(db: Session, name: str, company_id: int) -> str:
+    """Generate a customer code from the name, unique within ``company_id``.
+
+    Codes are unique PER COMPANY (``uq_customers_company_code``, migration 115), so
+    the probe reads only the active company's codes -- another tenant's ``ACM001``
+    is neither visible here nor a collision. Soft-deleted customers are counted on
+    purpose: the constraint has no partial predicate, so a deleted customer still
+    owns its code. The number starts at "matching codes + 1" (the historical
+    behaviour) and steps past any code already taken, so a hand-keyed ``ACM002``
+    can no longer make the generator mint a duplicate.
+    """
     # Take first 3 chars of name, uppercase
     base = "".join(c for c in name.upper() if c.isalnum())[:3]
     if len(base) < 3:
         base = base.ljust(3, "X")
 
-    # Find next number
-    query = db.query(Customer).filter(Customer.code.like(f"{base}%"))
-    if company_id is not None:
-        query = query.filter(Customer.company_id == company_id)
-    existing = query.count()
-    return f"{base}{existing + 1:03d}"
+    taken = {
+        code
+        for (code,) in tenant_query(db, Customer, company_id)
+        .with_entities(Customer.code)
+        .filter(Customer.code.like(f"{base}%"))
+        .all()
+        if code
+    }
+    number = len(taken) + 1
+    while f"{base}{number:03d}" in taken:
+        number += 1
+    return f"{base}{number:03d}"
 
 
 @router.get("/", response_model=List[CustomerResponse])
@@ -409,8 +442,12 @@ def get_customer_stats(
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
+    # Both child reads are tenant-scoped. The link to a customer is the free-text
+    # ``customer_name``, and names are only unique PER COMPANY, so an unscoped read
+    # returned every other tenant's parts, work-order numbers and customer POs
+    # filed under the same name.
     customer_parts = (
-        db.query(Part)
+        tenant_query(db, Part, company_id)
         .filter(
             Part.customer_name == customer.name,
             Part.is_deleted == False,  # noqa: E712
@@ -421,7 +458,9 @@ def get_customer_stats(
     part_ids = [part.id for part in customer_parts]
 
     work_orders_query = (
-        db.query(WorkOrder).options(joinedload(WorkOrder.part)).filter(WorkOrder.is_deleted == False)  # noqa: E712
+        tenant_query(db, WorkOrder, company_id)
+        .options(joinedload(WorkOrder.part))
+        .filter(WorkOrder.is_deleted == False)  # noqa: E712
     )
 
     if part_ids:
@@ -514,20 +553,43 @@ def get_customer_stats(
 def create_customer(
     customer_in: CustomerCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(CUSTOMER_CREATE_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new customer"""
-    # Check name uniqueness
-    if db.query(Customer).filter(Customer.name == customer_in.name, Customer.company_id == company_id).first():
+    """Create a customer in the active company. Admin / Manager / Supervisor.
+
+    Supervisor is admitted because New Work Order creates the customer inline when
+    the typed name is new, and Supervisor may create work orders.
+
+    ``name`` and ``code`` must each be unique within the company (400 "Customer
+    name already exists" / "Customer code already exists"); another company's
+    customers never collide. ``code`` is generated from the name when omitted.
+    Writes an audit_log CREATE row in the same transaction.
+    """
+    # Both probes DELIBERATELY see soft-deleted customers: uq_customers_company_name
+    # and uq_customers_company_code have no partial predicate, so a deleted customer
+    # still owns its name and code (and restore has no collision check).
+    if tenant_query(db, Customer, company_id).filter(Customer.name == customer_in.name).first():
         raise HTTPException(status_code=400, detail="Customer name already exists")
+    if customer_in.code and tenant_query(db, Customer, company_id).filter(Customer.code == customer_in.code).first():
+        raise HTTPException(status_code=400, detail="Customer code already exists")
 
     code = customer_in.code or generate_customer_code(db, customer_in.name, company_id)
 
     customer = Customer(**customer_in.model_dump(exclude={"code"}), code=code)
     customer.company_id = company_id
     db.add(customer)
-    db.commit()
+    try:
+        # Flush first so the snapshot carries the id and column defaults, and log
+        # BEFORE the commit so the audit row commits atomically with the customer.
+        db.flush()
+        audit.log_create("customer", customer.id, customer.name, new_values=customer)
+        db.commit()
+    except IntegrityError as exc:
+        # TOCTOU backstop: a concurrent create can slip past the probes above.
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Customer name or code already exists") from exc
     db.refresh(customer)
     return customer
 
@@ -537,11 +599,15 @@ def update_customer(
     customer_id: int,
     customer_in: CustomerUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(CUSTOMER_UPDATE_ROLES)),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a customer"""
+    """Update a live customer in the active company. Admin / Manager only.
+
+    Only the supplied fields change; a rename must stay unique within the company.
+    Writes an audit_log UPDATE row with the supplied fields' old and new values.
+    """
     customer = (
         db.query(Customer)
         .filter(Customer.id == customer_id, Customer.company_id == company_id, Customer.is_deleted.is_(False))
@@ -554,17 +620,28 @@ def update_customer(
     update_data = customer_in.model_dump(exclude_unset=True)
     previous = {field: getattr(customer, field) for field in update_data}
 
-    # Check name uniqueness if changing
+    # Check name uniqueness if changing. Sees soft-deleted rows on purpose (see
+    # create_customer): the per-company constraint spans them.
     if "name" in update_data and update_data["name"] != customer.name:
-        if db.query(Customer).filter(Customer.name == update_data["name"], Customer.company_id == company_id).first():
+        if tenant_query(db, Customer, company_id).filter(Customer.name == update_data["name"]).first():
             raise HTTPException(status_code=400, detail="Customer name already exists")
 
     for field, value in update_data.items():
         setattr(customer, field, value)
 
-    audit.log_update("customer", customer.id, customer.name, old_values=previous, new_values=update_data)
-
-    db.commit()
+    try:
+        # Flush BEFORE the audit call, inside the try. AuditService.log autoflushes on
+        # its chain-tail read and swallows any exception as best-effort, so a pending
+        # rename that hits uq_customers_company_name there would be eaten and the
+        # commit would raise PendingRollbackError (500), not IntegrityError. Flushing
+        # here surfaces the constraint violation to this handler first.
+        db.flush()
+        audit.log_update("customer", customer.id, customer.name, old_values=previous, new_values=update_data)
+        db.commit()
+    except IntegrityError as exc:
+        # TOCTOU backstop for a concurrent rename onto the same name.
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Customer name already exists") from exc
     db.refresh(customer)
     return customer
 
@@ -578,16 +655,30 @@ def delete_customer(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Soft delete or permanently delete a customer."""
+    """Soft delete or permanently delete a customer.
+
+    A second soft delete of an already soft-deleted customer is refused **400**;
+    ``hard_delete=true`` on a tombstone is still allowed.
+    """
+    # Deliberately NOT filtered on is_deleted: delete must see the tombstone, both to
+    # refuse a double soft delete below and to let hard_delete remove one.
     customer = db.query(Customer).filter(Customer.id == customer_id, Customer.company_id == company_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
+    if customer.is_deleted and not hard_delete:
+        # A re-delete would overwrite deleted_at/deleted_by and write a DELETE row
+        # claiming the customer was live -- falsifying the only record of the
+        # is_active value it had before the first delete.
+        raise HTTPException(status_code=400, detail="Customer is already deleted")
+
     audit = AuditService(db, current_user, request)
 
     if hard_delete:
-        # Check for dependencies
-        part_count = db.query(Part).filter(Part.customer_name == customer.name).count()
+        # Check for dependencies -- in THIS company only. Names are unique per
+        # company, so an unscoped count refused the delete over another tenant's
+        # parts and disclosed how many it had.
+        part_count = tenant_query(db, Part, company_id).filter(Part.customer_name == customer.name).count()
         if part_count > 0:
             raise HTTPException(
                 status_code=400,
@@ -596,16 +687,27 @@ def delete_customer(
 
         # Log BEFORE the terminal commit so the audit row commits atomically
         # with the delete (AuditService.log only flushes; get_db never commits).
-        audit.log_delete("customer", customer.id, customer.name)
+        # The full row goes into old_values: after this commit the audit chain is
+        # the only place the record still exists.
+        audit.log_delete("customer", customer.id, customer.name, old_values=customer)
         db.delete(customer)
         db.commit()
         return {"message": "Customer permanently deleted"}
 
-    # Soft delete
+    # Soft delete. The delete also clears is_active, so the row records the value it
+    # had -- restore does not put it back (it re-activates unconditionally), and this
+    # row is the only evidence of what the flag was.
+    was_active = bool(customer.is_active)
     customer.soft_delete(current_user.id)
     customer.is_active = False
     # Log BEFORE the terminal commit so the audit row persists atomically.
-    audit.log_delete("customer", customer.id, customer.name, soft_delete=True)
+    audit.log_delete(
+        "customer",
+        customer.id,
+        customer.name,
+        old_values={"is_deleted": False, "is_active": was_active},
+        soft_delete=True,
+    )
     db.commit()
     return {"message": "Customer marked as deleted (soft delete)", "can_restore": True}
 
@@ -628,17 +730,19 @@ def restore_customer(
 
     audit = AuditService(db, current_user, request)
 
+    was_active = bool(customer.is_active)
     customer.restore()
     customer.is_active = True
 
     # Log BEFORE the terminal commit so the audit row commits atomically with
-    # the restore (AuditService.log only flushes; get_db never commits).
+    # the restore (AuditService.log only flushes; get_db never commits). Both
+    # flags the restore writes are recorded -- the is_active flip included.
     audit.log_update(
         "customer",
         customer.id,
         customer.name,
-        old_values={"is_deleted": True},
-        new_values={"is_deleted": False},
+        old_values={"is_deleted": True, "is_active": was_active},
+        new_values={"is_deleted": False, "is_active": True},
         action="restore",
     )
     db.commit()

@@ -171,6 +171,8 @@ def test_soft_delete_customer_persists_delete_audit(client: TestClient, db_sessi
     assert rows[0].resource_type == RESOURCE
     assert rows[0].resource_id == customer.id
     assert rows[0].company_id == COMPANY_A
+    # The delete also clears is_active; the row records the value it had.
+    assert rows[0].old_values == {"is_deleted": False, "is_active": True}
 
 
 # ---------------------------------------------------------------------------
@@ -250,9 +252,10 @@ def test_restore_customer_persists_restore_audit(client: TestClient, db_session:
     assert restore_row.resource_type == RESOURCE
     assert restore_row.resource_id == customer.id
     assert restore_row.company_id == COMPANY_A
-    # log_update captures the is_deleted transition in old/new values.
-    assert restore_row.old_values == {"is_deleted": True}
-    assert restore_row.new_values == {"is_deleted": False}
+    # log_update captures both flags the restore writes: the is_deleted transition and
+    # the unconditional is_active re-activation (this fixture was soft-deleted inactive).
+    assert restore_row.old_values == {"is_deleted": True, "is_active": False}
+    assert restore_row.new_values == {"is_deleted": False, "is_active": True}
 
 
 # ---------------------------------------------------------------------------
