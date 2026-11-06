@@ -650,11 +650,9 @@ class TestToolForeignReferences:
 
 
 class TestToolCodeUniqueness:
-    def test_a_tool_id_another_tenant_already_uses_is_400_not_500_and_writes_nothing(
-        self, client: TestClient, db_session: Session
-    ):
-        # ``tools.tool_id`` is still GLOBALLY unique (no per-company compound yet), so the
-        # tenant-scoped probe misses it and the flush is what refuses.
+    def test_a_tool_id_another_tenant_uses_is_accepted_per_company(self, client: TestClient, db_session: Session):
+        # ``tool_id`` is unique per company (migration 116): another tenant's identical tool
+        # tag is no longer refused, and refusing it would disclose that it exists.
         taken = make_tool(db_session, company_id=COMPANY_A)
         ensure_company(db_session, COMPANY_B)
         headers = headers_for(db_session, company_id=COMPANY_B, role=UserRole.MANAGER)
@@ -662,9 +660,27 @@ class TestToolCodeUniqueness:
 
         response = client.post(f"{TOOLS_URL}/", json={"tool_id": taken.tool_id, "name": "Mine"}, headers=headers)
 
+        assert response.status_code == 200, response.text
+        mine = db_session.query(Tool).filter(Tool.company_id == COMPANY_B).one()
+        assert (mine.tool_id, mine.name) == (taken.tool_id, "Mine")
+        assert audit_count(db_session) == audit_before + 1
+
+    def test_a_same_company_race_past_the_probe_is_400_not_500_and_writes_nothing(
+        self, client: TestClient, db_session: Session, monkeypatch
+    ):
+        from app.api.endpoints import tool_management as tool_endpoint
+        from tests.api.test_business_keys_per_company import probe_misses_once
+
+        taken = make_tool(db_session, company_id=COMPANY_A)
+        headers = headers_for(db_session, company_id=COMPANY_A, role=UserRole.MANAGER)
+        audit_before = audit_count(db_session)
+        probe_misses_once(monkeypatch, tool_endpoint, Tool)
+
+        response = client.post(f"{TOOLS_URL}/", json={"tool_id": taken.tool_id, "name": "Mine"}, headers=headers)
+
         assert response.status_code == 400, response.text
         assert response.json()["detail"] == "Tool ID already exists"
-        assert db_session.query(Tool).filter(Tool.company_id == COMPANY_B).count() == 0
+        assert db_session.query(Tool).filter(Tool.tool_id == taken.tool_id).count() == 1
         assert audit_count(db_session) == audit_before
         follow_up = client.post(
             f"{TOOLS_URL}/", json={"tool_id": f"{taken.tool_id}-B", "name": "Mine"}, headers=headers

@@ -450,8 +450,9 @@ def create_reason_code(
     try:
         db.flush()
     except IntegrityError:
-        # ``downtime_reason_codes.code`` still carries a GLOBAL unique constraint, so a
-        # code another tenant already uses fails here rather than in the probe above.
+        # ``code`` is unique per company (``uq_downtime_reason_codes_company_code``,
+        # migration 116), so another tenant's identical code is accepted. This catch is
+        # the backstop for a same-company race the probe above cannot see.
         db.rollback()
         raise HTTPException(status_code=400, detail="Reason code already exists")
     audit.log_create("downtime_reason_code", reason_code.id, reason_code.code, new_values=reason_code)

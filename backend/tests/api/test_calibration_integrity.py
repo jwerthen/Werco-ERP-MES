@@ -865,22 +865,44 @@ class TestEquipmentWritesAudited:
         )
         assert (row.action, row.company_id, row.resource_identifier) == ("CREATE", COMPANY_A, code)
 
-    def test_a_code_another_tenant_already_uses_is_400_not_500_and_writes_nothing(
-        self, client: TestClient, db_session: Session
-    ):
-        # ``equipment.equipment_id`` is still GLOBALLY unique (no per-company compound yet),
-        # so the tenant-scoped probe misses it and the flush is what refuses.
+    def test_a_code_another_tenant_uses_is_accepted_per_company(self, client: TestClient, db_session: Session):
+        # ``equipment_id`` is unique per company (migration 116): another tenant's identical
+        # gauge tag is no longer refused, and refusing it would disclose that it exists.
         code = f"SHARED-CODE-{_next()}"
         make_gauge(db_session, company_id=COMPANY_A).equipment_id = code
         db_session.commit()
         headers = quality_headers(db_session, company_id=COMPANY_B)
+
+        response = client.post(EQUIPMENT_URL, json={"equipment_id": code, "name": "Mine"}, headers=headers)
+
+        assert response.status_code == 200, response.text
+        mine = db_session.query(Equipment).filter(Equipment.company_id == COMPANY_B).one()
+        assert (mine.equipment_id, mine.name) == (code, "Mine")
+        row = (
+            db_session.query(AuditLog)
+            .filter(AuditLog.resource_type == "equipment", AuditLog.resource_id == mine.id)
+            .one()
+        )
+        assert (row.action, row.company_id) == ("CREATE", COMPANY_B)
+
+    def test_a_same_company_race_past_the_probe_is_400_not_500_and_writes_nothing(
+        self, client: TestClient, db_session: Session, monkeypatch
+    ):
+        from app.api.endpoints import calibration as calibration_endpoint
+        from tests.api.test_business_keys_per_company import probe_misses_once
+
+        code = f"RACE-CODE-{_next()}"
+        make_gauge(db_session, company_id=COMPANY_A).equipment_id = code
+        db_session.commit()
+        headers = quality_headers(db_session, company_id=COMPANY_A)
         audit_before = audit_count(db_session)
+        probe_misses_once(monkeypatch, calibration_endpoint, Equipment)
 
         response = client.post(EQUIPMENT_URL, json={"equipment_id": code, "name": "Mine"}, headers=headers)
 
         assert response.status_code == 400, response.text
         assert response.json()["detail"] == "Equipment ID already exists"
-        assert db_session.query(Equipment).filter(Equipment.company_id == COMPANY_B).count() == 0
+        assert db_session.query(Equipment).filter(Equipment.equipment_id == code).count() == 1
         assert audit_count(db_session) == audit_before
         # The refused flush must not poison the request session for the next call.
         follow_up = client.post(EQUIPMENT_URL, json={"equipment_id": f"{code}-B", "name": "Mine"}, headers=headers)

@@ -27,6 +27,7 @@ from datetime import datetime
 from itertools import count
 
 import pytest
+import sqlalchemy as sa
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -41,6 +42,28 @@ from app.models.user import UserRole
 from tests.api.kiosk_test_helpers import COMPANY_A, COMPANY_B, ensure_company, make_user, user_headers
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
+
+
+def probe_misses_once(monkeypatch, module, model) -> None:
+    """Make ``module``'s next tenant-scoped duplicate probe on ``model`` see nothing.
+
+    Simulates the race the per-company constraint backstops: a same-company create of
+    the same code commits between the router's probe and its flush. The probe passes,
+    the flush hits ``uq_<table>_company_<col>``, and the router's ``IntegrityError``
+    handler must answer 400 and leave the request session usable. Since migration 116
+    nothing else reaches that handler -- another tenant's identical code is accepted.
+    """
+    real = module.tenant_query
+    state = {"missed": False}
+
+    def tenant_query(db, target, company_id):
+        query = real(db, target, company_id)
+        if target is model and not state["missed"]:
+            state["missed"] = True
+            return query.filter(sa.false())
+        return query
+
+    monkeypatch.setattr(module, "tenant_query", tenant_query)
 
 
 # ---------------------------------------------------------------- quality numbering (NCR / CAR)
@@ -129,8 +152,8 @@ def test_a_voided_ncr_keeps_its_number_and_is_never_reissued(client: TestClient,
 # ---------------------------------------------------------------- user-entered identifiers
 
 # kind -> (create URL, model, key column, existing duplicate detail, body builder)
-# MANAGER is allowed by every one of these create routes (they require only an
-# authenticated user on this branch, and MANAGER stays inside each write gate PR #307 adds).
+# MANAGER is inside every one of these create routes' write gates (calibration:
+# Admin/Manager/Quality; tools and downtime reason codes: Admin/Manager/Supervisor).
 CATALOG_CREATES = {
     "equipment": (
         "/api/v1/calibration/equipment",

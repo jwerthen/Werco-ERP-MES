@@ -535,9 +535,9 @@ class TestReasonCodeIntegrity:
         db_session.refresh(target)
         assert (target.code, target.name) == ("MECH-02", "Spindle")
 
-    def test_a_code_another_tenant_already_uses_is_400_not_500(self, client: TestClient, db_session: Session):
-        # ``downtime_reason_codes.code`` is still GLOBALLY unique, so the tenant-scoped probe
-        # misses it and the flush is what refuses.
+    def test_a_code_another_tenant_uses_is_accepted_per_company(self, client: TestClient, db_session: Session):
+        # ``code`` is unique per company (migration 116): another tenant's identical reason
+        # code is no longer refused, and refusing it would disclose that it exists.
         make_reason_code(db_session, company_id=COMPANY_A, code="SHARED-01")
         headers = headers_for(db_session, company_id=COMPANY_B, role=UserRole.MANAGER)
         audit_before = reason_code_audit_count(db_session)
@@ -548,8 +548,31 @@ class TestReasonCodeIntegrity:
             headers=headers,
         )
 
+        assert response.status_code == 200, response.text
+        mine = db_session.query(DowntimeReasonCode).filter(DowntimeReasonCode.company_id == COMPANY_B).one()
+        assert (mine.code, mine.name) == ("SHARED-01", "Mine")
+        assert reason_code_audit_count(db_session) == audit_before + 1
+
+    def test_a_same_company_race_past_the_probe_is_400_not_500(
+        self, client: TestClient, db_session: Session, monkeypatch
+    ):
+        from app.api.endpoints import downtime as downtime_endpoint
+        from tests.api.test_business_keys_per_company import probe_misses_once
+
+        make_reason_code(db_session, company_id=COMPANY_A, code="RACE-01")
+        headers = headers_for(db_session, company_id=COMPANY_A, role=UserRole.MANAGER)
+        audit_before = reason_code_audit_count(db_session)
+        probe_misses_once(monkeypatch, downtime_endpoint, DowntimeReasonCode)
+
+        response = client.post(
+            f"{DOWNTIME_URL}/reason-codes",
+            json={"code": "RACE-01", "name": "Mine", "category": "mechanical"},
+            headers=headers,
+        )
+
         assert response.status_code == 400, response.text
-        assert db_session.query(DowntimeReasonCode).filter(DowntimeReasonCode.company_id == COMPANY_B).count() == 0
+        assert response.json()["detail"] == "Reason code already exists"
+        assert db_session.query(DowntimeReasonCode).filter(DowntimeReasonCode.code == "RACE-01").count() == 1
         assert reason_code_audit_count(db_session) == audit_before
 
     @pytest.mark.parametrize("role", [UserRole.VIEWER, UserRole.OPERATOR, UserRole.QUALITY, UserRole.SHIPPING])

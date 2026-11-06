@@ -441,9 +441,10 @@ def create_equipment(
     try:
         db.flush()
     except IntegrityError:
-        # ``equipment.equipment_id`` still carries a GLOBAL unique constraint (no
-        # per-company compound yet), so a code another tenant already uses fails here
-        # rather than in the tenant-scoped probe above. Same answer as the probe.
+        # ``equipment_id`` is unique per company (``uq_equipment_company_equipment_id``,
+        # migration 116), so another tenant's identical code is accepted. This catch is
+        # the backstop for a same-company race the probe above cannot see: two creates
+        # of one code passing the probe concurrently. Same answer as the probe.
         db.rollback()
         raise HTTPException(status_code=400, detail="Equipment ID already exists")
     audit.log_create("equipment", equipment.id, equipment.equipment_id, new_values=equipment)
