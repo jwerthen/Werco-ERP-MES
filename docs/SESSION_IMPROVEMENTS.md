@@ -126,14 +126,9 @@ tests/test_services.py
 - Handles disconnections gracefully
 - Connection counting and monitoring
 
-**Broadcast Functions:**
-```python
-await manager.broadcast(message, "dashboard_update")
-await broadcast_work_order_update(work_order_id, data)
-await broadcast_shop_floor_update(work_center_id, data)
-await send_notification_to_user(user_id, notification)
-await broadcast_quality_alert(alert_data)
-```
+**Broadcast Functions:** superseded. The all-tenant `manager.broadcast`, the unscoped helper calls
+and the optional-auth socket this session describes no longer exist. Every broadcast is now
+tenant-scoped and requires `company_id`. See `docs/API.md` → Real-time Updates → Event delivery.
 
 **Benefits:**
 - Real-time dashboard updates without page refresh

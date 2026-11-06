@@ -1,9 +1,10 @@
 """NCR void (soft-delete) + restore endpoint coverage.
 
-Covers the quality-record void path added to ``app/api/endpoints/quality.py``:
-role gating, the blank-reason guard, the "already voided" / "not voided" states,
-the active-work-order-blocker guardrail, tamper-evident audit emission (which the
-plain ``update_ncr`` path deliberately does NOT do), and restore-reopens-to-OPEN.
+Covers the quality-record void path (``app/api/endpoints/quality.py`` ->
+``app/services/quality_record_service.py``): role gating, the blank-reason guard, the
+"already voided" / "not voided" states, the active-work-order-blocker guardrail,
+tamper-evident audit emission, and restore-reopens-to-OPEN. The audit chain for the
+other NCR/CAR writes is covered in ``test_ncr_car_audit_chain.py``.
 """
 
 from app.models.audit_log import AuditLog
@@ -58,7 +59,7 @@ class TestVoidNCR:
 
         _void(client, admin_headers, ncr_id, {"reason": "Raised in error"})
 
-        # update_ncr does NOT audit; the void path MUST — both a STATUS_CHANGE and a DELETE row.
+        # The void path writes both a STATUS_CHANGE and a DELETE row.
         assert len(_audit_rows(db_session, ncr_id, "STATUS_CHANGE")) == 1
         delete_rows = _audit_rows(db_session, ncr_id, "DELETE")
         assert len(delete_rows) == 1

@@ -53,8 +53,8 @@ interface DowntimeEvent {
   created_at: string;
   updated_at: string;
   work_center?: { id: number; code: string; name: string };
-  reporter?: { id: number; username: string; full_name?: string };
-  resolver?: { id: number; username: string; full_name?: string };
+  reporter?: { id: number; username?: string | null; full_name?: string | null };
+  resolver?: { id: number; username?: string | null; full_name?: string | null };
   work_order?: { id: number; wo_number?: string };
 }
 

@@ -1,19 +1,33 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, UniqueConstraint
 
 from app.db.database import Base
 from app.db.mixins import SoftDeleteMixin, TenantMixin
 
 
 class Customer(Base, SoftDeleteMixin, TenantMixin):
-    """Customer master record"""
+    """Customer master record.
+
+    ``name`` and ``code`` are unique PER COMPANY (migration 115), never globally:
+    a global unique let one tenant's customer name or code block another tenant's
+    and disclosed that it existed. Neither constraint has a partial predicate, so a
+    soft-deleted customer keeps its name and code. The plain ``ix_customers_name`` /
+    ``ix_customers_code`` indexes stay for single-column lookups. The constraints
+    and indexes here must stay byte-identical to
+    ``alembic/versions/115_customers_unique_per_company.py`` (the create_all ->
+    stamp -> upgrade bootstrap builds them from this class).
+    """
 
     __tablename__ = "customers"
+    __table_args__ = (
+        UniqueConstraint("company_id", "name", name="uq_customers_company_name"),
+        UniqueConstraint("company_id", "code", name="uq_customers_company_code"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(255), unique=True, nullable=False, index=True)
-    code = Column(String(50), unique=True, index=True)
+    name = Column(String(255), nullable=False, index=True)
+    code = Column(String(50), index=True)
 
     # Contact info
     contact_name = Column(String(255))

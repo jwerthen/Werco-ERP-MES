@@ -5,6 +5,7 @@ Handles broadcasting messages to connected clients.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -14,13 +15,31 @@ from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
 
+# Upper bound on one ``send_text`` to one socket. Realtime delivery is serialized per
+# process (``app.core.realtime``), so a socket whose client has stopped reading would
+# otherwise hold up every other socket's events behind it. A send that times out is
+# treated like any failed send: that socket is dropped from delivery.
+WS_SEND_TIMEOUT_SECONDS = 5.0
+
+
+async def _send_bounded(websocket: WebSocket, message_json: str) -> None:
+    await asyncio.wait_for(websocket.send_text(message_json), timeout=WS_SEND_TIMEOUT_SECONDS)
+
 
 class ConnectionManager:
     """Manages WebSocket connections and broadcasts messages.
 
     Tenant isolation (invariant #1): each connection's active ``company_id`` is
     captured at connect time so broadcasts can be scoped to a single tenant.
-    ``broadcast_to_company`` only sends to sockets belonging to that company.
+    ``broadcast_to_company`` only sends to sockets belonging to that company, and
+    ``send_to_user`` only to that user's sockets admitted under the named company.
+
+    There is deliberately NO all-tenants fan-out. Every event this app broadcasts
+    is tenant data (work-order, operation, blocker and work-center ids, statuses),
+    and the old ``broadcast()`` -- reached whenever a caller left ``company_id``
+    out -- delivered those to every company's sockets. No caller needs a global
+    path; add one only for a genuinely tenant-free message, under a name that says
+    so, never as a fallback for a missing ``company_id``.
     """
 
     def __init__(self):
@@ -112,29 +131,6 @@ class ConnectionManager:
         self.disconnect(websocket)
         return False
 
-    async def broadcast(self, message: Dict[str, Any], message_type: str = "update"):
-        """Send a message to all connected clients."""
-        if not self.active_connections:
-            return
-
-        data = {"type": message_type, "data": message, "timestamp": None}  # Will be set by frontend
-
-        message_json = json.dumps(data)
-        disconnected = []
-
-        for connection in list(self.active_connections):
-            try:
-                if not await self._may_deliver(connection):
-                    continue
-                await connection.send_text(message_json)
-            except Exception as e:
-                logger.error(f"Error sending to WebSocket: {e}")
-                disconnected.append(connection)
-
-        # Remove disconnected clients
-        for conn in disconnected:
-            self.disconnect(conn)
-
     async def broadcast_to_company(self, company_id: int, message: Dict[str, Any], message_type: str = "update"):
         """Send a message only to connections belonging to ``company_id``.
 
@@ -156,16 +152,35 @@ class ConnectionManager:
             try:
                 if not await self._may_deliver(connection):
                     continue
-                await connection.send_text(message_json)
+                await _send_bounded(connection, message_json)
             except Exception as e:
-                logger.error(f"Error sending to company WebSocket: {e}")
+                logger.error("Error sending to company WebSocket: %s: %s", type(e).__name__, e)
                 disconnected.append(connection)
 
         for conn in disconnected:
             self.disconnect(conn)
 
-    async def send_to_user(self, user_id: str, message: Dict[str, Any], message_type: str = "notification"):
-        """Send a message to a specific user's connections."""
+    async def send_to_user(
+        self,
+        user_id: str,
+        message: Dict[str, Any],
+        message_type: str = "notification",
+        *,
+        company_id: Optional[int],
+    ):
+        """Send a message to ``user_id``'s connections admitted under ``company_id`` only.
+
+        A user is not a tenant boundary: a platform principal can hold one socket in
+        each company it has switched into, so "every socket this user holds" spans
+        tenants. ``company_id`` is therefore REQUIRED (keyword-only, no default) and an
+        explicit ``None`` reaches nobody -- the same rule as the ``broadcast_*`` helpers.
+        """
+        if company_id is None:
+            logger.warning(
+                "Dropped %s message to a user with no company_id: tenant events are never sent across tenants",
+                message_type,
+            )
+            return
         if user_id not in self.user_connections:
             return
 
@@ -175,12 +190,14 @@ class ConnectionManager:
         disconnected = []
 
         for connection in list(self.user_connections[user_id]):
+            if self.connection_company.get(connection) != company_id:
+                continue
             try:
                 if not await self._may_deliver(connection):
                     continue
-                await connection.send_text(message_json)
+                await _send_bounded(connection, message_json)
             except Exception as e:
-                logger.error(f"Error sending to user WebSocket: {e}")
+                logger.error("Error sending to user WebSocket: %s: %s", type(e).__name__, e)
                 disconnected.append(connection)
 
         # Remove disconnected clients
@@ -209,36 +226,48 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-async def broadcast_dashboard_update(update_data: Dict[str, Any], company_id: Optional[int] = None):
-    """Broadcast dashboard updates.
+async def _broadcast_tenant_event(company_id: Optional[int], message: Dict[str, Any], message_type: str) -> None:
+    """Deliver one tenant event to ``company_id``'s sockets, or to NOBODY.
 
-    When ``company_id`` is provided the update is delivered only to that
-    company's connections (tenant isolation, invariant #1). ``None`` preserves
-    the legacy global broadcast for any non-tenant-scoped caller.
+    ``company_id is None`` used to mean "broadcast to every tenant". It now means the
+    caller failed to say whose data this is, so the message is dropped and a warning
+    is logged (the message type and event name only -- never the payload, which
+    carries the tenant's ids). Dropping is the safe direction: a missed realtime
+    nudge leaves one tenant's screen stale until its next fetch, while a delivered
+    one hands that tenant's work-order, operation and blocker ids to every other
+    company's sockets and triggers refetches on their screens.
     """
-    if company_id is not None:
-        await manager.broadcast_to_company(company_id, update_data, message_type="dashboard_update")
+    if company_id is None:
+        logger.warning(
+            "Dropped %s broadcast (event=%s) with no company_id: tenant events are never sent to every tenant",
+            message_type,
+            message.get("event"),
+        )
         return
-    await manager.broadcast(update_data, message_type="dashboard_update")
+    await manager.broadcast_to_company(company_id, message, message_type=message_type)
+
+
+async def broadcast_dashboard_update(update_data: Dict[str, Any], *, company_id: Optional[int]) -> None:
+    """Broadcast a dashboard update to ``company_id``'s connections only.
+
+    ``company_id`` is REQUIRED (keyword-only, no default): pass the active company
+    from ``get_current_company_id``. An explicit ``None`` is refused -- logged and
+    dropped, never fanned out to every tenant (invariant #1).
+    """
+    await _broadcast_tenant_event(company_id, update_data, "dashboard_update")
 
 
 async def broadcast_work_order_update(
-    work_order_id: int, update_data: Dict[str, Any], company_id: Optional[int] = None
-):
-    """Broadcast work order status updates (tenant-scoped when ``company_id`` is given)."""
+    work_order_id: int, update_data: Dict[str, Any], *, company_id: Optional[int]
+) -> None:
+    """Broadcast a work-order update to ``company_id``'s connections only (``None`` is refused)."""
     message = {"work_order_id": work_order_id, **update_data}
-    if company_id is not None:
-        await manager.broadcast_to_company(company_id, message, message_type="work_order_update")
-        return
-    await manager.broadcast(message, message_type="work_order_update")
+    await _broadcast_tenant_event(company_id, message, "work_order_update")
 
 
 async def broadcast_shop_floor_update(
-    work_center_id: int, update_data: Dict[str, Any], company_id: Optional[int] = None
-):
-    """Broadcast shop floor updates for a work center (tenant-scoped when ``company_id`` is given)."""
+    work_center_id: int, update_data: Dict[str, Any], *, company_id: Optional[int]
+) -> None:
+    """Broadcast a shop-floor update for a work center to ``company_id``'s connections only (``None`` is refused)."""
     message = {"work_center_id": work_center_id, **update_data}
-    if company_id is not None:
-        await manager.broadcast_to_company(company_id, message, message_type="shop_floor_update")
-        return
-    await manager.broadcast(message, message_type="shop_floor_update")
+    await _broadcast_tenant_event(company_id, message, "shop_floor_update")
