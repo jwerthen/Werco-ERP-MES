@@ -1,12 +1,29 @@
-from datetime import date, datetime, timedelta
+"""Customer Complaints & RMA router (mounted at ``/complaints``).
+
+Thin by design: every lookup, reference check, transition guard and audit row lives in
+``app/services/customer_complaint_service.py``, whose module docstring holds the
+tenancy / audit / role contracts. Each route scopes to the active company through
+``get_current_company_id``; a foreign id is a 404. Writes are role-gated:
+
+* ``AUTHOR_ROLES`` (Admin / Manager / Supervisor / Quality, the ``quality:inspect``
+  tier): create and edit complaints and RMAs, record an investigation, receive and
+  inspect returned material.
+* ``APPROVER_ROLES`` (Admin / Manager / Quality, the ``quality:approve`` tier):
+  resolve and close a complaint, raise an NCR or CAR from it, and approve, deny,
+  dispose and complete an RMA.
+
+Reads (dashboard, 8D report, lists, details) are open to any authenticated user of
+the tenant, like every other operational module.
+"""
+
+from datetime import date, datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
-from sqlalchemy import extract, func
-from sqlalchemy.orm import Session, joinedload
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_company_id, get_current_user, require_role
+from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.db.database import get_db
 from app.models.customer_complaint import (
     ComplaintSeverity,
@@ -15,8 +32,10 @@ from app.models.customer_complaint import (
     ReturnMaterialAuthorization,
     RMAStatus,
 )
-from app.models.quality import CorrectiveActionRequest, NCRSource, NonConformanceReport
-from app.models.user import User, UserRole
+from app.models.user import User
+from app.services import customer_complaint_service as complaints
+from app.services.audit_service import AuditService
+from app.services.customer_complaint_service import APPROVER_ROLES, AUTHOR_ROLES, complaint_transaction
 
 router = APIRouter()
 
@@ -72,7 +91,23 @@ class ComplaintCreate(BaseModel):
 
 
 class ComplaintUpdate(BaseModel):
-    customer_name: Optional[str] = Field(None, max_length=255)
+    # ``status`` IS DELIBERATELY ABSENT, and unknown fields are refused (422) so a client
+    # still sending it learns that instead of being silently ignored. The blind setattr
+    # this schema feeds used to let any caller set any status -- CLOSED straight from
+    # RECEIVED, with no investigation, no resolution, no resolved/closed date and no
+    # audit evidence. Status now moves only through the workflow verbs
+    # (investigate / resolve / close), each role-gated, state-guarded and audited.
+    # Consequence, accepted: PENDING_RESOLUTION and VOID have no writer until a
+    # dedicated, reasoned and audited verb ships for them.
+    #
+    # The VERBS' OWN FIELDS are absent for the same reason. Investigate owns
+    # investigation_findings / root_cause / containment_action (re-run it to amend them
+    # while the complaint is open). Resolve owns resolution_description /
+    # corrective_action / preventive_action / actual_cost: that is the Approver's
+    # corrective-action decision, and an Author-tier PUT must not rewrite it.
+    model_config = ConfigDict(extra="forbid")
+
+    customer_name: Optional[str] = Field(None, min_length=1, max_length=255)
     customer_po_number: Optional[str] = Field(None, max_length=100)
     customer_contact: Optional[str] = Field(None, max_length=255)
     part_id: Optional[int] = None
@@ -81,18 +116,10 @@ class ComplaintUpdate(BaseModel):
     serial_number: Optional[str] = Field(None, max_length=100)
     quantity_affected: Optional[float] = Field(None, gt=0)
     severity: Optional[ComplaintSeverity] = None
-    status: Optional[ComplaintStatus] = None
-    title: Optional[str] = Field(None, max_length=255)
-    description: Optional[str] = None
-    investigation_findings: Optional[str] = None
-    root_cause: Optional[str] = None
-    containment_action: Optional[str] = None
-    corrective_action: Optional[str] = None
-    preventive_action: Optional[str] = None
-    resolution_description: Optional[str] = None
+    title: Optional[str] = Field(None, min_length=3, max_length=255)
+    description: Optional[str] = Field(None, min_length=5)
     assigned_to: Optional[int] = None
     estimated_cost: Optional[float] = Field(None, ge=0)
-    actual_cost: Optional[float] = Field(None, ge=0)
 
 
 class InvestigateRequest(BaseModel):
@@ -169,13 +196,20 @@ class RMACreate(BaseModel):
 
 
 class RMAUpdate(BaseModel):
+    # ``disposition`` and ``credit_amount`` ARE DELIBERATELY ABSENT (unknown fields are
+    # refused, 422): both are outputs of ``POST /rma/{id}/dispose``, and a PUT carrying
+    # them bypassed its allow-list, its Admin/Manager/Quality gate, its from-state guard
+    # and its required audit row. The service also holds the remaining decision-bearing
+    # fields to their window (409): quantity / reason only while REQUESTED,
+    # inspection_findings only while UNDER_INSPECTION, replacement_wo_id only on an RMA
+    # dispositioned 'replace'; and a COMPLETED / DENIED RMA cannot be edited at all.
+    model_config = ConfigDict(extra="forbid")
+
     quantity: Optional[float] = Field(None, gt=0)
     lot_number: Optional[str] = Field(None, max_length=100)
-    reason: Optional[str] = None
-    disposition: Optional[str] = Field(None, max_length=100)
+    reason: Optional[str] = Field(None, min_length=5)
     shipping_tracking: Optional[str] = Field(None, max_length=255)
-    inspection_findings: Optional[str] = None
-    credit_amount: Optional[float] = Field(None, ge=0)
+    inspection_findings: Optional[str] = Field(None, min_length=5)
     replacement_wo_id: Optional[int] = None
     notes: Optional[str] = None
 
@@ -232,153 +266,45 @@ class EightDReport(BaseModel):
     d8_customer_satisfaction: Optional[str] = None
 
 
-# ============== Number Generators ==============
+class ReceiveRequest(BaseModel):
+    shipping_tracking: Optional[str] = Field(None, max_length=255)
 
 
-def generate_complaint_number(db: Session) -> str:
-    year = datetime.now().strftime("%Y")
-    prefix = f"CC-{year}-"
-    last = (
-        db.query(CustomerComplaint)
-        .filter(CustomerComplaint.complaint_number.like(f"{prefix}%"))
-        .order_by(CustomerComplaint.complaint_number.desc())
-        .first()
-    )
-
-    if last:
-        num = int(last.complaint_number.split("-")[-1]) + 1
-    else:
-        num = 1
-    return f"{prefix}{num:04d}"
+class InspectRequest(BaseModel):
+    inspection_findings: str = Field(..., min_length=5)
 
 
-def generate_rma_number(db: Session) -> str:
-    year = datetime.now().strftime("%Y")
-    prefix = f"RMA-{year}-"
-    last = (
-        db.query(ReturnMaterialAuthorization)
-        .filter(ReturnMaterialAuthorization.rma_number.like(f"{prefix}%"))
-        .order_by(ReturnMaterialAuthorization.rma_number.desc())
-        .first()
-    )
-
-    if last:
-        num = int(last.rma_number.split("-")[-1]) + 1
-    else:
-        num = 1
-    return f"{prefix}{num:04d}"
+class DisposeRequest(BaseModel):
+    disposition: str = Field(..., max_length=100)
+    credit_amount: Optional[float] = Field(None, ge=0)
+    replacement_wo_id: Optional[int] = None
+    notes: Optional[str] = None
 
 
 # ============== Complaint Endpoints ==============
 
 
 @router.get("/complaints/dashboard", response_model=DashboardResponse)
-def get_dashboard(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Get complaint dashboard statistics"""
-    open_statuses = [ComplaintStatus.RECEIVED, ComplaintStatus.UNDER_INVESTIGATION, ComplaintStatus.PENDING_RESOLUTION]
-    open_complaints = (
-        db.query(func.count(CustomerComplaint.id)).filter(CustomerComplaint.status.in_(open_statuses)).scalar() or 0
-    )
-
-    # Average resolution time
-    resolved = (
-        db.query(CustomerComplaint)
-        .filter(CustomerComplaint.resolved_date.isnot(None), CustomerComplaint.date_received.isnot(None))
-        .all()
-    )
-    avg_days = None
-    if resolved:
-        total_days = sum(
-            (r.resolved_date - r.date_received).days for r in resolved if r.resolved_date and r.date_received
-        )
-        avg_days = round(total_days / len(resolved), 1) if resolved else None
-
-    # By severity
-    severity_counts = (
-        db.query(CustomerComplaint.severity, func.count(CustomerComplaint.id))
-        .filter(CustomerComplaint.status.in_(open_statuses))
-        .group_by(CustomerComplaint.severity)
-        .all()
-    )
-    by_severity = {s.value: c for s, c in severity_counts}
-
-    # By customer (top 10)
-    by_customer_rows = (
-        db.query(CustomerComplaint.customer_name, func.count(CustomerComplaint.id).label("count"))
-        .group_by(CustomerComplaint.customer_name)
-        .order_by(func.count(CustomerComplaint.id).desc())
-        .limit(10)
-        .all()
-    )
-    by_customer = [{"customer": name, "count": count} for name, count in by_customer_rows]
-
-    # Satisfaction rate
-    satisfied_total = (
-        db.query(func.count(CustomerComplaint.id)).filter(CustomerComplaint.customer_satisfied.isnot(None)).scalar()
-        or 0
-    )
-    satisfied_yes = (
-        db.query(func.count(CustomerComplaint.id)).filter(CustomerComplaint.customer_satisfied == True).scalar() or 0
-    )
-    satisfaction_rate = round((satisfied_yes / satisfied_total) * 100, 1) if satisfied_total > 0 else None
-
-    # Monthly trend (last 12 months)
-    twelve_months_ago = date.today() - timedelta(days=365)
-    trend_rows = (
-        db.query(
-            extract('year', CustomerComplaint.date_received).label('year'),
-            extract('month', CustomerComplaint.date_received).label('month'),
-            func.count(CustomerComplaint.id).label('count'),
-        )
-        .filter(CustomerComplaint.date_received >= twelve_months_ago)
-        .group_by('year', 'month')
-        .order_by('year', 'month')
-        .all()
-    )
-    trend = [{"year": int(r.year), "month": int(r.month), "count": r.count} for r in trend_rows]
-
-    # Open RMAs
-    open_rma_statuses = [
-        RMAStatus.REQUESTED,
-        RMAStatus.APPROVED,
-        RMAStatus.MATERIAL_RECEIVED,
-        RMAStatus.UNDER_INSPECTION,
-        RMAStatus.DISPOSITION_DECIDED,
-    ]
-    open_rmas = (
-        db.query(func.count(ReturnMaterialAuthorization.id))
-        .filter(ReturnMaterialAuthorization.status.in_(open_rma_statuses))
-        .scalar()
-        or 0
-    )
-
-    return DashboardResponse(
-        open_complaints=open_complaints,
-        avg_resolution_days=avg_days,
-        by_severity=by_severity,
-        by_customer=by_customer,
-        satisfaction_rate=satisfaction_rate,
-        trend=trend,
-        open_rmas=open_rmas,
-    )
+def get_dashboard(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Complaint and RMA statistics for the active company: open complaints, average
+    resolution days, open complaints by severity, top customers, satisfaction rate,
+    12-month trend and open RMAs."""
+    return DashboardResponse(**complaints.complaint_dashboard(db, company_id))
 
 
 @router.get("/complaints/8d-report/{complaint_id}", response_model=EightDReport)
-def get_8d_report(complaint_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Generate 8D report data for a complaint"""
-    complaint = (
-        db.query(CustomerComplaint)
-        .options(
-            joinedload(CustomerComplaint.part),
-            joinedload(CustomerComplaint.customer),
-            joinedload(CustomerComplaint.rmas),
-        )
-        .filter(CustomerComplaint.id == complaint_id)
-        .first()
-    )
-
-    if not complaint:
-        raise HTTPException(status_code=404, detail="Complaint not found")
+def get_8d_report(
+    complaint_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """8D report data (D1-D8) for one complaint of the active company; 404 if it is not ours."""
+    complaint = complaints.get_complaint_or_404(db, company_id, complaint_id)
 
     satisfaction_text = None
     if complaint.customer_satisfied is not None:
@@ -387,7 +313,7 @@ def get_8d_report(complaint_id: int, db: Session = Depends(get_db), current_user
             satisfaction_text += f" - {complaint.satisfaction_notes}"
 
     return EightDReport(
-        complaint=complaint,
+        complaint=ComplaintResponse.model_validate(complaint),
         d1_team=f"Assigned to user ID: {complaint.assigned_to}" if complaint.assigned_to else None,
         d2_problem_description=complaint.description,
         d3_containment_action=complaint.containment_action,
@@ -412,16 +338,8 @@ def list_complaints(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """List all complaints with filters"""
-    query = (
-        db.query(CustomerComplaint)
-        .filter(CustomerComplaint.company_id == company_id)
-        .options(
-            joinedload(CustomerComplaint.part),
-            joinedload(CustomerComplaint.customer),
-            joinedload(CustomerComplaint.rmas),
-        )
-    )
+    """List the active company's complaints, newest first, with optional filters."""
+    query = complaints.complaint_query(db, company_id)
 
     if status:
         query = query.filter(CustomerComplaint.status == status)
@@ -438,43 +356,31 @@ def list_complaints(
 
 
 @router.get("/complaints/{complaint_id}", response_model=ComplaintResponse)
-def get_complaint(complaint_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Get complaint details"""
-    complaint = (
-        db.query(CustomerComplaint)
-        .options(
-            joinedload(CustomerComplaint.part),
-            joinedload(CustomerComplaint.customer),
-            joinedload(CustomerComplaint.rmas),
-        )
-        .filter(CustomerComplaint.id == complaint_id)
-        .first()
-    )
-
-    if not complaint:
-        raise HTTPException(status_code=404, detail="Complaint not found")
-    return complaint
+def get_complaint(
+    complaint_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """One complaint of the active company, with its part, customer and RMAs; 404 if it is not ours."""
+    return complaints.get_complaint_or_404(db, company_id, complaint_id)
 
 
 @router.post("/complaints/", response_model=ComplaintResponse)
 def create_complaint(
     data: ComplaintCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(AUTHOR_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new customer complaint"""
-    complaint = CustomerComplaint(
-        complaint_number=generate_complaint_number(db),
-        **data.model_dump(),
-        received_by=current_user.id,
-        date_received=data.date_received or date.today(),
-    )
-    complaint.company_id = company_id
-    db.add(complaint)
-    db.commit()
-    db.refresh(complaint)
-    return complaint
+    """Record a customer complaint (status RECEIVED). Admin / Manager / Supervisor / Quality.
+
+    ``customer_id``, ``part_id``, ``work_order_id`` and ``assigned_to`` must name live
+    records of the active company (422 otherwise)."""
+    with complaint_transaction(db):
+        complaint_id = complaints.create_complaint(db, company_id, data.model_dump(), current_user, audit).id
+    return complaints.get_complaint_or_404(db, company_id, complaint_id)
 
 
 @router.put("/complaints/{complaint_id}", response_model=ComplaintResponse)
@@ -482,25 +388,19 @@ def update_complaint(
     complaint_id: int,
     data: ComplaintUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(AUTHOR_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a complaint"""
-    complaint = (
-        db.query(CustomerComplaint)
-        .filter(CustomerComplaint.id == complaint_id, CustomerComplaint.company_id == company_id)
-        .first()
-    )
-    if not complaint:
-        raise HTTPException(status_code=404, detail="Complaint not found")
+    """Edit a complaint's details. Admin / Manager / Supervisor / Quality. 409 once the
+    complaint is closed or void.
 
-    update_data = data.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(complaint, field, value)
-
-    db.commit()
-    db.refresh(complaint)
-    return complaint
+    Status, investigation and resolution fields are not editable here (422): use
+    investigate / resolve / close. A changed reference must name a live record of the
+    active company (422 otherwise)."""
+    with complaint_transaction(db):
+        complaints.update_complaint(db, company_id, complaint_id, data.model_dump(exclude_unset=True), audit)
+    return complaints.get_complaint_or_404(db, company_id, complaint_id)
 
 
 @router.post("/complaints/{complaint_id}/investigate", response_model=ComplaintResponse)
@@ -508,23 +408,15 @@ def investigate_complaint(
     complaint_id: int,
     data: InvestigateRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(AUTHOR_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update complaint to under investigation with findings"""
-    complaint = db.query(CustomerComplaint).filter(CustomerComplaint.id == complaint_id).first()
-    if not complaint:
-        raise HTTPException(status_code=404, detail="Complaint not found")
-
-    complaint.status = ComplaintStatus.UNDER_INVESTIGATION
-    complaint.investigation_findings = data.investigation_findings
-    if data.root_cause:
-        complaint.root_cause = data.root_cause
-    if data.containment_action:
-        complaint.containment_action = data.containment_action
-
-    db.commit()
-    db.refresh(complaint)
-    return complaint
+    """Record investigation findings and move an open complaint to UNDER_INVESTIGATION.
+    Admin / Manager / Supervisor / Quality. 400 once the complaint is resolved or closed."""
+    with complaint_transaction(db):
+        complaints.investigate_complaint(db, company_id, complaint_id, audit, **data.model_dump())
+    return complaints.get_complaint_or_404(db, company_id, complaint_id)
 
 
 @router.post("/complaints/{complaint_id}/resolve", response_model=ComplaintResponse)
@@ -532,134 +424,69 @@ def resolve_complaint(
     complaint_id: int,
     data: ResolveRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(APPROVER_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Resolve a complaint"""
-    complaint = db.query(CustomerComplaint).filter(CustomerComplaint.id == complaint_id).first()
-    if not complaint:
-        raise HTTPException(status_code=404, detail="Complaint not found")
-
-    complaint.status = ComplaintStatus.RESOLVED
-    complaint.resolution_description = data.resolution_description
-    complaint.resolved_date = date.today()
-    if data.corrective_action:
-        complaint.corrective_action = data.corrective_action
-    if data.preventive_action:
-        complaint.preventive_action = data.preventive_action
-    if data.actual_cost is not None:
-        complaint.actual_cost = data.actual_cost
-
-    db.commit()
-    db.refresh(complaint)
-    return complaint
+    """Resolve an investigated complaint (UNDER_INVESTIGATION or PENDING_RESOLUTION ->
+    RESOLVED). Admin / Manager / Quality. The audit row is required: 503 and nothing
+    saved if it cannot be written."""
+    with complaint_transaction(db):
+        complaints.resolve_complaint(db, company_id, complaint_id, audit, **data.model_dump())
+    return complaints.get_complaint_or_404(db, company_id, complaint_id)
 
 
 @router.post("/complaints/{complaint_id}/close", response_model=ComplaintResponse)
 def close_complaint(
-    complaint_id: int, data: CloseRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    complaint_id: int,
+    data: CloseRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(APPROVER_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Close a complaint with optional satisfaction feedback"""
-    complaint = db.query(CustomerComplaint).filter(CustomerComplaint.id == complaint_id).first()
-    if not complaint:
-        raise HTTPException(status_code=404, detail="Complaint not found")
-
-    complaint.status = ComplaintStatus.CLOSED
-    complaint.closed_date = date.today()
-    if data.customer_satisfied is not None:
-        complaint.customer_satisfied = data.customer_satisfied
-    if data.satisfaction_notes:
-        complaint.satisfaction_notes = data.satisfaction_notes
-
-    db.commit()
-    db.refresh(complaint)
-    return complaint
+    """Close a RESOLVED complaint, optionally recording customer satisfaction.
+    Admin / Manager / Quality. The audit row is required: 503 and nothing saved if it
+    cannot be written."""
+    with complaint_transaction(db):
+        complaints.close_complaint(db, company_id, complaint_id, audit, **data.model_dump())
+    return complaints.get_complaint_or_404(db, company_id, complaint_id)
 
 
 @router.post("/complaints/{complaint_id}/create-ncr", response_model=ComplaintResponse)
 def create_ncr_from_complaint(
     complaint_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    current_user: User = Depends(require_role(APPROVER_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a linked NCR from a complaint"""
-    complaint = db.query(CustomerComplaint).filter(CustomerComplaint.id == complaint_id).first()
-    if not complaint:
-        raise HTTPException(status_code=404, detail="Complaint not found")
-    if complaint.ncr_id:
-        raise HTTPException(status_code=400, detail="Complaint already has a linked NCR")
+    """Raise a customer-return NCR from the complaint and link it. Admin / Manager / Quality.
 
-    # Generate NCR number
-    today = datetime.now().strftime("%Y%m%d")
-    prefix = f"NCR-{today}-"
-    last = (
-        db.query(NonConformanceReport)
-        .filter(NonConformanceReport.ncr_number.like(f"{prefix}%"))
-        .order_by(NonConformanceReport.ncr_number.desc())
-        .first()
-    )
-    num = int(last.ncr_number.split("-")[-1]) + 1 if last else 1
-    ncr_number = f"{prefix}{num:03d}"
-
-    ncr = NonConformanceReport(
-        ncr_number=ncr_number,
-        title=f"NCR from {complaint.complaint_number}: {complaint.title}",
-        description=complaint.description,
-        source=NCRSource.CUSTOMER_RETURN,
-        part_id=complaint.part_id,
-        work_order_id=complaint.work_order_id,
-        lot_number=complaint.lot_number,
-        serial_number=complaint.serial_number,
-        quantity_affected=complaint.quantity_affected,
-        detected_by=current_user.id,
-        detected_date=date.today(),
-    )
-    db.add(ncr)
-    db.flush()
-
-    complaint.ncr_id = ncr.id
-    db.commit()
-    db.refresh(complaint)
-    return complaint
+    Numbered, evented (``ncr_created``) and tenant-tagged like ``POST /quality/ncr``.
+    400 if the complaint already has an NCR. The audit rows are required: 503 and
+    nothing saved if they cannot be written."""
+    with complaint_transaction(db):
+        complaints.create_ncr_from_complaint(db, company_id, complaint_id, current_user, audit)
+    return complaints.get_complaint_or_404(db, company_id, complaint_id)
 
 
 @router.post("/complaints/{complaint_id}/create-car", response_model=ComplaintResponse)
 def create_car_from_complaint(
     complaint_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    current_user: User = Depends(require_role(APPROVER_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a linked CAR from a complaint"""
-    complaint = db.query(CustomerComplaint).filter(CustomerComplaint.id == complaint_id).first()
-    if not complaint:
-        raise HTTPException(status_code=404, detail="Complaint not found")
-    if complaint.car_id:
-        raise HTTPException(status_code=400, detail="Complaint already has a linked CAR")
+    """Raise a corrective action request from the complaint and link it. Admin / Manager / Quality.
 
-    # Generate CAR number
-    today = datetime.now().strftime("%Y%m%d")
-    prefix = f"CAR-{today}-"
-    last = (
-        db.query(CorrectiveActionRequest)
-        .filter(CorrectiveActionRequest.car_number.like(f"{prefix}%"))
-        .order_by(CorrectiveActionRequest.car_number.desc())
-        .first()
-    )
-    num = int(last.car_number.split("-")[-1]) + 1 if last else 1
-    car_number = f"{prefix}{num:03d}"
-
-    car = CorrectiveActionRequest(
-        car_number=car_number,
-        title=f"CAR from {complaint.complaint_number}: {complaint.title}",
-        problem_description=complaint.description,
-        initiated_by=current_user.id,
-    )
-    db.add(car)
-    db.flush()
-
-    complaint.car_id = car.id
-    db.commit()
-    db.refresh(complaint)
-    return complaint
+    Numbered, evented (``car_created``) and tenant-tagged like ``POST /quality/car``.
+    400 if the complaint already has a CAR. The audit rows are required: 503 and
+    nothing saved if they cannot be written."""
+    with complaint_transaction(db):
+        complaints.create_car_from_complaint(db, company_id, complaint_id, current_user, audit)
+    return complaints.get_complaint_or_404(db, company_id, complaint_id)
 
 
 # ============== RMA Endpoints ==============
@@ -676,15 +503,8 @@ def list_rmas(
     current_user: User = Depends(get_current_user),
     company_id: int = Depends(get_current_company_id),
 ):
-    """List all RMAs with filters"""
-    query = (
-        db.query(ReturnMaterialAuthorization)
-        .filter(ReturnMaterialAuthorization.company_id == company_id)
-        .options(
-            joinedload(ReturnMaterialAuthorization.part),
-            joinedload(ReturnMaterialAuthorization.customer),
-        )
-    )
+    """List the active company's RMAs, newest first, with optional filters."""
+    query = complaints.rma_query(db, company_id)
 
     if status:
         query = query.filter(ReturnMaterialAuthorization.status == status)
@@ -697,37 +517,32 @@ def list_rmas(
 
 
 @router.get("/rma/{rma_id}", response_model=RMAResponse)
-def get_rma(rma_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Get RMA details"""
-    rma = (
-        db.query(ReturnMaterialAuthorization)
-        .options(
-            joinedload(ReturnMaterialAuthorization.part),
-            joinedload(ReturnMaterialAuthorization.customer),
-        )
-        .filter(ReturnMaterialAuthorization.id == rma_id)
-        .first()
-    )
-
-    if not rma:
-        raise HTTPException(status_code=404, detail="RMA not found")
-    return rma
+def get_rma(
+    rma_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    company_id: int = Depends(get_current_company_id),
+):
+    """One RMA of the active company; 404 if it is not ours."""
+    return complaints.get_rma_or_404(db, company_id, rma_id)
 
 
 @router.post("/rma/", response_model=RMAResponse)
 def create_rma(
     data: RMACreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(AUTHOR_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new RMA"""
-    rma = ReturnMaterialAuthorization(rma_number=generate_rma_number(db), **data.model_dump())
-    rma.company_id = company_id
-    db.add(rma)
-    db.commit()
-    db.refresh(rma)
-    return rma
+    """Open a return material authorization (status REQUESTED). Admin / Manager / Supervisor / Quality.
+
+    ``complaint_id``, ``customer_id`` and ``part_id`` must name records of the active
+    company (422 otherwise). A ``customer_id`` / ``part_id`` equal to the one the
+    complaint already names is accepted even if that record has since been retired."""
+    with complaint_transaction(db):
+        rma_id = complaints.create_rma(db, company_id, data.model_dump(), audit).id
+    return complaints.get_rma_or_404(db, company_id, rma_id)
 
 
 @router.put("/rma/{rma_id}", response_model=RMAResponse)
@@ -735,73 +550,50 @@ def update_rma(
     rma_id: int,
     data: RMAUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(AUTHOR_ROLES)),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update an RMA"""
-    rma = (
-        db.query(ReturnMaterialAuthorization)
-        .filter(ReturnMaterialAuthorization.id == rma_id, ReturnMaterialAuthorization.company_id == company_id)
-        .first()
-    )
-    if not rma:
-        raise HTTPException(status_code=404, detail="RMA not found")
+    """Edit an RMA's details. Admin / Manager / Supervisor / Quality. 409 once the RMA is
+    completed or denied.
 
-    update_data = data.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(rma, field, value)
-
-    db.commit()
-    db.refresh(rma)
-    return rma
+    Status, disposition and credit_amount are not editable here (422): use the RMA
+    workflow verbs. 409 when the RMA's state locks a field: quantity / reason change only
+    while requested, inspection_findings only while under inspection, and
+    replacement_wo_id links only on an RMA dispositioned 'replace'."""
+    with complaint_transaction(db):
+        complaints.update_rma(db, company_id, rma_id, data.model_dump(exclude_unset=True), audit)
+    return complaints.get_rma_or_404(db, company_id, rma_id)
 
 
 @router.post("/rma/{rma_id}/approve", response_model=RMAResponse)
 def approve_rma(
     rma_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    current_user: User = Depends(require_role(APPROVER_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Approve an RMA"""
-    rma = db.query(ReturnMaterialAuthorization).filter(ReturnMaterialAuthorization.id == rma_id).first()
-    if not rma:
-        raise HTTPException(status_code=404, detail="RMA not found")
-    if rma.status != RMAStatus.REQUESTED:
-        raise HTTPException(status_code=400, detail="RMA can only be approved from REQUESTED status")
-
-    rma.status = RMAStatus.APPROVED
-    rma.authorized_by = current_user.id
-    rma.authorized_date = date.today()
-
-    db.commit()
-    db.refresh(rma)
-    return rma
+    """Approve a REQUESTED RMA, recording who authorized it. Admin / Manager / Quality.
+    The audit row is required: 503 and nothing saved if it cannot be written."""
+    with complaint_transaction(db):
+        complaints.decide_rma(db, company_id, rma_id, current_user, audit, approve=True)
+    return complaints.get_rma_or_404(db, company_id, rma_id)
 
 
 @router.post("/rma/{rma_id}/deny", response_model=RMAResponse)
 def deny_rma(
     rma_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    current_user: User = Depends(require_role(APPROVER_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Deny an RMA"""
-    rma = db.query(ReturnMaterialAuthorization).filter(ReturnMaterialAuthorization.id == rma_id).first()
-    if not rma:
-        raise HTTPException(status_code=404, detail="RMA not found")
-    if rma.status != RMAStatus.REQUESTED:
-        raise HTTPException(status_code=400, detail="RMA can only be denied from REQUESTED status")
-
-    rma.status = RMAStatus.DENIED
-    rma.authorized_by = current_user.id
-    rma.authorized_date = date.today()
-
-    db.commit()
-    db.refresh(rma)
-    return rma
-
-
-class ReceiveRequest(BaseModel):
-    shipping_tracking: Optional[str] = Field(None, max_length=255)
+    """Deny a REQUESTED RMA, recording who decided. Admin / Manager / Quality. The audit
+    row is required: 503 and nothing saved if it cannot be written."""
+    with complaint_transaction(db):
+        complaints.decide_rma(db, company_id, rma_id, current_user, audit, approve=False)
+    return complaints.get_rma_or_404(db, company_id, rma_id)
 
 
 @router.post("/rma/{rma_id}/receive", response_model=RMAResponse)
@@ -809,54 +601,29 @@ def receive_rma(
     rma_id: int,
     data: ReceiveRequest = ReceiveRequest(),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role(AUTHOR_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Mark RMA material as received"""
-    rma = db.query(ReturnMaterialAuthorization).filter(ReturnMaterialAuthorization.id == rma_id).first()
-    if not rma:
-        raise HTTPException(status_code=404, detail="RMA not found")
-    if rma.status != RMAStatus.APPROVED:
-        raise HTTPException(status_code=400, detail="RMA must be approved before receiving material")
-
-    rma.status = RMAStatus.MATERIAL_RECEIVED
-    rma.received_date = date.today()
-    if data.shipping_tracking:
-        rma.shipping_tracking = data.shipping_tracking
-
-    db.commit()
-    db.refresh(rma)
-    return rma
-
-
-class InspectRequest(BaseModel):
-    inspection_findings: str = Field(..., min_length=5)
+    """Mark an APPROVED RMA's material as received. Admin / Manager / Supervisor / Quality."""
+    with complaint_transaction(db):
+        complaints.receive_rma(db, company_id, rma_id, audit, shipping_tracking=data.shipping_tracking)
+    return complaints.get_rma_or_404(db, company_id, rma_id)
 
 
 @router.post("/rma/{rma_id}/inspect", response_model=RMAResponse)
 def inspect_rma(
-    rma_id: int, data: InspectRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    rma_id: int,
+    data: InspectRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(AUTHOR_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Record RMA inspection findings"""
-    rma = db.query(ReturnMaterialAuthorization).filter(ReturnMaterialAuthorization.id == rma_id).first()
-    if not rma:
-        raise HTTPException(status_code=404, detail="RMA not found")
-    if rma.status != RMAStatus.MATERIAL_RECEIVED:
-        raise HTTPException(status_code=400, detail="Material must be received before inspection")
-
-    rma.status = RMAStatus.UNDER_INSPECTION
-    rma.inspection_date = date.today()
-    rma.inspection_findings = data.inspection_findings
-
-    db.commit()
-    db.refresh(rma)
-    return rma
-
-
-class DisposeRequest(BaseModel):
-    disposition: str = Field(..., max_length=100)
-    credit_amount: Optional[float] = Field(None, ge=0)
-    replacement_wo_id: Optional[int] = None
-    notes: Optional[str] = None
+    """Record inspection findings on received RMA material. Admin / Manager / Supervisor / Quality."""
+    with complaint_transaction(db):
+        complaints.inspect_rma(db, company_id, rma_id, audit, inspection_findings=data.inspection_findings)
+    return complaints.get_rma_or_404(db, company_id, rma_id)
 
 
 @router.post("/rma/{rma_id}/dispose", response_model=RMAResponse)
@@ -864,48 +631,29 @@ def dispose_rma(
     rma_id: int,
     data: DisposeRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    current_user: User = Depends(require_role(APPROVER_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Set RMA disposition"""
-    rma = db.query(ReturnMaterialAuthorization).filter(ReturnMaterialAuthorization.id == rma_id).first()
-    if not rma:
-        raise HTTPException(status_code=404, detail="RMA not found")
-    if rma.status not in [RMAStatus.UNDER_INSPECTION, RMAStatus.MATERIAL_RECEIVED]:
-        raise HTTPException(status_code=400, detail="RMA must be under inspection or material received for disposition")
-
-    valid_dispositions = ["replace", "repair", "credit", "scrap", "return_to_customer"]
-    if data.disposition not in valid_dispositions:
-        raise HTTPException(status_code=400, detail=f"Disposition must be one of: {', '.join(valid_dispositions)}")
-
-    rma.status = RMAStatus.DISPOSITION_DECIDED
-    rma.disposition = data.disposition
-    if data.credit_amount is not None:
-        rma.credit_amount = data.credit_amount
-    if data.replacement_wo_id:
-        rma.replacement_wo_id = data.replacement_wo_id
-    if data.notes:
-        rma.notes = data.notes
-
-    db.commit()
-    db.refresh(rma)
-    return rma
+    """Decide an RMA's disposition: replace, repair, credit, scrap or return_to_customer.
+    Admin / Manager / Quality. ``replacement_wo_id`` must be a live work order of the
+    active company. The audit row is required: 503 and nothing saved if it cannot be
+    written."""
+    with complaint_transaction(db):
+        complaints.dispose_rma(db, company_id, rma_id, audit, **data.model_dump())
+    return complaints.get_rma_or_404(db, company_id, rma_id)
 
 
 @router.post("/rma/{rma_id}/complete", response_model=RMAResponse)
 def complete_rma(
     rma_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])),
+    current_user: User = Depends(require_role(APPROVER_ROLES)),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Complete an RMA"""
-    rma = db.query(ReturnMaterialAuthorization).filter(ReturnMaterialAuthorization.id == rma_id).first()
-    if not rma:
-        raise HTTPException(status_code=404, detail="RMA not found")
-    if rma.status != RMAStatus.DISPOSITION_DECIDED:
-        raise HTTPException(status_code=400, detail="RMA disposition must be decided before completing")
-
-    rma.status = RMAStatus.COMPLETED
-
-    db.commit()
-    db.refresh(rma)
-    return rma
+    """Complete an RMA whose disposition is decided. Admin / Manager / Quality. The
+    audit row is required: 503 and nothing saved if it cannot be written."""
+    with complaint_transaction(db):
+        complaints.complete_rma(db, company_id, rma_id, audit)
+    return complaints.get_rma_or_404(db, company_id, rma_id)

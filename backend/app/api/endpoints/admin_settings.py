@@ -6,7 +6,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_company_id, require_role
+from app.api.deps import get_audit_service, get_current_company_id, require_role
 from app.db.database import get_db
 from app.models.company import Company
 from app.models.quote_config import (
@@ -24,6 +24,7 @@ from app.schemas.admin_settings import (
     WorkCenterTypesResponse,
     WorkCenterTypesUpdate,
 )
+from app.services.audit_service import AuditService
 from app.services.notification_email_recipients import (
     EMAIL_EVENTS,
     deliverable,
@@ -31,6 +32,7 @@ from app.services.notification_email_recipients import (
     email_settings_response,
     setting_key,
 )
+from app.services.user_provisioning import atomic_security_write
 from app.services.work_center_type_service import (
     get_in_use_work_center_types,
     get_work_center_types,
@@ -55,7 +57,14 @@ def log_change(
     new_value: any = None,
     ip_address: str = None,
 ):
-    """Log a settings change for audit purposes.
+    """Record a settings change in the Admin page's settings HISTORY (``SettingsAuditLog``).
+
+    **This is a display table, not the audit record.** ``settings_audit_log`` is a plain
+    mutable tenant table outside the tamper-evident chain, kept because the Admin -> Settings
+    history tab reads it (``GET /admin/settings/audit-log``). Every caller ALSO writes the
+    authoritative row through ``AuditService`` in the same transaction (invariant 2) -- the
+    role-permission verbs via ``log_required``, so a failed audit rolls the RBAC change back.
+    Never call this on its own for a new settings write.
 
     SettingsAuditLog has a NOT NULL company_id (TenantMixin). The row is tagged
     with the *active* company — the one resolved by get_current_company_id, i.e.
@@ -110,7 +119,16 @@ def update_email_recipients(
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
+    """Set (or, with ``user_ids: null``, restore the default for) one email event's audience.
+
+    Audited on the tamper-evident chain (``notification_email_recipients`` UPDATE row) as
+    well as in the settings history the Admin page reads. Both sides of the chain row are the
+    EFFECTIVE audience (``email_recipient_ids``, read before and after the write) plus
+    ``uses_default``, so the two sides mean the same thing; a save that changes neither -- e.g.
+    restoring the default when no override is saved -- writes no row to either record.
+    """
     if event_key not in EMAIL_EVENTS:
         raise HTTPException(status_code=400, detail="This email type does not have configurable recipients.")
     ids = sorted(set(data.user_ids)) if data.user_ids is not None else None
@@ -129,6 +147,10 @@ def update_email_recipients(
     )
     previous_ids = email_recipient_ids(db, company_id, event_key)
     old_value = sorted(previous_ids) if previous_ids is not None else None
+    # No saved row = the shipped default audience (``old_value`` is then that default's resolved
+    # ids, or None for an event with no default addresses, i.e. the automatic audience) -- not
+    # an explicit selection.
+    old_uses_default = setting is None
     if ids is None:
         if setting is not None:
             db.delete(setting)
@@ -144,18 +166,36 @@ def update_email_recipients(
                 description=f"Email recipients: {EMAIL_EVENTS[event_key].label}",
             )
         )
-    log_change(
-        db,
-        "email_recipients",
-        None,
-        EMAIL_EVENTS[event_key].label,
-        "update",
-        current_user,
-        "user_ids",
-        old_value,
-        ids,
-        get_client_ip(request),
-    )
+    db.flush()
+    # Re-resolve AFTER the write, so the new side is the effective audience too -- the request's
+    # ``None`` means "restore the default", not "nobody", and must not be recorded as the latter.
+    current_ids = email_recipient_ids(db, company_id, event_key)
+    new_value = sorted(current_ids) if current_ids is not None else None
+    new_uses_default = ids is None
+    if (old_value, old_uses_default) != (new_value, new_uses_default):
+        log_change(
+            db,
+            "email_recipients",
+            None,
+            EMAIL_EVENTS[event_key].label,
+            "update",
+            current_user,
+            "user_ids",
+            old_value,
+            ids,
+            get_client_ip(request),
+        )
+        # ``uses_default`` disambiguates the ids: a default audience is not an explicit
+        # selection, even when it resolves to the same users.
+        audit.log_update(
+            "notification_email_recipients",
+            None,
+            event_key,
+            old_values={"user_ids": old_value, "uses_default": old_uses_default},
+            new_values={"user_ids": new_value, "uses_default": new_uses_default},
+            description=f"Updated email recipients: {EMAIL_EVENTS[event_key].label}",
+            extra_data={"event_key": event_key},
+        )
     db.commit()
     return email_settings_response(db, company_id)
 
@@ -185,8 +225,13 @@ def update_work_center_rate(
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update a work center's hourly rate"""
+    """Update a work center's hourly (labor costing) rate.
+
+    Audited on the tamper-evident chain as a ``work_center`` UPDATE -- the same resource type
+    ``PUT /work-centers/{id}`` writes, so a rate's full history reads from one place.
+    """
     wc = db.query(WorkCenter).filter(WorkCenter.id == work_center_id, WorkCenter.company_id == company_id).first()
     if not wc:
         raise HTTPException(status_code=404, detail="Work center not found")
@@ -205,6 +250,15 @@ def update_work_center_rate(
         old_rate,
         data.hourly_rate,
         get_client_ip(request),
+    )
+    audit.log_update(
+        "work_center",
+        wc.id,
+        wc.code,
+        old_values={"hourly_rate": old_rate},
+        new_values={"hourly_rate": data.hourly_rate},
+        description=f"Updated labor rate for work center {wc.code}",
+        extra_data={"source": "admin_settings"},
     )
 
     db.commit()
@@ -239,8 +293,9 @@ def update_work_center_types_admin(
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update allowed work center types"""
+    """Update allowed work center types (audited on the chain and in the settings history)."""
     old_types = get_work_center_types(db, include_in_use=False, company_id=company_id)
     in_use = get_in_use_work_center_types(db, company_id=company_id)
     missing_in_use = [t for t in in_use if t not in (data.types or [])]
@@ -258,6 +313,14 @@ def update_work_center_types_admin(
         old_types,
         types,
         get_client_ip(request),
+    )
+    audit.log_update(
+        "work_center_types",
+        None,
+        "work_center_types",
+        old_values={"types": old_types},
+        new_values={"types": types},
+        description="Updated allowed work center types",
     )
     db.commit()
     return {"types": types, "in_use": in_use}
@@ -411,6 +474,41 @@ async def seed_database(db: Session = Depends(get_db), current_user: User = Depe
 from app.models.role_permission import ALL_PERMISSIONS, DEFAULT_ROLE_PERMISSIONS, PERMISSION_CATEGORIES, RolePermission
 
 
+def _log_role_permission_change(
+    audit: AuditService,
+    *,
+    stored_id: int,
+    role: str,
+    old_permissions: list,
+    new_permissions: list,
+    was_customized: bool,
+    action: str,
+    company_id: int,
+) -> None:
+    """Write the REQUIRED tamper-evident row for an RBAC change (raises ``AuditWriteError``).
+
+    Callers run inside ``atomic_security_write``, which turns that error into a rollback of
+    the permission change and a 503 -- an RBAC change with no evidence never commits.
+    """
+    old_set, new_set = set(old_permissions), set(new_permissions)
+    verb = "Reset" if action == "reset" else "Updated"
+    audit.log_required(
+        action=AuditService.ACTIONS["UPDATE"],
+        resource_type="role_permission",
+        resource_id=stored_id,
+        resource_identifier=role,
+        description=f"{verb} permissions for role '{role}'" + (" to the defaults" if action == "reset" else ""),
+        old_values={"permissions": sorted(old_set), "is_customized": was_customized},
+        new_values={"permissions": sorted(new_set), "is_customized": action != "reset"},
+        extra_data={
+            "action": action,
+            "granted": sorted(new_set - old_set),
+            "revoked": sorted(old_set - new_set),
+        },
+        company_id=company_id,
+    )
+
+
 @router.get("/role-permissions")
 def get_all_role_permissions(
     db: Session = Depends(get_db),
@@ -472,8 +570,15 @@ def update_role_permissions(
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Update permissions for a specific role"""
+    """Update permissions for a specific role.
+
+    An RBAC change, so its evidence is REQUIRED: the ``role_permission`` UPDATE row goes
+    through ``log_required`` inside ``atomic_security_write`` -- if the audit row cannot be
+    written, the permission change is rolled back and the caller gets **503**, the same
+    posture as account administration.
+    """
     try:
         user_role = UserRole(role)
     except ValueError:
@@ -491,35 +596,48 @@ def update_role_permissions(
         .first()
     )
 
-    old_permissions = stored.permissions if stored else DEFAULT_ROLE_PERMISSIONS.get(user_role, [])
+    was_customized = stored is not None
+    old_permissions = list(stored.permissions or []) if stored else list(DEFAULT_ROLE_PERMISSIONS.get(user_role, []))
 
-    if stored:
-        stored.permissions = permissions
-        stored.updated_by = current_user.id
-    else:
-        stored = RolePermission(
-            role=user_role,
-            permissions=permissions,
-            updated_by=current_user.id,
+    with atomic_security_write(db):
+        if stored:
+            stored.permissions = permissions
+            stored.updated_by = current_user.id
+        else:
+            stored = RolePermission(
+                role=user_role,
+                permissions=permissions,
+                updated_by=current_user.id,
+                company_id=company_id,
+            )
+            db.add(stored)
+        # Flush first so a newly created override has its real id in both records (the
+        # history row used to say entity_id 0 for every first customization).
+        db.flush()
+
+        log_change(
+            db,
+            "role_permission",
+            stored.id,
+            role,
+            "update",
+            current_user,
+            field_changed="permissions",
+            old_value=old_permissions,
+            new_value=permissions,
+            ip_address=get_client_ip(request),
+        )
+        _log_role_permission_change(
+            audit,
+            stored_id=stored.id,
+            role=role,
+            old_permissions=old_permissions,
+            new_permissions=list(permissions),
+            was_customized=was_customized,
+            action="update",
             company_id=company_id,
         )
-        db.add(stored)
 
-    # Log the change
-    log_change(
-        db,
-        "role_permission",
-        stored.id if stored.id else 0,
-        role,
-        "update",
-        current_user,
-        field_changed="permissions",
-        old_value=old_permissions,
-        new_value=permissions,
-        ip_address=get_client_ip(request),
-    )
-
-    db.commit()
     db.refresh(stored)
 
     return {"role": role, "permissions": stored.permissions, "is_customized": True}
@@ -532,8 +650,15 @@ def reset_role_permissions(
     db: Session = Depends(get_db),
     current_user: User = Depends(admin_only),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
-    """Reset a role's permissions to defaults"""
+    """Reset a role's permissions to defaults.
+
+    Removes the company's override row (``role_permissions`` is configuration, not a
+    ``SoftDeleteMixin`` record -- "no override" IS the default state). The RBAC change is
+    evidenced by a REQUIRED ``role_permission`` audit row, atomically, exactly like the
+    update verb; resetting a role that has no override changes nothing and writes nothing.
+    """
     try:
         user_role = UserRole(role)
     except ValueError:
@@ -546,22 +671,33 @@ def reset_role_permissions(
     )
 
     if stored:
-        old_permissions = stored.permissions
-        db.delete(stored)
+        old_permissions = list(stored.permissions or [])
+        default_permissions = list(DEFAULT_ROLE_PERMISSIONS.get(user_role, []))
+        stored_id = stored.id
+        with atomic_security_write(db):
+            db.delete(stored)
 
-        log_change(
-            db,
-            "role_permission",
-            stored.id,
-            role,
-            "reset",
-            current_user,
-            field_changed="permissions",
-            old_value=old_permissions,
-            new_value=DEFAULT_ROLE_PERMISSIONS.get(user_role, []),
-            ip_address=get_client_ip(request),
-        )
-
-        db.commit()
+            log_change(
+                db,
+                "role_permission",
+                stored_id,
+                role,
+                "reset",
+                current_user,
+                field_changed="permissions",
+                old_value=old_permissions,
+                new_value=default_permissions,
+                ip_address=get_client_ip(request),
+            )
+            _log_role_permission_change(
+                audit,
+                stored_id=stored_id,
+                role=role,
+                old_permissions=old_permissions,
+                new_permissions=default_permissions,
+                was_customized=True,
+                action="reset",
+                company_id=company_id,
+            )
 
     return {"role": role, "permissions": DEFAULT_ROLE_PERMISSIONS.get(user_role, []), "is_customized": False}
