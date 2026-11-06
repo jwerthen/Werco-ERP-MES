@@ -5009,6 +5009,85 @@ uploads go through text extraction + LLM. See
 > a *global* unique constraint, so a per-tenant sequence would hand two companies the same number
 > and the second insert would fail. The scan reads only the highest number, never row content.
 
+### Tool & Fixture Management (tool crib)
+
+`app/api/endpoints/tool_management.py`, mounted at `/tool-management`.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/tool-management/tools/` | List tools (`status`, `tool_type`, `search`, `include_inactive`) | Yes |
+| GET | `/tool-management/tools/dashboard` | Totals, checked-out / replacement-due / inspection-due counts, by type and status | Yes |
+| GET | `/tool-management/tools/checked-out` | Tools currently `in_use` | Yes |
+| GET | `/tool-management/tools/replacement-due` | Tools with ≤ 20% life remaining | Yes |
+| GET | `/tool-management/tools/inspection-due` | Tools whose `next_inspection_date` is today or earlier | Yes |
+| GET | `/tool-management/tools/{id}` | Tool detail | Yes |
+| GET | `/tool-management/tools/{id}/history` | Checkout ledger and usage log | Yes |
+| POST | `/tool-management/tools/` | Create a tool | Admin / Manager / Supervisor |
+| PUT | `/tool-management/tools/{id}` | Edit a tool (`in_use` / `retired` rules below) | Admin / Manager / Supervisor |
+| DELETE | `/tool-management/tools/{id}` | **Retire** (status → `retired`, `is_active` → `false`; the row, ledger and usage history are kept). Already retired and inactive → no-op, no second audit row | Admin / Manager / Supervisor |
+| POST | `/tool-management/tools/{id}/checkout` | Check out (→ `in_use`); 400 if already out or `retired` / `lost` / `damaged` | Any role except Viewer |
+| POST | `/tool-management/tools/{id}/checkin` | Check in: `condition_in` (alias `condition`) `good` / `worn` → `available`, `damaged` → `damaged`, `needs_maintenance` / `needs_repair` → `maintenance`; any other word **422** | Any role except Viewer |
+| POST | `/tool-management/tools/{id}/log-usage` | Add `usage_hours` / `usage_cycles` to the tool's life totals | Any role except Viewer |
+
+> ⚠️ **Checkout and log-usage were returning 500 on every call.** `ToolCheckout` and `ToolUsageLog`
+> carry `TenantMixin`'s NOT NULL `company_id` and neither handler set it, so the crib could record
+> no checkout ledger and no usage history. Both rows now take `company_id` from the tenant-scoped
+> tool, and the ledger row, the tool's state change and the audit row commit together.
+
+> **Every handler is tenant-scoped, and foreign ids 404.** `GET .../{id}/history` resolved the tool
+> by bare id, and the dashboard, checked-out, replacement-due and inspection-due reads aggregated
+> across every tenant. Every lookup by tool id now resolves inside the active company — a flat **404**
+> `"Tool not found"`, the same body an absent id gets. `work_center_id` and `work_order_id` on
+> checkout and log-usage must belong to the active company (**404** `"Work center not found"` /
+> `"Work order not found"`), and a soft-deleted work order is refused the same way: a new link is a
+> selection (invariant 3). Expect the dashboard counts to drop on a multi-company install; they were
+> summing every tenant.
+
+> **RBAC was added; there was none.** Every handler was a bare `get_current_user`, so a Viewer could
+> create, edit and retire tools. Managing tool records follows the inventory stock mutators (Admin /
+> Manager / Supervisor — a tool is crib inventory). Using a tool (checkout / checkin / log-usage)
+> stays open to every tenant role except **Viewer**. Reads stay open. See
+> `docs/RBAC_PERMISSIONS.md` → Tool & Fixture Management.
+
+> **Every state change writes a tamper-evident `audit_log` row** (resource type `tool` unless noted;
+> the router wrote none before): `log_create` on create; `log_update` on edit, plus
+> `log_status_change` when the status moved; `log_status_change` on retire (the `is_active` flip in
+> `extra_data`), on checkout (`checkout_id`, `work_center_id`, `work_order_id`, `condition_out`) and
+> on checkin (`checkout_id`, `condition_in`); and a `tool_usage_log` `log_create` on log-usage,
+> carrying the tool's new life totals.
+
+> **`in_use` is entered only by checkout and left only by checkin**, so the checkout ledger and the
+> tool's status cannot drift apart. `PUT` with `status: in_use` is **409** (use checkout); changing
+> the status **or `is_active`** of a checked-out tool is **409** (check it in first — hiding a
+> checked-out tool would drop it off `/checked-out` and strand its open checkout); and retiring a
+> checked-out tool is **409**. **Retirement has one door:** `PUT` with `status: retired` is **409**
+> naming `DELETE /tools/{id}`, because a `PUT` retire left `is_active` true and the "retired" tool on
+> every active list. Every refusal is raised before any field is written. Every write verb (`PUT`,
+> `DELETE`, checkout, checkin, log-usage) row-locks the tool (`SELECT … FOR UPDATE OF tools` on
+> Postgres) before reading its state, so two simultaneous checkouts cannot both see `available` and
+> leave two open ledger rows, and two usage logs cannot lose an increment. `PUT` applies an explicit
+> field allowlist rather than a blind `setattr` over the body. An
+> unknown `status` or `tool_type` (previously a 500) and an explicit `null` on `name`, `tool_type`,
+> `status` or `is_active` are **422**. `usage_hours` / `usage_cycles` below 0 are **422** — a
+> negative entry would rewind a tool's life and hide it from replacement-due — and
+> `inspection_interval_days` is bounded `1…3650`. A `tool_id` another tenant already uses returns
+> **400** `"Tool ID already exists"` instead of a 500: `tools.tool_id` still carries a global unique
+> constraint (see Calibration → `equipment_id` codes).
+
+> **Check-in records the condition the person picked.** The Tool Management page sends `condition`
+> (`good` / `worn` / `damaged` / `needs_repair`) where the API read only `condition_in`, defaulted to
+> `good`; so once checkout started saving, a tool reported **damaged** would have gone back to
+> `available` with an audit row saying `condition_in: good`. The API now accepts `condition` as an
+> alias, takes a closed vocabulary (trimmed, case-insensitive), stores the word as given on the
+> checkout row and in the audit row's `extra_data`, and refuses anything else with **422** — the tool
+> stays checked out and nothing is written. An omitted condition still means `good`.
+>
+> ⚠️ **The rest of the page's contract still does not match (pre-existing, not fixed here).**
+> `ToolManagement.tsx` sends `tool_number` / `max_uses` on create, so creating a tool from the page is
+> a **422** (missing `tool_id`). Checkout sends `checked_out_to`, which the API ignores: custody is
+> recorded against the signed-in user who performed the checkout. The page also shows its write
+> controls to a Viewer, who now gets a 403. Fixing those is a separate change.
+
 ### Routing
 
 | Method | Endpoint | Description | Auth Required |
@@ -6830,6 +6909,115 @@ value of `null` is unrecorded, not failed. Characteristic counts, evidence chang
 rows commit together; failed audit persistence returns **503** (`"Unable to save audit record"`)
 and rolls them back. Historical part labels remain visible for same-company soft-deleted parts;
 foreign related records are not expanded.
+
+### Calibration (gauges and calibration records)
+
+`app/api/endpoints/calibration.py`, mounted at `/calibration`. This is the gauge register behind the
+process-sheet gauge check (`docs/KIOSK.md` → Gauge capture): a `requires_gauge` measurement accepts a
+gauge only while it is `active` **and** its `next_calibration_date` is today or later, so what sets
+those two fields is what the check is worth.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/calibration/equipment` | List gauges (`status` filter, incl. `due_soon`; `include_inactive`) | Yes |
+| GET | `/calibration/equipment/due-soon` | Gauges due within `days` (`1 … 365`, default 30) | Yes |
+| GET | `/calibration/equipment/{id}` | Gauge plus its calibration records | Yes |
+| GET | `/calibration/equipment/{id}/history` | Calibration records, newest first | Yes |
+| POST | `/calibration/equipment` | Register a gauge (it has no due date until its first passing calibration) | Admin / Manager / Quality |
+| PUT | `/calibration/equipment/{id}` | Edit a gauge; `status` may only take it **out** of service (see below) | Admin / Manager / Quality |
+| POST | `/calibration/equipment/{id}/calibrate` | Record a calibration; the `result` decides the gauge's state (see below) | Admin / Manager / Quality |
+
+> ⚠️ **`POST .../calibrate` returned 500 on every call, and its logic would have certified a failed
+> gauge.** `CalibrationRecord` carries `TenantMixin`'s NOT NULL `company_id` and the handler never set
+> it, so no calibration could be recorded. Behind the insert, every record — whatever its `result` —
+> set the gauge `active` and advanced `next_calibration_date` by the interval, so a recorded **fail**
+> would have put the gauge straight past the gauge check. The record now takes `company_id` from the
+> tenant-scoped gauge, and the result decides the outcome:
+>
+> | `result` | Gauge `status` | `last_calibration_date` / `next_calibration_date` | Record `due_date` |
+> |---|---|---|---|
+> | `pass`, `adjusted` | `active` | calibration date / calibration date + `calibration_interval_days` | calibration date + interval |
+> | `fail` | `out_of_service` | unchanged — a failed calibration never extends certification | calibration date (due now) |
+>
+> `result` is **required** — omitting it is **422** with nothing written. (It used to default to
+> `pass`, and a default never reaches the validator, so a request that named no outcome — an API or
+> MCP caller leaving the field out — certified the gauge.) It is trimmed and matched
+> case-insensitively (`" Fail "` is `fail`); any other word is **422** with nothing written, so an
+> unrecognised or missing result is never read as either outcome. `adjusted` means the gauge was
+> brought back into tolerance and certified as-left.
+>
+> **`calibration_date` cannot be in the future** — **422** with nothing written. The bound is the
+> later of the server's local and UTC dates, so the Central "today" the Calibration page sends is
+> never refused. Unbounded, a future-dated pass (a year typo on a certificate) certified the gauge a
+> year too long and, as the newest record on file, outranked a genuine `fail` recorded today —
+> leaving the failed gauge `active` and passing the gauge check.
+>
+> **A record is always filed, but it moves the gauge only when it is the newest on file and the
+> gauge is not `retired`.** A record dated before the latest calibration already on file (a backdated
+> certificate) is history: entering an old pass cannot re-certify a gauge that has failed since.
+> Same-day records apply in entry order, so a fail entered after a same-day pass takes the gauge out
+> of service. The response model is `CalibrationRecordedResponse` — the record fields plus
+> `equipment_status` and `applied_to_equipment` (`false` when the record was filed as history only),
+> so a caller can tell "filed" from "filed and the gauge moved".
+>
+> **A pass cannot lift a hand pull it predates.** Taking a gauge out of service with `PUT` (it was
+> dropped, it is suspect) writes no calibration record, so "newest on file" alone would let a stale
+> certificate — dated after the last record but *before* the pull — re-certify the gauge someone had
+> just quarantined. While a gauge is `out_of_service`, a `pass` / `adjusted` record applies only if
+> its `calibration_date` is **on or after** the Central date of the newest hand pull in the current
+> out-of-service episode; otherwise it is filed as history (`applied_to_equipment: false`). The pull
+> date comes from the gauge's `equipment` `STATUS_CHANGE` audit rows (no new column): rows written by
+> a failed calibration are skipped, since a fail is already ordered by its own record date, and a pull
+> that a later passing calibration resolved does not count. A gauge that is out of service with no
+> status evidence explaining it (set before this router was audited) uses its `updated_at` instead —
+> never earlier than the real pull, so it can only refuse more. Date granularity means a certificate
+> dated the same day as the pull is accepted.
+>
+> **Writes are serialized per gauge.** `calibrate` and `PUT` row-lock the gauge
+> (`SELECT … FOR UPDATE OF equipment` on Postgres) before deciding anything, so two calibrations
+> posted together are ordered rather than both reading the same "newest on file".
+>
+> **The evidence is fail-closed.** The record, its `CREATE` audit row (resource type `calibration`:
+> result, dates, certificate, performer, provider, as-found / as-left, `applied_to_equipment`) and,
+> when the status moved, an `equipment` `STATUS_CHANGE` row commit in one transaction through
+> `AuditService.log_required`. If either audit write fails nothing is saved and the call returns
+> **503** (`"Unable to save audit record. No changes were committed."`). This is the AS9100D 7.1.5.2
+> calibration record.
+
+> **`PUT /calibration/equipment/{id}` can take a gauge out of service but never put one back.**
+> `status` accepts `out_of_service` or `retired`. Setting `active`, `due` or `overdue` is **409**,
+> naming `POST /calibration/equipment/{id}/calibrate`: a gauge returns to `active` only through a
+> passing calibration record, and `due` / `overdue` are derived from dates. (A newly registered gauge
+> is stored `active` with no due date; the gauge check refuses it until its first passing calibration
+> sets one.) Re-sending the gauge's current
+> status is a no-op, not a refusal. A retired gauge comes back only by `PUT` → `out_of_service` and
+> then a passing calibration. Before this change `PUT` was a blind `setattr` over the body, so any
+> authenticated user could set `active` on an out-of-calibration gauge, and an unknown status word was
+> a **500** (now **422**). Fields are applied from an explicit allowlist (`name`, `description`,
+> `equipment_type`, `location`, `assigned_to`, `calibration_interval_days`, `calibration_provider`,
+> `is_active`, `notes`, plus `status`); `calibration_interval_days` is bounded `1…3650` on create and
+> update; an explicit `null` on `name`, `calibration_interval_days`, `is_active` or `status` is
+> **422**. `PUT` writes a `log_update` row (self-suppressed when nothing changed) plus, when the status
+> moved, a `STATUS_CHANGE` row that is **required evidence**: a hand pull starts the AS9100D 7.1.5.2
+> suspect-product window and is what a later backdated pass is measured against, so it is written
+> through `AuditService.log_required` and, if it cannot be saved, the whole edit rolls back with
+> **503**. A field-only edit is not gated on it. `POST /calibration/equipment` writes a `log_create`.
+> `is_active: false` hides a gauge from the lists but does **not** affect the gauge check, which reads
+> `status` and the due date only — take a gauge out of use with `status`, not `is_active`.
+
+> **Tenancy.** `GET .../{id}/history` resolved the gauge by bare id, and the record query behind
+> `GET .../{id}` was not company-filtered. Both now resolve the gauge in the active company and read
+> only that company's records; a foreign gauge is a flat **404** with the same body as an absent id
+> (`"Equipment not found"`), and `PUT` / `calibrate` against one write nothing. The list also keeps a
+> stored `retired` status as `retired`; it used to be recomputed from dates into `active` / `due` /
+> `overdue`, which only `out_of_service` was exempt from.
+
+> **`equipment_id` codes are still unique install-wide.** `equipment.equipment_id` — like
+> `tools.tool_id` and `downtime_reason_codes.code` — still carries a global unique constraint;
+> migration `026` moved seven other tables to `(company_id, …)` compounds but not these. A code
+> another tenant already uses now gets the same **400** `"Equipment ID already exists"` as a
+> same-tenant duplicate instead of a 500, which still tells the caller that *some* tenant uses it. The
+> per-company compound is a follow-up migration.
 
 ### Job costing
 
@@ -9114,6 +9302,71 @@ records, targets) require **Admin / Manager / Supervisor**.
 > that day) are skipped entirely — no staffed time is uncomputable, not an all-zero measurement.
 > Cron-written records are audited with the system as actor. See `docs/DOCKER_PRODUCTION.md` →
 > Background Jobs.
+
+### Downtime Tracking
+
+`app/api/endpoints/downtime.py`, mounted at `/downtime`. An event is reported against a work center
+(optionally a work order) and resolved when the machine runs again; **UNPLANNED** event minutes are
+the availability input to `POST /oee/calculate/{work_center_id}` above.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/downtime/` | List events (`work_center_id`, `category`, `planned_type`, `date_from` / `date_to`, `active_only`; `skip`, `limit` `1 … 5000`) | Yes |
+| GET | `/downtime/active` | Unresolved events | Yes |
+| GET | `/downtime/summary` | Resolved events: total / planned / unplanned hours, by category, top 15 reasons | Yes |
+| GET | `/downtime/by-work-center` | Resolved-event hours per work center | Yes |
+| GET | `/downtime/reason-codes` | Reason-code vocabulary (`category`, `active_only`) | Yes |
+| GET | `/downtime/{id}` | One event | Yes |
+| POST | `/downtime/` | Report (start) an event | Any role except Viewer |
+| POST | `/downtime/{id}/resolve` | Resolve: sets `end_time` (default now) and `duration_minutes` | Any role except Viewer |
+| PUT | `/downtime/{id}` | Correct an event after the fact | Admin / Manager / Supervisor |
+| POST | `/downtime/reason-codes` | Create a reason code | Admin / Manager / Supervisor |
+| PUT | `/downtime/reason-codes/{id}` | Edit a reason code (retire with `is_active: false`) | Admin / Manager / Supervisor |
+
+There is no delete endpoint.
+
+> ⚠️ **Every event read returned 500, and so did create — after committing.** The `reporter` /
+> `resolver` objects in `DowntimeEventResponse` declared a required `username`, but `User` has no such
+> column and `reported_by` is NOT NULL, so every event failed response validation: list, get and
+> active were 500s, and create, update and resolve were 500s *after* their change had committed.
+> `reporter.username`
+> and `resolver.username` are now optional and **always `null`** (the page's TypeScript type now says
+> `username?: string | null`; nothing renders it). Read `full_name`.
+
+> **Tenancy: the work center and work order are validated, and a legacy cross-tenant link no longer
+> renders.** `work_center_id` and `work_order_id` on create and on `PUT` must belong to the active
+> company — a flat **404** (`"Work center not found"` / `"Work order not found"`), never 403 — and a
+> soft-deleted work order is refused the same way. On `PUT` only a reference that **changes** is
+> validated: re-sending the work order the event already names (a client that `PUT`s the whole object
+> back to fix `category`) is not a new selection, so it still saves after that job was soft-deleted —
+> the historical record keeps naming what it named (invariant 3). The work center need not be active: downtime is
+> what you record against a machine that is down. Unvalidated, the write doubled as a read, because
+> the response rendered the foreign machine's name straight back. A row written before this guard is
+> owned by the caller and passes every `company_id` filter, so event reads now load `work_center` /
+> `work_order` under tenant loader criteria: a foreign relation reads as `null`, while
+> `work_center_id` stays visible so the row can be corrected. `GET /downtime/by-work-center` filters
+> the joined work center by company too, so such a row drops out of that grouping (its minutes still
+> count in `/summary`). Another tenant's event is **404** on get, `PUT` and resolve, with nothing
+> written. See the pre-deploy detection SQL in `docs/RBAC_PERMISSIONS.md` → Downtime.
+
+> **RBAC was added; there was none.** Every handler was a bare `get_current_user`, so a Viewer could
+> start, correct and close the events OEE availability is computed from. Reporting (create / resolve)
+> stays open to every tenant role except **Viewer**; correcting an event (`PUT`) and managing reason
+> codes match the OEE write roles (Admin / Manager / Supervisor), because both rewrite OEE inputs after
+> the fact. Reads stay open. See `docs/RBAC_PERMISSIONS.md` → Downtime.
+
+> **Every state change writes a tamper-evident `audit_log` row** (the router wrote none before):
+> `downtime_event` `log_create` on create, `log_update` on `PUT`, and `log_status_change` (`active` →
+> `resolved`, with `end_time`, `duration_minutes` and `resolution` in `extra_data`) on resolve;
+> `downtime_reason_code` `log_create` / `log_update`. The `downtime_started` / `downtime_resolved`
+> operational events are unchanged. `PUT` and resolve row-lock the event (`SELECT … FOR UPDATE OF
+> downtime_events` on Postgres), so two simultaneous resolves cannot both pass the "not yet resolved"
+> check. `PUT /downtime/{id}` applies an explicit allowlist
+> (`work_center_id`, `work_order_id`, `category`, `planned_type`, `reason_code`, `description`,
+> `resolution`) rather than a blind `setattr`; an explicit `null` on `work_center_id`, `category` or
+> `planned_type` (NOT NULL columns) is **422**. A reason-code edit onto a code the tenant already has
+> is **400** `"Reason code already exists"`, and so is a code another tenant uses (global unique
+> constraint — see Calibration → `equipment_id` codes).
 
 ### Users (Admin)
 
