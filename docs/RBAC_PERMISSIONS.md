@@ -1026,6 +1026,38 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > Empty result → nothing to do. Non-empty → those rows need repointing at a machine the owning
 > company actually has.
 
+### Tool & Fixture Management (tool crib)
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View (tools, dashboard, checked-out, replacement-due, inspection-due, history) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Create / edit tool (`POST /tool-management/tools/`, `PUT .../tools/{id}`) | ✓ | ✓ | ✓ | | | | |
+| Retire tool (`DELETE /tool-management/tools/{id}`) | ✓ | ✓ | ✓ | | | | |
+| Check out / check in (`POST .../tools/{id}/checkout`, `.../checkin`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| Log usage (`POST .../tools/{id}/log-usage`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
+
+> ⚠️ **This table is new because the router had NO role gating at all.** Every handler was
+> `Depends(get_current_user)`, so a **Viewer could create, edit and retire tools** and check them in
+> and out, with no audit row naming who.
+>
+> **Managing a tool record follows the inventory stock mutators** (`inventory.STOCK_MUTATOR_ROLES` —
+> the Inventory Adjust / Issue / Receive rows, Admin / Manager / Supervisor), as `TOOL_PLANNING_ROLES`
+> in `app/api/endpoints/tool_management.py`: a tool is crib inventory. **Using a tool**
+> (`TOOL_USE_ROLES`) is open to every tenant role except **Viewer**. `/tool-management` is
+> route-gated on `inventory:view`, which every role holds, and the page offers checkout and checkin
+> to all of them, so the read-only Viewer is the only role that loses anything. Kiosk operator tokens
+> are path-fenced to the shop-floor routes, so there is no kiosk caller. Superuser / Platform Admin
+> bypass, as elsewhere.
+>
+> **Reads stay open to every role, and are now tenant-scoped.** The history read resolved a tool by
+> bare id, and the dashboard and the checked-out / replacement-due / inspection-due lists aggregated
+> across tenants. Every state change now writes an `audit_log` row (`tool`, `tool_usage_log`). See
+> `docs/API.md` → Tool & Fixture Management.
+>
+> ⚠️ **The client has no matching gate yet.** `ToolManagement.tsx` renders its write controls
+> unconditionally, so a Viewer sees controls the server now refuses and gets a 403 toast. Pairing the
+> client gate with the server gate is a follow-up, as for Maintenance above.
+
 ### Supplier Scorecards, Audits & Approved Supplier List
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
@@ -1780,6 +1812,20 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > where the `PUT /quality/ncr/{id}` update path wrote no `audit_log` row at all. See `docs/API.md` →
 > Quality.
 
+> **Calibration — endpoint mapping (now enforced in code).** `POST /api/v1/calibration/equipment`,
+> `PUT /calibration/equipment/{id}` and `POST /calibration/equipment/{id}/calibrate` are enforced to
+> the **Calibration** row above via `require_role([ADMIN, MANAGER, QUALITY])`
+> (`CALIBRATION_WRITE_ROLES` in `app/api/endpoints/calibration.py`) — the same set that holds the
+> frontend's `quality:calibration` permission, which route-gates `/calibration`. **This is a
+> permission change:** until now the row described the UI only. Every calibration write was a bare
+> `get_current_user`, so any authenticated user in the tenant — a Viewer included — could set a gauge
+> `active` and put it past the process-sheet gauge check. Reads (`GET /calibration/equipment`,
+> `/due-soon`, `/{id}`, `/{id}/history`) stay open to every role in the tenant, tenant-scoped; the
+> dashboard's calibration-due alert reads `/due-soon`. Superuser / Platform Admin bypass, as
+> elsewhere. The role is necessary, not sufficient: `PUT` may only take a gauge **out** of service
+> (**409** otherwise), and only a passing calibration record puts one back — see `docs/API.md` →
+> Calibration.
+
 ### Operator Certifications & Training
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
@@ -2305,6 +2351,50 @@ and writes an `EXPORT` audit row through `AuditService`:
 > **Audit coverage (2026-06-09).** The OEE write endpoints now also write a tamper-evident `audit_log`
 > row on every record/target create/update/delete (and the auto-calc upsert), so OEE mutations are on
 > the hash chain alongside the role gate. No role change — audit-trail coverage only.
+
+### Downtime
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View (events, active, summary, by-work-center, reason codes) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Report / resolve an event (`POST /downtime/`, `POST /downtime/{id}/resolve`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| Correct an event (`PUT /downtime/{id}`) | ✓ | ✓ | ✓ | | | | |
+| Manage reason codes (`POST /downtime/reason-codes`, `PUT /downtime/reason-codes/{id}`) | ✓ | ✓ | ✓ | | | | |
+
+> ⚠️ **This table is new because the router had NO role gating and no audit.** Every handler was
+> `Depends(get_current_user)`, so a **Viewer could start, correct and close downtime events** — and
+> UNPLANNED event minutes are subtracted from productive run in OEE availability (see OEE above).
+>
+> **Reporting stays on the floor; correcting matches OEE Write.** `DOWNTIME_REPORT_ROLES` (create /
+> resolve, `app/api/endpoints/downtime.py`) is every tenant role except **Viewer**: `/downtime` is
+> route-gated on `work_orders:view`, which every role holds, and `DowntimeTracking.tsx` calls only
+> create and resolve, so operators keep logging stoppages. `DOWNTIME_MANAGE_ROLES` (`PUT` and the
+> reason-code writes) is Admin / Manager / Supervisor — the `OEE_WRITE_ROLES` set — because both
+> rewrite OEE inputs after the fact; no page calls them today. Reads stay open to every role,
+> tenant-scoped. There is no delete endpoint. Superuser / Platform Admin bypass, as elsewhere.
+>
+> **Every state change writes a tamper-evident `audit_log` row** (`downtime_event`,
+> `downtime_reason_code`), and `work_center_id` / `work_order_id` are validated against the active
+> company (flat **404**). See `docs/API.md` → Downtime Tracking.
+>
+> ⚠️ **The client has no matching gate yet.** `DowntimeTracking.tsx` shows its create and resolve
+> controls to a Viewer, who now gets a 403 toast.
+
+> **Before deploying, check for legacy cross-tenant rows.** The write guards stop *new* mis-tenanted
+> events; they do nothing about rows written before them. Event reads now render such a row's foreign
+> work center / work order as `null`, but the rows themselves are a data problem:
+>
+> ```sql
+> SELECT 'downtime_events.work_center' AS t, d.id, d.company_id AS owner, w.company_id AS fk_owner
+>   FROM downtime_events d JOIN work_centers w ON w.id = d.work_center_id
+>  WHERE w.company_id <> d.company_id
+> UNION ALL SELECT 'downtime_events.work_order', d.id, d.company_id, wo.company_id
+>   FROM downtime_events d JOIN work_orders wo ON wo.id = d.work_order_id
+>  WHERE wo.company_id <> d.company_id;
+> ```
+>
+> Empty result → nothing to do. Non-empty → repoint each row with `PUT /downtime/{id}` (Admin /
+> Manager / Supervisor) at a machine or job the owning company actually has.
 
 <a id="werco-copilot-read-only-ai-chat"></a>
 
