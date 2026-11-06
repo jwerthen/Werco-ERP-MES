@@ -4,7 +4,8 @@ The scrap-code vocabulary is quality-system configuration, so the invariants are
 the AS9100D/CMMC set:
   * tenant isolation -- codes never read/write across companies; ``code`` is
     unique PER TENANT (two companies may share a code string; DowntimeReasonCode's
-    global unique is a known defect deliberately not copied),
+    former global unique, a defect deliberately not copied here, was fixed by
+    migration 116_business_keys_per_company),
   * RBAC -- writes are ADMIN/MANAGER/QUALITY; operators can read (the pickers)
     but never write,
   * audit -- create/update land tamper-evident audit_log rows,

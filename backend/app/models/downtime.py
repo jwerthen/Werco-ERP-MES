@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import Boolean, Column, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -67,9 +67,13 @@ class DowntimeReasonCode(Base, TenantMixin):
     """Predefined reason codes for categorizing downtime events"""
 
     __tablename__ = "downtime_reason_codes"
+    # ``code`` (the user-entered reason code) is unique PER COMPANY, never globally;
+    # ``ix_downtime_reason_codes_code`` stays as a plain lookup index.
+    # Lock-step with migration 116_business_keys_per_company.
+    __table_args__ = (UniqueConstraint("company_id", "code", name="uq_downtime_reason_codes_company_code"),)
 
     id = Column(Integer, primary_key=True, index=True)
-    code = Column(String(50), unique=True, nullable=False, index=True)
+    code = Column(String(50), nullable=False, index=True)
     name = Column(String(255), nullable=False)
     category = Column(SQLEnum(DowntimeCategory), nullable=False)
     description = Column(Text, nullable=True)

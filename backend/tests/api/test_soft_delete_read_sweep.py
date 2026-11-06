@@ -57,8 +57,8 @@ _NCR_BODY = {
 # ---------------------------------------------------------------------------
 
 
-def _create_ncr(client: TestClient, headers: dict) -> int:
-    resp = client.post("/api/v1/quality/ncr", headers=headers, json=_NCR_BODY)
+def _create_ncr(client: TestClient, headers: dict, **overrides) -> int:
+    resp = client.post("/api/v1/quality/ncr", headers=headers, json={**_NCR_BODY, **overrides})
     assert resp.status_code in (status.HTTP_200_OK, status.HTTP_201_CREATED), resp.text
     return resp.json()["id"]
 
@@ -320,11 +320,21 @@ def test_quality_metrics_excludes_other_company_receipts(client: TestClient, db_
     assert float(metrics["receiving_total_qty"]) == 3.0  # company B's 100 is excluded
 
 
-# NOTE: a cross-tenant NCR-count test is intentionally NOT included here. The
-# reports quality-metrics NCR query IS correctly company_id-scoped, but creating an
-# NCR under a second company on the same calendar day trips a *pre-existing,
-# unrelated* defect: ``ncrs.ncr_number`` carries a GLOBAL ``unique=True`` while
-# ``generate_ncr_number`` numbers per-company, so company B's first NCR of the day
-# ("NCR-YYYYMMDD-001") collides with company A's. That is a latent multi-tenant bug
-# outside this feature's scope (see the test-engineer report); the receipt aggregate
-# above already proves the company_id blocker fix.
+def test_quality_metrics_excludes_other_company_ncrs(client: TestClient, db_session: Session):
+    """Company A's quality-metrics NCR counts must not include company B's NCRs.
+
+    Both companies file NCRs on the same calendar day, so each draws its own
+    "NCR-YYYYMMDD-001". Until migration 116 ``ncrs.ncr_number`` was GLOBALLY unique, so
+    the second company's create collided and this test could not be written; the number
+    is now unique per company, as ``(company_id, ncr_number)``."""
+    admin_a = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    admin_b = make_user(db_session, role=UserRole.ADMIN, company_id=2)
+
+    # Company B files today's first two NCRs, customer returns that would swamp A's counts if they leaked.
+    _create_ncr(client, headers_for(admin_b), source="customer_return")
+    _create_ncr(client, headers_for(admin_b), source="customer_return")
+    _create_ncr(client, headers_for(admin_a))  # company A's own same-day "-001"
+
+    metrics = client.get("/api/v1/reports/quality-metrics", headers=headers_for(admin_a)).json()
+    assert metrics["total_ncrs"] == 1  # company B's two are excluded
+    assert metrics["ncr_by_source"] == {"in_process": 1}

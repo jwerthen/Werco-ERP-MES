@@ -11,8 +11,9 @@ inside this SQLite-based suite is locked here:
    imports and exposes callable ``upgrade()``/``downgrade()``.
 2. Source invariants (unit): the new-table RLS convention
    (``ENABLE ROW LEVEL SECURITY`` on scrap_reason_codes, docs/SUPABASE_SECURITY.md);
-   the per-tenant unique (``company_id, code`` -- NOT a global unique, the
-   DowntimeReasonCode defect deliberately not copied); the OEE unique key on
+   the per-tenant unique (``company_id, code`` -- NOT a global unique; 063
+   deliberately did not copy DowntimeReasonCode's global unique on ``code``, a
+   defect since fixed by migration 116_business_keys_per_company); the OEE unique key on
    ``COALESCE(shift, '')``; the pre-flight dedupe KEEPING the most recently
    updated row (ORDER BY updated_at DESC ... rn = 1 survives, rn > 1 deleted)
    inside the same transaction as the index build.
@@ -105,8 +106,9 @@ def test_new_table_gets_row_level_security():
 def test_scrap_code_uniqueness_is_per_tenant_not_global():
     source = _source()
     assert 'sa.UniqueConstraint("company_id", "code", name="uq_scrap_reason_codes_company_code")' in source
-    # The known DowntimeReasonCode defect (a global unique on code) is not copied:
-    # no bare unique=True on the code column definition.
+    # 063 did not copy DowntimeReasonCode's then-global unique on code (a defect since
+    # fixed by migration 116_business_keys_per_company): no bare unique=True on the code
+    # column definition.
     code_column = re.search(r'sa\.Column\("code",[^\n]*\)', source)
     assert code_column is not None
     assert "unique=True" not in code_column.group(0)

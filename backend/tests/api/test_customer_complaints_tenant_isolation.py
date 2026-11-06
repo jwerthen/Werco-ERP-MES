@@ -33,8 +33,10 @@ What these tests lock (router prefix ``/complaints`` + in-router ``/complaints/.
 - selected references must be live rows of the active company, except an RMA's
   customer / part copied from its own complaint, which only has to be ours;
 - create-ncr / create-car produce tenant-correct, per-company-numbered records and
-  emit the same events as the quality router's create paths. A strict xfail pins the
-  known defect that per-company NCR/CAR numbers collide on their global unique index.
+  emit the same events as the quality router's create paths, and a second tenant's
+  same-day "-001" no longer collides (NCR/CAR numbers are unique per company, 116);
+- complaint and RMA numbers are per-company sequences under a per-company lock, so
+  two tenants may hold the same CC-/RMA- number.
 """
 
 from datetime import date, datetime, timedelta
@@ -42,7 +44,6 @@ from datetime import date, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token
@@ -614,10 +615,29 @@ class TestComplaintWorkflowAudit:
         rows = _audit_rows(db_session, "customer_complaint", complaint.id)
         assert [(row.action, row.company_id) for row in rows] == [("CREATE", COMPANY_A)]
 
-    def test_complaint_numbers_are_one_global_sequence(self, client: TestClient, db_session: Session, quality_a):
-        # complaint_number is globally unique, so the sequence is global (per-company
-        # numbering needs a migration first); the lock keeps it collision-free.
-        make_complaint(db_session, company_id=COMPANY_B, complaint_number=f"CC-{datetime.now():%Y}-0007")
+    def test_complaint_numbers_are_a_per_company_sequence(self, client: TestClient, db_session: Session, quality_a):
+        # complaint_number is unique per company (migration 116), so each tenant numbers
+        # from its own highest value: another tenant's CC-YYYY-0007 neither advances our
+        # sequence nor blocks our own -0001, and our next number follows our own last one.
+        year = f"{datetime.now():%Y}"
+        make_complaint(db_session, company_id=COMPANY_B, complaint_number=f"CC-{year}-0007")
+        payload = {"customer_name": "Acme", "title": "Dented", "description": "Dented flange"}
+
+        first = client.post(f"{API}/complaints/", json=payload, headers=headers_for(quality_a))
+        second = client.post(f"{API}/complaints/", json=payload, headers=headers_for(quality_a))
+
+        assert first.status_code == 200, first.text
+        assert second.status_code == 200, second.text
+        assert first.json()["complaint_number"] == f"CC-{year}-0001"
+        assert second.json()["complaint_number"] == f"CC-{year}-0002"
+        # The other tenant's row is untouched and still holds its number.
+        owned = db_session.query(CustomerComplaint).filter(CustomerComplaint.company_id == COMPANY_B).one()
+        assert owned.complaint_number == f"CC-{year}-0007"
+
+    def test_two_tenants_may_hold_the_same_complaint_number(self, client: TestClient, db_session: Session, quality_a):
+        # The case the global unique turned into a 500: another tenant already holds -0001.
+        year = f"{datetime.now():%Y}"
+        make_complaint(db_session, company_id=COMPANY_B, complaint_number=f"CC-{year}-0001")
 
         response = client.post(
             f"{API}/complaints/",
@@ -626,7 +646,7 @@ class TestComplaintWorkflowAudit:
         )
 
         assert response.status_code == 200, response.text
-        assert response.json()["complaint_number"] == f"CC-{datetime.now():%Y}-0008"
+        assert response.json()["complaint_number"] == f"CC-{year}-0001"
 
     def test_full_workflow_writes_one_status_change_row_per_verb(
         self, client: TestClient, db_session: Session, quality_a
@@ -898,9 +918,13 @@ class TestRMAWorkflow:
             "lot_number": {"old": None, "new": "LOT-9"},
         }
 
-    def test_rma_numbers_are_one_global_sequence(self, client: TestClient, db_session: Session, quality_a):
-        # rma_number is globally unique like complaint_number, so the sequence is global.
-        make_rma(db_session, company_id=COMPANY_B, rma_number=f"RMA-{datetime.now():%Y}-0003")
+    def test_rma_numbers_are_a_per_company_sequence(self, client: TestClient, db_session: Session, quality_a):
+        # rma_number is unique per company like complaint_number (migration 116): another
+        # tenant's -0001 and -0003 are invisible to our sequence, which follows our own -0001.
+        year = f"{datetime.now():%Y}"
+        make_rma(db_session, company_id=COMPANY_B, rma_number=f"RMA-{year}-0001")
+        make_rma(db_session, company_id=COMPANY_B, rma_number=f"RMA-{year}-0003")
+        make_rma(db_session, company_id=COMPANY_A, rma_number=f"RMA-{year}-0001")
 
         response = client.post(
             f"{API}/rma/",
@@ -909,13 +933,15 @@ class TestRMAWorkflow:
         )
 
         assert response.status_code == 200, response.text
-        assert response.json()["rma_number"] == f"RMA-{datetime.now():%Y}-0004"
+        assert response.json()["rma_number"] == f"RMA-{year}-0002"
 
     def test_complaint_and_rma_numbers_are_allocated_under_the_generator_lock(
         self, client: TestClient, db_session: Session, quality_a, monkeypatch
     ):
         # SQLite cannot exercise the advisory lock itself; this holds that both
-        # allocators still take it (the read-max-plus-one scan is racy without it).
+        # allocators still take it (the read-max-plus-one scan is racy without it), and
+        # take it per company: the sequences are per company, so a global slot would
+        # make every tenant's create wait on every other's for nothing.
         from app.services import customer_complaint_service
 
         taken = []
@@ -936,7 +962,7 @@ class TestRMAWorkflow:
         )
 
         assert complaint.status_code == 200 and rma.status_code == 200
-        assert taken == [("complaint_number", None), ("rma_number", None)]
+        assert taken == [("complaint_number", COMPANY_A), ("rma_number", COMPANY_A)]
 
 
 # ---------------------------------------------------------------- PUT vs the workflow verbs
@@ -1407,8 +1433,8 @@ class TestEscalation:
             company_id=COMPANY_A,
         )
         # The other tenant's higher same-day number is what makes "-002" prove per-company
-        # allocation: a global scan would hand out -006. (-005 cannot collide with A's -002
-        # on the globally-unique ncr_number.)
+        # allocation: a global scan would hand out -006. (The same-number case, B already
+        # holding A's next "-001", is test_same_day_escalations_in_two_tenants_do_not_collide.)
         other_tenant = NonConformanceReport(
             ncr_number=f"NCR-{today}-005",
             title="Other tenant NCR",
@@ -1529,18 +1555,12 @@ class TestEscalation:
         assert _state(db_session, CustomerComplaint, complaint.id)["ncr_id"] is None
         assert _side_effect_counts(db_session) == before_counts
 
-    # KNOWN DEFECT, pinned rather than hidden. quality_numbering allocates NCR / CAR
-    # numbers PER COMPANY, but ncrs.ncr_number and cars.car_number are GLOBALLY unique
-    # (unique=True; never re-keyed to (company_id, number)). The first same-day NCR/CAR
-    # of a second tenant therefore gets the same "-001" the first tenant already holds,
-    # and the insert fails. This affects every NCR/CAR writer, not only this router, and
-    # needs a migration re-keying both uniques. strict=True: once that lands this XPASSes
-    # and fails, so the marker has to come off.
-    @pytest.mark.xfail(
-        strict=True,
-        raises=IntegrityError,
-        reason="ncr_number / car_number are globally unique but numbered per company",
-    )
+    # quality_numbering allocates NCR / CAR numbers PER COMPANY, and since migration 116
+    # ncrs.ncr_number and cars.car_number are unique per company, as (company_id, number).
+    # Before that both were GLOBALLY unique, so the first same-day NCR/CAR of a second
+    # tenant drew the "-001" the first tenant already held and the insert failed (a 500
+    # from every NCR/CAR writer). Pinned here, at the escalation verbs, because this
+    # router reaches both allocators.
     @pytest.mark.parametrize("verb", ["create-ncr", "create-car"])
     def test_same_day_escalations_in_two_tenants_do_not_collide(
         self, client: TestClient, db_session: Session, quality_a, verb
@@ -1572,3 +1592,9 @@ class TestEscalation:
         response = client.post(f"{API}/complaints/{complaint.id}/{verb}", headers=headers_for(quality_a))
 
         assert response.status_code == 200, response.text
+        if verb == "create-ncr":
+            ncr = db_session.get(NonConformanceReport, response.json()["ncr_id"])
+            assert (ncr.company_id, ncr.ncr_number) == (COMPANY_A, f"NCR-{today}-001")
+        else:
+            car = db_session.get(CorrectiveActionRequest, response.json()["car_id"])
+            assert (car.company_id, car.car_number) == (COMPANY_A, f"CAR-{today}-001")

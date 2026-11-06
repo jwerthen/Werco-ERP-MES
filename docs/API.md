@@ -6824,6 +6824,10 @@ date. A final status (`passed`, `failed`, `conditional`) **or any existing `comp
 all header, characteristic, and prefill writes return **409**: corrections require a new inspection.
 The legacy `version` request field is not an optimistic-lock guarantee for the FAI model.
 
+Create numbers each inspection `FAI-YYYYMMDD-NNN` from a per-company sequence under a per-company
+lock. `fai_number` is unique per company (migration `116`). Before `116` it was globally unique, so
+a second company's first FAI of the day returned **500**.
+
 Prefill preserves existing measurement values/devices and never sets `is_conforming`; ambiguous
 labels and specification mismatches remain unmatched for the inspector to resolve. A conformance
 value of `null` is unrecorded, not failed. Characteristic counts, evidence changes and required audit
@@ -7125,10 +7129,10 @@ Admin / Manager / Quality (see [RBAC](RBAC_PERMISSIONS.md#customer-complaints--r
 > Before this fix both verbs returned **500**, because they built the NCR or CAR without a
 > `company_id`.
 >
-> **Known limitation, pending a migration.** `ncr_number` and `car_number` are globally unique,
-> but numbered per company. If two tenants raise an NCR (or CAR) on the same day, both draw
-> `NCR-YYYYMMDD-001` (or `CAR-…`), and the second insert fails on the unique index with a 500.
-> This affects every NCR/CAR writer, not only these verbs.
+> **NCR and CAR numbers are unique per company (migration `116`).** Two companies may each hold
+> `NCR-YYYYMMDD-001` (or `CAR-…`) on the same day. Before `116` both columns were globally unique,
+> so the second company's first NCR or CAR of the day failed with a 500 on every NCR/CAR writer,
+> these verbs included.
 >
 > **Audit.** Every write records through `AuditService`, with resource types `customer_complaint`,
 > `rma`, `ncr` and `car`.
@@ -7151,10 +7155,14 @@ Admin / Manager / Quality (see [RBAC](RBAC_PERMISSIONS.md#customer-complaints--r
 > [NOTIFICATIONS.md](NOTIFICATIONS.md)).
 >
 > **Numbering and creation.** Complaint numbers are `CC-YYYY-NNNN` and RMA numbers `RMA-YYYY-NNNN`.
-> Each comes from one sequence **shared across tenants**, because both columns are globally unique.
-> Allocation runs under an advisory lock, so concurrent creates cannot collide. A complaint's
-> `received_by` is the caller, and `date_received` defaults to the server's current date. Before
-> this fix, `POST /complaints/complaints/` returned **500** on every call.
+> Each company has its own sequence for each, and both columns are unique per company (migration
+> `116`), so two companies may both hold `CC-2026-0001`. Allocation runs under a per-company
+> advisory lock, so concurrent creates in one company cannot collide and different companies never
+> wait on each other. Until `116` both came from one sequence shared across tenants. Existing
+> numbers were not renumbered: a company's next number follows its own highest existing number,
+> so gaps left by the shared sequence remain. A complaint's `received_by` is the caller, and
+> `date_received` defaults to the server's current date. Before this fix,
+> `POST /complaints/complaints/` returned **500** on every call.
 >
 > **Timestamp exception.** These response schemas still extend `BaseModel` rather than
 > `UTCModel`, so `created_at` / `updated_at` are not normalized to a trailing `Z` (see
