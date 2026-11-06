@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -39,6 +39,7 @@ from app.schemas.quality import (
 from app.services import fai_service, process_sheet_service
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
+from app.services.quality_numbering import generate_car_number as _generate_car_number
 from app.services.quality_numbering import generate_ncr_number as _generate_ncr_number
 
 router = APIRouter()
@@ -392,19 +393,7 @@ def create_car_from_ncr(
 
 
 def generate_car_number(db: Session, company_id: int = None) -> str:
-    acquire_generator_lock(db, "car_number", company_id)
-    today = datetime.now().strftime("%Y%m%d")
-    prefix = f"CAR-{today}-"
-    query = db.query(CorrectiveActionRequest).filter(CorrectiveActionRequest.car_number.like(f"{prefix}%"))
-    if company_id is not None:
-        query = query.filter(CorrectiveActionRequest.company_id == company_id)
-    last = query.order_by(CorrectiveActionRequest.car_number.desc()).first()
-
-    if last:
-        num = int(last.car_number.split("-")[-1]) + 1
-    else:
-        num = 1
-    return f"{prefix}{num:03d}"
+    return _generate_car_number(db, company_id, lock=acquire_generator_lock)
 
 
 @router.get("/car", response_model=List[CARResponse])

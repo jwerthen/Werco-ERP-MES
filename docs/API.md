@@ -1269,6 +1269,116 @@ Updates record old/new values through the normal committed audit path.
 Editing a soft-deleted customer returns 404; the update endpoint cannot reactivate
 a deleted record. Customer pickers independently exclude tombstoned rows.
 
+### Customers
+
+`app/api/endpoints/customers.py`, mounted at `/customers`. Every route resolves the customer in the
+active company; another company's customer id answers **404** with the same detail a missing id gets.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/customers/` | List customers by name (`active_only` default `true`; `search` matches name, code, contact name, city; `include_deleted` is honored for Admin only; `limit` 1–5000, `offset`) | Yes |
+| GET | `/customers/names` | `{id, name}` pairs of active, non-deleted customers, for pickers | Yes |
+| GET | `/customers/{id}` | Customer detail | Yes |
+| GET | `/customers/{id}/stats` | Parts and assemblies filed under the customer's name, work-order counts by status, and current / past / recent work orders, **from the active company only** (see note) | Yes |
+| POST | `/customers/` | Create. `code` is optional and generated from the name when omitted. **400** `Customer name already exists` / `Customer code already exists` on a duplicate **within the company**. Writes an audit `CREATE` row in the same transaction | Admin / Manager / Supervisor |
+| PUT | `/customers/{id}` | Partial update of a live customer (**404** on a soft-deleted one). A rename onto a name already used in the company is **400** `Customer name already exists`, including when a concurrent rename races past the check. `code` is not updatable | Admin / Manager |
+| DELETE | `/customers/{id}` | Soft delete by default (also clears `is_active`). A second soft delete of an already-deleted customer is **400** `Customer is already deleted` and changes nothing. `hard_delete=true` removes the row (a soft-deleted one too), and is refused **400** while parts of the active company carry the customer's name | Admin / Manager |
+| POST | `/customers/{id}/restore` | Restore a soft-deleted customer (**400** if it is not deleted). Restore always sets `is_active = true` (see note) | Admin / Manager |
+| POST | `/customers/import-csv` | See [Bulk Imports & Templates](#bulk-imports--templates-excel-migration-kit) | Admin / Manager |
+
+> **Create and update are now role-gated.** Both previously required only an authenticated user.
+> Update is Admin / Manager, matching the rest of the customer master's writes (import, delete,
+> restore) and the vendor master's create / update. Create is Admin / Manager / Supervisor, the same
+> roles `POST /work-orders/` admits, because New Work Order creates the customer inline when the
+> typed name is new and abandons the work-order submit if that create is refused. Other roles get
+> **403** `Insufficient permissions`; reads stay open to every role. The Customers page does not yet
+> hide Add / Edit by role, so a refused save reaches the user as an error toast. See
+> [RBAC → Customers](RBAC_PERMISSIONS.md#customers).
+
+> **Name and code are unique per company, not globally (migration `115`).** `create_all` had built
+> `customers.name` and `customers.code` as global unique indexes, so one company's customer name or
+> code blocked every other company from using it, and the refusal disclosed that it existed. A
+> second company's generated `ACM001` was a **500**. Uniqueness is now
+> `UNIQUE (company_id, name)` and `UNIQUE (company_id, code)`. Neither has a partial predicate, so a
+> soft-deleted customer keeps its name and code: creating or renaming onto a tombstone's name or code
+> is still **400**. A generated code is the first three letters or digits of the name plus a
+> three-digit number, counted within the active company only, and it steps past any code already
+> taken there, including a hand-keyed or soft-deleted one. A concurrent create that slips past the
+> duplicate check is mapped to **400** `Customer name or code already exists`, and a concurrent
+> rename to **400** `Customer name already exists`. Neither leaves a row change or an audit row.
+
+> **`/stats` and the hard-delete check are tenant-scoped.** A customer's parts and work orders are
+> linked by the free-text `customer_name`, not a foreign key. Both reads previously had no company
+> predicate, so a name shared by two companies returned the other company's part numbers,
+> work-order numbers and customer POs, and the hard-delete count refused the delete over the other
+> company's parts while disclosing how many it had. Both now read the active company only.
+>
+> The hard-delete check counts parts only. Customer complaints, RMAs, RFQ quotes, fabrication
+> quotes and the governance tables reference `customers.id` with no `ON DELETE`, so on PostgreSQL a
+> hard delete of a customer they still reference fails with a database error (**500**) rather than
+> a 400. Work orders that name the customer are not counted. Soft delete is unaffected.
+
+> **Audit rows.** Create writes a `CREATE` row (it wrote none before). Soft delete's `DELETE` row
+> records `old_values` `{is_deleted: false, is_active: <prior value>}`; because a second soft delete
+> is refused, that row cannot be overwritten by a later one claiming the customer was live. Restore's
+> `RESTORE` row
+> records both `is_deleted` and `is_active`, old and new. A hard delete's
+> `DELETE` row carries the full removed record in `old_values`, which is the only copy left after
+> the commit. Unlike vendor restore, customer restore does not put back the `is_active` value the
+> customer had before the delete; that prior value is recorded only in the soft-delete audit row.
+
+### Custom Fields
+
+`app/api/endpoints/custom_fields.py`, mounted at `/custom-fields`. Definitions and values are both
+company-scoped.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/custom-fields/definitions` | List definitions (`entity_type` filter; `active_only` default `true`) | Yes |
+| POST | `/custom-fields/definitions` | Create a definition (**400** when the `field_key` already exists for that entity type in the company). Writes an audit `CREATE` row | Admin / Manager |
+| GET | `/custom-fields/definitions/{id}` | Definition detail | Yes |
+| PUT | `/custom-fields/definitions/{id}` | Update a definition. Writes an audit `UPDATE` row with the supplied fields' old and new values | Admin / Manager |
+| DELETE | `/custom-fields/definitions/{id}` | Deactivate a definition (`is_active = false`; no row is removed). Writes an audit `STATUS_CHANGE` row (`active` → `inactive`); deactivating an already-inactive definition returns 200 and records nothing | Admin |
+| GET | `/custom-fields/values/{entity_type}/{entity_id}` | `{entity_type, entity_id, fields: {field_key: value}}` for one record. Values of deactivated definitions are omitted. Accepts a soft-deleted record | Yes |
+| POST | `/custom-fields/values/{entity_type}/{entity_id}` | Body `{field_key, value}`. Creates or overwrites one value on a live record. **404** when the field is not an active definition of the company; **400** when the value does not fit the field type | Yes |
+| POST | `/custom-fields/values/bulk` | Body `{entity_type, entity_id, values: {field_key: value}}`. Returns `results[]`, one `success` or `error` per key; an unknown field or an unparseable value is an `error` and the other keys still apply | Yes |
+| DELETE | `/custom-fields/values/{entity_type}/{entity_id}/{field_key}` | Remove one value. Works on a deactivated definition's value. **404** when the field or the value does not exist in the company | Yes |
+
+`entity_type` is one of `part`, `work_order`, `work_center`, `customer`, `supplier` (a vendor),
+`inventory` (an `inventory_items` stock row) and `bom`. `entity_id` is that record's id.
+
+> **The value routes are tenant-scoped (they were not).** Before this change the four `/values/*`
+> routes took no company: they looked definitions up by `field_key` across every company, never
+> checked that `entity_id` existed, and read, overwrote and deleted value rows by id alone. New value
+> rows were also built without `company_id`, which is NOT NULL, so creating a value always failed
+> with a **500**. Now:
+>
+> - The target record must exist **in the active company**, or the route answers **404**
+>   (`<entity_type> <entity_id> not found`) and writes nothing; for bulk, nothing at all is written.
+>   The GET accepts a soft-deleted record; every write and the DELETE require a live one.
+> - The definition is resolved by company, `field_key` and `entity_type`. Another company's
+>   definition with the same key is never used.
+> - Value rows are read, overwritten and deleted only within the active company, and new rows carry
+>   `company_id`.
+> - Every create, overwrite and delete writes an audit row: `resource_type` `custom_field_value`,
+>   identifier `<entity_type>:<entity_id>:<field_key>`, the value columns old and new, and
+>   `extra_data` `{field_key, entity_type, entity_id}`. The delete stays physical (value rows carry
+>   no soft delete), so its `DELETE` row records the removed value.
+> - A value the field type cannot hold is **400** `Invalid value for '<field_key>' (<field_type>)`
+>   instead of a 500. A `date` / `datetime` value must be an ISO-8601 string; a JSON number,
+>   boolean, object or array is refused this way rather than failing at the database. In bulk only
+>   parse errors become per-key `error` results; a database error now fails the whole request
+>   instead of being reported as one key's error.
+>
+> **Definition writes are audited too.** Create, update and deactivate write `custom_field_definition`
+> rows (identifier `<entity_type>:<field_key>`). Deactivating a definition hides every value under
+> it, and editing one (`options`, `is_active`) changes how those values read, so who changed a
+> definition is recorded alongside the value writes.
+>
+> **Known gap: the value routes have no role gate.** Any authenticated user of the company, Viewer
+> included, can set or delete a value. That predates this change, is not intended policy, and is
+> tracked as a follow-up. See [RBAC → Custom Fields](RBAC_PERMISSIONS.md#custom-fields).
+
 ### Work Orders
 
 | Method | Endpoint | Description | Auth Required |
@@ -7090,6 +7200,153 @@ in `RBAC_PERMISSIONS.md`.
   "overall_suggested_compliance": "compliant"
 }
 ```
+
+### Customer Complaints & RMA
+
+Complaint and RMA endpoints are mounted under `/complaints`. The router's own routes are
+`/complaints/…` and `/rma/…`, so the public paths are `/complaints/complaints/…` and
+`/complaints/rma/…`. **Author** means Admin / Manager / Supervisor / Quality; **Approver** means
+Admin / Manager / Quality (see [RBAC](RBAC_PERMISSIONS.md#customer-complaints--rma)).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/complaints/complaints/dashboard` | Active-company stats: open complaints, average resolution days, open complaints by severity, top 10 customers, satisfaction rate, 12-month trend, open RMAs | Yes |
+| GET | `/complaints/complaints/` | List complaints, newest first (`status`, `severity`, `customer_id`, `date_from`, `date_to`, `skip`, `limit`) | Yes |
+| GET | `/complaints/complaints/{complaint_id}` | Get a complaint with its part, customer and RMAs | Yes |
+| GET | `/complaints/complaints/8d-report/{complaint_id}` | 8D report data (D1–D8) for one complaint | Yes |
+| POST | `/complaints/complaints/` | Record a complaint (status `received`) | Author |
+| PUT | `/complaints/complaints/{complaint_id}` | Edit complaint details. **No `status`, investigation or resolution fields** (422); **409** once `closed` / `void` | Author |
+| POST | `/complaints/complaints/{complaint_id}/investigate` | Record findings; `received` / `under_investigation` / `pending_resolution` → `under_investigation` | Author |
+| POST | `/complaints/complaints/{complaint_id}/resolve` | `under_investigation` / `pending_resolution` → `resolved` (required audit) | Approver |
+| POST | `/complaints/complaints/{complaint_id}/close` | `resolved` → `closed`, optionally recording customer satisfaction (required audit) | Approver |
+| POST | `/complaints/complaints/{complaint_id}/create-ncr` | Raise a `customer_return` NCR from the complaint and link it (required audit) | Approver |
+| POST | `/complaints/complaints/{complaint_id}/create-car` | Raise a CAR from the complaint and link it (required audit) | Approver |
+| GET | `/complaints/rma/` | List RMAs, newest first (`status`, `customer_id`, `complaint_id`, `skip`, `limit`) | Yes |
+| GET | `/complaints/rma/{rma_id}` | Get an RMA | Yes |
+| POST | `/complaints/rma/` | Open an RMA (status `requested`) | Author |
+| PUT | `/complaints/rma/{rma_id}` | Edit RMA details. **No `status`, `disposition` or `credit_amount`** (422); state-locked fields **409**; **409** once `completed` / `denied` | Author |
+| POST | `/complaints/rma/{rma_id}/approve` | `requested` → `approved`; records `authorized_by` / `authorized_date` (required audit) | Approver |
+| POST | `/complaints/rma/{rma_id}/deny` | `requested` → `denied`; records `authorized_by` / `authorized_date` (required audit) | Approver |
+| POST | `/complaints/rma/{rma_id}/receive` | `approved` → `material_received` (optional `shipping_tracking`) | Author |
+| POST | `/complaints/rma/{rma_id}/inspect` | `material_received` → `under_inspection` (`inspection_findings` required) | Author |
+| POST | `/complaints/rma/{rma_id}/dispose` | `under_inspection` / `material_received` → `disposition_decided` (required audit) | Approver |
+| POST | `/complaints/rma/{rma_id}/complete` | `disposition_decided` → `completed` (required audit) | Approver |
+
+> **Tenant isolation (all complaint and RMA endpoints).** Every route resolves through the caller's
+> **active company** (`get_current_company_id`). A complaint or RMA id that belongs to another
+> tenant returns **404** (`"Complaint not found"` / `"RMA not found"`) before anything is read or
+> changed. The dashboard aggregates only the active company. Part, customer and RMA expansions
+> are scoped too: a legacy row that points across tenants renders `part` / `customer` as `null`
+> and omits the foreign RMA. Same-company part and customer labels stay readable after those
+> rows are soft-deleted. Neither model is soft-deletable, and there is no delete endpoint.
+>
+> **Roles (tightened 2026-11-05).** Author and Approver verbs return **403** to every other role
+> (Operator, Shipping, Viewer, and Supervisor on Approver verbs), with nothing written. Before this
+> change, complaint create / edit / investigate / resolve / close and RMA create / edit / receive /
+> inspect were open to any authenticated user. Reads remain open to any authenticated user of the
+> tenant.
+>
+> **Status moves only through the workflow verbs.** A verb called from the wrong state returns
+> **400** with nothing written; the complaint verbs name the current status in `detail`. Resolve
+> needs an investigation first, so `received` → `resolved` is refused. `dispose` returns **400**
+> unless `disposition` is one of `replace`, `repair`, `credit`, `scrap`, `return_to_customer`.
+> Every writer locks its row before checking state, so two concurrent transitions cannot both
+> pass the same guard. **Breaking change:** `PUT /complaints/complaints/{id}` no longer accepts
+> `status`, and `PUT /complaints/rma/{id}` no longer accepts `disposition`. Both update schemas
+> refuse unknown fields, so a client still sending either field gets **422** rather than having it
+> ignored. As a result `pending_resolution` and `void` currently have no writer.
+>
+> **PUT cannot do a verb's job.** An Author-tier edit must not rewrite an Approver's decision or
+> write findings outside the verb that owns them, so:
+> - **Verb-owned fields are not in the update schemas (422).** On a complaint these are
+>   investigate's `investigation_findings`, `root_cause` and `containment_action` (re-run
+>   `investigate` to amend them while the complaint is open) and resolve's
+>   `resolution_description`, `corrective_action`, `preventive_action` and `actual_cost`. On an
+>   RMA it is `credit_amount`, which only `dispose` sets. **Breaking change** for any client
+>   sending them; no page in the app does.
+> - **Closed records are frozen (409).** A `closed` or `void` complaint and a `completed` or
+>   `denied` RMA refuse every edit (`"A closed complaint is a closed quality record and cannot be
+>   edited"`), the same rule as completed FAI evidence. A `resolved` complaint is still editable.
+> - **RMA fields keep to their window (409).** `quantity` and `reason` change only while the RMA
+>   is `requested` (approve authorized them); `inspection_findings` only while `under_inspection`
+>   (`inspect` writes them first; `dispose` decides on them); `replacement_wo_id` links only on an
+>   RMA dispositioned `replace` (the replacement job is often opened after the decision). Sending a
+>   locked field's current value unchanged is not a change and is accepted.
+> - Every refusal is raised before anything is written.
+>
+> **Request validation (422).**
+> - **Cleared fields.** An explicit `null` on a required field returns
+>   `"<fields> cannot be cleared"`. For complaints these are `customer_name`, `title`,
+>   `description`, `quantity_affected`, `severity` and `estimated_cost`. For RMAs they are
+>   `quantity` and `reason`. An empty `title` / `description` / `customer_name` is refused on edit
+>   with the same minimum lengths create enforces.
+> - **References.** A selected reference must be a live row of the active company, otherwise
+>   the request returns `"<field> does not reference a live <kind> in your company"` (`"…an
+>   active user…"` for `assigned_to`). This covers
+>   `customer_id`, `part_id` and `work_order_id` (not soft-deleted) and `assigned_to` (an active
+>   user) on complaint create and edit; `complaint_id`, `customer_id` and `part_id` on RMA create;
+>   and `replacement_wo_id` on RMA edit and `dispose`.
+> - **Unchanged references.** On an edit, a reference that is not changing is not re-checked, so
+>   retiring a part does not block edits to the complaints that name it.
+> - **References copied from the complaint.** On RMA create, a `customer_id` / `part_id` equal to
+>   the one the RMA's complaint already names is a record, not a new choice (the Create RMA dialog
+>   sends exactly those), so it only has to belong to the active company: retiring the customer or
+>   part after the complaint was logged does not block the return. Any other value must be live.
+> - A complaint's own `customer_id` / `part_id` / `work_order_id` must be live on create: a
+>   complaint about an already-retired item is recorded without the link.
+>
+> **NCR / CAR escalation.** `create-ncr` creates an NCR in the active company with source
+> `customer_return`. It copies the complaint's part, work order, lot, serial, quantity and
+> description, and sets the caller as `detected_by`. `create-car` creates a CAR from the
+> description, with the caller as `initiated_by`. Titles read `NCR from <complaint_number>: <title>`
+> (or `CAR from …`), truncated to 255 characters.
+> - Numbers come from the same per-company generators as `POST /quality/ncr` and `POST /quality/car`
+>   (`services/quality_numbering.py`).
+> - Each verb emits the same `ncr_created` / `car_created` event, so the `ncr.created` /
+>   `car.created` notifications fire. The event payload also carries `complaint_id` and
+>   `complaint_number`.
+> - **400** if the complaint already has a linked NCR (or CAR).
+> - `create-ncr` returns **409** if the complaint's stored part or work order belongs to another
+>   company (legacy rows only). A soft-deleted part or work order of the caller's own company is
+>   accepted, because the NCR records what the complaint named.
+>
+> Before this fix both verbs returned **500**, because they built the NCR or CAR without a
+> `company_id`.
+>
+> **Known limitation, pending a migration.** `ncr_number` and `car_number` are globally unique,
+> but numbered per company. If two tenants raise an NCR (or CAR) on the same day, both draw
+> `NCR-YYYYMMDD-001` (or `CAR-…`), and the second insert fails on the unique index with a 500.
+> This affects every NCR/CAR writer, not only these verbs.
+>
+> **Audit.** Every write records through `AuditService`, with resource types `customer_complaint`,
+> `rma`, `ncr` and `car`.
+> - Creates write a `CREATE` row; edits write an `UPDATE` row with old and new snapshots.
+> - Workflow verbs write a `STATUS_CHANGE` row, with the field diffs in `extra_data.changes`.
+>   Re-investigating a complaint already `under_investigation` changes no status, so it writes an
+>   `UPDATE` row instead.
+> - `create-ncr` / `create-car` write a `CREATE` row for the new NCR or CAR and an `UPDATE` row for
+>   the complaint's link.
+> - The decisions and the quality records they raise use `log_required`: `resolve`, `close`, RMA
+>   `approve` / `deny` / `dispose` / `complete`, and `create-ncr` / `create-car` (the new record's
+>   `CREATE` row and the complaint's link row). If a required row cannot be saved, the response
+>   is **503** (`"Unable to save audit record. No changes were committed."`) and everything rolls
+>   back, including the new NCR or CAR and its event. Create, edit, `investigate`, `receive` and
+>   `inspect` keep best-effort audit semantics.
+> - Each request is one transaction, so any refusal or error leaves nothing behind.
+>
+> No complaint or RMA operational event is emitted, so the `complaint.received` /
+> `complaint.status_changed` notification catalog entries stay dormant (see
+> [NOTIFICATIONS.md](NOTIFICATIONS.md)).
+>
+> **Numbering and creation.** Complaint numbers are `CC-YYYY-NNNN` and RMA numbers `RMA-YYYY-NNNN`.
+> Each comes from one sequence **shared across tenants**, because both columns are globally unique.
+> Allocation runs under an advisory lock, so concurrent creates cannot collide. A complaint's
+> `received_by` is the caller, and `date_received` defaults to the server's current date. Before
+> this fix, `POST /complaints/complaints/` returned **500** on every call.
+>
+> **Timestamp exception.** These response schemas still extend `BaseModel` rather than
+> `UTCModel`, so `created_at` / `updated_at` are not normalized to a trailing `Z` (see
+> [Timestamps](#timestamps)).
 
 ### Engineering Change Orders (ECO)
 
