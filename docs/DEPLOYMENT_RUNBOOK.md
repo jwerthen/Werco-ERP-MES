@@ -311,9 +311,9 @@ statement, writes no row, and adds no environment variable, secret, cron or work
     ORDER BY 1;
     ```
 
-  - In a test company, create an NCR and confirm it saves with an `NCR-YYYYMMDD-NNN` number.
-    `POST /quality/ncr` writes no audit row, so check the audit side on an FAI: create one and
-    confirm it gets an `FAI-YYYYMMDD-NNN` number and leaves one `fai` `CREATE` row in the Audit Log.
+  - In a test company, create an NCR and an FAI. Confirm they save with `NCR-YYYYMMDD-NNN` and
+    `FAI-YYYYMMDD-NNN` numbers, and that each leaves one `CREATE` row (`ncr`, `fai`) in the Audit
+    Log. Both writers are required-audited, so a missing row means the create rolled back.
   - In the same company, create equipment with an ID the company already uses. Expect **400**
     `Equipment ID already exists`.
 - **Rollback.** On an ordinary application rollback, keep the per-company constraints; older code
