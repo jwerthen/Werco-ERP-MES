@@ -20,6 +20,7 @@ from app.models.work_order_blocker import (
     WorkOrderBlockerStatus,
 )
 from app.schemas.work_order_blocker import WorkOrderBlockerCreate, WorkOrderBlockerUpdate
+from app.services.ai_learning_service import stale_open_recommendations
 from app.services.audit_service import AuditService
 from app.services.operation_action_gates import operation_blocked_by_predecessors
 from app.services.operational_event_service import OperationalEventService, redact_event_payload
@@ -352,6 +353,18 @@ class WorkOrderBlockerService:
             blocker.resolved_at = blocker.resolved_at or datetime.utcnow()
             blocker.resolved_by = blocker.resolved_by or user.id
             resume = self._resume_operation_if_no_open_blockers(blocker)
+            # A closed blocker has nothing left to escalate or triage: retire its open AI
+            # cards in THIS transaction, so the Action Inbox never offers an Accept & apply
+            # on a blocker that is already gone. Every blocker close reaches this method (the
+            # PUT and /resolve routes); nothing else writes a blocker's status. Stale, not
+            # dismissed -- nobody rejected the card, so no learning event is written.
+            stale_open_recommendations(
+                self.db,
+                company_id=company_id,
+                reason=f"Blocker {blocker.status}; nothing left to escalate",
+                target_entity_type="work_order_blocker",
+                target_entity_id=blocker.id,
+            )
         blocker.updated_at = datetime.utcnow()
 
         OperationalEventService(self.db).emit_best_effort(
@@ -447,10 +460,26 @@ class WorkOrderBlockerService:
     def stale_open_blockers(
         self, *, company_id: Optional[int] = None, older_than_hours: int = 24
     ) -> List[WorkOrderBlocker]:
+        """Open/acknowledged blockers older than the cutoff, on a LIVE, non-terminal work order.
+
+        A blocker left open on a finished, cancelled or deleted job is not holding up the
+        schedule, so the nightly stale-blocker escalation must not mint (or notify) for it.
+        """
         cutoff = datetime.utcnow() - timedelta(hours=older_than_hours)
-        query = self.db.query(WorkOrderBlocker).filter(
-            WorkOrderBlocker.status.in_([WorkOrderBlockerStatus.OPEN.value, WorkOrderBlockerStatus.ACKNOWLEDGED.value]),
-            WorkOrderBlocker.reported_at <= cutoff,
+        query = (
+            self.db.query(WorkOrderBlocker)
+            .join(
+                WorkOrder,
+                (WorkOrder.id == WorkOrderBlocker.work_order_id) & (WorkOrder.company_id == WorkOrderBlocker.company_id),
+            )
+            .filter(
+                WorkOrderBlocker.status.in_(
+                    [WorkOrderBlockerStatus.OPEN.value, WorkOrderBlockerStatus.ACKNOWLEDGED.value]
+                ),
+                WorkOrderBlocker.reported_at <= cutoff,
+                WorkOrder.is_deleted == False,  # noqa: E712
+                WorkOrder.status.notin_(list(TERMINAL_WO_STATUSES)),
+            )
         )
         if company_id is not None:
             query = query.filter(WorkOrderBlocker.company_id == company_id)
@@ -615,7 +644,9 @@ class WorkOrderBlockerService:
                 recommendation_type=recommendation_type,
                 status="pending",
                 priority="high" if blocker.severity in {"high", "critical"} else "medium",
-                title=f"Clear blocker on {work_order.work_order_number}",
+                # "Triage", not "Clear": applying this card acknowledges and escalates; it
+                # never resolves the blocker or lifts the hold.
+                title=f"Triage blocker on {work_order.work_order_number}",
                 summary=(
                     "Material is blocking this work order. Review inventory, open POs, and alternate stock."
                     if blocker.category == WorkOrderBlockerCategory.MATERIAL_MISSING.value
@@ -630,7 +661,8 @@ class WorkOrderBlockerService:
                     "blocker_id": blocker.id,
                     "category": blocker.category,
                     "href": f"/work-orders/{work_order.id}",
-                    "autonomy": "auto_execute",
+                    # A person's Accept & apply, never automatic (owner ruling 3).
+                    "autonomy": "apply_on_accept",
                 },
                 evidence=[
                     {
