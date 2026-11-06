@@ -1,7 +1,7 @@
 import json
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
@@ -774,8 +774,9 @@ class WorkOrderUpdate(BaseModel):
     status: Optional[WorkOrderStatus] = None
     # 081. Optional, so an update that never mentions sequencing never changes it.
     # Flipping False -> True also DEMOTES un-started READY operations the pooled rule
-    # had promoted (see work_orders.update_work_order): the only write in the system
-    # that moves an operation backwards, and it is audited per operation.
+    # had promoted (see work_orders.update_work_order), through the one demotion core
+    # (work_order_state_service.demote_ready_operations, whose other caller is a
+    # work-order resume landing DRAFT), and it is audited per operation.
     sequential_operations: Optional[bool] = Field(
         default=None,
         description="True = a sequenced ROUTING: an operation becomes READY only once every lower-sequence "
@@ -1091,6 +1092,29 @@ class WorkOrderRestoreResponse(UTCModel):
         description="Ties the delete had cancelled that were deliberately NOT re-opened — the planner must "
         "correct the part class or re-tie by hand, or the job will run without that material demand. Empty "
         "on a clean restore.",
+    )
+
+
+class WorkOrderResumeResponse(UTCModel):
+    """Response for ``POST /work-orders/{id}/resume`` ("Resume Work Order").
+
+    ``status`` is where the held job went back to, and ``restore_basis`` is why: a resume
+    never releases a job, so a non-DRAFT target needs a release record on the work order.
+    ``message`` is display-ready (the DRAFT case tells the user to release it).
+    """
+
+    work_order_id: int
+    message: str = Field(..., description="Display-ready confirmation; for a DRAFT result it says to release it.")
+    status: WorkOrderStatus = Field(
+        ..., description="The restored status: in_progress, released, or draft (no release on record)."
+    )
+    restore_basis: Literal["release_record_with_work", "release_record", "no_release_record"] = Field(
+        ...,
+        description="release_record_with_work -> in_progress; release_record -> released; "
+        "no_release_record -> draft.",
+    )
+    operations_returned_to_pending: int = Field(
+        ..., ge=0, description="Un-worked READY operations returned to PENDING (non-zero only for a draft result)."
     )
 
 

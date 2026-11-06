@@ -1162,3 +1162,94 @@ class TestResultShaping:
         assert (
             result.structured_content["method"] == "GET" and result.structured_content["path"] == "/api/v1/work-orders/"
         )
+
+
+# --------------------------------------------------------------------------- ruling 2: draft / on-hold gates
+
+
+class TestWorkOrderHoldGates:
+    """Ruling 2 (2026-11-05) through the agent door: the routes enforce it, the tools name the verbs."""
+
+    async def test_in_progress_refusal_names_both_the_start_and_the_resume_tool(
+        self, client, db_session, manager_headers, test_work_order, catalog
+    ):
+        server, executor = make_server(catalog, headers=manager_headers)
+        result = await call(
+            server,
+            "update_work_order",
+            {"work_order_id": test_work_order.id, "version": test_work_order.version, "status": "in_progress"},
+        )
+        assert result.is_error and result.structured_content["status"] == 422
+        detail = result.structured_content["detail"]
+        assert "work_orders_start_work_order" in detail and "work_orders_resume_work_order" in detail
+        assert executor.calls == []
+
+    async def test_holding_a_draft_returns_the_routes_409_verbatim(
+        self, client, db_session, manager_headers, test_work_order, catalog
+    ):
+        server, _ = make_server(catalog, headers=manager_headers)
+        result = await call(
+            server,
+            "update_work_order",
+            {"work_order_id": test_work_order.id, "version": test_work_order.version, "status": "on_hold"},
+        )
+        direct = client.put(
+            f"/api/v1/work-orders/{test_work_order.id}",
+            json={"version": test_work_order.version, "status": "on_hold"},
+            headers=manager_headers,
+        )
+        assert result.is_error and result.structured_content["status"] == 409
+        assert direct.status_code == 409
+        assert result.structured_content["detail"] == direct.json()["detail"]
+        assert _row(db_session, test_work_order.id).status == WorkOrderStatus.DRAFT
+
+    async def test_resume_is_a_role_gated_generated_tool(
+        self, client, db_session, manager_headers, operator_headers, test_work_order, test_user, catalog
+    ):
+        row = _row(db_session, test_work_order.id)
+        row.status = WorkOrderStatus.ON_HOLD
+        row.released_by = test_user.id
+        db_session.commit()
+
+        operator_server, _ = make_server(catalog, headers=operator_headers)
+        refused = await call(operator_server, "work_orders_resume_work_order", {"work_order_id": test_work_order.id})
+        assert refused.is_error
+        assert refused.structured_content["status"] == 403
+        assert refused.structured_content["detail"] == "Insufficient permissions"
+        assert _row(db_session, test_work_order.id).status == WorkOrderStatus.ON_HOLD
+
+        server, _ = make_server(catalog, headers=manager_headers)
+        result = await call(server, "work_orders_resume_work_order", {"work_order_id": test_work_order.id})
+        assert not result.is_error, result.content
+        assert result.structured_content["status"] == "released"
+        assert result.structured_content["restore_basis"] == "release_record"
+        assert _row(db_session, test_work_order.id).status == WorkOrderStatus.RELEASED
+
+    async def test_add_laser_nest_on_a_held_job_keeps_the_hold_and_says_so(
+        self, client, db_session, manager_headers, test_work_center, catalog
+    ):
+        laser = _seed_laser_work_center(db_session)
+        job = _seed_laser_work_order_with_nest(db_session, test_work_center, cnc_file_name=None)
+        job.status = WorkOrderStatus.ON_HOLD
+        db_session.commit()
+        server, _ = make_server(catalog, headers=manager_headers)
+
+        result = await call(
+            server,
+            "add_laser_nest",
+            {"work_order_id": job.id, "cnc_number": "P2", "planned_runs": 1, "work_center_id": laser.id},
+        )
+
+        assert not result.is_error, result.content
+        payload = result.structured_content
+        assert payload["demoted_to_draft"] is False
+        assert "ON HOLD" in payload["note"] and "work_orders_resume_work_order" in payload["note"]
+        assert _row(db_session, job.id).status == WorkOrderStatus.ON_HOLD
+
+    def test_instructions_name_the_real_clock_in_and_resume_tools(self, catalog):
+        from app.mcp.server import DEFAULT_INSTRUCTIONS
+
+        names = {tool.name for tool in catalog}
+        for name in ("clock_in", "work_orders_resume_work_order", "work_orders_start_work_order"):
+            assert name in names
+            assert name in DEFAULT_INSTRUCTIONS

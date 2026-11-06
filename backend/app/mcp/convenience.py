@@ -90,6 +90,14 @@ RELEASE_STAMP_NOTE = (
     "released_at / released_by still carry the stamp the route wrote when it created the laser work order "
     "RELEASED; release_work_order re-stamps them when the planner releases it."
 )
+# The generated tool that lifts a WORK-ORDER hold (POST /work-orders/{id}/resume). Starting
+# refuses a held job, and update_work_order refuses status in_progress, so this is the door.
+RESUME_WORK_ORDER_TOOL = "work_orders_resume_work_order"
+WO_ON_HOLD = "on_hold"
+ON_HOLD_KEPT_NOTE = (
+    "The laser work order was ON HOLD before the call and the route kept it on hold: its nest operations are "
+    f"refused by clock-in and every start verb until a supervisor lifts the hold with {RESUME_WORK_ORDER_TOOL}."
+)
 # Belt to the list-query brace in ``_resolve_laser_work_order``: the work-order list is windowed.
 LASER_CHILD_LOOKUP_LIMIT = 5000
 
@@ -577,11 +585,12 @@ _UPDATE_WORK_ORDER_SCHEMA: Dict[str, Any] = {
         "priority": {"type": "integer", "minimum": 1, "maximum": 10, "description": "1 = highest."},
         "status": {
             "type": "string",
-            "description": "Accepted: 'draft' (put an unreleased job back to draft), 'on_hold', 'cancelled'. "
-            "REFUSED here: 'released' and 'in_progress' -- releasing is release_work_order and starting is "
-            "work_orders_start_work_order; both record who authorised it and promote the first operation, which a "
-            "status write would skip. 'complete' / 'closed' are refused by the route itself (use "
-            "work_orders_complete_work_order).",
+            "description": "Accepted: 'draft' (put an unreleased job back to draft), 'on_hold' (a released or "
+            "in-progress job only -- the route refuses 409 on a draft, which has nothing on the floor to hold), "
+            "'cancelled'. REFUSED here: 'released' and 'in_progress' -- releasing is release_work_order, starting "
+            "is work_orders_start_work_order (released jobs only), and lifting a hold is "
+            "work_orders_resume_work_order; each records who authorised it, which a status write would skip. "
+            "'complete' / 'closed' are refused by the route itself (use work_orders_complete_work_order).",
         },
         "sequential_operations": {
             "type": "boolean",
@@ -611,11 +620,19 @@ async def _update_work_order(ctx: ToolContext, args: Dict[str, Any]) -> types.Ca
     requested = str(args.get("status") or "").strip().lower()
     verb = STATUS_WRITES_WITH_A_REAL_VERB.get(requested)
     if verb:
+        detail = (
+            f"status {requested!r} is not written through update_work_order: use {verb}, which records who "
+            "authorised it (released_at / released_by) and promotes the first operation. A status write here would "
+            "skip both."
+        )
+        if requested == "in_progress":
+            detail += (
+                f" {verb} starts RELEASED jobs only: an on-hold job is resumed with {RESUME_WORK_ORDER_TOOL}, and a "
+                "draft job is released first with release_work_order."
+            )
         raise ctx.fail(
             status=422,
-            detail=f"status {requested!r} is not written through update_work_order: use {verb}, which records who "
-            "authorised it (released_at / released_by) and promotes the first operation. A status write here would "
-            "skip both.",
+            detail=detail,
             method="PUT",
             path=path,
         )
@@ -905,9 +922,10 @@ async def _import_laser_nest_package(ctx: ToolContext, args: Dict[str, Any]) -> 
         return ctx.finish(imported, tool=tool, method="POST", path=path)
 
     if args.get("release"):
-        return ctx.synthesize(
-            {"import": payload, "work_order": child, "demoted_to_draft": False}, tool=tool, method="POST", path=path
-        )
+        released: Dict[str, Any] = {"import": payload, "work_order": child, "demoted_to_draft": False}
+        if child.get("status") == WO_ON_HOLD:
+            released["note"] = ON_HOLD_KEPT_NOTE
+        return ctx.synthesize(released, tool=tool, method="POST", path=path)
 
     # Rule 6: the import is born RELEASED; hand it back as DRAFT unless told otherwise.
     outcome = await _demote_to_draft(ctx, child, headline="IMPORT SUCCEEDED", evidence={"import": payload})
@@ -952,10 +970,10 @@ _ADD_LASER_NEST_SCHEMA: Dict[str, Any] = {
         "release": {
             "type": "boolean",
             "default": False,
-            "description": "The route force-sets the laser work order RELEASED with the new nest READY. By default "
-            "this tool puts a NEW laser work order, or one that was DRAFT before the call, back to DRAFT with its "
-            "operations PENDING; pass true to leave it RELEASED. A job already on the floor before the call "
-            "(released / in progress / on hold) is never taken off it.",
+            "description": "The route force-sets the laser work order RELEASED with the new nest READY (an on-hold "
+            "job stays on hold). By default this tool puts a NEW laser work order, or one that was DRAFT before the "
+            "call, back to DRAFT with its operations PENDING; pass true to leave it RELEASED. A job already on the "
+            "floor before the call (released / in progress / on hold) is never taken off it.",
         },
     },
     "required": ["work_order_id", "cnc_number", "planned_runs"],
@@ -1019,12 +1037,15 @@ async def _add_laser_nest(ctx: ToolContext, args: Dict[str, Any]) -> types.CallT
         )
 
     if args.get("release") or status_before not in (None, WO_DRAFT):
-        note = (
-            "Left RELEASED as requested."
-            if args.get("release")
-            else f"The laser work order was already {status_before!r} before the nest was added; it was left as the "
-            f"route set it ({laser.get('status')!r}) rather than taken off the floor."
-        )
+        if status_before == WO_ON_HOLD:
+            note = ON_HOLD_KEPT_NOTE
+        elif args.get("release"):
+            note = "Left RELEASED as requested."
+        else:
+            note = (
+                f"The laser work order was already {status_before!r} before the nest was added; it was left as the "
+                f"route set it ({laser.get('status')!r}) rather than taken off the floor."
+            )
         return ctx.synthesize(
             {"nest": nest, "work_order": laser, "demoted_to_draft": False, "note": note},
             tool=tool,
@@ -1231,8 +1252,9 @@ CONVENIENCE_TOOLS: Tuple[ConvenienceTool, ...] = (
         "update_work_order",
         "PUT /api/v1/work-orders/{id} — Edit a work order's header (priority, due date, quantity, customer, unit #, "
         "notes, sequencing, scrap) with its current version (409 when stale). status accepts draft / on_hold / "
-        "cancelled only: 'released' and 'in_progress' are refused — releasing is release_work_order, starting is "
-        "work_orders_start_work_order. [Work Orders]",
+        "cancelled only, and on_hold only for a released or in-progress job (the route refuses a draft 409): "
+        "'released' and 'in_progress' are refused — releasing is release_work_order, starting is "
+        "work_orders_start_work_order, and lifting a hold is work_orders_resume_work_order. [Work Orders]",
         _strict(_UPDATE_WORK_ORDER_SCHEMA),
         _UPDATE,
         _update_work_order,
@@ -1258,7 +1280,8 @@ CONVENIENCE_TOOLS: Tuple[ConvenienceTool, ...] = (
         "import_laser_nest_package",
         "POST /api/v1/work-orders/laser-nest-packages/standalone/import or /{id}/laser-nest-packages/import — Import a "
         "nest package (ZIP or nest PDF) into a laser work order. The route creates it RELEASED with its nest "
-        "operations READY; this tool sets it back to DRAFT and the operations to PENDING unless release=true, and "
+        "operations READY (an on-hold job stays on hold); this tool sets it back to DRAFT and the operations to "
+        "PENDING unless release=true, and "
         "refuses a target whose laser work order already carries manually entered nests. Returns {import, "
         "work_order, demoted_to_draft, operations_returned_to_pending, note}. [Work Orders]",
         _strict(_IMPORT_NEST_SCHEMA),
@@ -1268,7 +1291,8 @@ CONVENIENCE_TOOLS: Tuple[ConvenienceTool, ...] = (
     ConvenienceTool(
         "add_laser_nest",
         "POST /api/v1/work-orders/{id}/laser-nests/manual — Key one laser nest by hand onto an assembly parent (its "
-        "laser child is found-or-created) or a laser work order. The route force-sets the laser work order RELEASED; "
+        "laser child is found-or-created) or a laser work order. The route force-sets the laser work order RELEASED "
+        "(an on-hold job stays on hold); "
         "this tool puts a new or previously-DRAFT one back to DRAFT with its operations PENDING unless release=true, "
         "never takes a job already on the floor off it, and refuses a job whose nests came from a package import. "
         "Returns {nest, work_order, demoted_to_draft, ...}. [Work Orders]",

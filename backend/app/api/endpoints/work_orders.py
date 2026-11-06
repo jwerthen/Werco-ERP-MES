@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.orm.exc import StaleDataError
 
+from app.api.audit_guard import required_audit
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 
 # THE tenant-scoped ``{part_id: Part}`` resolver for BOM-line components. Imported rather
@@ -68,6 +69,7 @@ from app.schemas.work_order import (
     WorkOrderOperationUpdate,
     WorkOrderResponse,
     WorkOrderRestoreResponse,
+    WorkOrderResumeResponse,
     WorkOrderSummary,
     WorkOrderUpdate,
 )
@@ -127,8 +129,15 @@ from app.services.material_consumption_service import (
 from app.services.material_tie_part_gate import assert_part_is_tieable_material
 from app.services.migration_import_service import import_open_work_orders
 from app.services.operation_action_gates import (
+    MSG_ALREADY_COMPLETE,
+    MSG_ALREADY_IN_PROGRESS,
+    MSG_DRAFT_CANNOT_BE_HELD,
+    MSG_OPERATION_ON_HOLD_NO_START,
     MSG_PREDECESSORS_INCOMPLETE,
+    MSG_WORK_ORDER_NOT_RELEASED,
+    MSG_WORK_ORDER_ON_HOLD,
     operation_blocked_by_predecessors,
+    work_order_start_blocker,
 )
 
 # WHY an operation is held, WHO held it and WHEN -- the SAME batched, pure-read view the
@@ -169,11 +178,13 @@ from app.services.work_order_state_service import (
     StatusTransition,
     WorkOrderStateError,
     active_work_order_operations,
+    apply_work_order_resume,
     begin_operation_progress,
     demote_operations_for_sequencing,
     finalize_operation_completion,
     find_parent_to_advance,
     is_laser_dispatch_work_order,
+    log_demotions_required,
     operation_target_quantity,
     operations_worked_out_of_sequence,
     reconcile_work_orders_from_completion_evidence,
@@ -1310,17 +1321,49 @@ def _load_parent_work_order(db: Session, work_order_id: int, company_id: int) ->
 def _laser_wo_audit_values(work_order: WorkOrder) -> dict:
     """WO-level audit snapshot for the laser-nest write paths.
 
-    The import/manual endpoints force-set ``status`` and rewrite the quantity
-    fields on the target laser WO; these are the fields whose old->new change
-    the WO-level ``log_update`` records (invariant 2).
+    The import/manual endpoints force-set ``status`` (keeping an on-hold job on hold),
+    stamp the release they perform and rewrite the quantity fields on the target laser
+    WO; these are the fields whose old->new change the WO-level ``log_update`` records
+    (invariant 2).
     """
     status_value = work_order.status.value if hasattr(work_order.status, "value") else work_order.status
     return {
         "status": status_value,
+        "released_at": to_utc_iso(work_order.released_at),
+        "released_by": work_order.released_by,
         "quantity_ordered": float(work_order.quantity_ordered or 0),
         "quantity_complete": float(work_order.quantity_complete or 0),
         "quantity_scrapped": float(work_order.quantity_scrapped or 0),
     }
+
+
+def _release_laser_work_order_for_nests(work_order: WorkOrder, *, released_by: int) -> None:
+    """The nest routes' force-RELEASE of their laser work order, recorded as a release.
+
+    Import Nest Package and the manual nest add put the laser work order on the floor
+    RELEASED -- that is their contract (a nest package is born released). Two rules on
+    top of the plain status write:
+
+    * an **ON_HOLD** job stays ON_HOLD. The usual reason to hold a package is bad nests,
+      and the fix is a re-import; silently lifting the hold here put the corrected (or
+      still-bad) nests straight back on the floor. The rebuilt nest operations are then
+      refused by every start verb until someone runs ``POST /work-orders/{id}/resume``.
+      ON_HOLD is non-terminal, so new material ties stay consumable.
+    * moving the job INTO RELEASED stamps ``released_by`` / ``released_at`` when it was
+      DRAFT or carries no stamp yet (a freshly created child or standalone job included):
+      the importer IS who authorized it, and the resume verb reads the stamp as the
+      release record. An existing stamp on a RELEASED / IN_PROGRESS job is preserved, so
+      a corrective re-import never rewrites who first released the job.
+
+    Callers snapshot ``_laser_wo_audit_values`` BEFORE calling this so the WO-level
+    ``log_update`` records the status and the stamp.
+    """
+    if work_order.status == WorkOrderStatus.ON_HOLD:
+        return
+    if work_order.status == WorkOrderStatus.DRAFT or work_order.released_at is None:
+        work_order.released_by = released_by
+        work_order.released_at = datetime.utcnow()
+    work_order.status = WorkOrderStatus.RELEASED
 
 
 # The closed vocabulary for how each imported row's sheet part came to be chosen:
@@ -3093,7 +3136,9 @@ async def _run_laser_nest_import(
                         laser_work_center = _laser_work_center_for_added_nest(
                             db, laser_work_order=child_work_order, company_id=company_id
                         )
-                child_work_order.status = WorkOrderStatus.RELEASED
+                # RELEASED (stamped as this importer's release) unless the job is on
+                # hold, which a corrective re-import keeps -- see the helper.
+                _release_laser_work_order_for_nests(child_work_order, released_by=current_user.id)
                 child_work_order.quantity_complete = 0
                 child_work_order.quantity_scrapped = 0
                 parent_work_order_id = parent_work_order.id if parent_work_order is not None else None
@@ -3477,11 +3522,12 @@ def create_manual_laser_nest_endpoint(
         parent_work_order, child_work_order = _resolve_laser_target(
             db, work_order=target_work_order, company_id=company_id
         )
-        # Snapshot BEFORE the mutations: the manual add force-sets RELEASED and
-        # re-derives quantity_ordered; that WO-level change is audited below
-        # (invariant 2). log_update self-suppresses when nothing changed.
+        # Snapshot BEFORE the mutations: the manual add force-sets RELEASED (stamped;
+        # an on-hold job stays on hold) and re-derives quantity_ordered; that WO-level
+        # change is audited below (invariant 2). log_update self-suppresses when
+        # nothing changed.
         pre_add_wo_values = _laser_wo_audit_values(child_work_order)
-        child_work_order.status = WorkOrderStatus.RELEASED
+        _release_laser_work_order_for_nests(child_work_order, released_by=current_user.id)
         # The machine the rest of this job's nests already run on; the shop-wide
         # auto-detect only when there are none. Raises 400 when neither yields a
         # laser work center, and 404 on an unknown/inactive explicit choice.
@@ -3700,7 +3746,9 @@ def update_work_order(
     when moving a terminal WO (COMPLETE/CLOSED/CANCELLED) back to a non-terminal
     status, and when setting ``status`` to COMPLETE/CLOSED from any status other
     than COMPLETE/CLOSED (completion must run its own endpoint's effect chain;
-    a CANCELLED work order can never become complete/closed).
+    a CANCELLED work order can never become complete/closed), and when putting a
+    **draft** work order on hold (a draft has nothing on the floor to hold -- release
+    it first; a hold is lifted with work_orders_resume_work_order).
 
     This is also the flip verb for ``sequential_operations``. Turning it ON returns
     **409** on a laser nest work order (its nests are a dispatch pool by type, so the
@@ -3784,6 +3832,16 @@ def update_work_order(
                 f"Use POST /work-orders/{work_order.id}/complete instead."
             ),
         )
+
+    # Owner ruling 2026-11-05: a hold stops work on the FLOOR, and a draft has nothing
+    # on the floor to stop. Refusing DRAFT -> ON_HOLD here (the only writer of a
+    # work-order ON_HOLD) means every hold placed from now on is on released work, so
+    # POST /work-orders/{id}/resume never has to guess whether a held job was ever
+    # authorized -- and an MCP-imported DRAFT laser job can no longer be laundered
+    # into RELEASED through a hold and a resume. Re-sending on_hold on a job already on
+    # hold stays a no-op; ON_HOLD -> DRAFT / CANCELLED stay allowed (restrictive moves).
+    if new_status == WorkOrderStatus.ON_HOLD and work_order.status == WorkOrderStatus.DRAFT:
+        raise HTTPException(status_code=409, detail=MSG_DRAFT_CANNOT_BE_HELD)
 
     # A finished job's due date is its PROMISE date: OTD scores against
     # `coalesce(must_ship_by, due_date)`, so moving it on a COMPLETE/CLOSED/CANCELLED
@@ -4330,7 +4388,13 @@ def release_work_order(
     work_order = (
         db.query(WorkOrder)
         .options(joinedload(WorkOrder.part))
-        .filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id)
+        .filter(
+            WorkOrder.id == work_order_id,
+            WorkOrder.company_id == company_id,
+            # Invariant 3: a soft-deleted work order is gone -- releasing one would put
+            # a tombstone's operations on the floor's board.
+            WorkOrder.is_deleted == False,  # noqa: E712
+        )
         .first()
     )
     if not work_order:
@@ -4427,16 +4491,38 @@ def start_work_order(
     work_order_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Start a work order (set to in-progress)"""
-    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
+    """Start a RELEASED work order (Admin/Manager/Supervisor): sets it IN_PROGRESS.
+
+    Refuses **409** on a draft (release it first: release_work_order) or on-hold
+    (work_orders_resume_work_order lifts a hold -- this verb no longer does) work
+    order, **400** on any other non-released status, **404** when missing or
+    soft-deleted.
+    """
+    work_order = (
+        db.query(WorkOrder)
+        .filter(
+            WorkOrder.id == work_order_id,
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
     if not work_order:
         raise HTTPException(status_code=404, detail="Work order not found")
 
-    if work_order.status not in [WorkOrderStatus.RELEASED, WorkOrderStatus.ON_HOLD]:
-        raise HTTPException(status_code=400, detail="Work order must be released or on-hold to start")
+    # Owner ruling 2026-11-05: starting is for RELEASED work only. It used to accept
+    # ON_HOLD and silently lift the hold -- open to ANY authenticated user, operators
+    # included. A hold is lifted by POST /work-orders/{id}/resume, which records the
+    # restore decision on the required audit chain.
+    if work_order.status == WorkOrderStatus.DRAFT:
+        raise HTTPException(status_code=409, detail=MSG_WORK_ORDER_NOT_RELEASED)
+    if work_order.status == WorkOrderStatus.ON_HOLD:
+        raise HTTPException(status_code=409, detail=MSG_WORK_ORDER_ON_HOLD)
+    if work_order.status != WorkOrderStatus.RELEASED:
+        raise HTTPException(status_code=400, detail="Work order must be released to start")
 
     old_status = work_order.status.value if work_order.status else None
     work_order.status = WorkOrderStatus.IN_PROGRESS
@@ -4462,7 +4548,16 @@ def start_work_order(
         old_status=old_status,
         new_status=WorkOrderStatus.IN_PROGRESS.value,
     )
-    db.commit()
+    try:
+        db.commit()
+    except StaleDataError as exc:
+        # A concurrent writer bumped the work order's version between read and commit
+        # (version_id_col mismatch). Surface a clean 409, not a 500.
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This work order was modified concurrently. Refresh and retry.",
+        ) from exc
     safe_broadcast(
         broadcast_work_order_update,
         work_order.id,
@@ -4482,6 +4577,145 @@ def start_work_order(
         company_id=company_id,
     )
     return {"message": "Work order started"}
+
+
+RESUME_AUDIT_UNAVAILABLE_DETAIL = (
+    "The audit record for resuming this work order could not be saved; nothing was changed. Retry."
+)
+RESUME_MESSAGES = {
+    WorkOrderStatus.IN_PROGRESS: "Work order resumed — it is back in progress.",
+    WorkOrderStatus.RELEASED: "Work order resumed — it is released and back on the floor.",
+    WorkOrderStatus.DRAFT: (
+        "No release is on record for this work order, so it returned to DRAFT — release it to put it back on "
+        "the floor."
+    ),
+}
+
+
+@router.post("/{work_order_id}/resume", response_model=WorkOrderResumeResponse)
+def resume_work_order(
+    work_order_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
+):
+    """Resume Work Order: lift a WORK-ORDER hold (Admin/Manager/Supervisor).
+
+    The one door out of a work-order ON_HOLD back to the floor; clock-in and every start
+    verb refuse 409 on a held job until it runs. Resuming never RELEASES a job -- Release
+    is the authorization step -- so the target comes from the release record:
+
+    * released (``released_at`` / ``released_by`` set) and work already done -> IN_PROGRESS;
+    * released, no work yet -> RELEASED;
+    * no release on record -> DRAFT, with every un-worked READY operation returned to
+      PENDING (one audited status change each); release it with release_work_order.
+
+    Operation-level holds are untouched (lift them with Resume / Clear Hold). Refuses
+    **400** when the work order is not on hold, **404** when missing or soft-deleted, and
+    **503** (nothing changed) when the required audit record cannot be written. Returns
+    ``status``, ``restore_basis`` and ``operations_returned_to_pending``.
+    """
+    work_order = (
+        db.query(WorkOrder)
+        .filter(
+            WorkOrder.id == work_order_id,
+            WorkOrder.company_id == company_id,
+            WorkOrder.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
+    if not work_order:
+        raise HTTPException(status_code=404, detail="Work order not found")
+    if work_order.status != WorkOrderStatus.ON_HOLD:
+        raise HTTPException(status_code=400, detail="Work order is not on hold")
+
+    outcome = apply_work_order_resume(db, work_order)
+    demoted = outcome.demoted_operations
+
+    # Flush the status write and every demotion BEFORE the first audit call (invariant
+    # 4): WorkOrder and WorkOrderOperation both map version_id_col, so a concurrent hold
+    # / clock-in makes this flush raise StaleDataError to the app-wide 409 handler --
+    # rather than being swallowed inside AuditService.log's savepoint and resurfacing as
+    # an opaque 500 (the same ordering note as update_work_order's sequencing demotion).
+    db.flush()
+
+    # REQUIRED evidence: a resume that cannot be audited does not happen (503, rolled
+    # back). The hold itself is still written by PUT's best-effort log_update; a resume
+    # decides where a job goes back to, and that decision must be on the chain.
+    with required_audit(db, RESUME_AUDIT_UNAVAILABLE_DETAIL):
+        audit.log_required(
+            action=AuditService.ACTIONS["STATUS_CHANGE"],
+            resource_type="work_order",
+            resource_id=work_order.id,
+            resource_identifier=work_order.work_order_number,
+            description=(
+                f"Work order {work_order.work_order_number} resumed from hold to '{outcome.status.value}' "
+                f"({outcome.restore_basis})"
+            ),
+            old_values={"status": outcome.previous_status.value},
+            new_values={"status": outcome.status.value},
+            extra_data={
+                "transition": "work_order_hold_cleared",
+                "restore_basis": outcome.restore_basis,
+                "operations_returned_to_pending": len(demoted),
+            },
+        )
+        log_demotions_required(
+            audit,
+            demoted,
+            reason=(
+                f"work order {work_order.work_order_number} was resumed with no release on record and returned "
+                "to draft."
+            ),
+            extra={"transition": "work_order_resumed_to_draft"},
+        )
+
+    try:
+        db.commit()
+    except StaleDataError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This work order was modified concurrently. Refresh and retry.",
+        ) from exc
+
+    status_value = outcome.status.value
+    safe_broadcast(
+        broadcast_work_order_update,
+        work_order.id,
+        {"event": "work_order_resumed", "status": status_value},
+        company_id=company_id,
+    )
+    safe_broadcast(
+        broadcast_dashboard_update,
+        {"event": "work_order_resumed", "work_order_id": work_order.id, "status": status_value},
+        company_id=company_id,
+    )
+    work_center_ids = sorted(
+        {
+            op.work_center_id
+            for op in tenant_query(db, WorkOrderOperation, company_id)
+            .filter(WorkOrderOperation.work_order_id == work_order.id)
+            .all()
+            if op.work_center_id
+        }
+    )
+    for wc_id in work_center_ids:
+        safe_broadcast(
+            broadcast_shop_floor_update,
+            wc_id,
+            {"event": "work_order_resumed", "work_order_id": work_order.id},
+            company_id=company_id,
+        )
+    return WorkOrderResumeResponse(
+        work_order_id=work_order.id,
+        message=RESUME_MESSAGES[outcome.status],
+        status=outcome.status,
+        restore_basis=outcome.restore_basis,
+        operations_returned_to_pending=len(demoted),
+    )
 
 
 @router.get("/{work_order_id}/material-requirements")
@@ -5415,6 +5649,13 @@ def start_operation(
     through ``PUT /shop-floor/operations/{id}/start`` and the kiosk, which stay open to
     any authenticated user.
 
+    Refused before any write, in the shop-floor twin's order: unknown operation (404);
+    already complete / already in progress (400 -- it never re-opens or re-stamps one);
+    work order missing or soft-deleted (404); **409** when the work order is a draft
+    ("release first": release_work_order), on hold (work_orders_resume_work_order), or
+    complete / closed / cancelled; **409** when the operation itself is on hold --
+    starting does not lift a hold.
+
     Predecessor gate: refused **400** ("Previous operations must be completed first")
     while a lower-sequence operation of the same work order is incomplete. Operations
     sharing the candidate's **work center** do not block it -- the same rule clock-in
@@ -5430,9 +5671,29 @@ def start_operation(
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
 
+    # Same order and text as PUT /shop-floor/operations/{id}/start. Without these two
+    # the write below unconditionally set IN_PROGRESS and re-stamped actual_start /
+    # started_by -- re-opening a COMPLETE operation and erasing who really started a
+    # running one, with an audit row that recorded only the status.
+    if operation.status == OperationStatus.COMPLETE:
+        raise HTTPException(status_code=400, detail=MSG_ALREADY_COMPLETE)
+    if operation.status == OperationStatus.IN_PROGRESS:
+        raise HTTPException(status_code=400, detail=MSG_ALREADY_IN_PROGRESS)
+
     work_order = operation.work_order
-    if not work_order:
+    if not work_order or work_order.is_deleted:
         raise HTTPException(status_code=404, detail="Work order not found")
+
+    # The work-order half of the start gate (terminal / draft / on hold) -- the shared
+    # helper, 409. This verb had NO work-order status check: a DRAFT work order's
+    # operation could be started while the work order stayed DRAFT.
+    start_blocked_reason = work_order_start_blocker(work_order)
+    if start_blocked_reason:
+        raise HTTPException(status_code=409, detail=start_blocked_reason)
+
+    # Starting is not how an operation's hold is lifted (Resume / Clear Hold is).
+    if operation.status == OperationStatus.ON_HOLD:
+        raise HTTPException(status_code=409, detail=MSG_OPERATION_ON_HOLD_NO_START)
 
     # One predicate, shared with the shop floor, so this gate cannot drift again.
     # It used to be an inline copy passing allow_same_work_center=False while the
@@ -5571,6 +5832,11 @@ def complete_operation(
     Unlike the shop-floor twin this verb does NOT require the operation to carry a labor
     record: closing an operation nobody clocked is a supervisor/quality decision the
     office path deliberately keeps.
+
+    Work-order gate on the auto-start (same as the shop-floor twin): completing a READY
+    operation starts it, so a READY operation under a **draft** work order is refused
+    **409** ("release first") and under an **on-hold** one **409** (resume the work order
+    first). An IN_PROGRESS operation stays completable on a held job.
     """
     # Reject non-finite quantities (NaN/Inf) up front: a plain float query param accepts
     # "nan"/"inf", and NaN slips past every `> 0`/`< 0` guard below (including the scrap-
@@ -5664,6 +5930,16 @@ def complete_operation(
             raise HTTPException(status_code=409, detail="Operation is on hold and cannot be completed")
         raise HTTPException(status_code=400, detail=f"Cannot complete operation with status: {operation.status.value}")
 
+    # Completing a READY operation STARTS it (the auto-start below), so it passes the
+    # start gate first -- identical to the shop-floor twin: a READY operation under a
+    # DRAFT or ON_HOLD work order is refused 409 with the start verbs' text, before the
+    # steps gate, any write and any inventory effect (this path used to book stock on a
+    # held job). An IN_PROGRESS operation is NOT gated. Terminal was refused above.
+    if operation.status != OperationStatus.IN_PROGRESS:
+        start_blocked_reason = work_order_start_blocker(work_order)
+        if start_blocked_reason:
+            raise HTTPException(status_code=409, detail=start_blocked_reason)
+
     # Process-sheet completion gate (PR 3): IDENTICAL to the shop-floor twin — an
     # ungated office/admin completion path would let anyone bypass the objective-
     # evidence requirement. When THIS request would FULLY complete the operation,
@@ -5698,7 +5974,8 @@ def complete_operation(
     work_centers_refreshed = False
 
     # Auto-start a READY op (consistent with the shop_floor twin). ON_HOLD is no
-    # longer reachable here -- it was refused above.
+    # longer reachable here -- it was refused above. This IS a start, which is why the
+    # work-order start gate ran above for a READY operation.
     if operation.status != OperationStatus.IN_PROGRESS:
         operation.status = OperationStatus.IN_PROGRESS
         if not operation.actual_start:
