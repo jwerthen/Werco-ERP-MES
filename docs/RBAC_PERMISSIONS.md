@@ -1824,6 +1824,7 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 | Calibration | ✓ | ✓ | | | ✓ | | |
 | Manage scrap reason codes | ✓ | ✓ | | | ✓ | | |
 | Void / restore NCR | ✓ | ✓ | | | ✓ | | |
+| Void / restore CAR | ✓ | ✓ | | | ✓ | | |
 
 > **Inspect — endpoint mapping.** The shop-floor inspection sign-off
 > `POST /api/v1/shop-floor/operations/{operation_id}/inspection` (which records
@@ -1856,14 +1857,38 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 >
 > **Void / restore NCR — endpoint mapping.** `DELETE /quality/ncr/{ncr_id}` (void) and
 > `POST /quality/ncr/{ncr_id}/restore` (`app/api/endpoints/quality.py`) are enforced **in code** to the
-> **Void / restore NCR** row above — `require_role([ADMIN, MANAGER, QUALITY])`. `NonConformanceReport`
+> **Void / restore NCR** row above — `require_role(quality_record_service.WRITE_ROLES)`, i.e.
+> `[ADMIN, MANAGER, QUALITY]`. `NonConformanceReport`
 > gained `SoftDeleteMixin` (migration `071_soft_delete_purchasing_ncr`); a void is a soft delete
 > (invariant #3) that also moves the NCR to the existing `VOID` status, requires a **non-blank
 > `reason`**, and is **refused (400)** while the NCR still actively gates a work order (an
-> `OPEN`/`ACKNOWLEDGED` `WorkOrderBlocker` references it). Restore reopens it to `OPEN`. Both are
-> tamper-evidently audited — the void writes a status-change **and** a delete row, closing a prior gap
-> where the `PUT /quality/ncr/{id}` update path wrote no `audit_log` row at all. See `docs/API.md` →
-> Quality.
+> `OPEN`/`ACKNOWLEDGED` `WorkOrderBlocker` references it). Restore reopens it to `OPEN` (clearing any
+> closure fields an NCR voided while CLOSED still carries). Both are
+> required-audited in the same transaction (**503** with rollback on audit loss): the void writes a
+> status-change **and** a delete row, restore a `RESTORE` row. See `docs/API.md` → Quality.
+>
+> **Void / restore CAR — endpoint mapping.** `POST /quality/car/{car_id}/void` and
+> `POST /quality/car/{car_id}/restore` are enforced **in code** to the **Void / restore CAR** row above
+> via the same `quality_record_service.WRITE_ROLES`; Operator, Supervisor and Viewer get **403**. Void
+> requires a **non-blank `reason`** (**422** otherwise), refuses a CLOSED or already-void CAR
+> (**409**), and records the reason on a required `STATUS_CHANGE` audit row. The CLOSED refusal stops
+> a one-step void only: the same roles can reopen a CLOSED CAR with a status-only `PUT` (no reason
+> captured yet) and then void it, with both steps on the audit trail. `VOID` is the CAR's tombstone:
+> the CAR stays readable. Restore reopens a void CAR to `open` (**409** when it is not void) on a
+> required `RESTORE` audit row.
+>
+> **NCR / CAR edits — endpoint mapping (the Approve row).** `PUT /quality/ncr/{ncr_id}` (edit,
+> disposition, close, reopen, assign, CAR link), `PUT /quality/car/{car_id}` (edit, verification,
+> close, reopen, assign) and `POST /quality/ncr/{ncr_id}/create-car` are enforced **in code** via
+> `require_role(quality_record_service.WRITE_ROLES)` = **Admin / Manager / Quality**, the **Approve**
+> row (the frontend detail screen gates on `quality:approve`, which the same three roles hold).
+> Filing an NCR (`POST /quality/ncr`), opening a CAR (`POST /quality/car`) and all NCR / CAR reads
+> depend on `get_current_user` only, so any authenticated user of the company can file one
+> (Operators included). Every one of these writes commits with a required audit row (**503** with
+> rollback on audit loss) and validates `part_id` / `work_order_id` / `assigned_to` / `car_id`
+> against the active company before writing (**404**). A CLOSED NCR or CAR refuses every change
+> except a status-only reopen (**409**), for every role. See `docs/API.md` → Quality → "NCR / CAR
+> writes".
 
 > **Calibration — endpoint mapping (now enforced in code).** `POST /api/v1/calibration/equipment`,
 > `PUT /calibration/equipment/{id}` and `POST /calibration/equipment/{id}/calibrate` are enforced to

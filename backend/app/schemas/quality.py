@@ -37,8 +37,18 @@ class NCRCreate(BaseModel):
 
 
 class NCRUpdate(BaseModel):
-    expected_updated_at: Optional[datetime] = None
-    version: int = Field(..., ge=0, description="Version for optimistic locking")
+    expected_updated_at: Optional[datetime] = Field(
+        None,
+        description=(
+            "The record's updated_at as last read. When sent and no longer current, the update is "
+            "refused with 409 -- this is the conflict check."
+        ),
+    )
+    version: int = Field(
+        ...,
+        ge=0,
+        description="Legacy field, required but ignored: NCRs carry no version column. Send expected_updated_at.",
+    )
     status: Optional[NCRStatus] = None
     disposition: Optional[NCRDisposition] = None
     quantity_rejected: Optional[Decimal] = Field(None, ge=Decimal('0'))
@@ -80,6 +90,12 @@ class NCRVoidRequest(BaseModel):
         if not value.strip():
             raise ValueError('reason is required')
         return value.strip()
+
+
+class CARVoidRequest(NCRVoidRequest):
+    """Why a CAR is being voided (a duplicate, or raised in error) -- recorded on its audit row."""
+
+    reason: str = Field(..., min_length=1, description="Why this CAR is being voided")
 
 
 class PartSummary(BaseModel):
@@ -154,8 +170,18 @@ class CARCreate(BaseModel):
 
 
 class CARUpdate(BaseModel):
-    expected_updated_at: Optional[datetime] = None
-    version: int = Field(..., ge=0)
+    expected_updated_at: Optional[datetime] = Field(
+        None,
+        description=(
+            "The record's updated_at as last read. When sent and no longer current, the update is "
+            "refused with 409 -- this is the conflict check."
+        ),
+    )
+    version: int = Field(
+        ...,
+        ge=0,
+        description="Legacy field, required but ignored: CARs carry no version column. Send expected_updated_at.",
+    )
     status: Optional[CARStatus] = None
     priority: Optional[int] = Field(None, ge=1, le=10)
     root_cause_analysis: Optional[str] = Field(None, max_length=2000)
