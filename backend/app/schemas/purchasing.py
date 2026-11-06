@@ -5,6 +5,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.validation import Money, MoneySmall
+from app.models.purchasing import POStatus
 from app.schemas.base import UTCModel
 
 
@@ -250,13 +251,30 @@ class POUpdate(BaseModel):
     ship_to: Optional[str] = Field(None, max_length=255)
     shipping_method: Optional[str] = Field(None, max_length=100)
     notes: Optional[str] = Field(None, max_length=2000)
-    status: Optional[str] = None
+    # Typed as the enum so an unknown value is a 422 at the boundary (it used to reach
+    # ``POStatus(value)`` in the handler and surface as a 500). Membership is not permission:
+    # which transitions ``PUT`` may perform is decided by
+    # ``purchasing.assert_po_status_edit_allowed`` -- SENT only through the send verb,
+    # PARTIAL/RECEIVED only through receiving, and nothing out of CLOSED/CANCELLED.
+    status: Optional[POStatus] = None
 
     @field_validator('required_date', 'expected_date', mode='before')
     @classmethod
     def empty_dates_to_none(cls, v: object) -> object:
         """HTML forms submit '' for a blank date input — treat it as omitted (parity with POBase)."""
         return blank_str_to_none(v)
+
+    @field_validator('status')
+    @classmethod
+    def status_not_null(cls, v: Optional[POStatus]) -> POStatus:
+        """An EXPLICIT ``null`` status is a 422, not a 500 on the NOT NULL-by-intent column.
+
+        ``None`` is this schema's "omitted" sentinel; field validators do not run on defaults,
+        so this fires only when the client actually sent ``"status": null``.
+        """
+        if v is None:
+            raise ValueError("status must be a purchase order status, not null")
+        return v
 
 
 class VendorSummary(BaseModel):

@@ -113,6 +113,10 @@ describe('Materials edit payload', () => {
     expect(payload).not.toHaveProperty('is_critical');
     // Not a rename channel.
     expect(payload).not.toHaveProperty('part_number');
+    // Not an activation channel either: the server's PartUpdate dropped both fields, and
+    // retiring a material is POST /parts/{id}/deactivate ("Mark Inactive…"), never a form save.
+    expect(payload).not.toHaveProperty('is_active');
+    expect(payload).not.toHaveProperty('status');
     // Still sends what the modal edits.
     expect(payload).toMatchObject({ name: 'CRS Sheet .050 REV C', version: 3 });
   });
