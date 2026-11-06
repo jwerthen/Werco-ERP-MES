@@ -1036,6 +1036,38 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > Empty result → nothing to do. Non-empty → those rows need repointing at a machine the owning
 > company actually has.
 
+### Tool & Fixture Management (tool crib)
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View (tools, dashboard, checked-out, replacement-due, inspection-due, history) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Create / edit tool (`POST /tool-management/tools/`, `PUT .../tools/{id}`) | ✓ | ✓ | ✓ | | | | |
+| Retire tool (`DELETE /tool-management/tools/{id}`) | ✓ | ✓ | ✓ | | | | |
+| Check out / check in (`POST .../tools/{id}/checkout`, `.../checkin`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| Log usage (`POST .../tools/{id}/log-usage`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
+
+> ⚠️ **This table is new because the router had NO role gating at all.** Every handler was
+> `Depends(get_current_user)`, so a **Viewer could create, edit and retire tools** and check them in
+> and out, with no audit row naming who.
+>
+> **Managing a tool record follows the inventory stock mutators** (`inventory.STOCK_MUTATOR_ROLES` —
+> the Inventory Adjust / Issue / Receive rows, Admin / Manager / Supervisor), as `TOOL_PLANNING_ROLES`
+> in `app/api/endpoints/tool_management.py`: a tool is crib inventory. **Using a tool**
+> (`TOOL_USE_ROLES`) is open to every tenant role except **Viewer**. `/tool-management` is
+> route-gated on `inventory:view`, which every role holds, and the page offers checkout and checkin
+> to all of them, so the read-only Viewer is the only role that loses anything. Kiosk operator tokens
+> are path-fenced to the shop-floor routes, so there is no kiosk caller. Superuser / Platform Admin
+> bypass, as elsewhere.
+>
+> **Reads stay open to every role, and are now tenant-scoped.** The history read resolved a tool by
+> bare id, and the dashboard and the checked-out / replacement-due / inspection-due lists aggregated
+> across tenants. Every state change now writes an `audit_log` row (`tool`, `tool_usage_log`). See
+> `docs/API.md` → Tool & Fixture Management.
+>
+> ⚠️ **The client has no matching gate yet.** `ToolManagement.tsx` renders its write controls
+> unconditionally, so a Viewer sees controls the server now refuses and gets a 403 toast. Pairing the
+> client gate with the server gate is a follow-up, as for Maintenance above.
+
 ### Supplier Scorecards, Audits & Approved Supplier List
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
@@ -1833,6 +1865,20 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > where the `PUT /quality/ncr/{id}` update path wrote no `audit_log` row at all. See `docs/API.md` →
 > Quality.
 
+> **Calibration — endpoint mapping (now enforced in code).** `POST /api/v1/calibration/equipment`,
+> `PUT /calibration/equipment/{id}` and `POST /calibration/equipment/{id}/calibrate` are enforced to
+> the **Calibration** row above via `require_role([ADMIN, MANAGER, QUALITY])`
+> (`CALIBRATION_WRITE_ROLES` in `app/api/endpoints/calibration.py`) — the same set that holds the
+> frontend's `quality:calibration` permission, which route-gates `/calibration`. **This is a
+> permission change:** until now the row described the UI only. Every calibration write was a bare
+> `get_current_user`, so any authenticated user in the tenant — a Viewer included — could set a gauge
+> `active` and put it past the process-sheet gauge check. Reads (`GET /calibration/equipment`,
+> `/due-soon`, `/{id}`, `/{id}/history`) stay open to every role in the tenant, tenant-scoped; the
+> dashboard's calibration-due alert reads `/due-soon`. Superuser / Platform Admin bypass, as
+> elsewhere. The role is necessary, not sufficient: `PUT` may only take a gauge **out** of service
+> (**409** otherwise), and only a passing calibration record puts one back — see `docs/API.md` →
+> Calibration.
+
 ### Operator Certifications & Training
 
 | Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
@@ -1875,6 +1921,65 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > delete). The create endpoints (and `update_training`'s re-pointed `work_center_id`) reject a
 > `user_id` / `work_center_id` that does not belong to the active company with **422** before insert
 > (cross-tenant FK-injection guard). See `docs/API.md` and `docs/WORK_ORDER_COMPLETION_REMEDIATION.md`.
+
+### Customer Complaints & RMA
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View (dashboard, lists, detail, 8D report) | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ |
+| Record / edit a complaint, record an investigation | ✓ | ✓ | ✓ | | ✓ | | |
+| Open / edit an RMA, receive and inspect returned material | ✓ | ✓ | ✓ | | ✓ | | |
+| Resolve / close a complaint | ✓ | ✓ | | | ✓ | | |
+| Raise an NCR / CAR from a complaint | ✓ | ✓ | | | ✓ | | |
+| Approve / deny / dispose / complete an RMA | ✓ | ✓ | | | ✓ | | |
+
+> **Endpoint mapping (enforced in code, 2026-11-05).** The router
+> (`app/api/endpoints/customer_complaints.py`, mounted at `/api/v1/complaints`) uses two role sets
+> defined in `app/services/customer_complaint_service.py`. They mirror the **Inspect** and
+> **Approve** rows of the [Quality](#quality) matrix:
+> - **`AUTHOR_ROLES` = Admin / Manager / Supervisor / Quality** (the `quality:inspect` tier):
+>   `POST /complaints/complaints/`, `PUT /complaints/complaints/{id}`, `POST …/{id}/investigate`,
+>   `POST /complaints/rma/`, `PUT /complaints/rma/{id}`, `POST /complaints/rma/{id}/receive` and
+>   `POST /complaints/rma/{id}/inspect`.
+> - **`APPROVER_ROLES` = Admin / Manager / Quality** (the `quality:approve` tier):
+>   `POST …/{id}/resolve`, `…/close`, `…/create-ncr`, `…/create-car`, and
+>   `POST /complaints/rma/{id}/approve`, `…/deny`, `…/dispose` and `…/complete`.
+>
+> Any other authenticated role receives **403** with nothing written. Superuser and Platform Admin
+> pass `require_role` as everywhere else, but stay bound to the active company.
+>
+> **What changed.** Before this fix only `create-ncr`, `create-car` and the RMA `approve` / `deny`
+> / `dispose` / `complete` verbs were gated, all to Admin / Manager / Quality, and those keep the
+> same set. Every other write, `resolve` and `close` included, was open to **any** authenticated
+> user. As a result:
+> - Operator, Viewer and Shipping lose every write they had: complaint create, edit, investigate,
+>   resolve and close, and RMA create, edit, receive and inspect.
+> - Supervisor loses `resolve` and `close` but keeps every author-tier verb.
+>
+> The page hides **New Complaint** (header and empty state) and **Create RMA** for roles without
+> `quality:inspect`, so Operator and Viewer no longer see controls the server would refuse.
+>
+> **Reads stay read-broad, scoped to the tenant.** The dashboard, both lists, complaint and RMA
+> detail and the 8D report depend on `get_current_user` only. The **View** row above is the UI's
+> `quality:view` gate on `/customer-complaints`, the same as the Quality View row. On the server,
+> every route (read or write) resolves through the active company: another tenant's id returns
+> **404** before anything is read or changed, the dashboard aggregates only the active company,
+> and part / customer / RMA expansions never cross tenants.
+>
+> **An Author-tier edit cannot make an Approver's decision.** `PUT` is Author-tier, so the update
+> schemas carry no field an Approver verb decides: no `status`, no resolution fields
+> (`resolution_description`, `corrective_action`, `preventive_action`, `actual_cost`) on a
+> complaint, and no `disposition` or `credit_amount` on an RMA (all **422**). The fields an
+> approval rests on are locked once it is made: RMA `quantity` / `reason` change only while
+> `requested`, and a `closed` / `void` complaint or a `completed` / `denied` RMA refuses every edit
+> (**409**). Investigation and inspection findings are likewise written only by their own verbs.
+>
+> **Writes are audited.** Resource types are `customer_complaint`, `rma`, `ncr` and `car`. `resolve`,
+> `close`, RMA `approve` / `deny` / `dispose` / `complete`, and the NCR or CAR a complaint raises
+> (with the complaint's link) write their audit rows with `log_required`: if a row cannot be saved
+> the request returns **503** and nothing commits. The other writes use the best-effort helpers.
+> Status moves only through the workflow verbs, which return **400** from the wrong state.
+> See [API: Customer Complaints & RMA](API.md#customer-complaints--rma).
 
 ### Engineering Change Orders (ECO)
 
@@ -2040,6 +2145,70 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 > badge gate is therefore **narrower than** that read split — a Manager can open the Users page and
 > read the list but cannot print badges — consistent with the Admin-only user-write posture in the
 > note directly above.
+
+### Customers
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View (list, names, detail, stats) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Create | ✓ | ✓ | ✓ | | | | |
+| Edit | ✓ | ✓ | | | | | |
+| Delete (soft or hard) / restore | ✓ | ✓ | | | | | |
+| Import (`POST /customers/import-csv`) | ✓ | ✓ | | | | | |
+
+> **Create and Edit were open to every authenticated user until this change**
+> (`POST /customers/`, `PUT /customers/{id}` depended on `get_current_user` only). Both are now
+> role-gated in `app/api/endpoints/customers.py`, with two different role sets:
+>
+> - **Edit** is `require_role([ADMIN, MANAGER])` (`CUSTOMER_UPDATE_ROLES`), matching the customer
+>   import, delete and restore routes and the vendor master's create / update. Changing an
+>   existing customer changes the CoC / FAI requirements and payment terms that quotes and
+>   shipments read, so it is treated as an office-controlled master.
+> - **Create** is `require_role([ADMIN, MANAGER, SUPERVISOR])` (`CUSTOMER_CREATE_ROLES`): exactly
+>   the roles `POST /work-orders/` admits. New Work Order (`WorkOrderNew.tsx`) creates the customer
+>   inline when the typed name is not in the master yet, and abandons the work-order submit if that
+>   create is refused. A create gate narrower than the work-order gate would stop a Supervisor from
+>   opening a work order for a new customer. A test holds the two role sets equal
+>   (`test_customer_create_gate_admits_exactly_the_work_order_create_roles`). A Supervisor create
+>   accepts the full create body (requirements and terms included), as it did before this change.
+>
+> Platform Admin and superuser pass both gates as everywhere else. Reads stay read-broad.
+>
+> **Known UI gap:** the Customers page shows Add and Edit to every role and the nav entry is not
+> gated. An Operator, Quality, Shipping or Viewer user who saves a new customer, and anyone below
+> Manager (Supervisor included) who saves an edit, sees the server's **403** as an error toast.
+> There is no `customers:*` permission in `frontend/src/utils/permissions.ts` yet to hide the
+> buttons with. New Work Order is not affected: only roles that may create work orders reach its
+> inline create, and all of them may create a customer.
+>
+> **Tenancy.** Every customer route is scoped to the active company. `GET /customers/{id}/stats`
+> and the hard-delete dependency check now also scope the parts and work orders they read by
+> `customer_name` (previously unscoped, so a name shared by two companies leaked the other
+> company's part numbers, work-order numbers and customer POs). Name and code are unique per
+> company (migration `115`), not globally. See `docs/API.md` → Customers.
+
+### Custom Fields
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View definitions and values | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Create / edit definitions | ✓ | ✓ | | | | | |
+| Deactivate definitions | ✓ | | | | | | |
+| Set / delete values (**ungated, known gap; see note**) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+> **Known gap, not intended policy: value writes carry no role gate.** Any authenticated user of
+> the active company, Viewer included, can set or delete a custom-field value on any record type.
+> That contradicts Viewer's read-only definition at the top of this document. It predates this
+> change and is tracked as a follow-up: gate value writes, at minimum excluding Viewer, preferably
+> mirroring the edit roles of each target record type. No page in the SPA calls the value-write
+> routes today; they are reachable through the API and the MCP catalog.
+>
+> What changed is tenancy and audit. The `/custom-fields/values/*` routes now resolve the
+> definition, the target record and the value row in the active company only (**404** otherwise;
+> writes require a live record), and every value create, overwrite and delete writes an audit row
+> (`custom_field_value`). Definition create, update and deactivate also write audit rows now
+> (`custom_field_definition`: `CREATE`, `UPDATE`, and a `STATUS_CHANGE` `active` → `inactive`).
+> See `docs/API.md` → Custom Fields.
 
 ### Bulk Imports (Import Center / Excel Migration Kit)
 
@@ -2235,6 +2404,50 @@ and writes an `EXPORT` audit row through `AuditService`:
 > **Audit coverage (2026-06-09).** The OEE write endpoints now also write a tamper-evident `audit_log`
 > row on every record/target create/update/delete (and the auto-calc upsert), so OEE mutations are on
 > the hash chain alongside the role gate. No role change — audit-trail coverage only.
+
+### Downtime
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| View (events, active, summary, by-work-center, reason codes) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Report / resolve an event (`POST /downtime/`, `POST /downtime/{id}/resolve`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| Correct an event (`PUT /downtime/{id}`) | ✓ | ✓ | ✓ | | | | |
+| Manage reason codes (`POST /downtime/reason-codes`, `PUT /downtime/reason-codes/{id}`) | ✓ | ✓ | ✓ | | | | |
+
+> ⚠️ **This table is new because the router had NO role gating and no audit.** Every handler was
+> `Depends(get_current_user)`, so a **Viewer could start, correct and close downtime events** — and
+> UNPLANNED event minutes are subtracted from productive run in OEE availability (see OEE above).
+>
+> **Reporting stays on the floor; correcting matches OEE Write.** `DOWNTIME_REPORT_ROLES` (create /
+> resolve, `app/api/endpoints/downtime.py`) is every tenant role except **Viewer**: `/downtime` is
+> route-gated on `work_orders:view`, which every role holds, and `DowntimeTracking.tsx` calls only
+> create and resolve, so operators keep logging stoppages. `DOWNTIME_MANAGE_ROLES` (`PUT` and the
+> reason-code writes) is Admin / Manager / Supervisor — the `OEE_WRITE_ROLES` set — because both
+> rewrite OEE inputs after the fact; no page calls them today. Reads stay open to every role,
+> tenant-scoped. There is no delete endpoint. Superuser / Platform Admin bypass, as elsewhere.
+>
+> **Every state change writes a tamper-evident `audit_log` row** (`downtime_event`,
+> `downtime_reason_code`), and `work_center_id` / `work_order_id` are validated against the active
+> company (flat **404**). See `docs/API.md` → Downtime Tracking.
+>
+> ⚠️ **The client has no matching gate yet.** `DowntimeTracking.tsx` shows its create and resolve
+> controls to a Viewer, who now gets a 403 toast.
+
+> **Before deploying, check for legacy cross-tenant rows.** The write guards stop *new* mis-tenanted
+> events; they do nothing about rows written before them. Event reads now render such a row's foreign
+> work center / work order as `null`, but the rows themselves are a data problem:
+>
+> ```sql
+> SELECT 'downtime_events.work_center' AS t, d.id, d.company_id AS owner, w.company_id AS fk_owner
+>   FROM downtime_events d JOIN work_centers w ON w.id = d.work_center_id
+>  WHERE w.company_id <> d.company_id
+> UNION ALL SELECT 'downtime_events.work_order', d.id, d.company_id, wo.company_id
+>   FROM downtime_events d JOIN work_orders wo ON wo.id = d.work_order_id
+>  WHERE wo.company_id <> d.company_id;
+> ```
+>
+> Empty result → nothing to do. Non-empty → repoint each row with `PUT /downtime/{id}` (Admin /
+> Manager / Supervisor) at a machine or job the owning company actually has.
 
 <a id="werco-copilot-read-only-ai-chat"></a>
 
