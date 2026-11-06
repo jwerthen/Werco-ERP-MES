@@ -530,8 +530,9 @@ class TestGaugeByCode:
 
     def test_code_match_is_case_insensitive_and_whitespace_tolerant(self, client: TestClient, db_session: Session):
         # Code-review overrule: the kiosk field is scan-OR-TYPE, so a hand-typed
-        # lowercase code must resolve (the column is globally unique, so a
-        # case-folded match cannot be ambiguous). The record echoes the CANONICAL
+        # lowercase code must resolve (the lookup is tenant-scoped and the code is
+        # unique per company since migration 116, so a case-folded match is ambiguous
+        # only if one company keeps two codes differing by case). The record echoes the CANONICAL
         # stored code, scanner padding is trimmed, and the two normalizations
         # compose. (The capture/hold-path canonical-echo variants also live in
         # tests/api/test_process_sheet_audit_fixes.py.)

@@ -502,9 +502,10 @@ def create_tool(
     try:
         db.flush()
     except IntegrityError:
-        # ``tools.tool_id`` still carries a GLOBAL unique constraint (no per-company
-        # compound yet), so a code another tenant already uses fails here rather than
-        # in the tenant-scoped probe above. Same answer as the probe.
+        # ``tool_id`` is unique per company (``uq_tools_company_tool_id``, migration 116),
+        # so another tenant's identical code is accepted. This catch is the backstop for
+        # a same-company race the probe above cannot see: two creates of one code passing
+        # the probe concurrently. Same answer as the probe.
         db.rollback()
         raise HTTPException(status_code=400, detail="Tool ID already exists")
     audit.log_create("tool", tool.id, tool.tool_id, new_values=tool)

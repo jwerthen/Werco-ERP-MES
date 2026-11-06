@@ -20,6 +20,9 @@ def generate_ncr_number(db: Session, company_id: int = None, *, lock=acquire_gen
     lock(db, "ncr_number", company_id)
     today = datetime.now().strftime("%Y%m%d")
     prefix = f"NCR-{today}-"
+    # Deliberately NO is_deleted filter: a voided NCR keeps its number for good, and
+    # uq_ncrs_company_ncr_number has no partial predicate, so the scan must see
+    # tombstones or it would reissue a voided number and 500 on the constraint.
     query = db.query(NonConformanceReport).filter(NonConformanceReport.ncr_number.like(f"{prefix}%"))
     if company_id is not None:
         query = query.filter(NonConformanceReport.company_id == company_id)

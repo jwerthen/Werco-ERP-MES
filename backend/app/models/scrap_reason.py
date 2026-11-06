@@ -31,10 +31,12 @@ class ScrapCategory(str, enum.Enum):
 class ScrapReasonCode(Base, TenantMixin):
     """Predefined reason codes for categorizing scrap (Lean Phase 1).
 
-    Modeled on ``DowntimeReasonCode`` (app/models/downtime.py) with one deliberate
-    difference: ``code`` is unique PER TENANT via ``UniqueConstraint(company_id,
-    code)`` -- NOT globally ``unique=True`` (DowntimeReasonCode's global unique is
-    a known cross-tenant defect; do not copy it). Referenced by the nullable
+    Modeled on ``DowntimeReasonCode`` (app/models/downtime.py). ``code`` is unique PER
+    TENANT via ``UniqueConstraint(company_id, code)`` -- NOT globally ``unique=True``.
+    That was originally the one deliberate difference: DowntimeReasonCode carried a
+    global unique on ``code``, a cross-tenant defect that migration
+    ``116_business_keys_per_company`` re-keyed to the same per-tenant shape, so the
+    two now agree. Referenced by the nullable
     ``scrap_reason_code_id`` FK on ``time_entries`` / ``work_order_operations`` /
     ``work_orders``; the free-text ``scrap_reason`` columns on those tables stay
     as narrative detail.

@@ -384,19 +384,22 @@ def _title(text: str) -> str:
 
 # ============== Numbering ==============
 #
-# complaint_number and rma_number are GLOBALLY unique (migration 024 / the model's
-# unique=True; 026 never re-keyed them per tenant), so these sequences stay global: a
-# per-company sequence would hand two tenants the same CC-YYYY-NNNN and the second
-# insert would fail on the unique index. Per-company numbering needs a migration that
-# re-keys both uniques to (company_id, number) first. Until then a global advisory lock
-# (company slot 0) serializes allocation so concurrent creates cannot collide.
+# Each company has its own CC-YYYY-NNNN / RMA-YYYY-NNNN sequence. complaint_number and
+# rma_number are unique per company, as (company_id, number) (migration
+# 116_business_keys_per_company re-keyed the old GLOBAL uniques), so two tenants may
+# both hold CC-2026-0001. The read-max-plus-one scan sees only the active company's
+# rows, and the advisory lock is per (namespace, company), so concurrent creates in one
+# company serialize while different companies never wait on each other. The scan
+# deliberately reads every row of the company: the constraint has no partial predicate,
+# so a number stays taken for good.
 
 
-def generate_complaint_number(db: Session) -> str:
-    acquire_generator_lock(db, "complaint_number")
+def generate_complaint_number(db: Session, company_id: int) -> str:
+    acquire_generator_lock(db, "complaint_number", company_id)
     prefix = f"CC-{datetime.now():%Y}-"
     last = (
-        db.query(CustomerComplaint.complaint_number)
+        tenant_query(db, CustomerComplaint, company_id)
+        .with_entities(CustomerComplaint.complaint_number)
         .filter(CustomerComplaint.complaint_number.like(f"{prefix}%"))
         .order_by(CustomerComplaint.complaint_number.desc())
         .first()
@@ -405,11 +408,12 @@ def generate_complaint_number(db: Session) -> str:
     return f"{prefix}{num:04d}"
 
 
-def generate_rma_number(db: Session) -> str:
-    acquire_generator_lock(db, "rma_number")
+def generate_rma_number(db: Session, company_id: int) -> str:
+    acquire_generator_lock(db, "rma_number", company_id)
     prefix = f"RMA-{datetime.now():%Y}-"
     last = (
-        db.query(ReturnMaterialAuthorization.rma_number)
+        tenant_query(db, ReturnMaterialAuthorization, company_id)
+        .with_entities(ReturnMaterialAuthorization.rma_number)
         .filter(ReturnMaterialAuthorization.rma_number.like(f"{prefix}%"))
         .order_by(ReturnMaterialAuthorization.rma_number.desc())
         .first()
@@ -521,7 +525,7 @@ def create_complaint(
     fields["date_received"] = fields.get("date_received") or date.today()
     complaint = CustomerComplaint(
         company_id=company_id,
-        complaint_number=generate_complaint_number(db),
+        complaint_number=generate_complaint_number(db, company_id),
         received_by=user.id,
         **fields,
     )
@@ -818,7 +822,7 @@ def create_rma(
     db: Session, company_id: int, values: Dict[str, Any], audit: AuditService
 ) -> ReturnMaterialAuthorization:
     _validate_references(db, company_id, values, records=_copied_from_complaint(db, company_id, values))
-    rma = ReturnMaterialAuthorization(company_id=company_id, rma_number=generate_rma_number(db), **values)
+    rma = ReturnMaterialAuthorization(company_id=company_id, rma_number=generate_rma_number(db, company_id), **values)
     db.add(rma)
     db.flush()
     audit.log_create(RMA_RESOURCE, rma.id, rma.rma_number, new_values=_snapshot(rma))

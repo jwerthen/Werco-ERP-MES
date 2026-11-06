@@ -3,7 +3,7 @@ from datetime import date, datetime
 
 from sqlalchemy import Boolean, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -40,9 +40,15 @@ class CustomerComplaint(Base, TenantMixin):
     """Customer Complaint tracking for AS9100D compliance"""
 
     __tablename__ = "customer_complaints"
+    # ``complaint_number`` is unique PER COMPANY, never globally; the plain
+    # ``ix_customer_complaints_complaint_number`` index stays for lookups.
+    # Lock-step with migration 116_business_keys_per_company.
+    __table_args__ = (
+        UniqueConstraint("company_id", "complaint_number", name="uq_customer_complaints_company_complaint_number"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
-    complaint_number = Column(String(50), unique=True, index=True, nullable=False)
+    complaint_number = Column(String(50), index=True, nullable=False)
 
     # Customer info
     customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True)
@@ -114,9 +120,15 @@ class ReturnMaterialAuthorization(Base, TenantMixin):
     """RMA - Return Material Authorization tracking"""
 
     __tablename__ = "return_material_authorizations"
+    # ``rma_number`` is unique PER COMPANY, never globally; the plain
+    # ``ix_return_material_authorizations_rma_number`` index stays for lookups.
+    # Lock-step with migration 116_business_keys_per_company.
+    __table_args__ = (
+        UniqueConstraint("company_id", "rma_number", name="uq_return_material_authorizations_company_rma_number"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
-    rma_number = Column(String(50), unique=True, index=True, nullable=False)
+    rma_number = Column(String(50), index=True, nullable=False)
 
     # Link to complaint
     complaint_id = Column(Integer, ForeignKey("customer_complaints.id"), nullable=True)

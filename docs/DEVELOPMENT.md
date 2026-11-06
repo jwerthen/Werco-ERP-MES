@@ -817,6 +817,37 @@ After bootstrap, normal incremental `alembic upgrade head` is the standard path.
 > chain test alone could not catch an overlong one; `test_migration_fresh_bootstrap.py` asserts
 > the limit directly for every revision from the `058` stamp up.
 
+> **A business key on a tenant table is unique per company, never globally.** A number, code or
+> user-entered ID on a `TenantMixin` table is declared as a named
+> `UniqueConstraint("company_id", "<col>", name="uq_<table>_company_<col>")` in `__table_args__`,
+> with the column itself `index=True` but **not** `unique=True`. On a tenant table, `unique=True`
+> makes `create_all` build a global unique index `ix_<table>_<col>`. That is the bug class `115`
+> and `116` fixed. With a per-company generator, a second company draws a number the first already
+> holds and the insert returns 500 (`116`'s NCR, CAR and FAI numbers). With a user-entered value,
+> the refusal tells one company which values another company uses (`115`'s customer names and
+> codes; `116`'s equipment IDs, tool IDs and downtime reason codes).
+>
+> To re-key an existing column, use `115_customers_unique_per_company` and
+> `116_business_keys_per_company` as templates. Rebuild `ix_<table>_<col>` as a plain index under
+> the same name, add the `uq_` constraint, guard each object independently, and mirror the result
+> in the model in the same PR. The upgrade needs no dedup, because adding `company_id` only loosens
+> the key. The downgrade tightens it, so it counts cross-row duplicates first and refuses before
+> any DDL, reporting each `table.column` and a count but never the values.
+>
+> Seven tenant tables still carry a global single-column unique on a business number. They are a
+> follow-up, not a pattern to copy. None returns a 500 the way NCRs did, because none is numbered
+> per company. Where the number comes from an install-wide sequence, it discloses how many records
+> other companies created:
+>
+> - `documents.document_number`, `engineering_change_orders.eco_number`,
+>   `shipments.shipment_number`, `mrp_runs.run_number` and `maintenance_work_orders.wo_number`
+>   come from a scan across every company. Only the document and shipment scans run under an
+>   install-wide lock, so two concurrent ECO, MRP-run or maintenance creates can still race to
+>   one number.
+> - `quotes.quote_number` is minted `FAB-<company_id>-<fabrication quote id>-R<revision>`, which
+>   embeds a global primary key.
+> - `rfq_packages.rfq_number` has no writer in `app/` today.
+
 ### Running the PostgreSQL verifiers locally
 
 The verifiers create and drop scratch schemas and databases (`DROP DATABASE … WITH (FORCE)`), so

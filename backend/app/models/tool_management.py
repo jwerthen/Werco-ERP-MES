@@ -3,7 +3,7 @@ from datetime import date, datetime
 
 from sqlalchemy import Boolean, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -38,9 +38,13 @@ class Tool(Base, TenantMixin):
     """Tool & fixture inventory"""
 
     __tablename__ = "tools"
+    # ``tool_id`` (the user-entered tool / fixture tag) is unique PER COMPANY, never
+    # globally; ``ix_tools_tool_id`` stays as a plain lookup index.
+    # Lock-step with migration 116_business_keys_per_company.
+    __table_args__ = (UniqueConstraint("company_id", "tool_id", name="uq_tools_company_tool_id"),)
 
     id = Column(Integer, primary_key=True, index=True)
-    tool_id = Column(String(50), unique=True, index=True, nullable=False)
+    tool_id = Column(String(50), index=True, nullable=False)
     name = Column(String(255), nullable=False)
     tool_type = Column(SQLEnum(ToolType), default=ToolType.OTHER)
     description = Column(Text, nullable=True)

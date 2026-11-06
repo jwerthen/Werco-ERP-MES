@@ -1,6 +1,6 @@
 """FAI writes preserve tenant boundaries, inspection authority and completed evidence."""
 
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 from sqlalchemy import inspect
@@ -338,3 +338,33 @@ def test_prefill_audit_preserves_blank_values_and_duplicate_balloon_identities(c
     assert changes[char.id]['old_values']['actual_value'] == '  '
     assert changes[duplicate.id]['old_values']['actual_value'] == ''
     assert {entry['new_values']['actual_value'] for entry in changes.values()} == {'1.005'}
+
+
+def test_same_day_fai_numbers_are_allocated_and_unique_per_company(client, db_session, inspections):
+    """A second tenant's first same-day FAI draws "-001" too, and that is not a collision.
+
+    ``fai_service._number`` allocates FAI-YYYYMMDD-NNN per company. Until migration 116
+    ``fais.fai_number`` was a GLOBAL unique index, so when another company already held
+    today's "-001" the insert failed and ``POST /quality/fai`` returned 500. It is now unique
+    per company, as ``(company_id, fai_number)``.
+    """
+    today = f'{datetime.now():%Y%m%d}'
+    foreign_wo = inspections[1][2]
+    db_session.add(
+        FirstArticleInspection(
+            company_id=2, fai_number=f'FAI-{today}-001', part_id=foreign_wo.part_id, total_characteristics=0
+        )
+    )
+    db_session.commit()
+    headers = user_headers(make_user(db_session, role=UserRole.QUALITY))
+
+    first = write(client, 'create', inspections[0], headers)
+    second = write(client, 'create', inspections[0], headers)
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert [first.json()['fai_number'], second.json()['fai_number']] == [f'FAI-{today}-001', f'FAI-{today}-002']
+    assert {db_session.get(FirstArticleInspection, r.json()['id']).company_id for r in (first, second)} == {1}
+    # The other tenant's same-number row is untouched.
+    held = db_session.query(FirstArticleInspection).filter_by(company_id=2, fai_number=f'FAI-{today}-001').one()
+    assert held.part_id == foreign_wo.part_id

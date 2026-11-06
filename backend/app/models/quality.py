@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import Boolean, Column, Date, DateTime
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -67,15 +67,19 @@ class NonConformanceReport(Base, SoftDeleteMixin, TenantMixin):
     # newest-first status lists, and source/disposition rollups. 003's
     # ix_ncrs_status_source is deliberately NOT restored -- no query filters
     # status AND source together, and each column is covered below.
+    # ``ncr_number`` is unique PER COMPANY (quality_numbering mints NCR-YYYYMMDD-NNN per
+    # company), never globally; ``ix_ncrs_ncr_number`` stays as a plain lookup index.
+    # Lock-step with migration 116_business_keys_per_company.
     __table_args__ = (
         Index("ix_ncrs_status", "status"),
         Index("ix_ncrs_status_created", "status", "created_at"),
         Index("ix_ncrs_source", "source"),
         Index("ix_ncrs_disposition", "disposition"),
+        UniqueConstraint("company_id", "ncr_number", name="uq_ncrs_company_ncr_number"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    ncr_number = Column(String(50), unique=True, index=True, nullable=False)
+    ncr_number = Column(String(50), index=True, nullable=False)
 
     # What's affected
     part_id = Column(Integer, ForeignKey("parts.id"), nullable=True)
@@ -144,13 +148,17 @@ class CorrectiveActionRequest(Base, TenantMixin):
     # Lock-step with migration 079_restore_stamped_over_idx (originally migration
     # 001; skipped by the create_all+stamp bootstrap): open-CAR lists and
     # overdue-CAR reads.
+    # ``car_number`` is unique PER COMPANY (quality_numbering mints CAR-YYYYMMDD-NNN per
+    # company), never globally; ``ix_cars_car_number`` stays as a plain lookup index.
+    # Lock-step with migration 116_business_keys_per_company.
     __table_args__ = (
         Index("ix_cars_status", "status"),
         Index("ix_cars_due_date", "due_date"),
+        UniqueConstraint("company_id", "car_number", name="uq_cars_company_car_number"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    car_number = Column(String(50), unique=True, index=True, nullable=False)
+    car_number = Column(String(50), index=True, nullable=False)
 
     # Classification
     car_type = Column(SQLEnum(CARType), default=CARType.CORRECTIVE)
@@ -202,10 +210,16 @@ class FirstArticleInspection(Base, TenantMixin):
     __tablename__ = "fais"
     # Lock-step with migration 079_restore_stamped_over_idx (originally migration
     # 001; skipped by the create_all+stamp bootstrap): open-FAI lists.
-    __table_args__ = (Index("ix_fais_status", "status"),)
+    # ``fai_number`` is unique PER COMPANY (fai_service mints FAI-YYYYMMDD-NNN per
+    # company), never globally; ``ix_fais_fai_number`` stays as a plain lookup index.
+    # Lock-step with migration 116_business_keys_per_company.
+    __table_args__ = (
+        Index("ix_fais_status", "status"),
+        UniqueConstraint("company_id", "fai_number", name="uq_fais_company_fai_number"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
-    fai_number = Column(String(50), unique=True, index=True, nullable=False)
+    fai_number = Column(String(50), index=True, nullable=False)
 
     # What's being inspected
     part_id = Column(Integer, ForeignKey("parts.id"), nullable=False)

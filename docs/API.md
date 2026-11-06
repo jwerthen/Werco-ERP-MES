@@ -5104,9 +5104,10 @@ uploads go through text extraction + LLM. See
 > unknown `status` or `tool_type` (previously a 500) and an explicit `null` on `name`, `tool_type`,
 > `status` or `is_active` are **422**. `usage_hours` / `usage_cycles` below 0 are **422** — a
 > negative entry would rewind a tool's life and hide it from replacement-due — and
-> `inspection_interval_days` is bounded `1…3650`. A `tool_id` another tenant already uses returns
-> **400** `"Tool ID already exists"` instead of a 500: `tools.tool_id` still carries a global unique
-> constraint (see Calibration → `equipment_id` codes).
+> `inspection_interval_days` is bounded `1…3650`. `tool_id` is unique per company (migration `116`):
+> a `tool_id` the company already uses returns **400** `"Tool ID already exists"`, including when two
+> creates race past the duplicate check, and another company's identical `tool_id` is accepted (see
+> Calibration → `equipment_id` codes).
 
 > **Check-in records the condition the person picked.** The Tool Management page sends `condition`
 > (`good` / `worn` / `damaged` / `needs_repair`) where the API read only `condition_in`, defaulted to
@@ -7051,6 +7052,10 @@ date. A final status (`passed`, `failed`, `conditional`) **or any existing `comp
 all header, characteristic, and prefill writes return **409**: corrections require a new inspection.
 The legacy `version` request field is not an optimistic-lock guarantee for the FAI model.
 
+Create numbers each inspection `FAI-YYYYMMDD-NNN` from a per-company sequence under a per-company
+lock. `fai_number` is unique per company (migration `116`). Before `116` it was globally unique, so
+a second company's first FAI of the day returned **500**.
+
 Prefill preserves existing measurement values/devices and never sets `is_conforming`; ambiguous
 labels and specification mismatches remain unmatched for the inspector to resolve. A conformance
 value of `null` is unrecorded, not failed. Characteristic counts, evidence changes and required audit
@@ -7160,12 +7165,12 @@ those two fields is what the check is worth.
 > stored `retired` status as `retired`; it used to be recomputed from dates into `active` / `due` /
 > `overdue`, which only `out_of_service` was exempt from.
 
-> **`equipment_id` codes are still unique install-wide.** `equipment.equipment_id` — like
-> `tools.tool_id` and `downtime_reason_codes.code` — still carries a global unique constraint;
-> migration `026` moved seven other tables to `(company_id, …)` compounds but not these. A code
-> another tenant already uses now gets the same **400** `"Equipment ID already exists"` as a
-> same-tenant duplicate instead of a 500, which still tells the caller that *some* tenant uses it. The
-> per-company compound is a follow-up migration.
+> **`equipment_id` codes are unique per company.** `equipment.equipment_id` — like `tools.tool_id`
+> and `downtime_reason_codes.code` — is unique on `(company_id, …)` since migration `116`; before
+> that all three were unique install-wide, so a code another tenant used was refused, which told the
+> caller that *some* tenant used it. Another company's identical code is now accepted. A code the
+> company already uses is **400** `"Equipment ID already exists"`, and so is a concurrent create that
+> races past the duplicate check and hits the per-company constraint (never a 500).
 
 ### Job costing
 
@@ -7464,10 +7469,10 @@ Admin / Manager / Quality (see [RBAC](RBAC_PERMISSIONS.md#customer-complaints--r
 > Before this fix both verbs returned **500**, because they built the NCR or CAR without a
 > `company_id`.
 >
-> **Known limitation, pending a migration.** `ncr_number` and `car_number` are globally unique,
-> but numbered per company. If two tenants raise an NCR (or CAR) on the same day, both draw
-> `NCR-YYYYMMDD-001` (or `CAR-…`), and the second insert fails on the unique index with a 500.
-> This affects every NCR/CAR writer, not only these verbs.
+> **NCR and CAR numbers are unique per company (migration `116`).** Two companies may each hold
+> `NCR-YYYYMMDD-001` (or `CAR-…`) on the same day. Before `116` both columns were globally unique,
+> so the second company's first NCR or CAR of the day failed with a 500 on every NCR/CAR writer,
+> these verbs included.
 >
 > **Audit.** Every write records through `AuditService`, with resource types `customer_complaint`,
 > `rma`, `ncr` and `car`.
@@ -7490,10 +7495,14 @@ Admin / Manager / Quality (see [RBAC](RBAC_PERMISSIONS.md#customer-complaints--r
 > [NOTIFICATIONS.md](NOTIFICATIONS.md)).
 >
 > **Numbering and creation.** Complaint numbers are `CC-YYYY-NNNN` and RMA numbers `RMA-YYYY-NNNN`.
-> Each comes from one sequence **shared across tenants**, because both columns are globally unique.
-> Allocation runs under an advisory lock, so concurrent creates cannot collide. A complaint's
-> `received_by` is the caller, and `date_received` defaults to the server's current date. Before
-> this fix, `POST /complaints/complaints/` returned **500** on every call.
+> Each company has its own sequence for each, and both columns are unique per company (migration
+> `116`), so two companies may both hold `CC-2026-0001`. Allocation runs under a per-company
+> advisory lock, so concurrent creates in one company cannot collide and different companies never
+> wait on each other. Until `116` both came from one sequence shared across tenants. Existing
+> numbers were not renumbered: a company's next number follows its own highest existing number,
+> so gaps left by the shared sequence remain. A complaint's `received_by` is the caller, and
+> `date_received` defaults to the server's current date. Before this fix,
+> `POST /complaints/complaints/` returned **500** on every call.
 >
 > **Timestamp exception.** These response schemas still extend `BaseModel` rather than
 > `UTCModel`, so `created_at` / `updated_at` are not normalized to a trailing `Z` (see
@@ -9597,8 +9606,8 @@ There is no delete endpoint.
 > (`work_center_id`, `work_order_id`, `category`, `planned_type`, `reason_code`, `description`,
 > `resolution`) rather than a blind `setattr`; an explicit `null` on `work_center_id`, `category` or
 > `planned_type` (NOT NULL columns) is **422**. A reason-code edit onto a code the tenant already has
-> is **400** `"Reason code already exists"`, and so is a code another tenant uses (global unique
-> constraint — see Calibration → `equipment_id` codes).
+> is **400** `"Reason code already exists"`. Reason codes are unique per company (migration `116`),
+> so another tenant's identical code is accepted — see Calibration → `equipment_id` codes.
 
 ### Users (Admin)
 

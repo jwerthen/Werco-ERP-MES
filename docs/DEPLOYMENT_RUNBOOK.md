@@ -252,6 +252,83 @@ job.
   operator data decision; the migration will not pick which company's customer to rename.
   See [API.md → Customers](API.md#customers).
 
+**Business numbers and codes unique per company.** Apply **116_business_keys_per_company** after
+**115** through the normal API boot migration path. It re-keys eight columns from global to
+per-company uniqueness: `ncrs.ncr_number`, `cars.car_number`, `fais.fai_number`,
+`customer_complaints.complaint_number`, `return_material_authorizations.rma_number`,
+`equipment.equipment_id`, `tools.tool_id` and `downtime_reason_codes.code`. For each it replaces the
+global unique index `ix_<table>_<column>` with a plain index of the same name, and adds
+`uq_<table>_company_<column>` on `(company_id, <column>)`. It also drops any named single-column
+unique constraint on the column if one exists. It creates no table and no RLS, revoke or role
+statement, writes no row, and adds no environment variable, secret, cron or worker job.
+
+- **The upgrade cannot fail on data.** Each new key is strictly looser than the global one it
+  replaces, so every existing row satisfies it. No pre-flight dedup is needed.
+- **Locks.** Adding each constraint and dropping each index takes an ACCESS EXCLUSIVE lock on that
+  table. The eight tables are small (tens to hundreds of rows), but the boot runs every pending
+  revision in one transaction, so all eight locks are held until it commits. The migration first
+  runs `SET LOCAL lock_timeout = '5s'`, so a long transaction holding any of the eight fails the
+  boot after 5 seconds instead of queueing every NCR, FAI, gauge and tool read behind it. The old
+  deployment keeps serving and redeploying is safe.
+- **Order.** Safe to apply before the application: old code never relied on cross-company
+  uniqueness. The new complaint and RMA numbering does rely on it. Against the old global indexes a
+  company's next number can be one another company already holds, and that create returns **500**.
+  The boot path migrates before the new API serves, so this matters only if migrations are run by
+  hand.
+- **What changes.** NCR, CAR and FAI numbers (`NCR-` / `CAR-` / `FAI-YYYYMMDD-NNN`) were already
+  allocated per company, so a second company's first record of the day drew a number another
+  company held and failed with **500** on every NCR, CAR and FAI writer. That stops. Equipment IDs,
+  tool IDs and downtime reason codes are user-entered: a same-company duplicate is still **400**
+  (`Equipment ID already exists`, `Tool ID already exists`, `Reason code already exists`), and
+  another company's identical value is now accepted instead of refused.
+- **Shipped with the same release (no migration involved):** complaint (`CC-YYYY-NNNN`) and RMA
+  (`RMA-YYYY-NNNN`) numbers are now one sequence per company, allocated under a per-company
+  advisory lock, so two companies may both hold `CC-2026-0001`. Existing numbers are not
+  renumbered. Each company continues from its own highest existing number, so gaps left by the old
+  shared sequence remain.
+- **Verify after deploy:**
+  - This query returns eight rows. `plain_index` must read `CREATE INDEX` (not
+    `CREATE UNIQUE INDEX`), `company_unique` must read `CREATE UNIQUE INDEX … (company_id, <column>)`,
+    and `constraint_type` must be `u`. A NULL means that object is missing.
+
+    ```sql
+    SELECT t.tbl || '.' || t.col AS business_key,
+           ix.indexdef           AS plain_index,
+           uq.indexdef           AS company_unique,
+           con.contype           AS constraint_type
+    FROM (VALUES ('ncrs', 'ncr_number'), ('cars', 'car_number'), ('fais', 'fai_number'),
+                 ('customer_complaints', 'complaint_number'),
+                 ('return_material_authorizations', 'rma_number'),
+                 ('equipment', 'equipment_id'), ('tools', 'tool_id'),
+                 ('downtime_reason_codes', 'code')) AS t(tbl, col)
+    LEFT JOIN pg_indexes ix
+           ON ix.schemaname = 'public' AND ix.indexname = 'ix_' || t.tbl || '_' || t.col
+    LEFT JOIN pg_indexes uq
+           ON uq.schemaname = 'public' AND uq.indexname = 'uq_' || t.tbl || '_company_' || t.col
+    LEFT JOIN pg_constraint con
+           ON con.conname = 'uq_' || t.tbl || '_company_' || t.col
+          AND con.conrelid = ('public.' || t.tbl)::regclass
+    ORDER BY 1;
+    ```
+
+  - In a test company, create an NCR and an FAI. Confirm they save with `NCR-YYYYMMDD-NNN` and
+    `FAI-YYYYMMDD-NNN` numbers, and that each leaves one `CREATE` row (`ncr`, `fai`) in the Audit
+    Log. Both writers are required-audited, so a missing row means the create rolled back.
+  - In the same company, create equipment with an ID the company already uses. Expect **400**
+    `Equipment ID already exists`.
+- **Rollback.** On an ordinary application rollback, keep the per-company constraints; older code
+  works against them. It numbers complaints and RMAs from the shared sequence again, which starts
+  past the highest number any company holds and so cannot collide. The downgrade restores the
+  eight global unique indexes only while no value in any of the eight columns is shared by two
+  rows. It counts all eight columns before any DDL, and if any value is shared it raises, reporting
+  `N table.column value(s)` per affected column (never the values themselves). Every generated
+  number is now per company, so on a multi-company install the first same-day NCR, CAR or FAI, or
+  the next complaint or RMA, in a second company is likely to create such a collision; treat the
+  downgrade as one-way there. Resolving collisions is an operator data
+  decision: renumbering an NCR, CAR or FAI rewrites the identifier a quality record was issued
+  under, and the migration will not pick which company's record to change.
+  See [API.md → Customer Complaints & RMA](API.md#customer-complaints--rma).
+
 ## Table of Contents
 
 1. [Quick Reference](#quick-reference)

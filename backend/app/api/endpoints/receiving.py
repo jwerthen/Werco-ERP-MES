@@ -680,7 +680,7 @@ def _create_ncr_for_rejection(
     """Create NCR in draft status for rejected material"""
     # Endpoint->endpoint edge kept function-local on purpose (shop_floor.py
     # precedent): quality.py owns the canonical company-scoped NCR number
-    # generator (with acquire_generator_lock — ncr_number is GLOBALLY unique),
+    # generator (with acquire_generator_lock — ncr_number is unique per company),
     # and importing it beats a second unlocked copy drifting.
     from app.api.endpoints.quality import generate_ncr_number
 
