@@ -168,7 +168,11 @@ chunked transfer-encoding and a header that lies.
 > escapes at render. Only the size cap remains. See
 > [SECURITY_ADVISORY_SUPPRESSIONS.md → bleach removed](SECURITY_ADVISORY_SUPPRESSIONS.md#bleach-removed--escape-at-the-sink-2026-07-30).
 
-**What it does not gate.** Only `application/json` bodies. **`multipart/form-data` / `UploadFile`
+**What it does not gate.** Only JSON bodies — every label FastAPI parses as JSON, i.e.
+`application/json` and any `application/*+json`, matched case-insensitively — with one exception: a
+`text/plain` body on `POST /api/v1/errors/log` is capped too. That route parses `text/plain` as JSON,
+because that is the label the SPA's `navigator.sendBeacon` body carries (see
+[API.md → Request Size Limits](API.md#request-size-limits)). **`multipart/form-data` / `UploadFile`
 paths are untouched** — every CSV/XLSX bulk import, RFQ package, laser-nest ZIP/PDF and PO source
 document keeps its own per-endpoint limit (the 20 MB cap in `qms_standards.py`, the 50 MB
 `LASER_UPLOAD_MAX_BYTES` in `work_orders.py`). Inbound **carrier webhooks** are untouched too:

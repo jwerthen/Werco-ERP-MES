@@ -7,6 +7,7 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.observability import set_sentry_tags
 from app.core.security import (
     verify_api_token,
     verify_display_token,
@@ -122,6 +123,17 @@ def is_user_bearer(token: str) -> bool:
     return verify_token(token) is not None or verify_api_token(token) is not None
 
 
+def _tag_sentry_principal(user: User) -> None:
+    """Tag this request's Sentry events with who made it and in which ACTIVE company.
+
+    ``company_id`` is ``_active_company_id`` -- the company the request is scoped to,
+    which differs from ``user.company_id`` for a platform admin who switched context.
+    Ids and the role only: no name or email reaches Sentry. No-op without Sentry.
+    """
+    role = getattr(user.role, "value", user.role)
+    set_sentry_tags(company_id=user._active_company_id, user_id=user.id, role=role)
+
+
 def get_current_user(
     request: Request,
     db: Session = Depends(get_db),
@@ -195,6 +207,7 @@ def get_current_user(
         user._api_token_id = api_token_record.id
         user._api_token_jti_prefix = api_token_record.jti_prefix
         user._api_token_label = api_token_record.label
+        _tag_sentry_principal(user)
         return user
 
     # An interactive credential: clear the marker explicitly. The same ORM
@@ -221,6 +234,7 @@ def get_current_user(
             detail="Read-only company context cannot modify data",
         )
 
+    _tag_sentry_principal(user)
     return user
 
 
