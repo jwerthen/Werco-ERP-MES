@@ -751,9 +751,11 @@ def _resolve_equipment(
         if not code:
             raise HTTPException(status_code=400, detail="equipment_code must not be blank")
         # Case-insensitive on purpose (code review): the kiosk field is scan-OR-TYPE
-        # and a typed code shouldn't fail on case. The column is globally unique, so
-        # a lowercase match cannot be ambiguous; the echo carries the CANONICAL
-        # stored code.
+        # and a typed code shouldn't fail on case. The lookup is tenant-scoped and
+        # equipment_id is unique per company (migration 116), but that uniqueness is
+        # case-SENSITIVE, so one company holding both "G-1" and "g-1" makes this
+        # case-folded ``.first()`` ambiguous -- a known gap, not a guarantee. The echo
+        # carries the CANONICAL stored code.
         equipment = (
             tenant_query(db, Equipment, company_id).filter(func.lower(Equipment.equipment_id) == code.lower()).first()
         )

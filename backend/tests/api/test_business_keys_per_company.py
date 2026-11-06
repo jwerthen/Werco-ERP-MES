@@ -102,6 +102,30 @@ def test_quality_record_numbering_is_its_own_sequence_per_company(client: TestCl
     assert _numbers(db_session, model, column, COMPANY_B) == [f"{prefix}-{today}-001", f"{prefix}-{today}-002"]
 
 
+def test_a_voided_ncr_keeps_its_number_and_is_never_reissued(client: TestClient, db_session: Session):
+    """The NCR scan deliberately sees tombstones (invariant 3's per-site exception).
+
+    uq_ncrs_company_ncr_number has no partial predicate, so a voided NCR keeps its number
+    for good: if a future sweep added ``is_deleted == False`` to the scan, the next create
+    would re-mint the voided "-001" and fail on the constraint.
+    """
+    url, _, column, prefix, body = QUALITY_CREATES["ncr"]
+    today = datetime.now().strftime("%Y%m%d")
+    user = make_user(db_session, company_id=COMPANY_A, role=UserRole.QUALITY)
+    headers = user_headers(user)
+
+    voided = client.post(url, json=body, headers=headers)
+    assert voided.status_code == 200, voided.text
+    record = db_session.get(NonConformanceReport, voided.json()["id"])
+    record.soft_delete(user.id)
+    db_session.commit()
+
+    response = client.post(url, json=body, headers=headers)
+
+    assert response.status_code == 200, response.text
+    assert [voided.json()[column], response.json()[column]] == [f"{prefix}-{today}-001", f"{prefix}-{today}-002"]
+
+
 # ---------------------------------------------------------------- user-entered identifiers
 
 # kind -> (create URL, model, key column, existing duplicate detail, body builder)
