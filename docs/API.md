@@ -1269,6 +1269,116 @@ Updates record old/new values through the normal committed audit path.
 Editing a soft-deleted customer returns 404; the update endpoint cannot reactivate
 a deleted record. Customer pickers independently exclude tombstoned rows.
 
+### Customers
+
+`app/api/endpoints/customers.py`, mounted at `/customers`. Every route resolves the customer in the
+active company; another company's customer id answers **404** with the same detail a missing id gets.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/customers/` | List customers by name (`active_only` default `true`; `search` matches name, code, contact name, city; `include_deleted` is honored for Admin only; `limit` 1–5000, `offset`) | Yes |
+| GET | `/customers/names` | `{id, name}` pairs of active, non-deleted customers, for pickers | Yes |
+| GET | `/customers/{id}` | Customer detail | Yes |
+| GET | `/customers/{id}/stats` | Parts and assemblies filed under the customer's name, work-order counts by status, and current / past / recent work orders, **from the active company only** (see note) | Yes |
+| POST | `/customers/` | Create. `code` is optional and generated from the name when omitted. **400** `Customer name already exists` / `Customer code already exists` on a duplicate **within the company**. Writes an audit `CREATE` row in the same transaction | Admin / Manager / Supervisor |
+| PUT | `/customers/{id}` | Partial update of a live customer (**404** on a soft-deleted one). A rename onto a name already used in the company is **400** `Customer name already exists`, including when a concurrent rename races past the check. `code` is not updatable | Admin / Manager |
+| DELETE | `/customers/{id}` | Soft delete by default (also clears `is_active`). A second soft delete of an already-deleted customer is **400** `Customer is already deleted` and changes nothing. `hard_delete=true` removes the row (a soft-deleted one too), and is refused **400** while parts of the active company carry the customer's name | Admin / Manager |
+| POST | `/customers/{id}/restore` | Restore a soft-deleted customer (**400** if it is not deleted). Restore always sets `is_active = true` (see note) | Admin / Manager |
+| POST | `/customers/import-csv` | See [Bulk Imports & Templates](#bulk-imports--templates-excel-migration-kit) | Admin / Manager |
+
+> **Create and update are now role-gated.** Both previously required only an authenticated user.
+> Update is Admin / Manager, matching the rest of the customer master's writes (import, delete,
+> restore) and the vendor master's create / update. Create is Admin / Manager / Supervisor, the same
+> roles `POST /work-orders/` admits, because New Work Order creates the customer inline when the
+> typed name is new and abandons the work-order submit if that create is refused. Other roles get
+> **403** `Insufficient permissions`; reads stay open to every role. The Customers page does not yet
+> hide Add / Edit by role, so a refused save reaches the user as an error toast. See
+> [RBAC → Customers](RBAC_PERMISSIONS.md#customers).
+
+> **Name and code are unique per company, not globally (migration `115`).** `create_all` had built
+> `customers.name` and `customers.code` as global unique indexes, so one company's customer name or
+> code blocked every other company from using it, and the refusal disclosed that it existed. A
+> second company's generated `ACM001` was a **500**. Uniqueness is now
+> `UNIQUE (company_id, name)` and `UNIQUE (company_id, code)`. Neither has a partial predicate, so a
+> soft-deleted customer keeps its name and code: creating or renaming onto a tombstone's name or code
+> is still **400**. A generated code is the first three letters or digits of the name plus a
+> three-digit number, counted within the active company only, and it steps past any code already
+> taken there, including a hand-keyed or soft-deleted one. A concurrent create that slips past the
+> duplicate check is mapped to **400** `Customer name or code already exists`, and a concurrent
+> rename to **400** `Customer name already exists`. Neither leaves a row change or an audit row.
+
+> **`/stats` and the hard-delete check are tenant-scoped.** A customer's parts and work orders are
+> linked by the free-text `customer_name`, not a foreign key. Both reads previously had no company
+> predicate, so a name shared by two companies returned the other company's part numbers,
+> work-order numbers and customer POs, and the hard-delete count refused the delete over the other
+> company's parts while disclosing how many it had. Both now read the active company only.
+>
+> The hard-delete check counts parts only. Customer complaints, RMAs, RFQ quotes, fabrication
+> quotes and the governance tables reference `customers.id` with no `ON DELETE`, so on PostgreSQL a
+> hard delete of a customer they still reference fails with a database error (**500**) rather than
+> a 400. Work orders that name the customer are not counted. Soft delete is unaffected.
+
+> **Audit rows.** Create writes a `CREATE` row (it wrote none before). Soft delete's `DELETE` row
+> records `old_values` `{is_deleted: false, is_active: <prior value>}`; because a second soft delete
+> is refused, that row cannot be overwritten by a later one claiming the customer was live. Restore's
+> `RESTORE` row
+> records both `is_deleted` and `is_active`, old and new. A hard delete's
+> `DELETE` row carries the full removed record in `old_values`, which is the only copy left after
+> the commit. Unlike vendor restore, customer restore does not put back the `is_active` value the
+> customer had before the delete; that prior value is recorded only in the soft-delete audit row.
+
+### Custom Fields
+
+`app/api/endpoints/custom_fields.py`, mounted at `/custom-fields`. Definitions and values are both
+company-scoped.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/custom-fields/definitions` | List definitions (`entity_type` filter; `active_only` default `true`) | Yes |
+| POST | `/custom-fields/definitions` | Create a definition (**400** when the `field_key` already exists for that entity type in the company). Writes an audit `CREATE` row | Admin / Manager |
+| GET | `/custom-fields/definitions/{id}` | Definition detail | Yes |
+| PUT | `/custom-fields/definitions/{id}` | Update a definition. Writes an audit `UPDATE` row with the supplied fields' old and new values | Admin / Manager |
+| DELETE | `/custom-fields/definitions/{id}` | Deactivate a definition (`is_active = false`; no row is removed). Writes an audit `STATUS_CHANGE` row (`active` → `inactive`); deactivating an already-inactive definition returns 200 and records nothing | Admin |
+| GET | `/custom-fields/values/{entity_type}/{entity_id}` | `{entity_type, entity_id, fields: {field_key: value}}` for one record. Values of deactivated definitions are omitted. Accepts a soft-deleted record | Yes |
+| POST | `/custom-fields/values/{entity_type}/{entity_id}` | Body `{field_key, value}`. Creates or overwrites one value on a live record. **404** when the field is not an active definition of the company; **400** when the value does not fit the field type | Yes |
+| POST | `/custom-fields/values/bulk` | Body `{entity_type, entity_id, values: {field_key: value}}`. Returns `results[]`, one `success` or `error` per key; an unknown field or an unparseable value is an `error` and the other keys still apply | Yes |
+| DELETE | `/custom-fields/values/{entity_type}/{entity_id}/{field_key}` | Remove one value. Works on a deactivated definition's value. **404** when the field or the value does not exist in the company | Yes |
+
+`entity_type` is one of `part`, `work_order`, `work_center`, `customer`, `supplier` (a vendor),
+`inventory` (an `inventory_items` stock row) and `bom`. `entity_id` is that record's id.
+
+> **The value routes are tenant-scoped (they were not).** Before this change the four `/values/*`
+> routes took no company: they looked definitions up by `field_key` across every company, never
+> checked that `entity_id` existed, and read, overwrote and deleted value rows by id alone. New value
+> rows were also built without `company_id`, which is NOT NULL, so creating a value always failed
+> with a **500**. Now:
+>
+> - The target record must exist **in the active company**, or the route answers **404**
+>   (`<entity_type> <entity_id> not found`) and writes nothing; for bulk, nothing at all is written.
+>   The GET accepts a soft-deleted record; every write and the DELETE require a live one.
+> - The definition is resolved by company, `field_key` and `entity_type`. Another company's
+>   definition with the same key is never used.
+> - Value rows are read, overwritten and deleted only within the active company, and new rows carry
+>   `company_id`.
+> - Every create, overwrite and delete writes an audit row: `resource_type` `custom_field_value`,
+>   identifier `<entity_type>:<entity_id>:<field_key>`, the value columns old and new, and
+>   `extra_data` `{field_key, entity_type, entity_id}`. The delete stays physical (value rows carry
+>   no soft delete), so its `DELETE` row records the removed value.
+> - A value the field type cannot hold is **400** `Invalid value for '<field_key>' (<field_type>)`
+>   instead of a 500. A `date` / `datetime` value must be an ISO-8601 string; a JSON number,
+>   boolean, object or array is refused this way rather than failing at the database. In bulk only
+>   parse errors become per-key `error` results; a database error now fails the whole request
+>   instead of being reported as one key's error.
+>
+> **Definition writes are audited too.** Create, update and deactivate write `custom_field_definition`
+> rows (identifier `<entity_type>:<field_key>`). Deactivating a definition hides every value under
+> it, and editing one (`options`, `is_active`) changes how those values read, so who changed a
+> definition is recorded alongside the value writes.
+>
+> **Known gap: the value routes have no role gate.** Any authenticated user of the company, Viewer
+> included, can set or delete a value. That predates this change, is not intended policy, and is
+> tracked as a follow-up. See [RBAC → Custom Fields](RBAC_PERMISSIONS.md#custom-fields).
+
 ### Work Orders
 
 | Method | Endpoint | Description | Auth Required |
@@ -1498,7 +1608,9 @@ a deleted record. Customer pickers independently exclude tombstoned rows.
 > the completion evidence has landed, so a stranded work order repairs itself the next time anyone
 > loads it. No new endpoint, no data migration, no owner action.
 > - **Which reads heal.** `GET /work-orders`, `GET /work-orders/{id}`, `GET /shop-floor/dashboard`
->   (bounded to the most-recently-touched open WOs by `SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT`),
+>   (bounded to the most-recently-touched open WOs by `SHOP_FLOOR_DASHBOARD_RECONCILE_LIMIT`, and only
+>   on a **200**: its `ETag` **304** returns before the reconcile, which a cross-origin SPA now
+>   actually receives — see [CORS](#cors)),
 >   `GET /shop-floor/operations`, and `GET /shop-floor/operations/{id}`. `POST /work-orders/` also
 >   reconciles, but a brand-new WO is DRAFT, so the DRAFT carve-out below makes it the no-op it has
 >   always been — **six** handlers call the reconcile, five of which can actually promote.
@@ -1527,6 +1639,33 @@ a deleted record. Customer pickers independently exclude tombstoned rows.
 > - **Still unaudited, as at the other two seams.** PENDING → READY writes no `audit_log` row (READY
 >   is queue state, not a production record); traceability for the flip is the tenant-scoped
 >   `operation_ready` OperationalEvent, which is what the Lean queue-time metric reads.
+>
+> **A failed reconcile side effect is absorbed, and reported (since 2026-11-05).** When a reconciling
+> read drives an operation or work order to COMPLETE, the handler then runs six side-effect legs over
+> those transitions before it commits: `audit`, `events`, `parent_advance`, `scheduling`,
+> `inventory_effects` and `cost_rollup`. Each leg absorbs its own exception, so the GET still returns
+> **200**, and that leg's remaining writes are skipped. The failure used to be swallowed with no trace
+> (`except Exception: pass`). It is now an **ERROR** log line with the traceback, carrying
+> `reconcile_step`, `company_id`, `user_id`, `work_order_ids` and `operation_ids`. With `SENTRY_DSN`
+> set it is also a Sentry event tagged `reconcile_step`, `company_id` and, where known, `user_id`.
+> The `audit` leg also reports, the same way, any status-change audit row that `AuditService` failed
+> to write and absorbed (it returns nothing rather than raising), naming the transitions left
+> unaudited.
+>
+> Once a database error has left the session unusable, every later leg that touches it fails with
+> `PendingRollbackError`. Those echoes are logged at **WARNING**, quoting the original error, with no
+> Sentry event: the cause was already reported where it happened, and the handler's commit will fail
+> and roll the whole reconcile back, so the next read retries.
+>
+> Transaction behaviour is unchanged. Only a failure that leaves the session unusable makes the
+> handler's commit fail, which rolls the status flips back together with their audit rows. Everything
+> else commits without whatever the failed leg did not write. On the `audit` leg that is a **known
+> gap** (invariant 2): a status flip can commit with its status-change audit row missing, either
+> because `AuditService` absorbed the write failure (it writes each row under a savepoint, so a
+> `sequence_number` collision that outlasts its retries leaves the session usable) or because a
+> non-database error ended the leg early. It is tracked as a follow-up: write these rows with
+> `AuditService.log_required` inside a savepoint and let an audit failure abort the reconcile. Until
+> that lands, the ERROR line and the Sentry event are the only record that it happened.
 >
 > **`PUT /scheduling/work-orders/{id}/unschedule` no longer demotes durably.** That endpoint clears
 > the schedule and flips each non-COMPLETE READY operation back to PENDING. On a released work order
@@ -4012,6 +4151,11 @@ environment variable or deployment configuration change is needed.
 > Do **not** add `is_active` or `status` to `PartUpdate`: `PUT /parts/{id}` and `PUT /materials/{id}`
 > are blind `setattr` loops whose lookups do not filter `is_deleted`, so exposing the flag there would
 > hand every Supervisor a way to clear a soft-delete mask through an ordinary form save.
+> **Until 2026-11-05 this was not actually true:** `PartUpdate` still declared `is_active` and a
+> free-text `status`, so both doors could write them. Both fields are now gone from the schema
+> (guarded by `tests/test_part_update_activation_fields.py`). A client that still sends either key
+> gets **200** with the key silently dropped (the schema ignores unknown keys): the row and the
+> `part` UPDATE audit diff are untouched.
 >
 > **Role: ADMIN / MANAGER — deliberately not the Supervisor edit tier**, matching the Combine verb
 > these shipped with and the renumber/revision identity tier. See `docs/RBAC_PERMISSIONS.md` → Parts.
@@ -4899,22 +5043,124 @@ uploads go through text extraction + LLM. See
 > a *global* unique constraint, so a per-tenant sequence would hand two companies the same number
 > and the second insert would fail. The scan reads only the highest number, never row content.
 
+### Tool & Fixture Management (tool crib)
+
+`app/api/endpoints/tool_management.py`, mounted at `/tool-management`.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/tool-management/tools/` | List tools (`status`, `tool_type`, `search`, `include_inactive`) | Yes |
+| GET | `/tool-management/tools/dashboard` | Totals, checked-out / replacement-due / inspection-due counts, by type and status | Yes |
+| GET | `/tool-management/tools/checked-out` | Tools currently `in_use` | Yes |
+| GET | `/tool-management/tools/replacement-due` | Tools with ≤ 20% life remaining | Yes |
+| GET | `/tool-management/tools/inspection-due` | Tools whose `next_inspection_date` is today or earlier | Yes |
+| GET | `/tool-management/tools/{id}` | Tool detail | Yes |
+| GET | `/tool-management/tools/{id}/history` | Checkout ledger and usage log | Yes |
+| POST | `/tool-management/tools/` | Create a tool | Admin / Manager / Supervisor |
+| PUT | `/tool-management/tools/{id}` | Edit a tool (`in_use` / `retired` rules below) | Admin / Manager / Supervisor |
+| DELETE | `/tool-management/tools/{id}` | **Retire** (status → `retired`, `is_active` → `false`; the row, ledger and usage history are kept). Already retired and inactive → no-op, no second audit row | Admin / Manager / Supervisor |
+| POST | `/tool-management/tools/{id}/checkout` | Check out (→ `in_use`); 400 if already out or `retired` / `lost` / `damaged` | Any role except Viewer |
+| POST | `/tool-management/tools/{id}/checkin` | Check in: `condition_in` (alias `condition`) `good` / `worn` → `available`, `damaged` → `damaged`, `needs_maintenance` / `needs_repair` → `maintenance`; any other word **422** | Any role except Viewer |
+| POST | `/tool-management/tools/{id}/log-usage` | Add `usage_hours` / `usage_cycles` to the tool's life totals | Any role except Viewer |
+
+> ⚠️ **Checkout and log-usage were returning 500 on every call.** `ToolCheckout` and `ToolUsageLog`
+> carry `TenantMixin`'s NOT NULL `company_id` and neither handler set it, so the crib could record
+> no checkout ledger and no usage history. Both rows now take `company_id` from the tenant-scoped
+> tool, and the ledger row, the tool's state change and the audit row commit together.
+
+> **Every handler is tenant-scoped, and foreign ids 404.** `GET .../{id}/history` resolved the tool
+> by bare id, and the dashboard, checked-out, replacement-due and inspection-due reads aggregated
+> across every tenant. Every lookup by tool id now resolves inside the active company — a flat **404**
+> `"Tool not found"`, the same body an absent id gets. `work_center_id` and `work_order_id` on
+> checkout and log-usage must belong to the active company (**404** `"Work center not found"` /
+> `"Work order not found"`), and a soft-deleted work order is refused the same way: a new link is a
+> selection (invariant 3). Expect the dashboard counts to drop on a multi-company install; they were
+> summing every tenant.
+
+> **RBAC was added; there was none.** Every handler was a bare `get_current_user`, so a Viewer could
+> create, edit and retire tools. Managing tool records follows the inventory stock mutators (Admin /
+> Manager / Supervisor — a tool is crib inventory). Using a tool (checkout / checkin / log-usage)
+> stays open to every tenant role except **Viewer**. Reads stay open. See
+> `docs/RBAC_PERMISSIONS.md` → Tool & Fixture Management.
+
+> **Every state change writes a tamper-evident `audit_log` row** (resource type `tool` unless noted;
+> the router wrote none before): `log_create` on create; `log_update` on edit, plus
+> `log_status_change` when the status moved; `log_status_change` on retire (the `is_active` flip in
+> `extra_data`), on checkout (`checkout_id`, `work_center_id`, `work_order_id`, `condition_out`) and
+> on checkin (`checkout_id`, `condition_in`); and a `tool_usage_log` `log_create` on log-usage,
+> carrying the tool's new life totals.
+
+> **`in_use` is entered only by checkout and left only by checkin**, so the checkout ledger and the
+> tool's status cannot drift apart. `PUT` with `status: in_use` is **409** (use checkout); changing
+> the status **or `is_active`** of a checked-out tool is **409** (check it in first — hiding a
+> checked-out tool would drop it off `/checked-out` and strand its open checkout); and retiring a
+> checked-out tool is **409**. **Retirement has one door:** `PUT` with `status: retired` is **409**
+> naming `DELETE /tools/{id}`, because a `PUT` retire left `is_active` true and the "retired" tool on
+> every active list. Every refusal is raised before any field is written. Every write verb (`PUT`,
+> `DELETE`, checkout, checkin, log-usage) row-locks the tool (`SELECT … FOR UPDATE OF tools` on
+> Postgres) before reading its state, so two simultaneous checkouts cannot both see `available` and
+> leave two open ledger rows, and two usage logs cannot lose an increment. `PUT` applies an explicit
+> field allowlist rather than a blind `setattr` over the body. An
+> unknown `status` or `tool_type` (previously a 500) and an explicit `null` on `name`, `tool_type`,
+> `status` or `is_active` are **422**. `usage_hours` / `usage_cycles` below 0 are **422** — a
+> negative entry would rewind a tool's life and hide it from replacement-due — and
+> `inspection_interval_days` is bounded `1…3650`. A `tool_id` another tenant already uses returns
+> **400** `"Tool ID already exists"` instead of a 500: `tools.tool_id` still carries a global unique
+> constraint (see Calibration → `equipment_id` codes).
+
+> **Check-in records the condition the person picked.** The Tool Management page sends `condition`
+> (`good` / `worn` / `damaged` / `needs_repair`) where the API read only `condition_in`, defaulted to
+> `good`; so once checkout started saving, a tool reported **damaged** would have gone back to
+> `available` with an audit row saying `condition_in: good`. The API now accepts `condition` as an
+> alias, takes a closed vocabulary (trimmed, case-insensitive), stores the word as given on the
+> checkout row and in the audit row's `extra_data`, and refuses anything else with **422** — the tool
+> stays checked out and nothing is written. An omitted condition still means `good`.
+>
+> ⚠️ **The rest of the page's contract still does not match (pre-existing, not fixed here).**
+> `ToolManagement.tsx` sends `tool_number` / `max_uses` on create, so creating a tool from the page is
+> a **422** (missing `tool_id`). Checkout sends `checked_out_to`, which the API ignores: custody is
+> recorded against the signed-in user who performed the checkout. The page also shows its write
+> controls to a Viewer, who now gets a 403. Fixing those is a separate change.
+
 ### Routing
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/routing/` | List all routings | Yes |
-| POST | `/routing/` | Create routing | Yes |
+| POST | `/routing/` | Create routing. **404** on another tenant's or a soft-deleted part | Yes |
 | GET | `/routing/{id}` | Get routing by ID | Yes |
 | PUT | `/routing/{id}` | Update routing | Yes |
 | POST | `/routing/{id}/release` | Release a draft routing for production (status → `released`, stamps `approved_by`/`approved_at`/`effective_date`) | Admin / Manager |
-| POST | `/routing/{id}/copy` | Copy a routing to a target part or new revision as a new **draft** — query params `target_part_id` (required) and `new_revision` (default `A`); copies all operations incl. `process_sheet_id`; **404** if the source routing or target part isn't found; writes one tamper-evident `audit_log` CREATE for the new routing (`extra_data.copied_from` = source routing id) | Admin / Manager |
+| POST | `/routing/{id}/copy` | Copy a routing to a target part or new revision as a new **draft** — query params `target_part_id` (required) and `new_revision` (default `A`); copies all operations incl. `process_sheet_id`; **404** if the source routing isn't found or the target part isn't a live part of this company (a soft-deleted target is refused); writes one tamper-evident `audit_log` CREATE for the new routing (`extra_data.copied_from` = source routing id) | Admin / Manager |
 | POST | `/routing/{id}/operations` | Add an operation (**400** on a released routing) | Admin / Manager / Supervisor |
 | PUT | `/routing/{id}/operations/{operation_id}` | Update an operation — draft: all fields; released: **time standards only** (see note) | Admin / Manager / Supervisor (released-routing edits: Admin / Manager) |
 | DELETE | `/routing/{id}/operations/{operation_id}` | Delete an operation (**400** on a released routing) | Admin / Manager / Supervisor |
 | POST | `/routing/{id}/operations/reorder` | Reorder operations (**400** on a released routing, **422** on a malformed body). **Also rewrites each listed operation's `operation_number` from its new `sequence`** — see the `operation_number` note below | Admin / Manager / Supervisor |
 | POST | `/routing/import/preview` | Upload a routing CSV/XLSX (multipart `file`), preview it WITHOUT writing (dry-run, fully rolled back) | Admin / Manager / Supervisor |
 | POST | `/routing/import/commit` | Commit a routing CSV/XLSX import — one draft routing per part, with one `audit_log` CREATE per routing | Admin / Manager / Supervisor |
+| POST | `/routing/generate-from-drawing` | AI step 1: upload a drawing (multipart `file` + `part_id`) and get a **proposed** routing for review — creates no routing. **404** on a soft-deleted part | Admin / Manager / Supervisor |
+| POST | `/routing/create-from-generation` | AI step 2: create the reviewed/edited proposal as a **draft** routing, writing one tamper-evident `audit_log` CREATE (see note). **404** on a soft-deleted part or an unknown generation session | Admin / Manager / Supervisor |
+
+> **AI routing generation — the accept step is the audited record (2026-11-05).**
+> `POST /routing/create-from-generation` is where a named person accepts an AI proposal, so it writes
+> the routing's `audit_log` CREATE (`resource_type="routing"`, identifier `"<part_number> Rev
+> <revision>"`) — the same row `POST /routing/` writes — with `extra_data`: `source`
+> (`ai_routing_generation`, or `create_from_generation` when no `generation_session_id` was sent),
+> `generation_session_id`, `model`, `prompt_version`, `extraction_confidence`, `correction_count` (human
+> edits to the proposal), `operation_count`, `operations` (one compact entry per accepted operation:
+> `sequence`, `operation_number` as stored, `name`, `work_center_id`, `setup_hours`, `run_hours_per_unit`,
+> `is_inspection_point`, `is_outside_operation` — *what* the person accepted, since these operations get
+> no per-operation `routing_operation` rows on this path) and `approved_by`. Before this, the step wrote only the
+> AI-learning interaction event, which is telemetry, not audit. `model` / `prompt_version` are
+> recorded on the generation session by `generate-from-drawing` **at proposal time** (the prompt can be
+> bumped between proposal and approval), and are `null` for a session generated before 2026-11-05 or
+> with no LLM call. The same change fixed the AI-learning event's `model_version`, which was always
+> `null` because nothing wrote the key it read, and made its `prompt_version` read the same
+> generation-time value as the audit row (falling back to the live prompt constant only for a session
+> generated before the version was recorded). Every door that attaches a new routing to a part —
+> both AI steps, manual `POST /routing/` and the `/{id}/copy` target — resolves it through one
+> live-part helper (`is_deleted == false`), so none spends a model call on, or attaches a routing to,
+> a soft-deleted part (**404**).
 
 > **Editing a RELEASED routing's operations — time standards only (`feat/routing-editable-time-standards`).**
 > A released routing's manufacturing **process** is frozen on release: `PUT /routing/{id}/operations/{operation_id}`
@@ -6812,6 +7058,115 @@ rows commit together; failed audit persistence returns **503** (`"Unable to save
 and rolls them back. Historical part labels remain visible for same-company soft-deleted parts;
 foreign related records are not expanded.
 
+### Calibration (gauges and calibration records)
+
+`app/api/endpoints/calibration.py`, mounted at `/calibration`. This is the gauge register behind the
+process-sheet gauge check (`docs/KIOSK.md` → Gauge capture): a `requires_gauge` measurement accepts a
+gauge only while it is `active` **and** its `next_calibration_date` is today or later, so what sets
+those two fields is what the check is worth.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/calibration/equipment` | List gauges (`status` filter, incl. `due_soon`; `include_inactive`) | Yes |
+| GET | `/calibration/equipment/due-soon` | Gauges due within `days` (`1 … 365`, default 30) | Yes |
+| GET | `/calibration/equipment/{id}` | Gauge plus its calibration records | Yes |
+| GET | `/calibration/equipment/{id}/history` | Calibration records, newest first | Yes |
+| POST | `/calibration/equipment` | Register a gauge (it has no due date until its first passing calibration) | Admin / Manager / Quality |
+| PUT | `/calibration/equipment/{id}` | Edit a gauge; `status` may only take it **out** of service (see below) | Admin / Manager / Quality |
+| POST | `/calibration/equipment/{id}/calibrate` | Record a calibration; the `result` decides the gauge's state (see below) | Admin / Manager / Quality |
+
+> ⚠️ **`POST .../calibrate` returned 500 on every call, and its logic would have certified a failed
+> gauge.** `CalibrationRecord` carries `TenantMixin`'s NOT NULL `company_id` and the handler never set
+> it, so no calibration could be recorded. Behind the insert, every record — whatever its `result` —
+> set the gauge `active` and advanced `next_calibration_date` by the interval, so a recorded **fail**
+> would have put the gauge straight past the gauge check. The record now takes `company_id` from the
+> tenant-scoped gauge, and the result decides the outcome:
+>
+> | `result` | Gauge `status` | `last_calibration_date` / `next_calibration_date` | Record `due_date` |
+> |---|---|---|---|
+> | `pass`, `adjusted` | `active` | calibration date / calibration date + `calibration_interval_days` | calibration date + interval |
+> | `fail` | `out_of_service` | unchanged — a failed calibration never extends certification | calibration date (due now) |
+>
+> `result` is **required** — omitting it is **422** with nothing written. (It used to default to
+> `pass`, and a default never reaches the validator, so a request that named no outcome — an API or
+> MCP caller leaving the field out — certified the gauge.) It is trimmed and matched
+> case-insensitively (`" Fail "` is `fail`); any other word is **422** with nothing written, so an
+> unrecognised or missing result is never read as either outcome. `adjusted` means the gauge was
+> brought back into tolerance and certified as-left.
+>
+> **`calibration_date` cannot be in the future** — **422** with nothing written. The bound is the
+> later of the server's local and UTC dates, so the Central "today" the Calibration page sends is
+> never refused. Unbounded, a future-dated pass (a year typo on a certificate) certified the gauge a
+> year too long and, as the newest record on file, outranked a genuine `fail` recorded today —
+> leaving the failed gauge `active` and passing the gauge check.
+>
+> **A record is always filed, but it moves the gauge only when it is the newest on file and the
+> gauge is not `retired`.** A record dated before the latest calibration already on file (a backdated
+> certificate) is history: entering an old pass cannot re-certify a gauge that has failed since.
+> Same-day records apply in entry order, so a fail entered after a same-day pass takes the gauge out
+> of service. The response model is `CalibrationRecordedResponse` — the record fields plus
+> `equipment_status` and `applied_to_equipment` (`false` when the record was filed as history only),
+> so a caller can tell "filed" from "filed and the gauge moved".
+>
+> **A pass cannot lift a hand pull it predates.** Taking a gauge out of service with `PUT` (it was
+> dropped, it is suspect) writes no calibration record, so "newest on file" alone would let a stale
+> certificate — dated after the last record but *before* the pull — re-certify the gauge someone had
+> just quarantined. While a gauge is `out_of_service`, a `pass` / `adjusted` record applies only if
+> its `calibration_date` is **on or after** the Central date of the newest hand pull in the current
+> out-of-service episode; otherwise it is filed as history (`applied_to_equipment: false`). The pull
+> date comes from the gauge's `equipment` `STATUS_CHANGE` audit rows (no new column): rows written by
+> a failed calibration are skipped, since a fail is already ordered by its own record date, and a pull
+> that a later passing calibration resolved does not count. A gauge that is out of service with no
+> status evidence explaining it (set before this router was audited) uses its `updated_at` instead —
+> never earlier than the real pull, so it can only refuse more. Date granularity means a certificate
+> dated the same day as the pull is accepted.
+>
+> **Writes are serialized per gauge.** `calibrate` and `PUT` row-lock the gauge
+> (`SELECT … FOR UPDATE OF equipment` on Postgres) before deciding anything, so two calibrations
+> posted together are ordered rather than both reading the same "newest on file".
+>
+> **The evidence is fail-closed.** The record, its `CREATE` audit row (resource type `calibration`:
+> result, dates, certificate, performer, provider, as-found / as-left, `applied_to_equipment`) and,
+> when the status moved, an `equipment` `STATUS_CHANGE` row commit in one transaction through
+> `AuditService.log_required`. If either audit write fails nothing is saved and the call returns
+> **503** (`"Unable to save audit record. No changes were committed."`). This is the AS9100D 7.1.5.2
+> calibration record.
+
+> **`PUT /calibration/equipment/{id}` can take a gauge out of service but never put one back.**
+> `status` accepts `out_of_service` or `retired`. Setting `active`, `due` or `overdue` is **409**,
+> naming `POST /calibration/equipment/{id}/calibrate`: a gauge returns to `active` only through a
+> passing calibration record, and `due` / `overdue` are derived from dates. (A newly registered gauge
+> is stored `active` with no due date; the gauge check refuses it until its first passing calibration
+> sets one.) Re-sending the gauge's current
+> status is a no-op, not a refusal. A retired gauge comes back only by `PUT` → `out_of_service` and
+> then a passing calibration. Before this change `PUT` was a blind `setattr` over the body, so any
+> authenticated user could set `active` on an out-of-calibration gauge, and an unknown status word was
+> a **500** (now **422**). Fields are applied from an explicit allowlist (`name`, `description`,
+> `equipment_type`, `location`, `assigned_to`, `calibration_interval_days`, `calibration_provider`,
+> `is_active`, `notes`, plus `status`); `calibration_interval_days` is bounded `1…3650` on create and
+> update; an explicit `null` on `name`, `calibration_interval_days`, `is_active` or `status` is
+> **422**. `PUT` writes a `log_update` row (self-suppressed when nothing changed) plus, when the status
+> moved, a `STATUS_CHANGE` row that is **required evidence**: a hand pull starts the AS9100D 7.1.5.2
+> suspect-product window and is what a later backdated pass is measured against, so it is written
+> through `AuditService.log_required` and, if it cannot be saved, the whole edit rolls back with
+> **503**. A field-only edit is not gated on it. `POST /calibration/equipment` writes a `log_create`.
+> `is_active: false` hides a gauge from the lists but does **not** affect the gauge check, which reads
+> `status` and the due date only — take a gauge out of use with `status`, not `is_active`.
+
+> **Tenancy.** `GET .../{id}/history` resolved the gauge by bare id, and the record query behind
+> `GET .../{id}` was not company-filtered. Both now resolve the gauge in the active company and read
+> only that company's records; a foreign gauge is a flat **404** with the same body as an absent id
+> (`"Equipment not found"`), and `PUT` / `calibrate` against one write nothing. The list also keeps a
+> stored `retired` status as `retired`; it used to be recomputed from dates into `active` / `due` /
+> `overdue`, which only `out_of_service` was exempt from.
+
+> **`equipment_id` codes are still unique install-wide.** `equipment.equipment_id` — like
+> `tools.tool_id` and `downtime_reason_codes.code` — still carries a global unique constraint;
+> migration `026` moved seven other tables to `(company_id, …)` compounds but not these. A code
+> another tenant already uses now gets the same **400** `"Equipment ID already exists"` as a
+> same-tenant duplicate instead of a 500, which still tells the caller that *some* tenant uses it. The
+> per-company compound is a follow-up migration.
+
 ### Job costing
 
 | Method | Endpoint | Description | Auth Required |
@@ -7189,6 +7544,56 @@ the public paths are `/eco/eco/…`.
 > plus task create/update and approval create — write to the tamper-evident `audit_log` (`GET /audit/`),
 > so the engineering-change lifecycle is fully traceable for AS9100D.
 
+### Quotes
+
+Customer quotes (`app/api/endpoints/quotes.py`). There is no create endpoint: an ERP quote is created
+when an estimate is approved and handed off in Fabrication Quoting (`/fabrication-quotes`).
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/quotes/` | List quotes, newest first. `status` (`all` = full history; omitted excludes `converted` / `expired`; unknown value **422**), `customer`, `search`, `limit` 1–5000 (default 100), `offset` | Yes |
+| GET | `/quotes/{quote_id}` | Get a quote | Yes |
+| PUT | `/quotes/{quote_id}` | Edit a draft/pending quote's commercial terms, or set its status (accept / reject / expire). Refusals in the note below | Admin / Manager / Supervisor |
+| POST | `/quotes/{quote_id}/send` | Mark the quote sent. Records the status only; no message is dispatched. **409** unless `draft` / `pending` / `sent` (re-sending a `sent` quote is an idempotent 200) | Admin / Manager / Supervisor |
+| GET | `/quotes/{quote_id}/conversion-plan` | Per line: whether it can become a work order, and why not | Yes |
+| POST | `/quotes/{quote_id}/convert` | Convert the reviewed lines (`line_ids`; default all eligible) into **DRAFT** work orders, one per line, in one transaction. **400** unless `sent` / `accepted`; **422** on an ineligible line, or on unlinked quote-only lines without `acknowledge_unlinked` | Admin / Manager / Supervisor |
+| POST | `/quotes/{quote_id}/generate-pdf` | Customer-ready quote PDF | Yes |
+
+> **Quote writes are role-gated and audited (2026-11-05).** `PUT`, `/send` and `/convert` share one
+> role set, `QUOTE_WRITE_ROLES` = Admin / Manager / Supervisor (superuser and Platform Admin pass, as
+> with every `require_role`). Until this change `PUT` and `/send` were open to any authenticated user,
+> so a Viewer could accept, reject, expire or mark sent a customer quote. Operator, Quality, Shipping
+> and Viewer now get **403**; reads are unchanged (read-broad, see `docs/RBAC_PERMISSIONS.md` →
+> Quotes). Audit rows, all written before the single terminal commit:
+>
+> - **Status moves** write one `quote` STATUS_CHANGE row each, with `extra_data.source`: `send`
+>   (`draft` / `pending` → `sent`, plus `customer_message_dispatched: false`), `status_update` (a `PUT`
+>   that sets the status), `edit` (the reset to `draft` that a content edit forces, which also clears
+>   the approval stamp) or `conversion`. A `PUT` that echoes the current status, and a re-send of a
+>   `sent` quote, write nothing.
+> - **A content edit** writes one `quote` UPDATE row with the field diff (`status` excluded, so each
+>   transition is exactly one row) and `extra_data.edited_fields`.
+> - **`/convert`** writes one `work_order` CREATE per work order minted — the same row `POST
+>   /work-orders/` writes, with `extra_data.source = "quote_conversion"`, `quote_id`, `quote_number`,
+>   `quote_line_id`, `quote_line_number`, `part_id` and `quantity` — plus one row on the quote: a
+>   STATUS_CHANGE to `accepted` (lines remain) or `converted`, carrying the created `work_orders` and
+>   `remaining_line_ids`, or, when the status does not move (a second partial conversion of an
+>   `accepted` quote), an UPDATE carrying the line → work-order links.
+>
+> These are best-effort, like `POST /work-orders/`: a failed audit write is logged and does not refuse
+> the change. Refusals are raised before the first field is written and write nothing.
+>
+> **`PUT` refusals.** **409** when `expected_updated_at` is stale; **409** on a content edit, or a move
+> back to `draft` / `pending`, once any line is linked to a work order; **409** on a content edit of a
+> quote that is not `draft` / `pending`; **409** when `lines` is sent (customer quote prices and lines
+> are frozen — revise the estimate in Fabrication Quoting); **409** on any status change to a
+> `converted` quote; **422** on `status: "converted"` (use `/convert`). Status transitions through
+> `PUT` are otherwise not whitelisted: for example `expired` → `sent` is still accepted, and audited.
+>
+> **UI.** The Quotes page shows **Edit draft**, **Send** and **Convert** only to the same role set
+> (`canWriteQuotes` in `frontend/src/utils/recordWriteAccess.ts`), so a hidden control and a refused
+> call agree. The server stays the enforcement.
+
 ### Purchasing
 
 | Method | Endpoint | Description | Auth Required |
@@ -7203,7 +7608,7 @@ the public paths are `/eco/eco/…`.
 | POST | `/purchasing/purchase-orders` | Create purchase order with its lines | Admin / Manager / Supervisor |
 | GET | `/purchasing/purchase-orders/{po_id}` | Get PO by ID | Yes |
 | PUT | `/purchasing/purchase-orders/{po_id}/supplier-confirmation` | Record acknowledgment, supplier-confirmed date and follow-up owner/due date on sent/partial POs; requires current `expected_updated_at`, stale returns 409. Requested dates remain unchanged | Admin / Manager / Supervisor, plus purchasing view/create permission |
-| PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order. **404** on a soft-deleted PO; **400** on a `status` change to anything but `closed`/`cancelled` while the vendor is soft-deleted (see note) | Admin / Manager / Supervisor |
+| PUT | `/purchasing/purchase-orders/{po_id}` | Update purchase order. **404** on a soft-deleted PO; a `status` is held to a transition whitelist — **409** naming the verb that owns the move, **422** on an unknown value or an explicit `null` (see *PO status edits* below); **400** on a `status` change to anything but `closed`/`cancelled` while the vendor is soft-deleted (see note) | Admin / Manager / Supervisor |
 | POST | `/purchasing/purchase-orders/{po_id}/send` | Issue a PO to the vendor — status → `sent`, stamps `order_date`; only `draft`/`approved` POs (else **400**). **404** on a soft-deleted PO | Admin / Manager |
 | POST | `/purchasing/purchase-orders/{po_id}/lines` | Add a line to a `draft` PO (else **400**) and roll the PO subtotal/total. **404** on a soft-deleted PO | Admin / Manager / Supervisor |
 | DELETE | `/purchasing/purchase-orders/{po_id}` | Soft-delete a purchase order — guarded, see note below | Admin / Manager |
@@ -7240,6 +7645,37 @@ the public paths are `/eco/eco/…`.
 > the PO recording the subtotal/total roll (`extra_data.cause = "po_line_added"`). Audit rows are
 > flushed before the terminal commit so they commit atomically with the change. (These endpoints
 > were RBAC-gated but unaudited prior to 2026-07-12; the import loader was already per-row audited.)
+>
+> **PO status edits — `PUT` may only make these moves (2026-11-05).** `PUT
+> /purchasing/purchase-orders/{po_id}` used to `setattr` any `POStatus` member, so a caller at the edit
+> tier could mark a PO `sent` without the Admin/Manager send verb or its `order_date` stamp, declare it
+> `received` with nothing received, or reopen a `closed` one. `POUpdate.status` is now typed as the enum
+> (an unknown value, or an explicit `"status": null`, is **422**; it used to be a **500**), and
+> `assert_po_status_edit_allowed` checks the move **before the first field is written**, so a refused
+> status rejects the whole body and leaves the row untouched (and writes no audit row):
+>
+> | Current status | `PUT` may set |
+> |---|---|
+> | `draft` / `pending_approval` / `approved` | each other, or `cancelled` |
+> | `sent` | `cancelled` (nothing received yet) |
+> | `partial` / `received` | `closed` (short-close / close-out) |
+> | `closed` / `cancelled` | nothing — terminal |
+>
+> Re-sending the **current** status is always allowed (a client echoing the record back). Everything
+> else is **409** with a `detail` naming the verb that owns the move: `sent` from `draft` / `approved` →
+> use `POST .../{po_id}/send`; from `pending_approval` → approve it first, then Send (Send accepts only
+> `draft` / `approved`); from `partial` / `received` → refused, a received PO returns to `sent` only when
+> its receipts are voided (`POST /receiving/receipt/{id}/void`); `partial` / `received` → set by receiving (`POST /receiving/receive`); out of
+> `closed` / `cancelled` → *"…closed and cancelled purchase orders are final… Raise a new purchase order
+> instead."*; `closed` with nothing received → cancel it instead; `cancelled` after material was
+> received → close it, or void the receipts first; back to a pre-send status once sent → cancel and
+> raise a new PO. The Purchasing UI never sends `status` on this route, so only API and MCP callers see
+> these refusals.
+>
+> **Not decided here: who may approve.** `pending_approval` / `approved` stay reachable through this
+> `PUT` at its Admin / Manager / Supervisor tier, exactly as before, with no `approved_by` /
+> `approved_at` stamp. A dedicated approve verb is an open follow-up — see `docs/RBAC_PERMISSIONS.md`
+> → Purchasing.
 >
 > **Vendor / PO soft-delete + restore (`Vendor`, `PurchaseOrder` now `SoftDeleteMixin`).** Both
 > `DELETE` endpoints are **soft** deletes (compliance invariant #3 — never a physical `DELETE`):
@@ -7280,7 +7716,7 @@ the public paths are `/eco/eco/…`.
 > |---|---|---|
 > | `PUT /purchasing/vendors/{id}` | **200** — and its blind `setattr` loop accepts `is_active`, so one call could leave a vendor `is_deleted=true` **and** `is_active=true`, bypassing `/restore` and its `action="restore"` audit row | **404** |
 > | `POST /po-upload/create-from-upload` (`vendor_id`) | created a live, receivable PO against the removed supplier — the PO Upload table below already promised this refusal, but only the *part* half of it was enforced | **400** "Vendor not found" |
-> | `PUT /purchasing/purchase-orders/{id}` (`status`) | flipped a **closed** PO back to `sent`, making it live and receivable against the removed supplier — this endpoint validates no transition at all, it only checks enum membership | **400** *"…its vendor X is deleted. Restore the vendor first."*, for any target status other than `closed`/`cancelled` |
+> | `PUT /purchasing/purchase-orders/{id}` (`status`) | flipped a **closed** PO back to `sent`, making it live and receivable against the removed supplier — this endpoint validated no transition at all, it only checked enum membership | Since 2026-11-05 the status whitelist (see *PO status edits* above) refuses every move out of `closed`/`cancelled` first: **409** *"…closed and cancelled purchase orders are final…"*. The vendor guard stays behind it as defense in depth and still answers **400** *"…its vendor X is deleted. Restore the vendor first."* for an allowed pre-send move (e.g. `draft` → `approved`) against a removed vendor |
 > | `POST /scanner/mappings` (`vendor_id`) | created the mapping | **404** "Vendor not found" |
 > | `POST /supplier-scorecards/approved-suppliers/` and `PUT .../approved-suppliers/{asl_id}` | entered / re-approved the removed supplier on the ASL | **409** *"…has been removed and cannot be approved…"* (see the next section) |
 > | `POST /purchasing/purchase-orders/import` (`vendor_code`) | imported the PO silently | row error naming the restore verb (see the Excel-migration section) |
@@ -9099,6 +9535,71 @@ records, targets) require **Admin / Manager / Supervisor**.
 > Cron-written records are audited with the system as actor. See `docs/DOCKER_PRODUCTION.md` →
 > Background Jobs.
 
+### Downtime Tracking
+
+`app/api/endpoints/downtime.py`, mounted at `/downtime`. An event is reported against a work center
+(optionally a work order) and resolved when the machine runs again; **UNPLANNED** event minutes are
+the availability input to `POST /oee/calculate/{work_center_id}` above.
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/downtime/` | List events (`work_center_id`, `category`, `planned_type`, `date_from` / `date_to`, `active_only`; `skip`, `limit` `1 … 5000`) | Yes |
+| GET | `/downtime/active` | Unresolved events | Yes |
+| GET | `/downtime/summary` | Resolved events: total / planned / unplanned hours, by category, top 15 reasons | Yes |
+| GET | `/downtime/by-work-center` | Resolved-event hours per work center | Yes |
+| GET | `/downtime/reason-codes` | Reason-code vocabulary (`category`, `active_only`) | Yes |
+| GET | `/downtime/{id}` | One event | Yes |
+| POST | `/downtime/` | Report (start) an event | Any role except Viewer |
+| POST | `/downtime/{id}/resolve` | Resolve: sets `end_time` (default now) and `duration_minutes` | Any role except Viewer |
+| PUT | `/downtime/{id}` | Correct an event after the fact | Admin / Manager / Supervisor |
+| POST | `/downtime/reason-codes` | Create a reason code | Admin / Manager / Supervisor |
+| PUT | `/downtime/reason-codes/{id}` | Edit a reason code (retire with `is_active: false`) | Admin / Manager / Supervisor |
+
+There is no delete endpoint.
+
+> ⚠️ **Every event read returned 500, and so did create — after committing.** The `reporter` /
+> `resolver` objects in `DowntimeEventResponse` declared a required `username`, but `User` has no such
+> column and `reported_by` is NOT NULL, so every event failed response validation: list, get and
+> active were 500s, and create, update and resolve were 500s *after* their change had committed.
+> `reporter.username`
+> and `resolver.username` are now optional and **always `null`** (the page's TypeScript type now says
+> `username?: string | null`; nothing renders it). Read `full_name`.
+
+> **Tenancy: the work center and work order are validated, and a legacy cross-tenant link no longer
+> renders.** `work_center_id` and `work_order_id` on create and on `PUT` must belong to the active
+> company — a flat **404** (`"Work center not found"` / `"Work order not found"`), never 403 — and a
+> soft-deleted work order is refused the same way. On `PUT` only a reference that **changes** is
+> validated: re-sending the work order the event already names (a client that `PUT`s the whole object
+> back to fix `category`) is not a new selection, so it still saves after that job was soft-deleted —
+> the historical record keeps naming what it named (invariant 3). The work center need not be active: downtime is
+> what you record against a machine that is down. Unvalidated, the write doubled as a read, because
+> the response rendered the foreign machine's name straight back. A row written before this guard is
+> owned by the caller and passes every `company_id` filter, so event reads now load `work_center` /
+> `work_order` under tenant loader criteria: a foreign relation reads as `null`, while
+> `work_center_id` stays visible so the row can be corrected. `GET /downtime/by-work-center` filters
+> the joined work center by company too, so such a row drops out of that grouping (its minutes still
+> count in `/summary`). Another tenant's event is **404** on get, `PUT` and resolve, with nothing
+> written. See the pre-deploy detection SQL in `docs/RBAC_PERMISSIONS.md` → Downtime.
+
+> **RBAC was added; there was none.** Every handler was a bare `get_current_user`, so a Viewer could
+> start, correct and close the events OEE availability is computed from. Reporting (create / resolve)
+> stays open to every tenant role except **Viewer**; correcting an event (`PUT`) and managing reason
+> codes match the OEE write roles (Admin / Manager / Supervisor), because both rewrite OEE inputs after
+> the fact. Reads stay open. See `docs/RBAC_PERMISSIONS.md` → Downtime.
+
+> **Every state change writes a tamper-evident `audit_log` row** (the router wrote none before):
+> `downtime_event` `log_create` on create, `log_update` on `PUT`, and `log_status_change` (`active` →
+> `resolved`, with `end_time`, `duration_minutes` and `resolution` in `extra_data`) on resolve;
+> `downtime_reason_code` `log_create` / `log_update`. The `downtime_started` / `downtime_resolved`
+> operational events are unchanged. `PUT` and resolve row-lock the event (`SELECT … FOR UPDATE OF
+> downtime_events` on Postgres), so two simultaneous resolves cannot both pass the "not yet resolved"
+> check. `PUT /downtime/{id}` applies an explicit allowlist
+> (`work_center_id`, `work_order_id`, `category`, `planned_type`, `reason_code`, `description`,
+> `resolution`) rather than a blind `setattr`; an explicit `null` on `work_center_id`, `category` or
+> `planned_type` (NOT NULL columns) is **422**. A reason-code edit onto a code the tenant already has
+> is **400** `"Reason code already exists"`, and so is a code another tenant uses (global unique
+> constraint — see Calibration → `equipment_id` codes).
+
 ### Users (Admin)
 
 | Method | Endpoint | Description | Auth Required |
@@ -9276,16 +9777,40 @@ roles). See [docs/NOTIFICATIONS.md](NOTIFICATIONS.md#sms-channel-twilio).
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/admin/settings` | Get system settings | Admin |
-| PUT | `/admin/settings` | Update system settings | Admin |
 | GET | `/admin/settings/audit-log` | Settings/quote-config change history (filterable, up to 1yr) | Admin |
+| GET | `/admin/settings/email-recipients` | Email types, selections, missing defaults and the company's user directory | Admin |
+| PUT | `/admin/settings/email-recipients/{event_key}` | Set one email type's recipients (`{"user_ids": [...]}`; `null` restores the default). **400** on an unknown email type, or on a user who is not an active user of this company with a deliverable address | Admin |
+| GET | `/admin/settings/work-center-rates` | Work centers with their hourly rates (`include_inactive` default false) | Admin |
+| PUT | `/admin/settings/work-center-rates/{work_center_id}` | Set a work center's hourly (labor costing) rate. **404** on another company's work center | Admin |
+| GET | `/admin/settings/work-center-types` | Allowed work-center types, plus the ones in use | Admin |
+| PUT | `/admin/settings/work-center-types` | Replace the allowed work-center types. **400** if it would remove a type still in use | Admin |
+| GET | `/admin/settings/role-permissions` | Every role's effective permissions (company override or default), plus the permission catalog | Admin |
+| GET | `/admin/settings/role-permissions/{role}` | One role's effective permissions and `is_customized` | Admin |
+| PUT | `/admin/settings/role-permissions/{role}` | Replace a role's permissions with a company override (body: JSON array of permission keys). **400** on an unknown role or permission; **503** if its required audit row cannot be written (see note) | Admin |
+| POST | `/admin/settings/role-permissions/{role}/reset` | Drop the company override so the role reverts to its defaults; a role with no override is a no-op. **503** as above | Admin |
 
 > **Settings-audit tenancy:** `GET /admin/settings/audit-log` reads the `SettingsAuditLog` trail
 > (admin / quote-config changes) and is **scoped to the caller's active company**
 > (`get_current_company_id`). Writes to this trail are tagged with that same active company, so a
 > platform admin's changes attribute to the company they have switched into — matching the
 > `/audit/*` (`AuditLog`) attribution. This is a separate trail from `/audit/*` and is **not** part
-> of the tamper-evident hash chain.
+> of the tamper-evident hash chain: it is the Admin page's settings-history display table, a plain
+> mutable tenant table.
+>
+> **Admin-settings writes are on the tamper-evident chain too (2026-11-05).** Every write that adds a
+> `SettingsAuditLog` row now also writes the authoritative `audit_log` row (`GET /audit/`) in the same
+> transaction:
+>
+> | Write | `audit_log` row | Failure posture |
+> |---|---|---|
+> | `PUT /role-permissions/{role}`, `POST /role-permissions/{role}/reset` | `role_permission` UPDATE, identifier = the role; old/new `permissions` + `is_customized`; `extra_data` `action` (`update` / `reset`), `granted`, `revoked` | **Required** — `log_required` inside `atomic_security_write`. If the audit row cannot be written the RBAC change is rolled back and the caller gets **503** `"Unable to save audit record"`, the same posture as account administration |
+> | `PUT /work-center-rates/{work_center_id}` | `work_center` UPDATE (the resource type `PUT /work-centers/{id}` writes), identifier = the work-center code, `extra_data.source = "admin_settings"` | Best-effort |
+> | `PUT /email-recipients/{event_key}` | `notification_email_recipients` UPDATE, identifier = the event key; old/new `user_ids` are the **effective** audience before and after (a `null` request records the default it restores, never `null`) + `uses_default` (a default audience is not an explicit selection). A save that changes neither writes no row, here or in the settings history | Best-effort |
+> | `PUT /work-center-types` | `work_center_types` UPDATE; old/new `types` | Best-effort |
+>
+> Refusals (bad role, unknown permission, foreign work center or user, unknown email type, removing an
+> in-use type) write neither row. A first customization of a role's permissions now records the new
+> override's real id in both records; the settings history used to log `entity_id` `0` for it.
 
 > **`POST /admin/settings/seed-database` ships no default credentials (Admin-only).** The one-time
 > bootstrap seed **no-ops once any user exists** (returns `{"status": "already_seeded"}`); on an
@@ -10450,13 +10975,69 @@ database session **before each event delivery**, after incoming messages, and af
 of idle time**. Expiry, account disablement/reassignment, company deactivation, loss of platform
 authority for a switched context, or loss of access to the parent resource closes the connection
 before further event delivery. Database-check failure also refuses delivery. Domain broadcasts
-remain tenant-scoped; a read-only company context can receive these read-only channels but cannot
-use them to mutate records. HTTP logout/switch/platform recovery exceptions do not apply here.
+are tenant-scoped (see **Event delivery** below); a read-only company context can receive these
+read-only channels but cannot use them to mutate records. HTTP logout/switch/platform recovery
+exceptions do not apply here.
 
 This is live identity/resource validation, not a token revocation list. Logout does **not** revoke
 an unexpired access JWT, and no server-side refresh revocation is introduced. The crew-station
 kiosk remains poll-only. Client-side controls reflect these policies; the API and socket checks
 remain authoritative.
+
+**Event delivery.** Writes push three message types, each as `{"type", "data", "timestamp"}`:
+`work_order_update` (`data.work_order_id`), `shop_floor_update` (`data.work_center_id`) and
+`dashboard_update`. Each goes **only** to sockets admitted under the company the write was made
+in: the request's active company from `get_current_company_id`, so a platform admin switched into
+another company broadcasts to that company, not their home one. There is **no all-tenant fan-out**:
+`ConnectionManager` has no send-to-every-socket method, and the three `broadcast_*` helpers in
+`app/core/websocket.py` take `company_id` as a required keyword. A call that passes `None` is
+dropped and logged at WARNING (message type and event name only, never the payload). Within a
+company the socket's path does not narrow delivery: every socket in the company receives every one
+of that company's events, and clients filter on `type` and the id in `data`.
+
+Delivery is **best-effort and supplementary; a fetch is the guarantee.** Dashboard, Work Orders
+and Work Order Detail also refresh every 30 seconds; Scheduling and Analytics refresh only on load.
+Handlers call `safe_broadcast` after the write commits; it queues the broadcast as a background task
+on the event loop and returns at once, from sync and `async` routes alike. The HTTP response does not
+wait for the per-socket authorization recheck, and a failed broadcast never fails the write: it is
+logged at WARNING with the helper name and exception, never the payload. Connections are held in
+memory per API process, so a socket held by a different API worker process does not receive the
+event.
+
+Queued broadcasts are delivered **one at a time per API process, in call order**. Each delivery
+rechecks every recipient socket against the database on a worker thread with its own session, and
+those threads and connections are shared with every HTTP request. Serializing keeps realtime to at
+most one worker thread and one pooled connection per process, and each socket receives events in the
+order they were broadcast. Three limits keep the queue from backing up:
+
+- At most **1000** broadcasts may wait per process. Past that, a new broadcast is dropped and
+  logged at WARNING (`Realtime broadcast ... dropped`).
+- A single send to one socket is bounded at **5 seconds**. A socket that does not accept the send in
+  time is dropped from delivery, like any socket whose send fails.
+- Pushes **ship off**: nothing is queued unless `REALTIME_BROADCAST_ENABLED=true` is set on the
+  deploy, and setting it back to `false` turns every push off again without a code change
+  (`docs/ENVIRONMENT_VARIABLES.md` → Realtime WebSocket pushes).
+
+`ConnectionManager.send_to_user` follows the same tenant rule as the broadcasts: it takes
+`company_id` as a required keyword and sends only to that user's sockets admitted under that company.
+A platform admin can hold sockets in several companies at once. Nothing in `app/` calls it today.
+
+> **Fixed 2026-11-05: two defects in this path.** (1) Blocker create/update/resolve
+> (`POST /work-order-blockers/work-orders/{work_order_id}`, `PUT /work-order-blockers/{id}`,
+> `POST /work-order-blockers/{id}/resolve`) and `POST /work-centers/{id}/status` broadcast without a
+> company. Their events (blocker id, category and status; work-center id and status) reached
+> **every** company's sockets and triggered refetches on other tenants' screens. (2) `safe_broadcast`
+> forwarded `company_id=` to `anyio.from_thread.run`, which takes positional arguments only. Every
+> tenant-scoped broadcast therefore raised `TypeError`, which was logged at DEBUG and dropped, so no
+> tenant-scoped push had reached a socket since scoping shipped (2026-06-07). Broadcasts from `async`
+> routes (both laser-nest-package imports) were also dropped. With pushes turned on
+> (`REALTIME_BROADCAST_ENABLED=true`; they ship off), the Dashboard, Shop Floor, Scheduling, Work
+> Orders, Work Order Detail and Analytics screens receive their own company's pushes and refetch on
+> them. The cross-tenant leak is closed either way. Guards:
+> `backend/tests/test_websocket_tenant_isolation.py` statically requires every broadcast call in
+> `app/` to pass `company_id=` traced to `Depends(get_current_company_id)`, and
+> `backend/tests/api/test_realtime_broadcast_tenant_scope.py` checks the blocker and work-center
+> routes end to end.
 
 ## Common Response Formats
 
@@ -10498,6 +11079,12 @@ display; the web UI renders them in shop-local Central time.
 }
 ```
 
+Each error also carries the offending `input`. When the route did not parse the body (it was sent
+under a non-JSON `Content-Type`), `input` is the raw body as text. Bytes that are not valid UTF-8 are
+rendered with replacement characters (`U+FFFD`). Until 2026-11-05 such a body made the 422 handler
+itself fail, so the caller got a **500** instead of the **422**, on any JSON route and without
+authentication.
+
 ### Not Found error (404)
 ```json
 {
@@ -10511,6 +11098,34 @@ display; the web UI renders them in shop-local Central time.
   "detail": "Could not validate credentials"
 }
 ```
+
+### Internal Server Error (500)
+```json
+{
+  "detail": "Internal server error (reference: 3f9a1c2e)",
+  "correlation_id": "3f9a1c2e"
+}
+```
+
+An unhandled exception returns this body. The response also carries an `X-Correlation-ID` header
+with the same value. The value is the request's correlation id: the caller's own `X-Correlation-ID`
+request header if it sent one of 1–64 characters drawn from `A–Z a–z 0–9 . _ -`, otherwise an
+8-character id the server generates. A caller's value in any other shape (too long, spaces,
+punctuation, non-ASCII) is replaced, never trimmed or echoed, because the id is repeated in the
+response header, in `detail` and on the log line. The same rule applies to every response's
+`X-Correlation-ID`, not only the 500. If the request failed before the correlation middleware ran, a
+fresh id is minted, and body, header and log line still agree. The id also appears on the server's ERROR log line that carries the traceback
+(`correlation_id=<id>`). When `SENTRY_DSN` is set it is the `correlation_id` tag on the Sentry
+event, so a quoted reference finds the traceback.
+
+The reference is repeated inside `detail` so that the web UI, which shows `detail` verbatim, displays
+it with no client change. Nothing else about the exception (type, message, traceback) reaches the
+client. For an allowed origin the 500 carries CORS headers and exposes `X-Correlation-ID` (see
+[CORS](#cors)).
+
+Until 2026-11-05 the body was `{"detail": "Internal server error"}` with no reference and no header.
+The handler runs in Starlette's `ServerErrorMiddleware`, outside the correlation middleware, and
+never saw the id. It now reads the id from `request.state`.
 
 ## Pagination
 
@@ -10719,6 +11334,37 @@ used to resolve the client-supplied `userId` to a user row and write an audit ro
 forge tamper-evident audit-chain entries attributed to a named employee in a named company. The
 body is additionally capped at **50 entries** with per-field length limits (**422** over either).
 
+**`POST /errors/log` reads its JSON body under either `application/json` or `text/plain`** (the
+`text/plain` label may carry parameters, e.g. `text/plain;charset=UTF-8`). A `text/plain` request is
+relabelled as JSON before FastAPI parses it, so it gets the same parse, the same `ErrorLogRequest`
+validation and caps, and the same **422** shape, and the OpenAPI `requestBody` is unchanged. No other
+content type is relabelled: an `application/octet-stream` body, for example, is still a **422**. The
+relabel is installed on this one route only (not on the errors router, and not app-wide), and
+`text/plain` is not parsed as JSON on any other path. The `MAX_JSON_BODY_BYTES` cap (**413**) covers
+the `text/plain` label on this path (see [Request Size Limits](#request-size-limits)).
+
+**`text/plain` is the supported beacon contract, not a legacy shim — do not remove it.** The SPA
+(`frontend/src/services/errorLogging.ts`) sends its crash and unload reports with
+`navigator.sendBeacon` and a `text/plain;charset=UTF-8` Blob on purpose. That label is
+CORS-safelisted, so the beacon is a simple request: no preflight, and it works cross-origin, which
+production is (Vercel → Railway). An `application/json` Blob is not safelisted, and Chromium refuses
+that beacon outright. If `sendBeacon` is unavailable, returns `false` or throws, the client falls back
+to a `fetch` with `keepalive: true` and `Content-Type: application/json`; the periodic flush is an
+ordinary JSON `fetch`.
+
+The client also guards the batch against the server's own refusals, because one bad entry fails the
+whole batch:
+- every field is clamped to the server's `ErrorLogEntry` cap (`url` 2,000, `message` 4,000, `stack`
+  20,000, …) instead of being sent over it and drawing a **422**;
+- a form boundary's preserved form contents (`metadata.preservedData`) are not sent at all; the server
+  never read them, and they could push the batch past the beacon's keepalive quota or the body cap;
+- a batch answered **429** or **5xx**, or lost to a network error, is re-queued for the next flush. A
+  **413** or **422** is not, since the same batch would be refused again.
+
+Why: until 2026-11-05 the SPA sent the beacon as a bare string. That is also labelled `text/plain`,
+and FastAPI does not parse `text/plain` as JSON, so every global-boundary crash report was rejected
+**422** and never reached a log line or Sentry.
+
 An over-limit request returns **HTTP 429** with a `Retry-After` header (seconds until the window
 resets) and body:
 ```json
@@ -10758,9 +11404,14 @@ an admin reset. Both key on a caller-supplied IP while `--forwarded-allow-ips=*`
 
 **JSON request bodies are capped at 256 KB** (`MAX_JSON_BODY_BYTES`, env-overridable; the
 pre-rename `MAX_SANITIZED_JSON_BODY_BYTES` is still honored as a deprecated alias). Every
-`application/json` `POST`/`PUT`/`PATCH` body is size-checked by middleware before the route
-runs — ahead of route auth, so an unauthenticated caller cannot choose how many bytes the app
-buffers and parses. Over the cap the request is **rejected**:
+JSON `POST`/`PUT`/`PATCH` body is size-checked by middleware before the route runs — ahead of
+route auth, so an unauthenticated caller cannot choose how many bytes the app buffers and parses.
+"JSON" means every label FastAPI itself parses as JSON: `application/json` and any
+`application/*+json` (`application/merge-patch+json`, `application/vnd.api+json`, …), matched
+case-insensitively with parameters ignored. Until 2026-11-05 the middleware matched only a
+literal `application/json…` prefix, so `Application/JSON` or a `+json` label was parsed by the
+route but never capped, and a non-JSON label such as `application/jsonx` was capped though never
+parsed. Over the cap the request is **rejected**:
 
 ```json
 { "detail": "Request body too large: 300000 bytes exceeds the 262144-byte limit for JSON requests." }
@@ -10768,6 +11419,12 @@ buffers and parses. Over the cap the request is **rejected**:
 
 Returned as **HTTP 413**. The check is applied to the declared `Content-Length` before the body
 is read, and again to the bytes actually received (chunked encoding, or a header that lies).
+
+**One non-JSON label is capped as well:** a `text/plain` body on `POST /errors/log`. That route
+parses `text/plain` as JSON (it is the label the SPA's `navigator.sendBeacon` body carries; see
+[Rate Limiting](#rate-limiting)), so without the cap the relabel would open an uncapped,
+unauthenticated JSON parse. Both gates apply to it. On every other path `text/plain` is neither
+parsed as JSON nor capped by this middleware.
 
 **Not affected:** `multipart/form-data` uploads, which keep their own per-endpoint caps (20 MB
 for QMS standard uploads, 50 MB `LASER_UPLOAD_MAX_BYTES` for laser-nest ZIP/PDF — those also
@@ -10920,6 +11577,29 @@ Cross-Origin Resource Sharing is configured to allow requests from:
 - Development: `http://localhost:3000`, `http://localhost:8000`
 - Production: Your configured frontend domain
 
+**Exposed response headers.** Responses send `Access-Control-Expose-Headers: X-Correlation-ID,
+Content-Disposition, ETag`, so cross-origin JavaScript can read those three headers. This applies when
+the SPA and the API are on different origins, as in the production Vercel → Railway deployment.
+- `X-Correlation-ID` is the reference for a failed request (see
+  [Internal Server Error (500)](#internal-server-error-500)).
+- `Content-Disposition` carries the server-chosen filename of a CSV/XLSX/PDF download.
+- `ETag` is the key the client's conditional-request cache uses.
+
+The shared CORS helper (`add_cors_headers` in `main.py`) sets the same expose list. The app uses that
+helper on the 500, which never passes back through `CORSMiddleware`, and on its middleware
+short-circuits and exception handlers: the 413 body-size refusal, the CSRF 403s, the 429s, and the
+`StaleDataError` 409, `HTTPException` and validation 422 handlers. The helper adds the list only for an
+allowed origin. A disallowed origin never gets `Access-Control-Allow-Origin`, so none of these headers
+is readable to it, whatever the expose list says.
+
+Before 2026-11-05 no headers were exposed, so a cross-origin SPA could read none of these three.
+Downloads fell back to the client's hard-coded filenames, and the ETag cache never stored an entry.
+Expect more **304**s once the cache starts working. `GET /shop-floor/dashboard` is the one route that
+emits an `ETag`, and its **304** returns before that read's reconcile runs, so the dashboard heals a
+stranded work order only on a read that returns **200** (the first load, or any read after the
+company's data changes). The other reconciling reads (`GET /work-orders`, `GET /work-orders/{id}`,
+`GET /shop-floor/operations…`) emit no `ETag` and still heal on every read.
+
 ## Trusted Hosts
 
 When `ALLOWED_HOSTS` is configured (production), a request whose HTTP `Host`
@@ -10984,7 +11664,7 @@ log. `unconfigured` means every enqueue will fail and no background job or cron 
 | 413 | Content Too Large — a JSON body over `MAX_JSON_BODY_BYTES` (default 256 KB, rejected by middleware before the route runs), or a file upload over its endpoint's own cap (e.g. 50 MB `LASER_UPLOAD_MAX_BYTES`). See [Request Size Limits](#request-size-limits) |
 | 422 | Validation Error — including a paging or window parameter outside its range (`limit`, `skip`/`offset`, `days`, `max_levels`), and a free-text `/exports/*` filter over its `max_length` (`warehouse` 50, `customer` 255, `transaction_type` 40); see [Bounds on paging and window parameters](#bounds-on-paging-and-window-parameters) |
 | 429 | Too Many Requests |
-| 500 | Internal Server Error |
+| 500 | Internal Server Error — the body (`correlation_id`, and inside `detail`) and the `X-Correlation-ID` header carry a reference to quote; see [Internal Server Error (500)](#internal-server-error-500) |
 | 502 | Bad Gateway — upstream AI-service failure on an AI endpoint (e.g. `/copilot/chat?stream=false`) |
 | 503 | Service Unavailable — an AI endpoint was called but the AI features are not configured (`ANTHROPIC_API_KEY` unset) |
 

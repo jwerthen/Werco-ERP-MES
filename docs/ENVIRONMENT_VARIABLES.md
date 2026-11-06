@@ -168,7 +168,11 @@ chunked transfer-encoding and a header that lies.
 > escapes at render. Only the size cap remains. See
 > [SECURITY_ADVISORY_SUPPRESSIONS.md → bleach removed](SECURITY_ADVISORY_SUPPRESSIONS.md#bleach-removed--escape-at-the-sink-2026-07-30).
 
-**What it does not gate.** Only `application/json` bodies. **`multipart/form-data` / `UploadFile`
+**What it does not gate.** Only JSON bodies — every label FastAPI parses as JSON, i.e.
+`application/json` and any `application/*+json`, matched case-insensitively — with one exception: a
+`text/plain` body on `POST /api/v1/errors/log` is capped too. That route parses `text/plain` as JSON,
+because that is the label the SPA's `navigator.sendBeacon` body carries (see
+[API.md → Request Size Limits](API.md#request-size-limits)). **`multipart/form-data` / `UploadFile`
 paths are untouched** — every CSV/XLSX bulk import, RFQ package, laser-nest ZIP/PDF and PO source
 document keeps its own per-endpoint limit (the 20 MB cap in `qms_standards.py`, the 50 MB
 `LASER_UPLOAD_MAX_BYTES` in `work_orders.py`). Inbound **carrier webhooks** are untouched too:
@@ -402,6 +406,26 @@ reconciled when opened in its detail / operations-list views; nothing is permane
 > grown past what read-path reconcile should carry. Raising this value increases per-request reconcile
 > cost; the **durable fix is the deferred ARQ reconcile job** (move reconcile off the read path
 > entirely), not an ever-higher cap. See `docs/WORK_ORDER_COMPLETION_REMEDIATION.md` → Rank 12.
+
+### Realtime WebSocket pushes
+
+Writes push `work_order_update` / `shop_floor_update` / `dashboard_update` events to the writing
+company's open sockets (`docs/API.md` → Real-time Updates → Event delivery). Every listening tab
+refetches on a push. This switch turns all pushes off without a code change.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `REALTIME_BROADCAST_ENABLED` | No | `false` | Arms every realtime push (`app.core.realtime.safe_broadcast`). Ships **off**; set `true` on the deploy to turn pushes on. When `false`, no write queues a push. Dashboard, Work Orders and Work Order Detail keep refreshing on their 30-second timers; Scheduling and Analytics refresh only on load. Writes are unaffected. |
+
+> **Why it ships off.** Until 2026-11-05 a defect dropped every company-scoped push, so production ran
+> with no pushes from 2026-06-07. The fix makes about 85 call sites deliverable again, and the
+> refetch load they cause has never been measured, so the fix deploys dark: with the default `false`,
+> production keeps running exactly as it has since June, minus the cross-tenant leak (which is closed
+> whether pushes are on or off). **To turn pushes on**, set `REALTIME_BROADCAST_ENABLED=true` on the
+> Railway API service at a time someone can watch it. Changing a Railway variable restarts the
+> service but needs no code deploy, and setting it back to `false` is the rollback. While it is on,
+> watch DB CPU, pool checkouts, p95 latency, and the `Realtime broadcast ... dropped` /
+> `... failed` and `WebSocket delivery authorization unavailable` WARNING lines.
 
 ### Redis (cache, rate limiting, AND the ARQ job queue)
 

@@ -53,6 +53,55 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# The per-operation fields an accepted AI routing's CREATE audit row snapshots (see
+# ``create_routing_from_generation``): identity, where it runs, the hours that cost and
+# schedule it, and the two flags that change what quality expects of it.
+_ACCEPTED_OPERATION_AUDIT_KEYS = (
+    "sequence",
+    "operation_number",
+    "name",
+    "work_center_id",
+    "setup_hours",
+    "run_hours_per_unit",
+    "is_inspection_point",
+    "is_outside_operation",
+)
+
+
+def _live_part_or_404(db: Session, part_id: int, company_id: int, *, detail: str = "Part not found") -> Part:
+    """Resolve a LIVE part of the active company, or 404 -- for every door that attaches a new
+    routing to a part: ``POST /routing/``, ``generate-from-drawing``, ``create-from-generation``
+    and the ``/{id}/copy`` target.
+
+    Attaching a new routing to a soft-deleted part is a SELECTION of a withdrawn record
+    (invariant 3), not a historical read, so the tombstone is filtered here rather than at each
+    call site. Deliberately NOT used by the routing READ paths, which keep naming the part an
+    existing routing was built for even after that part is deleted.
+    """
+    part = (
+        db.query(Part)
+        .filter(Part.id == part_id, Part.company_id == company_id, Part.is_deleted == False)  # noqa: E712
+        .first()
+    )
+    if not part:
+        raise HTTPException(status_code=404, detail=detail)
+    return part
+
+
+def _generation_provenance(gen_result: Dict[str, Any]) -> Dict[str, Any]:
+    """The model / prompt identity behind a generated proposal, from its extraction metadata.
+
+    Only keys the generator actually reported are returned (``None`` values are dropped), so a
+    proposal produced without an LLM call records nothing rather than a misleading null.
+    """
+    metadata = gen_result.get("_extraction_metadata") or {}
+    provenance = {
+        "model": metadata.get("model"),
+        "model_tier": metadata.get("model_tier"),
+        "prompt_version": metadata.get("prompt_version"),
+    }
+    return {key: value for key, value in provenance.items() if value is not None}
+
 
 def _routing_generation_corrections(
     generation_session: RoutingGenerationSession,
@@ -188,10 +237,9 @@ async def generate_routing_from_drawing(
     Upload a drawing (PDF, DXF, STEP) and get a proposed draft routing.
     Returns the proposed routing for user review -- does NOT create it yet.
     """
-    # Validate part exists
-    part = db.query(Part).filter(Part.id == part_id, Part.company_id == company_id).first()
-    if not part:
-        raise HTTPException(status_code=404, detail="Part not found")
+    # Live parts only, matching ``create-from-generation`` (a proposal for a soft-deleted part
+    # could never be accepted, so don't spend a model call on one).
+    part = _live_part_or_404(db, part_id, company_id)
 
     # Validate file extension
     ext = Path(file.filename or "").suffix.lower()
@@ -394,7 +442,12 @@ async def generate_routing_from_drawing(
         warnings=all_warnings,
         extraction_confidence=gen_result.get("extraction_confidence", "medium"),
         source_was_ocr=is_ocr,
-        learned_context=learned_context,
+        # The model and prompt version that produced THIS proposal ride along with the learned
+        # context, so approving it later (``create-from-generation``) can name them in the
+        # routing's CREATE audit row and the AI-learning event -- both of which read
+        # ``learned_context["model"]``, a key nothing used to write. Recorded at generation
+        # time on purpose: the prompt can be bumped between proposal and approval.
+        learned_context={**learned_context, **_generation_provenance(gen_result)},
     )
     db.commit()
     db.refresh(generation_session)
@@ -419,15 +472,20 @@ def create_routing_from_generation(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
+    audit: AuditService = Depends(get_audit_service),
 ):
     """
     Create a routing and its operations from the reviewed/edited generation result.
     The routing is created in 'draft' status.
+
+    This is the step where a named person accepts an AI proposal, so it writes the routing's
+    CREATE row on the tamper-evident audit chain -- the same row ``POST /routing/`` writes --
+    with the generation session, model, prompt version, the count of human corrections and a
+    compact snapshot of every accepted operation (``operations``: sequence, number, name, work
+    center, setup/run hours, inspection/outside flags) in ``extra_data``. The AI-learning
+    interaction event below is telemetry, not that record.
     """
-    # Check part exists
-    part = db.query(Part).filter(Part.id == data.part_id, Part.company_id == company_id).first()
-    if not part:
-        raise HTTPException(status_code=404, detail="Part not found")
+    part = _live_part_or_404(db, data.part_id, company_id)
 
     generation_session = None
     if data.generation_session_id:
@@ -489,6 +547,10 @@ def create_routing_from_generation(
 
     # Create operations
     approved_operations = []
+    # What the person actually accepted, one compact entry per operation, for the CREATE audit
+    # row below: the work centers and hours are the substance of the acceptance, and these
+    # operations get no per-operation ``routing_operation`` rows of their own on this path.
+    accepted_operations: List[Dict[str, Any]] = []
     for op_data in data.operations:
         op_dict = op_data.model_dump()
         approved_operations.append(op_dict.copy())
@@ -497,12 +559,19 @@ def create_routing_from_generation(
             # prefix at render time. Fallback only: a caller-supplied number is stored
             # verbatim. See work_orders.create_routing_operations_for_work_order.
             op_dict["operation_number"] = str(op_dict["sequence"])
+        accepted_operations.append({key: op_dict.get(key) for key in _ACCEPTED_OPERATION_AUDIT_KEYS})
         operation = RoutingOperation(routing_id=routing.id, company_id=company_id, **op_dict)
         db.add(operation)
 
     db.flush()
     db.refresh(routing)
     calculate_routing_totals(routing, db)
+    # Generation-time identity, recorded on the session when the proposal was made (the prompt
+    # can be bumped between proposal and approval). Read ONCE, before the learning pass, and
+    # shared by the AI-learning event and the audit row so the two can never name different
+    # prompts for the same acceptance.
+    generation_context = dict(generation_session.learned_context or {}) if generation_session else {}
+    ai_corrections: List[AICorrectionCreate] = []
     if generation_session:
         correction_summary = learn_from_approved_generation(
             db,
@@ -534,11 +603,36 @@ def create_routing_from_generation(
                     "suggest_only": True,
                 },
                 confidence_score=0.75 if not ai_corrections else 0.55,
-                prompt_version=ROUTING_GENERATION_PROMPT.version,
-                model_version=(generation_session.learned_context or {}).get("model"),
+                # The live constant is only the fallback for a session generated before the
+                # prompt version was recorded on it (the telemetry's pre-existing behavior).
+                prompt_version=generation_context.get("prompt_version") or ROUTING_GENERATION_PROMPT.version,
+                model_version=generation_context.get("model"),
                 corrections=ai_corrections,
             ),
         )
+    audit.log_create(
+        "routing",
+        routing.id,
+        f"{part.part_number} Rev {routing.revision}",
+        new_values=routing,
+        description=(
+            f"Created routing {part.part_number} Rev {routing.revision} from "
+            + ("an accepted AI drawing proposal" if generation_session else "a drawing-generation form")
+        ),
+        extra_data={
+            "source": "ai_routing_generation" if generation_session else "create_from_generation",
+            "generation_session_id": generation_session.id if generation_session else None,
+            # Generation-time identity, recorded on the session when the proposal was made;
+            # None for a session generated before that was recorded, or with no LLM call.
+            "model": generation_context.get("model"),
+            "prompt_version": generation_context.get("prompt_version"),
+            "extraction_confidence": generation_session.extraction_confidence if generation_session else None,
+            "correction_count": len(ai_corrections),
+            "operation_count": len(approved_operations),
+            "operations": accepted_operations,
+            "approved_by": current_user.id,
+        },
+    )
     db.commit()
 
     # Reload with relationships for response
@@ -763,11 +857,8 @@ def create_routing(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Create a new routing for a part"""
-    # Check part exists
-    part = db.query(Part).filter(Part.id == routing_in.part_id, Part.company_id == company_id).first()
-    if not part:
-        raise HTTPException(status_code=404, detail="Part not found")
+    """Create a new routing for a live part (404 for another tenant's or a soft-deleted part)."""
+    part = _live_part_or_404(db, routing_in.part_id, company_id)
 
     # Check for existing active routing
     existing = (
@@ -1225,10 +1316,8 @@ def copy_routing(
     if not source:
         raise HTTPException(status_code=404, detail="Source routing not found")
 
-    # Check target part exists
-    target_part = db.query(Part).filter(Part.id == target_part_id, Part.company_id == company_id).first()
-    if not target_part:
-        raise HTTPException(status_code=404, detail="Target part not found")
+    # Target must be a live part -- a copy attaches a NEW routing, like the create doors.
+    target_part = _live_part_or_404(db, target_part_id, company_id, detail="Target part not found")
 
     # Create new routing
     new_routing = Routing(
