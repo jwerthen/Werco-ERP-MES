@@ -10852,13 +10852,69 @@ database session **before each event delivery**, after incoming messages, and af
 of idle time**. Expiry, account disablement/reassignment, company deactivation, loss of platform
 authority for a switched context, or loss of access to the parent resource closes the connection
 before further event delivery. Database-check failure also refuses delivery. Domain broadcasts
-remain tenant-scoped; a read-only company context can receive these read-only channels but cannot
-use them to mutate records. HTTP logout/switch/platform recovery exceptions do not apply here.
+are tenant-scoped (see **Event delivery** below); a read-only company context can receive these
+read-only channels but cannot use them to mutate records. HTTP logout/switch/platform recovery
+exceptions do not apply here.
 
 This is live identity/resource validation, not a token revocation list. Logout does **not** revoke
 an unexpired access JWT, and no server-side refresh revocation is introduced. The crew-station
 kiosk remains poll-only. Client-side controls reflect these policies; the API and socket checks
 remain authoritative.
+
+**Event delivery.** Writes push three message types, each as `{"type", "data", "timestamp"}`:
+`work_order_update` (`data.work_order_id`), `shop_floor_update` (`data.work_center_id`) and
+`dashboard_update`. Each goes **only** to sockets admitted under the company the write was made
+in: the request's active company from `get_current_company_id`, so a platform admin switched into
+another company broadcasts to that company, not their home one. There is **no all-tenant fan-out**:
+`ConnectionManager` has no send-to-every-socket method, and the three `broadcast_*` helpers in
+`app/core/websocket.py` take `company_id` as a required keyword. A call that passes `None` is
+dropped and logged at WARNING (message type and event name only, never the payload). Within a
+company the socket's path does not narrow delivery: every socket in the company receives every one
+of that company's events, and clients filter on `type` and the id in `data`.
+
+Delivery is **best-effort and supplementary; a fetch is the guarantee.** Dashboard, Work Orders
+and Work Order Detail also refresh every 30 seconds; Scheduling and Analytics refresh only on load.
+Handlers call `safe_broadcast` after the write commits; it queues the broadcast as a background task
+on the event loop and returns at once, from sync and `async` routes alike. The HTTP response does not
+wait for the per-socket authorization recheck, and a failed broadcast never fails the write: it is
+logged at WARNING with the helper name and exception, never the payload. Connections are held in
+memory per API process, so a socket held by a different API worker process does not receive the
+event.
+
+Queued broadcasts are delivered **one at a time per API process, in call order**. Each delivery
+rechecks every recipient socket against the database on a worker thread with its own session, and
+those threads and connections are shared with every HTTP request. Serializing keeps realtime to at
+most one worker thread and one pooled connection per process, and each socket receives events in the
+order they were broadcast. Three limits keep the queue from backing up:
+
+- At most **1000** broadcasts may wait per process. Past that, a new broadcast is dropped and
+  logged at WARNING (`Realtime broadcast ... dropped`).
+- A single send to one socket is bounded at **5 seconds**. A socket that does not accept the send in
+  time is dropped from delivery, like any socket whose send fails.
+- Pushes **ship off**: nothing is queued unless `REALTIME_BROADCAST_ENABLED=true` is set on the
+  deploy, and setting it back to `false` turns every push off again without a code change
+  (`docs/ENVIRONMENT_VARIABLES.md` → Realtime WebSocket pushes).
+
+`ConnectionManager.send_to_user` follows the same tenant rule as the broadcasts: it takes
+`company_id` as a required keyword and sends only to that user's sockets admitted under that company.
+A platform admin can hold sockets in several companies at once. Nothing in `app/` calls it today.
+
+> **Fixed 2026-11-05: two defects in this path.** (1) Blocker create/update/resolve
+> (`POST /work-order-blockers/work-orders/{work_order_id}`, `PUT /work-order-blockers/{id}`,
+> `POST /work-order-blockers/{id}/resolve`) and `POST /work-centers/{id}/status` broadcast without a
+> company. Their events (blocker id, category and status; work-center id and status) reached
+> **every** company's sockets and triggered refetches on other tenants' screens. (2) `safe_broadcast`
+> forwarded `company_id=` to `anyio.from_thread.run`, which takes positional arguments only. Every
+> tenant-scoped broadcast therefore raised `TypeError`, which was logged at DEBUG and dropped, so no
+> tenant-scoped push had reached a socket since scoping shipped (2026-06-07). Broadcasts from `async`
+> routes (both laser-nest-package imports) were also dropped. With pushes turned on
+> (`REALTIME_BROADCAST_ENABLED=true`; they ship off), the Dashboard, Shop Floor, Scheduling, Work
+> Orders, Work Order Detail and Analytics screens receive their own company's pushes and refetch on
+> them. The cross-tenant leak is closed either way. Guards:
+> `backend/tests/test_websocket_tenant_isolation.py` statically requires every broadcast call in
+> `app/` to pass `company_id=` traced to `Depends(get_current_company_id)`, and
+> `backend/tests/api/test_realtime_broadcast_tenant_scope.py` checks the blocker and work-center
+> routes end to end.
 
 ## Common Response Formats
 
