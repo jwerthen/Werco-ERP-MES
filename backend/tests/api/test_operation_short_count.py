@@ -807,15 +807,38 @@ class TestFloorCloseSuccesses:
         assert fresh(db_session, WorkOrder, wo.id).quantity_complete == 8
 
     def test_in_progress_work_on_a_held_job_follows_the_short_rules(self, client, db_session, eight_of_ten):
-        """Combined pin (b): gates keeps IN_PROGRESS completable on a held job; ruling 1 still applies."""
+        """Combined pin (b): gates keeps IN_PROGRESS completable on a held job; ruling 1 still applies.
+
+        The gates' work-order start rung covers a READY operation only (completing it would
+        start it), so work already running when the job was held reaches the short-count
+        rules unchanged: refused 409 with nothing written while 2 are unaccounted, then
+        closed 200 once they are declared as scrap with a reason -- under REQUIRED audit.
+        """
         ann, wo, op = eight_of_ten
         set_op(db_session, fresh(db_session, WorkOrder, wo.id), status=WorkOrderStatus.ON_HOLD)
+        before = _snapshot(db_session, op.id)
+
         refused = _complete(client, op, ann)
         assert refused.status_code == 409, refused.text
         assert refused.json()["detail"] == short_count_message(op, OperationAccounting(target=10, good=8, scrapped=0))
+        assert refused.json()["detail"] != MSG_WORK_ORDER_ON_HOLD
+        assert _snapshot(db_session, op.id) == before
+        assert op_audit_rows(db_session, op.id) == []
+        assert ledger_rows(db_session) == []
+
         ok = _complete(client, op, ann, quantity_scrapped=2, scrap_reason="crack")
         assert ok.status_code == 200, ok.text
-        assert fresh(db_session, WorkOrderOperation, op.id).quantity_short_declared == 2
+        op_row = fresh(db_session, WorkOrderOperation, op.id)
+        assert (op_row.status, op_row.quantity_complete, op_row.quantity_scrapped, op_row.scrap_reason) == (
+            DONE,
+            8,
+            2,
+            "crack",
+        )
+        assert op_row.quantity_short_declared == 2
+        (row,) = [r for r in op_audit_rows(db_session, op.id) if r.action == "COMPLETE_OPERATION"]
+        assert row.extra_data["closed_short"] is True
+        assert row.extra_data["scrap_declared_at_close"] == 2
 
 
 class TestMessages:

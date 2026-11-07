@@ -314,24 +314,41 @@ class TestOfficeComplete:
         assert fresh(db_session, WorkOrderOperation, op20.id).status == DONE
         assert fresh(db_session, WorkOrder, wo.id).quantity_complete == 8
 
-    def test_a_ready_operation_on_a_held_job_is_refused_before_any_input_check(self, client, db_session, supervisor):
-        """Combined pin (a): the work-order start gate outranks every short-count check."""
+    @pytest.mark.parametrize(
+        "params",
+        [
+            # scrap rising with no reason -- would be the 422 if the input checks ran first
+            {"quantity_complete": 8, "quantity_scrapped": 2, "quantity_override_reason": "desk"},
+            # nothing changes -- would be the 200 'No change -- Op N left open'
+            {"quantity_complete": 0},
+            # a short-shaped partial -- would be the 200 'Progress updated' (an auto-start)
+            {"quantity_complete": 4},
+            # negative scrap -- would be the 400 'quantity_scrapped cannot be negative'
+            {"quantity_complete": 8, "quantity_scrapped": -1},
+        ],
+        ids=["scrap-without-reason", "no-change", "partial", "negative-scrap"],
+    )
+    def test_a_ready_operation_on_a_held_job_is_refused_before_any_input_check(
+        self, client, db_session, supervisor, params
+    ):
+        """Combined pin (a): the work-order start gate outranks every short-count check.
+
+        A READY operation on an ON_HOLD work order is a STATE conflict: every short-shaped
+        submit gets the gates' 409 with nothing written -- not a 200 'No change', not the
+        partial branch's auto-start, and not a 422 / 400 from the short-count input checks
+        that come after the rung.
+        """
         wc = make_work_center(db_session)
-        _, (op,) = make_routing(db_session, work_centers=[wc], statuses=[READY], wo_status=WorkOrderStatus.ON_HOLD)
+        wo, (op,) = make_routing(db_session, work_centers=[wc], statuses=[READY], wo_status=WorkOrderStatus.ON_HOLD)
         before = _op_state(db_session, op.id)
 
-        resp = _office(
-            client,
-            op,
-            supervisor,
-            quantity_complete=8,
-            quantity_scrapped=2,
-            quantity_override_reason="desk",
-        )
+        resp = _office(client, op, supervisor, **params)
         assert resp.status_code == 409, resp.text
         assert resp.json()["detail"] == MSG_WORK_ORDER_ON_HOLD
         assert _op_state(db_session, op.id) == before
         assert op_audit_rows(db_session, op.id) == []
+        assert ledger_rows(db_session) == []
+        assert fresh(db_session, WorkOrder, wo.id).status == WorkOrderStatus.ON_HOLD
 
     def test_a_required_row_that_cannot_be_saved_writes_nothing(self, client, db_session, supervisor, monkeypatch):
         wc = make_work_center(db_session)
