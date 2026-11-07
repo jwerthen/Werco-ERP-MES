@@ -211,8 +211,8 @@ another. `blocked_kind` is `credential`, `read_only`,
 5. Company AI egress is on — else **403**. Read literally: with egress off, nothing is applied,
    even by a person. This is a **deliberate reading of ruling 3** adopted for this release, not an
    oversight: Accept & apply itself makes no LLM call, so the coupling is to the company's "AI
-   actions" switch rather than to data egress. It is pending owner confirmation; dropping the gate
-   (one check in `apply_refusal` plus copy) is an owner decision — don't "fix" it in passing.
+   actions" switch rather than to data egress. **The owner confirmed this reading on 2026-11-07**;
+   dropping the gate (one check in `apply_refusal` plus copy) is an owner decision — don't "fix" it in passing.
 6. The person's role can perform the action (table below) — else **403**.
 7. The target still makes sense — else **409** with the plan's reason.
 8. The fingerprint still matches — else **409**.
@@ -263,8 +263,8 @@ limited to a person signed in whose role could apply it (403 for API tokens, age
 roles). Dismiss, snooze and feedback stay open to everyone **deliberately** (a design decision
 for this release): they never run anything, and closing them to lower roles would leave
 an Operator no way to clear a card from their own inbox. Dismiss retires a card just as
-permanently as Mark handled, so this gate is partial protection; whether Dismiss on an action
-card should take the same gate is an open owner question. Suggest-only cards stay acceptable by
+permanently as Mark handled, so this gate is partial protection — and **the owner decided on
+2026-11-07 that Dismiss stays open to every role** rather than taking the same gate. Suggest-only cards stay acceptable by
 anyone. In the UI the button reads:
 
 - **Accept & apply** when `can_apply`, with "Accept & apply will: {summary}" and any warnings;

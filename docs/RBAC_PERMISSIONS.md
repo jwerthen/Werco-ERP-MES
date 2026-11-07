@@ -2535,11 +2535,12 @@ and writes an `EXPORT` audit row through `AuditService`:
 > credential**, including on action cards (a design decision for this release). They run
 > nothing, and gating them would leave an Operator unable to clear their own inbox. The gate
 > above is therefore partial: Dismiss retires a card as permanently as Mark handled does (and
-> also records a `rejected` learning signal). Whether Dismiss on an action card should take the
-> same gate (`mark_handled_refusal`) is an open owner question, not an oversight.
+> also records a `rejected` learning signal). **The owner decided on 2026-11-07 that Dismiss on an
+> action card stays open to every role** — it does not take the `mark_handled_refusal` gate. That is a
+> decision, not an oversight.
 >
-> **The AI-egress gate on Accept & apply is a deliberate reading of ruling 3, pending owner
-> confirmation.** Accept & apply makes no LLM call — it is a deterministic, tenant-local write — so
+> **The AI-egress gate on Accept & apply is a deliberate reading of ruling 3, confirmed by the
+> owner on 2026-11-07.** Accept & apply makes no LLM call — it is a deterministic, tenant-local write — so
 > the coupling is to the company's "AI actions" switch, not to data egress. While egress is off
 > (the default) no tenant gets Accept & apply; cards show the plan and anyone whose role could
 > apply it can Mark handled. Dropping the gate is one check in `apply_refusal` plus copy, and is an owner decision.
