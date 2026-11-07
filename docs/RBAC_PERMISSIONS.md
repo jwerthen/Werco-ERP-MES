@@ -249,6 +249,10 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 >   `require_role([ADMIN, MANAGER, SUPERVISOR])`, with required (fail-closed) audit rows. It never
 >   releases a job: with no release on record the job returns to DRAFT and goes back through
 >   **Release**.
+>   It is also the MCP tool `work_orders_resume_work_order`, and a standing per-user API token
+>   holding one of those roles may call it — the same posture as `release_work_order` (**owner
+>   decision 2026-11-07**: an agent may lift a work-order hold; each call is audited as the token's
+>   user with `extra_data.credential`).
 >
 > Work Order detail shows **Start** (released), **Hold Work Order** (released / in progress) and
 > **Resume Work Order** (on hold) only to users holding `work_orders:edit` (or a superuser) — the same
