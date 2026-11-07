@@ -2,15 +2,15 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **691 tools** — 15 hand-written *convenience* tools plus
-**676 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **763 tools** — 15 hand-written *convenience* tools plus
+**748 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app.
 
 This is the runbook: how to run it, how to authenticate, what the tools are called, which rules
 the convenience tools enforce, what a result looks like, and what to do when a call fails.
 
-**Counts and names were checked with `python -m app.mcp --print-catalog` during the September 2026
-fabrication quoting cutover** (15 convenience + 676 generated tools, 16 shadowed raw operations).
+**Counts and names were re-checked with `python -m app.mcp --print-catalog` on 2026-11-07, for the
+draft / on-hold floor gates** (15 convenience + 748 generated tools, 16 shadowed raw operations).
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -54,7 +54,10 @@ quote against the live catalog, so a name that shifts fails CI instead of going 
 - **A shop-floor automaton.** Clock-in / start / complete tools are the real routes (`clock_in`,
   `shop_floor_start_operation`, `shop_floor_complete_operation`, …). Nothing is auto-completed and
   no quantity is invented; the same gates (labor-record requirement, predecessor gating, 409 on a
-  stale version) apply.
+  stale version, **409 on a draft or on-hold work order**) apply. `clock_in`,
+  `shop_floor_start_operation`, `work_orders_start_operation` and completing a READY operation are
+  refused on a job that is not released (`release_work_order` first) or is on hold
+  (`work_orders_resume_work_order` first).
 
 ---
 
@@ -328,7 +331,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `SetupWizard` (`/setup`) | Setup & Readiness | `get_setup_health`, `get_part_readiness` |
 | `WorkOrders` (`/work-orders`) | Work Orders, Work Order Templates | `work_orders_list_work_orders`, `get_work_order_by_number`, `update_work_order_priority`, `work_orders_delete_work_order`, `work_orders_restore_work_order`, `list_work_order_templates`, `use_work_order_template` |
 | `WorkOrderNew` (`/work-orders/new`) | Work Orders, Parts, Bill of Materials, Routing, Customers, Setup & Readiness, Work Centers | `create_work_order`★, `preview_work_order_operations`, `get_routing_by_part`, `list_customer_names`, `get_part_readiness`, `list_work_centers`★ |
-| `WorkOrderDetail` (`/work-orders/:id`) | Work Orders, Work Order Materials, Laser Nests, Work Order Blockers, Documents, Shop Floor | `get_work_order`★, `add_operation`★, `update_work_order`★, `release_work_order`★, `duplicate_work_order`★, `add_laser_nest`★, `work_orders_start_work_order`, `work_orders_complete_work_order`, `work_orders_complete_operation`, `work_orders_update_operation`, `update_laser_nest`, `delete_laser_nest`, `list_material_allocations`, `create_work_order_blocker`, `attach_document_to_work_order` |
+| `WorkOrderDetail` (`/work-orders/:id`) | Work Orders, Work Order Materials, Laser Nests, Work Order Blockers, Documents, Shop Floor | `get_work_order`★, `add_operation`★, `update_work_order`★, `release_work_order`★, `duplicate_work_order`★, `add_laser_nest`★, `work_orders_start_work_order`, `work_orders_resume_work_order`, `work_orders_complete_work_order`, `work_orders_complete_operation`, `work_orders_update_operation`, `update_laser_nest`, `delete_laser_nest`, `list_material_allocations`, `create_work_order_blocker`, `attach_document_to_work_order` |
 | `ShopFloor` (`/shop-floor`) | Shop Floor, Work Order Blockers, Work Centers, Work Orders | `get_shop_floor_dashboard`★, `get_all_operations`, `get_active_shop_users`, `list_work_order_blockers`, `resolve_work_order_blocker` |
 | `ShopFloorSimple` (`/shop-floor/operations`) | Shop Floor, Scanner, Work Centers, Work Orders | `get_all_operations`, `shop_floor_start_operation`, `shop_floor_complete_operation`, `put_operation_on_hold`, `shop_floor_resume_operation`, `lookup_barcode`, `resolve_action` |
 | `OperatorKiosk` (`/kiosk`) | Shop Floor | `clock_in`, `clock_out`, `get_my_active_job`, `get_work_center_queue`, `get_operation_steps`, `record_operation_step`, `report_operation_production`, `shop_floor_complete_operation` — under the caller's own user token (kiosk badge tokens are refused) |
@@ -541,11 +544,11 @@ with a 422 that names it, never accepted-and-ignored.
 | `create_work_order` | `POST /work-orders/` | `part_id`, `quantity_ordered` (required); `work_order_type`, `parent_work_order_id`, `priority`, `due_date`, `customer_name`, `customer_po`, `unit_number`, `notes`, `special_instructions`, `sequential_operations`, `serial_numbers`, `auto_routing` (query, default `true`). **No `status` argument** — passing one is a 422 | See [DRAFT guarantees](#9-draft-guarantees). Refuses `work_order_type: "laser_cutting"` **before** calling, with the API's own wording |
 | `add_operation` | `POST /work-orders/{id}/operations` | `work_order_id`, `name`, `work_center` (required; **int id or name/code string**); `sequence` (10–990, multiple of 10); passthrough `operation_number`, `description`, `setup_instructions`, `run_instructions`, `setup_time_hours`, `run_time_hours`, `run_time_per_piece`, `requires_inspection`, `inspection_type`, `component_part_id`, `component_quantity`, `operation_group`. `quantity` is accepted by the schema only to be **refused 422 with an explanation** | **Name guard** (below). Work center by name: exact match on name or code → substring → refuses **404** on none, **409** naming the candidates on more than one ("Pass the id"). `sequence` omitted → `GET /work-orders/{id}` and use the next multiple of 10 after the current maximum (10 on an empty plan). **An operation has no quantity of its own** — it runs the work order's `quantity_ordered`; `component_quantity` is the BOM component demand for the step (the per-operation piece target on a batch job), not an operation quantity, so the spec's `quantity` is not aliased to it. Not for laser WOs (the route refuses 400) |
 | `get_work_order` | `GET /work-orders/{id}` or `/work-orders/by-number/{n}` | `work_order_id` **or** `work_order_number` (percent-encoded into the path, so `../` or `?` cannot steer the call onto another route) | Full `WorkOrderResponse`: operations, nests (`operations[].laser_nest`), status, `version` |
-| `update_work_order` | `PUT /work-orders/{id}` | `work_order_id`, `version` (required); `quantity_ordered`, `priority`, `status`, `sequential_operations`, `due_date`, `customer_name`, `customer_po`, `unit_number`, `notes`, `special_instructions`, `quantity_complete`, `quantity_scrapped`, `scrap_reason` — every `WorkOrderUpdate` field, pinned to the route's own schema by a catalog test | The header edit verb, version-gated (409 when stale). **`status` accepts `draft` / `on_hold` / `cancelled` only**: `released` and `in_progress` are refused **422** naming the real verbs (`release_work_order`, `work_orders_start_work_order`) — the route's blind `setattr` would accept them with no `released_at` / `released_by` and no operation promotion; `complete` / `closed` are refused by the route itself. `status: "draft"` is how a released-but-unstarted job is put back (the nest tools use the same PUT) |
+| `update_work_order` | `PUT /work-orders/{id}` | `work_order_id`, `version` (required); `quantity_ordered`, `priority`, `status`, `sequential_operations`, `due_date`, `customer_name`, `customer_po`, `unit_number`, `notes`, `special_instructions`, `quantity_complete`, `quantity_scrapped`, `scrap_reason` — every `WorkOrderUpdate` field, pinned to the route's own schema by a catalog test | The header edit verb, version-gated (409 when stale). **`status` accepts `draft` / `on_hold` / `cancelled` only** (and `on_hold` only on a released or in-progress job — the route refuses a draft **409**, it has nothing on the floor to hold): `released` and `in_progress` are refused **422** naming the real verbs (`release_work_order`, `work_orders_start_work_order`; the `in_progress` refusal also names `work_orders_resume_work_order`, because the start verb takes released jobs only and a hold is lifted by the resume tool) — the route's blind `setattr` would accept them with no `released_at` / `released_by` and no operation promotion; `complete` / `closed` are refused by the route itself. `status: "draft"` is how a released-but-unstarted job is put back (the nest tools use the same PUT) |
 | `duplicate_work_order` | `POST /work-orders/{id}/duplicate` | `work_order_id`, `quantity_ordered` (both required — the route requires the quantity; a laser job ignores it and derives its own from the copied nests), `due_date` | Copies the *plan* onto a new DRAFT (`WORK_ORDER_TEMPLATES.md` / duplicate service); post-checks DRAFT |
 | `release_work_order` | `POST /work-orders/{id}/release` | `work_order_id` | Explicit only; the route refuses anything not DRAFT. The **only** tool that releases work |
 | `import_laser_nest_package` | `POST /work-orders/laser-nest-packages/standalone/import` or `POST /work-orders/{id}/laser-nest-packages/import` | `work_order_id` (omit for standalone), `file` `{filename, content_base64, content_type?}` **or** `source_path`, `rows` (list → sent as the JSON string the route expects, or a string), `work_center_id`, `due_date` (standalone only), `sheet_match_provenance`, `release` (default `false`) | See [Nest import demotion](#10-nest-import-demotion). Returns `{import, work_order, demoted_to_draft, operations_returned_to_pending, note}` |
-| `add_laser_nest` | `POST /work-orders/{id}/laser-nests/manual` | `work_order_id`, `cnc_number`, `planned_runs` (required); `nest_name`, `material`, `thickness`, `sheet_size`, `work_center_id`, `material_part_id`, `qty_per_run` (the route's `LaserNestManualCreate`, pinned by a catalog test); `release` (default `false`) | Keys one nest by hand onto an assembly parent (its laser child is found-or-created by the route) or a laser WO. The route **force-sets the laser WO RELEASED** with the new nest READY; the tool applies §10 to it — a **new** laser WO, or one that was **DRAFT before the call**, comes back DRAFT with PENDING operations; a job already on the floor (released / in progress / on hold before the call) is **never taken off it** (`demoted_to_draft: false` + a `note`). Refuses **409** a job whose nests came from a package import (§10 rule 1, the other direction). Returns `{nest, work_order, demoted_to_draft, ...}` |
+| `add_laser_nest` | `POST /work-orders/{id}/laser-nests/manual` | `work_order_id`, `cnc_number`, `planned_runs` (required); `nest_name`, `material`, `thickness`, `sheet_size`, `work_center_id`, `material_part_id`, `qty_per_run` (the route's `LaserNestManualCreate`, pinned by a catalog test); `release` (default `false`) | Keys one nest by hand onto an assembly parent (its laser child is found-or-created by the route) or a laser WO. The route **force-sets the laser WO RELEASED** with the new nest READY (recording the release as the caller's when it was a draft or unstamped; an **on-hold** job stays on hold and the `note` says so, naming `work_orders_resume_work_order`); the tool applies §10 to it — a **new** laser WO, or one that was **DRAFT before the call**, comes back DRAFT with PENDING operations; a job already on the floor (released / in progress / on hold before the call) is **never taken off it** (`demoted_to_draft: false` + a `note`). Refuses **409** a job whose nests came from a package import (§10 rule 1, the other direction). Returns `{nest, work_order, demoted_to_draft, ...}` |
 | `get_shop_floor_dashboard` | `GET /shop-floor/dashboard` (+ `GET /shop-floor/dispatch-board`) | `include_dispatch_board` (default `false`) | With the flag: `{"dashboard": …, "dispatch_board": …}` |
 | `list_inventory` | `GET /inventory/` or `GET /inventory/summary` | `summary` (default `false`), `part_id`, `warehouse`, `location_code`, `has_quantity` (default `true`), `limit` (default 200, max 10000), `offset` | `summary=true` → per-part totals |
 | `list_purchase_orders` | `GET /purchasing/purchase-orders` | `status`, `vendor_id`, `deleted_only`, `limit` (default 200), `offset` | |
@@ -610,7 +613,8 @@ replacement. Adding a convenience tool whose route is *not* in the shadow set is
   RELEASED — not creation, not duplication, not template use (`use_work_order_template` is a
   generated tool over a route that itself lands DRAFT), and not the header update: the generic
   `PUT /work-orders/{id}` is shadowed by `update_work_order`, which refuses `status: released` and
-  `status: in_progress` (422 naming `release_work_order` / `work_orders_start_work_order`) because
+  `status: in_progress` (422 naming `release_work_order` / `work_orders_start_work_order`, and for
+  `in_progress` also `work_orders_resume_work_order`) because
   the route's blind `setattr` would accept them with no `released_at` / `released_by` and no
   operation promotion — a release the audit trail could not attribute. The two Excel-cutover
   loaders that mint work orders RELEASED / IN_PROGRESS outright are not tools (§6.1). The nest
@@ -622,7 +626,9 @@ replacement. Adding a convenience tool whose route is *not* in the shadow set is
 
 The application's nest-package import creates the laser work order **RELEASED, with its nest
 operations READY** — that is what the planners' import button means — and the manual-nest route
-force-sets the laser work order it lands on the same way. `import_laser_nest_package` and
+force-sets the laser work order it lands on the same way. Both routes record that release
+(`released_by` = the caller, `released_at` = now) when the laser work order was new, a draft or
+unstamped — an existing stamp is kept — and both **keep an on-hold laser work order on hold**. `import_laser_nest_package` and
 `add_laser_nest` keep those routes and add four rules:
 
 1. **Manual nests and a package import are never mixed on one job — in either direction, and the
@@ -650,8 +656,9 @@ force-sets the laser work order it lands on the same way. `import_laser_nest_pac
    the planner's later `release_work_order` would be refused. The result is
    `{"import": <raw import response>, "work_order": <re-read WO>, "demoted_to_draft": true,
    "operations_returned_to_pending": N, "note": …}`; the `note` discloses what the demote cannot
-   undo — `released_at` / `released_by` still carry the stamp the route wrote, and
-   `release_work_order` re-stamps them when the planner releases. With `release=true` the tool
+   undo — `released_at` / `released_by` still carry the release the route recorded, and
+   `release_work_order` re-stamps them when the planner releases. (A stamp on a DRAFT job is
+   harmless: `update_work_order` cannot put a draft on hold, and the next release re-stamps.) With `release=true` the tool
    returns `{"import": …, "work_order": child, "demoted_to_draft": false}` and leaves the job on
    the floor's board.
 3. **`add_laser_nest` applies the same demote only to a job that was not on the floor.** The route
@@ -659,7 +666,12 @@ force-sets the laser work order it lands on the same way. `import_laser_nest_pac
    laser work order's status *before* the call: a **new** child, or one that was **DRAFT**, comes
    back DRAFT with PENDING operations exactly as in rule 2; a job that was released / in progress /
    on hold before the nest was added is left as the route set it (`demoted_to_draft: false` plus a
-   `note` saying why) — adding a nest to a running job must never take the job off the floor.
+   `note` saying why) — adding a nest to a running job must never take the job off the floor. The
+   route itself **keeps an on-hold job on hold** (and so does a package import with `release=true`):
+   the `note` then says the job is still ON HOLD and that its nests are refused by clock-in and every
+   start verb until `work_orders_resume_work_order` runs. The route now also records the release it
+   performs (`released_by` / `released_at`) on a new or previously-DRAFT laser work order, keeping an
+   existing stamp.
 4. **A failed demote is loud.** If the header `PUT` fails (409 on a concurrent edit, 403, …) the
    result is `is_error` with the PUT's status and a message beginning **`IMPORT SUCCEEDED, BUT work
    order … is still RELEASED`** (`NEST ADDED, BUT …` from `add_laser_nest`), with the `import` /
@@ -775,7 +787,7 @@ import_laser_nest_package
      "work_order": {"id": 930, "status": "draft", "version": 1, "work_order_type": "laser_cutting",
                     "operations": [{"sequence": 10, "status": "pending", ...}, ...]},
      "demoted_to_draft": true, "operations_returned_to_pending": 12,
-     "note": "released_at / released_by still carry the stamp the route wrote …"}
+     "note": "released_at / released_by still carry the release the route recorded …"}
 
 get_work_order           {"work_order_id": 930}
   → nests under operations[].laser_nest (cnc_file_name set = imported); nothing on the dispatch board
@@ -839,7 +851,9 @@ Shop-floor time is never faked: `clock_in {"work_order_id", "operation_id", "wor
 `report_operation_production {"operation_id", "quantity_complete_delta"}`,
 `clock_out {"time_entry_id", "quantity_produced"}` and
 `shop_floor_complete_operation {"operation_id", "quantity_complete"}` are the real routes with the
-real gates (a complete with zero labor recorded is refused 400, exactly as at the kiosk).
+real gates (a complete with zero labor recorded is refused 400, exactly as at the kiosk; `clock_in`
+on a draft or on-hold work order is refused 409 — release it with `release_work_order` or lift the
+hold with `work_orders_resume_work_order` first).
 
 ---
 
@@ -853,7 +867,9 @@ real gates (a complete with zero labor recorded is refused 400, exactly as at th
 | Tool result `{"status": 401, "detail": "Could not obtain an ERP access token…"}` | Refresh and login both failed (wrong password, locked account, login rate limit 5/min) | Check the account in the UI; wait out the limit |
 | `{"status": 403, "detail": "Insufficient permissions"}` | The user's role does not allow that route (`require_role`) — the SPA would refuse too | Use a user with the right role; nothing in MCP can widen it |
 | `{"status": 409, ...}` on `update_work_order` | Stale `version` (optimistic locking) | `get_work_order` → resend with the current `version` |
-| `{"status": 422, ...}` from `update_work_order` naming `release_work_order` / `work_orders_start_work_order` | `status: released` or `in_progress` was written through the header update | Call the named verb; the header update never releases or starts work (§9) |
+| `{"status": 422, ...}` from `update_work_order` naming `release_work_order` / `work_orders_start_work_order` | `status: released` or `in_progress` was written through the header update | Call the named verb; the header update never releases or starts work (§9). To lift a work-order hold, call `work_orders_resume_work_order` |
+| `{"status": 409, "detail": "This work order has not been released — release first…"}` or `"This work order is on hold…"` from `clock_in`, `shop_floor_start_operation`, `work_orders_start_operation`, `work_orders_start_work_order` or a complete of a READY operation | The work order is DRAFT or ON_HOLD — the floor cannot start work on it | A person with the role decides: `release_work_order` for a draft, `work_orders_resume_work_order` for a held job (Admin / Manager / Supervisor) |
+| `{"status": 409, "detail": "A draft work order has not been released, so there is nothing on the floor to hold…"}` from `update_work_order` | `status: on_hold` on a DRAFT | Leave it in draft; hold only released / in-progress work |
 | `{"status": 422, ...}` `"Additional properties are not allowed ('serach' was unexpected)"` | A misspelled argument — every schema is strict (§6.3) | Fix the argument name; nothing was dispatched |
 | `{"status": 409, ...}` from `add_operation` naming several work centers | Ambiguous `work_center` string | Pass the `id` (from `list_work_centers`) or a more specific name |
 | `{"status": 409, ...}` from `import_laser_nest_package` naming nests | Target already carries manually entered nests | Import into a fresh standalone WO (omit `work_order_id`) |

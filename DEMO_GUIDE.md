@@ -263,8 +263,10 @@ Created → Released → In Progress → Complete → Closed
 ```
 
 **Status Actions:**
-- **Release** - Makes available for shop floor
-- **Start** - Begins tracking, sets actual start date
+- **Release** - Makes available for shop floor (the floor cannot check in to or start a draft job)
+- **Start** - Begins tracking, sets actual start date (released jobs only; admin/manager/supervisor)
+- **Hold Work Order** - Stops the floor on a released or in-progress job; nobody can check in or start an operation until it is resumed
+- **Resume Work Order** - Lifts the hold; the job goes back to In Progress, Released, or (with no release on record) Draft
 - **Complete** - All quantity produced
 - **Close** - Final accounting, locks record
 

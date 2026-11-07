@@ -32,7 +32,7 @@ Run through this every time you start, before you touch a part:
 Some cells have a dedicated wall or machine-side touchscreen that runs a simpler, big-button version of the kiosk, set up by IT for that one station. If your cell has one, it works like this:
 
 1. **Scan your badge** (or type your employee number on the on-screen pad and press the arrow). You don't need to tap anything first — just scan.
-2. The screen shows **your station's queue**. Tap a job, then tap **CLOCK IN**. That's it — two taps. Jobs your manager put in a running order are at the top, each marked **RUN 1**, **RUN 2**, and so on — work them in that order unless your lead says otherwise. Jobs with no RUN mark come after them. The order is a recommendation: you can still start any job on the list.
+2. The screen shows **your station's queue**. Tap a job, then tap **CLOCK IN**. That's it — two taps. Jobs your manager put in a running order are at the top, each marked **RUN 1**, **RUN 2**, and so on — work them in that order unless your lead says otherwise. Jobs with no RUN mark come after them. The order is a recommendation: you can still start any job on the list — except one marked **NOT RELEASED** or **WO ON HOLD**: its work order isn't released yet or is on hold, so **CLOCK IN** is greyed out and the screen says why. Only a supervisor can clear that.
 3. While you're on a job, a banner stays pinned at the top with three big buttons: **REPORT PRODUCTION** (enter good and scrap on the keypad — any scrap makes you pick a reason from the grid, no skipping it), **COMPLETE** (closes your time and finishes the step), and **HOLD** (pick why the job is stopping — material missing, machine down, and so on). A smaller **CORRECT OVER-COUNT** button sits below them for fixing a miscount — see [Fixing an over-count](#fixing-an-over-count-you-entered-too-many).
 4. **It logs you out by itself** after about 4 minutes of no touching, with a countdown warning first — tap anywhere to stay on. Always scan in as yourself; never work under someone else's badge.
 
@@ -93,6 +93,13 @@ If the **Check In** button is greyed out or shows **Waiting**, the job isn't rea
   So "I could check into this five minutes ago and now I can't" usually means a teammate or your lead
   just held one of the other items on your machine.
 - **The job is on hold.** Someone paused this operation itself. See "Resuming held work" below.
+- **The button says "Not released".** The work order is still a draft — a supervisor hasn't released
+  it to the floor yet. You can't start it, and nothing you do here will. Ask your supervisor to
+  release it.
+- **The button says "WO on hold".** A supervisor has put the whole **work order** on hold. You can't
+  check in to or start any of its steps until a supervisor resumes it (**Resume Work Order** on the
+  work order). Resuming an operation's hold won't lift it. If you were already clocked in when the
+  hold landed, you can still clock out and record what you made.
 - **The job is blocked.** There may be a reported problem (missing material, machine down, quality hold) stopping it.
 
 What to do: pick the next job in the list and let your supervisor know the top job is stuck — but if
@@ -224,6 +231,7 @@ Before you leave, leave the floor clean for the next shift:
 | Symptom | What to do |
 | --- | --- |
 | **Check In won't work / shows "Waiting"** | An earlier step at **another** station isn't done yet, or the job is on hold or blocked. Earlier steps at *your own* station don't block you — unless one of them is **on hold**, which stops every item of that job on your machine until it's cleared. Run the next job and tell your supervisor; if the whole group greyed out at once, that's a hold and your lead clears it. |
+| **Check In shows "Not released" or "WO on hold"** | The work order hasn't been released yet, or a supervisor has put the whole work order on hold. Only a supervisor can fix it (**Release**, or **Resume Work Order**). Run the next job and tell your supervisor which work order it is. |
 | **My completion says "Clock in to this operation before completing it"** | Nobody has ever clocked in to that operation, so it can't be booked as finished. Check in first (even briefly), then complete. Your own session doesn't have to still be open — any recorded time on the operation satisfies it. |
 | **My completion was rejected** | Make sure the quantity is a whole, non-negative number and isn't more than what's ordered. Try again and add a note. If it keeps failing, get your supervisor. |
 | **Correct over-count won't remove the parts** | You can only remove what *you* recorded on this operation (your current check-in plus your own earlier ones), and only before the step is finished. If it says to *ask a supervisor*, the operation is already complete — a supervisor fixes it in the office. If it says you can only remove a smaller number, that's all you personally counted that isn't already approved — approved labor and a teammate's count need a supervisor's **Correct count** on the work-order page. |
