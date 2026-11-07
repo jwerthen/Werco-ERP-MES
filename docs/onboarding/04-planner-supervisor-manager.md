@@ -122,10 +122,19 @@ On the **work order detail** page, the action buttons in the top-right change wi
 2. **Start** — moves a released job into progress (admin, manager, or supervisor only). It works on a **released** job only; it won't start a draft and it won't take a job off hold.
 3. **Hold Work Order** — stops the floor on a released or in-progress job (admin, manager, or supervisor; you confirm first). While it's on hold nobody can check in to it or start an operation, and operators see **WO on hold**. Anyone already clocked in can still clock out and record what they made. A draft can't be put on hold — it isn't on the floor yet.
 4. **Resume Work Order** — lifts that hold (admin, manager, or supervisor). The system puts the job back where its record says: **In progress** if it was released and work had started, **Released** if it was released but nothing had been worked, or **Draft** if no release is on record (even if work had started) — then it tells you to release it, and its unstarted steps come off the floor until you do. Resume Work Order doesn't clear an *operation's* own hold; that is still **Clear Hold** on the operation row.
-5. **Complete** — finishes the job; you'll be asked for the quantity completed and quantity scrapped.
+5. **Complete** — finishes the job; you'll be asked for the quantity completed and quantity scrapped. The window starts from what's already recorded. Booking more than the floor recorded needs a short written reason (it goes on the audit trail with your name), and if you finish **below** the ordered quantity the shortfall has to be covered by scrap with a reason — otherwise leave the job open.
 6. **Print Traveler** — opens the printable traveler that goes out to the floor with the job.
 
 On a job that's on hold, an operation row's **Complete** is greyed out for any step that hasn't started yet — completing it would start it — so resume the job first. A step that was already running when the hold landed can still be completed.
+
+**Completing an operation from the office — a short count is scrap with a reason, or it stays open.** An operation row's **Complete** opens a window pre-filled with the good and scrap totals already recorded on the floor (not the target):
+
+- A step closes only when **good + scrap** cover every piece that reached it. If you enter less, the window shows **SHORT** with a **Report n as scrap** shortcut, and the button becomes **Save progress · leave open** — it saves your numbers and the step stays open. Scrap you add needs a reason; scrap already recorded is never lowered here.
+- **Pieces that were never started are not scrap.** Leave the step open and lower the work order's quantity instead — the system won't let you lower it below what a step has already accounted for.
+- Recording **more good than the floor counted** asks *"Why record more than the floor counted?"* — a required reason saved with your name. A step nobody ever clocked into needs no reason.
+- If someone is **still clocked in** when you close a step short, the window says who and offers **Clock them out and close** — they're clocked out without counting pieces they haven't reported, so check with them first.
+- Rows with work in progress show an **n unaccounted** chip next to the quantity, so you can see which steps still need a count, scrap, or a decision.
+- On a routed job a step left open short holds up the steps after it — that's deliberate: account for the pieces or re-plan the quantity.
 
 **Keying paper labor for a held job.** A back-entry clock-in on the Shop Floor **Time Clock** is refused on a job that's on hold, the same as a live one. Resume the work order, key the labor, then put it back on hold.
 
@@ -141,6 +150,7 @@ Operators can walk back their **own** miscounts from the floor, but two cases ne
 1. Click **Correct count** on the operation row.
 2. Enter the **quantity to remove** and a **reason** — the reason is required and goes on the audit trail with your name.
 3. Confirm. The operation's completed count (and the work order's rollup) drop by that amount.
+4. If the operation is already **finished** and the lower count would leave it short, the window tells you so and offers **Reopen Op N and correct**. Confirming reopens the step (it goes back to in progress) and applies the correction; the steps after it that haven't started go back to waiting. If a later step already finished with those parts, correct that one first.
 
 What it can and can't do:
 
@@ -148,7 +158,7 @@ What it can and can't do:
 - **Approved labor is locked.** If some of the count is on approved entries, the refusal tells you how much is correctable and how much is approved — **unapprove** the entry first (Time Entries approval), then correct.
 - **A finished operation *can* be corrected here — that's the difference between your button and the operator's.** The operator is told to "ask a supervisor" once the step is complete; this is where they're asking. If the operation consumed tied material, correct the count **first**, then use **Return material** on the work order's Materials panel to put the material the lower count no longer accounts for back on its lot.
 - **Not on a finished job.** A completed, closed or cancelled **work order** is refused for everyone — its production record is closed.
-- **This is a miscount fix, not scrap.** Nothing moves to scrap, and the job's status doesn't change. Bad parts are reported as scrap with a scrap reason instead.
+- **This is a miscount fix, not scrap.** Nothing moves to scrap, and the job's status doesn't change unless you choose **Reopen**. Bad parts are reported as scrap with a scrap reason instead.
 - **Everything is recorded** — the amount removed, which time entries it came off, your reason, and your name land on the tamper-evident audit trail.
 
 If the correction is refused, the reason shows right in the window — it tells you exactly what's correctable.

@@ -577,6 +577,62 @@ and completing an IN_PROGRESS operation stay allowed on a held job.
 
 See `docs/API.md` → Work Orders → "Draft and on-hold work orders refuse every start".
 
+**Short count at operation completion (owner ruling 1, 2026-11-05).** One migration, no environment
+variable. After this deploy a short count at operation completion is reported as scrap with a reason
+or the operation stays open: `POST /api/v1/shop-floor/operations/{id}/complete` closes at the good
+the floor recorded and refuses **409** (writing nothing) while units are unaccounted, the office
+operation complete and force-complete apply the same rule, and an API token may not close work short
+(**403**).
+
+1. **Migration `117_operation_short_declared`** (down-revision `116_business_keys_per_company`) adds
+   one nullable `Float` column, `work_order_operations.quantity_short_declared` — no default, no
+   backfill, no index, no RLS or grant change. It runs at **API boot** (`alembic upgrade head` in the
+   API image's start command, before uvicorn) and is a metadata-only change on Postgres, safe online.
+   The worker image never migrates, so deploy the **API before or with the worker**: a worker on the
+   new code against a database that has not run `117` would select a column that does not exist yet.
+   Every existing row reads `NULL` ("never declared"), so clock-out, reconcile-on-read and the
+   work-order header behave exactly as before on existing data. The downgrade drops the column and
+   with it every short declared since the deploy (pre-117 code never reads it).
+
+2. **Optional, read-only diagnostic — awareness, not a gate.** Operations closed short before the
+   rule existed (COMPLETE with good + scrap below their target, on a work order still open). Nothing
+   reads them differently after the deploy; the list is for knowing which records predate ruling 1.
+
+   ```sql
+   SELECT wo.company_id, wo.work_order_number, wo.status AS wo_status,
+          op.id AS operation_id, op.sequence, op.operation_number,
+          CASE WHEN op.component_quantity > 0 THEN op.component_quantity
+               ELSE wo.quantity_ordered END AS target,
+          op.quantity_complete, op.quantity_scrapped
+   FROM work_order_operations op
+   JOIN work_orders wo ON wo.id = op.work_order_id AND wo.company_id = op.company_id
+   WHERE wo.is_deleted = false
+     AND wo.status NOT IN ('COMPLETE','CLOSED','CANCELLED')
+     AND wo.work_order_type <> 'laser_cutting'
+     AND op.status = 'COMPLETE'
+     AND COALESCE(op.quantity_complete, 0) + COALESCE(op.quantity_scrapped, 0)
+         < CASE WHEN op.component_quantity > 0 THEN op.component_quantity ELSE wo.quantity_ordered END
+   ORDER BY wo.company_id, wo.work_order_number, op.sequence;
+   ```
+
+3. **During the deploy window.** A kiosk or tablet still running the old bundle sends
+   `{"quantity_complete": <target>}` to the floor close after a short clock-out; it now gets the
+   *"…exceeds the n good recorded…"* 409 and the operator sees *"Clocked out, but completing failed"*.
+   The operation is left open, which is what the rule requires — reload every kiosk and floor tablet
+   after the deploy. An MCP agent or script that relied on a partial floor `/complete` now gets 409,
+   and any standing API token that closed work short now gets 403.
+
+4. **Training handouts.** The onboarding markdown (`docs/onboarding/02-operator-shop-floor.md`,
+   `04-planner-supervisor-manager.md`) now also covers the short-count flow (SHORT, report as scrap,
+   CLOCK OUT · KEEP OPEN, office Save progress / Reopen). Re-print the two PDFs in
+   `docs/onboarding/pdf/` from the current markdown once, after this deploy, as item 3 above says —
+   they are not generated from the repo. The generated quick-reference role cards
+   (`docs/onboarding/quick-reference/`, built by `docs/onboarding/generate_onboarding_pdfs.py`) do
+   not mention the short-count flow yet; update the kiosk and crew-station card content in that
+   script and regenerate before handing them out.
+
+See `docs/API.md` → Work Orders → "Short count at completion".
+
 ---
 
 ## Standard Deployment

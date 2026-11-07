@@ -10,7 +10,9 @@ This is the runbook: how to run it, how to authenticate, what the tools are call
 the convenience tools enforce, what a result looks like, and what to do when a call fails.
 
 **Counts and names were re-checked with `python -m app.mcp --print-catalog` on 2026-11-07, for the
-draft / on-hold floor gates** (15 convenience + 748 generated tools, 16 shadowed raw operations).
+draft / on-hold floor gates, and again the same day for the short-count close rules** (15
+convenience + 748 generated tools, 16 shadowed raw operations — the short-count change added no
+tool).
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -57,7 +59,11 @@ quote against the live catalog, so a name that shifts fails CI instead of going 
   stale version, **409 on a draft or on-hold work order**) apply. `clock_in`,
   `shop_floor_start_operation`, `work_orders_start_operation` and completing a READY operation are
   refused on a job that is not released (`release_work_order` first) or is on hold
-  (`work_orders_resume_work_order` first).
+  (`work_orders_resume_work_order` first). **Nothing closes short** (owner ruling 1):
+  `shop_floor_complete_operation` closes at the good the floor already recorded and is refused
+  **409** while any unit is unaccounted, and an **API token** may not close work short through any
+  completion tool (**403**). The agent instructions say what to do with that 409: leave the work open
+  and tell the user — never invent scrap, a reason or a quantity to make a close succeed.
 
 ---
 
@@ -285,7 +291,13 @@ or mint, list or revoke tokens, including through the three tools that front tho
 (`create_api_token`, `list_api_tokens`, `revoke_api_token`: Admin only, with an interactive JWT).
 The fence blocks those direct verbs only: an **Admin**-held token is still an Admin on `/users`
 (`create_user`, `update_user`, `reset_user_password`), so the bound user's role is the real
-boundary. No token is ever bound to a superuser / `platform_admin` (409 at mint, refused at use),
+boundary. One credential rule sits on top of the role: an API token may not **close work short** —
+`shop_floor_complete_operation` / `work_orders_complete_operation` on a short close and
+`work_orders_complete_work_order` below the order answer **403** `"Closing work short must be done
+by a person signed in to the app, not an API token."` whatever the user's role (a full-count close
+is unaffected). It is the short-count rule's own refusal; read together with ruling 3 as "standing
+API tokens may not make judgment writes", it awaits owner confirmation. An interactive access JWT —
+the person's own session, which the MCP client approves call by call — is not refused. No token is ever bound to a superuser / `platform_admin` (409 at mint, refused at use),
 deactivating a token's user revokes it, and every audit row a token writes carries
 `extra_data.credential` naming the token.
 Full reference: [API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients).
@@ -852,10 +864,15 @@ A Viewer or Operator running the same session gets `403 Insufficient permissions
 Shop-floor time is never faked: `clock_in {"work_order_id", "operation_id", "work_center_id"}`,
 `report_operation_production {"operation_id", "quantity_complete_delta"}`,
 `clock_out {"time_entry_id", "quantity_produced"}` and
-`shop_floor_complete_operation {"operation_id", "quantity_complete"}` are the real routes with the
-real gates (a complete with zero labor recorded is refused 400, exactly as at the kiosk; `clock_in`
-on a draft or on-hold work order is refused 409 — release it with `release_work_order` or lift the
-hold with `work_orders_resume_work_order` first).
+`shop_floor_complete_operation {"operation_id"}` are the real routes with the real gates (a complete
+with zero labor recorded is refused 400, exactly as at the kiosk; `clock_in` on a draft or on-hold
+work order is refused 409 — release it with `release_work_order` or lift the hold with
+`work_orders_resume_work_order` first). `shop_floor_complete_operation` is a **close**: it books the
+good already recorded through `clock_out` / `report_operation_production`, its `quantity_complete`
+argument is deprecated (an expectation check, refused 409 above the recorded good), and a count that
+leaves units unaccounted is refused 409 with nothing written. `clock_out`'s result carries
+`operation_status` — `"complete"` when the clock-out itself completed the operation at a full good
+count, in which case there is nothing left to close.
 
 ---
 
@@ -872,6 +889,9 @@ hold with `work_orders_resume_work_order` first).
 | `{"status": 422, ...}` from `update_work_order` naming `release_work_order` / `work_orders_start_work_order` | `status: released` or `in_progress` was written through the header update | Call the named verb; the header update never releases or starts work (§9). To lift a work-order hold, call `work_orders_resume_work_order` |
 | `{"status": 409, "detail": "This work order has not been released — release first…"}` or `"This work order is on hold…"` from `clock_in`, `shop_floor_start_operation`, `work_orders_start_operation`, `work_orders_start_work_order`, a complete of a READY operation, or `work_orders_update_operation` setting `status: in_progress` (or `status: ready` on a draft) | The work order is DRAFT or ON_HOLD — the floor cannot start work on it | A person with the role decides: `release_work_order` for a draft, `work_orders_resume_work_order` for a held job (Admin / Manager / Supervisor) |
 | `{"status": 409, "detail": "A draft work order has not been released, so there is nothing on the floor to hold…"}` from `update_work_order` | `status: on_hold` on a DRAFT | Leave it in draft; hold only released / in-progress work |
+| `{"status": 409, "detail": "Op 20: 2 of 10 not yet accounted for (8 good, 0 scrapped)…"}` from `shop_floor_complete_operation`, or `"…unaccounted for…"` from `work_orders_complete_work_order` | The count is short and nobody has said where the missing pieces went (owner ruling 1) — nothing was written | Leave the work open and tell the user. Recording the pieces, or reporting them as scrap with a reason, is a decision for the person who knows; never invent scrap, a reason or a quantity to make the close succeed |
+| `{"status": 403, "detail": "Closing work short must be done by a person signed in to the app, not an API token."}` | An API token tried to close an operation or a work order short | A person closes it in the app; nothing an API token holds changes this |
+| `{"status": 409, "detail": "… is complete; its counts are the completion record…"}` from `work_orders_update_operation` | A count or status edit on a COMPLETE operation | Corrections go through `reduce_operation_production_office` (Admin / Manager / Supervisor), which can reopen the operation — a person's decision |
 | `{"status": 422, ...}` `"Additional properties are not allowed ('serach' was unexpected)"` | A misspelled argument — every schema is strict (§6.3) | Fix the argument name; nothing was dispatched |
 | `{"status": 409, ...}` from `add_operation` naming several work centers | Ambiguous `work_center` string | Pass the `id` (from `list_work_centers`) or a more specific name |
 | `{"status": 409, ...}` from `import_laser_nest_package` naming nests | Target already carries manually entered nests | Import into a fresh standalone WO (omit `work_order_id`) |

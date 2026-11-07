@@ -84,7 +84,9 @@ tier, that tier stands — this rule is a floor, never a loosening.
 
 Agents reach the API through the MCP server in `backend/app/mcp/` ([docs/MCP.md](MCP.md)) —
 either the Streamable HTTP door at `/mcp` (off by default, `WERCO_MCP_HTTP_ENABLED`) or the stdio
-bridge `python -m app.mcp`. **Nothing in this document changes for them.** Every tool call is a
+bridge `python -m app.mcp`. **Nothing in this document changes for them** (one credential rule —
+an API token may not close work short — is below the Work Orders matrix, and applies to an API
+token however it is presented). Every tool call is a
 real request dispatched through the same routers with a real user's bearer — a 15-minute access JWT
 or a long-lived, Admin-issued **API token** bound to one user (see the API tokens callout under
 [Admin](#admin)): `get_current_user` resolves the user, tenancy comes from the token's active
@@ -220,8 +222,9 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > **The shop-floor rows above are ticked for every role on purpose — that is what the code does, not
 > an aspiration.** `PUT /shop-floor/operations/{id}/start` and `POST /shop-floor/operations/{id}/complete`
 > both take a bare `Depends(get_current_user)`, so a **Viewer** or **Shipping** user can clock in and
-> then complete an operation — booking it at target quantity, receiving finished goods, consuming tied
-> material and writing chain rows. The new labor-evidence gate on floor completion does **not** close
+> then complete an operation — closing it at the good count recorded on the floor (or declaring the
+> shortfall as scrap with a reason), receiving finished goods, consuming tied material and writing
+> chain rows. The new labor-evidence gate on floor completion does **not** close
 > this: it is a record-quality check, not an authorization one, and the same caller satisfies it with
 > one extra clock-in request. This is **pre-existing** and was not introduced by the pooling work, but
 > pooling widens its reach (1 reachable operation on a batch WO becomes N). Ticking the cells honestly
@@ -268,6 +271,40 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > draft — so the generic edit cannot stand in for the start verb it sits beside. Paper back-entry has
 > no exemption. Labor already running when a job is held stays closable (clock-out, production
 > report, completing an IN_PROGRESS operation).
+
+> **Short count at completion (owner ruling 1, 2026-11-05) — state and credential rules; no role
+> cell changed.** A short count at operation completion is reported as scrap with a reason, or the
+> operation stays open; it is never closed at the counted quantity. The role gates are exactly the
+> rows above — what changed is what each verb will close, and for whom:
+> - **Complete (shop-floor verb)** — still every role (see the note above). It is now a **close**:
+>   it books the good already recorded on the floor and refuses **409**, writing nothing, while any
+>   received unit is unaccounted. It credits nothing to anyone's time entry, and a short close
+>   with someone else still clocked in needs `acknowledge_open_entries` (their unreported pieces will
+>   not be counted).
+> - **Complete (office verb)** — still Admin / Manager / Supervisor / Quality. It closes only when
+>   good + scrap cover every unit that reached the operation (otherwise it saves progress), recording
+>   more good than the floor's labor evidence needs a `quantity_override_reason` written as required
+>   audit evidence, and a short close with anyone clocked in needs `acknowledge_open_entries`. An
+>   operation **nobody ever clocked into** still closes from the desk with no reason — the owner's
+>   office-exempt asymmetry with the shop-floor labor gate is unchanged.
+> - **Force-complete** (`POST /work-orders/{id}/complete`, Admin / Manager / Supervisor / Quality) —
+>   bounded by what the floor recorded (an override reason to exceed it, required audit) and refused
+>   when the shortfall is not covered by scrap with a reason.
+> - **Correcting a completed operation** — the office reduce-production verb stays **Admin / Manager
+>   / Supervisor** (the existing gate), and is now the only way to correct a COMPLETE operation's
+>   count: a correction that would leave it short must send `reopen_operation` (it returns to in
+>   progress, with required audit rows). The operator's twin refuses `reopen_operation` (**422**), and
+>   `PUT /work-orders/operations/{id}` refuses count / status edits on a COMPLETE operation (**409**).
+> - **An API token may not close work short** — a credential rule, not a role rule: a short close by
+>   either complete verb and a force-complete below the order answer **403** for a standing per-user
+>   API token (`app.core.credentials.is_api_token_credential`), whatever its user's role. A
+>   full-count close by the same token is unaffected, and a **crew-station badge token is a person**
+>   and may close short. This is the short-count rule's own refusal; read together with ruling 3 as
+>   "standing API tokens may not make judgment writes", owner confirmation of that combined reading is
+>   **pending**. An interactive JWT, including one carried by an MCP client, is the person's own
+>   session and is not refused.
+>
+> See `docs/API.md` → Work Orders → "Short count at completion".
 
 > **Hold / resume are operator-facing; resolving the blocker behind a hold is not.** Both rows above
 > are new to this matrix; **neither gate changed**. `PUT /api/v1/shop-floor/operations/{id}/hold` and
@@ -421,8 +458,12 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > back, so neither half can be exercised without the authority to do the other. The supervisor's
 > optional note is recorded on
 > the **audit row only**, never written onto another operator's labor record. In the UI this is
-> the **Correct count** action on the work-order detail page, gated on `work_orders:edit`. See
-> `docs/API.md` → Work Orders → "Over-count correction … (supervisor/office)".
+> the **Correct count** action on the work-order detail page, gated on `work_orders:edit`. Since owner
+> ruling 1 a correction that would leave a COMPLETE operation short also needs `reopen_operation`
+> (the dialog's explicit **Reopen Op N and correct** step) and returns it to in progress — the same
+> Admin / Manager / Supervisor tier, no new permission; the operator verb refuses `reopen_operation`
+> with **422**. See `docs/API.md` → Work Orders → "Over-count correction … (supervisor/office)" and
+> "Short count at completion".
 
 > **Renumber a part — endpoint mapping.** `POST /api/v1/parts/{id}/renumber` (change a part's
 > number in place, retiring the old one) is enforced in code to `require_role([ADMIN, MANAGER])` —

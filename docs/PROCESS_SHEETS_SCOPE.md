@@ -200,6 +200,8 @@ The required-steps gate covers **every** path that flips an operation COMPLETE, 
 | WO-level `POST /work-orders/{id}/complete` (ADMIN/MANAGER/SUPERVISOR/QUALITY) | **Deliberate audited evidence-override** (jwerthen 2026-07-06): force-complete proceeds; the audit row records `steps_bypassed` count + details and the response carries a bypass summary. This is the sanctioned close-out for legacy/paper-evidenced/MRB-decided jobs |
 | Excel migration import | Paper-evidenced cutover: imported COMPLETE operations carry no step records **by design** — evidence for migration-era WOs lives in the paper system of record |
 
+**Short close on a serialized work order (owner ruling 1, 2026-11-05).** When either close verb would close an operation **short** (good + scrap cover what reached it, good does not) on a serialized work order whose per-serial step records are missing, it is refused **409** with its own text ahead of `STEPS_INCOMPLETE`: a scrapped serial can never satisfy the per-serial gate, and step records must never be made up for a scrapped part. Serial-level scrap disposition (and excluding scrapped serials from the gate) is a follow-up that needs its own store; until then force-complete's audited bypass is the supervisor path. See `docs/API.md` → Work Orders → "Short count at completion".
+
 Evidence attachments: `attachment_document_id` must reference a `QUALITY_RECORD` Document belonging to the operation's WO (exactly what the in-fence step-attachment endpoint produces) — anything else is 400. Kiosk tokens upload via `/shop-floor/.../attachment`; `/documents/upload` remains fenced off.
 
 ### Open decisions carried forward (surfaced in PR 1 review)

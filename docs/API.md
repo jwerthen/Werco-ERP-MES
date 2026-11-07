@@ -648,6 +648,16 @@ bot permission — the token is exactly as powerful as the user it belongs to, a
 > log in and mint tokens. The real boundary is the bound user's role — give a bot the narrowest role
 > that does its job.
 >
+> **One credential rule on top of the role: an API token never closes work short (owner ruling 1,
+> 2026-11-05).** Declaring where missing pieces went is a judgment a named person makes, so a short
+> close by either operation-complete verb and a force-complete below the order answer **403**
+> `"Closing work short must be done by a person signed in to the app, not an API token."` for an API
+> token, whatever its user's role (`app.core.credentials.is_api_token_credential`); a full-count close
+> is unaffected, and a crew-station badge token is a person and may close short. It is the
+> short-count rule's own refusal and reads together with ruling 3 as "standing API tokens may not make
+> judgment writes" — owner confirmation of that combined reading is pending. See Work Orders → "Short
+> count at completion".
+>
 > **The row wins over the claims.** The `api_tokens` row — never the JWT — says who and which
 > company: the JWT's `user_id` / `company_id` must equal the row's or the token is refused, the active
 > company is pinned to the row's `company_id` (a platform admin's switched context never applies, and
@@ -1387,19 +1397,19 @@ company-scoped.
 | POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) and the optional `unit_number` (≤ 50 chars — see "Unit #" below) | Yes |
 | GET | `/work-orders/{id}` | Get work order by ID | Yes |
 | GET | `/work-orders/{id}/timeline` | Chronological job history with category, actor and time filters; opaque cursor, `limit` 1–100 (default 30). Returns business events and source links, not raw audit payloads | Yes |
-| PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below). **`status: on_hold` on a DRAFT work order returns 409** (a draft has nothing on the floor to hold — release it first); this `PUT` is the "Hold Work Order" write for a released / in-progress job, and the door that puts a held job back on the floor is `POST /work-orders/{id}/resume` (this `PUT` can still move a held job to `draft` or `cancelled`, which keeps it off the floor; its blind move to `released` / `in_progress` is a known gap — see "Draft and on-hold work orders refuse every start" below) | Admin / Manager / Supervisor |
+| PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below). **`status: on_hold` on a DRAFT work order returns 409** (a draft has nothing on the floor to hold — release it first); this `PUT` is the "Hold Work Order" write for a released / in-progress job, and the door that puts a held job back on the floor is `POST /work-orders/{id}/resume` (this `PUT` can still move a held job to `draft` or `cancelled`, which keeps it off the floor; its blind move to `released` / `in_progress` is a known gap — see "Draft and on-hold work orders refuse every start" below). **Lowering `quantity_ordered` below what a whole-order operation has already accounted for (its good + scrap) returns 409** naming the operation, before any field is written — lower the order only by units no operation has started (see "Short count at completion" below) | Admin / Manager / Supervisor |
 | DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it) | Admin / Manager |
 | POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below. Reached from Work Orders → **Deleted** (`deleted_only=true` above) | Admin / Manager |
 | POST | `/work-orders/{id}/release` | Release to production (**404** when missing or soft-deleted) | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/start` | Start production: a **RELEASED** work order → IN_PROGRESS. **409** on a DRAFT (release first) or ON_HOLD (resume it — this verb no longer lifts a hold) work order, **400** on any other non-released status, **404** when missing or soft-deleted, **409** on a concurrent write | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/resume` | **Resume Work Order** — lift a *work-order* hold. Never releases: the target comes from the release record (`released_at` / `released_by`) — IN_PROGRESS when released and worked, RELEASED when released and unworked, **DRAFT** when no release is on record (un-worked READY operations, laser nests included, return to PENDING). **400** when not on hold, **404** when missing or soft-deleted, **503** (nothing changed) when the required audit rows cannot be written. Operation-level holds are untouched. See "Draft and on-hold work orders refuse every start" below | Admin / Manager / Supervisor |
-| POST | `/work-orders/{id}/complete` | Complete work order (409 if the WO is CANCELLED) | Yes |
+| POST | `/work-orders/{id}/complete` | Force-complete a work order (privileged override), booking `quantity_complete` as its finished count — the header is **set** to it. **409** if the WO is CANCELLED or an open operation is on hold. **409** when `quantity_complete` exceeds what the floor recorded (naming the binding operation) unless `quantity_override_reason` is sent, and **400** above what can still exist once declared shorts are out, even with a reason; **409** when the shortfall below the order is not covered by floor-reported scrap or `quantity_scrapped` (with a reason); **403** for an API token completing short; **503** (nothing saved) when the required audit row cannot be written. See "Short count at completion" below | Admin / Manager / Supervisor / Quality |
 | POST | `/work-orders/{id}/duplicate` | **Duplicate a work order** — copy its *plan* (operations, laser nests, open material ties, re-snapshotted process-sheet steps) onto a new **DRAFT** WO. Body `{quantity_ordered, due_date}`; **201** returning an **envelope**, not a bare work order. See "Duplicating a work order" below | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/operations` | Add an operation to a work order | Admin / Manager / Supervisor |
-| PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below). **409** if it sets `status` to COMPLETE on a not-yet-complete operation — completion goes through the completion endpoints (see "Terminal-state lock"). **409** with the start gate's text if it sets `status` to IN_PROGRESS on an operation of a draft, on-hold or complete / closed / cancelled work order, and **409** "release first" if it sets `status` to READY on a draft — both before any field is written; re-sending the operation's current status is not a transition (see "Draft and on-hold work orders refuse every start") | Admin / Manager / Supervisor |
+| PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below). **409** if it sets `status` to COMPLETE on a not-yet-complete operation — completion goes through the completion endpoints (see "Terminal-state lock"). **409** with the start gate's text if it sets `status` to IN_PROGRESS on an operation of a draft, on-hold or complete / closed / cancelled work order, and **409** "release first" if it sets `status` to READY on a draft — both before any field is written; re-sending the operation's current status is not a transition (see "Draft and on-hold work orders refuse every start"). **On a COMPLETE operation, changing `quantity_complete`, `quantity_scrapped`, `scrap_reason` or `status` returns 409** — those are the completion record; correct the good count with `…/reduce-production`, which can reopen the operation (re-sending the stored values, and every other field, is still accepted) | Admin / Manager / Supervisor |
 | POST | `/work-orders/operations/{id}/start` | Start an operation (**office** verb — operators start work through `PUT /shop-floor/operations/{id}/start` and the kiosk, which stay operator-open). Refused before any write, in the shop-floor twin's order: **400** already complete / already in progress (it never re-opens or re-stamps one), **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **409** operation on hold (starting does not lift a hold), **400** predecessors | Admin / Manager / Supervisor / Quality |
-| POST | `/work-orders/operations/{id}/complete` | Complete an operation (or record partial progress; 409 if the parent WO is terminal; **409 for a READY operation on a draft or on-hold WO** — completing it would start it). **Office** verb — the shop-floor twin is the operator path | Admin / Manager / Supervisor / Quality |
-| POST | `/work-orders/operations/{id}/reduce-production` | Supervisor/office over-count correction — walk back good-count across **any** operator's **unapproved** labor on the operation; **a COMPLETE operation is correctable here** (unlike the operator's twin), a terminal WO is not; no clock-in required (see note below) | Admin / Manager / Supervisor |
+| POST | `/work-orders/operations/{id}/complete` | Record an operation's good and scrap **totals** from the office. It **closes only when good + scrap cover every unit that reached the operation**; otherwise it saves progress and stays open (a submit that changes nothing is a **200** "No change" that writes nothing). 409 if the parent WO is terminal; **409 for a READY operation on a draft or on-hold WO** — completing it would start it. Query params `quantity_scrapped` (a total that never lowers), `scrap_reason` / `scrap_reason_code_id`, `quantity_override_reason`, `acknowledge_open_entries` — see "Short count at completion" below. **Office** verb — the shop-floor twin is the operator path | Admin / Manager / Supervisor / Quality |
+| POST | `/work-orders/operations/{id}/reduce-production` | Supervisor/office over-count correction — walk back good-count across **any** operator's **unapproved** labor on the operation; **a COMPLETE operation is correctable here** (unlike the operator's twin), a terminal WO is not; no clock-in required. A correction that would leave a COMPLETE operation short is **409** unless the body sends `reopen_operation: true`, which returns it to in progress (see note below) | Admin / Manager / Supervisor |
 | GET | `/work-orders/{id}/material-allocations` | List the work order's material ties (`include_inactive`, default `true`) | Yes |
 | POST | `/work-orders/{id}/material-allocations` | Tie a material part to the work order or one of its operations (**201**) | Admin / Manager / Supervisor |
 | PATCH | `/work-orders/{id}/material-allocations/{allocation_id}` | Edit an **open** tie's quantities, lot pin, or notes | Admin / Manager / Supervisor |
@@ -1580,7 +1590,9 @@ company-scoped.
 > check**, so a sequenced routing constrains the normal flow without making out-of-order completion
 > unreachable. Stated plainly so nobody plans around a guarantee that isn't there:
 > - **`_sync_operation_status_from_quantity`** (read path) flips an operation to COMPLETE from closed
->   labor evidence once its booked quantity reaches target — ungated by sequence.
+>   labor evidence once its booked good count reaches the units that reached it (the target, unless an
+>   upstream close in its chain declared a short — see "Short count at completion") — ungated by
+>   sequence. Scrap never counts there, so a read never closes a short.
 > - **`_copy_slot_completion_evidence`** (read path) flips regenerated sibling rows sharing a progress
 >   key to COMPLETE from a completed sibling's evidence — ungated by sequence.
 > - **`POST /work-orders/{id}/complete`** (Admin / Manager / Supervisor / Quality) force-completes every
@@ -1592,7 +1604,9 @@ company-scoped.
 >   override** — the full old→new row diff lands on the tamper-evident chain — and the read-path heal
 >   will **never re-demote** it, because that heal reads PENDING rows only. (Its status refusals are
 >   work-order-state rules, not sequence rules: COMPLETE always, IN_PROGRESS on a draft / on-hold /
->   terminal work order, READY on a draft — see "Draft and on-hold work orders refuse every start".)
+>   terminal work order, READY on a draft — see "Draft and on-hold work orders refuse every start" —
+>   and any status change at all on an operation that is already COMPLETE — see "Short count at
+>   completion".)
 >
 > **`_apply_work_order_schedule` promotes without a gate and is provably safe — don't "fix" it.**
 > `PUT /scheduling/work-orders/{id}/schedule`, `…/schedule-earliest`, and
@@ -1828,31 +1842,220 @@ company-scoped.
 > jobs with no release record will resume to DRAFT.
 >
 > **Completion contract (shared finalizer).** Operation completion rolls up into the work order
-> through one shared finalizer, so all completion paths behave identically. On the absolute
-> completion verbs (`/operations/{id}/complete`, both here and on the shop floor) the stored
-> `quantity_complete` is `clamp(max(existing, requested, recorded production evidence), 0, target)`:
-> it never drops below the value already recorded or below durable production evidence, and never
-> exceeds the operation target. The work order's `quantity_complete` only ever moves forward. On a
+> through one shared finalizer, so all completion paths behave identically. The office
+> `/work-orders/operations/{id}/complete` stores the requested good **total** as
+> `clamp(max(existing, requested, recorded production evidence), 0, target)`: it never drops below
+> the value already recorded or below durable production evidence, and never exceeds the operation
+> target (nor the units that can still reach the operation — see "Short count at completion" below).
+> The shop-floor `/shop-floor/operations/{id}/complete` records **no** good of its own: it closes at
+> `clamp(max(existing, recorded production evidence), 0, target)`. While operations are open the work
+> order's `quantity_complete` only moves forward. When **every** operation is COMPLETE it is **set**
+> by one rule (`finished_quantity_at_all_complete`): `quantity_ordered` when no operation declared a
+> short (the old snap, now clamped to the order), otherwise what came out of the last whole-order
+> stage — or the sum of the line items when their targets add up to the order. A force-complete
+> (`/work-orders/{id}/complete`) sets it to the quantity it books. On a
 > **laser dispatch-pool WO** (`work_order_type='laser_cutting'`) the work-order rollup is the
 > **sum** of per-nest progress rather than the sequential single-operation rule, and completing all
 > nests does **not** snap the header to `quantity_ordered` — see "Pool WO header progress" under
 > Laser Nests. Scrap
 > is **opt-in on update**: `quantity_scrapped` is optional on both `/work-orders/{id}/complete` and
-> `/work-orders/operations/{id}/complete` — omit it to leave previously-recorded scrap untouched;
-> send an explicit value (including `0`) to overwrite it. When the value written is **> 0** a
-> scrap reason is **required** (else **422**) — free-text `scrap_reason`, or on
-> `/work-orders/{id}/complete` alternatively a structured `scrap_reason_code_id` — see "Scrap reason
-> is required when scrap is reported" below. Completing an **on-hold** operation is
-> rejected with **409 Conflict** (`{"detail": "Operation is on hold and cannot be completed"}`);
+> `/work-orders/operations/{id}/complete` — omit it to leave previously-recorded scrap untouched. On
+> `/work-orders/{id}/complete` an explicit value (including `0`) overwrites the work order's scrap; on
+> `/work-orders/operations/{id}/complete` it is a **total that never lowers** (a value below what is
+> recorded leaves the recorded scrap as it is). A scrap reason is **required** (else **422**) when
+> `/work-orders/{id}/complete` writes scrap above **0**, or when `/work-orders/operations/{id}/complete`
+> raises the recorded total — free-text `scrap_reason` or a structured `scrap_reason_code_id`, on
+> both verbs — see "Scrap reason is required when scrap is reported" below. Completing an
+> **on-hold** operation is rejected with **409 Conflict**
+> (`{"detail": "Operation is on hold and cannot be completed"}`);
 > `/work-orders/{id}/complete` likewise returns **409** if any open operation is on hold
 > (`"…is on hold; resolve the hold first"`) — resolve the hold before completing. Completing a
 > **READY** operation of a **draft** or **on-hold** work order is refused **409** on both operation
 > completion verbs (completing it would start it — see "Draft and on-hold work orders refuse every
-> start" above); an IN_PROGRESS operation stays completable. A work order that
-> reaches `complete` always carries both an `actual_start` and an `actual_end`. Successful completion
-> responses carry a `quality_exceptions` array (default `[]`) listing any unsatisfied **quality gates**
-> — see "Quality gates on completion are warn-and-record" under Shop Floor; these warn, they do **not**
-> block the completion.
+> start" above); an IN_PROGRESS operation stays completable, under the short-count rules below. A
+> work order that reaches `complete` always carries both an `actual_start` and an `actual_end`.
+> Successful completion responses carry a `quality_exceptions` array (default `[]`) listing any
+> unsatisfied **quality gates** — see "Quality gates on completion are warn-and-record" under Shop
+> Floor; these warn, they do **not** block the completion.
+>
+> **Short count at completion (owner ruling 1, 2026-11-05).** A short count at operation completion
+> is reported as **scrap with a reason**, or the operation **stays open** — it is never closed at the
+> counted quantity. Every short close is an explicit Complete by a named person; nothing closes a
+> short on its own. The arithmetic has one implementation,
+> `work_order_state_service.OperationAccounting` (built by `operation_accounting` /
+> `stage_accounting`), which every verb, read model and seam below calls:
+>
+> | Figure | Meaning |
+> |---|---|
+> | `target` | The operation's target (`operation_target_quantity` — what `quantity_ordered` means on every operation payload) |
+> | `ceiling` | `target` − the shorts declared upstream in this operation's chain — the **most good the server accepts** here (clock-out, `/production` and the office verb refuse **400** above it) |
+> | `received` | `ceiling` − soft feed credit from a short component chain — the units that actually reached the operation |
+> | `unaccounted` | `received` − good − scrap — what a close must still account for |
+> | `closing_short` | `received` − good — the short a close declares (covered by scrap) |
+>
+> - **Two completion rules, deliberately different.** The implicit auto-complete paths — a clock-out,
+>   and reconcile-on-read — complete an operation only on a **full good count** of the units that
+>   reached it (`good ≥ received`). Scrap never counts there, so an operator who scrapped two and is
+>   re-running replacements is never closed out from under them, and a GET never closes a short. The
+>   explicit close verbs — `POST /shop-floor/operations/{id}/complete` and
+>   `POST /work-orders/operations/{id}/complete` — close when good **+ scrap** cover every received
+>   unit (`unaccounted = 0`). An operation whose target is 0 is no longer auto-completed by a
+>   clock-out.
+> - **A short is declared, never inferred.** A close that closes short writes
+>   `work_order_operations.quantity_short_declared` = `received − good` (migration `117`; `null` on
+>   every other close and on every pre-117 row). Only the two explicit close verbs write it, it is on
+>   no request schema, and nothing re-derives it from the counts later — so a later correction cannot
+>   change what the next stage was credited with, and existing data reads exactly as before.
+> - **Credit flows along chains, by sequence.** The operations of one component part
+>   (`component_part_id`) form a chain that is always credited. The work order's whole-order
+>   operations (no component, target = `quantity_ordered`) form the main chain, credited **only on a
+>   sequential work order** (`sequential_operations = true`). Laser dispatch-pool nests and line
+>   items are singletons and never receive credit. A short declared upstream lowers each later
+>   operation's `ceiling`; a component chain's loss reaches the main chain as **soft** feed credit
+>   (`ceil(lost ÷ qty_per)`), which lowers `received` but never the `ceiling`, so an assembly built from
+>   replenished components can still record its full count. **On a pooled work order the main chain
+>   gets no credit**: an operation after a short close must record scrap for the units it never got,
+>   or stay open — the remedy is the audited sequential flip (`PUT /work-orders/{id}`).
+> - **An operation left open short holds the routing.** Later operations at other work centers stay
+>   PENDING behind it on any work order, and on a sequential one every later operation does. Pieces
+>   never started are **never** scrap (scrap consumes material, invariant 6): leave the operation
+>   open and have a supervisor lower `quantity_ordered` (floored, below) or a nest's `planned_runs`.
+> - **The all-complete header** is `finished_quantity_at_all_complete` — see "Completion contract"
+>   above. A work order that closed 8 good + 2 scrapped at its last stage books 8, and its
+>   finished-goods receipt is 8.
+>
+> **The office verb — `POST /work-orders/operations/{id}/complete`** (Admin / Manager / Supervisor /
+> Quality). Query parameters: `quantity_complete` (required, the absolute good **total**),
+> `quantity_scrapped` (optional absolute scrap **total that never lowers** — omit it to leave the
+> floor's scrap untouched), `scrap_reason` / `scrap_reason_code_id` (required only when the scrap
+> total rises; written only then, never cleared), `quantity_override_reason`, and
+> `acknowledge_open_entries` (default `false`). Every check runs before the first write, in this
+> order: **400** non-finite quantity; **404**; **409** terminal work order; **400** predecessors
+> incomplete; **400** bad quantity / missing target; **400** already complete; **409** operation on
+> hold (**400** other non-startable status); **409** a READY operation under a draft / on-hold work
+> order; **400** negative scrap; **404** / **422** unknown / inactive scrap code; **422** a scrap rise
+> with no reason; **400** good above the `ceiling`; **422** good above the floor's labor evidence with
+> no `quantity_override_reason` — only when the operation carries any TimeEntry, so desk cleanup of
+> never-clocked work stays reason-free (the owner's office-exempt asymmetry). Then the decision:
+> - **Not accounted, nothing changed** (same good, no scrap rise) → **200**
+>   `{"message": "No change — Op N left open", "is_fully_complete": false, …}` that writes **nothing**
+>   — not even the auto-start.
+> - **Not accounted otherwise** → **200** `"Progress updated"`, the operation stays open.
+> - **Accounted and short** (`closing_short > 0`) → **403** for an API token; **409** naming anyone
+>   still clocked in (the caller included) unless `acknowledge_open_entries=true`, which clocks them
+>   out with their quantities untouched (pieces they never reported are not counted) and lists them in
+>   `closed_time_entries`; **409** on a serialized work order whose per-serial step records are
+>   missing. A **full-count** office close never auto-closes anyone.
+> - Then, whenever the call closes the operation, **409** `STEPS_INCOMPLETE` as before.
+>
+> The response is `{message, is_fully_complete, operation: {id, status, quantity_complete,
+> quantity_scrapped, upstream_quantity_short, quantity_unaccounted, quantity_short_declared},
+> closed_time_entries, quality_exceptions}`. Every call that writes records **one** quantity audit row
+> (`UPDATE`, `work_order_operation`; old/new `quantity_complete`, `quantity_scrapped`, `scrap_reason`,
+> `scrap_reason_code_id`, `quantity_short_declared`; `extra_data` `changes`, `target`, `received`,
+> `upstream_quantity_short`, `unaccounted_after`, `closed_short`, `asserted_above_recorded`,
+> `recorded`, `override_reason`, `acknowledged_open_entries`), followed on a close by the
+> `STATUS_CHANGE` row, whose `extra_data` now carries `target` / `received` /
+> `upstream_quantity_short`. The quantity row is **required** evidence (`log_required`) whenever scrap
+> rose, the close was short or good exceeded the floor's evidence: when it cannot be written nothing
+> is saved and the answer is **503** `The completion audit could not be saved; nothing was changed.
+> Please retry.`
+>
+> **Force-complete — `POST /work-orders/{id}/complete`** (Admin / Manager / Supervisor / Quality) is
+> held to the rule at the **work-order** grain. After its existing checks (cancelled **409**, an open
+> operation on hold **409**, the scrap-reason **422**) and before any write, one grouped,
+> tenant-scoped TimeEntry read feeds `work_order_completion_bounds`: `deliverable` (the most the
+> floor's recorded good supports at the binding operation), `physical_max` (the most that can exist
+> once declared shorts are out) and `floor_loss` (units the floor already accounted as lost). It
+> refuses, in order: **409** `quantity_complete` above `deliverable` without a non-blank
+> `quantity_override_reason` (naming the binding operation); **400**, with a reason, above
+> `physical_max`; **409** when `quantity_ordered − quantity_complete` is not covered by
+> `max(floor_loss, work-order scrap)` (the `quantity_scrapped` sent, else the stored value); **403**
+> an API token completing below the order. The header is then **set** to `quantity_complete` for every
+> work-order type — never `max()`'d with the header before the loop, which on a routing whose first
+> stage completed at the full order re-inflated the finished-goods receipt past a declared short (two
+> stages, op 10 at 10, op 20 at 8 + 2: the header and the FG receipt are 8, not 10). Open operations
+> are still closed without invented per-operation counts and without a declared short. The quantity
+> audit row carries `extra_data` `deliverable`, `physical_max`, `floor_loss`, `binding_operation_id`,
+> `binding_operation`, `override_reason`, `asserted_above_recorded`, and is **required** evidence
+> (**503**, nothing saved) whenever the booked quantity is below the order or an override was used.
+> The response shape is unchanged. An unreported work order booked at its full order passes the
+> bounds exactly as before.
+>
+> **Correcting a completed operation.**
+> - **`PUT /work-orders/operations/{id}`** refuses **409** a change to `quantity_complete`,
+>   `quantity_scrapped`, `scrap_reason` or `status` on a COMPLETE operation, after the version check
+>   and before any write. Re-sending the stored values (compared numerically) and editing any other
+>   field are still accepted.
+> - **`POST /work-orders/operations/{id}/reduce-production`** (the office twin, body
+>   `ProductionReductionRequest`) gains `reopen_operation` (default `false`). When lowering a
+>   COMPLETE operation's count would leave it short, the correction is refused **409** before any
+>   write unless `reopen_operation: true` is sent. Then the operation returns to **IN_PROGRESS**
+>   (`actual_end`, `completed_by` and `quantity_short_declared` cleared, `current_operation_id`
+>   re-pointed) and every un-worked READY operation it now blocks returns to PENDING through the one
+>   demotion core (scope `blocked_by`). The reopen is refused **409** while a later operation of the
+>   same chain is COMPLETE — correct that one first. The reopen's `STATUS_CHANGE` row
+>   (`extra_data.transition = "reopened_by_correction"`, the reason, the accounting and the demoted
+>   ids) and one ready → pending row per demoted operation
+>   (`extra_data.transition = "predecessor_reopened"`) are **required** evidence: **503**
+>   `The correction audit could not be saved; nothing was changed. Please retry.` rolls the whole
+>   correction back. A correction that scrap still covers leaves the operation COMPLETE and its declared
+>   short untouched. Consumed material is never auto-returned — use the material return verb. The
+>   operator's `POST /shop-floor/operations/{id}/reduce-production` refuses `reopen_operation: true`
+>   with **422** `reopen_operation is an office correction`.
+> - **`PUT /work-orders/{id}`** refuses **409** lowering `quantity_ordered` below the largest good +
+>   scrap any whole-order operation has already recorded, after the status / draft / due-date checks
+>   and before the sequencing check and any write. Laser nests and line items set no floor.
+>
+> **API tokens may not close work short.** A standing per-user API token
+> (`app.core.credentials.is_api_token_credential`) is refused **403** `Closing work short must be
+> done by a person signed in to the app, not an API token.` on a short close by either operation
+> verb and on a force-complete below the order; a full-count close by the same token is unchanged. A
+> crew-station badge token is a person and may close short. This refusal is the short-count rule's
+> own; it reads together with ruling 3 as "standing API tokens may not make judgment writes", and
+> owner confirmation of that combined reading is **pending**. An interactive JWT — including one an
+> MCP client carries — is the person's own session and is not refused.
+>
+> **Read models.** `WorkOrderOperationResponse` (every response built through
+> `_enrich_work_order_operations` — `GET /work-orders/{id}`, by-number, create, duplicate, both
+> nest-package imports, template use) carries `quantity_short_declared` (the column) and, computed in
+> memory, `upstream_quantity_short`, `quantity_good_ceiling` and `quantity_unaccounted` (`null`
+> outside that enrichment). `WorkOrderResponse` there carries `quantity_deliverable` and
+> `quantity_accounted_loss` — the same bounds the force-complete enforces, from one grouped TimeEntry
+> read per work order. `quantity_ordered` keeps meaning the target; a client derives
+> `received = quantity_ordered − upstream_quantity_short`. The floor reads carry the same per-operation
+> keys — see Shop Floor → "Short-count figures on floor reads".
+>
+> **Refusal texts** (plain strings from `operation_action_gates`, rendered verbatim by every surface;
+> `Op N` is the operation's label, never doubled on a legacy `Op 10` value):
+>
+> | Where | Status | `detail` |
+> |---|---|---|
+> | Floor close verb | 409 | `Op N: {u} of {received} not yet accounted for ({good} good, {scrap} scrapped). Record finished pieces (clock out with your count, or Report production), report lost pieces as scrap with a reason, or leave the operation open. Pieces never started: ask a supervisor to lower the quantity.` — plus ` ({n} never reached it — closed short upstream.)` when an upstream close declared a short. The office verb saves progress instead of refusing |
+> | Both close verbs (short close) | 409 | `{A and B} {is/are} still clocked in to Op N — have them clock out with their count first, or leave the operation open.` — the office verb appends ` Resubmit with acknowledge_open_entries to clock them out; pieces they have not reported will not be counted.` |
+> | Both close verbs (short close) | 409 | `Op N is {n} short on a serialized work order and required step records are missing for {SN-1, SN-2 / this operation}. Scrapped serials can't be recorded yet — leave the operation open and ask a supervisor. Never record steps for a part that was scrapped.` |
+> | Both close verbs, force-complete | 403 | `Closing work short must be done by a person signed in to the app, not an API token.` |
+> | Floor close verb | 409 | `quantity_complete ({q}) exceeds the {good} good recorded on Op N; record the pieces through clock-out or Report production, or report the shortfall as scrap with a reason.` |
+> | Floor close verb | 409 | `Op N has only {u} unaccounted; declaring {d} scrap would over-state it. Refresh and re-enter; extra scrap belongs on clock-out or Report production.` |
+> | Clock-out | 409 | `Op N is already complete; clock out with 0 pieces and tell a supervisor about any extra pieces.` |
+> | Office verb, clock-out, `/production` | 400 | `Quantity ({q}) exceeds the {ceiling} units that can reach Op N — {n} were closed short upstream.` (clock-out and `/production` keep their old text when nothing upstream was declared short) |
+> | Office verb | 422 | `quantity_override_reason is required to record more good than the {recorded} counted on the floor for Op N` |
+> | Floor close verb (body), office verb | 422 | `scrap_reason or scrap_reason_code_id is required when quantity_scrapped is greater than 0` |
+> | Office verb | 200 | `No change — Op N left open` |
+> | Force-complete | 409 | `quantity_complete ({Q}) exceeds the {d} the floor recorded at Op N; record the pieces there, or give quantity_override_reason` (` at Op N` omitted when nothing binds) |
+> | Force-complete | 400 | `quantity_complete ({Q}) exceeds the {p} that can still be delivered; {n} were reported scrapped short` |
+> | Force-complete | 409 | `cannot complete work order: {short} of {ordered} unaccounted for ({Q} complete, {covered} scrapped); report the short as scrap with a reason, or leave the work order open` |
+> | `PUT /work-orders/operations/{id}` | 409 | `Op N is complete; its counts are the completion record. Correct the good count with reduce-production (it can reopen the operation).` |
+> | Office reduce | 409 | `Lowering Op N by {d} would leave it {n} short, and a completed operation cannot be short. Resubmit with reopen_operation to reopen it (it returns to in progress).` |
+> | Office reduce | 409 | `Op M is already complete with these units; correct Op M first.` |
+> | `PUT /work-orders/{id}` | 409 | `Op N has already accounted for {floor} units; lower the order only by units no operation has started.` |
+> | Close verbs, force-complete / office reduce | 503 | `The completion audit could not be saved; nothing was changed. Please retry.` / `The correction audit could not be saved; nothing was changed. Please retry.` |
+>
+> **Not changed:** the scanner's `complete_blockers` stay state-only (so `legal_actions` may list
+> `complete` for an operation whose close would be refused short); the material consumption formula
+> (it now reads honest counts); laser nest `PATCH` of `planned_runs` (lowering below completed runs is
+> still allowed); and the floor-requires-labor / office-exempt asymmetry. **Before deploying**, see
+> [`DEPLOYMENT_RUNBOOK.md` → Wave 2 rollout](DEPLOYMENT_RUNBOOK.md#wave-2-rollout) (migration `117`).
 >
 > **Completion signals.** When a work order reaches **COMPLETE** (operation/WO completion paths) or
 > **CLOSED** (shipment close), the system fires a uniform signal set: an internal `WO_COMPLETED`
@@ -2035,15 +2238,18 @@ company-scoped.
 >   with `uq_wo_inventory_issue`).
 >
 > **Reporting production is still NOT a consumption trigger.** A partial production report on an open
-> operation — `POST /shop-floor/operations/{id}/complete` short of the full quantity, or a clock-out
-> that does not close the operation — moves **no stock**. Keying 3 of 6 runs on an unfinished nest
+> operation — `POST /shop-floor/operations/{id}/production`, an office
+> `POST /work-orders/operations/{id}/complete` that saves progress, or a clock-out that does not close
+> the operation — moves **no stock**. Keying 3 of 6 runs on an unfinished nest
 > deducts nothing; the sheets move when that operation closes. Client copy built on these numbers must
 > say "deducts when this operation completes", never "deducting now".
 >
 > **Force-complete is a no-op for consumption in practice.** `POST /work-orders/{id}/complete` calls
 > the seam for symmetry, but it never writes `operation.quantity_complete`, so `target` is 0 and the
 > sum-delta is non-positive: a force-completed operation's tie posts nothing unless the operation
-> already carried produced quantity from an earlier report. See
+> already carried produced quantity from an earlier report. (Since ruling 1 it does **set** the
+> work-order header to the quantity it books, so the finished-goods receipt and the BOM backflush
+> basis follow that figure — see "Short count at completion".) See
 > `docs/MATERIAL_CONSUMPTION_PLAN.md` → "Residual gaps of the operation-completion trigger".
 >
 > The two tie shapes behave differently:
@@ -2194,19 +2400,25 @@ company-scoped.
 >   and new values ride the tamper-evident audit row.
 > - **`POST /work-orders/operations/{id}/complete`** — gained a `scrap_reason` **query parameter**;
 >   this path also now rejects a **negative** `quantity_scrapped` with **400 Bad Request**
->   (`"quantity_scrapped cannot be negative"`), matching `/work-orders/{id}/complete`.
+>   (`"quantity_scrapped cannot be negative"`), matching `/work-orders/{id}/complete`. Since owner
+>   ruling 1 its `quantity_scrapped` is a **total that never lowers**, and the reason is required only
+>   when that total **rises**: either `scrap_reason` or the newly accepted `scrap_reason_code_id`
+>   satisfies it (422 `"scrap_reason or scrap_reason_code_id is required when quantity_scrapped is
+>   greater than 0"`), and both are written only then — a re-sent total never relabels or clears the
+>   floor's recorded reason (see "Short count at completion" above).
 >
 > The `422` is enforced at the data boundary (Pydantic body validator on the two `PUT` bodies; an
 > in-handler guard on the two query-param `complete` verbs), so a scripted/API client can no longer
 > record reasonless scrap that the office/admin UIs already block. `scrap_reason_code_id` is accepted
-> **only** on `/work-orders/{id}/complete` — the other three office endpoints remain free-text-only.
+> on the two `complete` verbs — the two `PUT` bodies remain free-text-only.
 >
 > **Over-count correction — `POST /work-orders/operations/{operation_id}/reduce-production`
 > (supervisor/office).** The role-gated twin of the operator's
 > `POST /shop-floor/operations/{id}/reduce-production` (see "Over-count correction" under Shop
 > Floor for the shared semantics — one shared core, the two paths cannot drift). It walks back
 > good-count quantity that was over-reported on an operation — a
-> miscount correction, **not** a scrap move (scrap fields and statuses are never touched).
+> miscount correction, **not** a scrap move (scrap fields are never touched, and the status changes
+> only through an explicit `reopen_operation`).
 > Differences from the shop-floor verb:
 > - **Role-gated**: `require_role([ADMIN, MANAGER, SUPERVISOR])` — an Operator gets **403** (this
 >   verb corrects **other operators'** labor records, a Work Orders **Edit** power, not operator
@@ -2221,7 +2433,10 @@ company-scoped.
 >   lowering a completed operation's count is precisely what opens the bounded
 >   `correct_over_consumption` allowance the return is measured against. **Order matters: reduce
 >   first** (the count is the record), then return the material the lower count no longer accounts
->   for. A corrected COMPLETE operation stays COMPLETE — it just carries a truthful count.
+>   for. A corrected COMPLETE operation stays COMPLETE with a truthful count **only while good + scrap
+>   still cover every unit that reached it**; a correction that would leave it short is refused
+>   **409** unless the body sends `reopen_operation: true`, which returns it to IN_PROGRESS (owner
+>   ruling 1 — see "Correcting a completed operation" under "Short count at completion" above).
 > - **No clock-in required** — the supervisor is correcting from the office, not working the
 >   operation.
 > - **Scope: ALL unapproved labor on the operation, any operator's** — the walk goes open entries
@@ -2237,7 +2452,7 @@ company-scoped.
 >
 > Body is the same `ProductionReductionRequest` (`quantity_delta` required `> 0` finite; `reason`
 > required non-blank ≤ 255 — a **correction** reason, not a scrap reason; optional `source` /
-> `notes`). Everything else matches the shop-floor twin: **tenant-scoped 404** before any mutation,
+> `notes`; `reopen_operation`, default `false`, office verb only). Everything else matches the shop-floor twin: **tenant-scoped 404** before any mutation,
 > the **terminal-work-order** refusal (**409** `"This work order is complete, closed or cancelled --
 > its recorded production can no longer be corrected"` — a message deliberately **split** from the
 > operator's "ask a supervisor" one, since referring a caller to a supervisor for a terminal work
@@ -2258,7 +2473,9 @@ company-scoped.
 > — the per-entry paper trail of the walk (`{time_entry_id, entry_type, quantity_produced_before,
 > quantity_produced_after}`, in walk order). See the "Over-count correction Schema" under Shop
 > Floor. In the app this is the **Correct count** action on each operation row of the work-order
-> detail page (gated on `work_orders:edit`).
+> detail page (gated on `work_orders:edit`); when the server answers "would leave it … short", the
+> dialog offers an explicit **Reopen Op N and correct** button that resends with
+> `reopen_operation: true` (never sent on the first attempt).
 
 > **`hold_context` — WHY an operation is held, on every work-order response.** Each
 > `WorkOrderOperationResponse` row carries `hold_context`, populated **only** when
@@ -3666,15 +3883,19 @@ environment variable or deployment configuration change is needed.
 > sum, so the header advances as **each** nest's sheets are cut rather than freezing at the largest
 > single nest's count until every nest completes. Two consequences:
 > - **No snap at completion.** When all nests reach COMPLETE the header is **not** snapped to
->   `quantity_ordered` — a nest completed short keeps the honest as-cut total (routed WOs keep
->   their existing complete-at-target behavior).
+>   `quantity_ordered` — a nest completed short keeps the honest as-cut total (routed WOs snap to
+>   the order only when no operation declared a short — see Work Orders → "Completion contract").
 > - **Raise-only self-heal on read.** A pool WO whose header is stale-low is healed up to the
 >   pooled sum by reconcile-on-read on its next work-order detail/list read — best-effort, never
 >   lowers, no production post required.
 >
 > The header stays monotonic-up except through the sanctioned reduce-production verbs, where
 > lowering one nest's evidence lowers the pool header by the same delta (see "Over-count
-> correction" under Work Orders and Shop Floor).
+> correction" under Work Orders and Shop Floor), and a force-complete, which sets it to the quantity
+> it books — bounded, unless it carries an override reason, by the sum of the nests' recorded
+> progress (see Work Orders → "Short count at completion"). A nest is a singleton: it never
+> receives upstream credit, so a nest closed short (good + scrap covering its planned runs) carries
+> its declared short on its own row only, and its `remaining_runs` stays above 0 on a COMPLETE nest.
 >
 > **Work-center selection (explicit pick, the job's own laser, auto-detect).** Each nest's
 > backing operation lands on a work center resolved in this order:
@@ -5504,11 +5725,11 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | GET | `/shop-floor/operations/{id}/documents` | Kiosk doc-viewer discovery: the operation's controlled part drawing, live nest reference PDF, nest material, and critical SPC characteristics (see note below) | Yes |
 | GET | `/shop-floor/documents/{id}/inline` | Serve a kiosk-viewable document PDF inline — DRAWING-type or live-nest-referenced only, tenant-scoped, uniform **404** on any miss (see note below) | Yes |
 | POST | `/shop-floor/clock-in` | Clock in to operation (starts a PENDING / READY one). Refusal order, all before any write: **400** already clocked in, **404** operation, **400** operation not on that work order, **400** wrong work center, **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **400** `Operation is not ready to start` (incl. an operation-level hold), **400** predecessors. A back-entry (`source = "backfill"`) is refused exactly like a live clock-in | Yes |
-| POST | `/shop-floor/clock-out/{id}` | Clock out with production data | Yes |
+| POST | `/shop-floor/clock-out/{id}` | Clock out with production data. Completes the operation on its own only on a **full good count** of the units that reached it (scrap never counts); the response's `operation_status` says whether it did. **400** above the good ceiling; on an operation someone already completed it is labor-only — **409** when it carries pieces, the entry staying open (see "Short-count figures on floor reads" and the Clock Out Schema below) | Yes |
 | PUT | `/shop-floor/operations/{id}/start` | Start an operation (**operator** verb — deliberately open to any authenticated user; the office twin `POST /work-orders/operations/{id}/start` is role-gated). Refusal order: **404** operation, **400** already complete / already in progress, **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **409** operation on hold (starting no longer lifts a hold), **400** predecessors. Lifts a RELEASED work order to IN_PROGRESS — never a draft one | Yes |
-| POST | `/shop-floor/operations/{id}/production` | Add produced/scrapped quantity while staying clocked in | Yes |
+| POST | `/shop-floor/operations/{id}/production` | Add produced/scrapped quantity while staying clocked in (**400** above the operation's good ceiling — see Work Orders → "Short count at completion") | Yes |
 | POST | `/shop-floor/operations/{id}/reduce-production` | Correct (walk back) good-count an operator OVER-reported on their **own unapproved** labor (open clock-in first, then their own earlier unapproved sessions), **before** the operation/WO is complete — a miscount fix, **not** scrap (see note + schema below) | Yes |
-| POST | `/shop-floor/operations/{id}/complete` | Complete / report progress on an operation. **409** for a READY operation on a draft or on-hold work order (completing it would start it); an IN_PROGRESS one stays completable | Yes |
+| POST | `/shop-floor/operations/{id}/complete` | **Close** an operation at the good count the floor already recorded — there is no partial branch, so a **200** always means COMPLETE. Refused **409**, writing nothing, while recorded good + scrap leave any received unit unaccounted (declare the lost pieces with `quantity_scrapped` + a reason, or leave it open), **403** for an API token closing short, **409** for a READY operation on a draft or on-hold work order (completing it would start it); an IN_PROGRESS one stays completable under the same rules. See "Floor completion contract" below | Yes |
 | PUT | `/shop-floor/operations/{id}/hold` | Put an operation on hold and close open time entries. For a live laser nest, optional category/severity/note are saved on the hold event and **do not create a blocker**; Resume/Clear Hold is sufficient. Non-nest categorized holds retain their structured blocker behavior. Cancelled nests return **409** and must be restored first | Yes |
 | PUT | `/shop-floor/operations/{id}/resume` | Take an operation **off** hold. **Restores, never promotes**: `IN_PROGRESS` if it ever started, else `PENDING` — lifted to `READY` only where the shared promotion rule would grant it (parent WO released and non-terminal, no incomplete predecessor — which predecessors count is the work order's `sequential_operations` setting: cross-work-center only on a pool, any earlier-sequence operation on a routing), so `pending` is a normal success status. **409** if the operation backs a **cancelled (soft-deleted) laser nest** — that is a tombstone, not a hold; **400** if it is not `ON_HOLD`; cross-tenant id → **404**. Deliberately does **not** resolve the blocker that caused the hold (that stays with the blocker resolve/dismiss flow); the response carries `open_blockers` so the caller can warn (BLK-4) — each `{ id, category, severity, status, has_note, free_text_withheld }`, plus the caller-supplied `title` **only** for a non-station caller (withheld from a badge-minted crew-station token, same rule as `held`). Each `PENDING → READY` flip it does cause emits `operation_ready` (`user_id: null`). Audited **`STATUS_CHANGE`** (old→new status; `extra_data.transition = "resume_operation"`). Reachable by a badge-minted kiosk token — see "Held work" below | Yes |
 | POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
@@ -6118,12 +6339,14 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > model: see the `/shop-floor/kiosk-stations` rows above and [docs/KIOSK.md](KIOSK.md) → Crew
 > station mode.
 >
-> **`closed_time_entries` on `POST /shop-floor/operations/{id}/complete`.** When a completion is
-> fully complete it auto-closes **every** operator's open time entry on the operation (existing
-> behavior); the response now names them —
-> `closed_time_entries: [{time_entry_id, user_id, operator_name}]`, empty on a partial/progress
-> update — so the crew kiosk can toast who was auto-clocked-out. Read-only addition; the
-> auto-close mutation is unchanged.
+> **`closed_time_entries` on `POST /shop-floor/operations/{id}/complete`.** A close auto-closes
+> **every** operator's open time entry on the operation; the response names them —
+> `closed_time_entries: [{time_entry_id, user_id, operator_name}]` — so the crew kiosk can toast who
+> was auto-clocked-out. Since owner ruling 1 the entries close with their quantities **untouched**:
+> the old block that credited the close's quantity delta to the first open entry is gone, so nothing
+> is ever recorded under another operator's name. A **short** close with anyone else still clocked in
+> is refused **409** naming them unless the body sends `acknowledge_open_entries: true` (their
+> unreported pieces will not be counted); a full-count close needs no acknowledgement.
 
 > **Held work on `GET /shop-floor/work-center-queue/{id}` (`held` + `held_truncated`).** The payload
 > gained a **second list**: the `ON_HOLD` operations at that work center, alongside the unchanged
@@ -6438,6 +6661,25 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 >   the my-active-job job dict **and** the `POST /operations/{id}/complete` response (the complete
 >   modal's "ROUTES TO" row).
 
+> **Short-count figures on floor reads (owner ruling 1).** Every kiosk queue row and `held` row
+> (`GET /shop-floor/work-center-queue/{id}`), every `GET /shop-floor/operations` row and every
+> `GET /shop-floor/my-active-job` job carries three server-derived keys, so no client re-implements
+> chain credit:
+>
+> | Key | Meaning |
+> |---|---|
+> | `upstream_quantity_short` | Units of this operation's target that never reached it, because an upstream close in its chain declared them short (`0` almost everywhere) |
+> | `quantity_good_ceiling` | The most good the server accepts here (`/production` and clock-out refuse **400** above it) |
+> | `quantity_unaccounted` | Received units recorded neither good nor scrapped — what a Complete must still account for |
+>
+> `quantity_ordered` keeps meaning the operation target; a client derives
+> `received = quantity_ordered − upstream_quantity_short`. The figures come from **one**
+> tenant-scoped `upstream_figures_by_operation` read per poll / page / set of running jobs, never a
+> per-row query; a row whose accounting is missing falls back to its own counts with no credit
+> (exact for every uncredited chain). The scanner's operation summary
+> (`POST /scanner/resolve-action`) carries `upstream_quantity_short` and `quantity_unaccounted` on
+> the evidence-floored good. Definitions: Work Orders → "Short count at completion".
+
 > **Material ties on operator reads (`/work-center-queue/{id}`, `/my-active-job`).** Both payloads
 > gained a **`material_ties`** array so the kiosk can state what leaves inventory — it rides these
 > already-authorized, already-tenant-scoped reads rather than the tie API, because
@@ -6688,9 +6930,11 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > text missing, `null`, or blank/whitespace-only — is rejected with **422 Unprocessable Entity**
 > (`"scrap_reason or scrap_reason_code_id is required when quantity_scrapped is greater than 0"` /
 > `"… quantity_scrapped_delta is greater than 0"`). When the scrap quantity is **0**, both stay
-> **optional** and may be omitted (e.g. the kiosk COMPLETE flow clocks out with zero scrap and no
-> reason). This invariant is enforced at the data boundary, so a scripted/API client can no longer
-> record reasonless scrap that the kiosk/desktop UIs already block.
+> **optional** and may be omitted (e.g. a kiosk clock-out with zero scrap needs no reason). This
+> invariant is enforced at the data boundary, so a scripted/API client can no longer record
+> reasonless scrap that the kiosk/desktop UIs already block. Since owner ruling 1 the same rule, with
+> the same 422 text and either a code or text, also guards the scrap a close declares on
+> `POST /shop-floor/operations/{id}/complete` (`OperationCompleteRequest.quantity_scrapped`).
 >
 > **Scrap → NCR on the production report (Foundry redesign).**
 > `POST /shop-floor/operations/{id}/production` (`ProductionReportRequest`) also accepts
@@ -6708,20 +6952,68 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > **400** before any mutation (an NCR documents scrap; a scrapless one is a client bug). The
 > scrap-reason-required **422** above is unchanged and evaluated first.
 >
-> **Completion contract.** The shop-floor `/operations/{id}/complete` shares the same finalizer as
-> the office endpoint (see "Completion contract" under Work Orders): the absolute verb stores
-> `clamp(max(existing, requested, recorded production evidence), 0, target)`; the additive verbs
-> (`/clock-out/{id}`, `/operations/{id}/production`) add a delta floored at the same evidence and
-> capped at the target. Completing an **on-hold** operation is rejected with **409 Conflict**
-> (`{"detail": "Operation is on hold and cannot be completed"}`).
+> **Floor completion contract — `POST /shop-floor/operations/{id}/complete` is a CLOSE (owner
+> ruling 1, 2026-11-05).** It shares the finalizer with the office endpoint (see "Completion
+> contract" and "Short count at completion" under Work Orders) but records **no good pieces of its
+> own**: it books the operation COMPLETE at the good count the floor already recorded through
+> clock-outs and production reports (`clamp(max(existing, recorded production evidence), 0,
+> target)`), and there is no partial branch — a **200** always means COMPLETE with
+> `is_fully_complete: true`. The additive verbs (`/clock-out/{id}`, `/operations/{id}/production`)
+> add a delta floored at the same evidence and capped at the operation's good ceiling. Body
+> (`OperationCompleteRequest`, unknown keys **422**):
+>
+> | Field | Meaning |
+> |---|---|
+> | `quantity_complete` | **Deprecated**, optional — an expectation check only, never stored; **409** when it exceeds the good recorded |
+> | `quantity_scrapped` | Pieces **lost at this operation that were never reported**, declared by the person closing it — an **additive** delta on the operation's scrap, needing `scrap_reason` or `scrap_reason_code_id` (else **422**), refused **409** above what is still unaccounted (a stale screen) |
+> | `scrap_reason` / `scrap_reason_code_id` | The declared scrap's reason; never clears a recorded one |
+> | `acknowledge_open_entries` | Required for a **short** close while anyone else is clocked in (their unreported pieces will not be counted); not needed at full count |
+> | `notes`, `source` | As before |
+>
+> Refused before any write, in order: terminal work order **409**; already complete **400**;
+> operation on hold **409** (other non-startable status **400**); a READY operation under a draft /
+> on-hold work order **409**; bad `quantity_complete` / missing target **400**; predecessors **400**;
+> no labor ever recorded **400** (below); `source` `import` **422**; bad scrap number **400**; unknown
+> / inactive scrap code **404** / **422**; `quantity_complete` above recorded good **409**; scrap above
+> unaccounted **409**; units still unaccounted **409** — the operation stays open; then, on a short
+> close only, an API token **403**, others clocked in without acknowledgement **409**, a serialized
+> work order with missing per-serial step records **409**; finally **409** `STEPS_INCOMPLETE`. (A body
+> with scrap but no reason is a **422** from the schema, so it answers before the work-order rung on a
+> READY operation of a held job; nothing is written either way.) Texts: Work Orders → "Short count at
+> completion" → Refusal texts.
+>
+> On success the declared scrap lands on the operation (reason and code set, never cleared) and on
+> the caller's own open TimeEntry only when that entry is unapproved — otherwise the audit row
+> records it as operation-only; `quantity_short_declared` is stamped (`received − good` when the
+> close was short, else `null`). One `COMPLETE_OPERATION` audit row carries old/new `status`,
+> `quantity_complete`, `quantity_scrapped`, `scrap_reason`, `scrap_reason_code_id`,
+> `quantity_short_declared` and `extra_data` `target`, `received`, `upstream_quantity_short`,
+> `scrap_declared_at_close`, `closed_short`, `scrap_attributed_to_time_entry_id`,
+> `acknowledged_open_entries`; it is **required** evidence on a short close or a scrap declaration
+> (**503** `The completion audit could not be saved; nothing was changed. Please retry.`, nothing
+> saved) and best-effort on a full-count close. The response adds `operation.quantity_scrapped`,
+> `operation.upstream_quantity_short` and `operation.quantity_short_declared`, and `message` is always
+> `"Operation completed"`. During the deploy window a cached client still sending
+> `{"quantity_complete": target}` after a short clock-out gets the "exceeds the … good recorded" 409
+> and the operation stays open.
+>
+> **Clock-out under the same rule.** `POST /shop-floor/clock-out/{id}` completes the operation only
+> on a full good count of the units that reached it (scrap never counts) and returns
+> `operation_status` (the operation's status after the write) on `TimeEntryResponse`, so a client that
+> clocks out and then closes knows whether a close is still needed. On an operation someone already
+> completed (work order not terminal) it is **labor-only**: a clock-out carrying pieces is refused
+> **409** before any write (the entry stays open — clock out with 0 and tell a supervisor), and a
+> 0-piece clock-out closes the entry and rolls up its hours with no quantity roll-up, no second
+> finalize, no status-change row and no consumption. Completing an **on-hold** operation is rejected
+> with **409 Conflict** (`{"detail": "Operation is on hold and cannot be completed"}`).
 >
 > **Shop-floor completion requires a labor record — 400.** `POST /shop-floor/operations/{id}/complete`
 > refuses an operation that carries **no `TimeEntry` at all** (tenant-scoped, existence only):
 > **400** `{"detail": "Clock in to this operation before completing it — no one has clocked in to it
-> yet."}`, raised after the quantity and predecessor checks and before any mutation. The verb is
-> absolute — it asserts the full target quantity and auto-starts a READY operation — so without this
-> one call books a finished operation with no labor behind it, and work-center pooling now offers a
-> batch work order N such operations where it offered one.
+> yet."}`, raised after the quantity and predecessor checks and before any mutation. The verb closes
+> at whatever good is recorded and auto-starts a READY operation, so without this one call could
+> close an operation nobody worked (declaring its whole target as scrap), and work-center pooling
+> offers a batch work order N such operations where it offered one.
 >
 > **Any** entry satisfies the gate, **open or closed**, and it is deliberately **not** "the caller is
 > clocked in right now": the kiosk clocks out first and completes second (so the caller's entry is
@@ -6888,6 +7180,55 @@ let a supervisor sign off on shop-floor labor (G5-A). Approve sets `approved` (t
 > neither present returns **422**. Both stay optional when no scrap is reported. See "A scrap reason
 > is required when scrap is reported" and "Structured scrap reason CODE" under the shop-floor notes
 > above.
+>
+> The response (`TimeEntryResponse`) carries **`operation_status`** — the operation's status after
+> this clock-out (`"complete"` when the clock-out itself completed it at a full good count; `null` on
+> clock-in). A clock-out completes the operation only when good covers every unit that reached it;
+> scrap never counts. On an already-COMPLETE operation a clock-out carrying pieces is **409** and a
+> 0-piece clock-out is labor-only (see "Clock-out under the same rule" above).
+
+#### Complete Operation Schema
+
+`POST /shop-floor/operations/{operation_id}/complete` body (`OperationCompleteRequest`,
+`extra="forbid"`). A full-count close needs no fields beyond the channel:
+
+```json
+{ "source": "kiosk" }
+```
+
+A short close that declares the lost pieces (the operation recorded 8 good of 10 received):
+
+```json
+{
+  "quantity_scrapped": 2,
+  "scrap_reason_code_id": 3,
+  "scrap_reason": "Cracked at the bend",
+  "acknowledge_open_entries": true,
+  "source": "kiosk"
+}
+```
+
+Response **200** (always a close):
+
+```json
+{
+  "message": "Operation completed",
+  "operation": {
+    "id": 812, "status": "complete", "quantity_complete": 8, "quantity_scrapped": 2,
+    "upstream_quantity_short": 0, "quantity_short_declared": 2,
+    "actual_start": "2026-11-07T14:02:11Z", "actual_end": "2026-11-07T16:40:03Z"
+  },
+  "work_order": { "id": 301, "status": "complete", "quantity_complete": 8 },
+  "is_fully_complete": true,
+  "quality_exceptions": [],
+  "closed_time_entries": [{ "time_entry_id": 4471, "user_id": 12, "operator_name": "Bob K." }],
+  "next_operation": null
+}
+```
+
+> `quantity_complete` is **deprecated** — an expectation check that is never stored (**409** above the
+> recorded good). `quantity_scrapped` is an **additive** delta, not a total. Refusals and texts:
+> "Floor completion contract" above and Work Orders → "Short count at completion".
 
 #### Over-count correction Schema
 
@@ -6949,7 +7290,8 @@ the caller's most recent closed unapproved session.)
 > `quantity_delta` must be `> 0`; `reason` is **required** and non-blank (a correction reason, not a
 > scrap reason). The delta may not exceed the caller's own **unapproved** recorded evidence on the
 > operation (**400** — approved labor is excluded and needs a supervisor), and the endpoint refuses
-> with **409** once the operation/WO is complete. See the full guardrail / error-code contract in
+> with **409** once the operation/WO is complete. `reopen_operation` (default `false`) is
+> **office-only**: this verb refuses `true` with **422** `reopen_operation is an office correction`. See the full guardrail / error-code contract in
 > "Over-count correction" under the shop-floor notes above.
 >
 > The **office twin** `POST /work-orders/operations/{operation_id}/reduce-production` (Admin /
@@ -6957,6 +7299,9 @@ the caller's most recent closed unapproved session.)
 > the same shape except `active_time_entry` is replaced by
 > `work_order {"id", "quantity_complete"}` (the recomputed rollup) — there is no caller clock-in on
 > that path — and its `reduced_time_entries[]` may span **multiple operators'** unapproved entries.
+> On a COMPLETE operation it requires `reopen_operation: true` whenever the lowered count would leave
+> the operation short; `operation.status` then reads `in_progress` (see Work Orders → "Correcting a
+> completed operation").
 
 ### Scanner (QR / barcode)
 
@@ -7007,7 +7352,11 @@ the caller's most recent closed unapproved session.)
 > write endpoints enforce (`app/services/operation_action_gates.py`, extracted from those
 > handlers, which now call the same helpers), and it **mirrors the live endpoints' gating
 > verbatim — clients should treat blocker text as display-ready** (a kiosk showing a resolver
-> blocker and a kiosk showing the endpoint's 400 show the same message).
+> blocker and a kiosk showing the endpoint's 400 show the same message). The summary also carries
+> `upstream_quantity_short` and `quantity_unaccounted` (owner ruling 1), figured on the
+> evidence-floored good. They are informational: `complete` in `legal_actions` stays a **state**
+> check, so it can be listed for an operation whose close the endpoint would still refuse **409**
+> because units are unaccounted (see Work Orders → "Short count at completion").
 >
 > **Routing-staleness warning is a documented proxy.** `warning: "routing_revision_changed"` (with
 > the accompanying `routing_revision_check` object) flags that the part's current **released**
