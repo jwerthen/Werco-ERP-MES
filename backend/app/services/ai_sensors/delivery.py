@@ -58,6 +58,12 @@ def run_at_risk_delivery_sensor(db: Session, company_id: int) -> int:
 
         days_until = (wo.due_date - today).days
         is_late = days_until < 0
+        target_priority = 1 if is_late else 2
+        current_priority = wo.priority if wo.priority is not None else 5
+        # Accept & apply only when it would actually RAISE the priority. A job already at
+        # (or above) the target gets an informational card: applying would be a no-op or a
+        # demotion, which the plan resolver refuses anyway.
+        autonomy = "apply_on_accept" if current_priority > target_priority else "suggest_only"
         priority = "high" if is_late or wo.priority <= 2 or wo.status == WorkOrderStatus.ON_HOLD else "medium"
         part_number = wo.part.part_number if wo.part else "unknown"
         status_value = wo.status.value if hasattr(wo.status, "value") else str(wo.status)
@@ -92,9 +98,9 @@ def run_at_risk_delivery_sensor(db: Session, company_id: int) -> int:
                 "type": "adjust_work_order_priority",
                 "work_order_id": wo.id,
                 "work_order_number": wo.work_order_number,
-                "priority": 1 if is_late else 2,
+                "priority": target_priority,
                 "href": f"/work-orders/{wo.id}",
-                "autonomy": "auto_execute",
+                "autonomy": autonomy,
                 "dedupe_key": f"at_risk_delivery:wo:{wo.id}",
             },
             evidence=[

@@ -2,7 +2,10 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowPathIcon, SparklesIcon } from '@heroicons/react/24/outline';
 import api from '../../services/api';
-import { AIRecommendation, recommendationIsApplyable } from '../../types/aiLearning';
+import { AIRecommendation, AIRecommendationApplyResult, recommendationAcceptMode } from '../../types/aiLearning';
+import { useToast } from '../ui/Toast';
+import { apiErrorDetail, apiErrorStatus } from '../../utils/apiError';
+import { useInFlightIds } from '../../hooks/useInFlightIds';
 import { AISuggestionCard } from './AISuggestionCard';
 
 interface ContextualAIStripProps {
@@ -11,11 +14,21 @@ interface ContextualAIStripProps {
   limit?: number;
   title?: string;
   className?: string;
+  /**
+   * Called after an Accept & apply succeeds, so the host page reloads the record it
+   * shows (the apply changed it server-side; a stale copy would 409 on the next edit).
+   */
+  onApplied?: (result: AIRecommendationApplyResult) => void;
 }
 
 /**
  * Ambient AI strip — loads pending recommendations for a target entity
  * without requiring the user to open Copilot or Action Inbox (Phase 3).
+ *
+ * Every action here is NON-optimistic: the card leaves only once the server has
+ * answered. Accept & apply in particular is server-gated (role, credential, AI egress,
+ * live plan + fingerprint), so a refusal keeps the card and toasts the server's detail
+ * verbatim; a 409 also reloads, because the card it refers to has changed.
  */
 export function ContextualAIStrip({
   entityType,
@@ -23,12 +36,15 @@ export function ContextualAIStrip({
   limit = 3,
   title = 'AI recommendations',
   className = '',
+  onApplied,
 }: ContextualAIStripProps) {
+  const { showToast } = useToast();
   const [items, setItems] = useState<AIRecommendation[]>([]);
   const [loading, setLoading] = useState(true);
-  const [actioningId, setActioningId] = useState<number | null>(null);
+  // Per-card in-flight state, so one card's request never re-enables another's buttons.
+  const actioning = useInFlightIds();
+  const applying = useInFlightIds();
   const [error, setError] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!entityId) return;
@@ -54,63 +70,89 @@ export function ContextualAIStrip({
     load();
   }, [load]);
 
-  const removeLocal = (id: number) => setItems((cur) => cur.filter((r) => r.id !== id));
+  const removeLocal = (id: number) => setItems(cur => cur.filter(r => r.id !== id));
+
+  const reportFailure = (err: unknown, fallback: string) => {
+    showToast('error', apiErrorDetail(err, fallback));
+    if (apiErrorStatus(err) === 409) {
+      void load();
+    }
+  };
 
   const onAccept = async (rec: AIRecommendation) => {
-    setActioningId(rec.id);
-    setToast(null);
+    const mode = recommendationAcceptMode(rec);
+    if (mode === 'none') return;
+    const isApply = mode === 'apply' && Boolean(rec.apply_action);
+    // Synchronous double-click guard for Accept & apply on THIS card.
+    if (isApply && !applying.start(rec.id)) return;
+    const owns = actioning.start(rec.id);
     try {
-      const apply = recommendationIsApplyable(rec);
-      const result = await api.acceptAIRecommendation(
-        rec.id,
-        apply ? 'Accepted & applied from context strip' : 'Accepted from context strip',
-        apply
-      );
-      removeLocal(rec.id);
-      if (result.apply_error) {
-        setToast(`Accepted, but apply failed: ${result.apply_error}`);
-      } else if (result.applied) {
-        setToast('Accepted and applied');
+      if (isApply && rec.apply_action) {
+        const result = await api.applyAIRecommendation(
+          rec.id,
+          rec.apply_action.fingerprint,
+          'Accepted & applied from context strip'
+        );
+        removeLocal(rec.id);
+        const applied = result.apply_result?.summary;
+        showToast('success', `Applied: ${typeof applied === 'string' ? applied : rec.apply_action.summary}`);
+        onApplied?.(result);
+        // Applying supersedes sibling cards on the same record and can change other
+        // cards' plans, so re-read what is still open here.
+        void load();
+      } else {
+        await api.acceptAIRecommendation(
+          rec.id,
+          mode === 'mark_handled' ? 'Marked handled from context strip' : 'Accepted from context strip'
+        );
+        removeLocal(rec.id);
       }
-    } catch {
-      setToast('Accept failed');
+    } catch (err) {
+      reportFailure(err, mode === 'apply' ? 'Accept & apply failed. Nothing was changed.' : 'Accept failed');
     } finally {
-      setActioningId(null);
+      if (owns) actioning.finish(rec.id);
+      if (isApply) applying.finish(rec.id);
     }
   };
 
   const onDismiss = async (rec: AIRecommendation) => {
-    setActioningId(rec.id);
+    const owns = actioning.start(rec.id);
     try {
       await api.dismissAIRecommendation(rec.id, 'Dismissed from context strip');
       removeLocal(rec.id);
+    } catch (err) {
+      reportFailure(err, 'Dismiss failed');
     } finally {
-      setActioningId(null);
+      if (owns) actioning.finish(rec.id);
     }
   };
 
   const onSnooze = async (rec: AIRecommendation, days: number) => {
-    setActioningId(rec.id);
+    const owns = actioning.start(rec.id);
     try {
       await api.snoozeAIRecommendation(rec.id, days, 'Snoozed from context strip');
       removeLocal(rec.id);
+    } catch (err) {
+      reportFailure(err, 'Snooze failed');
     } finally {
-      setActioningId(null);
+      if (owns) actioning.finish(rec.id);
     }
   };
 
   const onFeedback = async (rec: AIRecommendation, feedback: string) => {
-    setActioningId(rec.id);
+    const owns = actioning.start(rec.id);
     try {
       await api.sendAIRecommendationFeedback(rec.id, { feedback });
     } finally {
-      setActioningId(null);
+      if (owns) actioning.finish(rec.id);
     }
   };
 
   if (loading && items.length === 0) {
     return (
-      <div className={`rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-sm text-slate-500 ${className}`}>
+      <div
+        className={`rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-sm text-slate-500 ${className}`}
+      >
         <span className="inline-flex items-center gap-2">
           <ArrowPathIcon className="h-4 w-4 animate-spin" />
           Loading AI context…
@@ -124,10 +166,7 @@ export function ContextualAIStrip({
   }
 
   return (
-    <section
-      aria-label={title}
-      className={`rounded-lg border border-cyan-500/25 bg-cyan-500/5 p-3 ${className}`}
-    >
+    <section aria-label={title} className={`rounded-lg border border-cyan-500/25 bg-cyan-500/5 p-3 ${className}`}>
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <SparklesIcon className="h-5 w-5 text-cyan-300" />
@@ -138,15 +177,14 @@ export function ContextualAIStrip({
           Open Action Inbox
         </Link>
       </div>
-      {toast && (
-        <p className="mb-2 rounded border border-slate-700 bg-slate-950/60 px-2 py-1 text-xs text-slate-300">{toast}</p>
-      )}
       <div className="grid grid-cols-1 gap-2 xl:grid-cols-3">
-        {items.map((rec) => (
+        {items.map(rec => (
           <AISuggestionCard
             key={rec.id}
             recommendation={rec}
-            disabled={actioningId === rec.id}
+            disabled={actioning.ids.has(rec.id) || applying.ids.has(rec.id)}
+            accepting={applying.ids.has(rec.id)}
+            showRecordLink={false}
             onAccept={onAccept}
             onDismiss={onDismiss}
             onFeedback={onFeedback}

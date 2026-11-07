@@ -815,17 +815,24 @@ AWS_REGION=us-east-1
 | `ANTHROPIC_COPILOT_MODEL` | No | `claude-opus-5-5` | Per-task model override for Hank chat (task `copilot_chat`). With automatic selection, unset/blank/`auto` uses Claude Opus 5.5 at every conversation length. An explicit task model takes precedence over global selection; global forced models/tiers still apply when the task override is absent |
 | `ANTHROPIC_HANK_INTAKE_MODEL` | No | (Default tier) | Per-task model override for saved Hank PDF extraction (`hank_document_intake`). Defaults to Sonnet for layout-aware extraction; document length or a larger structured-output budget alone does not select Opus. Set consistently on API and worker |
 | `ANTHROPIC_NL_SEARCH_MODEL` | No | (router auto) | Per-task model override for the `/search/nl` natural-language intent parse (task `nl_search`). Unset: pinned to the Fast tier (Haiku) |
-| `ANTHROPIC_AUTO_EXECUTE_MODEL` | No | (router auto) | Per-task model override for the always-on auto-execute decision (task `auto_execute`, see [docs/AI_ALWAYS_ON.md](AI_ALWAYS_ON.md)). Unset: Fast tier (Haiku). Same Anthropic client as all other LLM features |
-| `AI_AUTO_EXECUTE_ENABLED` | No | `true` | Master switch for Claude always-on auto-execute of allowlisted Action Inbox actions after nightly aggregation |
-| `AI_AUTO_EXECUTE_MIN_CONFIDENCE` | No | `0.55` | Minimum recommendation confidence to send to Claude for auto-execute selection |
-| `AI_AUTO_EXECUTE_FALLBACK_MIN_CONFIDENCE` | No | `0.75` | When Claude is unavailable (egress off / no API key), auto-execute candidates at or above this confidence |
-| `AI_AUTO_EXECUTE_MAX_BATCH` | No | `25` | Max recommendations considered per company per auto-execute run |
 | `ANTHROPIC_LASER_NEST_MODEL` | No | (router auto) | Per-task model override for laser-nest PDF field extraction (task `laser_nest_extraction`, see [docs/API.md](API.md) → Laser Nests). Covers both extraction passes — the verification pass (`feature="laser_nest_verification"`) runs under the same task — but **not** the multi-page segmentation pass (task `laser_nest_segmentation`, no per-task override; tier-level overrides apply). Unset: the native-PDF (vision) path routes to the Default tier (Sonnet); the flattened-text fallback (>20 MB or unreadable PDFs) picks by complexity, escalating for OCR'd or large sheets. Pin a different tier here to override |
 | `ANTHROPIC_SHEET_STOCK_MODEL` | No | (router auto) | Per-task model override for sheet-stock disambiguation on laser-nest preview (task `sheet_stock_disambiguation`, see [docs/API.md](API.md) → Laser Nests → "Sheet-stock suggestions on preview"). Unset: the **Default tier (Sonnet)**, pinned explicitly in the router rather than scored — the prompt is a short shortlist with no PDF and would otherwise score down to the Fast tier, and this is the hardest judgment in the feature (the metallurgy-and-size call the deterministic matcher refused to make). The leg only **re-ranks** a shortlist the deterministic matcher already gated — it cannot add a candidate and cannot set `auto_fill_part_id` — so pinning a cheaper or costlier model here changes ordering quality, never what may be tied. Skipped entirely when the company's `allow_ai_egress` is off, and any failure leaves the deterministic order untouched |
 | `WEBHOOK_ENCRYPTION_KEY` | Conditional¹ | - | Fernet key for encrypting outbound-webhook secrets at rest. Also the **fallback** for `INTEGRATION_ENCRYPTION_KEY` when that is unset. |
 | `INTEGRATION_ENCRYPTION_KEY` | Conditional¹ | (falls back to `WEBHOOK_ENCRYPTION_KEY`) | Fernet key that encrypts **integration secrets at rest** — carrier-account API keys and inbound-webhook signing secrets (see [docs/SHIPPING_CARRIER_INTEGRATION.md](SHIPPING_CARRIER_INTEGRATION.md)) **and the ProxyBox thermal-printer API key** (see [docs/THERMAL_LABEL_PRINTING.md](THERMAL_LABEL_PRINTING.md)). **Reused, not new** for thermal printing. Resolution order: `INTEGRATION_ENCRYPTION_KEY` → `WEBHOOK_ENCRYPTION_KEY` → (dev/test only) an ephemeral generated key. |
 
 > ¹ **Required to *use* carrier integration in `production`/`staging`** — not for boot. The app and Alembic migrations start fine without a key. But because carrier API keys / inbound-webhook secrets are encrypted at rest with it (CMMC SC-28), in prod/staging **creating or using a carrier account — or verifying an inbound carrier webhook — fails loudly** until at least one of `INTEGRATION_ENCRYPTION_KEY` / `WEBHOOK_ENCRYPTION_KEY` is set (a loud startup WARNING is logged while it's absent). The ephemeral-generated-key fallback exists **only** in dev/test — a generated key does not survive a restart and differs per worker/replica, which would leave stored secrets permanently undecryptable, so it is refused outright in prod/staging rather than used silently.
+
+> **Removed 2026-11-05: the AI auto-execute variables.** `AI_AUTO_EXECUTE_ENABLED`,
+> `AI_AUTO_EXECUTE_MIN_CONFIDENCE`, `AI_AUTO_EXECUTE_FALLBACK_MIN_CONFIDENCE`,
+> `AI_AUTO_EXECUTE_MAX_BATCH`, `AI_AUTO_EXECUTE_LLM_TIMEOUT` (never documented here) and
+> `ANTHROPIC_AUTO_EXECUTE_MODEL` configured the always-on agent that applied Action Inbox
+> recommendations without a person. Owner ruling 3 removed that agent (nothing AI-driven executes
+> without a named person clicking Accept & apply; see
+> [AI_ALWAYS_ON.md → Phase 5](AI_ALWAYS_ON.md#phase-5--claude-auto-execute-retired-2026-11-05)),
+> so these variables are **ignored**. The nightly `aggregate_ai_learning_job` logs one WARNING
+> naming any that are still set. Delete them from the API and worker services once the release
+> that removed the agent is serving on both — see
+> [DEPLOYMENT_RUNBOOK.md → Wave 2 rollout](DEPLOYMENT_RUNBOOK.md#wave-2-rollout) for the order.
 
 > **Generating a Fernet key.** `WEBHOOK_ENCRYPTION_KEY` and `INTEGRATION_ENCRYPTION_KEY`
 > are **Fernet** keys (not `secrets.token_urlsafe` like `SECRET_KEY`). Generate one with:
