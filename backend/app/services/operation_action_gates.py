@@ -15,7 +15,8 @@ The blocker MESSAGES are kept verbatim from the endpoints so a kiosk that shows
 a resolver blocker and a kiosk that gets the endpoint's 400 show the same text.
 """
 
-from typing import List, Optional
+import re
+from typing import Iterable, List, Optional, Sequence
 
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
@@ -24,6 +25,7 @@ from app.models.time_entry import TimeEntry
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.services.work_order_state_service import (
     TERMINAL_WO_STATUSES,
+    OperationAccounting,
     has_incomplete_predecessors,
     is_laser_dispatch_work_order,
     work_order_allows_same_work_center,
@@ -83,6 +85,123 @@ MSG_DRAFT_CANNOT_BE_HELD = (
     "A draft work order has not been released, so there is nothing on the floor to hold. "
     "Leave it in draft until it is ready, then release it."
 )
+
+
+# --------------------------------------------------------------------------- #
+# Short count at completion (owner ruling 1, 2026-11-05): a short count is reported as
+# scrap with a reason, or the operation stays open -- never short-closed at the counted
+# quantity. The refusals below are PLAIN STRINGS from one module, so every kiosk,
+# desktop and MCP surface renders them verbatim. Each names the operation by its
+# ``operation_label`` and says what to do next. The arithmetic behind them is
+# ``work_order_state_service.OperationAccounting`` -- never re-derive it here.
+# --------------------------------------------------------------------------- #
+
+# A standing machine credential (``app.core.credentials.is_api_token_credential``) may
+# close a full count but never closes work short: declaring where missing pieces went is
+# a judgment a named person makes. A crew-station badge token is a person and may.
+API_TOKEN_SHORT_CLOSE = "Closing work short must be done by a person signed in to the app, not an API token."
+# The floor completion audit row is REQUIRED evidence on a short close or a scrap
+# declaration (``AuditService.log_required``); when it cannot be written nothing is saved.
+COMPLETION_AUDIT_UNAVAILABLE = "The completion audit could not be saved; nothing was changed. Please retry."
+
+# An existing "Op"/"Operation" prefix (followed by a separator or a digit) or a
+# self-labeled "Nest N" identifier is NOT prefixed again -- the server-side twin of the
+# display rule in ``frontend/src/utils/operationLabel.ts``, so a legacy "Op 10" row or a
+# laser nest never reads "Op Op 10" / "Op Nest 3". The stored value is never rewritten.
+_ALREADY_LABELED = re.compile(r"^\s*(?:op(?:eration)?(?=[\s\-_.:#]|\d)|nest\s)", re.IGNORECASE)
+
+
+def operation_label(operation: WorkOrderOperation) -> str:
+    """``"Op 10"`` for messages: ``operation_number``, else the sequence."""
+    ident = str(operation.operation_number or operation.sequence or operation.id or "").strip()
+    if _ALREADY_LABELED.match(ident):
+        return ident
+    return f"Op {ident}"
+
+
+def _qty_text(value: float) -> str:
+    """``8`` / ``0.5`` -- float noise rounded off, no trailing ``.0``."""
+    return f"{round(float(value or 0), 6):g}"
+
+
+def _join_names(names: Sequence[str]) -> str:
+    names = [name for name in names if name]
+    if len(names) <= 1:
+        return names[0] if names else "Another operator"
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def short_count_message(operation: WorkOrderOperation, acct: OperationAccounting) -> str:
+    """409: the close would leave received units unaccounted -- nothing was written."""
+    message = (
+        f"{operation_label(operation)}: {_qty_text(acct.unaccounted)} of {_qty_text(acct.received)} not yet "
+        f"accounted for ({_qty_text(acct.good)} good, {_qty_text(acct.scrapped)} scrapped). Record finished pieces "
+        "(clock out with your count, or Report production), report lost pieces as scrap with a reason, or leave "
+        "the operation open. Pieces never started: ask a supervisor to lower the quantity."
+    )
+    if acct.upstream_short > 1e-9:
+        message += f" ({_qty_text(acct.upstream_short)} never reached it — closed short upstream.)"
+    return message
+
+
+def others_clocked_in_message(operation: WorkOrderOperation, names: Sequence[str], *, office: bool = False) -> str:
+    """409: a short close would clock out other operators before they reported their count."""
+    verb = "is" if len([name for name in names if name]) <= 1 else "are"
+    message = (
+        f"{_join_names(names)} {verb} still clocked in to {operation_label(operation)} — have them clock out with "
+        "their count first, or leave the operation open."
+    )
+    if office:
+        message += (
+            " Resubmit with acknowledge_open_entries to clock them out; pieces they have not reported will not be "
+            "counted."
+        )
+    return message
+
+
+def serialized_short_message(operation: WorkOrderOperation, short: float, serials: Iterable[str]) -> str:
+    """409: a short close on a serialized work order whose per-serial step records are missing."""
+    serial_list = [str(serial) for serial in serials if serial]
+    missing_for = ", ".join(serial_list) if serial_list else "this operation"
+    return (
+        f"{operation_label(operation)} is {_qty_text(short)} short on a serialized work order and required step "
+        f"records are missing for {missing_for}. Scrapped serials can't be recorded yet — leave the operation open "
+        "and ask a supervisor. Never record steps for a part that was scrapped."
+    )
+
+
+def ceiling_exceeded_message(operation: WorkOrderOperation, quantity: float, acct: OperationAccounting) -> str:
+    """400: more good than can reach this operation once upstream closes declared shorts."""
+    return (
+        f"Quantity ({_qty_text(quantity)}) exceeds the {_qty_text(acct.ceiling)} units that can reach "
+        f"{operation_label(operation)} — {_qty_text(acct.chain_upstream)} were closed short upstream."
+    )
+
+
+def exceeds_recorded_message(operation: WorkOrderOperation, quantity: float, recorded_good: float) -> str:
+    """409: the floor close asserted more good than the floor recorded (it records none itself)."""
+    return (
+        f"quantity_complete ({_qty_text(quantity)}) exceeds the {_qty_text(recorded_good)} good recorded on "
+        f"{operation_label(operation)}; record the pieces through clock-out or Report production, or report the "
+        "shortfall as scrap with a reason."
+    )
+
+
+def scrap_overdeclare_message(operation: WorkOrderOperation, unaccounted: float, declared: float) -> str:
+    """409: the scrap declared at close is more than is still unaccounted (a stale screen)."""
+    return (
+        f"{operation_label(operation)} has only {_qty_text(unaccounted)} unaccounted; declaring "
+        f"{_qty_text(declared)} scrap would over-state it. Refresh and re-enter; extra scrap belongs on clock-out "
+        "or Report production."
+    )
+
+
+def completed_operation_clock_out_message(operation: WorkOrderOperation) -> str:
+    """409: a quantity-carrying clock-out on an operation someone already completed."""
+    return (
+        f"{operation_label(operation)} is already complete; clock out with 0 pieces and tell a supervisor about any "
+        "extra pieces."
+    )
 
 
 def _status_value(status: object) -> str:

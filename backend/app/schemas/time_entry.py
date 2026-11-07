@@ -213,6 +213,10 @@ class TimeEntryResponse(TimeEntryBase):
     # but required steps lack records — the op stayed IN_PROGRESS (never trapped the
     # entry; labor closed normally). Backward-compatible: null when not applicable.
     steps_incomplete: Optional[StepsIncompleteInfo] = None
+    # Owner ruling 1: the operation's status AFTER this clock-out ("complete" when the
+    # clock-out itself completed it at a full good count), so a client that clocks out and
+    # then closes knows whether a close is still needed. Null on clock-in / when N/A.
+    operation_status: Optional[str] = None
 
     class Config:
         from_attributes = True

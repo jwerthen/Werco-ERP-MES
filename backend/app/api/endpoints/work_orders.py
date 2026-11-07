@@ -240,6 +240,9 @@ def _audit_reconcile_transitions(
                     "source": "reconcile_on_read",
                     "work_order_number": tr.work_order_number,
                     "time_entry_ids": tr.time_entry_ids,
+                    # Owner ruling 1 (INT3): an operation transition carries the
+                    # {target, received, upstream_quantity_short} it was decided on.
+                    **tr.extra_data,
                 },
             )
             # ``AuditService.log`` absorbs its own failures and returns None (e.g. a
