@@ -469,9 +469,7 @@ def _plan_draft_ncr(db: Session, company_id: int, action: Mapping[str, Any], ctx
     title = str(action.get("title") or ctx.get("fallback_title") or "")[:200]
     if len(title) < 5:
         title = f"Quality review: {title}"
-    description = str(
-        action.get("description") or ctx.get("fallback_description") or ctx.get("fallback_title") or ""
-    )
+    description = str(action.get("description") or ctx.get("fallback_description") or ctx.get("fallback_title") or "")
     if len(description) < 5:
         description = f"{description} (opened from AI quality recommendation)"
     facts.update(quantity_affected=quantity, title=title, description=description[:4000])
@@ -924,9 +922,9 @@ class AIActionApplier:
             )
             self.db.flush()
         else:
-            blocker = tenant_query(self.db, WorkOrderBlocker, self.company_id).filter(
-                WorkOrderBlocker.id == blocker_id
-            ).one()
+            blocker = (
+                tenant_query(self.db, WorkOrderBlocker, self.company_id).filter(WorkOrderBlocker.id == blocker_id).one()
+            )
         if facts.get("new_severity"):
             audit.log_update(
                 resource_type="work_order_blocker",

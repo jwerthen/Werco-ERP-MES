@@ -14,7 +14,6 @@ from app.models.company import Company
 from app.models.user import User
 from app.models.work_order import WorkOrder
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
-from app.services import notification_links
 from app.schemas.ai_learning import (
     AICorrectionCreate,
     AIInteractionEventCreate,
@@ -22,6 +21,7 @@ from app.schemas.ai_learning import (
     AIRecommendationCreate,
     AIRecommendationFeedbackRequest,
 )
+from app.services import notification_links
 
 SENSITIVE_KEY_PARTS = {
     "authorization",
@@ -777,9 +777,7 @@ class AILearningService:
                 by_reason[reason].append(recommendation_id)
 
         return sum(
-            stale_open_recommendations(
-                self.db, company_id=company_id, reason=reason, recommendation_ids=ids, now=now
-            )
+            stale_open_recommendations(self.db, company_id=company_id, reason=reason, recommendation_ids=ids, now=now)
             for reason, ids in by_reason.items()
         )
 

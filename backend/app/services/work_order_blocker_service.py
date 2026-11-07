@@ -470,7 +470,8 @@ class WorkOrderBlockerService:
             self.db.query(WorkOrderBlocker)
             .join(
                 WorkOrder,
-                (WorkOrder.id == WorkOrderBlocker.work_order_id) & (WorkOrder.company_id == WorkOrderBlocker.company_id),
+                (WorkOrder.id == WorkOrderBlocker.work_order_id)
+                & (WorkOrder.company_id == WorkOrderBlocker.company_id),
             )
             .filter(
                 WorkOrderBlocker.status.in_(
