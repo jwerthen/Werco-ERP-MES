@@ -168,6 +168,9 @@ class TestAILearningAPI:
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
         assert data["recommendations_created"] >= 1
+        # Ruling 3: the aggregation never applies anything, so it no longer reports it.
+        assert "auto_executed" not in data
+        assert "auto_execute_failed" not in data
 
         recommendations = client.get("/api/v1/ai/recommendations", headers=admin_headers).json()
         titles = {item["title"] for item in recommendations}

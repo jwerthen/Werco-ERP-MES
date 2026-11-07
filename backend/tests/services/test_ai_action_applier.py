@@ -212,7 +212,7 @@ class TestAIActionApplier:
 @pytest.mark.api
 @pytest.mark.requires_db
 class TestAcceptApplyAPI:
-    def test_accept_with_apply_priority(self, client: TestClient, admin_headers: dict, db_session: Session):
+    def test_apply_route_priority(self, client: TestClient, admin_headers: dict, admin_user, db_session: Session):
         part = _part(db_session, "API-P")
         wo = WorkOrder(
             work_order_number="WO-API-P",
@@ -243,15 +243,20 @@ class TestAcceptApplyAPI:
         db_session.add(rec)
         db_session.commit()
 
+        listed = client.get("/api/v1/ai/recommendations", headers=admin_headers).json()
+        row = next(item for item in listed if item["id"] == rec.id)
+        fingerprint = row["apply_action"]["fingerprint"]
+
         response = client.post(
-            f"/api/v1/ai/recommendations/{rec.id}/accept",
-            json={"reason": "Do it", "apply": True},
+            f"/api/v1/ai/recommendations/{rec.id}/apply",
+            json={"reason": "Do it", "expected_fingerprint": fingerprint},
             headers=admin_headers,
         )
         assert response.status_code == status.HTTP_200_OK
         body = response.json()
         assert body["applied"] is True
         assert body["recommendation"]["status"] == "accepted"
+        assert body["recommendation"]["accepted_by"] == admin_user.id
         assert body["apply_result"]["new_priority"] == 1
         db_session.refresh(wo)
         assert wo.priority == 1

@@ -85,11 +85,39 @@ class TestDeliverySensor:
         titles = {r.title for r in recs}
         assert any("Late work order WO-LATE-1" in t for t in titles)
         assert any("At-risk delivery WO-RISK-1" in t for t in titles)
-        assert all(r.suggested_action.get("autonomy") == "auto_execute" for r in recs)
+        # Ruling 3: a person's Accept & apply, never an auto tier. Both fixture WOs sit
+        # above their target priority (P2 late -> P1, P5 at-risk -> P2), so both apply.
+        assert all(r.suggested_action.get("autonomy") == "apply_on_accept" for r in recs)
         assert all(r.suggested_action.get("type") == "adjust_work_order_priority" for r in recs)
 
         # Dedupe on second run
         assert run_at_risk_delivery_sensor(db_session, 1) == 0
+
+    def test_work_order_already_at_target_priority_is_suggest_only(self, db_session: Session):
+        """A late job already at P1 gets an informational card: applying would be a no-op."""
+        part = _part(db_session, part_number="DEL-P1")
+        db_session.add(
+            WorkOrder(
+                work_order_number="WO-LATE-P1",
+                part_id=part.id,
+                quantity_ordered=10,
+                status=WorkOrderStatus.IN_PROGRESS,
+                priority=1,
+                due_date=date.today() - timedelta(days=2),
+                company_id=1,
+            )
+        )
+        db_session.commit()
+
+        assert run_at_risk_delivery_sensor(db_session, 1) == 1
+        db_session.commit()
+        rec = (
+            db_session.query(AIRecommendation)
+            .filter(AIRecommendation.recommendation_type == "at_risk_delivery", AIRecommendation.company_id == 1)
+            .one()
+        )
+        assert rec.suggested_action["autonomy"] == "suggest_only"
+        assert rec.suggested_action["priority"] == 1
 
 
 @pytest.mark.unit
@@ -143,6 +171,11 @@ class TestInventorySensor:
         assert rec.target_entity_id == low.id
         assert "INV-LOW" in rec.title
         assert rec.priority == "high"  # below safety stock
+        # Ruling 3: a person's Accept & apply. The mint-time vendor is evidence only --
+        # Accept & apply resolves the part's CURRENT primary supplier at click time.
+        assert rec.suggested_action["autonomy"] == "apply_on_accept"
+        assert "vendor_id" not in rec.suggested_action
+        assert rec.evidence[0]["primary_supplier_id_at_mint"] == low.primary_supplier_id
         assert run_inventory_risk_sensor(db_session, 1) == 0
 
 
@@ -193,6 +226,7 @@ class TestQualitySensor:
         )
         assert rec.target_entity_id == bad.id
         assert "Q-BAD" in rec.title
+        assert rec.suggested_action["autonomy"] == "apply_on_accept"
 
 
 @pytest.mark.unit
@@ -337,6 +371,7 @@ class TestAggregateIncludesSensors:
         summary = AILearningService(db_session).aggregate_learning_signals(company_ids=[1])
         db_session.commit()
 
+        assert "auto_executed" not in summary
         assert summary["sensor_recommendations_created"] >= 1
         assert summary["recommendations_created"] >= 1
         assert (
