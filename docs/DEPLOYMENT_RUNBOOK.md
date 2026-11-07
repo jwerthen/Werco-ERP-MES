@@ -594,9 +594,16 @@ operation complete and force-complete apply the same rule, and an API token may 
    work-order header behave exactly as before on existing data. The downgrade drops the column and
    with it every short declared since the deploy (pre-117 code never reads it).
 
-2. **Optional, read-only diagnostic — awareness, not a gate.** Operations closed short before the
-   rule existed (COMPLETE with good + scrap below their target, on a work order still open). Nothing
-   reads them differently after the deploy; the list is for knowing which records predate ruling 1.
+2. **Optional, read-only diagnostic — and the supervisor follow-up it finds.** Operations closed
+   short before the rule existed (COMPLETE with good + scrap below their target, on a work order
+   still open). The legacy operation itself reads exactly as before (no declaration, so no credit),
+   but the **open later operations of the same work order can no longer close at what physically
+   reached them**: they still owe the full target, and ruling 1 refuses to close them short without
+   scrap. **Do not have the floor scrap units that never reached them.** The supervisor remedy is one
+   of: lower `quantity_ordered` to what the legacy stage passed on (Work Order detail → edit — allowed
+   down to the largest good + scrap any whole-order stage recorded; restated per-operation targets
+   follow it), or force-complete the work order at the work-order grain (`POST
+   /work-orders/{id}/complete`) with the work-order scrap and a reason covering the shortfall.
 
    ```sql
    SELECT wo.company_id, wo.work_order_number, wo.status AS wo_status,
@@ -615,18 +622,33 @@ operation complete and force-complete apply the same rule, and an API token may 
    ORDER BY wo.company_id, wo.work_order_number, op.sequence;
    ```
 
-3. **During the deploy window.** A kiosk or tablet still running the old bundle sends
-   `{"quantity_complete": <target>}` to the floor close after a short clock-out; it now gets the
-   *"…exceeds the n good recorded…"* 409 and the operator sees *"Clocked out, but completing failed"*.
-   The operation is left open, which is what the rule requires — reload every kiosk and floor tablet
-   after the deploy. An MCP agent or script that relied on a partial floor `/complete` now gets 409,
-   and any standing API token that closed work short now gets 403.
+3. **During the deploy window — promote the API first.** Vercel (SPA) and Railway (API) both
+   auto-deploy from `main`, and the SPA usually goes live first. For this release that order
+   matters: the NEW floor clients send `/shop-floor/operations/{id}/complete` without
+   `quantity_complete`, which the OLD API requires, so every kiosk / crew / desktop Complete answers
+   **422** (*"Clocked out, but completing failed: …quantity_complete…"*) until the API is live. It
+   fails closed — nothing is half-written; the operation stays open and Complete works once the API
+   is up. To avoid the window, hold the Vercel promotion (or redeploy the frontend) until Railway
+   reports the new API SUCCESS and `/health` answers from it. The reverse case: a kiosk or tablet
+   still running the OLD bundle sends `{"quantity_complete": <target>}` after a short clock-out; it
+   now gets the *"…exceeds the n good recorded…"* 409 and the operator sees *"Clocked out, but
+   completing failed"*. The operation is left open, which is what the rule requires — reload every
+   kiosk and floor tablet after the deploy. An MCP agent or script that relied on a partial floor
+   `/complete` now gets 409, and any standing API token that closed work short, booked good above
+   the floor's count, edited operation counts or lowered an order after work was recorded now gets
+   403.
+   One deliberate read-path change on old data: a work order whose operations all completed but whose
+   header sits ABOVE its order is lowered to the order at the next reconciling read (and its
+   finished-goods receipt posts at the order) — the header is now clamped to `quantity_ordered`. To
+   see any before the deploy: `SELECT company_id, work_order_number, quantity_ordered,
+   quantity_complete FROM work_orders WHERE is_deleted = false AND status NOT IN
+   ('COMPLETE','CLOSED','CANCELLED') AND quantity_complete > quantity_ordered;`.
 
 4. **Training handouts.** The onboarding markdown (`docs/onboarding/02-operator-shop-floor.md`,
    `04-planner-supervisor-manager.md`) now also covers the short-count flow (SHORT, report as scrap,
    CLOCK OUT · KEEP OPEN, office Save progress / Reopen). Re-print the two PDFs in
-   `docs/onboarding/pdf/` from the current markdown once, after this deploy, as item 3 above says —
-   they are not generated from the repo. The generated quick-reference role cards
+   `docs/onboarding/pdf/` from the current markdown once, after this deploy, as the floor-gates
+   item 3 ("Training handouts") above says — they are not generated from the repo. The generated quick-reference role cards
    (`docs/onboarding/quick-reference/`, built by `docs/onboarding/generate_onboarding_pdfs.py`) do
    not mention the short-count flow yet; update the kiosk and crew-station card content in that
    script and regenerate before handing them out.

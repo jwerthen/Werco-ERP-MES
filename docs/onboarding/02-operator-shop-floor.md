@@ -169,9 +169,12 @@ If the job comes up short — say 8 good out of 10 — **the step does not close
 - **Pieces you finished but haven't entered yet:** record them (check out with your count, or use **More** / **REPORT PRODUCTION**).
 - **Pieces that were lost or ruined:** report them as **scrap with a reason**. Then the step can close at 8 good, 2 scrapped.
 - **Pieces that were never started** (material ran out, sheets weren't cut): these are **not** scrap. Check out and leave the step open, and tell your supervisor — they lower the quantity on the work order.
-- **Someone else is still clocked in:** they need to clock out with their count first, or leave the step open.
+- **Someone else is still clocked in:** they need to clock out with their count first, or leave the step open. The kiosk doesn't fill in the count or offer **Report as scrap** while they are on the step — some of those pieces may be theirs.
+- **The step before yours already reported the loss** (on a job whose steps aren't sequenced): don't scrap pieces you never received. The screen says so — ask your supervisor to turn on **Sequential operations** for the job.
 
 If the system refuses with "not yet accounted for", nothing was saved — read the message, account for the pieces, or leave it open. On a routed job, the next station can't start the work until this step closes, so tell your lead when you leave one open short.
+
+If you find scrap after a step was already completed, clock out with 0 and tell your supervisor — they can add it, with a reason, from the work order.
 
 > Tip: Always enter scrap when it happens, not at the end of the day from memory. Accurate scrap counts are part of our quality records.
 

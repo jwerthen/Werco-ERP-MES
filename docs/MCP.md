@@ -62,7 +62,8 @@ quote against the live catalog, so a name that shifts fails CI instead of going 
   (`work_orders_resume_work_order` first). **Nothing closes short** (owner ruling 1):
   `shop_floor_complete_operation` closes at the good the floor already recorded and is refused
   **409** while any unit is unaccounted, and an **API token** may not close work short through any
-  completion tool (**403**). The agent instructions say what to do with that 409: leave the work open
+  completion tool, book more good than the floor counted, edit an operation's counts, or lower an
+  order once work is recorded (**403**). The agent instructions say what to do with that 409: leave the work open
   and tell the user — never invent scrap, a reason or a quantity to make a close succeed.
 
 ---
@@ -295,7 +296,12 @@ boundary. One credential rule sits on top of the role: an API token may not **cl
 `shop_floor_complete_operation` / `work_orders_complete_operation` on a short close and
 `work_orders_complete_work_order` below the order answer **403** `"Closing work short must be done
 by a person signed in to the app, not an API token."` whatever the user's role (a full-count close
-is unaffected). It is the short-count rule's own refusal; read together with ruling 3 as "standing
+is unaffected) — nor make the related count judgments: good above the floor's record
+(`work_orders_complete_operation`, `work_orders_complete_work_order`), count edits through
+`work_orders_update_operation`, and lowering `quantity_ordered` (`update_work_order`) once work is
+recorded answer **403** `"Recording more good than the floor counted, editing an operation's counts,
+or lowering the order after work was recorded must be done by a person signed in to the app, not an
+API token."`. These are the short-count rule's own refusals; read together with ruling 3 as "standing
 API tokens may not make judgment writes", it awaits owner confirmation. An interactive access JWT —
 the person's own session, which the MCP client approves call by call — is not refused. No token is ever bound to a superuser / `platform_admin` (409 at mint, refused at use),
 deactivating a token's user revokes it, and every audit row a token writes carries

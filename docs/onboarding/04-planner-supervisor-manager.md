@@ -131,7 +131,10 @@ On a job that's on hold, an operation row's **Complete** is greyed out for any s
 
 - A step closes only when **good + scrap** cover every piece that reached it. If you enter less, the window shows **SHORT** with a **Report n as scrap** shortcut, and the button becomes **Save progress · leave open** — it saves your numbers and the step stays open. Scrap you add needs a reason; scrap already recorded is never lowered here.
 - **Pieces that were never started are not scrap.** Leave the step open and lower the work order's quantity instead — the system won't let you lower it below what a step has already accounted for.
-- Recording **more good than the floor counted** asks *"Why record more than the floor counted?"* — a required reason saved with your name. A step nobody ever clocked into needs no reason.
+- Recording **more good than the floor counted** asks *"Why record more than the floor counted?"* — a required reason saved with your name. A step nobody ever clocked into needs no reason. The **Use floor count (n)** shortcut fills what the floor recorded; **Book n good (needs a reason)** is the full count, and asks why.
+- **Scrap found after a step completed** can be added from the operation's edit form, with a reason (it never lowers what is recorded).
+- On a job whose steps **aren't sequenced**, a loss declared at an earlier step isn't credited to the later ones. If a later step is refused for pieces it never received, turn on **Sequential operations** for the job before that step closes — don't have the floor scrap them a second time. Once the job has steps closed short, the sequencing switch is locked where flipping it would change what those closes meant.
+- Raising the order quantity after a step has completed is refused — open a new work order for the extra units.
 - If someone is **still clocked in** when you close a step short, the window says who and offers **Clock them out and close** — they're clocked out without counting pieces they haven't reported, so check with them first.
 - Rows with work in progress show an **n unaccounted** chip next to the quantity, so you can see which steps still need a count, scrap, or a decision.
 - On a routed job a step left open short holds up the steps after it — that's deliberate: account for the pieces or re-plan the quantity.

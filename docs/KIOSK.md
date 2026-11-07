@@ -160,30 +160,48 @@ URL is all the station setup there is.
      operation has tied material — the [material deduction notice](#material-deduction-notice).
      Final-entry GOOD **pre-fills at what is still unaccounted for** (received − good − scrap, off
      the server's `upstream_quantity_short`), a one-tap honest finish for an operator who reports
-     at the end. Under [owner ruling 1](#short-count-owner-ruling-1-2026-11-05) the overlay never
-     lets a short count close: when the entry would leave units unaccounted it shows an amber
-     **SHORT n** tile (`· RUNS` on a nest) and a status panel — *"n of m not yet accounted for —
-     record finished pieces, report lost pieces as scrap, or leave Op N open"* (plus *"n never
-     reached it — closed short upstream."* when an earlier stage closed short) — with a **Report n
-     as scrap** button that fills the scrap field and brings up the required reason grid, and the
-     COMPLETE button stays disabled while short. When the queue row's roster shows anyone **else**
-     clocked in and the finish would close short, COMPLETE is disabled with *"{names} still
-     clocked in — they must clock out with their count first"* and the leave-open row takes the
-     primary look. The overlay's **Clock out · leave Op N open** row switches it to leave-open mode
+     at the end — **unless anyone else is on the roster**, when it starts empty (some of those
+     pieces may be the crewmate's unreported work). Under
+     [owner ruling 1](#short-count-owner-ruling-1-2026-11-05) the overlay never lets a short count
+     close: when the entry would leave units unaccounted it shows an amber **SHORT n** tile (`· RUNS`
+     on a nest) and a status panel — *"n of m not yet accounted for — record finished pieces, report
+     lost pieces as scrap, or leave Op N open"* (plus *"n never reached it — closed short upstream."*
+     when an earlier stage closed short) and *"Pieces never started? They are not scrap — clock out
+     and keep Op N open, and ask a supervisor to lower the quantity."* — with a **Report n as scrap**
+     button that fills the scrap field and brings up the required reason grid, and the COMPLETE
+     button stays disabled while short (its `aria-describedby` points at the panel). The one-tap
+     fill is **withheld** while a crewmate is clocked in (*"Some of these may still be with
+     {names}, who have not reported yet."* — their pieces are not scrap) and on a **pooled** job whose
+     earlier operation already declared the loss (`upstream_short_uncredited`: *"n were already
+     closed short at an earlier operation, but this job's operations are not sequenced … Do not
+     report pieces you never received as scrap — ask a supervisor to turn on Sequential
+     operations."*); scrap the operator really made can still be keyed. When the queue row's roster
+     shows anyone **else** clocked in and the finish would close short, COMPLETE is disabled with
+     *"{names} still clocked in — they must clock out with their count first"* and the leave-open
+     row takes the primary look. The overlay's **Clock out · leave Op N open** row switches it to leave-open mode
      at any time, short or not (and **Complete Op N instead** switches back).
 
-     Confirming clocks out first (`POST /shop-floor/clock-out/{id}` with the final good and scrap
-     and, when any scrap is entered, the scrap-grid reason). Then: when the clock-out's
-     `operation_status` is `complete` — a full good count completed the operation on its own — the
-     kiosk is done and calls no `/complete` (that call used to come back "already complete" and
-     turn every full count into an error toast); when the clock-out flagged missing step records it
-     opens the steps view; otherwise it calls `POST /shop-floor/operations/{id}/complete` with **no
-     quantity** (`{source: "kiosk"}`) — the floor verb is a close that books the recorded good. A
+     Confirming clocks out first (`POST /shop-floor/clock-out/{id}` with the final good). Scrap that
+     **covers a short** rides the close instead — `POST /shop-floor/operations/{id}/complete` with
+     `quantity_scrapped` and its reason — because the close re-checks it against what is still
+     unaccounted under the row lock and refuses an over-statement from a stale screen (a crewmate
+     reported pieces since the overlay opened), where the clock-out cannot tell that from
+     legitimate replacement scrap; only an entry that is a **full good count** on its own carries
+     its scrap on the clock-out. Then: when the clock-out's `operation_status` is `complete` — a full
+     good count completed the operation on its own — the kiosk is done and calls no `/complete`
+     (that call used to come back "already complete" and turn every full count into an error
+     toast); if scrap was being held for the close, it says the operation completed with the pieces
+     already recorded and that scrap was **not** recorded. When the clock-out flagged missing step
+     records it opens the steps view; otherwise it calls `/complete` with **no quantity**
+     (`{source: "kiosk"}` plus any covering scrap) — the floor verb is a close that books the
+     recorded good. The overlay's SHORT figures follow the live active job while it is open. A
      refusal of the clock-out itself (nothing landed) renders **inline** in the overlay, which stays
      open with the entry intact — e.g. *"Op 20 is already complete; clock out with 0 pieces…"* when
      the office closed the operation while the operator was still clocked in; set GOOD to 0 and keep
-     it open. If the clock-out lands but the close is refused, the kiosk says so — *"Clocked out, but
-     completing failed: …"* — labor is closed either way. A completion refused with **409
+     it open. A scrim tap or Escape while the request is in flight does not close the overlay under
+     it. If the clock-out lands but the close is refused, the kiosk says so and names the next step
+     — *"Clocked out, but completing failed: … — Op N is still open; clock in and Complete again, or
+     ask a supervisor."* — labor is closed either way. A completion refused with **409
      `STEPS_INCOMPLETE`** (required process-sheet steps missing conforming records) opens the steps
      view with the outstanding steps rendered inline (see
      [Process steps](#process-steps-process-sheets-capture)).
@@ -219,10 +237,10 @@ URL is all the station setup there is.
      posts the clock-out only — never `/complete` — toasts *"Clocked out — Op N left open (n not yet
      accounted for)"* and never chains the next job. One honest exception the overlay states up
      front: a **full good count** still completes the operation on clock-out whichever verb was
-     chosen (*"That is the full count — clocking out completes Op N."*), and that completion consumes
-     the operation's tied material like any other. The material notice is not shown in this mode —
-     including in that full-count case, a known gap. Always available — walking away must never
-     require claiming the operation is finished.
+     chosen (*"That is the full count — clocking out completes Op N."* — judged on the server's hard
+     good ceiling), and that completion consumes the operation's tied material like any other, so
+     the material notice appears in this mode exactly then. Always available — walking away must
+     never require claiming the operation is finished. The button is 48 px tall.
    - **CORRECT OVER-COUNT** — opens a touch `KioskCorrectionScreen` (digits-only keypad, **no
      minus key**, plus a **required** correction-reason tile from a set **distinct from the scrap
      grid** — "Double-counted", "Scanned twice", "Wrong qty entered", "Mis-key / typo", "Wrong
@@ -397,8 +415,11 @@ my-active-job — `frontend/src/utils/shortCount.ts` transcribes only the per-op
 a parity test holds it to the Python):
 
 - **Nothing closes a short on its own.** A clock-out completes an operation only on a full **good**
-  count of the units that reached it; scrap never counts there, so an operator who scrapped two and
-  is re-running replacements is never closed out from under them. Every short close is an explicit
+  count of the units that can reach it (the hard ceiling — a stage short only by soft component feed
+  is closed by an explicit COMPLETE, so replenished components can still be recorded); scrap never
+  counts there, so an operator who scrapped two and is re-running replacements is never closed out
+  from under them, and the desktop / phone cards keep **+1** until the good ceiling even after scrap
+  has accounted for every piece. Every short close is an explicit
   COMPLETE by a named person — the single-operator kiosk, the crew station's badge-signed COMPLETE,
   the desktop page's **Complete Op N after checking out**, or the office.
 - **Units never started are not scrap** (scrap consumes material). Leave the operation open and ask
@@ -407,9 +428,11 @@ a parity test holds it to the Python):
 - **What reached the operation.** On a sequential routing, a stage closed short upstream lowers what
   the next stages can receive: the SHORT readout counts only what reached this operation, and the
   screen says how many *"never reached it — closed short upstream."* A component part's own stages
-  always pass that credit along; on a **pooled** work order the whole-order stages do not, so a later
-  stage there must report the missing units as scrap or stay open — the remedy is turning
-  **Sequential operations** on (Work Order detail).
+  always pass that credit along; on a **pooled** work order the whole-order stages do not. A later
+  stage there must **not** report units it never received as scrap (that records the same loss twice
+  and consumes material for runs that never happened): the screen and the close's refusal say so,
+  and the remedy is a supervisor turning **Sequential operations** on (Work Order detail) before that
+  stage closes.
 - **An operation left open short holds the routing.** Later operations at other work centers stay
   off the board until it closes, and on a sequential work order so does every later operation at
   its own work center. That is the intended consequence of ruling 1: the shop either accounts for
@@ -424,6 +447,8 @@ a parity test holds it to the Python):
 - **No NCR and nothing automatic.** "Report n as scrap" only fills the scrap field the operator then
   confirms with a reason; filing an NCR stays the operator's explicit OPEN NCR toggle on REPORT
   PRODUCTION. A standing API token may not close work short at all (403).
+- **Scrap found after a close.** A completed operation refuses a clock-out carrying pieces (clock
+  out with 0); a supervisor can add the scrap, with a reason, from the work order.
 
 ## Job instructions on screen
 
@@ -1022,8 +1047,8 @@ Two more facts the copy carries because both otherwise read as bugs:
   actually recorded — `/complete` no longer asserts `quantity_complete = quantity_ordered` — so the
   prediction is computed from the **final good**: what is already recorded plus what is keyed here
   (on the crew station, the crew total so far plus the pending entry). The single-operator overlay
-  does not show the notice in **leave-open** mode — even when the entry is a full count that the
-  clock-out will complete (a known gap; see CLOCK OUT · KEEP OPEN).
+  does not show the notice in **leave-open** mode — except when the entry is a full good count,
+  which the clock-out completes (and consumes) whichever verb was chosen.
 - **SCRAP raises it.** A scrapped run physically used its sheet (posted as `ISSUE`, not `SCRAP`, so
   lot genealogy keeps it), so keying 2 scrap predicts 2 **extra** sheets. An explicit line says so —
   *"Includes +2 for the 2 scrap you entered — a scrapped run still used its material"* — because
@@ -1441,8 +1466,9 @@ Five things about it are load-bearing rather than cosmetic:
   **no row** (the crew tally banner is absent there for the same reason) — never an unbounded one.
   On COMPLETE the good field pre-fills at what is still **unaccounted for** (received − good −
   scrap), and the screen goes **SHORT** — Continue disabled with *"n short — report as scrap, or
-  Cancel and have each operator LEAVE with their count"*, plus a **Report n as scrap** button —
-  whenever the entry leaves any of it unaccounted (owner ruling 1); the production-report screen
+  Cancel and have each operator LEAVE with their count"*, plus a **Report n as scrap** button and
+  *"Pieces never started? They are not scrap — Cancel, leave the job open, and ask a supervisor to
+  lower the quantity."* — whenever the entry leaves any of it unaccounted (owner ruling 1); the production-report screen
   carries no such readout. Recording more than the good ceiling is an office over-count, not a tap
   here. The over-count **CORRECTION** screen has no quick adds at all — it
   removes pieces.
@@ -1481,7 +1507,9 @@ measurement.
 - **JOIN / LEAVE (badge decides).** Tap a job → "scan badge to join or leave". If the badge's
   user is already on the roster, it's a **LEAVE**: the quantity screen closes their own entry
   (`POST /shop-floor/clock-out/{their time_entry_id}`; 0/0 allowed, scrap requires a structured
-  reason). Otherwise it's a **JOIN** (`POST /shop-floor/clock-in`, entry type **Run** by default
+  reason). When that clock-out is a full good count it completes the operation (and deducts its
+  tied material); the toast then says *"{name} clocked out — Op N completed"* instead of a bare
+  "clocked out". Otherwise it's a **JOIN** (`POST /shop-floor/clock-in`, entry type **Run** by default
   with a **Setup** toggle). Joining while clocked in elsewhere is allowed — the kiosk shows an
   informational "also clocked in at …" toast, never a block. A stale-roster double join gets the
   server's 400 ("already clocked in") as an info toast plus a refresh. A job whose work order is a
@@ -1539,15 +1567,23 @@ measurement.
   with `acknowledge_open_entries: true`, because a short close would otherwise be refused 409
   naming them (owner ruling 1). A badge scan inside the dialog signs it, and **where the final
   pieces ride depends on the signer**:
-  - **The signer is on the roster** (holds an entry on this operation) → good **and** scrap (with
-    its reason) post through the idempotent, request-id'd `production` report as that operator,
-    then `complete` closes with nothing but the acknowledgement. If the production lands but the
-    close is refused, it says so (*"Saved production, but completing failed: …"*).
+  - **The signer is on the roster** (holds an entry on this operation) → the good posts through the
+    idempotent, request-id'd `production` report as that operator, then `complete` closes with the
+    acknowledgement — and with any scrap that **covers a short** (and its reason), because the close
+    bounds it by what is still unaccounted under the row lock (a stale board cannot over-state it)
+    and attributes it to the signer's own entry. Replacement scrap on a full good count rides the
+    `production` report with the pieces. If the production lands but the close is refused, it says
+    so (*"Saved production, but completing failed: …"*, adding *"(the n scrap was not saved)"* when
+    the scrap rode the refused close).
   - **The signer holds no entry** (a lead closing out a crew's job) → `production` would refuse
     them, so good cannot be recorded under that badge at all: with good > 0 **nothing is sent** and
     the screen says *"This badge is not clocked in to this job — scan a badge that is, or JOIN
     first, to record the n good."* — and on a job carrying a `start_blocked_reason` (draft or held
-    work order, where JOIN is refused) only *"…scan a badge that is clocked in to this job…"*. With
+    work order, where JOIN is refused) only *"…scan a badge that is clocked in to this job…"*, or,
+    when nobody is clocked in at all, *"No one is clocked in to this job, and it can't be joined while
+    it is on hold (in draft). Record the n good once a supervisor resumes (releases) it, or ask a
+    supervisor."* A READY job on such a work order shows COMPLETE disabled with the reason
+    (completing it would start it). With
     only scrap entered, the scrap and its reason ride `complete` itself (declared at the close); a
     refusal then reads *"Nothing was saved — …"*, because a refused close writes nothing.
 

@@ -85,8 +85,9 @@ tier, that tier stands — this rule is a floor, never a loosening.
 Agents reach the API through the MCP server in `backend/app/mcp/` ([docs/MCP.md](MCP.md)) —
 either the Streamable HTTP door at `/mcp` (off by default, `WERCO_MCP_HTTP_ENABLED`) or the stdio
 bridge `python -m app.mcp`. **Nothing in this document changes for them** (one credential rule —
-an API token may not close work short — is below the Work Orders matrix, and applies to an API
-token however it is presented). Every tool call is a
+an API token may not make the short-count judgment writes: closing work short, recording more good
+than the floor counted, editing an operation's counts, lowering an order once work was recorded — is
+below the Work Orders matrix, and applies to an API token however it is presented). Every tool call is a
 real request dispatched through the same routers with a real user's bearer — a 15-minute access JWT
 or a long-lived, Admin-issued **API token** bound to one user (see the API tokens callout under
 [Admin](#admin)): `get_current_user` resolves the user, tenancy comes from the token's active
@@ -294,15 +295,21 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 >   / Supervisor** (the existing gate), and is now the only way to correct a COMPLETE operation's
 >   count: a correction that would leave it short must send `reopen_operation` (it returns to in
 >   progress, with required audit rows). The operator's twin refuses `reopen_operation` (**422**), and
->   `PUT /work-orders/operations/{id}` refuses count / status edits on a COMPLETE operation (**409**).
-> - **An API token may not close work short** — a credential rule, not a role rule: a short close by
->   either complete verb and a force-complete below the order answer **403** for a standing per-user
->   API token (`app.core.credentials.is_api_token_credential`), whatever its user's role. A
->   full-count close by the same token is unaffected, and a **crew-station badge token is a person**
->   and may close short. This is the short-count rule's own refusal; read together with ruling 3 as
+>   `PUT /work-orders/operations/{id}` refuses good / status edits and scrap LOWERING on a COMPLETE
+>   operation (**409**) — the same Admin / Manager / Supervisor gate may still ADD scrap found after
+>   the close, with a reason, as required audit evidence.
+> - **An API token may not make count judgments** — a credential rule, not a role rule. A standing
+>   per-user API token (`app.core.credentials.is_api_token_credential`) is refused **403**, whatever
+>   its user's role, on: a short close by either complete verb; a force-complete below the order or
+>   above what the floor recorded; recording good above the floor's labor count on the office verb
+>   (override reason or not); any count edit (`quantity_complete` / `quantity_scrapped` /
+>   `scrap_reason`) through `PUT /work-orders/operations/{id}`; and lowering `quantity_ordered` once
+>   any operation has recorded good, scrap or labor. A full-count close by the same token, and scrap
+>   reported through clock-out / `/production`, are unaffected; a **crew-station badge token is a
+>   person** and passes. These are the short-count rule's own refusals; read together with ruling 3 as
 >   "standing API tokens may not make judgment writes", owner confirmation of that combined reading is
->   **pending**. An interactive JWT, including one carried by an MCP client, is the person's own
->   session and is not refused.
+>   **pending** — including whether an agent using a person's interactive JWT (an MCP client) may
+>   close short, which today it may: that JWT is the person's own session and is not refused.
 >
 > See `docs/API.md` → Work Orders → "Short count at completion".
 
