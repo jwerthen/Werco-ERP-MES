@@ -17,12 +17,15 @@ from app.models.work_order_blocker import WorkOrderBlockerCategory, WorkOrderBlo
 from app.schemas.work_order_blocker import WorkOrderBlockerCreate
 from app.services import dispatch_service
 from app.services.laser_nest_service import active_laser_nest, sync_laser_nest_from_operation
+from app.services.operation_action_gates import ceiling_exceeded_message
 from app.services.operational_event_service import OperationalEventService, redact_event_payload
 from app.services.production_receipt_service import find_production_replay, record_production_receipt
 from app.services.scrap_reason_service import resolve_scrap_reason_code_or_http
 from app.services.work_order_blocker_service import WorkOrderBlockerService
 from app.services.work_order_state_service import (
+    QTY_EPSILON,
     floor_operation_quantity_at_evidence,
+    operation_accounting,
     operation_target_quantity,
     sync_work_order_quantity_complete,
 )
@@ -163,6 +166,12 @@ def report_production_command(db, current_user, company_id, operation_id, produc
         raise HTTPException(
             status_code=400, detail=f"Quantity ({next_complete_qty}) cannot exceed quantity ordered ({target_qty})"
         )
+    # Owner ruling 1: nor above the CEILING -- the target less units an upstream close in
+    # this operation's chain declared short (the same cap clock-out applies). Uncredited
+    # chains read the target, so this adds no query there.
+    acct = operation_accounting(work_order, operation)
+    if target_qty > 0 and next_complete_qty > acct.ceiling + QTY_EPSILON:
+        raise HTTPException(status_code=400, detail=ceiling_exceeded_message(operation, next_complete_qty, acct))
 
     # /production is an ADDITIVE verb: floor the incremented total at durable
     # TimeEntry evidence and cap at target so additive and absolute writes converge
