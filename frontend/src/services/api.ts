@@ -65,6 +65,7 @@ import {
   InventoryCombineRequest,
   InventoryCombineResult,
   PartActivationResult,
+  ShopFloorCompleteOperationRequest,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
@@ -2539,7 +2540,10 @@ class ApiService {
     return response.data;
   }
 
-  async completeOperation(operationId: number, data: { quantity_complete: number; notes?: string; source?: string }) {
+  // Owner ruling 1: a CLOSE verb. It books the good the floor already recorded and is
+  // refused 409 (nothing written) while the count is short — floor clients send no
+  // quantity_complete, only scrap declared at the close (with a reason) when covering one.
+  async completeOperation(operationId: number, data: ShopFloorCompleteOperationRequest = {}) {
     const response = await this.api.post(`/shop-floor/operations/${operationId}/complete`, data);
     this.invalidateDashboardCache();
     return response.data;

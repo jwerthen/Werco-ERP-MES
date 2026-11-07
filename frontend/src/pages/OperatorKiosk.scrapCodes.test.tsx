@@ -145,13 +145,17 @@ describe('OperatorKiosk scrap-code payloads', () => {
     );
   });
 
-  it('COMPLETE carries the code id on the clock-out leg, then completes at target', async () => {
-    mockedApi.clockOut.mockResolvedValue({});
+  it('COMPLETE carries the code id on the clock-out leg, then closes with no quantity', async () => {
+    mockedApi.clockOut.mockResolvedValue({ operation_status: 'in_progress' });
     mockedApi.completeOperation.mockResolvedValue({});
     renderKiosk();
 
     fireEvent.click(await screen.findByRole('button', { name: /^complete op$/i }));
-    // GOOD prefills with the remaining quantity (50 - 5 = 45); add 2 scrap.
+    // 45 are still unaccounted for (50 - 5): 43 good + 2 scrap covers them (owner ruling 1).
+    fireEvent.click(screen.getByTestId('kiosk-qty-good'));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    fireEvent.click(screen.getByTestId('kiosk-key-4'));
+    fireEvent.click(screen.getByTestId('kiosk-key-3'));
     fireEvent.click(screen.getByTestId('kiosk-qty-scrap'));
     fireEvent.click(screen.getByTestId('kiosk-key-2'));
     fireEvent.click(screen.getByRole('button', { name: 'OT — Out of tolerance' }));
@@ -159,13 +163,14 @@ describe('OperatorKiosk scrap-code payloads', () => {
 
     await waitFor(() => expect(mockedApi.completeOperation).toHaveBeenCalled());
     expect(mockedApi.clockOut).toHaveBeenCalledWith(501, {
-      quantity_produced: 45,
+      quantity_produced: 43,
       quantity_scrapped: 2,
       scrap_reason: undefined,
       scrap_reason_code_id: 7,
       source: 'kiosk',
     });
-    expect(mockedApi.completeOperation).toHaveBeenCalledWith(31, { quantity_complete: 50, source: 'kiosk' });
+    // The scrap (and its code) rode the clock-out; the close sends no quantity at all.
+    expect(mockedApi.completeOperation).toHaveBeenCalledWith(31, { source: 'kiosk' });
   });
 
   it('fails soft to the legacy reason tiles (text payload, no code id) when the codes fetch rejects', async () => {

@@ -33,6 +33,7 @@ import KioskCorrectionScreen from '../components/kiosk/KioskCorrectionScreen';
 import KioskReportModal from '../components/kiosk/KioskReportModal';
 import KioskHoldModal from '../components/kiosk/KioskHoldModal';
 import KioskCompleteModal from '../components/kiosk/KioskCompleteModal';
+import type { KioskCompleteMode } from '../components/kiosk/KioskCompleteModal';
 import KioskDocViewer, { KioskDocTab, KioskDocTransport } from '../components/kiosk/KioskDocViewer';
 import KioskStepsPanel, { StepsTransport } from '../components/kiosk/KioskStepsPanel';
 import KioskOneTapLane from '../components/kiosk/KioskOneTapLane';
@@ -71,6 +72,12 @@ import type { MissingStepInfo, QualityHoldResult } from '../types/processSheet';
 import ProductionRecoveryNotice from '../components/kiosk/ProductionRecoveryNotice';
 import { useProductionReportRequest } from '../components/kiosk/useProductionReportRequest';
 import { useScrapReasonCodes } from '../hooks/useScrapReasonCodes';
+import {
+  clockOutOperationStatus,
+  formatShortQuantity,
+  goodCeiling as resolveGoodCeiling,
+  shortAfterEntry,
+} from '../utils/shortCount';
 
 const POLL_INTERVAL_MS = 15_000;
 
@@ -94,7 +101,9 @@ type KioskView =
   // Over-count correction (reduce-production) — walk back good pieces the
   // operator OVER-reported on their own open clock-in. Server-gated, non-optimistic.
   | { name: 'correct'; job: ActiveJob }
-  | { name: 'complete'; job: ActiveJob }
+  // COMPLETE (`finish`) and CLOCK OUT · KEEP OPEN (`leave_open`) share one overlay
+  // (owner ruling 1): both ride the clock-out; only `finish` then closes the operation.
+  | { name: 'complete'; job: ActiveJob; mode: KioskCompleteMode }
   | { name: 'hold'; job: ActiveJob }
   // Lifting a hold from the queue. Server-gated (400 when the op is not held)
   // ⇒ non-optimistic: the confirm stays up until the server answers.
@@ -270,6 +279,9 @@ export default function OperatorKiosk() {
   // correction screen (verbatim, next to the confirm button) — mirrors the crew
   // station's badgeError pattern. A toast alone proved unreadable on the floor.
   const [correctError, setCorrectError] = useState<string | null>(null);
+  // A clock-out the server refused from the COMPLETE / KEEP OPEN overlay — nothing
+  // landed, so the refusal renders INLINE in the overlay and the entry stays editable.
+  const [completeError, setCompleteError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<KioskToast[]>([]);
   const [nowMs, setNowMs] = useState(() => Date.now());
   // Honest timers (decision 8): server_time rides the queue + my-active-job
@@ -351,6 +363,7 @@ export default function OperatorKiosk() {
     setView({ name: 'queue' });
     setChoosingWorkstation(false);
     setCorrectError(null);
+    setCompleteError(null);
     if (previousSession.current !== sessionKey) {
       setActiveJob(null);
       setSessionNcr(null);
@@ -679,6 +692,7 @@ export default function OperatorKiosk() {
     setActiveJob(null);
     setSessionNcr(null);
     setCorrectError(null);
+    setCompleteError(null);
     setNoticeSources(NO_NOTICE_SOURCES);
   }, [isAuthenticated]);
 
@@ -832,22 +846,40 @@ export default function OperatorKiosk() {
     [refresh, showToast]
   );
 
+  /**
+   * COMPLETE and CLOCK OUT · KEEP OPEN — the overlay's two verbs (owner ruling 1).
+   *
+   * Both close the operator's own labor record FIRST (good, scrap and its reason land on
+   * the TimeEntry). Then:
+   *  (a) the clock-out COMPLETED the operation on its own (a full good count — the
+   *      response's `operation_status` says so) → done. No `/complete`: it would be
+   *      refused "already complete", which used to turn every full count into an
+   *      error toast for a successful outcome;
+   *  (b) the clock-out flagged missing required step records → the steps view;
+   *  (c) KEEP OPEN → done, the operation stays open, and the toast says how much is
+   *      still unaccounted for;
+   *  (d) COMPLETE → `/complete` with NO quantity. The floor verb is a close: it books
+   *      the good the floor recorded and refuses (writing nothing) while the count is
+   *      short — the overlay only lets this through once scrap covers the short.
+   *
+   * A refusal of the clock-out itself (nothing landed) renders INLINE in the overlay,
+   * which stays open with the entry intact. Once the clock-out has landed a later
+   * refusal can only be reported honestly: "Clocked out, but completing failed".
+   */
   const handleComplete = useCallback(
     async (
       job: ActiveJob,
-      good: number,
-      scrap: number,
-      scrapReason: string | null,
-      scrapReasonCodeId: number | null,
-      chainItem: KioskQueueItem | null
+      mode: KioskCompleteMode,
+      entry: { good: number; scrap: number; scrapReason: string | null; scrapReasonCodeId: number | null },
+      context: { chainItem: KioskQueueItem | null; unaccountedAfter: number }
     ) => {
       if (!job.operation_id) return;
+      const { good, scrap, scrapReason, scrapReasonCodeId } = entry;
+      const opLabel = formatOperationLabel(job.operation_number);
       setBusy(true);
+      setCompleteError(null);
       let clockedOut = false;
       try {
-        // Mirrors ShopFloorSimple's sequencing: close the operator's own labor
-        // record first (quantities + scrap reason land on the TimeEntry), then
-        // assert operation completion at the target quantity.
         const clockOutRes: unknown = await api.clockOut(job.time_entry_id, {
           quantity_produced: good,
           quantity_scrapped: scrap,
@@ -856,25 +888,38 @@ export default function OperatorKiosk() {
           source: KIOSK_SOURCE,
         });
         clockedOut = true;
-        // The clock-out itself succeeded but the server flagged missing required
-        // step records (the operation deliberately stays IN_PROGRESS). NOT an
-        // error — labor was recorded fine. Skip the completion call the server
-        // just told us it would refuse, say so as info, and open the steps view
-        // with the outstanding steps inline.
-        const pendingSteps = extractClockOutStepsIncomplete(clockOutRes);
-        if (pendingSteps && job.operation_id != null) {
-          showToast('info', clockedOutStepsMessage(pendingSteps));
-          setView({ name: 'steps', operationId: job.operation_id, jobLabel: jobLabel(job), missing: pendingSteps });
-          return;
+        if (clockOutOperationStatus(clockOutRes) !== 'complete') {
+          // The clock-out itself succeeded but the server flagged missing required
+          // step records (the operation deliberately stays IN_PROGRESS). NOT an
+          // error — labor was recorded fine. Skip the completion call the server
+          // just told us it would refuse, say so as info, and open the steps view
+          // with the outstanding steps inline.
+          const pendingSteps = extractClockOutStepsIncomplete(clockOutRes);
+          if (pendingSteps && job.operation_id != null) {
+            showToast('info', clockedOutStepsMessage(pendingSteps));
+            setView({ name: 'steps', operationId: job.operation_id, jobLabel: jobLabel(job), missing: pendingSteps });
+            return;
+          }
+          if (mode === 'leave_open') {
+            const left = context.unaccountedAfter;
+            showToast(
+              'info',
+              left > 0
+                ? `Clocked out — ${opLabel} left open (${formatShortQuantity(left)} not yet accounted for)`
+                : `Clocked out — ${opLabel} left open`
+            );
+            setView({ name: 'queue' });
+            return;
+          }
+          await api.completeOperation(job.operation_id, { source: KIOSK_SOURCE });
         }
-        await api.completeOperation(job.operation_id, {
-          quantity_complete: Number(job.quantity_ordered || 0),
-          source: KIOSK_SOURCE,
-        });
         showToast('success', `Completed ${job.work_order_number}`);
         setSessionNcr(null);
-        // Chained next-job start (decision 6): NON-optimistic — attempted only
-        // after the complete landed, refusal surfaced verbatim, lands on queue.
+        // Chained next-job start (decision 6): NON-optimistic — attempted only after
+        // the operation actually closed (by the clock-out or by /complete), refusal
+        // surfaced verbatim, lands on queue. KEEP OPEN never chains: the operator
+        // chose to walk away, not to start the next job.
+        const chainItem = mode === 'finish' ? context.chainItem : null;
         if (chainItem && workCenterId != null) {
           try {
             await api.clockIn({
@@ -911,7 +956,10 @@ export default function OperatorKiosk() {
             setView({ name: 'queue' });
           }
         } else {
-          showToast('error', message);
+          // Nothing landed: keep the overlay (and the entry) up, refusal inline and
+          // verbatim — e.g. "Op 20 is already complete; clock out with 0 pieces…",
+          // which the operator answers by setting GOOD to 0 and keeping it open.
+          setCompleteError(message);
         }
       } finally {
         setBusy(false);
@@ -1093,9 +1141,17 @@ export default function OperatorKiosk() {
    * `unbanked` comes out of the remaining because the pending taps are already
    * promised to the server; leaving them in would let the lane count past the
    * target and key a guaranteed refusal.
+   *
+   * The ceiling is `quantity_good_ceiling` when the row carries it (owner ruling 1:
+   * units an upstream close declared short can never reach this operation, and
+   * `/production` refuses past them), else the target as before.
    */
   const oneTapRemaining = activeQueueItem
-    ? Math.max(0, Number(activeQueueItem.quantity_ordered || 0) - Number(activeQueueItem.quantity_complete || 0))
+    ? Math.max(
+        0,
+        resolveGoodCeiling(activeQueueItem.quantity_ordered, activeQueueItem.quantity_good_ceiling) -
+          Number(activeQueueItem.quantity_complete || 0)
+      )
     : null;
   const oneTapLane =
     oneTapRemaining == null ? undefined : (
@@ -1607,7 +1663,10 @@ export default function OperatorKiosk() {
                           type="button"
                           disabled={mutationsBlocked}
                           aria-describedby={!online ? OFFLINE_HINT_ID : undefined}
-                          onClick={() => setView({ name: 'complete', job: activeJob })}
+                          onClick={() => {
+                            setCompleteError(null);
+                            setView({ name: 'complete', job: activeJob, mode: 'finish' });
+                          }}
                           className="h-[50px] flex-1 rounded-[4px] border border-fd-green/45 bg-fd-green/10 font-mono text-[13px] font-bold uppercase tracking-[0.1em] text-fd-green transition-transform duration-150 ease-out active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 min-[1100px]:h-14"
                         >
                           Complete op
@@ -1635,6 +1694,24 @@ export default function OperatorKiosk() {
                           Correct count
                         </button>
                       </div>
+                      {/* CLOCK OUT · KEEP OPEN (owner ruling 1): end this session with
+                          the pieces finished so far and leave the operation open for
+                          the next shift. Lower emphasis than COMPLETE on purpose, but
+                          always here — walking away must never require claiming the
+                          operation is finished. GOOD starts at 0 in this mode. */}
+                      <button
+                        type="button"
+                        data-testid="kiosk-active-keep-open"
+                        disabled={mutationsBlocked}
+                        aria-describedby={!online ? OFFLINE_HINT_ID : undefined}
+                        onClick={() => {
+                          setCompleteError(null);
+                          setView({ name: 'complete', job: activeJob, mode: 'leave_open' });
+                        }}
+                        className="h-11 rounded-[4px] border border-fd-line font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-fd-body transition-transform duration-150 ease-out active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Clock out · keep open
+                      </button>
                     </div>
                   </>
                 ) : (
@@ -1971,7 +2048,11 @@ export default function OperatorKiosk() {
 
       {view.name === 'complete' && (
         <KioskCompleteModal
+          // Keyed by mode: the overlay holds its own entry state, and switching verbs
+          // from the running panel must start a fresh entry, not inherit the other's.
+          key={`${view.job.time_entry_id}-${view.mode}`}
           job={view.job}
+          mode={view.mode}
           nowMs={correctedNowMs}
           stepsTotal={activeQueueItem?.steps_total}
           stepsRecorded={activeQueueItem?.steps_recorded}
@@ -1991,6 +2072,15 @@ export default function OperatorKiosk() {
           // exactly that case, so fall back to it rather than render nothing.
           materialTies={activeQueueItem?.material_ties ?? view.job.material_ties}
           operationScrapped={activeQueueItem?.quantity_scrapped ?? view.job.operation_quantity_scrapped}
+          // Owner ruling 1: what reached this operation, the server's good ceiling,
+          // and who else is clocked in — same queue-row-then-my-active-job fallback.
+          // The roster only rides the queue row; off-machine it is unknown and the
+          // server stays the arbiter of the others-clocked-in refusal.
+          upstreamShort={activeQueueItem?.upstream_quantity_short ?? view.job.upstream_quantity_short}
+          goodCeiling={activeQueueItem?.quantity_good_ceiling ?? view.job.quantity_good_ceiling}
+          roster={activeQueueItem?.roster}
+          currentUserId={user?.id ?? null}
+          error={completeError}
           nextQueueItem={nextQueueItem}
           machineCode={machineCode}
           sessionNcrNumber={
@@ -2000,7 +2090,10 @@ export default function OperatorKiosk() {
           busy={mutationsBlocked}
           online={online}
           offlineHintId={OFFLINE_HINT_ID}
-          onCancel={() => setView({ name: 'queue' })}
+          onCancel={() => {
+            setCompleteError(null);
+            setView({ name: 'queue' });
+          }}
           onSteps={
             view.job.operation_id != null
               ? () =>
@@ -2012,7 +2105,30 @@ export default function OperatorKiosk() {
               : undefined
           }
           onConfirm={(good, scrap, reason, codeId) =>
-            void handleComplete(view.job, good, scrap, reason, codeId, nextQueueItem)
+            void handleComplete(
+              view.job,
+              'finish',
+              { good, scrap, scrapReason: reason, scrapReasonCodeId: codeId },
+              { chainItem: nextQueueItem, unaccountedAfter: 0 }
+            )
+          }
+          onLeaveOpen={(good, scrap, reason, codeId) =>
+            void handleComplete(
+              view.job,
+              'leave_open',
+              { good, scrap, scrapReason: reason, scrapReasonCodeId: codeId },
+              {
+                chainItem: null,
+                unaccountedAfter: shortAfterEntry({
+                  target: view.job.quantity_ordered,
+                  upstreamShort: activeQueueItem?.upstream_quantity_short ?? view.job.upstream_quantity_short,
+                  complete: view.job.quantity_complete,
+                  scrapped: activeQueueItem?.quantity_scrapped ?? view.job.operation_quantity_scrapped,
+                  good,
+                  scrap,
+                }),
+              }
+            )
           }
         />
       )}

@@ -8,6 +8,7 @@ import {
   LaserNestInfo,
   MyActiveJobResponse,
   OperationHold,
+  OperationShortCountFields,
   ShopFloorOperationsDispatchFields,
   User,
   WorkCenterQueueResponse,
@@ -51,6 +52,13 @@ import { useScrapReasonCodes } from '../hooks/useScrapReasonCodes';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId, isKioskMode } from '../utils/kiosk';
 import { formatOperationLabel } from '../utils/operationLabel';
 import { startBlockedLabel } from '../utils/startBlock';
+import {
+  clockOutOperationStatus,
+  closingShortAfterEntry,
+  formatShortQuantity,
+  operationUnaccounted,
+  shortAfterEntry,
+} from '../utils/shortCount';
 import { ScanResolveResult } from '../types/scan';
 import { useAuth } from '../context/AuthContext';
 import { useCompany } from '../context/CompanyContext';
@@ -68,7 +76,12 @@ import DispatchNoticeBanner from '../components/kiosk/DispatchNoticeBanner';
 import { useDispatchNotice } from '../hooks/useDispatchNotice';
 import type { DispatchNoticeSource } from '../hooks/useDispatchNotice';
 
-interface Operation {
+/**
+ * One `GET /shop-floor/operations` row. It carries the short-count figures (owner
+ * ruling 1, `OperationShortCountFields`) so "remaining" is computed from what actually
+ * REACHED the operation — the received count — and scrap counts as accounted for.
+ */
+interface Operation extends OperationShortCountFields {
   id: number;
   work_order_id: number;
   work_order_number: string;
@@ -272,6 +285,9 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
   const [expandedOperationId, setExpandedOperationId] = useState<number | null>(null);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [checkOutData, setCheckOutData] = useState({ quantity_produced: 0, quantity_scrapped: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
+  // "Complete Op N after checking out" (owner ruling 1): the desk/phone floor's short
+  // close. Offered only once this check-out accounts for every received unit.
+  const [checkOutCompleteAfter, setCheckOutCompleteAfter] = useState(false);
   const [productionData, setProductionData] = useState(INITIAL_PRODUCTION_DATA);
   useEffect(() => {
     if (productionModal) productionSave.saveDraft(productionModal.operation.id, { timeEntryId: productionModal.job.time_entry_id, data: productionData });
@@ -403,7 +419,14 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
           work_order_quantity_ordered: item.work_order_quantity_ordered,
           component_quantity: item.component_quantity,
           quantity_complete: item.quantity_complete,
-          quantity_scrapped: 0,
+          // The REAL operation scrap total (the queue row has always sent it) — the
+          // received-aware remaining subtracts scrap, so a hard-coded 0 here would
+          // over-state what is left on every job with recorded scrap.
+          quantity_scrapped: Number(item.quantity_scrapped || 0),
+          // Owner ruling 1: the same three server figures the list rows carry.
+          upstream_quantity_short: item.upstream_quantity_short ?? null,
+          quantity_good_ceiling: item.quantity_good_ceiling ?? null,
+          quantity_unaccounted: item.quantity_unaccounted ?? null,
           priority: item.priority,
           due_date: item.due_date,
           customer_name: null,
@@ -817,8 +840,16 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
     return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
   }, [nowMs]);
 
+  // What is still unaccounted for on an operation (owner ruling 1): units that REACHED
+  // it (target less any upstream short) recorded neither good nor scrapped. This is
+  // what a close must still cover, so it is also what "Remaining" fills in.
   const getRemainingQuantity = useCallback((operation: Operation) => {
-    return Math.max(0, Number(operation.quantity_ordered || 0) - Number(operation.quantity_complete || 0));
+    return operationUnaccounted({
+      target: operation.quantity_ordered,
+      upstreamShort: operation.upstream_quantity_short,
+      complete: operation.quantity_complete,
+      scrapped: operation.quantity_scrapped,
+    });
   }, []);
 
   /**
@@ -923,6 +954,7 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
     selectCurrentJob(job);
     setCheckOutModal({ operation, job });
     setCheckOutData({ quantity_produced: 0, quantity_scrapped: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
+    setCheckOutCompleteAfter(false);
   };
 
   const handleOpenProductionModal = (operation: Operation, job: ActiveJob) => {
@@ -988,6 +1020,7 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
   const closeCheckOutModal = () => {
     setCheckOutModal(null);
     setCheckOutData({ quantity_produced: 0, quantity_scrapped: 0, scrap: EMPTY_SCRAP_SELECTION, notes: '' });
+    setCheckOutCompleteAfter(false);
   };
 
   const closeProductionModal = () => {
@@ -1106,14 +1139,15 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
     }
   };
 
+  // Owner ruling 1: `/complete` is a CLOSE. It books the good the floor already
+  // recorded — no quantity is sent — and refuses (writing nothing) while the count is
+  // short or a crewmate is still clocked in. The refusal is shown verbatim.
   const handleCompleteOperation = async (operation: Operation) => {
     if (actionLoading !== null || productionSave.mutationsBlocked) return;
     setCompleteConfirm(null);
     setActionLoading(operation.id);
     try {
-      await api.completeOperation(operation.id, {
-        quantity_complete: Number(operation.quantity_ordered || 0),
-      });
+      await api.completeOperation(operation.id, { source: 'desktop' });
       showToast('success', `Completed ${operation.work_order_number}`);
       await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
     } catch (err: any) {
@@ -1123,12 +1157,44 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
     }
   };
 
+  // What this check-out would still leave unaccounted for, and so whether "complete
+  // after" may be offered: only once good + scrap (recorded and entered) cover every
+  // received unit — the same arithmetic the server's close decides on.
+  const checkOutUnaccountedAfter = checkOutModal
+    ? shortAfterEntry({
+        target: checkOutModal.operation.quantity_ordered,
+        upstreamShort: checkOutModal.operation.upstream_quantity_short,
+        complete: checkOutModal.operation.quantity_complete,
+        scrapped: checkOutModal.operation.quantity_scrapped,
+        good: checkOutData.quantity_produced,
+        scrap: checkOutData.quantity_scrapped,
+      })
+    : 0;
+  const checkOutCanComplete = Boolean(
+    checkOutModal &&
+      checkOutModal.operation.status !== 'complete' &&
+      Number(checkOutModal.operation.quantity_ordered || 0) > 0 &&
+      checkOutUnaccountedAfter <= 0
+  );
+
+  /**
+   * Check Out — and, when ticked, complete the operation right after (the floor's
+   * short close for an operator-only desktop/phone shop, owner ruling 1).
+   *
+   * Two writes, in order, each reported honestly: the clock-out (good, scrap and its
+   * reason land on the time entry), then `/complete` with no quantity. When the
+   * clock-out completed the operation on its own (a full good count — its
+   * `operation_status` says so) there is nothing left to close, so no `/complete`.
+   */
   const handleClockOut = async () => {
     if (!checkOutModal || actionLoading !== null || productionSave.mutationsBlocked) return;
 
-    setActionLoading(checkOutModal.operation.id);
+    const { operation } = checkOutModal;
+    const completeAfter = checkOutCompleteAfter && checkOutCanComplete;
+    setActionLoading(operation.id);
+    let clockedOut = false;
     try {
-      await api.clockOut(checkOutModal.job.time_entry_id, {
+      const res: unknown = await api.clockOut(checkOutModal.job.time_entry_id, {
         quantity_produced: Number(checkOutData.quantity_produced || 0),
         quantity_scrapped: Number(checkOutData.quantity_scrapped || 0),
         notes: checkOutData.notes || undefined,
@@ -1139,11 +1205,27 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
           ? scrapSelectionPayload(scrapCodes, checkOutData.scrap)
           : {}),
       });
-      showToast('success', `Checked out of ${checkOutModal.operation.work_order_number}`);
+      clockedOut = true;
+      if (clockOutOperationStatus(res) === 'complete') {
+        showToast('success', `Completed ${operation.work_order_number}`);
+      } else if (completeAfter) {
+        await api.completeOperation(operation.id, { source: 'desktop' });
+        showToast('success', `Completed ${operation.work_order_number}`);
+      } else {
+        showToast('success', `Checked out of ${operation.work_order_number}`);
+      }
       closeCheckOutModal();
       await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
     } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to check out');
+      const detail = err.response?.data?.detail;
+      if (clockedOut) {
+        // The labor landed; only the close was refused. Say both, verbatim.
+        showToast('error', `Checked out, but completing failed: ${detail || 'Failed to complete operation'}`);
+        closeCheckOutModal();
+        await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
+      } else {
+        showToast('error', detail || 'Failed to check out');
+      }
     } finally {
       setActionLoading(null);
     }
@@ -1481,6 +1563,7 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
               onHold={() => { if (currentOperation) openHoldModal(currentOperation); }}
               onCheckOut={() => { if (currentOperation && selectedActiveJob) handleOpenCheckOut(currentOperation, selectedActiveJob); }}
               onComplete={() => setCompleteConfirm(currentOperation)}
+              operationStatus={currentOperation?.status ?? null}
             />
           ) : (
             <div className="space-y-3">
@@ -2110,7 +2193,14 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
             const startBlockedReasonId = `shop-floor-start-blocked-${op.id}`;
             const showCheckIn = op.status === 'pending' || op.status === 'ready' || (op.status === 'in_progress' && !activeJob);
             const remainingQuantity = getRemainingQuantity(op);
+            // Every received unit is recorded good or scrapped — the operation can close
+            // (owner ruling 1). Covered by scrap when the good alone falls short.
             const targetReached = Boolean(activeJob && op.status === 'in_progress' && remainingQuantity <= 0);
+            const coveredByScrap = closingShortAfterEntry({
+              target: op.quantity_ordered,
+              upstreamShort: op.upstream_quantity_short,
+              complete: op.quantity_complete,
+            }) > 0;
             
             return (
               <div
@@ -2217,8 +2307,14 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
                   <div className="mb-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                       <div>
-                        <p className="text-sm font-semibold text-emerald-300">Target quantity reached</p>
-                        <p className="text-xs text-emerald-200/80">Stay clocked in, complete the operation, or check out.</p>
+                        <p className="text-sm font-semibold text-emerald-300">
+                          {coveredByScrap ? 'All pieces accounted for' : 'Target quantity reached'}
+                        </p>
+                        <p className="text-xs text-emerald-200/80">
+                          {coveredByScrap
+                            ? `${formatShortQuantity(Number(op.quantity_complete || 0))} good · ${formatShortQuantity(Number(op.quantity_scrapped || 0))} scrapped — complete the operation, or check out.`
+                            : 'Stay clocked in, complete the operation, or check out.'}
+                        </p>
                       </div>
                       <div className="flex gap-2">
                         <button
@@ -2433,11 +2529,22 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
         {documentView && <KioskDocViewer operationId={documentView.operationId} initialTab={documentView.tab} transport={SHOP_FLOOR_DOCS} onBack={() => setDocumentView(null)} />}
       </Modal>
 
-      {/* Confirm full-quantity completion (closes the operation, no undo) */}
+      {/* Confirm the close (no undo). It books what the floor recorded — the message
+          says exactly that, never "full quantity" (owner ruling 1). */}
       <ConfirmDialog
         open={completeConfirm !== null}
-        title="Complete operation at full quantity?"
-        message="This closes the operation and cannot be undone."
+        title="Complete this operation?"
+        message={
+          completeConfirm
+            ? `This closes ${formatOperationLabel(completeConfirm.operation_number)} at ${formatShortQuantity(
+                Number(completeConfirm.quantity_complete || 0)
+              )} good${
+                Number(completeConfirm.quantity_scrapped || 0) > 0
+                  ? ` · ${formatShortQuantity(Number(completeConfirm.quantity_scrapped || 0))} scrapped`
+                  : ''
+              } and cannot be undone.`
+            : 'This closes the operation and cannot be undone.'
+        }
         confirmLabel="Complete Operation"
         cancelLabel="Cancel"
         variant="warning"
@@ -2794,7 +2901,8 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
                   </button>
                 </div>
                 <p className="mt-2 text-xs text-slate-400">
-                  Use this only for parts not already added with +1 Complete. Remaining: {getRemainingQuantity(checkOutModal.operation)}
+                  Use this only for parts not already added with +1 Complete. Not yet accounted for:{' '}
+                  {formatShortQuantity(getRemainingQuantity(checkOutModal.operation))}
                 </p>
               </div>
 
@@ -2822,6 +2930,33 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
                   onChange={(scrap) => setCheckOutData({ ...checkOutData, scrap })}
                 />
               )}
+
+              {/* Owner ruling 1: closing the operation from here is offered only once
+                  every received unit is recorded good or scrapped. Short, the honest
+                  options are scrap with a reason, or checking out and leaving it open. */}
+              <div>
+                <label
+                  htmlFor="shopfloor-checkout-complete-after"
+                  className={`flex min-h-11 items-center gap-3 text-sm ${checkOutCanComplete ? 'text-white' : 'text-slate-400'}`}
+                >
+                  <input
+                    id="shopfloor-checkout-complete-after"
+                    type="checkbox"
+                    className="h-5 w-5"
+                    checked={checkOutCompleteAfter && checkOutCanComplete}
+                    disabled={!checkOutCanComplete}
+                    onChange={(e) => setCheckOutCompleteAfter(e.target.checked)}
+                    aria-describedby={!checkOutCanComplete ? 'shopfloor-checkout-complete-after-hint' : undefined}
+                  />
+                  Complete {formatOperationLabel(checkOutModal.operation.operation_number)} after checking out
+                </label>
+                {!checkOutCanComplete && checkOutUnaccountedAfter > 0 && (
+                  <p id="shopfloor-checkout-complete-after-hint" className="mt-1 text-xs text-amber-300">
+                    {formatShortQuantity(checkOutUnaccountedAfter)} not yet accounted for — enter lost pieces as scrap
+                    with a reason, or check out and leave it open
+                  </p>
+                )}
+              </div>
 
               <div>
                 <label htmlFor="shopfloor-checkout-notes" className="label">Notes (optional)</label>
@@ -2857,7 +2992,7 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
                 ) : (
                   <>
                     <CheckCircleIcon className="h-5 w-5 mr-2" />
-                    End time and save
+                    {checkOutCompleteAfter && checkOutCanComplete ? 'Check out & complete' : 'End time and save'}
                   </>
                 )}
               </button>

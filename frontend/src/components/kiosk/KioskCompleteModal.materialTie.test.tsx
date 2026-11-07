@@ -10,9 +10,11 @@
  *    1's sheets out of stock on this very tap. It must not slip back to "when
  *    the work order finishes" (understates), and it must not drift to per-run
  *    (over-states: reporting runs on an open operation posts nothing);
- *  - the GOOD keypad does not move the number (/complete asserts
- *    `quantity_complete = quantity_ordered`), while the SCRAP keypad does, and
- *    the UI says why;
+ *  - the number follows the FINAL good — recorded so far plus what is keyed — because
+ *    since owner ruling 1 the close books the good the floor RECORDED (it no longer
+ *    asserts `quantity_complete = quantity_ordered`); the SCRAP keypad raises it too,
+ *    and the UI says why;
+ *  - KEEP OPEN closes nothing, so it predicts nothing;
  *  - a predicted shortage is informational: it never disables the Complete CTA.
  */
 
@@ -95,15 +97,28 @@ describe('KioskCompleteModal — material deduction notice', () => {
     expect(text).not.toMatch(/per run|each run completes|deducting now/i);
   });
 
-  it('is computed from the ORDERED quantity — the good keypad does not move it', async () => {
+  it('follows the FINAL good — the good keypad moves it, because the close books recorded good', async () => {
     const user = userEvent.setup();
     renderModal({ materialTies: [TIE], operationScrapped: 0 });
 
+    // Prefilled at the 5 still unaccounted for → 5 runs' worth.
     expect(screen.getByTestId('kiosk-complete-material')).toHaveTextContent('5 EA · SHT-.125-304');
-    // Key a different good count; /complete still asserts quantity_ordered.
+    // Re-key 2 good (a short the operator would then have to cover with scrap).
     await user.click(screen.getByTestId('kiosk-qty-good'));
+    await user.click(screen.getByRole('button', { name: 'Clear' }));
     await user.click(screen.getByRole('button', { name: '2' }));
+    expect(screen.getByTestId('kiosk-complete-material')).toHaveTextContent('2 EA · SHT-.125-304');
+  });
+
+  it('counts good already recorded on the operation into the final good', () => {
+    // 3 recorded + the 2 still unaccounted for (prefilled) = 5.
+    renderModal({ job: { ...JOB, quantity_complete: 3 }, materialTies: [TIE], operationScrapped: 0 });
     expect(screen.getByTestId('kiosk-complete-material')).toHaveTextContent('5 EA · SHT-.125-304');
+  });
+
+  it('shows no deduction notice in KEEP OPEN mode — leaving the operation open deducts nothing', () => {
+    renderModal({ mode: 'leave_open', onLeaveOpen: jest.fn(), materialTies: [TIE], operationScrapped: 0 });
+    expect(screen.queryByTestId('kiosk-complete-material')).not.toBeInTheDocument();
   });
 
   it('RAISES the prediction as scrap is keyed, and says why', async () => {
@@ -120,10 +135,12 @@ describe('KioskCompleteModal — material deduction notice', () => {
   });
 
   it('uses the OPERATION scrap total, not this session count', () => {
-    // job.quantity_scrapped (this time entry's session count) is 0; the
-    // operation already carries 3. Target = 5 ordered + 3 scrapped = 8.
+    // job.quantity_scrapped (this time entry's session count) is 0; the operation
+    // already carries 3, so only 2 are still unaccounted for and GOOD prefills at 2.
+    // Target = 2 good + 3 scrapped = 5 — and the 3 already-scrapped runs count.
     renderModal({ materialTies: [TIE], operationScrapped: 3 });
-    expect(screen.getByTestId('kiosk-complete-material')).toHaveTextContent('8 EA · SHT-.125-304');
+    expect(screen.getByTestId('kiosk-qty-good')).toHaveTextContent('2');
+    expect(screen.getByTestId('kiosk-complete-material')).toHaveTextContent('5 EA · SHT-.125-304');
   });
 
   it('subtracts what a partially consumed tie already reported', () => {

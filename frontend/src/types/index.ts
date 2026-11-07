@@ -2356,7 +2356,55 @@ export interface KioskJobInstructions {
   operation_run_instructions?: string | null;
 }
 
-export interface ActiveJob extends KioskJobInstructions {
+/**
+ * Short-count figures (owner ruling 1, 2026-11-05) every floor job payload carries —
+ * the kiosk queue and held rows, `GET /shop-floor/my-active-job`, and
+ * `GET /shop-floor/operations`. Server-derived, so no client re-implements the chain
+ * credit; `utils/shortCount.ts` does only the per-operation arithmetic on them.
+ *
+ * - `upstream_quantity_short` — units of the target (`quantity_ordered`) that never
+ *   reached this operation because an upstream close in its chain declared them short.
+ *   0 almost everywhere; received = `quantity_ordered − upstream_quantity_short`.
+ * - `quantity_good_ceiling` — the most good the server will accept here.
+ * - `quantity_unaccounted` — received units recorded neither good nor scrapped: what a
+ *   Complete must still account for.
+ *
+ * Optional because the SPA and API deploy independently — a payload without them reads
+ * as "nothing lost upstream", which is what every pre-ruling row is.
+ */
+export interface OperationShortCountFields {
+  upstream_quantity_short?: number | null;
+  quantity_good_ceiling?: number | null;
+  quantity_unaccounted?: number | null;
+}
+
+/**
+ * Body of `POST /shop-floor/operations/{id}/complete` (owner ruling 1). The floor verb is
+ * a CLOSE: it books the good the floor already recorded (clock-out / Report production)
+ * and refuses 409 — writing nothing — while any received unit is unaccounted for. The
+ * server forbids unknown keys (422).
+ */
+export interface ShopFloorCompleteOperationRequest {
+  /**
+   * Deprecated: an expectation check only — the close never RAISES good to it, and a
+   * value above the recorded good is a 409. Floor clients omit it.
+   */
+  quantity_complete?: number;
+  /** Scrap declared AT the close (an additive delta), to cover a short. Needs a reason. */
+  quantity_scrapped?: number;
+  scrap_reason?: string;
+  scrap_reason_code_id?: number;
+  /**
+   * The closer has seen who else is still clocked in: a SHORT close then clocks them out
+   * too, and pieces they have not reported are not counted. Without it a short close is
+   * refused while anyone else holds an open entry.
+   */
+  acknowledge_open_entries?: boolean;
+  notes?: string;
+  source?: string;
+}
+
+export interface ActiveJob extends KioskJobInstructions, OperationShortCountFields {
   time_entry_id: number;
   clock_in: string;
   entry_type: TimeEntryType;

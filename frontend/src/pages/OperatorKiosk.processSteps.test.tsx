@@ -359,7 +359,9 @@ describe('OperatorKiosk process steps', () => {
   });
 
   it('a STEPS_INCOMPLETE completion refusal renders the missing steps inline with a jump-to-step affordance', async () => {
-    mockedApi.clockOut.mockResolvedValue({});
+    // A covered SHORT (owner ruling 1): the clock-out leaves the op open, so /complete
+    // runs — and it is that close the steps gate refuses.
+    mockedApi.clockOut.mockResolvedValue({ operation_status: 'in_progress' });
     mockedApi.completeOperation.mockRejectedValue({
       response: {
         status: 409,
@@ -375,7 +377,15 @@ describe('OperatorKiosk process steps', () => {
     renderKiosk();
 
     fireEvent.click(await screen.findByRole('button', { name: /^complete op$/i }));
+    // 45 still unaccounted for: 44 good + 1 scrap with a reason.
+    fireEvent.click(screen.getByTestId('kiosk-qty-good'));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    fireEvent.click(screen.getByTestId('kiosk-key-4'));
+    fireEvent.click(screen.getByTestId('kiosk-key-4'));
+    fireEvent.click(screen.getByTestId('kiosk-complete-report-scrap'));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Scrap reason' })).getAllByRole('button')[0]);
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+    await waitFor(() => expect(mockedApi.completeOperation).toHaveBeenCalledWith(31, { source: 'kiosk' }));
 
     // Honest two-step message, verbatim missing labels…
     expect(

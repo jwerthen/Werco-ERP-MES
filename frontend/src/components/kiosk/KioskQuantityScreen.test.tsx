@@ -87,3 +87,43 @@ it('emits (null, null) when nothing was scrapped', () => {
 
   expect(onConfirm).toHaveBeenCalledWith(4, 0, null, null);
 });
+
+describe('SHORT readout (owner ruling 1) is COMPLETE-only', () => {
+  it('the production-report usage (no shortBaseline) shows no SHORT and confirms any entry as before', () => {
+    const onConfirm = renderScreen(null);
+    // 1 good of an operation that may well be short — /production is additive and
+    // never closes anything, so the screen must not gate it.
+    fireEvent.click(screen.getByTestId('kiosk-key-1'));
+    expect(screen.queryByTestId('kiosk-qty-short')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('kiosk-qty-short-hint')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+    expect(onConfirm).toHaveBeenCalledWith(1, 0, null, null);
+  });
+
+  it('with a shortBaseline, a short entry shows SHORT n, offers Report as scrap, and blocks confirm', () => {
+    const onConfirm = jest.fn();
+    render(
+      <KioskQuantityScreen
+        title="Complete job"
+        jobLabel="WO-1 · Op 10"
+        confirmLabel="Continue"
+        requireTotalPositive={false}
+        shortBaseline={{ target: 10, upstreamShort: 0, complete: 6, scrapped: 0 }}
+        shortInRuns
+        scrapCodes={null}
+        busy={false}
+        onConfirm={onConfirm}
+        onCancel={jest.fn()}
+      />
+    );
+    fireEvent.click(screen.getByTestId('kiosk-key-3'));
+
+    expect(screen.getByTestId('kiosk-qty-short')).toHaveTextContent('Short 1 run');
+    expect(screen.getByTestId('kiosk-qty-confirm')).toBeDisabled();
+
+    fireEvent.click(screen.getByTestId('kiosk-qty-report-scrap'));
+    fireEvent.click(screen.getByRole('button', { name: 'Material defect' }));
+    fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+    expect(onConfirm).toHaveBeenCalledWith(3, 1, 'Material defect', null);
+  });
+});

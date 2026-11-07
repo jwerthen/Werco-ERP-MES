@@ -5,7 +5,7 @@
  * `KioskCompleteModal.materialTie.test.tsx`; this is the other half of the same
  * copy, and it had none. Both screens render the SAME builders from
  * `utils/materialTie`, which is exactly why it needs its own pin — a wiring
- * mistake here (feeding `pendingGood` instead of `quantityOrdered`, dropping the
+ * mistake here (dropping the recorded good from the final good, dropping the
  * timing note) would sail past that file while shipping a different number to a
  * different set of operators.
  *
@@ -17,9 +17,10 @@
  *    nest and draws nest by nest) nor drift to per-run (over-states: production
  *    reported on the previous screen posts nothing on its own, because an
  *    in-progress operation is still reducible and consumption never reverses);
- *  - the good count entered on the previous screen does NOT move the number
- *    (/complete asserts `quantity_complete = quantity_ordered`) while the scrap
- *    count DOES, and the UI says why;
+ *  - the number follows the FINAL good: what the operation already has recorded
+ *    plus the good entered on the previous screen (owner ruling 1 — the close books
+ *    recorded good, it no longer asserts `quantity_complete = quantity_ordered`), and
+ *    the scrap count raises it too, and the UI says why;
  *  - a predicted shortage is informational — it never gates the badge signature.
  */
 
@@ -53,7 +54,7 @@ const renderModal = (props: Partial<React.ComponentProps<typeof KioskCompleteCon
       nowMs={Date.parse('2026-07-25T13:00:00Z')}
       pendingGood={0}
       pendingScrap={0}
-      quantityOrdered={5}
+      quantityCompleteSoFar={5}
       workOrderNumber="WO-2026-0142"
       busy={false}
       error={null}
@@ -91,15 +92,21 @@ describe('KioskCompleteConfirmModal — material deduction notice', () => {
     expect(text).not.toMatch(/per run|each run completes|deducting now/i);
   });
 
-  it('scales by the ORDERED quantity, not the good count from the previous screen', () => {
-    // The crew station reports production first and then asserts completion at
-    // the target, so `pendingGood` never moves this number.
-    renderModal({ materialTies: [TIE], operationScrapped: 0, pendingGood: 2, quantityOrdered: 5 });
+  it('scales by the FINAL good: recorded so far plus the good from the previous screen', () => {
+    // The crew reports the final pieces first, and the close books what the floor
+    // recorded — so 3 already recorded + 2 pending = 5 runs' worth.
+    renderModal({ materialTies: [TIE], operationScrapped: 0, pendingGood: 2, quantityCompleteSoFar: 3 });
     expect(notice()).toHaveTextContent('5 EA · SHT-.125-304');
   });
 
   it('RAISES the prediction for the scrap being reported, and says why', () => {
-    renderModal({ materialTies: [TIE], operationScrapped: 0, pendingGood: 3, pendingScrap: 2 });
+    renderModal({
+      materialTies: [TIE],
+      operationScrapped: 0,
+      quantityCompleteSoFar: 2,
+      pendingGood: 3,
+      pendingScrap: 2,
+    });
 
     expect(notice()).toHaveTextContent('7 EA · SHT-.125-304');
     expect(screen.getByTestId('kiosk-crew-complete-material-scrap')).toHaveTextContent(
@@ -109,7 +116,7 @@ describe('KioskCompleteConfirmModal — material deduction notice', () => {
 
   it('uses the OPERATION scrap total and subtracts what a partial tie already reported', () => {
     renderModal({ materialTies: [{ ...TIE, qty_consumed: 2 }], operationScrapped: 3 });
-    // target = 1/run x (5 ordered + 3 scrapped) = 8, less 2 already consumed.
+    // target = 1/run x (5 good + 3 scrapped) = 8, less 2 already consumed.
     expect(notice()).toHaveTextContent('6 EA · SHT-.125-304');
   });
 

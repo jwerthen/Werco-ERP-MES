@@ -33,10 +33,12 @@ interface KioskCompleteConfirmModalProps {
   /** The OPERATION's scrap total already recorded (not a session count). */
   operationScrapped?: number | null;
   /**
-   * The operation's ordered/target quantity — what `/complete` asserts as
-   * `quantity_complete`, and therefore what the material prediction scales by.
+   * The good the OPERATION already has recorded (the queue row's `quantity_complete`).
+   * Owner ruling 1: the close books the good the floor recorded — this plus the
+   * `pendingGood` reported just before it — so that, not the target, is what the
+   * material prediction scales by.
    */
-  quantityOrdered?: number | null;
+  quantityCompleteSoFar?: number | null;
   /**
    * Work order number — CONTEXT for the deduction notice, not its trigger. The
    * trigger is this operation completing; the job label just makes the sentence
@@ -57,6 +59,11 @@ interface KioskCompleteConfirmModalProps {
  * auto-clocked-out (with their running durations) and takes the badge scan
  * that signs the completion. While it is open it OWNS the scanner (the page
  * behind it must disable its own badge capture).
+ *
+ * The roster list is also what the signer ACKNOWLEDGES (owner ruling 1): a close that
+ * declares a short clocks those operators out too, and pieces they have not reported
+ * are not counted — so the caption says exactly that, and the host sends
+ * `acknowledge_open_entries` only because this list was on screen.
  */
 export default function KioskCompleteConfirmModal({
   open,
@@ -67,7 +74,7 @@ export default function KioskCompleteConfirmModal({
   pendingScrap,
   materialTies,
   operationScrapped,
-  quantityOrdered,
+  quantityCompleteSoFar,
   workOrderNumber,
   busy,
   error,
@@ -76,19 +83,20 @@ export default function KioskCompleteConfirmModal({
 }: KioskCompleteConfirmModalProps) {
   const [badge, setBadge] = useState('');
 
-  // Predicted material draw. `quantityOrdered` (not `pendingGood`) because
-  // /complete asserts `quantity_complete = quantity_ordered` — the good count
-  // entered on the previous screen does not move this number. The scrap count
-  // DOES: a scrapped run still used its material.
+  // Predicted material draw at the close this badge scan fires. The close books the
+  // good the floor RECORDED (owner ruling 1) — what the operation already has plus the
+  // final pieces about to be reported — so both the good and the scrap entered on the
+  // previous screen move this number (a scrapped run still used its material).
+  const finalGood = Math.max(0, Number(quantityCompleteSoFar || 0)) + Math.max(0, pendingGood);
   const prediction = useMemo(
     () =>
       predictMaterialConsumption({
         ties: materialTies,
-        quantityOrdered,
+        quantityOrdered: finalGood,
         operationScrapped,
         scrapEntered: pendingScrap,
       }),
-    [materialTies, quantityOrdered, operationScrapped, pendingScrap]
+    [materialTies, finalGood, operationScrapped, pendingScrap]
   );
   const scrapNote = prediction ? scrapNoteText(prediction, pendingScrap) : null;
   const shortageNote = prediction ? shortageNoteText(prediction) : null;
@@ -174,7 +182,7 @@ export default function KioskCompleteConfirmModal({
         {roster.length > 0 ? (
           <>
             <p className="text-xl font-semibold text-fd-amber">
-              Everyone currently clocked in will be clocked out:
+              Everyone currently clocked in will be clocked out — pieces they have not reported are not counted:
             </p>
             <ul aria-label="Will be clocked out" className="mt-2 space-y-1">
               {roster.map((entry) => (
