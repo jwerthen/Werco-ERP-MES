@@ -739,7 +739,12 @@ class TestDraftNCR:
 
 
 class TestRacesAndRollback:
-    def test_single_winner_and_claim_before_handler(self, client, db_session, supervisor_headers):
+    def test_second_click_is_refused_and_exactly_one_po_exists(self, client, db_session, supervisor_headers):
+        # The second click is refused by the route's pre-check (the card already reads
+        # accepted), so this does NOT reach the claim. The compare-and-set claim itself is
+        # pinned by test_ai_apply_tenancy_and_claim.py::TestClaimIsACompareAndSet, where the
+        # decision lands after the pre-check; removing the claim's status predicate leaves
+        # this test green and fails that one.
         vendor = _vendor(db_session, "VONE")
         part = _part(db_session, "PO-ONCE", primary_supplier_id=vendor.id, reorder_quantity=4)
         rec = _po_rec(db_session, part)

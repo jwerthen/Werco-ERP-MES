@@ -83,6 +83,16 @@ const renderStrip = (props: Partial<React.ComponentProps<typeof ContextualAIStri
     </MemoryRouter>
   );
 
+// A toast's text alone does not prove its variant: a failed call surfacing as a green
+// success (or a success as a red alert) would pass a text-only assertion. Check both.
+const expectToast = async (message: string, variant: 'success' | 'error') => {
+  const text = await screen.findByText(message);
+  const toast = text.closest('[role="alert"], [role="status"]');
+  expect(toast).not.toBeNull();
+  expect(toast).toHaveAttribute('role', variant === 'error' ? 'alert' : 'status');
+  expect(toast).toHaveClass(variant === 'error' ? 'bg-red-600' : 'bg-green-600');
+};
+
 const strip = () => screen.findByRole('region', { name: 'AI for this work order' });
 
 beforeEach(() => {
@@ -123,7 +133,7 @@ describe('ContextualAIStrip', () => {
     });
 
     expect(onApplied).toHaveBeenCalledWith(result);
-    expect(await screen.findByText('Applied: Raise WO-2001 priority from P5 to P1')).toBeInTheDocument();
+    await expectToast('Applied: Raise WO-2001 priority from P5 to P1', 'success');
     await waitFor(() => expect(screen.queryByText('Expedite WO-2001')).not.toBeInTheDocument());
   });
 
@@ -139,7 +149,7 @@ describe('ContextualAIStrip', () => {
     const region = await strip();
     fireEvent.click(within(region).getByRole('button', { name: /accept & apply/i }));
 
-    expect(await screen.findByText(detail)).toBeInTheDocument();
+    await expectToast(detail, 'error');
     expect(within(region).getByText('Expedite WO-2001')).toBeInTheDocument();
     expect(onApplied).not.toHaveBeenCalled();
     // A 403 is not a changed card: no reload.
@@ -157,7 +167,7 @@ describe('ContextualAIStrip', () => {
     const region = await strip();
     fireEvent.click(within(region).getByRole('button', { name: /accept & apply/i }));
 
-    expect(await screen.findByText(detail)).toBeInTheDocument();
+    await expectToast(detail, 'error');
     await waitFor(() => expect(mockApi.getAIRecommendations).toHaveBeenCalledTimes(2));
   });
 
@@ -207,9 +217,7 @@ describe('ContextualAIStrip', () => {
       const region = await strip();
       fireEvent.click(within(region).getByRole('button', { name: 'Dismiss' }));
 
-      expect(
-        await screen.findByText('This recommendation is already accepted; it can no longer be dismissed.')
-      ).toBeInTheDocument();
+      await expectToast('This recommendation is already accepted; it can no longer be dismissed.', 'error');
       // Let any stray rejection surface before asserting.
       await act(async () => {
         await new Promise(resolve => setTimeout(resolve, 0));

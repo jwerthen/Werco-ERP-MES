@@ -200,3 +200,25 @@ def test_retired_auto_execute_env_warns(monkeypatch, caplog):
     assert len(messages) == 1
     assert "AI_AUTO_EXECUTE_ENABLED" in messages[0] and "ANTHROPIC_AUTO_EXECUTE_MODEL" in messages[0]
     assert "Delete these variables" in messages[0]
+
+
+def test_soft_deleted_wo_blocker_not_escalated(db_session: Session, admin_user, run_job):
+    blocker = _stale_blocker(db_session, "WO-JOB-GONE", priority=5)
+    work_order = db_session.query(WorkOrder).filter(WorkOrder.id == blocker.work_order_id).one()
+    work_order.soft_delete(admin_user.id)
+    db_session.commit()
+
+    assert run_job()["stale_blockers_escalated"] == 0
+    assert _escalation_cards(db_session, blocker) == []
+    assert _escalated_events(db_session, blocker) == 0
+
+
+def test_the_nightly_task_itself_warns_about_retired_env(db_session: Session, run_job, monkeypatch, caplog):
+    # The warning must fire from the scheduled task, not only from the helper in isolation:
+    # that is the only place an operator who left AI_AUTO_EXECUTE_ENABLED set will see it.
+    monkeypatch.setenv("AI_AUTO_EXECUTE_MIN_CONFIDENCE", "0.9")
+    with caplog.at_level(logging.WARNING, logger=ai_learning_jobs.logger.name):
+        summary = run_job()
+    assert "auto_executed" not in summary
+    messages = [r.getMessage() for r in caplog.records if "retired setting" in r.getMessage()]
+    assert len(messages) == 1 and "AI_AUTO_EXECUTE_MIN_CONFIDENCE" in messages[0]

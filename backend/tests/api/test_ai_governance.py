@@ -81,3 +81,24 @@ def test_context_normalizes_a_legacy_auto_tag(db_session):
     )
 
     assert [row["autonomy"] for row in rows] == ["apply_on_accept"]
+
+
+def test_policy_egress_read_denies_without_a_company_and_reads_the_seam_at_call_time(monkeypatch):
+    """``ai_egress_allowed`` is the POLICY read behind the Accept & apply door.
+
+    The underlying seam treats a missing company as "allowed" (an LLM-call edge); a policy
+    read must not, or a request without a tenant would pass the egress gate. And the seam
+    is looked up at call time, so the suite-wide patch (and a per-test OFF patch) applies.
+    """
+    seen = []
+
+    def seam(company_id=None):
+        seen.append(company_id)
+        return company_id == 7
+
+    monkeypatch.setattr(llm_client, "_ai_egress_allowed", seam)
+
+    assert llm_client.ai_egress_allowed(None) is False
+    assert llm_client.ai_egress_allowed(7) is True
+    assert llm_client.ai_egress_allowed(8) is False
+    assert seen == [7, 8]  # None never reaches the seam

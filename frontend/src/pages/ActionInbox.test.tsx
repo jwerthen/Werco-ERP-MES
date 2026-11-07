@@ -232,6 +232,16 @@ it('counts featured recommendations in Open Actions consistently across filter v
 // handled, Dismiss and Snooze stay optimistic.
 // ---------------------------------------------------------------------------
 
+// A toast's text alone does not prove its variant: a failed call surfacing as a green
+// success (or a success as a red alert) would pass a text-only assertion. Check both.
+const expectToast = async (message: string, variant: 'success' | 'error') => {
+  const text = await screen.findByText(message);
+  const toast = text.closest('[role="alert"], [role="status"]');
+  expect(toast).not.toBeNull();
+  expect(toast).toHaveAttribute('role', variant === 'error' ? 'alert' : 'status');
+  expect(toast).toHaveClass(variant === 'error' ? 'bg-red-600' : 'bg-green-600');
+};
+
 const makeApplyAction = (overrides: Partial<AIRecommendationApplyAction> = {}): AIRecommendationApplyAction => ({
   action_type: 'adjust_work_order_priority',
   summary: 'Raise WO-3001 priority from P5 to P1',
@@ -303,7 +313,7 @@ describe('ActionInbox AI Accept & apply (ruling 3)', () => {
     });
 
     await waitFor(() => expect(screen.queryByText('Expedite WO-3001')).not.toBeInTheDocument());
-    expect(await screen.findByText('Applied: Raise WO-3001 priority from P5 to P1')).toBeInTheDocument();
+    await expectToast('Applied: Raise WO-3001 priority from P5 to P1', 'success');
   });
 
   it('a refused apply keeps the card, toasts the server detail verbatim, and refetches on 409', async () => {
@@ -323,7 +333,7 @@ describe('ActionInbox AI Accept & apply (ruling 3)', () => {
     const hero = await screen.findByRole('region', { name: 'Top 3 today' });
     fireEvent.click(within(hero).getByRole('button', { name: /accept & apply/i }));
 
-    expect(await screen.findByText(detail)).toBeInTheDocument();
+    await expectToast(detail, 'error');
     expect(screen.getByText('Expedite WO-3001')).toBeInTheDocument();
     // The 409 re-reads the pending AI list (not a silent refetch: the toast above says why).
     await waitFor(() => expect(mockApi.getAIRecommendations).toHaveBeenCalledTimes(2));
@@ -342,7 +352,7 @@ describe('ActionInbox AI Accept & apply (ruling 3)', () => {
     const hero = await screen.findByRole('region', { name: 'Top 3 today' });
     fireEvent.click(within(hero).getByRole('button', { name: /accept & apply/i }));
 
-    expect(await screen.findByText(detail)).toBeInTheDocument();
+    await expectToast(detail, 'error');
     expect(screen.getByText('Expedite WO-3001')).toBeInTheDocument();
     expect(mockApi.getAIRecommendations).toHaveBeenCalledTimes(1);
   });
