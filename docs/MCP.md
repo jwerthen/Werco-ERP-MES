@@ -671,7 +671,9 @@ unstamped — an existing stamp is kept — and both **keep an on-hold laser wor
    the `note` then says the job is still ON HOLD and that its nests are refused by clock-in and every
    start verb until `work_orders_resume_work_order` runs. The route now also records the release it
    performs (`released_by` / `released_at`) on a new or previously-DRAFT laser work order, keeping an
-   existing stamp.
+   existing stamp. With the default `release=false` the tool then puts the job back to DRAFT, so
+   that DRAFT keeps the route's stamp; it is inert (Release re-stamps, a draft cannot be held, and
+   flow metrics leave DRAFT work orders out of WIP).
 4. **A failed demote is loud.** If the header `PUT` fails (409 on a concurrent edit, 403, …) the
    result is `is_error` with the PUT's status and a message beginning **`IMPORT SUCCEEDED, BUT work
    order … is still RELEASED`** (`NEST ADDED, BUT …` from `add_laser_nest`), with the `import` /
@@ -868,7 +870,7 @@ hold with `work_orders_resume_work_order` first).
 | `{"status": 403, "detail": "Insufficient permissions"}` | The user's role does not allow that route (`require_role`) — the SPA would refuse too | Use a user with the right role; nothing in MCP can widen it |
 | `{"status": 409, ...}` on `update_work_order` | Stale `version` (optimistic locking) | `get_work_order` → resend with the current `version` |
 | `{"status": 422, ...}` from `update_work_order` naming `release_work_order` / `work_orders_start_work_order` | `status: released` or `in_progress` was written through the header update | Call the named verb; the header update never releases or starts work (§9). To lift a work-order hold, call `work_orders_resume_work_order` |
-| `{"status": 409, "detail": "This work order has not been released — release first…"}` or `"This work order is on hold…"` from `clock_in`, `shop_floor_start_operation`, `work_orders_start_operation`, `work_orders_start_work_order` or a complete of a READY operation | The work order is DRAFT or ON_HOLD — the floor cannot start work on it | A person with the role decides: `release_work_order` for a draft, `work_orders_resume_work_order` for a held job (Admin / Manager / Supervisor) |
+| `{"status": 409, "detail": "This work order has not been released — release first…"}` or `"This work order is on hold…"` from `clock_in`, `shop_floor_start_operation`, `work_orders_start_operation`, `work_orders_start_work_order`, a complete of a READY operation, or `work_orders_update_operation` setting `status: in_progress` (or `status: ready` on a draft) | The work order is DRAFT or ON_HOLD — the floor cannot start work on it | A person with the role decides: `release_work_order` for a draft, `work_orders_resume_work_order` for a held job (Admin / Manager / Supervisor) |
 | `{"status": 409, "detail": "A draft work order has not been released, so there is nothing on the floor to hold…"}` from `update_work_order` | `status: on_hold` on a DRAFT | Leave it in draft; hold only released / in-progress work |
 | `{"status": 422, ...}` `"Additional properties are not allowed ('serach' was unexpected)"` | A misspelled argument — every schema is strict (§6.3) | Fix the argument name; nothing was dispatched |
 | `{"status": 409, ...}` from `add_operation` naming several work centers | Ambiguous `work_center` string | Pass the `id` (from `list_work_centers`) or a more specific name |

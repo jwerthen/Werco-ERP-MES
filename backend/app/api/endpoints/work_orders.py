@@ -4609,7 +4609,6 @@ RESUME_MESSAGES = {
 @router.post("/{work_order_id}/resume", response_model=WorkOrderResumeResponse)
 def resume_work_order(
     work_order_id: int,
-    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
@@ -4707,16 +4706,9 @@ def resume_work_order(
         {"event": "work_order_resumed", "work_order_id": work_order.id, "status": status_value},
         company_id=company_id,
     )
-    work_center_ids = sorted(
-        {
-            op.work_center_id
-            for op in tenant_query(db, WorkOrderOperation, company_id)
-            .filter(WorkOrderOperation.work_order_id == work_order.id)
-            .all()
-            if op.work_center_id
-        }
-    )
-    for wc_id in work_center_ids:
+    # The work centers come from the operations apply_work_order_resume already read
+    # (tenant-scoped, before the commit) -- no second query.
+    for wc_id in outcome.work_center_ids:
         safe_broadcast(
             broadcast_shop_floor_update,
             wc_id,
@@ -5318,6 +5310,14 @@ def update_operation(
     completion has finalization and inventory side effects (operation-scoped
     tied-material consumption included) that this generic update would skip — use
     ``POST /work-orders/operations/{id}/complete`` instead.
+
+    Setting ``status`` to IN_PROGRESS starts the operation, so it is refused **409**
+    with the start gate's text when the work order is a draft ("release first":
+    release_work_order), on hold (work_orders_resume_work_order) or
+    complete / closed / cancelled; setting ``status`` to READY on a draft work order is
+    refused **409** too (it would put unreleased work on the dispatch board). Both are
+    raised before any field is written. Re-sending the operation's current status is
+    not a transition and is accepted.
     """
     operation = (
         db.query(WorkOrderOperation)
@@ -5362,6 +5362,28 @@ def update_operation(
                 f"Use POST /work-orders/operations/{operation.id}/complete instead."
             ),
         )
+
+    # Owner ruling 2026-11-05 (ruling 2): this generic PUT must not be a way around the
+    # start gate. Writing IN_PROGRESS here STARTS the operation, and the office complete
+    # verb then accepts an IN_PROGRESS operation with no work-order gate (labor already
+    # running on a held job must stay closable) -- so without this refusal the two calls
+    # together would start AND complete work, tied-material consumption included, on a
+    # job nobody released or a supervisor stopped. The shared helper decides it (no inline
+    # twin); a terminal work order gets its existing "cannot start operation" text. READY
+    # on a DRAFT is refused as well: Release is the authorization step and the record of
+    # who put work on the floor, and resume-to-DRAFT demotes exactly those rows. Raised
+    # before the dispatch lock and the first setattr, so a refusal writes nothing. A
+    # re-sent CURRENT status is not a transition (the COMPLETE refusal above follows the
+    # same rule), so an unrelated edit that echoes the status still lands.
+    if new_op_status is not None and new_op_status != operation.status:
+        status_blocked_reason: Optional[str] = None
+        if new_op_status == OperationStatus.IN_PROGRESS:
+            status_blocked_reason = work_order_start_blocker(operation.work_order)
+        elif new_op_status == OperationStatus.READY and operation.work_order is not None:
+            if operation.work_order.status == WorkOrderStatus.DRAFT:
+                status_blocked_reason = MSG_WORK_ORDER_NOT_RELEASED
+        if status_blocked_reason:
+            raise HTTPException(status_code=409, detail=status_blocked_reason)
 
     # Work-center reassignment (planner action, e.g. re-dispatching a laser nest to
     # another laser -- but legitimate for any operation between compatible work

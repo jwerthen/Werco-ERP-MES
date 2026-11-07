@@ -309,13 +309,17 @@ def get_flow_metrics(db: Session, company_id: int, start: date, end: date) -> Fl
 
     # Average WIP: daily open-WO count from released_at/actual_end evidence.
     # CANCELLED is excluded entirely (no cancellation timestamp exists to bound
-    # its WIP span honestly).
+    # its WIP span honestly). So is DRAFT, for the same reason: a draft carrying a
+    # ``released_at`` was released and then put back (an MCP nest import with
+    # ``release=false`` stamps the release and hands the job back as DRAFT; a ``PUT``
+    # back to draft keeps the stamp), it is not on the floor now, and nothing records
+    # when it left -- counting it would hold it in WIP from the stamp onwards forever.
     wip_candidates = (
         db.query(WorkOrder.released_at, WorkOrder.actual_end)
         .filter(
             WorkOrder.company_id == company_id,
             WorkOrder.is_deleted == False,  # noqa: E712
-            WorkOrder.status != WorkOrderStatus.CANCELLED,
+            WorkOrder.status.notin_([WorkOrderStatus.CANCELLED, WorkOrderStatus.DRAFT]),
             WorkOrder.released_at.isnot(None),
             WorkOrder.released_at <= end_dt,
             or_(WorkOrder.actual_end.is_(None), WorkOrder.actual_end >= start_dt),

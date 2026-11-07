@@ -103,7 +103,7 @@ def work_order_start_blocker(work_order: Optional[WorkOrder]) -> Optional[str]:
     * DRAFT -> :data:`MSG_WORK_ORDER_NOT_RELEASED` -- Release is the authorization step
       and the record of who put the job on the floor, so the floor never starts work the
       release has not authorized (and never releases it as a side effect);
-    * ON_HOLD -> :data:`MSG_WORK_ORDER_ON_HOLD` -- lifted only by
+    * ON_HOLD -> :data:`MSG_WORK_ORDER_ON_HOLD` -- put back on the floor by
       ``POST /work-orders/{id}/resume`` ("Resume Work Order"), never by starting.
 
     ``None`` means "no WORK-ORDER refusal", never "startable": the operation's own
@@ -118,8 +118,11 @@ def work_order_start_blocker(work_order: Optional[WorkOrder]) -> Optional[str]:
     ``POST /work-orders/operations/{id}/start``, the READY auto-start branch of BOTH
     complete verbs (``POST /shop-floor/operations/{id}/complete`` and
     ``POST /work-orders/operations/{id}/complete`` -- completing a READY operation STARTS
-    it first), :func:`clock_in_blockers` and :func:`complete_blockers` (the scanner), and
-    the floor read payloads' ``start_blocked_reason`` (``/shop-floor/operations`` rows,
+    it first), the generic ``PUT /work-orders/operations/{id}`` when it writes ``status``
+    IN_PROGRESS (a hand-set start; READY on a DRAFT is refused there with
+    :data:`MSG_WORK_ORDER_NOT_RELEASED` as well), :func:`clock_in_blockers` and
+    :func:`complete_blockers` (the scanner), and the floor read payloads'
+    ``start_blocked_reason`` (``/shop-floor/operations`` rows,
     ``/shop-floor/operations/{id}``, the kiosk queue and held rows).
 
     Deliberately NOT called by: op-level resume, blocker resolve/dismiss, production

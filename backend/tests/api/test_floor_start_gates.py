@@ -521,3 +521,167 @@ def test_kiosk_queue_and_held_rows_carry_the_reason_and_stay_listed(client, db_s
     assert held[held_op.id]["work_order_status"] == "on_hold"
     # Same row shape on both lists.
     assert {"start_blocked_reason", "work_order_status"} <= set(held[held_op.id]) & set(queue[ready_op.id])
+
+
+# =========================================================================== 7. the generic operation PUT
+
+# PUT /work-orders/operations/{id} writes ``status`` through a blind setattr loop. Writing
+# IN_PROGRESS there is a hand-set START, and the office complete verb accepts an
+# IN_PROGRESS operation with no work-order gate -- so without the refusal the two calls
+# together started AND completed work (tied-material consumption included) on a job nobody
+# released or a supervisor stopped. Same helper, same 409 text, before the first setattr.
+
+TERMINAL_START_TEXT = {
+    WorkOrderStatus.CANCELLED: "cannot start operation: work order is cancelled",
+    WorkOrderStatus.COMPLETE: "cannot start operation: work order is complete",
+}
+
+
+def put_operation(client: TestClient, op: WorkOrderOperation, user, **fields):
+    return client.put(
+        f"/api/v1/work-orders/operations/{op.id}",
+        json={"version": op.version, **fields},
+        headers=user_headers(user),
+    )
+
+
+def operation_update_rows(db: Session, op_id: int) -> list[AuditLog]:
+    return (
+        db.query(AuditLog)
+        .filter(
+            AuditLog.resource_type == "work_order_operation",
+            AuditLog.resource_id == op_id,
+            AuditLog.action == "UPDATE",
+        )
+        .all()
+    )
+
+
+def _name_of(db: Session, op: WorkOrderOperation) -> str:
+    db.expire_all()
+    return db.query(WorkOrderOperation).filter(WorkOrderOperation.id == op.id).one().name
+
+
+@pytest.mark.parametrize(
+    "wo_status, reason",
+    [
+        (WorkOrderStatus.DRAFT, MSG_WORK_ORDER_NOT_RELEASED),
+        (WorkOrderStatus.ON_HOLD, MSG_WORK_ORDER_ON_HOLD),
+        (WorkOrderStatus.CANCELLED, TERMINAL_START_TEXT[WorkOrderStatus.CANCELLED]),
+        (WorkOrderStatus.COMPLETE, TERMINAL_START_TEXT[WorkOrderStatus.COMPLETE]),
+    ],
+)
+@pytest.mark.parametrize("op_status", [OperationStatus.PENDING, OperationStatus.READY])
+def test_generic_operation_put_cannot_start_an_operation_the_start_gate_refuses(
+    client, db_session, floor, wo_status, reason, op_status
+):
+    wc, _, supervisor = floor
+    wo, op = make_wo_with_operation(db_session, work_center=wc, wo_status=wo_status, op_status=op_status)
+    original_name = op.name
+    before = snapshot(db_session, wo, op)
+
+    # A ride-along field proves the refusal lands before the setattr loop, not after it.
+    resp = put_operation(client, op, supervisor, status="in_progress", name="should not land")
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"] == reason
+    assert_no_pending_writes(db_session)
+    assert snapshot(db_session, wo, op) == before
+    assert _name_of(db_session, op) == original_name
+    assert operation_update_rows(db_session, op.id) == []
+
+
+def test_generic_operation_put_cannot_mark_an_operation_ready_on_a_draft(client, db_session, floor):
+    """READY on a DRAFT would put unreleased work on the dispatch board -- Release is the
+    authorization step (resume-to-DRAFT demotes exactly these rows)."""
+    wc, _, supervisor = floor
+    wo, op = make_wo_with_operation(
+        db_session, work_center=wc, wo_status=WorkOrderStatus.DRAFT, op_status=OperationStatus.PENDING
+    )
+    before = snapshot(db_session, wo, op)
+
+    resp = put_operation(client, op, supervisor, status="ready")
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"] == MSG_WORK_ORDER_NOT_RELEASED
+    assert_no_pending_writes(db_session)
+    assert snapshot(db_session, wo, op) == before
+    assert operation_update_rows(db_session, op.id) == []
+
+
+def test_generic_operation_put_start_on_a_released_work_order_still_lands_positive_control(client, db_session, floor):
+    """The positive control for the zero-row assertions above: the SAME query finds the row."""
+    wc, _, supervisor = floor
+    wo, op = make_wo_with_operation(
+        db_session, work_center=wc, wo_status=WorkOrderStatus.RELEASED, op_status=OperationStatus.READY
+    )
+
+    resp = put_operation(client, op, supervisor, status="in_progress")
+
+    assert resp.status_code == 200, resp.text
+    db_session.expire_all()
+    assert (
+        db_session.query(WorkOrderOperation).filter(WorkOrderOperation.id == op.id).one().status
+        == OperationStatus.IN_PROGRESS
+    )
+    assert len(operation_update_rows(db_session, op.id)) == 1
+
+
+@pytest.mark.parametrize(
+    "wo_status, op_status, fields, expected_status",
+    [
+        # The supervisor override on a held job stays: un-holding one operation by hand is
+        # not a start, and every start verb still refuses it until the work order resumes.
+        (WorkOrderStatus.ON_HOLD, OperationStatus.ON_HOLD, {"status": "ready"}, OperationStatus.READY),
+        # Ordinary edits on a draft are not status writes at all.
+        (WorkOrderStatus.DRAFT, OperationStatus.PENDING, {"name": "Renamed"}, OperationStatus.PENDING),
+        # Echoing the CURRENT status in an unrelated edit is not a transition -- running labor
+        # on a held job keeps being editable.
+        (
+            WorkOrderStatus.ON_HOLD,
+            OperationStatus.IN_PROGRESS,
+            {"status": "in_progress", "name": "Renamed"},
+            OperationStatus.IN_PROGRESS,
+        ),
+        (WorkOrderStatus.DRAFT, OperationStatus.READY, {"status": "ready", "name": "Renamed"}, OperationStatus.READY),
+    ],
+)
+def test_generic_operation_put_edits_that_are_not_a_start_still_land(
+    client, db_session, floor, wo_status, op_status, fields, expected_status
+):
+    wc, _, supervisor = floor
+    wo, op = make_wo_with_operation(db_session, work_center=wc, wo_status=wo_status, op_status=op_status)
+
+    resp = put_operation(client, op, supervisor, **fields)
+
+    assert resp.status_code == 200, resp.text
+    db_session.expire_all()
+    row = db_session.query(WorkOrderOperation).filter(WorkOrderOperation.id == op.id).one()
+    assert row.status == expected_status
+    if "name" in fields:
+        assert row.name == fields["name"]
+    assert db_session.query(WorkOrder).filter(WorkOrder.id == wo.id).one().status == wo_status
+
+
+def test_the_put_then_office_complete_door_is_closed_on_a_held_job(client, db_session, floor):
+    """The composed bypass the review found: hand-set IN_PROGRESS, then office-complete it.
+    The first call is refused, so the second meets the READY auto-start rung and is refused
+    too -- no completion, nothing booked."""
+    wc, _, supervisor = floor
+    wo, op = make_wo_with_operation(
+        db_session, work_center=wc, wo_status=WorkOrderStatus.ON_HOLD, op_status=OperationStatus.READY
+    )
+
+    assert put_operation(client, op, supervisor, status="in_progress").status_code == 409
+    resp = client.post(
+        f"/api/v1/work-orders/operations/{op.id}/complete",
+        params={"quantity_complete": 10},
+        headers=user_headers(supervisor),
+    )
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"] == MSG_WORK_ORDER_ON_HOLD
+    db_session.expire_all()
+    row = db_session.query(WorkOrderOperation).filter(WorkOrderOperation.id == op.id).one()
+    assert row.status == OperationStatus.READY
+    assert float(row.quantity_complete or 0) == 0

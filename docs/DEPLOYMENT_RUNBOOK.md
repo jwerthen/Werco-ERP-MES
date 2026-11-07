@@ -530,9 +530,10 @@ cd frontend; npm test
 
 **Floor gates for draft / on-hold work orders (owner ruling 2026-11-05).** No migration and no
 environment variable. After this deploy, clock-in, both operation-start verbs and completing a
-READY operation refuse **409** on a work order that is DRAFT or ON_HOLD, and a held work order is
-lifted only by **Resume Work Order** (`POST /api/v1/work-orders/{id}/resume`), which resumes to DRAFT
-when no release is on record. Before deploying, run these two **read-only** queries against
+READY operation refuse **409** on a work order that is DRAFT or ON_HOLD (so does a hand-set
+`status: in_progress` through `PUT /api/v1/work-orders/operations/{id}`), and a held work order goes
+back to the floor through **Resume Work Order** (`POST /api/v1/work-orders/{id}/resume`), which
+resumes to DRAFT when no release is on record. Before deploying, run these two **read-only** queries against
 production (Supabase SQL editor; status enum labels are stored uppercase) and have a supervisor
 clear what they find. Operators already clocked in are not affected: clock-out, production reports
 and completing an IN_PROGRESS operation stay allowed on a held job.
@@ -565,6 +566,14 @@ and completing an IN_PROGRESS operation stay allowed on a held job.
    WHERE is_deleted = false AND status = 'ON_HOLD' AND released_at IS NULL AND released_by IS NULL
    ORDER BY company_id, work_order_number;
    ```
+
+3. **Training handouts.** The onboarding markdown (`docs/onboarding/02-operator-shop-floor.md`,
+   `04-planner-supervisor-manager.md`) describes the new "Not released" / "WO on hold" refusals and
+   Start / Hold / Resume Work Order, but the committed PDFs in `docs/onboarding/pdf/` were **not**
+   regenerated — no generator in the repo produces them (they are Chrome print-to-PDF renders of the
+   markdown; `docs/onboarding/generate_onboarding_pdfs.py` builds only `quick-reference/`). Before
+   handing the operator or supervisor guide to anyone after this deploy, re-print those two PDFs from
+   the current markdown (once, after the short-count PR if it ships in the same window).
 
 See `docs/API.md` → Work Orders → "Draft and on-hold work orders refuse every start".
 

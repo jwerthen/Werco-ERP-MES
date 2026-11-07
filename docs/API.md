@@ -1387,7 +1387,7 @@ company-scoped.
 | POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) and the optional `unit_number` (≤ 50 chars — see "Unit #" below) | Yes |
 | GET | `/work-orders/{id}` | Get work order by ID | Yes |
 | GET | `/work-orders/{id}/timeline` | Chronological job history with category, actor and time filters; opaque cursor, `limit` 1–100 (default 30). Returns business events and source links, not raw audit payloads | Yes |
-| PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below). **`status: on_hold` on a DRAFT work order returns 409** (a draft has nothing on the floor to hold — release it first); this `PUT` is the "Hold Work Order" write for a released / in-progress job, and a hold is lifted only by `POST /work-orders/{id}/resume` (see "Draft and on-hold work orders refuse every start" below) | Admin / Manager / Supervisor |
+| PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below). **`status: on_hold` on a DRAFT work order returns 409** (a draft has nothing on the floor to hold — release it first); this `PUT` is the "Hold Work Order" write for a released / in-progress job, and the door that puts a held job back on the floor is `POST /work-orders/{id}/resume` (this `PUT` can still move a held job to `draft` or `cancelled`, which keeps it off the floor; its blind move to `released` / `in_progress` is a known gap — see "Draft and on-hold work orders refuse every start" below) | Admin / Manager / Supervisor |
 | DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it) | Admin / Manager |
 | POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below. Reached from Work Orders → **Deleted** (`deleted_only=true` above) | Admin / Manager |
 | POST | `/work-orders/{id}/release` | Release to production (**404** when missing or soft-deleted) | Admin / Manager / Supervisor |
@@ -1396,7 +1396,7 @@ company-scoped.
 | POST | `/work-orders/{id}/complete` | Complete work order (409 if the WO is CANCELLED) | Yes |
 | POST | `/work-orders/{id}/duplicate` | **Duplicate a work order** — copy its *plan* (operations, laser nests, open material ties, re-snapshotted process-sheet steps) onto a new **DRAFT** WO. Body `{quantity_ordered, due_date}`; **201** returning an **envelope**, not a bare work order. See "Duplicating a work order" below | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/operations` | Add an operation to a work order | Admin / Manager / Supervisor |
-| PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below). **409** if it sets `status` to COMPLETE on a not-yet-complete operation — completion goes through the completion endpoints (see "Terminal-state lock") | Admin / Manager / Supervisor |
+| PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below). **409** if it sets `status` to COMPLETE on a not-yet-complete operation — completion goes through the completion endpoints (see "Terminal-state lock"). **409** with the start gate's text if it sets `status` to IN_PROGRESS on an operation of a draft, on-hold or complete / closed / cancelled work order, and **409** "release first" if it sets `status` to READY on a draft — both before any field is written; re-sending the operation's current status is not a transition (see "Draft and on-hold work orders refuse every start") | Admin / Manager / Supervisor |
 | POST | `/work-orders/operations/{id}/start` | Start an operation (**office** verb — operators start work through `PUT /shop-floor/operations/{id}/start` and the kiosk, which stay operator-open). Refused before any write, in the shop-floor twin's order: **400** already complete / already in progress (it never re-opens or re-stamps one), **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **409** operation on hold (starting does not lift a hold), **400** predecessors | Admin / Manager / Supervisor / Quality |
 | POST | `/work-orders/operations/{id}/complete` | Complete an operation (or record partial progress; 409 if the parent WO is terminal; **409 for a READY operation on a draft or on-hold WO** — completing it would start it). **Office** verb — the shop-floor twin is the operator path | Admin / Manager / Supervisor / Quality |
 | POST | `/work-orders/operations/{id}/reduce-production` | Supervisor/office over-count correction — walk back good-count across **any** operator's **unapproved** labor on the operation; **a COMPLETE operation is correctable here** (unlike the operator's twin), a terminal WO is not; no clock-in required (see note below) | Admin / Manager / Supervisor |
@@ -1586,11 +1586,13 @@ company-scoped.
 > - **`POST /work-orders/{id}/complete`** (Admin / Manager / Supervisor / Quality) force-completes every
 >   still-open operation through the shared finalizer — ungated by sequence. (It *does* refuse **409**
 >   when an open operation is ON_HOLD.)
-> - **`PUT /work-orders/operations/{id}`** (Admin / Manager / Supervisor) refuses only `status`
->   **COMPLETE**; a supervisor may hand-set an operation to **READY** through its blind `setattr` loop.
->   That is a **deliberate, role-gated, audited supervisor override** — the full old→new row diff lands
->   on the tamper-evident chain — and the read-path heal will **never re-demote** it, because that heal
->   reads PENDING rows only.
+> - **`PUT /work-orders/operations/{id}`** (Admin / Manager / Supervisor) carries no predecessor
+>   check; a supervisor may hand-set an operation to **READY** through its blind `setattr` loop on a
+>   released, in-progress or on-hold work order. That is a **deliberate, role-gated, audited supervisor
+>   override** — the full old→new row diff lands on the tamper-evident chain — and the read-path heal
+>   will **never re-demote** it, because that heal reads PENDING rows only. (Its status refusals are
+>   work-order-state rules, not sequence rules: COMPLETE always, IN_PROGRESS on a draft / on-hold /
+>   terminal work order, READY on a draft — see "Draft and on-hold work orders refuse every start".)
 >
 > **`_apply_work_order_schedule` promotes without a gate and is provably safe — don't "fix" it.**
 > `PUT /scheduling/work-orders/{id}/schedule`, `…/schedule-earliest`, and
@@ -1721,7 +1723,8 @@ company-scoped.
 > gate, and every start path calls it — there are no inline copies: `POST /shop-floor/clock-in` (kiosk,
 > crew JOIN, desk Check In, Time Clock, and paper back-entry — `source = "backfill"` has **no**
 > exemption), `PUT /shop-floor/operations/{id}/start`, `POST /work-orders/operations/{id}/start`, the
-> READY auto-start branch of **both** complete verbs, the scanner resolver (`clock_in_blockers` /
+> READY auto-start branch of **both** complete verbs, the generic `PUT /work-orders/operations/{id}`
+> when it writes `status: in_progress` (a hand-set start), the scanner resolver (`clock_in_blockers` /
 > `complete_blockers`, so `POST /scanner/resolve-action` reports the same text), and the floor read
 > payloads' `start_blocked_reason`. Every refusal happens before any write (no TimeEntry, no status
 > flip, no audit row) and is a **409** with a plain-string `detail` — never a 400, because the crew
@@ -1749,6 +1752,16 @@ company-scoped.
 >   already **IN_PROGRESS** is **not** gated, and neither are clock-out, production reporting,
 >   operation resume or blocker resolve/dismiss: labor already running when a job is held must always
 >   be closable, and the kiosk's finish flow completes an IN_PROGRESS operation after clocking out.
+> - **The generic operation `PUT` is not a way around the gate.** `PUT /work-orders/operations/{id}`
+>   with `status: in_progress` is refused **409** with the table's text on a draft, on-hold or terminal
+>   work order — without it, a hand-set IN_PROGRESS followed by the office complete verb (which accepts
+>   an IN_PROGRESS operation with no work-order gate, by design) started *and* completed work, tied
+>   material included, on a job nobody released or a supervisor stopped. `status: ready` on a **draft**
+>   is refused **409** with the `draft` text too (it would put unreleased work on the dispatch board;
+>   resume-to-DRAFT demotes exactly those rows). Both are raised before the first field is written,
+>   and re-sending the operation's current status in an unrelated edit is not a transition, so it
+>   still lands. Hand-setting READY on a held job's operation stays the supervisor override it was —
+>   every start verb still refuses that operation until the work order resumes.
 > - **A soft-deleted work order is 404** on clock-in, both start verbs, `POST /work-orders/{id}/start`
 >   and `POST /work-orders/{id}/release`.
 > - **A laser child does not inherit its assembly parent's draft or hold** — the gate reads the
@@ -1776,7 +1789,9 @@ company-scoped.
 > draft / on-hold gate. The hold itself is recorded by the `PUT`'s best-effort `log_update`.
 >
 > **Resume Work Order — `POST /work-orders/{id}/resume`** (Admin / Manager / Supervisor) is the one door
-> out of a work-order hold. It never releases a job — Release is the authorization step — so the
+> that puts a held job back on the floor under the release-record rule below. (`PUT` ON_HOLD → DRAFT and
+> ON_HOLD → CANCELLED also leave a hold, restrictively — neither puts work on the floor; the `PUT`'s
+> blind ON_HOLD → RELEASED / IN_PROGRESS write is the known gap above.) It never releases a job — Release is the authorization step — so the
 > target comes from the release record (`released_at` or `released_by`) and the operations' work
 > evidence (the work order's `actual_start`, any COMPLETE operation, or any operation that is
 > IN_PROGRESS, carries an `actual_start`, has booked good/scrap quantity, or has any TimeEntry):
@@ -3522,6 +3537,16 @@ environment variable or deployment configuration change is needed.
 > package is bad nests, and the fix is a re-import): its rebuilt nest operations are refused by
 > clock-in and every start verb until `POST /work-orders/{id}/resume`. Because laser WOs are now
 > stamped, they count in the `released_at`-based flow metrics.
+>
+> Two consequences of stamping at the route, both deliberate and recorded on the audit chain:
+> (a) the MCP `import_laser_nest_package` / `add_laser_nest` tools with the default `release=false`
+> put the job back to DRAFT *after* the route stamped it, so that DRAFT keeps a `released_by` /
+> `released_at` for a release the caller chose not to keep. The stamp is inert — `PUT` refuses
+> DRAFT → ON_HOLD, Release re-stamps, and the Little's-law average WIP on `GET /analytics/flow` leaves
+> DRAFT work orders out (as it does CANCELLED) — but any new reader of `released_at` should filter
+> DRAFT the same way. (b) A legacy RELEASED / IN_PROGRESS laser job that never carried a stamp gets
+> `released_at` = the re-import time, so its release-based lead time starts later than the real
+> release did.
 >
 > **Re-import is refused (409) when a wiped operation already consumed tied material.** Because the
 > rebuild destroys the laser operations, any **material allocation** scoped to one of them would be
@@ -9436,7 +9461,9 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > ("n/a"), never a fake 0/100:
 > - **`/flow`** — per completed WO: lead time (release → `actual_end`), release→first/last-ship days,
 >   value-add RUN hours, and PCE (value-add ÷ lead time); summary adds median/avg lead time,
->   Little's Law WIP/throughput, and per-work-center queue times (measured from `operation_ready`
+>   Little's Law WIP/throughput (the daily open-WO count runs from `released_at` to `actual_end` and
+>   leaves out CANCELLED and DRAFT work orders — neither records when it left the floor, and a DRAFT
+>   can carry a release stamp for a release that was put back), and per-work-center queue times (measured from `operation_ready`
 >   events where available, predecessor-end → start as fallback, with `from_ready_events` counting
 >   the former). **Queue time has a series break at 2026-08-11:** operations sharing a work center
 >   now all become READY at work-order release rather than one at a time, so for those operations the

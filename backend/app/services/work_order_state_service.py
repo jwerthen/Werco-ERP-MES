@@ -834,6 +834,10 @@ class WorkOrderResumeOutcome:
     status: WorkOrderStatus
     restore_basis: HoldRestoreBasis
     demoted_operations: list[WorkOrderOperation]
+    # Every work center the work order's operations sit at (sorted, de-duplicated) -- the
+    # shop-floor channels the caller broadcasts ``work_order_resumed`` on, taken from the
+    # operations this function already read so the route issues no second query.
+    work_center_ids: tuple[int, ...] = ()
 
 
 def apply_work_order_resume(db: Session, work_order: WorkOrder) -> WorkOrderResumeOutcome:
@@ -864,6 +868,7 @@ def apply_work_order_resume(db: Session, work_order: WorkOrder) -> WorkOrderResu
         status=target,
         restore_basis=basis,
         demoted_operations=demoted,
+        work_center_ids=tuple(sorted({op.work_center_id for op in operations if op.work_center_id})),
     )
 
 

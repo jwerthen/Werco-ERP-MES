@@ -262,9 +262,12 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > both operation-complete verbs refuse **409** for **every** role — Admin included — when the
 > operation's work order is DRAFT ("release first") or ON_HOLD ("Resume Work Order"). This is a
 > state gate, not a role gate: no role cell above changed, and a supervisor's only way past it is the
-> audited door (**Release** or **Resume Work Order**). Paper back-entry has no exemption. Labor
-> already running when a job is held stays closable (clock-out, production report, completing an
-> IN_PROGRESS operation).
+> audited door (**Release** or **Resume Work Order**). The office verbs carry the same state gate:
+> `POST /work-orders/operations/{id}/start`, and the generic `PUT /work-orders/operations/{id}`
+> (Admin / Manager / Supervisor) when it hand-sets `status: in_progress` — or `status: ready` on a
+> draft — so the generic edit cannot stand in for the start verb it sits beside. Paper back-entry has
+> no exemption. Labor already running when a job is held stays closable (clock-out, production
+> report, completing an IN_PROGRESS operation).
 
 > **Hold / resume are operator-facing; resolving the blocker behind a hold is not.** Both rows above
 > are new to this matrix; **neither gate changed**. `PUT /api/v1/shop-floor/operations/{id}/hold` and

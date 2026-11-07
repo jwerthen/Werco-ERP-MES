@@ -278,6 +278,35 @@ class TestResumeWorkOrder:
         # Op holds and READY ops of a resumed released job are untouched.
         assert reread(db_session, WorkOrderOperation, op.id).status == OperationStatus.READY
 
+    def test_resume_broadcasts_on_every_work_center_of_the_job_once(self, client, db_session, monkeypatch):
+        """The shop-floor channels come from the operations the resume already read (no
+        second query): one ``work_order_resumed`` per distinct work center, nothing for a
+        work center the job has no operation at."""
+        import app.api.endpoints.work_orders as work_orders_module
+
+        # Record at the route's safe_broadcast seam (delivery itself may be switched off by
+        # REALTIME_BROADCAST_ENABLED, which would make a patched broadcaster never run).
+        calls: list[tuple] = []
+        monkeypatch.setattr(
+            work_orders_module, "safe_broadcast", lambda fn, *args, **kwargs: calls.append((fn, args, kwargs))
+        )
+        wc_a = make_work_center(db_session)
+        wc_b = make_work_center(db_session)
+        unrelated = make_work_center(db_session)
+        supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
+        wo, _ = make_wo_with_operation(db_session, work_center=wc_a, wo_status=WorkOrderStatus.ON_HOLD)
+        add_op(db_session, wo, wc_b, sequence=20, status=OperationStatus.PENDING)
+        add_op(db_session, wo, wc_a, sequence=30, status=OperationStatus.PENDING)
+        stamp(db_session, wo, supervisor)
+
+        resp = client.post(resume_url(wo.id), headers=user_headers(supervisor))
+
+        assert resp.status_code == 200, resp.text
+        sent = [(args[0], args[1]) for fn, args, _ in calls if fn is work_orders_module.broadcast_shop_floor_update]
+        assert sorted(wc_id for wc_id, _ in sent) == sorted([wc_a.id, wc_b.id])
+        assert unrelated.id not in {wc_id for wc_id, _ in sent}
+        assert all(payload == {"event": "work_order_resumed", "work_order_id": wo.id} for _, payload in sent)
+
     def test_a_complete_operation_counts_as_work_even_without_actual_start(self, client, db_session):
         wc = make_work_center(db_session)
         supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
