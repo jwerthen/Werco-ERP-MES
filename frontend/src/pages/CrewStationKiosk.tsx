@@ -33,6 +33,7 @@ import ProductionRecoveryNotice from '../components/kiosk/ProductionRecoveryNoti
 import { useProductionReportRequest } from '../components/kiosk/useProductionReportRequest';
 import { KioskApiError } from '../services/kioskStationClient';
 import { getKioskStationId } from '../utils/kiosk';
+import { startBlockedLabel } from '../utils/startBlock';
 import { useKioskIdleLogout } from '../hooks/useKioskIdleLogout';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { useWakeLock } from '../hooks/useWakeLock';
@@ -739,6 +740,12 @@ export default function CrewStationKiosk() {
         showToast('success', `${operator.user.full_name} joined ${item.work_order_number}`);
         setView({ name: 'job', operationId: item.operation_id });
       } catch (err) {
+        // 400 only. A WORK-ORDER refusal (not released / on hold / closed) is a
+        // 409 on purpose so it never lands here and reads as "already clocked
+        // in": it is re-thrown, and the callers render it verbatim — inline on
+        // the badge-scan screen (setBadgeError) or as an error toast from the
+        // operator sheet. The job-first scan path does not pre-block a blocked
+        // job, so a roster on a just-held job can still badge out (LEAVE).
         if (err instanceof KioskApiError && err.status === 400) {
           // e.g. "already clocked in" — roster was stale; refresh sorts it out.
           showToast('info', kioskErrorMessage(err, 'Already clocked in.'));
@@ -2368,12 +2375,22 @@ export default function CrewStationKiosk() {
                 <ul className="space-y-2">
                   {queue
                     .filter((q) => !(q.roster || []).some((r) => r.user_id === view.operator.user.id))
-                    .map((item) => (
+                    .map((item) => {
+                      // A WORK-ORDER refusal (not released / on hold) stays on
+                      // `queue` — unlike an operation hold — so the row is listed
+                      // with the server's reason but cannot be tapped: JOIN would
+                      // only come back 409 with that same text.
+                      const startBlockedReason = item.start_blocked_reason || null;
+                      const reasonId = `crew-join-blocked-${item.operation_id}`;
+                      return (
                       <li key={item.operation_id}>
                         <button
                           type="button"
-                          disabled={mutationsBlocked}
-                          aria-describedby={!online ? OFFLINE_HINT_ID : undefined}
+                          disabled={mutationsBlocked || startBlockedReason !== null}
+                          aria-describedby={
+                            !online ? OFFLINE_HINT_ID : startBlockedReason ? reasonId : undefined
+                          }
+                          data-testid={`crew-join-row-${item.operation_id}`}
                           onClick={async () => {
                             setBusy(true);
                             try {
@@ -2394,13 +2411,25 @@ export default function CrewStationKiosk() {
                               {formatOperationLabel(item.operation_number)} ·{' '}
                               {item.operation_name || 'Operation'}
                             </span>
+                            {startBlockedReason && (
+                              <span id={reasonId} className="mt-1 block text-base text-fd-amber">
+                                {startBlockedReason}
+                              </span>
+                            )}
                           </span>
-                          <span className="shrink-0 text-sm font-bold uppercase tracking-wider text-fd-blue">
-                            Tap to join (run)
-                          </span>
+                          {startBlockedReason ? (
+                            <span className="shrink-0 text-sm font-bold uppercase tracking-wider text-fd-amber">
+                              {startBlockedLabel(item.work_order_status)}
+                            </span>
+                          ) : (
+                            <span className="shrink-0 text-sm font-bold uppercase tracking-wider text-fd-blue">
+                              Tap to join (run)
+                            </span>
+                          )}
                         </button>
                       </li>
-                    ))}
+                      );
+                    })}
                 </ul>
               )}
             </div>

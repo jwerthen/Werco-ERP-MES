@@ -10,7 +10,8 @@ import {
   operationNumberText,
 } from './kioskConstants';
 import { UnitBadge } from '../ui';
-import { KioskMovedUpChip, KioskRunOrderChip, KioskStepsChip } from './KioskQueueCard';
+import { startBlockedLabel } from '../../utils/startBlock';
+import { KioskMovedUpChip, KioskRunOrderChip, KioskStartBlockedChip, KioskStepsChip } from './KioskQueueCard';
 
 interface KioskCrewJobCardProps {
   item: KioskCrewQueueItem;
@@ -44,7 +45,9 @@ export default function KioskCrewJobCard({ item, nowMs, onSelect, disabled = fal
       // row announced "operation Op 10" beside a new row's "operation 10".
       aria-label={`Work order ${item.work_order_number}, operation ${
         item.operation_name || operationNumberText(item.operation_number) || ''
-      }, ${roster.length} clocked in${movedUp ? ', moved up' : ''}`}
+      }, ${roster.length} clocked in${movedUp ? ', moved up' : ''}${
+        item.start_blocked_reason ? `, ${startBlockedLabel(item.work_order_status).toLowerCase()}` : ''
+      }`}
       className={`grid w-full grid-cols-[1fr_auto] items-center gap-4 rounded border px-5 py-5 text-left transition-colors active:translate-y-px disabled:opacity-40 ${
         pastDue
           ? 'border-fd-red/60 bg-fd-red/5 hover:border-fd-red'
@@ -66,6 +69,10 @@ export default function KioskCrewJobCard({ item, nowMs, onSelect, disabled = fal
           >
             {inProgress ? 'In progress' : 'Ready'}
           </span>
+          {/* The WORK ORDER refuses new starts (not released / on hold). The card
+              stays tappable on purpose: a roster on a just-held job must still be
+              able to LEAVE, and the job screen is where JOIN is refused. */}
+          <KioskStartBlockedChip item={item} size="crew" />
           <KioskStepsChip item={item} />
         </div>
         <div className="mt-2 truncate text-xl text-fd-body">

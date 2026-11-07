@@ -17,6 +17,7 @@ import {
   saveKioskWorkstation,
 } from '../utils/kiosk';
 import { formatCentralDateTime, formatCentralTime } from '../utils/centralTime';
+import { startBlockedLabel } from '../utils/startBlock';
 import { useKioskIdleLogout } from '../hooks/useKioskIdleLogout';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { useWakeLock } from '../hooks/useWakeLock';
@@ -688,6 +689,7 @@ export default function OperatorKiosk() {
   // human-readable reason and is referenced via aria-describedby.
   const mutationsBlocked = busy || !online || !initialLoadDone;
   const OFFLINE_HINT_ID = 'kiosk-offline-hint';
+  const CONFIRM_START_BLOCKED_ID = 'kiosk-confirm-start-blocked';
 
   // --- Mutations (all send source:"kiosk") ----------------------------------
   const handleClockIn = useCallback(
@@ -707,6 +709,16 @@ export default function OperatorKiosk() {
         await refresh();
       } catch (err) {
         showToast('error', kioskErrorMessage(err, 'Could not clock in. Try again.'));
+        // 409 = the WORK ORDER refused the start (not released, on hold, or
+        // closed) — a state the confirm screen did not know about, e.g. a
+        // supervisor held the job after the queue was read. Staying on a confirm
+        // screen whose Clock in can never succeed is a dead end, so land on the
+        // queue and re-read it: the card then carries the reason chip. Every
+        // other refusal keeps today's behavior (stay put, retry).
+        if ((err as { response?: { status?: number } } | null)?.response?.status === 409) {
+          setView({ name: 'queue' });
+          await refresh();
+        }
       } finally {
         setBusy(false);
       }
@@ -986,12 +998,29 @@ export default function OperatorKiosk() {
   const activeQueueItem =
     activeJob?.operation_id != null ? queue.find((q) => q.operation_id === activeJob.operation_id) : undefined;
 
-  // Next queued (non-active) job on this machine, in server (run) order. Held
-  // work cannot appear here: the server keeps it off `queue` entirely.
+  // Next queued (non-active) job on this machine, in server (run) order — the
+  // target of the chained clock-in after a complete. An OPERATION-level hold
+  // cannot appear here (the server keeps those off `queue`, on `held`). A
+  // WORK-ORDER refusal can: a READY operation of a draft or on-hold job stays on
+  // `queue` carrying `start_blocked_reason`, so it is skipped explicitly — the
+  // chain must never aim at a job the server will refuse.
   const nextQueueItem = useMemo(
-    () => queue.find((q) => q.operation_id !== activeJob?.operation_id) ?? null,
+    () => queue.find((q) => q.operation_id !== activeJob?.operation_id && !q.start_blocked_reason) ?? null,
     [queue, activeJob?.operation_id]
   );
+
+  // Why the WORK ORDER refuses the job on the confirm screen, if it does. Read
+  // from the LIVE queue row when there is one (the confirm keeps the row it was
+  // opened with, and a poll can land a supervisor's hold while it is up), else
+  // from that snapshot. Null = no work-order refusal — never "startable".
+  const confirmItem = view.name === 'confirm' ? view.item : null;
+  const confirmStartBlock = useMemo(() => {
+    if (!confirmItem) return null;
+    const live = queue.find((q) => q.operation_id === confirmItem.operation_id) ?? confirmItem;
+    return live.start_blocked_reason
+      ? { reason: live.start_blocked_reason, status: live.work_order_status ?? null }
+      : null;
+  }, [confirmItem, queue]);
 
   const operatorInitials = `${(user?.first_name || ' ')[0] || ''}${(user?.last_name || ' ')[0] || ''}`
     .trim()
@@ -1759,6 +1788,21 @@ export default function OperatorKiosk() {
                   Review {formatStepsChip(view.item).toLowerCase()}
                 </button>
               )}
+              {confirmStartBlock && (
+                <div
+                  role="status"
+                  id={CONFIRM_START_BLOCKED_ID}
+                  data-testid="kiosk-confirm-start-blocked"
+                  className="mt-3 rounded-[4px] border border-fd-amber/60 bg-fd-amber/10 px-4 py-3"
+                >
+                  <p className="font-mono text-sm font-bold uppercase tracking-[0.08em] text-fd-amber">
+                    {startBlockedLabel(confirmStartBlock.status)}
+                  </p>
+                  {/* The server's text, verbatim — the same string the clock-in
+                      would refuse with. Never reworded here. */}
+                  <p className="mt-1 text-lg text-fd-body">{confirmStartBlock.reason}</p>
+                </div>
+              )}
               <div className="mt-5 grid grid-cols-2 gap-3">
                 <button
                   type="button"
@@ -1771,13 +1815,27 @@ export default function OperatorKiosk() {
                 </button>
                 <button
                   type="button"
-                  disabled={mutationsBlocked}
-                  aria-describedby={!online ? OFFLINE_HINT_ID : undefined}
-                  title={!online ? 'Offline — clock in is disabled until reconnected' : undefined}
+                  disabled={mutationsBlocked || confirmStartBlock !== null}
+                  aria-describedby={
+                    !online ? OFFLINE_HINT_ID : confirmStartBlock ? CONFIRM_START_BLOCKED_ID : undefined
+                  }
+                  title={
+                    !online
+                      ? 'Offline — clock in is disabled until reconnected'
+                      : confirmStartBlock
+                        ? confirmStartBlock.reason
+                        : undefined
+                  }
                   onClick={() => void handleClockIn(view.item)}
                   className="min-h-16 rounded-[4px] bg-fd-green font-mono text-xl font-bold uppercase tracking-[0.08em] text-[#04140b] transition-transform duration-150 ease-out active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  {!online ? 'Offline' : busy ? 'Clocking in…' : 'Clock in'}
+                  {!online
+                    ? 'Offline'
+                    : confirmStartBlock
+                      ? startBlockedLabel(confirmStartBlock.status)
+                      : busy
+                        ? 'Clocking in…'
+                        : 'Clock in'}
                 </button>
               </div>
             </section>

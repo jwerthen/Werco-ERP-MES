@@ -158,6 +158,15 @@ export interface KioskQueueItem extends KioskJobInstructions {
   // render nothing at all (no placeholder, no "not tied" nag): an untied work
   // order must look byte-identical to its pre-feature self.
   material_ties?: KioskMaterialTie[] | null;
+  // The WORK ORDER's status, and the server's verbatim refusal text when that
+  // status blocks every start: not released yet (draft), held by a supervisor
+  // (on hold), or terminal. Both ride queue AND held rows (one row builder).
+  // A work-order hold does NOT move a row onto `held` — a READY operation of an
+  // on-hold job stays on `queue` with the reason set, so the card can say why it
+  // will not start instead of vanishing. A null reason is "no work-order
+  // refusal", never "startable". Optional so pre-feature payloads still typecheck.
+  work_order_status?: string | null;
+  start_blocked_reason?: string | null;
   // --- `held` rows only (never `queue`) -------------------------------------
   // Stated explicitly by the server on held rows, with no `true` twin on queue
   // rows on purpose: whether a QUEUED operation may actually start is decided by

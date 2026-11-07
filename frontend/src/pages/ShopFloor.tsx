@@ -35,6 +35,7 @@ import {
 import { QueueListIcon, DocumentTextIcon, ArrowTopRightOnSquareIcon } from '@heroicons/react/24/outline';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId, isKioskMode } from '../utils/kiosk';
 import { formatOperationLabel, operationNumberText } from '../utils/operationLabel';
+import { startBlockedLabel } from '../utils/startBlock';
 import { Modal } from '../components/ui/Modal';
 
 interface WorkOrderDetails {
@@ -905,6 +906,30 @@ export default function ShopFloor() {
                                 <CheckCircleIcon className="h-5 w-5" />
                                 Active
                               </span>
+                            ) : item.start_blocked_reason ? (
+                              // The WORK ORDER refuses every start (not released /
+                              // on hold). Disabled for back-entry too: the server
+                              // refuses a source=backfill clock-in exactly like a
+                              // live one, so a supervisor resumes the job first.
+                              // The reason is the server's text, verbatim.
+                              <>
+                                <button
+                                  type="button"
+                                  disabled
+                                  className="btn-success btn-sm w-full"
+                                  title={item.start_blocked_reason}
+                                  aria-describedby={`time-clock-start-blocked-${item.operation_id}`}
+                                >
+                                  <PauseCircleIcon className="h-4 w-4 mr-1.5" />
+                                  {startBlockedLabel(item.work_order_status)}
+                                </button>
+                                <span
+                                  id={`time-clock-start-blocked-${item.operation_id}`}
+                                  className="block max-w-[14rem] text-xs text-amber-700"
+                                >
+                                  {item.start_blocked_reason}
+                                </span>
+                              </>
                             ) : (
                               <button
                                 onClick={() => handleClockIn(item)}
