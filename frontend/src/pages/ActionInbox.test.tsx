@@ -12,7 +12,8 @@ import { render, screen, waitFor, within, fireEvent, act } from '@testing-librar
 import { MemoryRouter } from 'react-router-dom';
 import ActionInbox from './ActionInbox';
 import api from '../services/api';
-import { AIRecommendation } from '../types/aiLearning';
+import { ToastProvider } from '../components/ui/Toast';
+import { AIRecommendation, AIRecommendationApplyAction, AIRecommendationApplyResult } from '../types/aiLearning';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -22,6 +23,7 @@ jest.mock('../services/api', () => ({
     updateOperationalInbox: jest.fn(),
     getAIRecommendations: jest.fn(),
     acceptAIRecommendation: jest.fn(),
+    applyAIRecommendation: jest.fn(),
     dismissAIRecommendation: jest.fn(),
     sendAIRecommendationFeedback: jest.fn(),
     snoozeAIRecommendation: jest.fn(),
@@ -57,7 +59,9 @@ const emptyHealth = { progress: 100, counts: {}, steps: [], issues: [] };
 const renderInbox = () =>
   render(
     <MemoryRouter>
-      <ActionInbox />
+      <ToastProvider>
+        <ActionInbox />
+      </ToastProvider>
     </MemoryRouter>
   );
 
@@ -219,4 +223,221 @@ it('counts featured recommendations in Open Actions consistently across filter v
   expect(
     within(screen.getByRole('button', { name: /Recommendation & setup actions/ })).getByText('4')
   ).toBeInTheDocument();
+});
+
+// ---------------------------------------------------------------------------
+// Owner ruling 3 (2026-11-05): nothing AI-driven runs without a person clicking
+// Accept & apply. The server decides what the button does (apply_action); Accept &
+// apply is server-gated and therefore NON-optimistic; record-only Accept / Mark
+// handled, Dismiss and Snooze stay optimistic.
+// ---------------------------------------------------------------------------
+
+const makeApplyAction = (overrides: Partial<AIRecommendationApplyAction> = {}): AIRecommendationApplyAction => ({
+  action_type: 'adjust_work_order_priority',
+  summary: 'Raise WO-3001 priority from P5 to P1',
+  warnings: [],
+  fingerprint: '0123456789abcdef',
+  can_apply: true,
+  can_mark_handled: true,
+  blocked_reason: null,
+  blocked_kind: null,
+  ...overrides,
+});
+
+const makeActionCard = (overrides: Partial<AIRecommendation> = {}): AIRecommendation =>
+  makeRecommendation({
+    id: 71,
+    title: 'Expedite WO-3001',
+    summary: 'WO-3001 is at risk of shipping late.',
+    score: 0.9,
+    target_entity_type: 'work_order',
+    target_entity_id: 3001,
+    target_href: '/work-orders/3001',
+    suggested_action: { type: 'adjust_work_order_priority', work_order_id: 3001, priority: 1 },
+    apply_action: makeApplyAction(),
+    ...overrides,
+  });
+
+describe('ActionInbox AI Accept & apply (ruling 3)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    localStorage.clear();
+    mockApi.getSetupHealth.mockResolvedValue(emptyHealth);
+  });
+
+  it('Accept & apply waits for the server and sends the fingerprint', async () => {
+    const card = makeActionCard();
+    // First read shows the card; the post-apply re-read no longer has it.
+    mockApi.getAIRecommendations.mockResolvedValueOnce([card]).mockResolvedValue([]);
+    let resolveApply: (value: AIRecommendationApplyResult) => void = () => {};
+    mockApi.applyAIRecommendation.mockReturnValue(
+      new Promise<AIRecommendationApplyResult>(resolve => {
+        resolveApply = resolve;
+      })
+    );
+
+    renderInbox();
+
+    const hero = await screen.findByRole('region', { name: 'Top 3 today' });
+    expect(within(hero).getByText('Accept & apply will: Raise WO-3001 priority from P5 to P1')).toBeInTheDocument();
+    fireEvent.click(within(hero).getByRole('button', { name: /accept & apply/i }));
+
+    expect(mockApi.applyAIRecommendation).toHaveBeenCalledWith(
+      71,
+      '0123456789abcdef',
+      'Accepted & applied from Action Inbox'
+    );
+    expect(mockApi.acceptAIRecommendation).not.toHaveBeenCalled();
+    // Non-optimistic: the card is still there, disabled, while the server decides.
+    expect(within(hero).getByText('Expedite WO-3001')).toBeInTheDocument();
+    expect(within(hero).getByRole('button', { name: /applying/i })).toBeDisabled();
+    expect(within(hero).getByRole('button', { name: 'Dismiss' })).toBeDisabled();
+
+    await act(async () => {
+      resolveApply({
+        recommendation: { ...card, status: 'accepted', apply_action: null },
+        applied: true,
+        apply_result: { action_type: 'adjust_work_order_priority', summary: 'Raise WO-3001 priority from P5 to P1' },
+        apply_error: null,
+      });
+    });
+
+    await waitFor(() => expect(screen.queryByText('Expedite WO-3001')).not.toBeInTheDocument());
+    expect(await screen.findByText('Applied: Raise WO-3001 priority from P5 to P1')).toBeInTheDocument();
+  });
+
+  it('a refused apply keeps the card, toasts the server detail verbatim, and refetches on 409', async () => {
+    const detail =
+      'This action changed since you loaded it. It would now: Raise WO-3001 priority from P3 to P1. Review it and click Accept & apply again.';
+    const refreshed = makeActionCard({
+      apply_action: makeApplyAction({
+        summary: 'Raise WO-3001 priority from P3 to P1',
+        fingerprint: 'fedcba9876543210',
+      }),
+    });
+    mockApi.getAIRecommendations.mockResolvedValueOnce([makeActionCard()]).mockResolvedValue([refreshed]);
+    mockApi.applyAIRecommendation.mockRejectedValue({ response: { status: 409, data: { detail } } });
+
+    renderInbox();
+
+    const hero = await screen.findByRole('region', { name: 'Top 3 today' });
+    fireEvent.click(within(hero).getByRole('button', { name: /accept & apply/i }));
+
+    expect(await screen.findByText(detail)).toBeInTheDocument();
+    expect(screen.getByText('Expedite WO-3001')).toBeInTheDocument();
+    // The 409 re-reads the pending AI list (not a silent refetch: the toast above says why).
+    await waitFor(() => expect(mockApi.getAIRecommendations).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText('Accept & apply will: Raise WO-3001 priority from P3 to P1')).toBeInTheDocument();
+    expect(mockApi.acceptAIRecommendation).not.toHaveBeenCalled();
+  });
+
+  it('a 403 refusal keeps the card and toasts verbatim without refetching', async () => {
+    const detail =
+      'AI actions are off for this company (AI egress is off), so nothing will be applied. An Admin can turn AI egress on in Admin Settings > AI Privacy, or you can act on the record directly.';
+    mockApi.getAIRecommendations.mockResolvedValue([makeActionCard()]);
+    mockApi.applyAIRecommendation.mockRejectedValue({ response: { status: 403, data: { detail } } });
+
+    renderInbox();
+
+    const hero = await screen.findByRole('region', { name: 'Top 3 today' });
+    fireEvent.click(within(hero).getByRole('button', { name: /accept & apply/i }));
+
+    expect(await screen.findByText(detail)).toBeInTheDocument();
+    expect(screen.getByText('Expedite WO-3001')).toBeInTheDocument();
+    expect(mockApi.getAIRecommendations).toHaveBeenCalledTimes(1);
+  });
+
+  it("mark-handled card calls acceptAIRecommendation, never applyAIRecommendation, and shows the Won't apply reason", async () => {
+    const reason = 'WO-3001 is already P1 (the suggestion was P1); nothing to apply';
+    mockApi.getAIRecommendations.mockResolvedValue([
+      makeActionCard({
+        apply_action: makeApplyAction({
+          summary: 'Raise WO-3001 priority from P1 to P1',
+          can_apply: false,
+          can_mark_handled: true,
+          blocked_kind: 'target',
+          blocked_reason: reason,
+        }),
+      }),
+    ]);
+    mockApi.acceptAIRecommendation.mockResolvedValue({
+      recommendation: makeActionCard({ status: 'accepted' }),
+      applied: false,
+      apply_result: null,
+      apply_error: null,
+    });
+
+    renderInbox();
+
+    const hero = await screen.findByRole('region', { name: 'Top 3 today' });
+    expect(within(hero).queryByRole('button', { name: /accept & apply/i })).not.toBeInTheDocument();
+    expect(
+      within(hero).getByText(`Won't apply: ${reason}. Mark handled records that you dealt with it; nothing is changed.`)
+    ).toBeInTheDocument();
+
+    fireEvent.click(within(hero).getByRole('button', { name: 'Mark handled' }));
+
+    await waitFor(() =>
+      expect(mockApi.acceptAIRecommendation).toHaveBeenCalledWith(71, 'Marked handled from Action Inbox')
+    );
+    expect(mockApi.applyAIRecommendation).not.toHaveBeenCalled();
+    // Record-only accept stays on the optimistic path.
+    await waitFor(() => expect(screen.queryByText('Expedite WO-3001')).not.toBeInTheDocument());
+  });
+
+  it('role-blocked card shows no accept button but keeps Dismiss/Snooze and shows the reason', async () => {
+    const reason =
+      'Your role (operator) cannot apply this action: Raise WO-3001 priority from P5 to P1. It needs Supervisor, Manager or Admin.';
+    mockApi.getAIRecommendations.mockResolvedValue([
+      makeActionCard({
+        apply_action: makeApplyAction({
+          can_apply: false,
+          can_mark_handled: false,
+          blocked_kind: 'role',
+          blocked_reason: reason,
+        }),
+      }),
+    ]);
+
+    renderInbox();
+
+    const hero = await screen.findByRole('region', { name: 'Top 3 today' });
+    expect(within(hero).queryByRole('button', { name: /accept/i })).not.toBeInTheDocument();
+    expect(within(hero).queryByRole('button', { name: /mark handled/i })).not.toBeInTheDocument();
+    expect(within(hero).getByRole('button', { name: 'Dismiss' })).toBeEnabled();
+    expect(within(hero).getByRole('button', { name: /snooze/i })).toBeEnabled();
+    expect(within(hero).getByText(reason)).toBeInTheDocument();
+    // The blocked card never dead-ends: the record is one click away.
+    expect(within(hero).getByRole('link', { name: /open record/i })).toHaveAttribute('href', '/work-orders/3001');
+  });
+
+  it('AI queue rows render an Open link to target_href', async () => {
+    mockApi.getAIRecommendations.mockResolvedValue([
+      makeActionCard({ id: 81, title: 'Queue item one', score: 0.5, target_href: '/parts/12' }),
+      makeActionCard({ id: 82, title: 'Queue item two', score: 0.4, target_href: null }),
+    ]);
+
+    renderInbox();
+
+    await screen.findByRole('region', { name: 'Top 3 today' });
+    // Non-default filter folds every recommendation into the queue.
+    fireEvent.click(screen.getByRole('button', { name: 'AI' }));
+
+    const openLinks = screen.getAllByRole('link', { name: 'Open' });
+    expect(openLinks).toHaveLength(1);
+    expect(openLinks[0]).toHaveAttribute('href', '/parts/12');
+  });
+
+  it('a high-priority AI item drives the "Review affected records" link to its record', async () => {
+    mockApi.getAIRecommendations.mockResolvedValue([
+      makeActionCard({ priority: 'high', target_href: '/work-orders/3001' }),
+    ]);
+
+    renderInbox();
+
+    expect(await screen.findByRole('link', { name: 'Review affected records' })).toHaveAttribute(
+      'href',
+      '/work-orders/3001'
+    );
+  });
 });

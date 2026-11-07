@@ -1,6 +1,7 @@
 import React from 'react';
-import { SparklesIcon } from '@heroicons/react/24/outline';
-import { AIRecommendation, recommendationIsApplyable } from '../../types/aiLearning';
+import { Link } from 'react-router-dom';
+import { ArrowTopRightOnSquareIcon, SparklesIcon } from '@heroicons/react/24/outline';
+import { AIRecommendation, recommendationAcceptMode } from '../../types/aiLearning';
 import { ConfidenceBadge } from './ConfidenceBadge';
 import { FeedbackButtons } from './FeedbackButtons';
 import { WhyThisSuggestion } from './WhyThisSuggestion';
@@ -8,8 +9,15 @@ import { WhyThisSuggestion } from './WhyThisSuggestion';
 interface AISuggestionCardProps {
   recommendation: AIRecommendation;
   disabled?: boolean;
+  /** Accept & apply is in flight for this card (server-gated, non-optimistic). */
+  accepting?: boolean;
   /** 1-based position in a ranked surface (e.g. the Action Inbox "Top 3 today" hero). */
   rank?: number;
+  /**
+   * Render an "Open record" link to the server-computed `target_href` (default true).
+   * The context strip passes false: it already sits on the record.
+   */
+  showRecordLink?: boolean;
   onAccept?: (recommendation: AIRecommendation) => void | Promise<void>;
   onDismiss?: (recommendation: AIRecommendation) => void | Promise<void>;
   onFeedback?: (recommendation: AIRecommendation, feedback: string) => void | Promise<void>;
@@ -26,12 +34,20 @@ const priorityStyles: Record<string, string> = {
 export function AISuggestionCard({
   recommendation,
   disabled = false,
+  accepting = false,
   rank,
+  showRecordLink = true,
   onAccept,
   onDismiss,
   onFeedback,
   onSnooze,
 }: AISuggestionCardProps) {
+  const applyAction = recommendation.apply_action ?? null;
+  const recordHref = showRecordLink ? recommendation.target_href : null;
+  // A blocked card has no Accept & apply, so the record is where the work happens:
+  // make the way there prominent so the card never dead-ends.
+  const blocked = Boolean(applyAction?.blocked_reason);
+
   return (
     <article className="rounded-lg border border-slate-700 bg-fd-panel p-4">
       <div className="flex items-start gap-3">
@@ -47,7 +63,9 @@ export function AISuggestionCard({
             )}
             <h3 className="font-semibold text-white">{recommendation.title}</h3>
             <ConfidenceBadge score={recommendation.confidence_score} />
-            <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${priorityStyles[recommendation.priority] || priorityStyles.info}`}>
+            <span
+              className={`rounded-full border px-2 py-0.5 text-xs font-medium ${priorityStyles[recommendation.priority] || priorityStyles.info}`}
+            >
               {recommendation.priority}
             </span>
           </div>
@@ -63,12 +81,29 @@ export function AISuggestionCard({
           {recommendation.status === 'pending' && (
             <FeedbackButtons
               disabled={disabled}
-              applyable={recommendationIsApplyable(recommendation)}
+              accepting={accepting}
+              acceptMode={recommendationAcceptMode(recommendation)}
+              applySummary={applyAction?.summary}
+              applyBlockedReason={applyAction?.blocked_reason}
+              applyWarnings={applyAction?.warnings || []}
               onAccept={onAccept ? () => onAccept(recommendation) : undefined}
               onDismiss={onDismiss ? () => onDismiss(recommendation) : undefined}
-              onFeedback={onFeedback ? (feedback) => onFeedback(recommendation, feedback) : undefined}
-              onSnooze={onSnooze ? (days) => onSnooze(recommendation, days) : undefined}
+              onFeedback={onFeedback ? feedback => onFeedback(recommendation, feedback) : undefined}
+              onSnooze={onSnooze ? days => onSnooze(recommendation, days) : undefined}
             />
+          )}
+          {recordHref && (
+            <Link
+              to={recordHref}
+              className={
+                blocked
+                  ? 'btn-secondary btn-sm mt-3'
+                  : 'mt-3 inline-flex items-center gap-1 text-xs text-cyan-300 hover:text-cyan-100'
+              }
+            >
+              <ArrowTopRightOnSquareIcon className="h-4 w-4" aria-hidden="true" />
+              Open record
+            </Link>
           )}
         </div>
       </div>
