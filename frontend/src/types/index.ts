@@ -190,6 +190,14 @@ export type WorkOrderStatus = 'draft' | 'released' | 'in_progress' | 'on_hold' |
  */
 export interface WorkOrderOperation extends OperationShortCountFields {
   quantity_short_declared?: number | null;
+  /**
+   * The floor's own labor record, from the server's batched evidence read: whether the
+   * operation has ANY time entry, and its evidence-floored good. The office modal asks for
+   * `quantity_override_reason` exactly when the server will — good above
+   * `quantity_recorded_good` on an operation that `has_labor_evidence`.
+   */
+  has_labor_evidence?: boolean | null;
+  quantity_recorded_good?: number | null;
   id: number;
   version: number;  // For optimistic locking
   work_order_id: number;
@@ -2398,6 +2406,12 @@ export interface OperationShortCountFields {
   upstream_quantity_short?: number | null;
   quantity_good_ceiling?: number | null;
   quantity_unaccounted?: number | null;
+  /**
+   * POOLED work order only: units an earlier whole-order operation already closed short.
+   * NOT credited (no accounting change) — the screen warns not to report them as scrap a
+   * second time and to have a supervisor turn on Sequential operations instead.
+   */
+  upstream_short_uncredited?: number | null;
 }
 
 /**

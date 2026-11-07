@@ -25,6 +25,7 @@ import {
   closingShortAfterEntry,
   formatShortQuantity,
   goodCeiling as resolveGoodCeiling,
+  implicitFullCountAfterEntry,
   operationReceived,
   operationUnaccounted,
   shortAfterEntry,
@@ -90,6 +91,12 @@ interface KioskCompleteModalProps {
   /** `quantity_good_ceiling` — the most good the server will accept. Absent = the target. */
   goodCeiling?: number | null;
   /**
+   * `upstream_short_uncredited` — on a POOLED work order, units an earlier operation already
+   * closed short. They are not credited here, so the overlay warns NOT to report them as
+   * scrap again (and does not offer the one-tap scrap fill).
+   */
+  uncreditedUpstream?: number | null;
+  /**
    * A refusal from the clock-out (nothing landed yet), shown INLINE and verbatim so
    * the operator can fix the entry without losing it.
    */
@@ -140,10 +147,14 @@ const TILE_GRID: Record<number, string> = {
  * same arithmetic visible BEFORE the tap, off `utils/shortCount.ts`:
  *
  * - FINISH mode pre-fills GOOD at what is still unaccounted for (a one-tap honest finish
- *   for an operator who reports at the end). When the entry would leave units unaccounted
- *   it shows SHORT n, offers "Report n as scrap" (which opens the required reason grid),
- *   and disables COMPLETE — the operator records the pieces, reports the loss, or leaves
- *   the operation open.
+ *   for an operator who reports at the end) — but only when nobody else is clocked in;
+ *   with a crewmate on the roster some of those pieces may be theirs, so GOOD starts
+ *   empty. When the entry would leave units unaccounted it shows SHORT n, offers "Report n
+ *   as scrap" (which opens the required reason grid), says that pieces never started are
+ *   NOT scrap, and disables COMPLETE — the operator records the pieces, reports the loss,
+ *   or leaves the operation open. The one-tap scrap fill is withheld while a crewmate is
+ *   clocked in (their unreported pieces are not scrap) and on a pooled job whose earlier
+ *   operation already declared the loss (scrapping it again double-counts it).
  * - LEAVE-OPEN mode pre-fills GOOD at 0: the operator enters only what they finished this
  *   session, so walking away can never invent good pieces. The leave-open verb is ALWAYS
  *   one tap away, short or not.
@@ -169,6 +180,7 @@ export default function KioskCompleteModal({
   currentUserId,
   upstreamShort,
   goodCeiling,
+  uncreditedUpstream,
   error,
   scrapCodes,
   busy,
@@ -187,7 +199,15 @@ export default function KioskCompleteModal({
   const unaccountedNow = operationUnaccounted(counts);
 
   const [mode, setMode] = useState<KioskCompleteMode>(onLeaveOpen ? initialMode : 'finish');
-  const finishPrefill = unaccountedNow > 0 ? formatShortQuantity(unaccountedNow) : '';
+  // Anyone on the roster who is not this operator. Matched on user id, falling back to
+  // this job's own entry when the operator id is unknown, so "me" is never "someone else".
+  const others = (roster || []).filter((r) =>
+    currentUserId != null ? r.user_id !== currentUserId : r.time_entry_id !== job.time_entry_id
+  );
+  // The FINISH prefill is "everything still unaccounted" — honest only when this operator is
+  // the one holding those pieces. With a crewmate still clocked in some of them may be the
+  // crewmate's unreported work, so the entry starts empty and the operator keys their own.
+  const finishPrefill = unaccountedNow > 0 && others.length === 0 ? formatShortQuantity(unaccountedNow) : '';
   const [good, setGood] = useState(mode === 'finish' ? finishPrefill : '');
   // An UNTOUCHED prefill follows the mode; once the operator keys a count it is theirs.
   const [goodTouched, setGoodTouched] = useState(false);
@@ -220,14 +240,12 @@ export default function KioskCompleteModal({
   const entry = { ...counts, good: goodQty, scrap: scrapQty };
   const short = shortAfterEntry(entry);
   const closingShort = closingShortAfterEntry(entry);
-  const fullCount = received > 0 && completeSoFar + goodQty >= received;
+  // Would the CLOCK-OUT complete the operation on its own? The server's implicit rule: a
+  // full GOOD count of the units that can reach it (the hard ceiling) — never scrap.
+  const fullCount = implicitFullCountAfterEntry({ target, ceiling: goodCeiling, complete: completeSoFar, good: goodQty });
   const unit = (n: number) => shortUnitLabel(isNest, n);
+  const uncredited = Math.max(0, Number(uncreditedUpstream || 0));
 
-  // Anyone on the roster who is not this operator. Matched on user id, falling back to
-  // this job's own entry when the operator id is unknown, so "me" is never "someone else".
-  const others = (roster || []).filter((r) =>
-    currentUserId != null ? r.user_id !== currentUserId : r.time_entry_id !== job.time_entry_id
-  );
   const otherNames = joinNames(others.map((r) => r.operator_name ?? UNKNOWN_OPERATOR_LABEL));
   const othersBlockShortClose = finishing && closingShort > 0 && others.length > 0;
 
@@ -239,7 +257,10 @@ export default function KioskCompleteModal({
   // Predicted material draw. Consumption reconciles to `per_run × (good + scrapped)` at
   // the moment THIS operation closes, and the close books the good the floor RECORDED —
   // so the number follows the final good (complete so far + this entry) and the scrap
-  // keypad alike. Leave-open closes nothing, so it predicts nothing (see the notice below).
+  // keypad alike. Leave-open normally closes nothing, so it predicts nothing — EXCEPT a
+  // full good count, which completes the operation at clock-out and consumes its tied
+  // material whichever verb was chosen (see the notice below).
+  const showMaterialNotice = finishing || fullCount;
   const prediction = useMemo(
     () =>
       predictMaterialConsumption({
@@ -340,6 +361,11 @@ export default function KioskCompleteModal({
         ? `Complete ${opLabel} · Start ${nextQueueItem.work_order_number}`
         : `Complete ${opLabel}`;
   const leaveOpenLabel = !online ? 'Offline' : busy ? 'Clocking out…' : `Clock out · leave ${opLabel} open`;
+  // A disabled COMPLETE points a screen reader at whatever explains it.
+  const finishDescribedBy =
+    [!online ? offlineHintId : null, showShort ? 'kiosk-complete-short' : null, othersBlockShortClose ? 'kiosk-complete-others' : null]
+      .filter(Boolean)
+      .join(' ') || undefined;
 
   const ctaBase =
     'h-[60px] flex-1 rounded-[4px] font-mono text-[15px] font-bold uppercase tracking-[0.1em] transition-transform duration-150 ease-out active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40';
@@ -428,6 +454,7 @@ export default function KioskCompleteModal({
             only fills the scrap field the operator then confirms. */}
         {showShort && (
           <div
+            id="kiosk-complete-short"
             role="status"
             data-testid="kiosk-complete-short"
             className="rounded-[4px] border border-fd-amber/45 bg-fd-amber/8 px-3.5 py-3"
@@ -441,15 +468,37 @@ export default function KioskCompleteModal({
                 {formatShortQuantity(upstream)} {unit(upstream)} never reached it — closed short upstream.
               </p>
             )}
-            <button
-              type="button"
-              data-testid="kiosk-complete-report-scrap"
-              disabled={busy}
-              onClick={reportShortAsScrap}
-              className="mt-2.5 min-h-11 rounded-[3px] border border-fd-red/55 bg-fd-red/10 px-3 font-mono text-xs font-bold uppercase tracking-[0.08em] text-fd-red transition-transform duration-150 ease-out active:scale-[0.98] disabled:opacity-40"
-            >
-              Report {formatShortQuantity(short)} as scrap
-            </button>
+            {/* Owner decision: pieces never started are never scrap (scrap consumes material
+                and records a defect that never happened). */}
+            <p data-testid="kiosk-complete-never-started" className="mt-1 text-[12px] text-fd-body">
+              Pieces never started? They are not scrap — clock out and keep {opLabel} open, and ask a supervisor to
+              lower the quantity.
+            </p>
+            {uncredited > 0 && (
+              <p data-testid="kiosk-complete-uncredited" className="mt-1 text-[12px] font-semibold text-fd-amber">
+                {formatShortQuantity(uncredited)} {unit(uncredited)} were already closed short at an earlier
+                operation, but this job&apos;s operations are not sequenced, so that loss is not credited here. Do not
+                report pieces you never received as scrap — ask a supervisor to turn on Sequential operations.
+              </p>
+            )}
+            {others.length > 0 ? (
+              // Some of the shortfall may be a crewmate's unreported pieces: a one-tap fill
+              // would turn good parts into scrap (and consume material that never reverses).
+              <p data-testid="kiosk-complete-short-with-others" className="mt-1 text-[12px] text-fd-body">
+                Some of these may still be with {otherNames}, who {others.length === 1 ? 'has' : 'have'} not
+                reported yet.
+              </p>
+            ) : uncredited > 0 ? null : (
+              <button
+                type="button"
+                data-testid="kiosk-complete-report-scrap"
+                disabled={busy}
+                onClick={reportShortAsScrap}
+                className="mt-2.5 min-h-12 rounded-[3px] border border-fd-red/55 bg-fd-red/10 px-3 font-mono text-xs font-bold uppercase tracking-[0.08em] text-fd-red transition-transform duration-150 ease-out active:scale-[0.98] disabled:opacity-40"
+              >
+                Report {formatShortQuantity(short)} as scrap
+              </button>
+            )}
           </div>
         )}
 
@@ -457,6 +506,7 @@ export default function KioskCompleteModal({
             clock out with their count first, or the work stays open. */}
         {othersBlockShortClose && (
           <p
+            id="kiosk-complete-others"
             role="status"
             data-testid="kiosk-complete-others"
             className="rounded-[4px] border border-fd-amber/45 bg-fd-amber/8 px-3.5 py-3 font-mono text-xs font-bold uppercase tracking-[0.06em] text-fd-amber"
@@ -549,9 +599,10 @@ export default function KioskCompleteModal({
             run": reporting runs on a still-open operation posts nothing (an
             in-progress operation is still reducible and consumption never
             auto-reverses). For the same reason LEAVE-OPEN shows no notice — it
-            closes nothing, so it deducts nothing. Untied operations render
-            nothing at all. */}
-        {finishing && prediction && prediction.lines.length > 0 && (
+            closes nothing, so it deducts nothing — UNLESS the entry is a full good
+            count, which completes the operation at clock-out (and consumes) under
+            either verb. Untied operations render nothing at all. */}
+        {showMaterialNotice && prediction && prediction.lines.length > 0 && (
           <div
             data-testid="kiosk-complete-material"
             className="rounded-[4px] border border-fd-line bg-fd-sunken px-3.5 py-3"
@@ -736,7 +787,7 @@ export default function KioskCompleteModal({
             data-testid="kiosk-qty-confirm"
             onClick={handleFinish}
             disabled={finishDisabled}
-            aria-describedby={!online ? offlineHintId : undefined}
+            aria-describedby={finishDescribedBy}
             className={finishClasses}
           >
             {finishLabel}

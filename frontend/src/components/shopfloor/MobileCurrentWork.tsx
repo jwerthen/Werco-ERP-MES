@@ -51,8 +51,12 @@ export default function MobileCurrentWork({ jobs, selected, onSelect, onQueue, o
   };
   const received = operationReceived(counts);
   const remaining = operationUnaccounted(counts);
-  // `/production` refuses good past the server's ceiling, so +1 stops there.
-  const atCeiling = complete + 1 > goodCeiling(target, selected.quantity_good_ceiling);
+  // `/production` refuses good past the server's ceiling, so +1 stops there. The room for
+  // GOOD is that ceiling — NOT "remaining": scrap never counts for an implicit completion, so
+  // an operator re-running replacements for scrapped pieces keeps +1 until the ceiling.
+  const ceiling = goodCeiling(target, selected.quantity_good_ceiling);
+  const atCeiling = complete + 1 > ceiling;
+  const goodRoom = ceiling - complete > 1e-9;
   const operationComplete = String(operationStatus ?? '').toLowerCase() === 'complete';
   return (
     <section aria-label="My current work" className="space-y-3">
@@ -80,13 +84,14 @@ export default function MobileCurrentWork({ jobs, selected, onSelect, onQueue, o
           <div><p className="text-sm text-slate-300">Completed</p><p className="text-3xl font-bold text-white">{complete}<span className="text-lg text-slate-400"> / {formatShortQuantity(received)}</span></p></div>
           <p className="pb-1 text-sm text-emerald-200">{formatShortQuantity(remaining)} remaining</p>
         </div>
-        {remaining > 0 ? (
+        {!operationComplete && (remaining > 0 || goodRoom) && (
           <button type="button" onClick={onAddOne} disabled={disabled || !operationAvailable || atCeiling}
             className="btn-success min-h-14 w-full text-lg disabled:opacity-50">+1 Complete</button>
-        ) : !operationComplete ? (
+        )}
+        {!operationComplete && remaining <= 0 && (
           <button type="button" onClick={onComplete} disabled={disabled || !operationAvailable || target <= 0}
-            className="btn-success min-h-14 w-full disabled:opacity-50">Complete operation</button>
-        ) : null}
+            className={`${goodRoom ? 'btn-secondary' : 'btn-success'} min-h-14 w-full disabled:opacity-50`}>Complete operation</button>
+        )}
         {!operationAvailable && <p role="status" className="text-sm text-amber-300">Refresh to load this operation before recording work.</p>}
       </div>
       {selected.laser_nest && <LaserNestOperatorPanel nest={selected.laser_nest} allowPreview={false} />}

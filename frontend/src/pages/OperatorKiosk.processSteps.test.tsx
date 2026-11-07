@@ -385,7 +385,13 @@ describe('OperatorKiosk process steps', () => {
     fireEvent.click(screen.getByTestId('kiosk-complete-report-scrap'));
     fireEvent.click(within(screen.getByRole('group', { name: 'Scrap reason' })).getAllByRole('button')[0]);
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
-    await waitFor(() => expect(mockedApi.completeOperation).toHaveBeenCalledWith(31, { source: 'kiosk' }));
+    await waitFor(() =>
+      expect(mockedApi.completeOperation).toHaveBeenCalledWith(31, {
+        source: 'kiosk',
+        quantity_scrapped: 1,
+        scrap_reason: 'Setup / first article',
+      })
+    );
 
     // Honest two-step message, verbatim missing labels…
     expect(

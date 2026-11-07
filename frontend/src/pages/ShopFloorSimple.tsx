@@ -56,6 +56,8 @@ import {
   clockOutOperationStatus,
   closingShortAfterEntry,
   formatShortQuantity,
+  goodCeiling as resolveGoodCeiling,
+  implicitFullCountAfterEntry,
   operationUnaccounted,
   shortAfterEntry,
 } from '../utils/shortCount';
@@ -1176,6 +1178,18 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       Number(checkOutModal.operation.quantity_ordered || 0) > 0 &&
       checkOutUnaccountedAfter <= 0
   );
+  // A full GOOD count completes the operation at clock-out on its own (the server's implicit
+  // rule) — ticked or not. Said up front instead of a checkbox that reads like an opt-in.
+  const checkOutFullCount = Boolean(
+    checkOutModal &&
+      checkOutModal.operation.status !== 'complete' &&
+      implicitFullCountAfterEntry({
+        target: checkOutModal.operation.quantity_ordered,
+        ceiling: checkOutModal.operation.quantity_good_ceiling,
+        complete: checkOutModal.operation.quantity_complete,
+        good: checkOutData.quantity_produced,
+      })
+  );
 
   /**
    * Check Out — and, when ticked, complete the operation right after (the floor's
@@ -1191,25 +1205,38 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
 
     const { operation } = checkOutModal;
     const completeAfter = checkOutCompleteAfter && checkOutCanComplete;
+    const scrapEntered = Number(checkOutData.quantity_scrapped || 0);
+    // Scrap that COVERS A SHORT on a "check out & complete" rides the close (the server
+    // re-checks it against what is still unaccounted under the row lock); otherwise — a
+    // plain check-out, or replacement scrap on a full good count — it rides the clock-out.
+    const scrapAtClose = completeAfter && !checkOutFullCount && scrapEntered > 0;
+    const clockOutScrap = scrapAtClose ? 0 : scrapEntered;
+    const scrapPayload = scrapEntered > 0 ? scrapSelectionPayload(scrapCodes, checkOutData.scrap) : {};
     setActionLoading(operation.id);
     let clockedOut = false;
     try {
       const res: unknown = await api.clockOut(checkOutModal.job.time_entry_id, {
         quantity_produced: Number(checkOutData.quantity_produced || 0),
-        quantity_scrapped: Number(checkOutData.quantity_scrapped || 0),
+        quantity_scrapped: clockOutScrap,
         notes: checkOutData.notes || undefined,
         // Structured scrap reason (company code id and/or free text) required
         // when scrap > 0 (compliance/traceability), mirroring the kiosk.
         // Omitted entirely when nothing was scrapped.
-        ...(Number(checkOutData.quantity_scrapped || 0) > 0
-          ? scrapSelectionPayload(scrapCodes, checkOutData.scrap)
-          : {}),
+        ...(clockOutScrap > 0 ? scrapPayload : {}),
       });
       clockedOut = true;
       if (clockOutOperationStatus(res) === 'complete') {
-        showToast('success', `Completed ${operation.work_order_number}`);
+        showToast(
+          scrapAtClose ? 'warning' : 'success',
+          scrapAtClose
+            ? `Completed ${operation.work_order_number} with the pieces already recorded — the ${formatShortQuantity(scrapEntered)} scrap entered was not recorded.`
+            : `Completed ${operation.work_order_number}`
+        );
       } else if (completeAfter) {
-        await api.completeOperation(operation.id, { source: 'desktop' });
+        await api.completeOperation(
+          operation.id,
+          scrapAtClose ? { source: 'desktop', quantity_scrapped: scrapEntered, ...scrapPayload } : { source: 'desktop' }
+        );
         showToast('success', `Completed ${operation.work_order_number}`);
       } else {
         showToast('success', `Checked out of ${operation.work_order_number}`);
@@ -2201,6 +2228,15 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
               upstreamShort: op.upstream_quantity_short,
               complete: op.quantity_complete,
             }) > 0;
+            // Room left for GOOD is the server's ceiling, not "unaccounted": the server keeps
+            // accepting good up to it (scrap never counts for an implicit completion), so an
+            // operator re-running replacements for scrapped pieces is never cut off — the
+            // "accounted, can close" banner shows BESIDE the production actions then.
+            const goodRoom = Math.max(
+              0,
+              resolveGoodCeiling(op.quantity_ordered, op.quantity_good_ceiling) - Number(op.quantity_complete || 0)
+            );
+            const showProductionActions = op.status === 'in_progress' && Boolean(activeJob) && (!targetReached || goodRoom > 0);
             
             return (
               <div
@@ -2385,13 +2421,13 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
 
                 {/* Action Buttons */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2" data-tour="sf-complete">
-                  {op.status === 'in_progress' && activeJob && !targetReached && (
+                  {showProductionActions && activeJob && (
                     <>
                       <button
                         onClick={() => reportProduction(op, 1)}
-                        disabled={actionLoading === op.id || productionSave.mutationsBlocked || remainingQuantity <= 0}
+                        disabled={actionLoading === op.id || productionSave.mutationsBlocked || goodRoom <= 0}
                         className="flex-1 btn-success text-base sm:text-sm py-3 sm:py-2.5 w-full disabled:opacity-50 disabled:cursor-not-allowed"
-                        title={remainingQuantity <= 0 ? 'Target quantity reached' : 'Add one completed part'}
+                        title={goodRoom <= 0 ? 'Target quantity reached' : 'Add one completed part'}
                       >
                         {actionLoading === op.id ? (
                           <ArrowPathIcon className="h-4 w-4 animate-spin mx-auto" />
@@ -2943,13 +2979,25 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
                     id="shopfloor-checkout-complete-after"
                     type="checkbox"
                     className="h-5 w-5"
-                    checked={checkOutCompleteAfter && checkOutCanComplete}
-                    disabled={!checkOutCanComplete}
+                    checked={checkOutFullCount || (checkOutCompleteAfter && checkOutCanComplete)}
+                    disabled={!checkOutCanComplete || checkOutFullCount}
                     onChange={(e) => setCheckOutCompleteAfter(e.target.checked)}
-                    aria-describedby={!checkOutCanComplete ? 'shopfloor-checkout-complete-after-hint' : undefined}
+                    aria-describedby={
+                      checkOutFullCount
+                        ? 'shopfloor-checkout-full-count-hint'
+                        : !checkOutCanComplete
+                          ? 'shopfloor-checkout-complete-after-hint'
+                          : undefined
+                    }
                   />
                   Complete {formatOperationLabel(checkOutModal.operation.operation_number)} after checking out
                 </label>
+                {checkOutFullCount && (
+                  <p id="shopfloor-checkout-full-count-hint" className="mt-1 text-xs text-emerald-300">
+                    That is the full count — checking out completes{' '}
+                    {formatOperationLabel(checkOutModal.operation.operation_number)} (and deducts any tied material).
+                  </p>
+                )}
                 {!checkOutCanComplete && checkOutUnaccountedAfter > 0 && (
                   <p id="shopfloor-checkout-complete-after-hint" className="mt-1 text-xs text-amber-300">
                     {formatShortQuantity(checkOutUnaccountedAfter)} not yet accounted for — enter lost pieces as scrap
@@ -2992,7 +3040,9 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
                 ) : (
                   <>
                     <CheckCircleIcon className="h-5 w-5 mr-2" />
-                    {checkOutCompleteAfter && checkOutCanComplete ? 'Check out & complete' : 'End time and save'}
+                    {checkOutFullCount || (checkOutCompleteAfter && checkOutCanComplete)
+                      ? 'Check out & complete'
+                      : 'End time and save'}
                   </>
                 )}
               </button>

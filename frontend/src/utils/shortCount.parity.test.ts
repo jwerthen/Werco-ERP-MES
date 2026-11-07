@@ -34,6 +34,14 @@
  * @property
  * def is_accounted(self) -> bool:
  *     return self.target > QTY_EPSILON and self.unaccounted <= QTY_EPSILON
+ *
+ * @property
+ * def exceeds_ceiling(self) -> bool:
+ *     return self.ceiling < self.target - QTY_EPSILON and self.good > self.ceiling + QTY_EPSILON
+ *
+ * @property
+ * def is_full_count(self) -> bool:
+ *     return self.ceiling > QTY_EPSILON and self.good + QTY_EPSILON >= self.ceiling and not self.exceeds_ceiling
  * ```
  *
  * The client never sees `chain_upstream` / `feed_short` — the CHAIN logic is server-only —
@@ -49,6 +57,7 @@ import {
   SHORT_EPSILON,
   closingShortAfterEntry,
   goodCeiling,
+  implicitFullCountAfterEntry,
   operationReceived,
   operationUnaccounted,
 } from './shortCount';
@@ -72,7 +81,9 @@ function backendAccounting(i: ServerInputs) {
   const unaccounted = Math.max(0, received - i.good - i.scrapped);
   const closingShort = Math.max(0, received - i.good);
   const isAccounted = i.target > BACKEND_EPSILON && unaccounted <= BACKEND_EPSILON;
-  return { ceiling, received, upstreamShort, unaccounted, closingShort, isAccounted };
+  const exceedsCeiling = ceiling < i.target - BACKEND_EPSILON && i.good > ceiling + BACKEND_EPSILON;
+  const isFullCount = ceiling > BACKEND_EPSILON && i.good + BACKEND_EPSILON >= ceiling && !exceedsCeiling;
+  return { ceiling, received, upstreamShort, unaccounted, closingShort, isAccounted, isFullCount };
 }
 
 const CASES: Array<{ name: string } & ServerInputs> = [
@@ -88,6 +99,9 @@ const CASES: Array<{ name: string } & ServerInputs> = [
   { name: 'target zero (never accounted)', target: 0, good: 0, scrapped: 0, chainUpstream: 0, feedShort: 0 },
   { name: 'nothing recorded yet', target: 12, good: 0, scrapped: 0, chainUpstream: 0, feedShort: 0 },
   { name: 'fractional residue', target: 0.3, good: 0.1, scrapped: 0.2, chainUpstream: 0, feedShort: 0 },
+  { name: 'replenished assembly past the feed', target: 10, good: 10, scrapped: 0, chainUpstream: 0, feedShort: 1 },
+  { name: 'a count above the ceiling', target: 10, good: 10, scrapped: 0, chainUpstream: 2, feedShort: 0 },
+  { name: 'a legacy count above the target', target: 10, good: 12, scrapped: 0, chainUpstream: 0, feedShort: 0 },
 ];
 
 describe('shortCount ⇄ OperationAccounting parity', () => {
@@ -108,6 +122,11 @@ describe('shortCount ⇄ OperationAccounting parity', () => {
     // The decision the floor screen makes ("COMPLETE is enabled") is the server's is_accounted.
     const clientAccounted = c.target > SHORT_EPSILON && clientUnaccounted <= SHORT_EPSILON;
     expect(clientAccounted).toBe(server.isAccounted);
+
+    // The IMPLICIT auto-complete a clock-out performs (the "that is the full count" hint).
+    expect(
+      implicitFullCountAfterEntry({ target: payload.target, ceiling: payload.ceiling, complete: c.good, good: 0 })
+    ).toBe(server.isFullCount);
   });
 
   it('uses the same epsilon as the server', () => {

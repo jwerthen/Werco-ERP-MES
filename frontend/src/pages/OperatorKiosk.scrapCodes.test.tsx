@@ -145,7 +145,7 @@ describe('OperatorKiosk scrap-code payloads', () => {
     );
   });
 
-  it('COMPLETE carries the code id on the clock-out leg, then closes with no quantity', async () => {
+  it('COMPLETE that covers a short carries the scrap and its code id on the close, not the clock-out', async () => {
     mockedApi.clockOut.mockResolvedValue({ operation_status: 'in_progress' });
     mockedApi.completeOperation.mockResolvedValue({});
     renderKiosk();
@@ -164,13 +164,18 @@ describe('OperatorKiosk scrap-code payloads', () => {
     await waitFor(() => expect(mockedApi.completeOperation).toHaveBeenCalled());
     expect(mockedApi.clockOut).toHaveBeenCalledWith(501, {
       quantity_produced: 43,
-      quantity_scrapped: 2,
+      quantity_scrapped: 0,
       scrap_reason: undefined,
-      scrap_reason_code_id: 7,
+      scrap_reason_code_id: undefined,
       source: 'kiosk',
     });
-    // The scrap (and its code) rode the clock-out; the close sends no quantity at all.
-    expect(mockedApi.completeOperation).toHaveBeenCalledWith(31, { source: 'kiosk' });
+    // The scrap that covers the short (and its code) rides the CLOSE, where the server
+    // re-checks it against what is still unaccounted under the row lock; no good quantity.
+    expect(mockedApi.completeOperation).toHaveBeenCalledWith(31, {
+      source: 'kiosk',
+      quantity_scrapped: 2,
+      scrap_reason_code_id: 7,
+    });
   });
 
   it('fails soft to the legacy reason tiles (text payload, no code id) when the codes fetch rejects', async () => {

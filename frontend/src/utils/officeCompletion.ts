@@ -49,23 +49,27 @@ export function isOverrideReasonRefusal(detail: unknown): boolean {
 }
 
 /**
- * Could the floor have clocked labor into this operation?
+ * Does this operation carry floor labor, so that booking more good than the floor
+ * recorded needs `quantity_override_reason`?
  *
- * The server requires `quantity_override_reason` to book more good than the floor
- * recorded ONLY on an operation that has any time entry; desk cleanup of never-clocked
- * work stays reason-free (the owner's floor-requires-labor / office-exempt asymmetry).
- * The office read model does not carry the time entries, so this is a deliberately
- * GENEROUS proxy: every clock-in starts the operation (`actual_start`), so an operation
- * that was never started cannot hold labor, and anything started — by a clock-in or by
- * an earlier desk save — is treated as if it might. A false "yes" costs one typed reason;
- * a false "no" is caught by the server's 422, which the modal turns into a required field.
+ * The server requires the reason ONLY on an operation that has any time entry; desk
+ * cleanup of never-clocked work stays reason-free (the owner's floor-requires-labor /
+ * office-exempt asymmetry). The office read model now carries the server's own answer,
+ * `has_labor_evidence` (from the same batched evidence read the verb uses) — that is used
+ * whenever present. Only a payload without it (an older backend) falls back to a
+ * deliberately GENEROUS proxy: every clock-in starts the operation (`actual_start`), so
+ * an operation never started cannot hold labor, and anything started is treated as if it
+ * might. A false "yes" costs one typed reason; a false "no" is caught by the server's 422,
+ * which the modal turns into a required field.
  */
 export function operationMayHaveLabor(
   operation: Pick<
     WorkOrderOperation,
     'status' | 'actual_start' | 'started_by' | 'actual_hours' | 'actual_setup_hours' | 'actual_run_hours'
-  >
+  > &
+    Partial<Pick<WorkOrderOperation, 'has_labor_evidence'>>
 ): boolean {
+  if (typeof operation.has_labor_evidence === 'boolean') return operation.has_labor_evidence;
   if (operation.actual_start || operation.started_by != null) return true;
   if (operation.status === 'in_progress' || operation.status === 'complete') return true;
   const hours =

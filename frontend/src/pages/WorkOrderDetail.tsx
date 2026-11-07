@@ -3900,6 +3900,7 @@ export default function WorkOrderDetail() {
               upstreamShort: completeTarget.operation.upstream_quantity_short,
               goodCeiling: completeTarget.operation.quantity_good_ceiling,
               laborRecorded: operationMayHaveLabor(completeTarget.operation),
+              floorRecorded: completeTarget.operation.quantity_recorded_good,
               isNest: !!completeTarget.operation.laser_nest,
               subjectLabel: operationLabel(completeTarget.operation),
             }

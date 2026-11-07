@@ -76,6 +76,7 @@ import {
   clockOutOperationStatus,
   formatShortQuantity,
   goodCeiling as resolveGoodCeiling,
+  implicitFullCountAfterEntry,
   shortAfterEntry,
 } from '../utils/shortCount';
 
@@ -862,6 +863,13 @@ export default function OperatorKiosk() {
    *      the good the floor recorded and refuses (writing nothing) while the count is
    *      short — the overlay only lets this through once scrap covers the short.
    *
+   * Scrap that COVERS A SHORT at the close rides `/complete` (`quantity_scrapped` with its
+   * reason), never the clock-out: the close re-checks it against what is still
+   * unaccounted under the row lock and refuses an over-statement (a crewmate reported
+   * pieces since the overlay opened), where the clock-out cannot tell replacement scrap
+   * from a stale screen. Only an entry that is a full good count on its own carries its
+   * scrap on the clock-out (that scrap was replaced, and no `/complete` follows).
+   *
    * A refusal of the clock-out itself (nothing landed) renders INLINE in the overlay,
    * which stays open with the entry intact. Once the clock-out has landed a later
    * refusal can only be reported honestly: "Clocked out, but completing failed".
@@ -871,23 +879,38 @@ export default function OperatorKiosk() {
       job: ActiveJob,
       mode: KioskCompleteMode,
       entry: { good: number; scrap: number; scrapReason: string | null; scrapReasonCodeId: number | null },
-      context: { chainItem: KioskQueueItem | null; unaccountedAfter: number }
+      context: { chainItem: KioskQueueItem | null; unaccountedAfter: number; fullCount: boolean }
     ) => {
       if (!job.operation_id) return;
       const { good, scrap, scrapReason, scrapReasonCodeId } = entry;
       const opLabel = formatOperationLabel(job.operation_number);
+      // A FINISH that closes by covering a short with scrap sends that scrap on /complete.
+      const scrapAtClose = mode === 'finish' && !context.fullCount && scrap > 0;
+      const clockOutScrap = scrapAtClose ? 0 : scrap;
       setBusy(true);
       setCompleteError(null);
       let clockedOut = false;
       try {
         const clockOutRes: unknown = await api.clockOut(job.time_entry_id, {
           quantity_produced: good,
-          quantity_scrapped: scrap,
-          scrap_reason: scrap > 0 && scrapReason ? scrapReason : undefined,
-          scrap_reason_code_id: scrap > 0 && scrapReasonCodeId != null ? scrapReasonCodeId : undefined,
+          quantity_scrapped: clockOutScrap,
+          scrap_reason: clockOutScrap > 0 && scrapReason ? scrapReason : undefined,
+          scrap_reason_code_id: clockOutScrap > 0 && scrapReasonCodeId != null ? scrapReasonCodeId : undefined,
           source: KIOSK_SOURCE,
         });
         clockedOut = true;
+        if (clockOutOperationStatus(clockOutRes) === 'complete' && scrapAtClose) {
+          // The clock-out completed the operation on its own: the floor recorded the full
+          // count after this overlay opened, so the shortfall the scrap was meant to cover
+          // no longer exists. Nothing was scrapped — say so rather than invent it.
+          showToast(
+            'error',
+            `Completed ${job.work_order_number} with the pieces already recorded — the ${formatShortQuantity(scrap)} scrap you entered was not recorded. Tell a supervisor if pieces were scrapped.`
+          );
+          setSessionNcr(null);
+          setView({ name: 'queue' });
+          return;
+        }
         if (clockOutOperationStatus(clockOutRes) !== 'complete') {
           // The clock-out itself succeeded but the server flagged missing required
           // step records (the operation deliberately stays IN_PROGRESS). NOT an
@@ -911,7 +934,17 @@ export default function OperatorKiosk() {
             setView({ name: 'queue' });
             return;
           }
-          await api.completeOperation(job.operation_id, { source: KIOSK_SOURCE });
+          await api.completeOperation(
+            job.operation_id,
+            scrapAtClose
+              ? {
+                  source: KIOSK_SOURCE,
+                  quantity_scrapped: scrap,
+                  ...(scrapReason ? { scrap_reason: scrapReason } : {}),
+                  ...(scrapReasonCodeId != null ? { scrap_reason_code_id: scrapReasonCodeId } : {}),
+                }
+              : { source: KIOSK_SOURCE }
+          );
         }
         showToast('success', `Completed ${job.work_order_number}`);
         setSessionNcr(null);
@@ -949,7 +982,13 @@ export default function OperatorKiosk() {
         // Two-step verb: if the clock-out landed but completion was refused, say so
         // honestly AND keep the backend's gating detail verbatim.
         if (clockedOut) {
-          showToast('error', `Clocked out, but completing failed: ${message}`);
+          // Name the next step (the steps view below is its own next step).
+          showToast(
+            'error',
+            missing
+              ? `Clocked out, but completing failed: ${message}`
+              : `Clocked out, but completing failed: ${message} — ${opLabel} is still open; clock in and Complete again, or ask a supervisor.`
+          );
           if (missing && job.operation_id != null) {
             setView({ name: 'steps', operationId: job.operation_id, jobLabel: jobLabel(job), missing });
           } else {
@@ -1708,7 +1747,7 @@ export default function OperatorKiosk() {
                           setCompleteError(null);
                           setView({ name: 'complete', job: activeJob, mode: 'leave_open' });
                         }}
-                        className="h-11 rounded-[4px] border border-fd-line font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-fd-body transition-transform duration-150 ease-out active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+                        className="h-12 rounded-[4px] border border-fd-line font-mono text-[12px] font-semibold uppercase tracking-[0.1em] text-fd-body transition-transform duration-150 ease-out active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         Clock out · keep open
                       </button>
@@ -2051,7 +2090,10 @@ export default function OperatorKiosk() {
           // Keyed by mode: the overlay holds its own entry state, and switching verbs
           // from the running panel must start a fresh entry, not inherit the other's.
           key={`${view.job.time_entry_id}-${view.mode}`}
-          job={view.job}
+          // The LIVE active job while it is still this entry, so the SHORT readout follows a
+          // crewmate's report (or an office close) instead of the snapshot the overlay
+          // opened on; the snapshot only when the poll has nothing for this entry.
+          job={activeJob && activeJob.time_entry_id === view.job.time_entry_id ? activeJob : view.job}
           mode={view.mode}
           nowMs={correctedNowMs}
           stepsTotal={activeQueueItem?.steps_total}
@@ -2078,6 +2120,7 @@ export default function OperatorKiosk() {
           // server stays the arbiter of the others-clocked-in refusal.
           upstreamShort={activeQueueItem?.upstream_quantity_short ?? view.job.upstream_quantity_short}
           goodCeiling={activeQueueItem?.quantity_good_ceiling ?? view.job.quantity_good_ceiling}
+          uncreditedUpstream={activeQueueItem?.upstream_short_uncredited ?? view.job.upstream_short_uncredited}
           roster={activeQueueItem?.roster}
           currentUserId={user?.id ?? null}
           error={completeError}
@@ -2091,6 +2134,9 @@ export default function OperatorKiosk() {
           online={online}
           offlineHintId={OFFLINE_HINT_ID}
           onCancel={() => {
+            // A scrim tap / Escape mid-flight must not close the overlay under the request:
+            // a refusal would then be written to a closed overlay and never shown.
+            if (busy) return;
             setCompleteError(null);
             setView({ name: 'queue' });
           }}
@@ -2109,7 +2155,16 @@ export default function OperatorKiosk() {
               view.job,
               'finish',
               { good, scrap, scrapReason: reason, scrapReasonCodeId: codeId },
-              { chainItem: nextQueueItem, unaccountedAfter: 0 }
+              {
+                chainItem: nextQueueItem,
+                unaccountedAfter: 0,
+                fullCount: implicitFullCountAfterEntry({
+                  target: view.job.quantity_ordered,
+                  ceiling: activeQueueItem?.quantity_good_ceiling ?? view.job.quantity_good_ceiling,
+                  complete: view.job.quantity_complete,
+                  good,
+                }),
+              }
             )
           }
           onLeaveOpen={(good, scrap, reason, codeId) =>
@@ -2119,6 +2174,7 @@ export default function OperatorKiosk() {
               { good, scrap, scrapReason: reason, scrapReasonCodeId: codeId },
               {
                 chainItem: null,
+                fullCount: false,
                 unaccountedAfter: shortAfterEntry({
                   target: view.job.quantity_ordered,
                   upstreamShort: activeQueueItem?.upstream_quantity_short ?? view.job.upstream_quantity_short,

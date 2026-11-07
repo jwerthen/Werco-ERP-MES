@@ -168,7 +168,7 @@ describe('CrewStationKiosk — short count (owner ruling 1)', () => {
     expect(screen.getByTestId('kiosk-qty-confirm')).toBeEnabled();
   });
 
-  it('a rostered signer: good AND scrap ride /production, and /complete carries only the acknowledgement', async () => {
+  it('a rostered signer: good rides /production, and the scrap covering the short rides /complete', async () => {
     mocked.mintBadgeToken.mockResolvedValue(BOB_MINT);
     mocked.reportProduction.mockResolvedValue({});
     mocked.completeOperation.mockResolvedValue({ closed_time_entries: [] });
@@ -184,18 +184,48 @@ describe('CrewStationKiosk — short count (owner ruling 1)', () => {
       expect(mocked.completeOperation).toHaveBeenCalledWith('op-token-bob', 31, {
         source: 'kiosk',
         acknowledge_open_entries: true,
+        // The close re-checks this against what is still unaccounted under the row lock
+        // (a stale board cannot over-state it), and attributes it to Bob's own entry.
+        quantity_scrapped: 2,
+        scrap_reason: 'Material defect',
+        scrap_reason_code_id: undefined,
       })
     );
     expect(mocked.reportProduction).toHaveBeenCalledWith('op-token-bob', 31, {
       request_id: expect.any(String),
       quantity_complete_delta: 4,
-      quantity_scrapped_delta: 2,
-      scrap_reason: 'Material defect',
-      scrap_reason_code_id: undefined,
+      quantity_scrapped_delta: 0,
       source: 'kiosk',
     });
     expect(mocked.reportProduction.mock.invocationCallOrder[0]).toBeLessThan(
       mocked.completeOperation.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('replacement scrap on a full good count still rides /production with the pieces', async () => {
+    mocked.mintBadgeToken.mockResolvedValue(BOB_MINT);
+    mocked.reportProduction.mockResolvedValue({});
+    mocked.completeOperation.mockResolvedValue({ closed_time_entries: [] });
+    renderKiosk();
+    await openComplete();
+    // The prefilled 6 is the full count; 1 scrap on top was replaced.
+    fireEvent.click(screen.getByTestId('kiosk-qty-scrap'));
+    fireEvent.click(screen.getByTestId('kiosk-key-1'));
+    fireEvent.click(screen.getByRole('button', { name: 'Material defect' }));
+    fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+    await screen.findByRole('dialog');
+    scanBadge('E011');
+
+    await waitFor(() =>
+      expect(mocked.completeOperation).toHaveBeenCalledWith('op-token-bob', 31, {
+        source: 'kiosk',
+        acknowledge_open_entries: true,
+      })
+    );
+    expect(mocked.reportProduction).toHaveBeenCalledWith(
+      'op-token-bob',
+      31,
+      expect.objectContaining({ quantity_complete_delta: 6, quantity_scrapped_delta: 1 })
     );
   });
 
@@ -237,6 +267,44 @@ describe('CrewStationKiosk — short count (owner ruling 1)', () => {
     );
     expect(alert).not.toHaveTextContent(/JOIN/);
     expect(mocked.completeOperation).not.toHaveBeenCalled();
+  });
+
+  it('on a held job nobody is clocked in to, it says there is no floor way to record the good — not "scan a badge"', async () => {
+    mocked.getQueue.mockResolvedValue(
+      queueWith({
+        ...ITEM,
+        roster: [],
+        work_order_status: 'on_hold',
+        start_blocked_reason: 'Work order is on hold — a supervisor must Resume Work Order first',
+      })
+    );
+    mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
+    renderKiosk();
+    await openComplete();
+    fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+    await screen.findByRole('dialog');
+    scanBadge('E013');
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(
+      "No one is clocked in to this job, and it can't be joined while it is on hold. Record the 6 good once a supervisor resumes it, or ask a supervisor."
+    );
+    expect(alert).not.toHaveTextContent(/scan a badge/);
+    expect(mocked.completeOperation).not.toHaveBeenCalled();
+  });
+
+  it('a READY job the work order refuses to start: COMPLETE is disabled with the reason (completing would start it)', async () => {
+    const reason = 'Work order is on hold — a supervisor must Resume Work Order first';
+    mocked.getQueue.mockResolvedValue(
+      queueWith({ ...ITEM, status: 'ready', roster: [], work_order_status: 'on_hold', start_blocked_reason: reason })
+    );
+    renderKiosk();
+    fireEvent.click(await screen.findByRole('button', { name: /WO-2026-0142/i }));
+    await screen.findByRole('region', { name: /job detail/i });
+    const verb = screen.getByTestId('crew-complete-verb');
+    expect(verb).toBeDisabled();
+    expect(verb).toHaveAttribute('aria-describedby', 'crew-complete-blocked');
+    expect(screen.getByText(reason, { selector: '#crew-complete-blocked' })).toBeInTheDocument();
   });
 
   it('a badge with no entry and only scrap: the scrap rides /complete itself, with its reason', async () => {
@@ -307,7 +375,9 @@ describe('CrewStationKiosk — short count (owner ruling 1)', () => {
     await screen.findByRole('dialog');
     scanBadge('E011');
 
-    const savedButFailed = await screen.findByText(`Saved production, but completing failed: ${detail}`);
+    const savedButFailed = await screen.findByText(
+      `Saved production, but completing failed (the 2 scrap was not saved): ${detail}`
+    );
     expect(savedButFailed.closest('[role="alert"]')).toHaveClass('text-fd-red');
   });
 });

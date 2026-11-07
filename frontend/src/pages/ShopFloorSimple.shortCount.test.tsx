@@ -171,7 +171,7 @@ describe('ShopFloorSimple — short count (owner ruling 1)', () => {
     expect(box).toBeDisabled();
   });
 
-  it('ticked: clocks out, then closes with NO quantity — two writes, in that order', async () => {
+  it('ticked: clocks out the good, then closes with the covering scrap and NO quantity — two writes, in order', async () => {
     mockedApi.clockOut.mockResolvedValue({ operation_status: 'in_progress' });
     mockedApi.completeOperation.mockResolvedValue({});
     renderShopFloor();
@@ -183,11 +183,19 @@ describe('ShopFloorSimple — short count (owner ruling 1)', () => {
     fireEvent.click(within(dialog).getByLabelText('Complete Op 20 after checking out'));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Check out & complete' }));
 
-    await waitFor(() => expect(mockedApi.completeOperation).toHaveBeenCalledWith(101, { source: 'desktop' }));
+    // The scrap that covers the short rides the CLOSE, which bounds it by what is still
+    // unaccounted under the row lock; the clock-out carries the good only.
+    await waitFor(() =>
+      expect(mockedApi.completeOperation).toHaveBeenCalledWith(
+        101,
+        expect.objectContaining({ source: 'desktop', quantity_scrapped: 1, scrap_reason: 'Material defect' })
+      )
+    );
     expect(mockedApi.clockOut).toHaveBeenCalledWith(
       501,
-      expect.objectContaining({ quantity_produced: 3, quantity_scrapped: 1, scrap_reason: 'Material defect' })
+      expect.objectContaining({ quantity_produced: 3, quantity_scrapped: 0 })
     );
+    expect(mockedApi.clockOut.mock.calls[0][1]).not.toHaveProperty('scrap_reason');
     expect(mockedApi.clockOut.mock.invocationCallOrder[0]).toBeLessThan(
       mockedApi.completeOperation.mock.invocationCallOrder[0]
     );
@@ -205,6 +213,17 @@ describe('ShopFloorSimple — short count (owner ruling 1)', () => {
 
     expect(await screen.findByText('Completed WO-2026-0042')).toBeInTheDocument();
     expect(mockedApi.completeOperation).not.toHaveBeenCalled();
+  });
+
+  it('a full good count is said up front: the box is checked and disabled, because the check-out completes it', async () => {
+    renderShopFloor();
+    const dialog = await openCheckOut();
+    setNumber(dialog, 'Additional good parts at checkout', 4);
+    const box = within(dialog).getByLabelText('Complete Op 20 after checking out');
+    expect(box).toBeChecked();
+    expect(box).toBeDisabled();
+    expect(within(dialog).getByText(/That is the full count — checking out completes/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Check out & complete' })).toBeInTheDocument();
   });
 
   it('unticked: a plain check-out that leaves the operation open', async () => {
@@ -244,6 +263,29 @@ describe('ShopFloorSimple — short count (owner ruling 1)', () => {
     );
     // An ERROR, not a warning: the check-out landed, the close was refused.
     expect(failed.closest('[role="alert"]')).toHaveClass('bg-red-600');
+  });
+
+  it('a card accounted for by scrap keeps +1 and Report quantity beside the close banner (replacements)', async () => {
+    // 8 good + 2 scrapped of 10: the operation CAN close, but good may still rise to the
+    // server's ceiling of 10 — the operator re-making the 2 must not be cut off.
+    mockedApi.getShopFloorOperations.mockResolvedValue({
+      operations: [{ ...OP, quantity_complete: 8, quantity_scrapped: 2, quantity_good_ceiling: 10 }],
+    });
+    renderShopFloor();
+    const card = await screen.findByTestId('shop-floor-op-101');
+    expect(within(card).getByText('All pieces accounted for')).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: /\+1 Complete/ })).toBeEnabled();
+    expect(within(card).getByRole('button', { name: 'Report quantity' })).toBeInTheDocument();
+  });
+
+  it('a card at its full good count offers only the close (no more good fits)', async () => {
+    mockedApi.getShopFloorOperations.mockResolvedValue({
+      operations: [{ ...OP, quantity_complete: 10, quantity_scrapped: 0, quantity_good_ceiling: 10 }],
+    });
+    renderShopFloor();
+    const card = await screen.findByTestId('shop-floor-op-101');
+    expect(within(card).getByText('Target quantity reached')).toBeInTheDocument();
+    expect(within(card).queryByRole('button', { name: /\+1 Complete/ })).not.toBeInTheDocument();
   });
 
   it('works from the received count and subtracts recorded scrap in "not yet accounted for"', async () => {

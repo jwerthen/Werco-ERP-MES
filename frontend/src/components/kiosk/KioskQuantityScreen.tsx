@@ -361,6 +361,11 @@ export default function KioskQuantityScreen({
             {formatShortQuantity(short)} of {formatShortQuantity(received)} not yet accounted for — record finished
             pieces, report lost pieces as scrap, or leave the job open.
           </p>
+          {/* Owner decision: pieces never started are never scrap. */}
+          <p data-testid="kiosk-qty-never-started" className="mt-1 text-base text-fd-body">
+            Pieces never started? They are not scrap — Cancel, leave the job open, and ask a supervisor to lower the
+            quantity.
+          </p>
           <button
             type="button"
             data-testid="kiosk-qty-report-scrap"

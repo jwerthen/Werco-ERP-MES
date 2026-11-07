@@ -107,6 +107,12 @@ interface CompleteWorkModalProps {
   /** Good already recorded — the prefill (an operation's count, or the work-order header). */
   recordedComplete: number;
   /**
+   * Operation mode: the good the FLOOR's labor record supports — the server's
+   * `quantity_recorded_good` (evidence-floored). Booking more than this on an operation with
+   * labor needs `quantity_override_reason`. Defaults to `recordedComplete`.
+   */
+  floorRecorded?: number | null;
+  /**
    * Scrap already recorded — the prefill and the floor the total never drops below.
    * `null` = unknown (a list summary): the field starts at 0 and 0 keeps whatever is
    * recorded.
@@ -152,6 +158,7 @@ export function CompleteWorkModal({
   target,
   defaultQuantityComplete,
   recordedComplete,
+  floorRecorded,
   recordedScrapped,
   upstreamShort,
   goodCeiling,
@@ -165,6 +172,8 @@ export function CompleteWorkModal({
   const subject = subjectLabel || (isOperation ? 'this operation' : 'this work order');
   const targetQty = Math.max(0, finiteOrNull(target ?? defaultQuantityComplete) ?? 0);
   const recordedGood = Math.max(0, finiteOrNull(recordedComplete) ?? 0);
+  // What the server judges an override against: the floor's evidence-floored good.
+  const floorGood = Math.max(recordedGood, finiteOrNull(floorRecorded) ?? recordedGood);
   const recordedScrapKnown = finiteOrNull(recordedScrapped);
   const recordedScrap = Math.max(0, recordedScrapKnown ?? 0);
   const upstream = Math.max(0, finiteOrNull(upstreamShort) ?? 0);
@@ -240,7 +249,7 @@ export function CompleteWorkModal({
   const needsReason = scrapRose;
   const reasonMissing = needsReason && !isScrapSelectionComplete(scrapCodes, scrap);
 
-  const goodRose = goodValid && completeNum > recordedGood + SHORT_EPSILON;
+  const goodRose = goodValid && completeNum > floorGood + SHORT_EPSILON;
   const exceedsDeliverable =
     !isOperation && goodValid && deliverableQty != null && completeNum > deliverableQty + SHORT_EPSILON;
   // The refusal on screen asks for the reason now; the sticky flag keeps asking
@@ -273,6 +282,18 @@ export function CompleteWorkModal({
     ? Math.max(0, Math.min(cap, received - scrapTotal))
     : Math.max(0, targetQty - workOrderCovered);
   const offerFullCount = goodValid && completeNum < fullCount - SHORT_EPSILON;
+  // What the floor's own records support — offered FIRST: the honest shortcut is to book
+  // what was counted and report the rest as scrap. Booking the full count above it is an
+  // assertion the server asks a reason for, and the shortcut says so.
+  const floorCount = isOperation ? Math.min(cap, floorGood) : deliverableQty;
+  const offerFloorCount =
+    goodValid &&
+    floorCount != null &&
+    Math.abs(completeNum - floorCount) > SHORT_EPSILON &&
+    floorCount < fullCount - SHORT_EPSILON;
+  const fullCountNeedsReason = isOperation
+    ? laborRecorded && fullCount > floorGood + SHORT_EPSILON
+    : deliverableQty != null && fullCount > deliverableQty + SHORT_EPSILON;
   // What "report as scrap" sets the scrap TOTAL to so the readout clears.
   const scrapToCover = isOperation ? scrapTotal + operationShort : Math.max(scrapTotal, targetQty - good);
 
@@ -359,16 +380,33 @@ export function CompleteWorkModal({
               />
             )}
           </FormField>
-          {offerFullCount && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              disabled={submitting}
-              onClick={() => setQtyComplete(fmt(fullCount))}
-            >
-              Use full count ({fmt(fullCount)})
-            </Button>
+          {(offerFloorCount || offerFullCount) && (
+            <div className="flex flex-wrap gap-2">
+              {offerFloorCount && floorCount != null && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={submitting}
+                  onClick={() => setQtyComplete(fmt(floorCount))}
+                >
+                  Use floor count ({fmt(floorCount)})
+                </Button>
+              )}
+              {offerFullCount && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={submitting}
+                  onClick={() => setQtyComplete(fmt(fullCount))}
+                >
+                  {fullCountNeedsReason
+                    ? `Book ${fmt(fullCount)} good (needs a reason)`
+                    : `Use full count (${fmt(fullCount)})`}
+                </Button>
+              )}
+            </div>
           )}
 
           {overrideShown && (

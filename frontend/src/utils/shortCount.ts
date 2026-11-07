@@ -101,6 +101,27 @@ export function goodCeiling(target: number | null | undefined, ceiling?: number 
   return Math.max(0, finite(target));
 }
 
+/**
+ * Would a clock-out with this entry complete the operation ON ITS OWN? The server's
+ * `OperationAccounting.is_full_count`: every unit that CAN reach the operation (the hard
+ * `quantity_good_ceiling`, never the soft received figure) is recorded GOOD — and no more
+ * than that (a count above the ceiling is never auto-completed). Scrap never counts here,
+ * so this is false for any entry that only covers a short with scrap: that close is an
+ * explicit Complete.
+ */
+export function implicitFullCountAfterEntry(input: {
+  target: number | null | undefined;
+  ceiling?: number | null;
+  complete?: number | null;
+  good?: number | null;
+}): boolean {
+  const target = Math.max(0, finite(input.target));
+  const cap = goodCeiling(target, input.ceiling);
+  const good = Math.max(0, finite(input.complete)) + Math.max(0, finite(input.good));
+  const exceeds = cap < target - SHORT_EPSILON && good > cap + SHORT_EPSILON;
+  return cap > SHORT_EPSILON && good + SHORT_EPSILON >= cap && !exceeds;
+}
+
 /** "run" / "runs" on a laser nest (its target is sheet runs), "pc" / "pcs" everywhere else. */
 export function shortUnitLabel(isNest: boolean, count: number): string {
   const one = Math.abs(count - 1) <= SHORT_EPSILON;

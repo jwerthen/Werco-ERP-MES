@@ -381,6 +381,7 @@ export default function WorkOrderOperationsModal({
                 upstreamShort: target.operation.upstream_quantity_short,
                 goodCeiling: target.operation.quantity_good_ceiling,
                 laborRecorded: operationMayHaveLabor(target.operation),
+              floorRecorded: target.operation.quantity_recorded_good,
                 isNest: !!target.operation.laser_nest,
                 subjectLabel: formatOperationLabel(target.operation.operation_number, target.operation.sequence),
               }

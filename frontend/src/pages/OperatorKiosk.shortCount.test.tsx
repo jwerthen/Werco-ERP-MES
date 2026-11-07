@@ -240,7 +240,10 @@ describe('OperatorKiosk — short count (owner ruling 1)', () => {
     fireEvent.click(screen.getByTestId('kiosk-qty-good'));
     fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
     key('6');
-    fireEvent.click(screen.getByTestId('kiosk-complete-report-scrap'));
+    // No one-tap scrap fill while Bob is clocked in — the operator keys real scrap.
+    expect(screen.queryByTestId('kiosk-complete-report-scrap')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('kiosk-qty-scrap'));
+    key('2');
     fireEvent.click(screen.getByRole('button', { name: 'Material defect' }));
 
     expect(screen.getByTestId('kiosk-complete-others')).toHaveTextContent(
@@ -248,6 +251,51 @@ describe('OperatorKiosk — short count (owner ruling 1)', () => {
     );
     expect(screen.getByTestId('kiosk-qty-confirm')).toBeDisabled();
     expect(mockedApi.clockOut).not.toHaveBeenCalled();
+  });
+
+  it('scrap covering a short that the floor no longer has: the op completes, and the scrap is NOT invented', async () => {
+    // The overlay saw 8 unaccounted; a crewmate reported the rest meanwhile, so the 6-good
+    // clock-out completed the operation on its own. The 2 "scrap" was never sent anywhere.
+    mockedApi.clockOut.mockResolvedValue({ operation_status: 'complete' });
+    renderKiosk();
+
+    fireEvent.click(await screen.findByRole('button', { name: /^complete op$/i }));
+    fireEvent.click(screen.getByTestId('kiosk-qty-good'));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    key('6');
+    fireEvent.click(screen.getByTestId('kiosk-complete-report-scrap'));
+    fireEvent.click(screen.getByRole('button', { name: 'Material defect' }));
+    fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+
+    const notice = await screen.findByText(/^Completed WO-2026-0142 with the pieces already recorded — the 2 scrap/);
+    expect(notice.closest('[role="alert"]')).not.toBeNull();
+    expect(mockedApi.clockOut).toHaveBeenCalledWith(
+      501,
+      expect.objectContaining({ quantity_produced: 6, quantity_scrapped: 0 })
+    );
+    expect(mockedApi.completeOperation).not.toHaveBeenCalled();
+    expect(mockedApi.clockIn).not.toHaveBeenCalled();
+  });
+
+  it('a scrim tap / Escape while the clock-out is in flight does not close the overlay under it', async () => {
+    let rejectClockOut: (reason: unknown) => void = () => undefined;
+    mockedApi.clockOut.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectClockOut = reject;
+        })
+    );
+    renderKiosk();
+
+    fireEvent.click(await screen.findByRole('button', { name: /^complete op$/i }));
+    fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+    await waitFor(() => expect(mockedApi.clockOut).toHaveBeenCalled());
+    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(document.activeElement || document.body, { key: 'Escape' });
+    expect(screen.getByTestId('kiosk-qty-confirm')).toBeInTheDocument();
+
+    rejectClockOut({ response: { status: 400, data: { detail: 'Quantity produced exceeds quantity ordered' } } });
+    expect(await screen.findByRole('alert')).toHaveTextContent('Quantity produced exceeds quantity ordered');
   });
 
   it('once the clock-out landed, a refused close is reported honestly and verbatim', async () => {
@@ -268,6 +316,8 @@ describe('OperatorKiosk — short count (owner ruling 1)', () => {
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
 
     const failed = await screen.findByText(/^Clocked out, but completing failed: Op 20: 2 of 10 not yet accounted for/);
+    // ... and names the way forward: the operator is clocked out, the operation open.
+    expect(failed).toHaveTextContent('Op 20 is still open; clock in and Complete again, or ask a supervisor.');
     // An ERROR (alert): the clock-out landed, the close did not.
     expect(failed.closest('[role="alert"]')).toHaveClass('text-fd-red');
     expect(mockedApi.completeOperation).toHaveBeenCalledWith(31, { source: 'kiosk' });

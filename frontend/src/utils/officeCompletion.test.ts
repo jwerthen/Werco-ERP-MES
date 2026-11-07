@@ -55,6 +55,12 @@ describe('operationMayHaveLabor', () => {
     expect(operationMayHaveLabor({ ...never, status: 'in_progress' })).toBe(true);
     expect(operationMayHaveLabor({ ...never, actual_run_hours: 0.5 })).toBe(true);
   });
+
+  it("prefers the server's own has_labor_evidence whenever the payload carries it", () => {
+    // A desk save started it, but nobody ever clocked in: no reason is required.
+    expect(operationMayHaveLabor({ ...never, status: 'in_progress', has_labor_evidence: false })).toBe(false);
+    expect(operationMayHaveLabor({ ...never, has_labor_evidence: true })).toBe(true);
+  });
 });
 
 describe('operationUnaccountedChip', () => {

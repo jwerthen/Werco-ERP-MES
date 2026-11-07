@@ -231,7 +231,7 @@ describe('OperatorKiosk', () => {
     expect(mockedApi.completeOperation).not.toHaveBeenCalled();
   });
 
-  it('COMPLETE on a short covered by scrap clocks out first, then closes with NO quantity', async () => {
+  it('COMPLETE on a short covered by scrap clocks out the good, then closes with the scrap and NO quantity', async () => {
     mockedApi.getMyActiveJob.mockResolvedValue({ active_jobs: [ACTIVE_JOB], active_job: ACTIVE_JOB });
     mockedApi.clockOut.mockResolvedValue({ operation_status: 'in_progress' });
     mockedApi.completeOperation.mockResolvedValue({});
@@ -250,10 +250,15 @@ describe('OperatorKiosk', () => {
     await waitFor(() => expect(mockedApi.completeOperation).toHaveBeenCalled());
     expect(mockedApi.clockOut).toHaveBeenCalledWith(
       501,
-      expect.objectContaining({ quantity_produced: 43, quantity_scrapped: 2, source: 'kiosk' })
+      expect.objectContaining({ quantity_produced: 43, quantity_scrapped: 0, source: 'kiosk' })
     );
-    // The close books the good the floor recorded — the kiosk never asserts the target.
-    expect(mockedApi.completeOperation).toHaveBeenCalledWith(31, { source: 'kiosk' });
+    // The close books the good the floor recorded — the kiosk never asserts the target — and
+    // carries the scrap that covers the short, which the server bounds by what is unaccounted.
+    expect(mockedApi.completeOperation).toHaveBeenCalledWith(31, {
+      source: 'kiosk',
+      quantity_scrapped: 2,
+      scrap_reason: 'Material defect',
+    });
     const clockOutOrder = mockedApi.clockOut.mock.invocationCallOrder[0];
     const completeOrder = mockedApi.completeOperation.mock.invocationCallOrder[0];
     expect(clockOutOrder).toBeLessThan(completeOrder);
@@ -364,7 +369,7 @@ describe('OperatorKiosk', () => {
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
 
     expect(
-      await screen.findByText('Clocked out, but completing failed: Final inspection has not been recorded')
+      await screen.findByText(/^Clocked out, but completing failed: Final inspection has not been recorded — Op/)
     ).toBeInTheDocument();
   });
 

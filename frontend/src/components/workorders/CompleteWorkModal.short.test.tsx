@@ -101,7 +101,8 @@ describe('operation mode', () => {
 
   it('requires the override reason to book more good than the floor recorded when labor may exist', () => {
     const { dialog, onSubmit } = renderModal({ recordedComplete: 6, recordedScrapped: 0 });
-    fireEvent.click(dialog.getByRole('button', { name: 'Use full count (10)' }));
+    // The shortcut says up front that booking past the floor count is an assertion.
+    fireEvent.click(dialog.getByRole('button', { name: 'Book 10 good (needs a reason)' }));
     expect(good(dialog)).toHaveValue(10);
     const reason = dialog.getByLabelText(/Why record more than the floor counted/);
     expect(reason).toBeRequired();
@@ -113,6 +114,18 @@ describe('operation mode', () => {
     expect(onSubmit).toHaveBeenCalledWith(
       expect.objectContaining({ quantityComplete: 10, overrideReason: 'Last 4 finished after the operator left' })
     );
+  });
+
+  it("judges the override against the floor's evidence-floored count, and offers it first", () => {
+    // Stored 6, but the floor's labor record shows 8 (an entry the reconcile has not folded
+    // in yet): booking 8 needs no reason, and "Use floor count" fills exactly that.
+    const { dialog, onSubmit } = renderModal({ recordedComplete: 6, floorRecorded: 8, recordedScrapped: 0 });
+    fireEvent.click(dialog.getByRole('button', { name: 'Use floor count (8)' }));
+    expect(good(dialog)).toHaveValue(8);
+    expect(dialog.queryByLabelText(/Why record more than the floor counted/)).not.toBeInTheDocument();
+    // The rest is a short to report, not good to assert.
+    expect(dialog.getByRole('button', { name: 'Report 2 as scrap' })).toBeInTheDocument();
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it('keeps desk cleanup of never-clocked work reason-free (the office-exempt asymmetry)', () => {

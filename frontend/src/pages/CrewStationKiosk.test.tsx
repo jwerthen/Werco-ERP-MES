@@ -201,6 +201,21 @@ describe('CrewStationKiosk', () => {
     );
   });
 
+  it('LEAVE with the full count says the operation completed — not just "clocked out"', async () => {
+    unlockedStation();
+    mocked.mintBadgeToken.mockResolvedValue(BOB_MINT);
+    mocked.clockOut.mockResolvedValue({ operation_status: 'complete' });
+    renderKiosk();
+
+    await openJobDetail();
+    fireEvent.click(screen.getByRole('button', { name: /join \/ leave/i }));
+    scanBadge('E011');
+    expect(await screen.findByText(/clock out — bob t/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
+
+    expect(await screen.findByText(/^Bob T clocked out — Op .* completed$/)).toBeInTheDocument();
+  });
+
   it('400 "already clocked in" surfaces as an info toast and refreshes the roster', async () => {
     unlockedStation();
     mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);

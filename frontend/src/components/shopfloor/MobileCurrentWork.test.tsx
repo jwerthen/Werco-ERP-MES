@@ -68,7 +68,14 @@ describe('MobileCurrentWork — short count (owner ruling 1)', () => {
     renderCard({ quantity_complete: 8, operation_quantity_scrapped: 2, quantity_scrapped: 0 });
     expect(screen.getByText('0 remaining')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Complete operation' })).toBeEnabled();
-    expect(screen.queryByRole('button', { name: '+1 Complete' })).not.toBeInTheDocument();
+  });
+
+  it('keeps +1 beside Complete while good is still below the ceiling — replacements for scrap', () => {
+    // 8 good + 2 scrapped: accounted (can close), but the operator may be re-making the 2.
+    // The server accepts good up to its ceiling (10), so +1 must not disappear.
+    renderCard({ quantity_complete: 8, operation_quantity_scrapped: 2, quantity_good_ceiling: 10 });
+    expect(screen.getByRole('button', { name: '+1 Complete' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Complete operation' })).toBeEnabled();
   });
 
   it('ignores this session scrap count — only the operation total is accounted for', () => {
@@ -83,6 +90,7 @@ describe('MobileCurrentWork — short count (owner ruling 1)', () => {
     expect(screen.getByText('0 remaining')).toBeInTheDocument();
     expect(screen.getByText('/ 8')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Complete operation' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: '+1 Complete' })).not.toBeInTheDocument();
   });
 
   it("disables +1 at the server's good ceiling, even when the snapshot still shows pieces remaining", () => {

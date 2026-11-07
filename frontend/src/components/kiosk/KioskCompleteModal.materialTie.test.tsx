@@ -121,6 +121,15 @@ describe('KioskCompleteModal — material deduction notice', () => {
     expect(screen.queryByTestId('kiosk-complete-material')).not.toBeInTheDocument();
   });
 
+  it('DOES show it in KEEP OPEN once the entry is a full count — that clock-out completes and consumes', async () => {
+    const user = userEvent.setup();
+    renderModal({ mode: 'leave_open', onLeaveOpen: jest.fn(), materialTies: [TIE], operationScrapped: 0 });
+    await user.click(screen.getByTestId('kiosk-qty-good'));
+    await user.click(screen.getByRole('button', { name: '5' }));
+    expect(screen.getByTestId('kiosk-complete-leave-open-full')).toBeInTheDocument();
+    expect(screen.getByTestId('kiosk-complete-material')).toHaveTextContent('5 EA · SHT-.125-304');
+  });
+
   it('RAISES the prediction as scrap is keyed, and says why', async () => {
     const user = userEvent.setup();
     renderModal({ materialTies: [TIE], operationScrapped: 0 });

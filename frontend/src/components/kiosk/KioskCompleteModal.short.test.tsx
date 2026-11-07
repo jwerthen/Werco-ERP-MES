@@ -207,8 +207,18 @@ describe('KioskCompleteModal — short count (owner ruling 1)', () => {
     it('a crewmate still clocked in disables a SHORT finish and promotes leave-open', async () => {
       const user = userEvent.setup();
       renderModal({ roster: [ME, BOB] });
+      // With Bob on the roster nothing is pre-filled: some of the 8 may be his.
+      expect(within(goodWell()).getByText('0')).toBeInTheDocument();
       await keyGood(user, '6');
-      await user.click(screen.getByTestId('kiosk-complete-report-scrap'));
+
+      // No one-tap "Report n as scrap": Bob's unreported pieces are not scrap.
+      expect(screen.queryByTestId('kiosk-complete-report-scrap')).not.toBeInTheDocument();
+      expect(screen.getByTestId('kiosk-complete-short-with-others')).toHaveTextContent(
+        'Some of these may still be with Bob T, who has not reported yet.'
+      );
+      // Scrap the operator really made is still theirs to key.
+      await user.click(scrapWell());
+      await user.click(screen.getByRole('button', { name: '2' }));
       await user.click(
         within(screen.getByRole('group', { name: 'Scrap reason' })).getByRole('button', { name: 'Material defect' })
       );
@@ -218,11 +228,14 @@ describe('KioskCompleteModal — short count (owner ruling 1)', () => {
         'Bob T still clocked in — they must clock out with their count first'
       );
       expect(complete()).toBeDisabled();
+      expect(complete()).toHaveAttribute('aria-describedby', expect.stringContaining('kiosk-complete-others'));
       expect(screen.getByTestId('kiosk-complete-leave-open')).toHaveClass('bg-fd-blue/15');
     });
 
-    it('a crewmate does not block a FULL-count finish (nothing is declared short)', () => {
+    it('a crewmate does not block a FULL-count finish (nothing is declared short)', async () => {
+      const user = userEvent.setup();
       renderModal({ roster: [ME, BOB] });
+      await keyGood(user, '8');
       expect(screen.queryByTestId('kiosk-complete-others')).not.toBeInTheDocument();
       expect(complete()).toBeEnabled();
     });
@@ -238,6 +251,41 @@ describe('KioskCompleteModal — short count (owner ruling 1)', () => {
       expect(screen.queryByTestId('kiosk-complete-others')).not.toBeInTheDocument();
       expect(complete()).toBeEnabled();
     });
+  });
+
+  it('says pieces never started are not scrap, next to the one-tap scrap fill', async () => {
+    const user = userEvent.setup();
+    renderModal();
+    await keyGood(user, '5');
+    expect(screen.getByTestId('kiosk-complete-never-started')).toHaveTextContent(
+      'Pieces never started? They are not scrap — clock out and keep Op 20 open, and ask a supervisor to lower the quantity.'
+    );
+    expect(screen.getByTestId('kiosk-complete-report-scrap')).toHaveClass('min-h-12');
+    expect(complete()).toHaveAttribute('aria-describedby', 'kiosk-complete-short');
+  });
+
+  it('on a POOLED job whose earlier operation already declared the loss, warns not to scrap it again', async () => {
+    const user = userEvent.setup();
+    renderModal({ uncreditedUpstream: 2 });
+    await keyGood(user, '6');
+    expect(screen.getByTestId('kiosk-complete-uncredited')).toHaveTextContent(
+      "2 pcs were already closed short at an earlier operation, but this job's operations are not sequenced"
+    );
+    expect(screen.getByTestId('kiosk-complete-uncredited')).toHaveTextContent(
+      'ask a supervisor to turn on Sequential operations'
+    );
+    // No one-tap fill: it would record the same loss twice and consume material for it.
+    expect(screen.queryByTestId('kiosk-complete-report-scrap')).not.toBeInTheDocument();
+  });
+
+  it('a clock-out that would complete on its own is judged on the hard ceiling, not the soft feed', async () => {
+    // 10 target, 2 recorded, 1 lost to component feed (received 9) — the ceiling is still 10.
+    const user = userEvent.setup();
+    renderModal({ mode: 'leave_open', upstreamShort: 1, goodCeiling: 10 });
+    await keyGood(user, '7');
+    expect(screen.queryByTestId('kiosk-complete-leave-open-full')).not.toBeInTheDocument();
+    await keyGood(user, '8');
+    expect(screen.getByTestId('kiosk-complete-leave-open-full')).toBeInTheDocument();
   });
 
   it('notes on KEEP OPEN that a full count completes the operation on clock-out', async () => {
