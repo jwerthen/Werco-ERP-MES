@@ -4446,9 +4446,9 @@ def complete_operation(
     """
     Close an operation at the good count already recorded on the floor (clock-outs and
     production reports) and clock out everyone still clocked in. Records no good pieces
-    itself and never closes short: if recorded good does not cover every unit that reached
-    the operation, it is refused 409 and nothing is written -- record the pieces first, or
-    leave it open. An API token may not close short (403).
+    itself and never closes short on its own: if recorded good does not cover every unit
+    that reached the operation, it is refused 409 and nothing is written -- record the
+    pieces first, or leave it open. An API token may not close short (403).
 
     A CLOSE verb (owner ruling 1, 2026-11-05) -- there is no partial branch. On 200 the
     operation is COMPLETE, ``is_fully_complete`` is always true, and every open TimeEntry
