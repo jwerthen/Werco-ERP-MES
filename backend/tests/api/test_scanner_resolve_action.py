@@ -37,7 +37,11 @@ from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
-from app.services.operation_action_gates import MSG_NO_LABOR_RECORDED
+from app.services.operation_action_gates import (
+    MSG_NO_LABOR_RECORDED,
+    MSG_WORK_ORDER_NOT_RELEASED,
+    MSG_WORK_ORDER_ON_HOLD,
+)
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -360,6 +364,36 @@ def test_clock_in_gate_parity_on_hold(client: TestClient, db_session: Session):
     assert real.status_code == 400
     assert real.json()["detail"] == "Operation is not ready to start"
     assert real.json()["detail"] in body["blockers"]["clock_in"]
+
+
+def _assert_work_order_gate_parity(client: TestClient, db_session: Session, wo_status, expected: str) -> None:
+    """Ruling 2: the resolver's clock_in blocker IS the real call's 409 detail."""
+    user = make_user(db_session)
+    wo, (op,), wc, _ = make_wo(db_session, wo_status=wo_status, op_statuses=[OperationStatus.READY])
+
+    body = resolve(client, user, f"OP:{op.id}")
+    assert "clock_in" not in body["legal_actions"]
+    assert expected in body["blockers"]["clock_in"]
+
+    real = client.post(
+        CLOCK_IN,
+        json={"work_order_id": wo.id, "operation_id": op.id, "work_center_id": wc.id, "entry_type": "run"},
+        headers=headers_for(user),
+    )
+    assert real.status_code == 409, real.text
+    assert real.json()["detail"] == expected
+    assert real.json()["detail"] in body["blockers"]["clock_in"]
+    assert db_session.query(TimeEntry).filter(TimeEntry.operation_id == op.id).count() == 0
+
+
+def test_clock_in_gate_parity_draft_work_order(client: TestClient, db_session: Session):
+    """DRAFT work order: no clock_in, the 'release first' text, and the real call 409s with it."""
+    _assert_work_order_gate_parity(client, db_session, WorkOrderStatus.DRAFT, MSG_WORK_ORDER_NOT_RELEASED)
+
+
+def test_clock_in_gate_parity_on_hold_work_order(client: TestClient, db_session: Session):
+    """ON_HOLD work order: no clock_in, the 'Resume Work Order' text, and the real call 409s with it."""
+    _assert_work_order_gate_parity(client, db_session, WorkOrderStatus.ON_HOLD, MSG_WORK_ORDER_ON_HOLD)
 
 
 def test_clock_in_gate_parity_already_clocked_in(client: TestClient, db_session: Session):

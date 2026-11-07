@@ -491,10 +491,12 @@ class TestImportStillReleases:
     nobody watching for it.
 
     Three sites in ``work_orders.py`` force ``RELEASED``; the manual-nest door is the
-    cheapest to exercise and is the one a planner reaches by hand. Note what is NOT
-    asserted: the import path force-sets the column, so ``released_by`` and
-    ``released_at`` stay NULL and no ``log_status_change`` row is written. Asserting a
-    release stamp here would fail against correct code.
+    cheapest to exercise and is the one a planner reaches by hand. Since ruling 2
+    (2026-11-05) the force-release is RECORDED: a DRAFT (or unstamped) laser work order
+    moved into RELEASED gets ``released_by`` = the caller and ``released_at`` = now,
+    because ``POST /work-orders/{id}/resume`` reads that stamp as the release record. The
+    stamp rides the existing WO-level ``log_update`` row; no ``log_status_change`` row is
+    written, and that absence is still pinned.
     """
 
     def test_the_manual_nest_door_still_force_sets_released(self, client: TestClient, db_session: Session):
@@ -522,10 +524,32 @@ class TestImportStillReleases:
         added = [op for op in operations_of(db_session, draft) if op.status == OperationStatus.READY]
         assert len(added) == 1
         assert added[0].id in {op.id for op in dispatch_rows_for(db_session, draft)}
-        # NOT asserted as a release: the column is force-set, so there is no actor stamp
-        # and no status-change row. Pinned so nobody "fixes" the absence.
-        assert draft.released_by is None
-        assert draft.released_at is None
+        # The force-release is recorded as the caller's release (ruling 2): the resume verb
+        # reads this stamp as the release record, so an unstamped laser job would resume
+        # to DRAFT. It is carried by the WO-level UPDATE row, not by a status-change row.
+        assert draft.released_by == admin.id
+        assert draft.released_at is not None
+        assert (
+            db_session.query(AuditLog)
+            .filter(
+                AuditLog.resource_type == "work_order",
+                AuditLog.resource_id == draft.id,
+                AuditLog.action == "STATUS_CHANGE",
+            )
+            .count()
+            == 0
+        )
+        update = (
+            db_session.query(AuditLog)
+            .filter(
+                AuditLog.resource_type == "work_order",
+                AuditLog.resource_id == draft.id,
+                AuditLog.action == "UPDATE",
+            )
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+        assert update is not None and update.new_values["released_by"] == admin.id
 
 
 # --------------------------------------------------------------------------- #

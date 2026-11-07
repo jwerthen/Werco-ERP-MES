@@ -175,9 +175,7 @@ def test_start_verbs_refuse_draft_and_on_hold_work_orders_and_write_nothing(
 
 @pytest.mark.parametrize("verb", VERBS)
 @pytest.mark.parametrize("wo_status", [WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS])
-def test_released_and_in_progress_work_orders_are_accepted_positive_control(
-    client, db_session, floor, verb, wo_status
-):
+def test_released_and_in_progress_work_orders_are_accepted_positive_control(client, db_session, floor, verb, wo_status):
     """The positive control for every zero-row assertion above: the SAME queries find the row."""
     wc, operator, supervisor = floor
     wo, op = make_wo_with_operation(db_session, work_center=wc, wo_status=wo_status, op_status=OperationStatus.READY)
@@ -342,11 +340,7 @@ def test_badge_token_clock_in_on_a_held_work_order_is_a_409_not_a_400(client, db
 
 
 def _backfill_audit_rows(db: Session) -> list[AuditLog]:
-    return (
-        db.query(AuditLog)
-        .filter(AuditLog.resource_type == "time_entry", AuditLog.action == "CREATE")
-        .all()
-    )
+    return db.query(AuditLog).filter(AuditLog.resource_type == "time_entry", AuditLog.action == "CREATE").all()
 
 
 def test_paper_back_entry_on_a_held_work_order_is_refused_like_any_clock_in(client, db_session, floor):

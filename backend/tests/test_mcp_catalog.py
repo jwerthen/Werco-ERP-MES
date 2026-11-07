@@ -215,6 +215,9 @@ class TestNames:
             "resume_operation",
             "delete_work_order",
             "restore_work_order",
+            # Ruling 2 (2026-11-05): "Resume Work Order" joins the work_order family that
+            # Preventive Maintenance's start_work_order collision seeds.
+            "resume_work_order",
             # Shadowed Work Orders twins are named too (names are assigned before shadowing).
             "duplicate_work_order",
             "release_work_order",
@@ -241,6 +244,7 @@ class TestNames:
             "shop_floor_resume_operation",
             "work_orders_delete_work_order",
             "work_orders_restore_work_order",
+            "work_orders_resume_work_order",
         }
         assert family <= names
         assert names.isdisjoint(
@@ -250,6 +254,7 @@ class TestNames:
                 "resume_operation",
                 "delete_work_order",
                 "restore_work_order",
+                "resume_work_order",
             }
         )
         # Same tags, different noun phrase: untouched. (A noun phrase is the whole tail, so

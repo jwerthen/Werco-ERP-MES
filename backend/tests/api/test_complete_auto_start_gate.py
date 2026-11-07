@@ -181,7 +181,9 @@ def test_positive_control_the_same_completion_on_a_released_job_consumes_and_com
 ):
     operator, supervisor = people
     wc = make_work_center(db_session)
-    wo, op = make_wo_with_operation(db_session, work_center=wc, wo_status=WorkOrderStatus.RELEASED, quantity_ordered=QTY)
+    wo, op = make_wo_with_operation(
+        db_session, work_center=wc, wo_status=WorkOrderStatus.RELEASED, quantity_ordered=QTY
+    )
     tie_material(db_session, wo, op)
     closed_entry(db_session, operator, op)
 
