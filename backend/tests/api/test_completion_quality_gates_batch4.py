@@ -41,6 +41,7 @@ from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
+from tests.api.completion_test_helpers import seed_recorded_good
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -298,13 +299,10 @@ def test_shop_floor_complete_with_inspection_incomplete_warns_not_blocks(client:
         requires_inspection=True,
         inspection_complete=False,
     )
-    # The floor verb refuses an operation with no labor recorded at all. Closed (the kiosk
-    # clocks out before completing) and zero-quantity, so the warn-not-block behavior
-    # under test is untouched.
-    entry = make_time_entry(db_session, user, wo, op)
-    entry.clock_out = datetime.utcnow()
-    entry.duration_hours = 1.0
-    db_session.commit()
+    # The floor verb refuses an operation with no labor recorded at all, and books only the
+    # good the floor recorded (owner ruling 1). Closed (the kiosk clocks out with its count
+    # before completing), so the warn-not-block behavior under test is untouched.
+    seed_recorded_good(db_session, op, 5, user)
 
     resp = client.post(
         f"/api/v1/shop-floor/operations/{op.id}/complete",

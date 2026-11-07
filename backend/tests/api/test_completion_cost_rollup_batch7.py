@@ -338,6 +338,16 @@ def test_shop_floor_complete_rolls_auto_closed_entry_hours(client, db_session, m
     make_open_entry(db_session, welder_b, wo, op, hours_ago=3.0)
     db_session.commit()
 
+    # Owner ruling 1: the close books only the good the floor recorded, so welder B reports
+    # the 5 on his own open entry first (the crew-station shape) -- no extra labor row, so
+    # the hours under test are still exactly the two auto-closed entries'.
+    reported = client.post(
+        f"/api/v1/shop-floor/operations/{op.id}/production",
+        json={"quantity_complete_delta": 5},
+        headers=headers_for(welder_b),
+    )
+    assert reported.status_code == status.HTTP_200_OK, reported.text
+
     resp = client.post(
         f"/api/v1/shop-floor/operations/{op.id}/complete",
         json={"quantity_complete": 5},

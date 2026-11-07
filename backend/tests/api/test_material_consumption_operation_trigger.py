@@ -64,6 +64,7 @@ from app.models.work_order_material import AllocationSource, AllocationStatus, W
 from app.services.audit_service import AuditService
 from app.services.completion_inventory_service import apply_operation_completion_inventory_effects
 from app.services.material_consumption_service import consume_tied_materials_for_work_order
+from tests.api.completion_test_helpers import seed_recorded_good
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -465,22 +466,18 @@ def drive_clock_out(client: TestClient, db: Session, user: User, op: WorkOrderOp
 
 
 def drive_shop_floor_complete(client: TestClient, db: Session, user: User, op: WorkOrderOperation, *, quantity: float):
-    """Shop-floor operation complete (``shop_floor.py`` :3959).
+    """Shop-floor operation complete (``shop_floor.py`` ``complete_operation``).
 
-    Lays down a CLOSED, zero-quantity labor record first, because the floor verb refuses
-    an operation with no ``TimeEntry`` at all (``operation_has_labor_evidence``) -- an
-    operation nobody ever worked cannot be booked complete from the floor. Every real
-    floor flow satisfies that: the kiosk clocks out before completing, and a crew's
-    entries are open when the lead completes.
-
-    CLOSED and zero-quantity on purpose, so the gate is satisfied without perturbing what
-    these tests measure: an OPEN entry would be auto-closed by the endpoint and credited
-    the completion delta, changing the labor evidence the consumption assertions read.
+    Since owner ruling 1 the floor verb is a CLOSE: it records no good pieces itself and
+    books the operation at the good the floor already recorded, refusing a short. So the
+    driver first tops the operation's labor evidence up to ``quantity`` on a CLOSED entry
+    -- the shape the kiosk leaves behind, since it clocks out with its count before
+    completing. That one entry also satisfies the labor gate (an operation nobody ever
+    worked cannot be booked complete from the floor). CLOSED on purpose: the endpoint's
+    auto-close loop never touches it, so the labor evidence the consumption assertions
+    read is exactly what was seeded.
     """
-    entry = clock_in_entry(db, user, op)
-    entry.clock_out = datetime.utcnow()
-    entry.duration_hours = 0.5
-    db.commit()
+    seed_recorded_good(db, op, quantity, user)
     return client.post(
         f"/api/v1/shop-floor/operations/{op.id}/complete",
         headers=headers_for(user),
@@ -1038,6 +1035,11 @@ def test_force_complete_consumes_nothing_because_target_is_zero(client: TestClie
     force-complete on an operation that DOES carry produced quantity from an earlier
     partial report consumes normally. The zero above is therefore about a quantity
     nobody recorded -- not about the seam being unwired.
+
+    Owner ruling 1 bounds force-complete at the work-order grain (by the good the floor
+    recorded, with an override reason to exceed it), but an operation nobody ever
+    reported carries no floor evidence to bound by, so ``quantity_complete`` = the order
+    still passes and the residual above is unchanged.
     """
     user = make_user(db_session)
     wc = make_work_center(db_session)

@@ -853,25 +853,37 @@ def test_reduce_only_affects_callers_entry_and_survives_reconcile(client: TestCl
     assert db_session.get(WorkOrder, wo.id).quantity_complete == 9
 
 
-def test_reduce_after_partial_complete_that_raised_quantity(client: TestClient, db_session: Session):
-    """A partial /complete raises the op total ABOVE the caller's evidence but leaves it open + IN_PROGRESS.
+def test_reduce_after_office_partial_that_raised_quantity(client: TestClient, db_session: Session):
+    """An office partial raises the op total ABOVE the floor's evidence but leaves it open + IN_PROGRESS.
 
-    The absolute /complete verb clamps to max(existing, requested, evidence); a partial
-    completion (< target) neither closes the clock-in nor credits the entry. A later
-    reduction must still walk the op total DOWN by the full delta (from 10, not just from
-    the 6 of evidence) and stay reconcile-safe on the next read.
+    Owner ruling 1 removed the floor ``/complete`` partial branch (it is a close verb now,
+    and 10 asserted on 6 recorded is refused 409), so the "total above evidence" state this
+    test needs comes from the office partial -- which, because the op has labor, must carry
+    a ``quantity_override_reason``. A partial neither closes the clock-in nor credits the
+    entry. A later floor reduction must still walk the op total DOWN by the full delta (from
+    10, not just from the 6 of evidence) and stay reconcile-safe on the next read.
     """
     operator = make_user(db_session)
+    supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
     wo, op, _wc = make_wo_op(db_session, quantity_ordered=20)
     make_open_entry(db_session, operator, wo, op)
     report_production(client, operator, op, 6)  # entry=6, op=6
 
-    comp = client.post(
+    floor = client.post(
         f"/api/v1/shop-floor/operations/{op.id}/complete",
-        json={"quantity_complete": 10},  # < target 20 -> partial: op stays IN_PROGRESS
+        json={"quantity_complete": 10},
         headers=headers_for(operator),
     )
+    assert floor.status_code == status.HTTP_409_CONFLICT, floor.text
+    assert "exceeds the 6 good recorded" in floor.json()["detail"]
+
+    comp = client.post(
+        f"/api/v1/work-orders/operations/{op.id}/complete",
+        params={"quantity_complete": 10, "quantity_override_reason": "counted 10 at the bench"},
+        headers=headers_for(supervisor),
+    )
     assert comp.status_code == status.HTTP_200_OK, comp.text
+    assert comp.json()["message"] == "Progress updated"
     db_session.expire_all()
     op_row = db_session.get(WorkOrderOperation, op.id)
     assert op_row.status == OperationStatus.IN_PROGRESS

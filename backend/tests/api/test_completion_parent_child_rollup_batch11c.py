@@ -25,7 +25,7 @@ Covered:
 - (d) tenant isolation -- a child/parent in another company is never picked up.
 """
 
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 import pytest
 from fastapi import status
@@ -37,7 +37,6 @@ from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.operational_event import OperationalEvent
 from app.models.part import Part
-from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import (
@@ -51,6 +50,7 @@ from app.services.work_order_state_service import (
     find_parent_to_advance,
     incomplete_child_work_orders,
 )
+from tests.api.completion_test_helpers import seed_recorded_good
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -504,26 +504,12 @@ def test_last_laser_child_via_shop_floor_complete_signals_parent(client: TestCli
     )
     child_op = make_op(db_session, child, wc, sequence=10)
     # Floor completion requires a labor record on the operation (an operator cannot
-    # book work nobody clocked). A CLOSED, zero-quantity entry is the shape the kiosk
-    # leaves behind -- it clocks OUT before completing -- and it is inert here: the
-    # handler's auto-close loop only touches entries with clock_out IS NULL, so this
-    # one is never credited the completion delta and the parent-rollup assertions
-    # below measure exactly what they measured before the gate existed.
-    db_session.add(
-        TimeEntry(
-            user_id=operator.id,
-            work_order_id=child.id,
-            operation_id=child_op.id,
-            work_center_id=wc.id,
-            entry_type=TimeEntryType.RUN,
-            clock_in=datetime.utcnow() - timedelta(hours=2),
-            clock_out=datetime.utcnow() - timedelta(hours=1),
-            duration_hours=1.0,
-            quantity_produced=0,
-            company_id=COMPANY_A,
-        )
-    )
-    db_session.commit()
+    # book work nobody clocked) and, since owner ruling 1, books only the good the floor
+    # recorded. A CLOSED entry carrying the 4 is the shape the kiosk leaves behind -- it
+    # clocks OUT with its count before completing -- and the handler's auto-close loop
+    # never touches it, so the parent-rollup assertions below measure exactly what they
+    # measured before.
+    seed_recorded_good(db_session, child_op, 4, operator)
 
     resp = client.post(
         f"/api/v1/shop-floor/operations/{child_op.id}/complete",
