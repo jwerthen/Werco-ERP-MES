@@ -3202,12 +3202,15 @@ async def _run_laser_nest_import(
 
                 if pre_import_wo_values is not None:
                     # Audit the WO-level effect of the (re)import on an EXISTING
-                    # laser WO: status forced to RELEASED, quantity_complete /
-                    # quantity_scrapped zeroed, quantity_ordered re-derived to
-                    # the package's total planned runs. log_update self-suppresses
-                    # when nothing actually changed (e.g. a classic child WO
-                    # freshly created by this very request), and only flushes, so
-                    # it commits atomically with the rebuild.
+                    # laser WO: status forced to RELEASED (an on-hold job kept on
+                    # hold), the release stamp written when it had none or was a
+                    # DRAFT, quantity_complete / quantity_scrapped zeroed,
+                    # quantity_ordered re-derived to the package's total planned
+                    # runs. A classic child WO freshly created by this very request
+                    # records its first release stamp here (it has no CREATE row of
+                    # its own). log_update self-suppresses when nothing actually
+                    # changed, and only flushes, so it commits atomically with the
+                    # rebuild.
                     audit.log_update(
                         resource_type="work_order",
                         resource_id=child_work_order.id,
@@ -3408,7 +3411,8 @@ async def import_standalone_laser_nest_package(
     """Import a nest package into a FRESH standalone laser-cutting work order.
 
     No parent work order and no part: the import creates a RELEASED
-    ``work_order_type='laser_cutting'`` WO with ``part_id`` NULL and
+    ``work_order_type='laser_cutting'`` WO (its release recorded as the importer's:
+    ``released_by`` / ``released_at``) with ``part_id`` NULL and
     ``quantity_ordered`` = total planned sheet runs, sets the package's
     ``child_work_order_id`` to it (``parent_work_order_id`` NULL), and attaches
     nest-PDF Documents to the created WO itself. Same request shape and audit
@@ -3460,6 +3464,12 @@ async def import_laser_nest_package(
     directly, no child is nested under it. See ``_run_laser_nest_import`` for
     the PDF confirm-and-commit vs legacy CNC paths and the audit contract.
 
+    The laser work order is set RELEASED, with the release recorded as the
+    caller's when it was a draft or carried no release stamp (an existing stamp is
+    kept). A laser work order that is ON HOLD stays on hold: its rebuilt nests are
+    refused by clock-in and every start verb until the hold is lifted
+    (``POST /work-orders/{id}/resume``).
+
     ``sheet_match_provenance`` is the same observational, audit-only breadcrumb
     documented on the standalone import: it never resolves anything and never
     creates a tie.
@@ -3500,6 +3510,10 @@ def create_manual_laser_nest_endpoint(
     ``laser_cutting`` (e.g. a standalone nest WO) -- the nest is appended to it
     directly. Delegates the state change to ``create_manual_laser_nest``.
     Untouched by, and does not touch, the import flow.
+
+    The laser work order is set RELEASED the same way the import does (release
+    recorded as the caller's when it was a draft or unstamped); one that is ON
+    HOLD stays on hold, so the new nest cannot be started until the hold is lifted.
 
     An optional ``material_part_id`` ties the created nest's operation to a stock
     material part (``qty_per_run`` defaults to 1.0), so that material is deducted when

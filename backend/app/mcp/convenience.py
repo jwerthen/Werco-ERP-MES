@@ -87,8 +87,9 @@ STATUS_WRITES_WITH_A_REAL_VERB: Mapping[str, str] = {
     "in_progress": "work_orders_start_work_order",
 }
 RELEASE_STAMP_NOTE = (
-    "released_at / released_by still carry the stamp the route wrote when it created the laser work order "
-    "RELEASED; release_work_order re-stamps them when the planner releases it."
+    "released_at / released_by still carry the release the route recorded when it put the laser work order "
+    "RELEASED (the caller's, for a new or previously-DRAFT job; an earlier stamp is kept); release_work_order "
+    "re-stamps them when the planner releases it."
 )
 # The generated tool that lifts a WORK-ORDER hold (POST /work-orders/{id}/resume). Starting
 # refuses a held job, and update_work_order refuses status in_progress, so this is the door.
