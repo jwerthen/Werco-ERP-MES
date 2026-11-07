@@ -582,7 +582,12 @@ _UPDATE_WORK_ORDER_SCHEMA: Dict[str, Any] = {
             "minimum": 0,
             "description": "Optimistic-lock version from the last read (get_work_order); a stale value is refused 409.",
         },
-        "quantity_ordered": {"type": "number", "exclusiveMinimum": 0},
+        "quantity_ordered": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Lowering it below the good + scrap an operation already accounted for is refused 409; "
+            "lower it only by units no operation has started.",
+        },
         "priority": {"type": "integer", "minimum": 1, "maximum": 10, "description": "1 = highest."},
         "status": {
             "type": "string",
