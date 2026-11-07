@@ -630,6 +630,14 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
     upstream_quantity_short: Optional[float] = None
     quantity_good_ceiling: Optional[float] = None
     quantity_unaccounted: Optional[float] = None
+    # Also injected by ``_enrich_work_order_operations``: on a POOLED work order, units an
+    # earlier whole-order operation declared short (NOT credited -- the client warns not to
+    # scrap them again); whether the operation has ANY TimeEntry; and its evidence-floored
+    # good. The office modal requires ``quantity_override_reason`` exactly when the server
+    # does: good above ``quantity_recorded_good`` on an operation ``has_labor_evidence``.
+    upstream_short_uncredited: Optional[float] = None
+    has_labor_evidence: Optional[bool] = None
+    quantity_recorded_good: Optional[float] = None
 
     # WHY this operation is held, WHO held it and WHEN -- so the Work Order page can disclose the
     # reason BEFORE anyone clicks Clear Hold. NOT an ORM column: injected as an in-memory attr by

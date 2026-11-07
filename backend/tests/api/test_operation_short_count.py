@@ -145,7 +145,10 @@ class TestOperationAccountingValueObject:
             (10, 8, 2, 0, 0, 10, 0, 2, False, True),
             (10, 10, 2, 0, 0, 10, 0, 0, True, True),  # scrap-then-replace: full count, no short
             (10, 8, 0, 2, 0, 8, 0, 0, True, True),  # upstream declared 2 -> 8 is a full count
-            (10, 9, 0, 0, 1, 9, 0, 0, True, True),  # soft feed: 9 reached it
+            # soft feed: 9 reached it -- an EXPLICIT close accounts for it, but the implicit
+            # auto-complete waits for the hard ceiling (replenished components may still come)
+            (10, 9, 0, 0, 1, 9, 0, 0, False, True),
+            (10, 10, 0, 2, 0, 8, 0, 0, False, True),  # over the ceiling: never auto-completed
             (10, 10, 0, 0, 1, 9, 0, 0, True, True),  # replenished components: good may exceed received
             (0, 0, 0, 0, 0, 0, 0, 0, False, False),  # no target: never full, never accounted
             (10, 0, 0, 10, 0, 0, 0, 0, False, True),  # nothing reached it
@@ -779,24 +782,34 @@ class TestFloorCloseSuccesses:
         assert a_row.clock_out is not None and b_row.clock_out is not None
 
     @pytest.mark.parametrize("approved", [False, True])
-    def test_scrap_lands_on_the_callers_unapproved_entry_only(self, client, db_session, approved):
+    def test_scrap_lands_on_the_callers_unapproved_entry_and_an_approved_open_one_refuses(
+        self, client, db_session, approved
+    ):
         lead = make_user(db_session, role=UserRole.OPERATOR)
         wc = make_work_center(db_session)
         _, (op,) = make_routing(db_session, work_centers=[wc], statuses=[OPEN])
         entry = add_entry(db_session, lead, op, produced=8, open_entry=True, approved=approved)
         set_op(db_session, op, quantity_complete=8)
 
+        before = _snapshot(db_session, op.id)
         resp = _complete(client, op, lead, quantity_scrapped=2, scrap_reason="crack")
+        if approved:
+            # Approval is the immutability boundary: a short close clocks out every open
+            # entry, so an APPROVED open one is refused before anything is written -- not
+            # closed with a new clock_out and duration under the supervisor's signature.
+            assert resp.status_code == 409, resp.text
+            assert "APPROVED time entry still open on Op 10" in resp.json()["detail"]
+            assert _snapshot(db_session, op.id) == before
+            assert op_audit_rows(db_session, op.id) == []
+            row = fresh(db_session, TimeEntry, entry.id)
+            assert row.clock_out is None and float(row.quantity_scrapped or 0) == 0
+            return
         assert resp.status_code == 200, resp.text
         row = fresh(db_session, TimeEntry, entry.id)
         (audit_row,) = [r for r in op_audit_rows(db_session, op.id) if r.action == "COMPLETE_OPERATION"]
-        if approved:
-            assert float(row.quantity_scrapped or 0) == 0, "approval is the immutability boundary"
-            assert audit_row.extra_data["scrap_attributed_to_time_entry_id"] is None
-        else:
-            assert float(row.quantity_scrapped or 0) == 2
-            assert row.scrap_reason == "crack"
-            assert audit_row.extra_data["scrap_attributed_to_time_entry_id"] == entry.id
+        assert float(row.quantity_scrapped or 0) == 2
+        assert row.scrap_reason == "crack"
+        assert audit_row.extra_data["scrap_attributed_to_time_entry_id"] == entry.id
         assert fresh(db_session, WorkOrderOperation, op.id).quantity_scrapped == 2
 
     def test_a_downstream_stage_closes_at_what_reached_it(self, client, db_session):

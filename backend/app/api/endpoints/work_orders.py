@@ -132,6 +132,7 @@ from app.services.material_consumption_service import (
 from app.services.material_tie_part_gate import assert_part_is_tieable_material
 from app.services.migration_import_service import import_open_work_orders
 from app.services.operation_action_gates import (
+    API_TOKEN_COUNT_JUDGMENT,
     API_TOKEN_SHORT_CLOSE,
     COMPLETION_AUDIT_UNAVAILABLE,
     MSG_ALREADY_COMPLETE,
@@ -142,18 +143,25 @@ from app.services.operation_action_gates import (
     MSG_SCRAP_REASON_OR_CODE_REQUIRED,
     MSG_WORK_ORDER_NOT_RELEASED,
     MSG_WORK_ORDER_ON_HOLD,
+    accounting_strand_message,
+    approved_open_entry_message,
     ceiling_exceeded_message,
     completed_counts_locked_message,
     force_complete_exceeds_physical_message,
     force_complete_exceeds_recorded_message,
     force_complete_unaccounted_message,
     office_no_change_message,
+    open_count_above_ceiling_message,
+    open_count_above_recorded_message,
     operation_blocked_by_predecessors,
     operation_has_labor_evidence,
     others_clocked_in_message,
     override_reason_required_message,
     quantity_ordered_floor_message,
+    quantity_ordered_raise_message,
+    sequencing_flip_blocked_message,
     serialized_short_message,
+    stale_scrap_message,
     work_order_start_blocker,
 )
 
@@ -198,10 +206,12 @@ from app.services.work_order_state_service import (
     StageFigures,
     StatusTransition,
     WorkOrderStateError,
+    accounting_change_strands,
     accounting_extra_data,
     active_work_order_operations,
     apply_work_order_resume,
     begin_operation_progress,
+    completed_chain_operation,
     demote_operations_for_sequencing,
     finalize_operation_completion,
     find_parent_to_advance,
@@ -214,11 +224,15 @@ from app.services.work_order_state_service import (
     quantity_ordered_floor,
     reconcile_work_orders_from_completion_evidence,
     record_short_declaration,
+    recorded_good_from_evidence,
     release_first_ready_operation,
     report_reconcile_leg_failure,
+    rescale_restated_operation_targets,
     resolve_absolute_operation_quantity,
+    sequencing_flip_conflict,
     stage_accounting,
     sync_work_order_quantity_complete,
+    uncredited_upstream_by_operation,
     validate_operation_quantity,
     work_order_completion_bounds_from_evidence,
     work_order_operation_progress,
@@ -983,7 +997,10 @@ def _inject_short_count_figures(work_order: WorkOrder, labor_evidence: dict) -> 
     upstream close in its chain declared them short), ``quantity_good_ceiling`` (the most good
     the server accepts) and ``quantity_unaccounted`` (received units neither good nor
     scrapped), from ``stage_accounting`` over the ACTIVE operations -- the one implementation.
-    ``quantity_short_declared`` is the column itself.
+    ``quantity_short_declared`` is the column itself. ``upstream_short_uncredited`` (a POOLED
+    work order's earlier declared short, not credited), ``has_labor_evidence`` and
+    ``quantity_recorded_good`` (the floor's evidence-floored good) let the office modal ask
+    for exactly what the server will.
 
     Per work order: ``quantity_deliverable`` (the most the floor's recorded good supports) and
     ``quantity_accounted_loss`` (units the floor already accounted as lost), from the SAME
@@ -991,6 +1008,7 @@ def _inject_short_count_figures(work_order: WorkOrder, labor_evidence: dict) -> 
     """
     active_operations = active_work_order_operations(work_order)
     figures = stage_accounting(work_order, active_operations)
+    uncredited = uncredited_upstream_by_operation(work_order, active_operations)
     for op in work_order.operations:
         figure = figures.get(op.id, StageFigures()) if op.id is not None else StageFigures()
         acct = OperationAccounting(
@@ -1003,6 +1021,13 @@ def _inject_short_count_figures(work_order: WorkOrder, labor_evidence: dict) -> 
         op.upstream_quantity_short = acct.upstream_short
         op.quantity_good_ceiling = acct.ceiling
         op.quantity_unaccounted = acct.unaccounted
+        op.upstream_short_uncredited = uncredited.get(op.id, 0.0) if op.id is not None else 0.0
+        # The floor's own labor record, from the batched evidence read: the office modal asks
+        # for quantity_override_reason exactly when the server would (good above
+        # ``quantity_recorded_good`` on an operation with ``has_labor_evidence``) -- no guess.
+        evidence = labor_evidence.get(op.id) if op.id is not None else None
+        op.has_labor_evidence = bool(evidence is not None and evidence.entries > 0)
+        op.quantity_recorded_good = recorded_good_from_evidence(work_order, op, evidence)
     bounds = work_order_completion_bounds_from_evidence(work_order, active_operations, labor_evidence)
     work_order.quantity_deliverable = bounds.deliverable
     work_order.quantity_accounted_loss = bounds.floor_loss
@@ -3962,16 +3987,39 @@ def update_work_order(
     # everything downstream, after the fact. Judged against the CURRENT order, before the
     # setattr loop writes the new one. Pieces never started are the legitimate case --
     # lowering by those is allowed. Laser nests (planned_runs) are untouched by design.
-    if "quantity_ordered" in update_data and update_data["quantity_ordered"] is not None:
+    old_quantity_ordered = float(work_order.quantity_ordered or 0)
+    quantity_ordered_changed = (
+        "quantity_ordered" in update_data
+        and update_data["quantity_ordered"] is not None
+        and abs(float(update_data["quantity_ordered"]) - old_quantity_ordered) > QTY_EPSILON
+    )
+    if quantity_ordered_changed:
         new_quantity_ordered = float(update_data["quantity_ordered"])
-        if new_quantity_ordered < float(work_order.quantity_ordered or 0) - QTY_EPSILON:
-            ordered_floor, floor_operation = quantity_ordered_floor(
-                work_order, active_work_order_operations(work_order)
-            )
+        if new_quantity_ordered < old_quantity_ordered:
+            active_ops = active_work_order_operations(work_order)
+            ordered_floor, floor_operation = quantity_ordered_floor(work_order, active_ops)
             if floor_operation is not None and new_quantity_ordered < ordered_floor - QTY_EPSILON:
                 raise HTTPException(
                     status_code=409,
                     detail=quantity_ordered_floor_message(floor_operation, ordered_floor),
+                )
+            # This PR's credential rule: lowering the order once work was recorded against it
+            # decides that the missing pieces were never started -- the ruling-1 judgment
+            # behind every short close, so a person makes it, not a standing API token.
+            if is_api_token_credential(current_user) and any(
+                float(op.quantity_complete or 0) > QTY_EPSILON
+                or float(op.quantity_scrapped or 0) > QTY_EPSILON
+                or op.status in (OperationStatus.IN_PROGRESS, OperationStatus.COMPLETE)
+                for op in active_ops
+            ):
+                raise HTTPException(status_code=403, detail=API_TOKEN_COUNT_JUDGMENT)
+        else:
+            # RAISING it re-targets every whole-order and component stage, so one that already
+            # COMPLETED at the old order would become a completed operation that is short.
+            completed = completed_chain_operation(work_order, active_work_order_operations(work_order))
+            if completed is not None:
+                raise HTTPException(
+                    status_code=409, detail=quantity_ordered_raise_message(completed, old_quantity_ordered)
                 )
 
     # 081: remember which way sequencing moved BEFORE the setattr loop overwrites it.
@@ -3982,6 +4030,29 @@ def update_work_order(
         and bool(update_data["sequential_operations"])
         and not bool(work_order.sequential_operations)
     )
+    sequencing_turned_off = (
+        "sequential_operations" in update_data
+        and not bool(update_data["sequential_operations"])
+        and bool(work_order.sequential_operations)
+    )
+
+    # Owner ruling 1: whole-order upstream credit is read at the work order's CURRENT
+    # setting, so a flip after a stage was closed short would re-interpret that declaration
+    # -- withdraw the credit the later stages closed on (OFF), or credit a declaration the
+    # later stages already covered themselves (ON, once one of them completed). Refused
+    # before any write; with nothing declared (every flip before this rule) nothing changes.
+    if (sequencing_turned_on or sequencing_turned_off) and not is_laser_dispatch_work_order(work_order):
+        flip_ops = active_work_order_operations(work_order)
+        flip_conflict = sequencing_flip_conflict(work_order, flip_ops, turning_on=sequencing_turned_on)
+        if flip_conflict is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=sequencing_flip_blocked_message(*flip_conflict, turning_on=sequencing_turned_on),
+            )
+        if sequencing_turned_on:
+            strand = accounting_change_strands(work_order, flip_ops, main_credit=True)
+            if strand is not None:
+                raise HTTPException(status_code=409, detail=accounting_strand_message(strand))
 
     # Refuse BEFORE the first setattr, so a refused flip leaves the row untouched.
     # Every completion verb re-evaluates the predecessor gate at action time, so an
@@ -4016,6 +4087,20 @@ def update_work_order(
 
     for field, value in update_data.items():
         setattr(work_order, field, value)
+
+    # Whole-order targets the new-work-order wizard restated as component_quantity move
+    # with the order; otherwise they would keep demanding the old count -- after ruling 1 an
+    # uncloseable target, since never-started units are never scrap. Each move is audited.
+    retargeted_operations = (
+        rescale_restated_operation_targets(
+            work_order,
+            active_work_order_operations(work_order),
+            old_quantity_ordered,
+            float(work_order.quantity_ordered),
+        )
+        if quantity_ordered_changed
+        else []
+    )
 
     # Turning sequencing ON must fix THIS work order, not just the next one. Every
     # promotion seam is forward-only, so operations the pooled rule already promoted
@@ -4053,6 +4138,26 @@ def update_work_order(
                 # the demotion beside the operation's completion history.
                 "operation_number": demoted_op.operation_number,
                 "sequence": demoted_op.sequence,
+            },
+        )
+
+    if retargeted_operations:
+        db.flush()
+    for retargeted_op, old_target in retargeted_operations:
+        audit.log_update(
+            resource_type="work_order_operation",
+            resource_id=retargeted_op.id,
+            resource_identifier=f"{work_order.work_order_number} OP{retargeted_op.sequence}",
+            old_values={"component_quantity": old_target},
+            new_values={"component_quantity": float(retargeted_op.component_quantity or 0)},
+            description=(
+                f"Operation target moved with work order {work_order.work_order_number}'s quantity: "
+                f"{old_target:g} -> {float(retargeted_op.component_quantity or 0):g}"
+            ),
+            extra_data={
+                "transition": "work_order_quantity_changed",
+                "operation_number": retargeted_op.operation_number,
+                "sequence": retargeted_op.sequence,
             },
         )
 
@@ -5085,6 +5190,16 @@ def complete_work_order(
         (op for op in operations if op.id == completion_bounds.binding_operation_id),
         None,
     )
+    completing_short = ordered_qty > 0 and requested_complete < ordered_qty - QTY_EPSILON
+    # This PR's credential rule, FIRST among the quantity refusals so a standing API token is
+    # never told to add a scrap reason or an override reason only to be refused for it next:
+    # completing short and booking more than the floor recorded are both judgments a named
+    # person makes (a crew-station badge token is a person and passes).
+    if is_api_token_credential(current_user) and (completing_short or asserted_above_recorded):
+        raise HTTPException(
+            status_code=403,
+            detail=API_TOKEN_SHORT_CLOSE if completing_short else API_TOKEN_COUNT_JUDGMENT,
+        )
     if asserted_above_recorded and override_reason is None:
         raise HTTPException(
             status_code=409,
@@ -5101,6 +5216,17 @@ def complete_work_order(
                 max(0.0, ordered_qty - completion_bounds.physical_max),
             ),
         )
+    # What the floor already reported LOST (declared shorts, scrap covering a shortfall) can
+    # never also be finished: quantity + that loss may not exceed the order, reason or not.
+    if ordered_qty > 0 and requested_complete + completion_bounds.hard_loss > ordered_qty + QTY_EPSILON:
+        raise HTTPException(
+            status_code=400,
+            detail=force_complete_exceeds_physical_message(
+                requested_complete,
+                max(0.0, ordered_qty - completion_bounds.hard_loss),
+                completion_bounds.hard_loss,
+            ),
+        )
     effective_scrap_claim = (
         float(quantity_scrapped) if quantity_scrapped is not None else float(work_order.quantity_scrapped or 0)
     )
@@ -5111,9 +5237,6 @@ def complete_work_order(
             status_code=409,
             detail=force_complete_unaccounted_message(unaccounted_short, ordered_qty, requested_complete, covered_loss),
         )
-    completing_short = ordered_qty > 0 and requested_complete < ordered_qty - QTY_EPSILON
-    if completing_short and is_api_token_credential(current_user):
-        raise HTTPException(status_code=403, detail=API_TOKEN_SHORT_CLOSE)
 
     # S2 (settled, user decision): this privileged override stays UNGATED by the
     # process-sheet steps gate — it is an audited EVIDENCE-OVERRIDE. Make the bypass
@@ -5510,8 +5633,10 @@ def update_operation(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Update an operation. The counts and status of a COMPLETE operation are its completion
-    record and are refused 409 here; correct them with reduce_operation_production_office.
+    """Update an operation. A COMPLETE operation's good count and status are its completion
+    record and are refused 409 here (scrap may still rise, with a reason); correct good with
+    reduce_operation_production_office. Raising an open operation's good past what can reach
+    it, or past the floor's labor count, is refused 409; an API token may not edit counts (403).
 
     Requires the operation's current ``version`` (stale -> **409**). Also returns
     **409** when setting ``status`` to COMPLETE on a not-yet-complete operation:
@@ -5519,9 +5644,18 @@ def update_operation(
     tied-material consumption included) that this generic update would skip — use
     ``POST /work-orders/operations/{id}/complete`` instead.
 
-    On a COMPLETE operation, changing ``quantity_complete``, ``quantity_scrapped``,
-    ``scrap_reason`` or ``status`` is refused **409**: those are the completion record. Correct
-    the good count with reduce_operation_production_office, which can reopen the operation.
+    On a COMPLETE operation, changing ``quantity_complete`` or ``status``, or LOWERING
+    ``quantity_scrapped``, is refused **409**: those are the completion record. Correct the good
+    count with reduce_operation_production_office, which can reopen the operation. Scrap found
+    after the close may be ADDED (with ``scrap_reason``) and the reason text corrected -- neither
+    can make it short -- written as REQUIRED audit evidence (**503**, nothing saved, when it
+    cannot be).
+
+    On an OPEN operation, raising ``quantity_complete`` above what can reach it after an
+    upstream short close, or above the good the floor's labor record shows (when anyone ever
+    clocked in), is refused **409** -- the office Complete's ``quantity_override_reason`` is the
+    door for the latter. A standing API token may not change ``quantity_complete`` /
+    ``quantity_scrapped`` / ``scrap_reason`` at all (**403**).
 
     Setting ``status`` to IN_PROGRESS starts the operation, so it is refused **409**
     with the start gate's text when the work order is a draft ("release first":
@@ -5565,14 +5699,59 @@ def update_operation(
     # bound at all, which could make a completed operation short after the fact. Refused
     # before any write; re-sending a value the row already holds is not a change. Counts
     # are corrected through reduce-production, which reopens the operation when it must.
+    count_changes = [
+        field
+        for field in ("quantity_complete", "quantity_scrapped", "scrap_reason")
+        if field in update_data and _differs_from_stored(update_data[field], getattr(operation, field))
+    ]
+    # This PR's credential rule: hand-editing an operation's counts is a judgment about
+    # where pieces went -- a person signed in to the app, not a standing API token.
+    if count_changes and is_api_token_credential(current_user):
+        raise HTTPException(status_code=403, detail=API_TOKEN_COUNT_JUDGMENT)
+    # A COMPLETE operation's good count and status may NOT change here. Scrap may still
+    # RISE (with the reason the schema already requires) and its reason text may be
+    # corrected: neither can make a completed operation short, and scrap found after an
+    # office close has no other operation-level door (the clock-out refuses pieces on a
+    # completed operation). Lowering scrap could make it short, so it stays refused. Such a
+    # correction is REQUIRED audit evidence below.
+    completed_scrap_correction = False
     if operation.status == OperationStatus.COMPLETE:
         locked_changes = [
             field
-            for field in ("quantity_complete", "quantity_scrapped", "scrap_reason", "status")
+            for field in ("quantity_complete", "status")
             if field in update_data and _differs_from_stored(update_data[field], getattr(operation, field))
         ]
+        if (
+            "quantity_scrapped" in count_changes
+            and float(update_data["quantity_scrapped"] or 0) < float(operation.quantity_scrapped or 0) - QTY_EPSILON
+        ):
+            locked_changes.append("quantity_scrapped")
         if locked_changes:
             raise HTTPException(status_code=409, detail=completed_counts_locked_message(operation))
+        completed_scrap_correction = bool(count_changes)
+    elif "quantity_complete" in count_changes and update_data["quantity_complete"] is not None:
+        # An OPEN operation: this generic PUT may not raise good past the rules every
+        # dedicated verb enforces -- above what can reach the operation after an upstream
+        # short close (the header and FG receipt would book units that never existed), or
+        # above the floor's labor record (INT7: that assertion needs the office Complete's
+        # quantity_override_reason, which keeps the reason on the record). Lowering, and an
+        # operation nobody clocked into, are unchanged.
+        requested_good = float(update_data["quantity_complete"])
+        if requested_good > float(operation.quantity_complete or 0) + QTY_EPSILON and operation.work_order is not None:
+            put_acct = operation_accounting(operation.work_order, operation, good=requested_good)
+            if put_acct.exceeds_ceiling:
+                raise HTTPException(
+                    status_code=409, detail=open_count_above_ceiling_message(operation, requested_good, put_acct)
+                )
+            if operation_has_labor_evidence(db, operation.id, company_id):
+                recorded_good = resolve_absolute_operation_quantity(
+                    db, operation, 0.0, operation_target_quantity(operation, operation.work_order)
+                )
+                if requested_good > recorded_good + QTY_EPSILON:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=open_count_above_recorded_message(operation, requested_good, recorded_good),
+                    )
 
     # Refuse status=COMPLETE via this generic PUT: it would be a FIFTH completion path
     # outside the four wired handlers -- no ``finalize_operation_completion``, no
@@ -5700,13 +5879,39 @@ def update_operation(
     # atomically with the change (AuditService.log() only flushes; the request session
     # never commits on teardown).
     db.flush()
-    audit.log_update(
-        resource_type="work_order_operation",
-        resource_id=operation.id,
-        resource_identifier=operation.operation_number,
-        old_values=old_values,
-        new_values=operation,
-    )
+    if completed_scrap_correction:
+        # Scrap recorded (or its reason corrected) on a COMPLETE operation changes its
+        # completion record: REQUIRED evidence, so it never lands without its row (503 and
+        # nothing saved otherwise).
+        with required_audit(db, COMPLETION_AUDIT_UNAVAILABLE):
+            audit.log_required(
+                action=audit.ACTIONS["UPDATE"],
+                resource_type="work_order_operation",
+                resource_id=operation.id,
+                resource_identifier=operation.operation_number,
+                description=(
+                    f"Corrected scrap on completed operation {operation.operation_number}: "
+                    f"{float(old_values.get('quantity_scrapped') or 0):g} -> {float(operation.quantity_scrapped or 0):g}"
+                    f" ({operation.scrap_reason or 'no reason'})"
+                ),
+                old_values={
+                    "quantity_scrapped": float(old_values.get("quantity_scrapped") or 0),
+                    "scrap_reason": old_values.get("scrap_reason"),
+                },
+                new_values={
+                    "quantity_scrapped": float(operation.quantity_scrapped or 0),
+                    "scrap_reason": operation.scrap_reason,
+                },
+                extra_data={"transition": "completed_operation_scrap_correction"},
+            )
+    else:
+        audit.log_update(
+            resource_type="work_order_operation",
+            resource_id=operation.id,
+            resource_identifier=operation.operation_number,
+            old_values=old_values,
+            new_values=operation,
+        )
     dispatch_changed_wc_ids: list = []
     if dispatch_before is not None:
         # Notice seam: AFTER the flush above (so the after-snapshot sees the move)
@@ -6110,8 +6315,11 @@ def complete_operation(
     **422** (an operation nobody clocked into needs no reason -- desk cleanup stays reason-free,
     and there is deliberately no labor gate here, unlike the shop-floor twin). On a SHORT close
     only: an API token **403**; anyone still clocked in without ``acknowledge_open_entries`` **409**
-    naming them; a serialized work order with missing per-serial step records **409**. Then
-    required process-sheet steps **409** ``STEPS_INCOMPLETE``.
+    naming them; an APPROVED open time entry **409**; a serialized work order with missing
+    per-serial step records **409**; a later stage already holding more good than the declaration
+    lets through **409**. Then required process-sheet steps **409** ``STEPS_INCOMPLETE``. A scrap
+    rise entered against a good count below what the floor has since recorded is refused **409**
+    (stale screen), and a standing API token may not record good above the floor's count (**403**).
 
     Nothing to change (same good, no scrap rise, still short) is a **200** "No change" that writes
     nothing -- not even the auto-start. A short close with ``acknowledge_open_entries`` clocks the
@@ -6260,12 +6468,23 @@ def complete_operation(
     # nobody ever clocked into has no floor count to exceed: desk cleanup of never-clocked
     # work stays reason-free (the owner's floor-requires-labor / office-exempt asymmetry).
     recorded_good = resolve_absolute_operation_quantity(db, operation, 0.0, target_qty)
+    # INT5 (office): a scrap rise submitted with a good count BELOW what the floor has since
+    # recorded was worked out on a stale screen -- the scrap would cover units that are now
+    # good. Refused rather than over-stating scrap (and the tied-material consumption read
+    # from it). A rise with a current count is still free to record replacement scrap.
+    if scrap_delta > QTY_EPSILON and quantity_complete < recorded_good - QTY_EPSILON:
+        raise HTTPException(status_code=409, detail=stale_scrap_message(operation, quantity_complete, recorded_good))
     override_reason = (quantity_override_reason or "").strip() or None
     asserted_above_recorded = (
         resolved_quantity > recorded_good + QTY_EPSILON
         and operation.id is not None
         and operation_has_labor_evidence(db, operation.id, company_id)
     )
+    # This PR's credential rule: booking more good than the floor counted is a judgment a
+    # named person makes, like a short close -- refused for a standing API token before the
+    # reason is even asked for (a crew-station badge token is a person and passes).
+    if asserted_above_recorded and is_api_token_credential(current_user):
+        raise HTTPException(status_code=403, detail=API_TOKEN_COUNT_JUDGMENT)
     if asserted_above_recorded and override_reason is None:
         raise HTTPException(status_code=422, detail=override_reason_required_message(operation, recorded_good))
 
@@ -6318,6 +6537,11 @@ def complete_operation(
                     operation, [name or "Another operator" for name in names], office=True
                 ),
             )
+        # Approval is the immutability boundary: the acknowledged close writes clock_out and
+        # duration on every open entry, so an APPROVED one is refused before any write.
+        approved_open = [entry for entry in open_entries if entry.approved is not None]
+        if approved_open:
+            raise HTTPException(status_code=409, detail=approved_open_entry_message(operation, approved_open))
         # INT6: scrapped serials can never satisfy the per-serial step gate, and there is
         # no serial-level scrap record yet -- refuse explicitly rather than with the
         # generic STEPS_INCOMPLETE. Force-complete stays the supervisor path.
@@ -6333,6 +6557,19 @@ def complete_operation(
                     status_code=409,
                     detail=serialized_short_message(operation, acct.closing_short, missing_serials),
                 )
+        # Declaring this short lowers what can reach the later stages of its chain (and the
+        # assembly a component chain feeds): refused when one already holds more good.
+        strand = accounting_change_strands(
+            work_order,
+            active_work_order_operations(work_order),
+            changed=operation,
+            status=OperationStatus.COMPLETE,
+            quantity_short_declared=acct.closing_short,
+            quantity_complete=resolved_quantity,
+            quantity_scrapped=new_scrap,
+        )
+        if strand is not None:
+            raise HTTPException(status_code=409, detail=accounting_strand_message(strand))
 
     # Process-sheet completion gate (PR 3): IDENTICAL to the shop-floor twin — an
     # ungated office/admin completion path would let anyone bypass the objective-

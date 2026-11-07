@@ -25,6 +25,7 @@ from app.models.time_entry import TimeEntry
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.services.work_order_state_service import (
     TERMINAL_WO_STATUSES,
+    AccountingStrand,
     OperationAccounting,
     has_incomplete_predecessors,
     is_laser_dispatch_work_order,
@@ -100,6 +101,14 @@ MSG_DRAFT_CANNOT_BE_HELD = (
 # close a full count but never closes work short: declaring where missing pieces went is
 # a judgment a named person makes. A crew-station badge token is a person and may.
 API_TOKEN_SHORT_CLOSE = "Closing work short must be done by a person signed in to the app, not an API token."
+# The same rule's other judgment writes about the count (this PR's own reading of "standing
+# API tokens may not make judgment writes"; owner confirmation of the combined reading is
+# pending): booking more good than the floor recorded, hand-editing an operation's counts,
+# and lowering the order once work has been recorded against it.
+API_TOKEN_COUNT_JUDGMENT = (
+    "Recording more good than the floor counted, editing an operation's counts, or lowering the order "
+    "after work was recorded must be done by a person signed in to the app, not an API token."
+)
 # The floor completion audit row is REQUIRED evidence on a short close or a scrap
 # declaration (``AuditService.log_required``); when it cannot be written nothing is saved.
 COMPLETION_AUDIT_UNAVAILABLE = "The completion audit could not be saved; nothing was changed. Please retry."
@@ -141,6 +150,16 @@ def short_count_message(operation: WorkOrderOperation, acct: OperationAccounting
     )
     if acct.upstream_short > 1e-9:
         message += f" ({_qty_text(acct.upstream_short)} never reached it — closed short upstream.)"
+    if acct.uncredited_upstream > 1e-9:
+        # A POOLED work order: the whole-order chain gets no upstream credit (owner decision),
+        # so the loss an earlier stage declared is counted against this one too. Scrapping it
+        # here would record the same loss twice and consume tied material for runs that never
+        # happened -- say so, and name the remedy (the audited sequencing flip credits it).
+        message += (
+            f" {_qty_text(acct.uncredited_upstream)} were already closed short at an earlier operation, but this "
+            "work order's operations are not sequenced, so that loss is not credited here. Do not report pieces "
+            "you never received as scrap — ask a supervisor to turn on Sequential operations for this work order."
+        )
     return message
 
 
@@ -200,7 +219,41 @@ def completed_operation_clock_out_message(operation: WorkOrderOperation) -> str:
     """409: a quantity-carrying clock-out on an operation someone already completed."""
     return (
         f"{operation_label(operation)} is already complete; clock out with 0 pieces and tell a supervisor about any "
-        "extra pieces."
+        "extra pieces (a supervisor can add scrap to a completed operation, with a reason, from the work order)."
+    )
+
+
+def good_above_ceiling_message(operation: WorkOrderOperation, acct: OperationAccounting) -> str:
+    """409: a close of an operation whose recorded good is above what can have reached it."""
+    return (
+        f"{operation_label(operation)} records {_qty_text(acct.good)} good, but only {_qty_text(acct.ceiling)} can "
+        f"have reached it — {_qty_text(acct.chain_upstream)} were closed short upstream. Correct the count at the "
+        "desk (Correct count / reduce-production) before closing it."
+    )
+
+
+def accounting_strand_message(strand: AccountingStrand) -> str:
+    """409: the change would strand another operation's accounting (``accounting_change_strands``)."""
+    label = operation_label(strand.operation)
+    if strand.reason == "unaccounted":
+        return f"{label} is already complete with these units and would no longer add up; correct {label} first."
+    return (
+        f"{label} already records {_qty_text(strand.after.good)} good, more than the {_qty_text(strand.after.ceiling)} "
+        f"that could reach it after this change; correct {label} first (Correct count / reduce-production)."
+    )
+
+
+def approved_open_entry_message(operation: WorkOrderOperation, entries: Sequence[TimeEntry]) -> str:
+    """409: a short close would clock out a time entry a supervisor already approved."""
+    names = []
+    for entry in entries:
+        user = getattr(entry, "user", None)
+        name = " ".join(part for part in (getattr(user, "first_name", None), getattr(user, "last_name", None)) if part)
+        names.append(name or "another operator")
+    return (
+        f"{_join_names(names)} {'has' if len(names) <= 1 else 'have'} an APPROVED time entry still open on "
+        f"{operation_label(operation)}; approval locks it, so closing short would rewrite signed-off labor. Unapprove "
+        "it (or have them clock out) first."
     )
 
 
@@ -217,6 +270,57 @@ MSG_SCRAP_REASON_OR_CODE_REQUIRED = (
 MSG_REOPEN_IS_OFFICE_ONLY = "reopen_operation is an office correction"
 # 503 when the reopen's REQUIRED audit rows cannot be written (nothing was changed).
 CORRECTION_AUDIT_UNAVAILABLE = "The correction audit could not be saved; nothing was changed. Please retry."
+
+
+def stale_scrap_message(operation: WorkOrderOperation, entered_good: float, recorded_good: float) -> str:
+    """409: the office raised scrap against a good count older than the one on record."""
+    return (
+        f"{operation_label(operation)} now records {_qty_text(recorded_good)} good, more than the "
+        f"{_qty_text(entered_good)} entered; the scrap was worked out against an older count. Refresh and re-enter."
+    )
+
+
+def open_count_above_ceiling_message(operation: WorkOrderOperation, quantity: float, acct: OperationAccounting) -> str:
+    """409: the generic operation PUT setting good above what can reach the operation."""
+    return (
+        f"quantity_complete ({_qty_text(quantity)}) exceeds the {_qty_text(acct.ceiling)} units that can reach "
+        f"{operation_label(operation)} — {_qty_text(acct.chain_upstream)} were closed short upstream."
+    )
+
+
+def open_count_above_recorded_message(operation: WorkOrderOperation, quantity: float, recorded: float) -> str:
+    """409: the generic operation PUT raising good above the floor's labor record."""
+    return (
+        f"quantity_complete ({_qty_text(quantity)}) is more than the {_qty_text(recorded)} counted on the floor for "
+        f"{operation_label(operation)}. Record the pieces through clock-out or Report production, or record them "
+        "from the office Complete with quantity_override_reason, which keeps the reason on the record."
+    )
+
+
+def quantity_ordered_raise_message(operation: WorkOrderOperation, ordered: float) -> str:
+    """409: ``PUT /work-orders/{id}`` raising the order after a stage completed at the old one."""
+    return (
+        f"{operation_label(operation)} is already complete at the order of {_qty_text(ordered)}; raising it would "
+        "leave a completed operation short. Open a new work order for the extra units."
+    )
+
+
+def sequencing_flip_blocked_message(
+    declaring: WorkOrderOperation, later: WorkOrderOperation, *, turning_on: bool
+) -> str:
+    """409: a ``sequential_operations`` flip would change what a declared short meant."""
+    short = _qty_text(float(declaring.quantity_short_declared or 0))
+    if turning_on:
+        return (
+            f"cannot switch this work order to sequential operations: {operation_label(declaring)} was closed {short} "
+            f"short and {operation_label(later)} has already completed under the current setting, so its counts "
+            "would no longer add up. Complete the work order from the office instead."
+        )
+    return (
+        f"cannot switch this work order off sequential operations: {operation_label(declaring)} was closed {short} "
+        f"short and {operation_label(later)} and the operations after it are credited with that; switching would "
+        "make them account for units that never reached them."
+    )
 
 
 def office_no_change_message(operation: WorkOrderOperation) -> str:

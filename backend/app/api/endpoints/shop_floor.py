@@ -4,6 +4,7 @@ import logging
 import math
 import os
 from collections import defaultdict
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from typing import Optional, Sequence, Union
 
@@ -127,11 +128,15 @@ from app.services.operation_action_gates import (
     MSG_OPERATION_ON_HOLD_NO_START,
     MSG_PREDECESSORS_INCOMPLETE,
     MSG_REOPEN_IS_OFFICE_ONLY,
+    MSG_SCRAP_REASON_OR_CODE_REQUIRED,
     MSG_WRONG_WORK_CENTER,
+    accounting_strand_message,
+    approved_open_entry_message,
     ceiling_exceeded_message,
     completed_operation_clock_out_message,
     exceeds_recorded_message,
     get_open_time_entry,
+    good_above_ceiling_message,
     operation_blocked_by_predecessors,
     operation_has_labor_evidence,
     others_clocked_in_message,
@@ -172,7 +177,9 @@ from app.services.work_order_state_service import (
     OperationAccounting,
     StatusTransition,
     WorkOrderStateError,
+    accounting_change_strands,
     accounting_extra_data,
+    active_work_order_operations,
     begin_operation_progress,
     finalize_operation_completion,
     find_parent_to_advance,
@@ -185,6 +192,7 @@ from app.services.work_order_state_service import (
     report_reconcile_leg_failure,
     resolve_absolute_operation_quantity,
     sync_work_order_quantity_complete,
+    uncredited_upstream_by_operation,
     upstream_figures_by_operation,
     validate_operation_quantity,
 )
@@ -823,13 +831,16 @@ def _short_count_fields(
     work_order: Optional[WorkOrder],
     acct: Optional[OperationAccounting],
 ) -> dict:
-    """The three short-count keys every floor job payload carries (owner ruling 1).
+    """The short-count keys every floor job payload carries (owner ruling 1).
 
     * ``upstream_quantity_short`` -- units of this operation's target that never reached it,
       because an upstream close in its chain declared them short (0 almost everywhere);
     * ``quantity_good_ceiling`` -- the most good the server will accept here;
     * ``quantity_unaccounted`` -- received units recorded neither good nor scrapped: what a
-      Complete must still account for (record the pieces, or report them as scrap).
+      Complete must still account for (record the pieces, or report them as scrap);
+    * ``upstream_short_uncredited`` -- on a POOLED work order, units an earlier whole-order
+      operation already declared short. Not credited (no accounting change), so the client
+      warns not to scrap them again and to have sequencing turned on instead.
 
     ``acct`` comes from ONE ``upstream_figures_by_operation`` read per poll. Without it the
     figures are the operation's own counts with no upstream credit -- exact for every
@@ -839,7 +850,12 @@ def _short_count_fields(
     """
     if acct is None:
         if operation is None or work_order is None:
-            return {"upstream_quantity_short": 0.0, "quantity_good_ceiling": None, "quantity_unaccounted": None}
+            return {
+                "upstream_quantity_short": 0.0,
+                "quantity_good_ceiling": None,
+                "quantity_unaccounted": None,
+                "upstream_short_uncredited": 0.0,
+            }
         acct = OperationAccounting(
             target=operation_target_quantity(operation, work_order),
             good=float(operation.quantity_complete or 0),
@@ -849,6 +865,9 @@ def _short_count_fields(
         "upstream_quantity_short": acct.upstream_short,
         "quantity_good_ceiling": acct.ceiling,
         "quantity_unaccounted": acct.unaccounted,
+        # A POOLED work order's earlier whole-order stage declared these short; they are NOT
+        # credited here (owner decision), so the floor must not scrap them a second time.
+        "upstream_short_uncredited": acct.uncredited_upstream,
     }
 
 
@@ -1995,10 +2014,14 @@ def clock_out(
         # operator must still be allowed to close out regardless of quantity.
         # Owner ruling 1: the cap is the operation's CEILING -- its target less units an
         # upstream close in its chain declared short (equal to the target otherwise).
+        #
+        # Only a clock-out that ADDS good is judged: a 0-piece clock-out always closes the
+        # entry (G6-A -- an open TimeEntry is never trapped), even when the stored count is
+        # already above the cap from some other write; that count is corrected at the desk.
         guard_acct = operation_accounting(work_order, operation)
         additional_good_qty = float(clock_out_data.quantity_produced or 0)
         proposed_good = float(operation.quantity_complete or 0) + additional_good_qty
-        if proposed_good > guard_acct.ceiling + QTY_EPSILON:
+        if additional_good_qty > 0 and proposed_good > guard_acct.ceiling + QTY_EPSILON:
             if guard_acct.ceiling < guard_acct.target - QTY_EPSILON:
                 raise HTTPException(
                     status_code=400, detail=ceiling_exceeded_message(operation, proposed_good, guard_acct)
@@ -4550,12 +4573,15 @@ def complete_operation(
     operation under a DRAFT / ON_HOLD work order **409** (completing it starts it); bad
     ``quantity_complete`` / missing target **400**; predecessors incomplete **400**; no
     labor ever recorded **400** (floor only -- the office twin deliberately has no such
-    gate); ``source`` 'import' **422**; bad scrap number **400**; unknown / inactive scrap
-    code **404** / **422**; ``quantity_complete`` above recorded good **409**; scrap above
-    unaccounted **409**; units still unaccounted **409**; then, on a short close only: an
-    API token **403**, others clocked in without acknowledgement **409**, a serialized work
-    order with missing per-serial step records **409**; finally required process-sheet
-    steps missing **409** ``STEPS_INCOMPLETE``. A short close or a scrap declaration is
+    gate); ``source`` 'import' **422**; bad scrap number **400**; scrap without a reason
+    **422**; unknown / inactive scrap code **404** / **422**; ``quantity_complete`` above
+    recorded good **409**; recorded good above what can reach the operation after an upstream
+    short close **409**; scrap above unaccounted **409**; units still unaccounted **409**;
+    then, on a short close only: an API token **403**, others clocked in without
+    acknowledgement **409**, an APPROVED open time entry **409**, a serialized work order with
+    missing per-serial step records **409**, a later stage already holding more good than the
+    declaration lets through **409**; finally required process-sheet steps missing **409**
+    ``STEPS_INCOMPLETE``. A short close or a scrap declaration is
     written with REQUIRED audit evidence: when that row cannot be saved, nothing is and the
     answer is **503**.
 
@@ -4692,6 +4718,14 @@ def complete_operation(
         raise HTTPException(status_code=400, detail="Quantity must be a valid number")
     if scrap_delta < 0:
         raise HTTPException(status_code=400, detail="quantity_scrapped cannot be negative")
+    # AS9100D defect traceability: scrap declared at close carries a reason -- a code or
+    # non-blank text. Here, after the work-order start rung, rather than as a schema
+    # validator, so a held / draft job answers with the gates' 409 first.
+    if scrap_delta > 0 and not (
+        (completion_data.scrap_reason and completion_data.scrap_reason.strip())
+        or completion_data.scrap_reason_code_id is not None
+    ):
+        raise HTTPException(status_code=422, detail=MSG_SCRAP_REASON_OR_CODE_REQUIRED)
     # Lean Phase 1: resolve the structured scrap code BEFORE any mutation (404 unknown /
     # cross-tenant, 422 inactive). None passes through untouched.
     scrap_code = resolve_scrap_reason_code_or_http(db, company_id, completion_data.scrap_reason_code_id)
@@ -4716,6 +4750,12 @@ def complete_operation(
     # pieces since it loaded) -- refused rather than over-stating scrap.
     stored_scrap = float(operation.quantity_scrapped or 0)
     before = operation_accounting(work_order, operation, good=recorded_good, scrapped=stored_scrap)
+    # More good on record than can have reached the operation once an upstream close
+    # declared a short (a desk edit or a reopen-and-re-close upstream put it there). Closing
+    # would book units that never existed into the header and the FG receipt; the count is
+    # corrected first, at the desk.
+    if before.exceeds_ceiling:
+        raise HTTPException(status_code=409, detail=good_above_ceiling_message(operation, before))
     if scrap_delta > before.unaccounted + QTY_EPSILON:
         raise HTTPException(
             status_code=409,
@@ -4723,8 +4763,16 @@ def complete_operation(
         )
     acct = operation_accounting(work_order, operation, good=recorded_good, scrapped=stored_scrap + scrap_delta)
     if not acct.is_accounted:
-        # Ruling 1: "or the operation stays open". NOTHING has been written.
-        raise HTTPException(status_code=409, detail=short_count_message(operation, acct))
+        # Ruling 1: "or the operation stays open". NOTHING has been written. On a POOLED work
+        # order an earlier whole-order stage's declared short is not credited here, so the
+        # message also says not to scrap units this stage never received.
+        uncredited = uncredited_upstream_by_operation(work_order, active_work_order_operations(work_order)).get(
+            operation.id, 0.0
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=short_count_message(operation, replace(acct, uncredited_upstream=uncredited)),
+        )
     closing_short = acct.closing_short > QTY_EPSILON
 
     # Every open entry on the operation -- the caller's own first. Read once: it feeds the
@@ -4763,6 +4811,12 @@ def complete_operation(
                 status_code=409,
                 detail=others_clocked_in_message(operation, [name or "Another operator" for name in names]),
             )
+        # Approval is the immutability boundary: a short close clocks out every open entry,
+        # and an APPROVED one (approval has no clock-out check) must not get a new clock_out
+        # and duration written under it. Refused before any write.
+        approved_open = [entry for entry in open_entries if entry.approved is not None]
+        if approved_open:
+            raise HTTPException(status_code=409, detail=approved_open_entry_message(operation, approved_open))
         # INT6: scrapped serials can never satisfy the per-serial step gate, and there is no
         # serial-level scrap record yet -- refuse with an anti-fabrication message rather
         # than the generic STEPS_INCOMPLETE. Force-complete stays the supervisor path.
@@ -4778,6 +4832,20 @@ def complete_operation(
                     status_code=409,
                     detail=serialized_short_message(operation, acct.closing_short, missing_serials),
                 )
+        # Declaring this short lowers what can reach the later stages of its chain (and, for a
+        # component chain, the assembly it feeds): refused when one of them already records
+        # more good than that would let through -- correct it first.
+        strand = accounting_change_strands(
+            work_order,
+            active_work_order_operations(work_order),
+            changed=operation,
+            status=OperationStatus.COMPLETE,
+            quantity_short_declared=acct.closing_short,
+            quantity_complete=recorded_good,
+            quantity_scrapped=stored_scrap + scrap_delta,
+        )
+        if strand is not None:
+            raise HTTPException(status_code=409, detail=accounting_strand_message(strand))
 
     # Process-sheet completion gate (PR 3): every required (non-INSTRUCTION) snapshot step
     # must carry a live conforming record -- per serial on a serialized WO -- before the

@@ -518,15 +518,16 @@ class TestOperationPutOnACompleteOperation:
         "fields",
         [
             {"quantity_complete": 8},
-            {"quantity_scrapped": 1, "scrap_reason": "late note"},
-            {"scrap_reason": "late note"},
             {"status": "in_progress"},
+            # Scrap may RISE on a completed operation (see below) but never fall: lowering it
+            # could leave the operation short after the fact.
+            {"quantity_scrapped": 1, "scrap_reason": "late note"},
         ],
     )
-    def test_count_and_status_edits_are_refused(self, client, db_session, supervisor, fields):
+    def test_good_status_and_scrap_lowering_are_refused(self, client, db_session, supervisor, fields):
         wc = make_work_center(db_session)
         _, (op, _) = make_routing(db_session, work_centers=[wc, make_work_center(db_session)], statuses=[DONE, READY])
-        set_op(db_session, op, quantity_complete=10)
+        set_op(db_session, op, quantity_complete=10, quantity_scrapped=2, scrap_reason="burr")
         before = _op_state(db_session, op.id)
 
         resp = client.put(
@@ -538,6 +539,51 @@ class TestOperationPutOnACompleteOperation:
         assert resp.json()["detail"] == completed_counts_locked_message(op)
         assert _op_state(db_session, op.id) == before
         assert op_audit_rows(db_session, op.id) == []
+
+    @pytest.mark.parametrize(
+        "fields, expected",
+        [
+            ({"quantity_scrapped": 1, "scrap_reason": "found at packing"}, (1.0, "found at packing")),
+            ({"scrap_reason": "corrected wording"}, (0.0, "corrected wording")),
+        ],
+    )
+    def test_a_scrap_rise_or_reason_correction_lands_with_required_audit(
+        self, client, db_session, supervisor, fields, expected
+    ):
+        """Scrap found after an office close has no other operation-level door (the clock-out
+        refuses pieces on a completed operation): it can be added, never lowered, and the
+        correction is REQUIRED evidence -- it cannot make a completed operation short."""
+        wc = make_work_center(db_session)
+        _, (op, _) = make_routing(db_session, work_centers=[wc, make_work_center(db_session)], statuses=[DONE, READY])
+        set_op(db_session, op, quantity_complete=10, scrap_reason="original")
+        resp = client.put(
+            OPERATION_PUT_URL.format(op=op.id),
+            json={"version": op.version, **fields},
+            headers=user_headers(supervisor),
+        )
+        assert resp.status_code == 200, resp.text
+        row = fresh(db_session, WorkOrderOperation, op.id)
+        assert (float(row.quantity_scrapped or 0), row.scrap_reason) == expected
+        assert (row.status, float(row.quantity_complete)) == (DONE, 10.0)
+        (audit_row,) = op_audit_rows(db_session, op.id)
+        assert audit_row.extra_data["transition"] == "completed_operation_scrap_correction"
+        assert audit_row.new_values["scrap_reason"] == expected[1]
+
+    def test_a_completed_scrap_correction_is_not_saved_without_its_audit_row(
+        self, client, db_session, supervisor, monkeypatch
+    ):
+        wc = make_work_center(db_session)
+        _, (op, _) = make_routing(db_session, work_centers=[wc, make_work_center(db_session)], statuses=[DONE, READY])
+        set_op(db_session, op, quantity_complete=10)
+        before = _op_state(db_session, op.id)
+        monkeypatch.setattr(AuditService, "log", lambda self, *a, **k: None)
+        resp = client.put(
+            OPERATION_PUT_URL.format(op=op.id),
+            json={"version": op.version, "quantity_scrapped": 1, "scrap_reason": "found at packing"},
+            headers=user_headers(supervisor),
+        )
+        assert resp.status_code == 503, resp.text
+        assert _op_state(db_session, op.id) == before
 
     def test_resending_the_stored_values_and_other_fields_still_land(self, client, db_session, supervisor):
         wc = make_work_center(db_session)

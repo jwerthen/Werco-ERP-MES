@@ -128,17 +128,11 @@ class OperationCompleteRequest(BaseModel):
         "bulk-migration loaders); a kiosk-scoped operator token forces 'kiosk' regardless of this hint.",
     )
 
-    @model_validator(mode="after")
-    def _require_scrap_reason(self) -> "OperationCompleteRequest":
-        # The ClockOut rule, verbatim (AS9100D defect traceability): scrap declared at close
-        # carries a reason -- a code or non-blank text. Negatives/NaN fall through to the
-        # handler's numeric guards.
-        has_reason = (self.scrap_reason and self.scrap_reason.strip()) or self.scrap_reason_code_id is not None
-        if (self.quantity_scrapped or 0) > 0 and not has_reason:
-            raise ValueError(
-                "scrap_reason or scrap_reason_code_id is required when quantity_scrapped is greater than 0"
-            )
-        return self
+    # The scrap-reason rule (scrap declared at close carries a code or non-blank text,
+    # AS9100D defect traceability) is enforced in the HANDLER, after the work-order start
+    # rung, not as a model validator here: a READY operation on a held or draft job must get
+    # the gates' 409 before any input check (the office twin's ladder), and a Pydantic
+    # validator would answer 422 first.
 
 
 class OperationHoldRequest(BaseModel):

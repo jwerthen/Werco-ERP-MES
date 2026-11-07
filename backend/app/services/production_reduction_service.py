@@ -28,8 +28,11 @@ the office correction is refused 409 unless the same request says ``reopen_opera
 then the operation returns to IN_PROGRESS through ``reopen_completed_operation`` (refused
 while a later stage of the same chain is COMPLETE), and the reopen is REQUIRED audit
 evidence. A correction that keeps the operation accounted (scrap covers it) leaves it
-COMPLETE, and its declared short untouched -- the declaration is written only by an
-explicit close.
+COMPLETE; when it raises the short the operation now closes with, its declaration is
+RE-STAMPED (REQUIRED audit) so the later stages are credited with the real loss -- refused
+409 when a later stage already holds more good than that lets through. Every reopen and
+re-stamp is judged by ``accounting_change_strands`` too, so a change can never strand a
+COMPLETE operation in another chain (a component chain feeds the assembly chain).
 
 The quantity math itself lives in
 ``work_order_state_service.reduce_operation_produced_quantity`` (the walk across
@@ -57,6 +60,7 @@ from app.services.audit_service import AuditService
 from app.services.laser_nest_service import sync_laser_nest_from_operation
 from app.services.operation_action_gates import (
     CORRECTION_AUDIT_UNAVAILABLE,
+    accounting_strand_message,
     reduce_would_leave_short_message,
     reopen_blocked_by_later_message,
 )
@@ -65,6 +69,7 @@ from app.services.work_order_state_service import (
     QTY_EPSILON,
     TERMINAL_WO_STATUSES,
     OperationQuantityReduction,
+    accounting_change_strands,
     accounting_extra_data,
     active_work_order_operations,
     later_completed_chain_operation,
@@ -343,25 +348,64 @@ def perform_production_reduction(
     # refuses a COMPLETE operation on the operator's).
     reopening = False
     reopen_accounting = None
+    # A correction that keeps a COMPLETE operation accounted (scrap still covers it) but
+    # raises the short it now closes with RE-STAMPS its declaration -- otherwise the later
+    # stages would keep being credited with the old figure and have to cover real loss
+    # with scrap that never happened there.
+    restamp: Optional[tuple[Optional[float], Optional[float]]] = None
     if operation.status == OperationStatus.COMPLETE:
         corrected_good = max(0.0, float(operation.quantity_complete or 0) - delta)
-        reopen_accounting = operation_accounting(work_order, operation, good=corrected_good)
+        active_operations = active_work_order_operations(work_order)
+        reopen_accounting = operation_accounting(work_order, operation, active_operations, good=corrected_good)
         if reopen_accounting.unaccounted > QTY_EPSILON:
             if not reopen_operation:
                 raise HTTPException(
                     status_code=409,
                     detail=reduce_would_leave_short_message(operation, delta, reopen_accounting.unaccounted),
                 )
-            later = later_completed_chain_operation(work_order, operation, active_work_order_operations(work_order))
+            later = later_completed_chain_operation(work_order, operation, active_operations)
             if later is not None:
                 raise HTTPException(status_code=409, detail=reopen_blocked_by_later_message(later))
+            # Chain identity is not the whole story: a component chain's declaration feeds the
+            # assembly chain, so reopening it (its declaration cleared) can strand a COMPLETE
+            # assembly stage in ANOTHER chain. Judged on the accounting itself.
+            strand = accounting_change_strands(
+                work_order,
+                active_operations,
+                changed=operation,
+                status=OperationStatus.IN_PROGRESS,
+                quantity_short_declared=None,
+                quantity_complete=corrected_good,
+            )
+            if strand is not None:
+                raise HTTPException(status_code=409, detail=accounting_strand_message(strand))
             reopening = True
+        else:
+            new_declared = reopen_accounting.closing_short if reopen_accounting.closing_short > QTY_EPSILON else None
+            old_declared = operation.quantity_short_declared
+            if abs(float(new_declared or 0) - float(old_declared or 0)) > QTY_EPSILON:
+                strand = accounting_change_strands(
+                    work_order,
+                    active_operations,
+                    changed=operation,
+                    status=OperationStatus.COMPLETE,
+                    quantity_short_declared=new_declared,
+                    quantity_complete=corrected_good,
+                )
+                if strand is not None:
+                    raise HTTPException(status_code=409, detail=accounting_strand_message(strand))
+                restamp = (
+                    float(old_declared) if old_declared is not None else None,
+                    new_declared,
+                )
 
     # Walk the delta across the eligible evidence + lower the op total + recompute the
     # WO rollup (see the service docstring for why this stays reconcile-safe).
     reduction = reduce_operation_produced_quantity(operation, work_order, entries, delta, work_order_operations)
 
     reopened_from = operation.status.value if reopening and operation.status else None
+    if restamp is not None:
+        operation.quantity_short_declared = restamp[1]
 
     operation.updated_at = datetime.utcnow()
     sync_laser_nest_from_operation(operation)
@@ -521,6 +565,31 @@ def perform_production_reduction(
                     "longer complete"
                 ),
                 extra={"transition": "predecessor_reopened", "reopened_operation_id": operation.id},
+            )
+
+    # The re-stamped declaration moves what the later stages are credited with: REQUIRED
+    # evidence (invariant 2, fail-closed), like the reopen.
+    if restamp is not None and reopen_accounting is not None:
+        with required_audit(db, CORRECTION_AUDIT_UNAVAILABLE):
+            audit.log_required(
+                action=audit.ACTIONS["UPDATE"],
+                resource_type="work_order_operation",
+                resource_id=operation.id,
+                resource_identifier=operation.operation_number,
+                description=(
+                    f"Re-declared the short on completed operation {operation.operation_number} for WO "
+                    f"{work_order.work_order_number}: lowering it by {delta:g} leaves "
+                    f"{float(restamp[1] or 0):g} of what reached it scrapped. Reason: {reason}"
+                ),
+                old_values={"quantity_short_declared": restamp[0]},
+                new_values={"quantity_short_declared": restamp[1]},
+                extra_data={
+                    **accounting_extra_data(reopen_accounting),
+                    "reason": reason,
+                    "quantity_delta": delta,
+                    "transition": "short_redeclared_by_correction",
+                    "path": path,
+                },
             )
 
     # F3 (per-entry audit discoverability): the operation-level row above is the

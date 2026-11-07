@@ -42,6 +42,7 @@ from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.services.audit_service import AuditService
 from app.services.operation_action_gates import (
     API_TOKEN_SHORT_CLOSE,
+    MSG_SCRAP_REASON_OR_CODE_REQUIRED,
     MSG_WORK_ORDER_ON_HOLD,
     completed_operation_clock_out_message,
     force_complete_exceeds_physical_message,
@@ -803,21 +804,28 @@ def test_a_ready_operation_on_a_held_job_writes_nothing_on_the_floor_close(clien
     assert fresh(db_session, WorkOrderOperation, op.id).actual_start is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Known ordering gap, reported not masked: the floor body's scrap-reason validator is a "
-        "Pydantic model validator, so it answers 422 before the handler reaches the gates' "
-        "work-order rung. The agreed ladder puts every scrap check AFTER that rung (the office "
-        "twin honours it: test_a_ready_operation_on_a_held_job_is_refused_before_any_input_check). "
-        "Nothing is written either way. Remove this marker when the check moves into the handler."
-    ),
-)
 def test_scrap_without_a_reason_on_a_held_ready_operation_gets_the_gates_answer(client, db_session):
+    """The scrap-reason rule runs in the handler AFTER the gates' work-order rung (the office
+    twin's ladder), not as a schema validator that would answer 422 first -- and nothing is
+    written either way."""
     ann = make_user(db_session)
     wc = make_work_center(db_session)
-    _, (op,) = make_routing(db_session, work_centers=[wc], statuses=[READY], wo_status=WorkOrderStatus.ON_HOLD)
+    wo, (op,) = make_routing(db_session, work_centers=[wc], statuses=[READY], wo_status=WorkOrderStatus.ON_HOLD)
     add_entry(db_session, ann, op, produced=8)
+    before = _world(db_session, wo)
     resp = client.post(COMPLETE_URL.format(op=op.id), json={"quantity_scrapped": 2}, headers=user_headers(ann))
     assert resp.status_code == 409, resp.text
     assert resp.json()["detail"] == MSG_WORK_ORDER_ON_HOLD
+    _assert_nothing_written(db_session, wo, before)
+
+
+def test_scrap_without_a_reason_on_a_running_operation_is_still_422(client, db_session):
+    ann = make_user(db_session)
+    wc = make_work_center(db_session)
+    wo, (op,) = make_routing(db_session, work_centers=[wc], statuses=[OperationStatus.IN_PROGRESS])
+    add_entry(db_session, ann, op, produced=8)
+    before = _world(db_session, wo)
+    resp = client.post(COMPLETE_URL.format(op=op.id), json={"quantity_scrapped": 2}, headers=user_headers(ann))
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"] == MSG_SCRAP_REASON_OR_CODE_REQUIRED
+    _assert_nothing_written(db_session, wo, before)
