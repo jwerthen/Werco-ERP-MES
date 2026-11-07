@@ -10,6 +10,7 @@ import uuid
 from dataclasses import asdict as dataclass_asdict
 from dataclasses import replace as dataclass_replace
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Dict, List, Literal, Optional, Set
@@ -33,6 +34,7 @@ from app.api.deps import get_audit_service, get_current_company_id, get_current_
 from app.api.endpoints.bom import tenant_parts_by_id
 from app.api.endpoints.user_workspaces import require_workspace_access
 from app.core.cache import invalidate_work_centers_cache
+from app.core.credentials import is_api_token_credential
 from app.core.realtime import safe_broadcast
 from app.core.time_utils import to_utc_iso
 from app.core.websocket import (
@@ -79,6 +81,7 @@ from app.services.audit_service import AuditService, AuditWriteError
 from app.services.completion_cost_service import (
     apply_completion_cost_rollup,
     compute_and_store_estimated_cost,
+    rollup_labor_hours_for_closed_entries,
     rollup_labor_hours_from_evidence,
 )
 from app.services.completion_inventory_service import (
@@ -129,14 +132,28 @@ from app.services.material_consumption_service import (
 from app.services.material_tie_part_gate import assert_part_is_tieable_material
 from app.services.migration_import_service import import_open_work_orders
 from app.services.operation_action_gates import (
+    API_TOKEN_SHORT_CLOSE,
+    COMPLETION_AUDIT_UNAVAILABLE,
     MSG_ALREADY_COMPLETE,
     MSG_ALREADY_IN_PROGRESS,
     MSG_DRAFT_CANNOT_BE_HELD,
     MSG_OPERATION_ON_HOLD_NO_START,
     MSG_PREDECESSORS_INCOMPLETE,
+    MSG_SCRAP_REASON_OR_CODE_REQUIRED,
     MSG_WORK_ORDER_NOT_RELEASED,
     MSG_WORK_ORDER_ON_HOLD,
+    ceiling_exceeded_message,
+    completed_counts_locked_message,
+    force_complete_exceeds_physical_message,
+    force_complete_exceeds_recorded_message,
+    force_complete_unaccounted_message,
+    office_no_change_message,
     operation_blocked_by_predecessors,
+    operation_has_labor_evidence,
+    others_clocked_in_message,
+    override_reason_required_message,
+    quantity_ordered_floor_message,
+    serialized_short_message,
     work_order_start_blocker,
 )
 
@@ -170,13 +187,18 @@ from app.services.scrap_reason_service import resolve_scrap_reason_code_or_http
 from app.services.sheet_stock_ai_resolver import resolve_ambiguous_sheet_matches
 from app.services.sheet_stock_matcher import STATUS_AMBIGUOUS, match_sheet_parts
 from app.services.storage_service import delete_ref
+from app.services.wallboard_service import operator_display_name
 from app.services.work_center_type_service import get_work_center_group
 from app.services.work_order_browse_service import browse_work_orders
 from app.services.work_order_duplicate_service import duplicate_work_order
 from app.services.work_order_state_service import (
+    QTY_EPSILON,
     TERMINAL_WO_STATUSES,
+    OperationAccounting,
+    StageFigures,
     StatusTransition,
     WorkOrderStateError,
+    accounting_extra_data,
     active_work_order_operations,
     apply_work_order_resume,
     begin_operation_progress,
@@ -185,14 +207,20 @@ from app.services.work_order_state_service import (
     find_parent_to_advance,
     is_laser_dispatch_work_order,
     log_demotions_required,
+    operation_accounting,
+    operation_labor_evidence,
     operation_target_quantity,
     operations_worked_out_of_sequence,
+    quantity_ordered_floor,
     reconcile_work_orders_from_completion_evidence,
+    record_short_declaration,
     release_first_ready_operation,
     report_reconcile_leg_failure,
     resolve_absolute_operation_quantity,
+    stage_accounting,
     sync_work_order_quantity_complete,
     validate_operation_quantity,
+    work_order_completion_bounds_from_evidence,
     work_order_operation_progress,
 )
 from app.services.work_order_template_service import templates_pointing_at_work_order
@@ -885,6 +913,12 @@ def _enrich_work_order_operations(work_order: WorkOrder, *, db: Session, company
             )
             hold_contexts = hold_contexts_for_operations(db, company_id=company_id, operation_ids=held_operation_ids)
 
+    # SHORT-COUNT EVIDENCE (owner ruling 1): one grouped, tenant-scoped TimeEntry read --
+    # SUM(produced) and COUNT per operation -- for the work-order completion bounds below.
+    # Under ``no_autoflush`` for the reason the hold read is: a render must never flush.
+    with db.no_autoflush:
+        labor_evidence = operation_labor_evidence(db, company_id, [op.id for op in work_order.operations])
+
     for op in work_order.operations:
         op.cancelled_nest_id = cancelled_nests.get(op.id)
         # Only an ON_HOLD row carries provenance; every other row is explicitly None rather
@@ -938,6 +972,40 @@ def _enrich_work_order_operations(work_order: WorkOrder, *, db: Session, company
     work_order.operation_count = metrics["operation_count"]
     work_order.operations_complete = metrics["operations_complete"]
     work_order.operation_progress_percent = metrics["operation_progress_percent"]
+
+    _inject_short_count_figures(work_order, labor_evidence)
+
+
+def _inject_short_count_figures(work_order: WorkOrder, labor_evidence: dict) -> None:
+    """Owner ruling 1 read-model figures, in memory (no query; the evidence is batched).
+
+    Per operation: ``upstream_quantity_short`` (target units that never reached it -- an
+    upstream close in its chain declared them short), ``quantity_good_ceiling`` (the most good
+    the server accepts) and ``quantity_unaccounted`` (received units neither good nor
+    scrapped), from ``stage_accounting`` over the ACTIVE operations -- the one implementation.
+    ``quantity_short_declared`` is the column itself.
+
+    Per work order: ``quantity_deliverable`` (the most the floor's recorded good supports) and
+    ``quantity_accounted_loss`` (units the floor already accounted as lost), from the SAME
+    bounds the force-complete enforces, so the office modal's SHORT readout is the server's.
+    """
+    active_operations = active_work_order_operations(work_order)
+    figures = stage_accounting(work_order, active_operations)
+    for op in work_order.operations:
+        figure = figures.get(op.id, StageFigures()) if op.id is not None else StageFigures()
+        acct = OperationAccounting(
+            target=operation_target_quantity(op, work_order),
+            good=float(op.quantity_complete or 0),
+            scrapped=float(op.quantity_scrapped or 0),
+            chain_upstream=figure.chain_upstream,
+            feed_short=figure.feed_short,
+        )
+        op.upstream_quantity_short = acct.upstream_short
+        op.quantity_good_ceiling = acct.ceiling
+        op.quantity_unaccounted = acct.unaccounted
+    bounds = work_order_completion_bounds_from_evidence(work_order, active_operations, labor_evidence)
+    work_order.quantity_deliverable = bounds.deliverable
+    work_order.quantity_accounted_loss = bounds.floor_loss
 
 
 def generate_work_order_number(db: Session, company_id: int = None) -> str:
@@ -3776,6 +3844,10 @@ def update_work_order(
     rule had promoted but the sequenced rule forbids are returned READY -> PENDING, one
     audited status change each; operations anyone has worked are never touched. Turning
     it OFF needs no repair -- the next reconciling read re-promotes the pool.
+
+    Lowering ``quantity_ordered`` below the good + scrap a whole-order operation has already
+    accounted for is refused **409** naming the operation: lower the order only by units no
+    operation has started.
     """
     work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
     if not work_order:
@@ -3884,6 +3956,23 @@ def update_work_order(
                     "the promise date its delivery performance was scored against."
                 ),
             )
+
+    # Owner ruling 1 (INT8): lowering the order below what a whole-order stage has already
+    # accounted for (good + scrap) would turn that stage's surplus into a short close of
+    # everything downstream, after the fact. Judged against the CURRENT order, before the
+    # setattr loop writes the new one. Pieces never started are the legitimate case --
+    # lowering by those is allowed. Laser nests (planned_runs) are untouched by design.
+    if "quantity_ordered" in update_data and update_data["quantity_ordered"] is not None:
+        new_quantity_ordered = float(update_data["quantity_ordered"])
+        if new_quantity_ordered < float(work_order.quantity_ordered or 0) - QTY_EPSILON:
+            ordered_floor, floor_operation = quantity_ordered_floor(
+                work_order, active_work_order_operations(work_order)
+            )
+            if floor_operation is not None and new_quantity_ordered < ordered_floor - QTY_EPSILON:
+                raise HTTPException(
+                    status_code=409,
+                    detail=quantity_ordered_floor_message(floor_operation, ordered_floor),
+                )
 
     # 081: remember which way sequencing moved BEFORE the setattr loop overwrites it.
     # Only pooled -> sequenced needs repair; the other direction heals itself, because
@@ -4825,22 +4914,36 @@ def complete_work_order(
     quantity_scrapped: Optional[float] = None,
     scrap_reason: Optional[str] = None,
     scrap_reason_code_id: Optional[int] = None,
+    quantity_override_reason: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(
         require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.QUALITY])
     ),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Manually complete a work order (privileged override).
+    """Manually complete a work order (privileged override), booking quantity_complete as its
+    finished count. It may not exceed what the floor recorded without quantity_override_reason
+    (409 names the binding operation), and a shortfall below the order must be covered by scrap
+    the floor reported or by quantity_scrapped with a reason (409); an API token may not complete
+    short (403).
 
-    DUP-4: this override now delegates to the SHARED rollup instead of blindly
+    Owner ruling 1 (2026-11-05), enforced at the WORK-ORDER grain: a short is reported as scrap
+    with a reason, or the work order stays open. The bounds come from the floor's own evidence
+    (``work_order_state_service.work_order_completion_bounds``, fed by one grouped TimeEntry read):
+    ``deliverable`` -- the most the recorded good supports at the binding operation (exceeding it
+    needs ``quantity_override_reason``, written as REQUIRED audit evidence); ``physical_max`` -- the
+    most that can exist once declared shorts are out (400 above it, even with a reason);
+    ``floor_loss`` -- units the floor already accounted as lost. ``ordered - quantity_complete``
+    must be covered by ``max(floor_loss, work-order scrap)``. The header is SET to
+    ``quantity_complete`` -- never ``max()``'d with the pre-loop header, which on a routing whose
+    first stage completed at the full order would re-inflate the FG receipt past a declared short.
+
+    DUP-4: this override delegates to the SHARED rollup instead of blindly
     flipping the WO to COMPLETE. It force-completes every still-open operation
     through the shared finalizer -- each gets ``actual_end``/``completed_by``
     stamped, an audit row, and the WO ``actual_start``/qty-sync/scheduling refresh
     -- so it can no longer leave a COMPLETE WO with open operations and unreleased
-    capacity. The manager-supplied ``quantity_complete`` is bounded
-    (validate_operation_quantity-style) and applied as a max-guarded override on
-    top of the computed finished quantity.
+    capacity. Open operations are closed WITHOUT invented per-operation counts.
 
     DUP-3 scrap parity (mirrors the op-level fix): ``quantity_scrapped`` is
     optional. When omitted (``None``) the WO's recorded scrap is left untouched so
@@ -4966,6 +5069,52 @@ def complete_work_order(
             ),
         )
 
+    # Owner ruling 1 at the WORK-ORDER grain (INT1), before the steps-bypass read and any
+    # mutation. ONE grouped, tenant-scoped TimeEntry read feeds the shared bounds -- the
+    # same figures the work-order read model shows as quantity_deliverable /
+    # quantity_accounted_loss, so the screen and the verb cannot disagree.
+    completion_bounds = work_order_completion_bounds_from_evidence(
+        work_order,
+        operations,
+        operation_labor_evidence(db, company_id, [op.id for op in operations]),
+    )
+    requested_complete = float(quantity_complete)
+    override_reason = (quantity_override_reason or "").strip() or None
+    asserted_above_recorded = requested_complete > completion_bounds.deliverable + QTY_EPSILON
+    binding_operation = next(
+        (op for op in operations if op.id == completion_bounds.binding_operation_id),
+        None,
+    )
+    if asserted_above_recorded and override_reason is None:
+        raise HTTPException(
+            status_code=409,
+            detail=force_complete_exceeds_recorded_message(
+                requested_complete, completion_bounds.deliverable, binding_operation
+            ),
+        )
+    if asserted_above_recorded and requested_complete > completion_bounds.physical_max + QTY_EPSILON:
+        raise HTTPException(
+            status_code=400,
+            detail=force_complete_exceeds_physical_message(
+                requested_complete,
+                completion_bounds.physical_max,
+                max(0.0, ordered_qty - completion_bounds.physical_max),
+            ),
+        )
+    effective_scrap_claim = (
+        float(quantity_scrapped) if quantity_scrapped is not None else float(work_order.quantity_scrapped or 0)
+    )
+    covered_loss = max(completion_bounds.floor_loss, effective_scrap_claim)
+    unaccounted_short = ordered_qty - requested_complete - covered_loss
+    if ordered_qty > 0 and unaccounted_short > QTY_EPSILON:
+        raise HTTPException(
+            status_code=409,
+            detail=force_complete_unaccounted_message(unaccounted_short, ordered_qty, requested_complete, covered_loss),
+        )
+    completing_short = ordered_qty > 0 and requested_complete < ordered_qty - QTY_EPSILON
+    if completing_short and is_api_token_credential(current_user):
+        raise HTTPException(status_code=403, detail=API_TOKEN_SHORT_CLOSE)
+
     # S2 (settled, user decision): this privileged override stays UNGATED by the
     # process-sheet steps gate — it is an audited EVIDENCE-OVERRIDE. Make the bypass
     # deliberate and visible, never silent: BEFORE mutating, compute the required
@@ -5019,14 +5168,17 @@ def complete_work_order(
         affected_work_centers |= finalize_operation_completion(db, work_order, operation)
 
         # Material consumption (incremental), for symmetry with the three other
-        # operation-completion paths. In practice a NO-OP here: force-complete never
-        # writes ``operation.quantity_complete``, so ``target = qty_per_run * (complete +
-        # scrapped)`` is 0 and the sum-delta is non-positive. Deliberately NOT "fixed"
-        # here -- whether a privileged force-complete should book produced quantity per
-        # operation is a separate product decision, and inventing one would silently
-        # deplete material for runs nobody reported. The tie still flushes through the
-        # whole-WO reconcile in apply_completion_inventory_effects below if the operation
-        # does carry produced quantity from an earlier partial report.
+        # operation-completion paths. Consumes only what the operation RECORDED (good +
+        # scrap) -- force-complete never writes ``operation.quantity_complete`` and never
+        # stamps ``quantity_short_declared`` (the work order goes terminal, so nothing
+        # downstream reads a declaration), so an unreported operation's sum-delta is
+        # non-positive and posts nothing. Deliberately NOT "fixed" here -- whether a
+        # privileged force-complete should book produced quantity per operation is a
+        # separate product decision, and inventing one would silently deplete material for
+        # runs nobody reported. The work-order bounds above are where ruling 1 is enforced.
+        # The tie still flushes through the whole-WO reconcile in
+        # apply_completion_inventory_effects below if the operation does carry produced
+        # quantity from an earlier partial report.
         #
         # The flush keeps an autoflush StaleDataError out of the engine's per-allocation
         # savepoint (where it would degrade into an ALLOCATION_CONSUMPTION_FAILED audit
@@ -5068,9 +5220,13 @@ def complete_work_order(
     if not work_order.actual_end:
         work_order.actual_end = now
 
-    # Apply the manager-supplied finished quantities as a max-guarded override on
-    # top of what the rollup computed -- never regress finished quantity (RUP-6).
-    work_order.quantity_complete = max(float(work_order.quantity_complete or 0), float(quantity_complete))
+    # The finished quantity is the DECLARED one, SET for every work-order type (INT1). It
+    # used to be max()'d with the header the loop above computed -- which on any routing
+    # whose first stage had completed at the full order re-inflated the header, the FG
+    # receipt and the backflush basis past a short the floor declared. The bounds above are
+    # what keep this honest: it can never exceed what the floor recorded without a stated,
+    # audited override, and a shortfall below the order is covered by reported scrap.
+    work_order.quantity_complete = requested_complete
     # DUP-3: only overwrite recorded WO scrap when an explicit value was supplied;
     # a defaulted (omitted) call must not zero previously-booked scrap. The
     # scrap-reason guard above (422) has already ensured a positive scrap carries a
@@ -5141,24 +5297,65 @@ def complete_work_order(
             "steps_bypassed_truncated": steps_bypassed_truncated,
         },
     )
-    audit.log_update(
-        resource_type="work_order",
-        resource_id=work_order.id,
-        resource_identifier=work_order.work_order_number,
-        old_values={
-            "quantity_complete": old_quantity_complete,
-            "quantity_scrapped": old_quantity_scrapped,
-            "scrap_reason": old_scrap_reason,
-            "scrap_reason_code_id": old_scrap_reason_code_id,
-        },
-        new_values={
-            "quantity_complete": work_order.quantity_complete,
-            "quantity_scrapped": effective_quantity_scrapped,
-            "scrap_reason": work_order.scrap_reason,
-            "scrap_reason_code_id": work_order.scrap_reason_code_id,
-        },
-        description=f"Recorded completion quantities for work order {work_order.work_order_number}",
-    )
+    quantity_old_values = {
+        "quantity_complete": old_quantity_complete,
+        "quantity_scrapped": old_quantity_scrapped,
+        "scrap_reason": old_scrap_reason,
+        "scrap_reason_code_id": old_scrap_reason_code_id,
+    }
+    quantity_new_values = {
+        "quantity_complete": work_order.quantity_complete,
+        "quantity_scrapped": effective_quantity_scrapped,
+        "scrap_reason": work_order.scrap_reason,
+        "scrap_reason_code_id": work_order.scrap_reason_code_id,
+    }
+    # The evidence the quantity was decided on, on the same row (owner ruling 1).
+    bounds_extra = {
+        "deliverable": completion_bounds.deliverable,
+        "physical_max": completion_bounds.physical_max,
+        "floor_loss": completion_bounds.floor_loss,
+        "binding_operation_id": completion_bounds.binding_operation_id,
+        "binding_operation": (
+            str(binding_operation.operation_number or binding_operation.sequence)
+            if binding_operation is not None
+            else None
+        ),
+        "override_reason": override_reason if asserted_above_recorded else None,
+        "asserted_above_recorded": asserted_above_recorded,
+    }
+    quantity_description = f"Recorded completion quantities for work order {work_order.work_order_number}"
+    if completing_short or asserted_above_recorded:
+        # REQUIRED evidence (invariant 2, fail-closed): a work order completed short, or
+        # above what the floor recorded, must not land without its quantity row -- the whole
+        # unit rolls back and the caller gets a 503.
+        with required_audit(db, COMPLETION_AUDIT_UNAVAILABLE):
+            audit.log_required(
+                action=audit.ACTIONS["UPDATE"],
+                resource_type="work_order",
+                resource_id=work_order.id,
+                resource_identifier=work_order.work_order_number,
+                description=quantity_description,
+                old_values=quantity_old_values,
+                new_values=quantity_new_values,
+                extra_data={
+                    "changes": {
+                        key: {"old": quantity_old_values[key], "new": quantity_new_values[key]}
+                        for key in quantity_new_values
+                        if quantity_old_values[key] != quantity_new_values[key]
+                    },
+                    **bounds_extra,
+                },
+            )
+    else:
+        audit.log_update(
+            resource_type="work_order",
+            resource_id=work_order.id,
+            resource_identifier=work_order.work_order_number,
+            old_values=quantity_old_values,
+            new_values=quantity_new_values,
+            description=quantity_description,
+            extra_data=bounds_extra,
+        )
 
     # Batch 4 / rank 7 (QG-1/3, BLK-2): warn-and-record for the privileged manual
     # completion. This force-completes EVERY open operation, so gather the gates at
@@ -5293,6 +5490,13 @@ def add_operation(
     return operation
 
 
+def _differs_from_stored(requested: Any, stored: Any) -> bool:
+    """Would writing ``requested`` change ``stored``? Numbers compare as floats (Decimal vs float)."""
+    if isinstance(requested, (int, float, Decimal)) and isinstance(stored, (int, float, Decimal)):
+        return abs(float(requested) - float(stored)) > QTY_EPSILON
+    return requested != stored
+
+
 @router.put("/operations/{operation_id}", response_model=WorkOrderOperationResponse)
 def update_operation(
     operation_id: int,
@@ -5306,13 +5510,18 @@ def update_operation(
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Update an operation.
+    """Update an operation. The counts and status of a COMPLETE operation are its completion
+    record and are refused 409 here; correct them with reduce_operation_production_office.
 
     Requires the operation's current ``version`` (stale -> **409**). Also returns
     **409** when setting ``status`` to COMPLETE on a not-yet-complete operation:
     completion has finalization and inventory side effects (operation-scoped
     tied-material consumption included) that this generic update would skip — use
     ``POST /work-orders/operations/{id}/complete`` instead.
+
+    On a COMPLETE operation, changing ``quantity_complete``, ``quantity_scrapped``,
+    ``scrap_reason`` or ``status`` is refused **409**: those are the completion record. Correct
+    the good count with reduce_operation_production_office, which can reopen the operation.
 
     Setting ``status`` to IN_PROGRESS starts the operation, so it is refused **409**
     with the start gate's text when the work order is a draft ("release first":
@@ -5349,6 +5558,21 @@ def update_operation(
             status_code=409,
             detail="Operation was modified by someone else. Refresh and try again.",
         )
+
+    # Owner ruling 1 (INT3): a COMPLETE operation's counts and status ARE its completion
+    # record -- the short it declared, what the next stage was credited and what consumed
+    # material were all decided on them. This blind setattr used to rewrite them with no
+    # bound at all, which could make a completed operation short after the fact. Refused
+    # before any write; re-sending a value the row already holds is not a change. Counts
+    # are corrected through reduce-production, which reopens the operation when it must.
+    if operation.status == OperationStatus.COMPLETE:
+        locked_changes = [
+            field
+            for field in ("quantity_complete", "quantity_scrapped", "scrap_reason", "status")
+            if field in update_data and _differs_from_stored(update_data[field], getattr(operation, field))
+        ]
+        if locked_changes:
+            raise HTTPException(status_code=409, detail=completed_counts_locked_message(operation))
 
     # Refuse status=COMPLETE via this generic PUT: it would be a FIFTH completion path
     # outside the four wired handlers -- no ``finalize_operation_completion``, no
@@ -5518,7 +5742,9 @@ def reduce_operation_production_office(
 ):
     """
     Supervisor/office over-count correction -- the role-gated twin of the operator's
-    ``POST /shop-floor/operations/{id}/reduce-production``.
+    ``POST /shop-floor/operations/{id}/reduce-production``. A correction that would leave a
+    COMPLETE operation short is refused 409 unless reopen_operation is sent (the operation
+    returns to in progress).
 
     Scope: walks the delta down ALL UNAPPROVED TimeEntry evidence on the operation
     (any operator), open entries first then newest-first. APPROVED entries are the
@@ -5545,9 +5771,17 @@ def reduce_operation_production_office(
     ``reason``, per-entry audit trail on the tamper-evident chain, best-effort
     OperationalEvent, optimistic-lock 409, and the RECOMPUTED work-order rollup (max
     over non-component siblings -- or, on a laser dispatch-pool WO, the pooled SUM of
-    per-nest progress -- only ever lowered). Scrap fields and statuses are never
-    touched: a corrected COMPLETE operation stays COMPLETE, it just carries a truthful
-    count.
+    per-nest progress -- only ever lowered). Scrap fields are never touched.
+
+    Owner ruling 1 (2026-11-05): a COMPLETE operation cannot be short. A correction that
+    keeps it accounted (good + scrap still cover every unit that reached it) leaves it
+    COMPLETE with a truthful count. One that would leave it short is refused **409** unless
+    the request sends ``reopen_operation: true``: the operation then returns to
+    **IN_PROGRESS** (``actual_end`` / ``completed_by`` / ``quantity_short_declared`` cleared),
+    the un-worked READY operations it now blocks return to PENDING, and the reopen is
+    REQUIRED audit evidence (**503**, nothing saved, when it cannot be written). The reopen
+    is refused **409** while a later operation of the same chain is COMPLETE -- correct that
+    one first. Consumed material is never auto-returned; use the return verb.
     """
     load_operation_for_reduction_or_http(db, operation_id, company_id, allow_completed_operation=True)
 
@@ -5602,6 +5836,7 @@ def reduce_operation_production_office(
         # Must match the pre-lock call above: the same gate runs again under the row
         # locks, so relaxing only one of the two would refuse under the lock instead.
         allow_completed_operation=True,
+        reopen_operation=reduction_data.reopen_operation,
     )
     operation = outcome.operation
     work_order = outcome.work_order
@@ -5829,6 +6064,9 @@ def complete_operation(
     quantity_complete: float,
     quantity_scrapped: Optional[float] = None,
     scrap_reason: Optional[str] = None,
+    scrap_reason_code_id: Optional[int] = None,
+    quantity_override_reason: Optional[str] = None,
+    acknowledge_open_entries: bool = False,
     db: Session = Depends(get_db),
     # Office verb. Previously open to ANY authenticated tenant user, VIEWER and
     # SHIPPING included -- already wrong, and load-bearing once operation
@@ -5849,33 +6087,39 @@ def complete_operation(
     ),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Complete an operation.
+    """Record an operation's totals from the office; it closes only when good + scrap cover
+    every unit that reached it, otherwise it saves progress and stays open. quantity_complete
+    is the absolute good total and quantity_scrapped an absolute scrap total that never lowers
+    (a rise needs scrap_reason or scrap_reason_code_id); good above the floor's labor count
+    needs quantity_override_reason; an API token may not close short (403).
 
-    DUP-3 scrap contract: ``quantity_scrapped`` is now optional. When omitted it
-    is NOT written, so this office path can no longer silently zero accumulated
-    operation scrap with a defaulted-0 query param. Pass an explicit value
-    (including 0) to update scrap.
+    Owner ruling 1 (2026-11-05): a short count is reported as scrap with a reason, or the operation
+    stays open -- never closed at the counted quantity. The decision is
+    ``work_order_state_service.OperationAccounting.is_accounted`` (good + scrap cover every unit
+    that reached the operation, upstream declared shorts excluded); a close stamps the short it
+    declared on ``quantity_short_declared``.
 
-    ON_HOLD policy (QG-5 / BLK-1): an ON_HOLD operation is REFUSED here, matching
-    the shop-floor twin. This path no longer force-lifts a held op to IN_PROGRESS
-    and silently completes it (leaving its blocker open). The quality-gate/blocker
-    enforcement that decides what may complete is Batch 4 (rank 7); here the two
-    endpoints are only made consistent.
+    Refused before any write, in order: non-finite quantity **400**; terminal work order **409**;
+    predecessors incomplete **400** (same-work-center predecessors don't block on a pooled work
+    order unless **ON_HOLD**; laser pools are exempt); bad ``quantity_complete`` / missing target
+    **400**; already complete **400**; operation ON_HOLD **409** (other non-startable status
+    **400**); a READY operation under a **draft** / **on-hold** work order **409** (completing it
+    starts it); negative scrap **400**; unknown / inactive scrap code **404** / **422**; a scrap
+    rise without a reason **422**; good above what can reach the operation after upstream short
+    closes **400**; good above the floor's labor evidence without ``quantity_override_reason``
+    **422** (an operation nobody clocked into needs no reason -- desk cleanup stays reason-free,
+    and there is deliberately no labor gate here, unlike the shop-floor twin). On a SHORT close
+    only: an API token **403**; anyone still clocked in without ``acknowledge_open_entries`` **409**
+    naming them; a serialized work order with missing per-serial step records **409**. Then
+    required process-sheet steps **409** ``STEPS_INCOMPLETE``.
 
-    Predecessor gate: refused **400** ("Previous operations must be completed first")
-    while a lower-sequence operation of the same work order is incomplete. Operations
-    sharing the candidate's **work center** do not block it -- the same rule clock-in and
-    the shop-floor twin enforce -- except when such a predecessor is **ON_HOLD**, which
-    blocks from any work center. Laser dispatch-pool work orders are exempt entirely.
-
-    Unlike the shop-floor twin this verb does NOT require the operation to carry a labor
-    record: closing an operation nobody clocked is a supervisor/quality decision the
-    office path deliberately keeps.
-
-    Work-order gate on the auto-start (same as the shop-floor twin): completing a READY
-    operation starts it, so a READY operation under a **draft** work order is refused
-    **409** ("release first") and under an **on-hold** one **409** (resume the work order
-    first). An IN_PROGRESS operation stays completable on a held job.
+    Nothing to change (same good, no scrap rise, still short) is a **200** "No change" that writes
+    nothing -- not even the auto-start. A short close with ``acknowledge_open_entries`` clocks the
+    named operators out with their quantities untouched (pieces they never reported are not
+    counted) and lists them in ``closed_time_entries``; a full-count close never auto-closes
+    anyone. Every call writes one quantity audit row; it is REQUIRED evidence (``log_required``,
+    **503** with nothing saved when it cannot be written) whenever scrap rose, the close was short
+    or good exceeded the floor's evidence.
     """
     # Reject non-finite quantities (NaN/Inf) up front: a plain float query param accepts
     # "nan"/"inf", and NaN slips past every `> 0`/`< 0` guard below (including the scrap-
@@ -5937,7 +6181,7 @@ def complete_operation(
     # op-complete handlers already enforce. Without this, finalizing the last op of a
     # CANCELLED WO would resurrect it to COMPLETE via the shared finalizer and re-fire
     # FG receipt/backflush/cost rollup plus a COMPLETE audit row.
-    if work_order and work_order.status in TERMINAL_WO_STATUSES:
+    if work_order.status in TERMINAL_WO_STATUSES:
         raise HTTPException(
             status_code=409,
             detail=f"cannot complete operation: work order is {work_order.status.value}",
@@ -5972,27 +6216,133 @@ def complete_operation(
     # Completing a READY operation STARTS it (the auto-start below), so it passes the
     # start gate first -- identical to the shop-floor twin: a READY operation under a
     # DRAFT or ON_HOLD work order is refused 409 with the start verbs' text, before the
-    # steps gate, any write and any inventory effect (this path used to book stock on a
-    # held job). An IN_PROGRESS operation is NOT gated. Terminal was refused above.
+    # quantity and accounting checks below, any write and any inventory effect (this path
+    # used to book stock on a held job). A "No change" or progress-only submit on such an
+    # operation is refused here too: a state conflict outranks a no-op, and the partial
+    # branch auto-starts. An IN_PROGRESS operation is NOT gated. Terminal was refused above.
     if operation.status != OperationStatus.IN_PROGRESS:
         start_blocked_reason = work_order_start_blocker(work_order)
         if start_blocked_reason:
             raise HTTPException(status_code=409, detail=start_blocked_reason)
 
+    # ---- Input checks (owner ruling 1). Every one of them runs before the first write;
+    # this path used to set quantity_complete and only then refuse a bad scrap value. ----
+    if quantity_scrapped is not None and quantity_scrapped < 0:
+        raise HTTPException(status_code=400, detail="quantity_scrapped cannot be negative")
+    # Lean Phase 1: resolve the structured code BEFORE any mutation (404 unknown /
+    # cross-tenant, 422 inactive). None passes through untouched.
+    scrap_code = resolve_scrap_reason_code_or_http(db, company_id, scrap_reason_code_id)
+    # The scrap TOTAL never lowers (it used to be an overwrite that could zero scrap the
+    # floor had recorded, and null its reason). A value below what is recorded is a no-op
+    # for scrap; a rise is the declared delta and must carry a reason or a code.
+    stored_scrap = float(operation.quantity_scrapped or 0)
+    new_scrap = max(stored_scrap, float(quantity_scrapped)) if quantity_scrapped is not None else stored_scrap
+    scrap_delta = new_scrap - stored_scrap
+    has_reason_text = bool(scrap_reason and scrap_reason.strip())
+    if scrap_delta > QTY_EPSILON and not (has_reason_text or scrap_code is not None):
+        raise HTTPException(status_code=422, detail=MSG_SCRAP_REASON_OR_CODE_REQUIRED)
+
+    # PR 4 (ledger): the good total is resolved ONCE under the lock and reused for the
+    # accounting, the steps gate and the store below -- gating and storing can never
+    # diverge. ABSOLUTE verb (DUP-3 / SFI-5): max(existing, requested, evidence), capped
+    # at target, so the office can never lower an operation below durable evidence.
+    stored_good = float(operation.quantity_complete or 0)
+    resolved_quantity = resolve_absolute_operation_quantity(db, operation, quantity_complete, target_qty)
+    acct = operation_accounting(work_order, operation, good=resolved_quantity, scrapped=new_scrap)
+    # Good above what can reach the operation once upstream closes declared a short.
+    if resolved_quantity > acct.ceiling + QTY_EPSILON:
+        raise HTTPException(
+            status_code=400,
+            detail=ceiling_exceeded_message(operation, resolved_quantity, acct),
+        )
+    # INT7: recording more good than the floor counted is a desk assertion -- allowed, but
+    # only with a stated reason, written as REQUIRED audit evidence below. An operation
+    # nobody ever clocked into has no floor count to exceed: desk cleanup of never-clocked
+    # work stays reason-free (the owner's floor-requires-labor / office-exempt asymmetry).
+    recorded_good = resolve_absolute_operation_quantity(db, operation, 0.0, target_qty)
+    override_reason = (quantity_override_reason or "").strip() or None
+    asserted_above_recorded = (
+        resolved_quantity > recorded_good + QTY_EPSILON
+        and operation.id is not None
+        and operation_has_labor_evidence(db, operation.id, company_id)
+    )
+    if asserted_above_recorded and override_reason is None:
+        raise HTTPException(status_code=422, detail=override_reason_required_message(operation, recorded_good))
+
+    # ---- The accounting decision. ----
+    is_fully_complete = acct.is_accounted
+    if not is_fully_complete and abs(resolved_quantity - stored_good) <= QTY_EPSILON and scrap_delta <= QTY_EPSILON:
+        # SF9: nothing would change and the operation stays open. Write NOTHING -- not
+        # the auto-start, not an audit row -- so an unchanged desk submit can never
+        # lift a READY operation (and its work order) onto the floor.
+        return {
+            "message": office_no_change_message(operation),
+            "is_fully_complete": False,
+            "operation": _office_completion_operation_payload(operation, acct),
+            "closed_time_entries": [],
+            "quality_exceptions": [],
+        }
+    closing_short = is_fully_complete and acct.closing_short > QTY_EPSILON
+
+    open_entries: list[TimeEntry] = []
+    missing_steps: Optional[list] = None
+    if closing_short:
+        # Ruling 1 / this PR's own credential rule: a standing API token may close a full
+        # count, but declaring where missing pieces went is a judgment a named person
+        # makes. (``is_api_token_credential`` -- a crew-station badge token is a person.)
+        if is_api_token_credential(current_user):
+            raise HTTPException(status_code=403, detail=API_TOKEN_SHORT_CLOSE)
+        # SF4: a short close must not land while anyone is still clocked in -- their
+        # unreported pieces would silently become the shortfall. The office verb has no
+        # caller entry of its own, so EVERY open entry counts. With the acknowledgement the
+        # close clocks them out below, quantities untouched.
+        open_entries = (
+            db.query(TimeEntry)
+            .options(joinedload(TimeEntry.user))
+            .filter(
+                TimeEntry.operation_id == operation.id,
+                TimeEntry.company_id == company_id,
+                TimeEntry.clock_out.is_(None),
+            )
+            .order_by(TimeEntry.clock_in.asc())
+            .all()
+        )
+        if open_entries and not acknowledge_open_entries:
+            names = [
+                operator_display_name(entry.user.first_name, entry.user.last_name) if entry.user else None
+                for entry in open_entries
+            ]
+            raise HTTPException(
+                status_code=409,
+                detail=others_clocked_in_message(
+                    operation, [name or "Another operator" for name in names], office=True
+                ),
+            )
+        # INT6: scrapped serials can never satisfy the per-serial step gate, and there is
+        # no serial-level scrap record yet -- refuse explicitly rather than with the
+        # generic STEPS_INCOMPLETE. Force-complete stays the supervisor path.
+        if process_sheet_service.parse_work_order_serials(work_order):
+            missing_steps = process_sheet_service.missing_required_steps(db, company_id, operation, work_order)
+            if missing_steps:
+                missing_serials: list[str] = []
+                for step in missing_steps:
+                    for serial in step.get("serials") or []:
+                        if serial not in missing_serials:
+                            missing_serials.append(serial)
+                raise HTTPException(
+                    status_code=409,
+                    detail=serialized_short_message(operation, acct.closing_short, missing_serials),
+                )
+
     # Process-sheet completion gate (PR 3): IDENTICAL to the shop-floor twin — an
     # ungated office/admin completion path would let anyone bypass the objective-
-    # evidence requirement. When THIS request would FULLY complete the operation,
-    # every required (non-INSTRUCTION) snapshot step must carry a live
-    # (non-superseded) conforming record — per serial on a serialized WO. Evaluated
-    # under the same row lock; partial progress updates and zero-step operations are
-    # unaffected.
-    #
-    # PR 4 (ledger): resolved ONCE under the lock and reused for both the gate and
-    # the store below — gating and storing can no longer diverge (TOCTOU closed),
-    # and the duplicate evidence query is gone.
-    resolved_quantity = resolve_absolute_operation_quantity(db, operation, quantity_complete, target_qty)
-    if resolved_quantity >= target_qty:
-        missing_steps = process_sheet_service.missing_required_steps(db, company_id, operation, work_order)
+    # evidence requirement. When THIS request CLOSES the operation, every required
+    # (non-INSTRUCTION) snapshot step must carry a live (non-superseded) conforming
+    # record — per serial on a serialized WO. Evaluated under the same row lock;
+    # progress updates and zero-step operations are unaffected.
+    if is_fully_complete:
+        if missing_steps is None:
+            missing_steps = process_sheet_service.missing_required_steps(db, company_id, operation, work_order)
         if missing_steps:
             raise HTTPException(
                 status_code=409,
@@ -6003,10 +6353,16 @@ def complete_operation(
                 },
             )
 
-    # Capture pre-mutation statuses/quantities so transitions can be audited below.
+    # ---- Every refusal is above this line; the mutation starts here. ----
     old_operation_status = operation.status.value if operation.status else None
     old_work_order_status = work_order.status.value if work_order and work_order.status else None
-    old_quantity_complete = float(operation.quantity_complete or 0)
+    old_quantity_values = {
+        "quantity_complete": stored_good,
+        "quantity_scrapped": stored_scrap,
+        "scrap_reason": operation.scrap_reason,
+        "scrap_reason_code_id": operation.scrap_reason_code_id,
+        "quantity_short_declared": operation.quantity_short_declared,
+    }
     work_order_completed = False
     # PERF-5: tracks whether the scheduling refresh ran (it runs with commit=False,
     # so the WC cache must be invalidated by us after the terminal commit succeeds).
@@ -6021,33 +6377,20 @@ def complete_operation(
             operation.actual_start = datetime.utcnow()
             operation.started_by = current_user.id
 
-    # ABSOLUTE verb (DUP-3 / SFI-5): clamp to max(existing, requested, evidence)
-    # capped at target so the office /complete can never lower the operation below
-    # durable TimeEntry evidence (which a later reconcile would silently re-raise).
-    # ``resolved_quantity`` was computed ONCE above (PR 4) — the gate and this store
-    # see the same value.
     operation.quantity_complete = resolved_quantity
-    # DUP-3 scrap: only overwrite when an explicit value was provided.
-    if quantity_scrapped is not None:
-        # Small correctness fix (compliance auditor): this office path had no non-negative
-        # guard on scrap (unlike complete_work_order). Reject a negative scrap with a 400.
-        if quantity_scrapped < 0:
-            raise HTTPException(status_code=400, detail="quantity_scrapped cannot be negative")
-        # AS9100D defect-traceability invariant (same rule as ClockOut/ProductionReportRequest):
-        # any positive scrap MUST carry a non-blank reason. Query-param path, so the guard lives
-        # in the handler (no Pydantic body validator). 422 matches the scrap-reason enforcement
-        # semantics established this session; blank/whitespace counts as missing.
-        if quantity_scrapped > 0 and not (scrap_reason and scrap_reason.strip()):
-            raise HTTPException(
-                status_code=422,
-                detail="scrap_reason is required when quantity_scrapped is greater than 0",
-            )
-        operation.quantity_scrapped = quantity_scrapped
-        operation.scrap_reason = scrap_reason
+    if scrap_delta > QTY_EPSILON:
+        operation.quantity_scrapped = new_scrap
+        # Never-clear semantics, like every other scrap writer: a reason or code describes
+        # the scrap this call ADDED and is never nulled by one that carries none.
+        if has_reason_text:
+            operation.scrap_reason = scrap_reason
+        if scrap_code is not None:
+            operation.scrap_reason_code_id = scrap_code.id
     operation.updated_at = datetime.utcnow()
+    if is_fully_complete:
+        record_short_declaration(operation, acct)
     sync_laser_nest_from_operation(operation)
 
-    is_fully_complete = resolved_quantity >= target_qty
     if is_fully_complete:
         operation.status = OperationStatus.COMPLETE
         operation.actual_end = datetime.utcnow()
@@ -6058,21 +6401,46 @@ def complete_operation(
     # (DUP-5): remaining-ops decision, COMPLETE-vs-release, actual_start/actual_end
     # stamping, qty sync, current_operation_id; it returns the WCs to refresh.
     affected_work_centers = {operation.work_center_id}
-    if work_order and is_fully_complete:
+    if is_fully_complete:
         affected_work_centers |= finalize_operation_completion(db, work_order, operation)
         work_order_completed = work_order.status == WorkOrderStatus.COMPLETE
-    elif work_order and not is_fully_complete:
+    else:
         # Partial progress: lift a RELEASED WO to IN_PROGRESS / stamp actual_start
         # and roll partial qty up without forcing a completion rollup.
         begin_operation_progress(work_order, operation)
 
-    if work_order:
-        sync_work_order_quantity_complete(
-            work_order,
-            operation,
-            all_operations_complete=work_order.status == WorkOrderStatus.COMPLETE,
-        )
-        work_order.updated_at = datetime.utcnow()
+    sync_work_order_quantity_complete(
+        work_order,
+        operation,
+        all_operations_complete=work_order.status == WorkOrderStatus.COMPLETE,
+    )
+    work_order.updated_at = datetime.utcnow()
+
+    # A short close the caller acknowledged clocks everyone still on the operation out,
+    # with their quantities UNTOUCHED (nothing is credited to anyone) -- exactly the
+    # shop-floor twin's auto-close. A full-count office close never auto-closes: a stale
+    # clock-out later is labor-only (the clock-out verb refuses pieces on a COMPLETE op).
+    closed_time_entries: list[dict] = []
+    if closing_short and open_entries:
+        closed_at = datetime.utcnow()
+        for entry in open_entries:
+            entry.clock_out = closed_at
+            if entry.clock_in:
+                entry.duration_hours = (closed_at - entry.clock_in).total_seconds() / 3600.0
+        closed_time_entries = [
+            {
+                "time_entry_id": entry.id,
+                "user_id": entry.user_id,
+                "operator_name": (
+                    operator_display_name(entry.user.first_name, entry.user.last_name) if entry.user else None
+                ),
+            }
+            for entry in open_entries
+        ]
+        # COST-3 (Batch 7, OPT-IN): the just-closed entries' hours roll into the
+        # operation and work order, summed across every operator.
+        if is_labor_cost_rollup_enabled(company_id):
+            rollup_labor_hours_for_closed_entries(work_order, operation, open_entries)
 
     if is_fully_complete:
         scheduling_service = SchedulingService(db, company_id)
@@ -6090,12 +6458,56 @@ def complete_operation(
         )
         work_centers_refreshed = True
 
-    # Audit completion transitions on the tamper-evident chain. This office/admin
-    # op-complete path previously emitted neither an OperationalEvent nor an audit
-    # row, unlike its shop_floor twin. Logged BEFORE the terminal commit so the
-    # audit rows commit atomically with the status change.
+    # Audit on the tamper-evident chain, BEFORE the terminal commit so the rows commit
+    # atomically with the change. The flush keeps a StaleDataError out of the audit
+    # savepoint (invariant 4).
     db.flush()
     audit = AuditService(db, current_user, request)
+    new_quantity_values = {
+        "quantity_complete": float(operation.quantity_complete or 0),
+        "quantity_scrapped": float(operation.quantity_scrapped or 0),
+        "scrap_reason": operation.scrap_reason,
+        "scrap_reason_code_id": operation.scrap_reason_code_id,
+        "quantity_short_declared": operation.quantity_short_declared,
+    }
+    # ONE quantity row on every call (the full close used to record only a status change,
+    # so the counts it was decided on were nowhere on the chain), carrying the accounting.
+    quantity_row = {
+        "action": audit.ACTIONS["UPDATE"],
+        "resource_type": "work_order_operation",
+        "resource_id": operation.id,
+        "resource_identifier": operation.operation_number,
+        "description": (
+            f"{'Completed' if is_fully_complete else 'Updated'} operation {operation.operation_number} "
+            f"from the office. Qty: {round(resolved_quantity, 6):g}/{round(target_qty, 6):g}, "
+            f"scrapped {round(new_scrap, 6):g}"
+            + (f". Override reason: {override_reason}" if asserted_above_recorded else "")
+        ),
+        "old_values": old_quantity_values,
+        "new_values": new_quantity_values,
+        "extra_data": {
+            "changes": {
+                key: {"old": old_quantity_values[key], "new": new_quantity_values[key]}
+                for key in new_quantity_values
+                if old_quantity_values[key] != new_quantity_values[key]
+            },
+            **accounting_extra_data(acct),
+            "unaccounted_after": acct.unaccounted,
+            "closed_short": closing_short,
+            "asserted_above_recorded": asserted_above_recorded,
+            "recorded": recorded_good,
+            "override_reason": override_reason if asserted_above_recorded else None,
+            "acknowledged_open_entries": [entry.id for entry in open_entries] if closing_short else [],
+        },
+    }
+    # REQUIRED evidence (invariant 2, fail-closed) whenever this call declared scrap, closed
+    # short, or asserted more good than the floor recorded: such a write landing without its
+    # row is the outcome ruling 1 exists to prevent, so the whole unit rolls back with a 503.
+    if scrap_delta > QTY_EPSILON or closing_short or asserted_above_recorded:
+        with required_audit(db, COMPLETION_AUDIT_UNAVAILABLE):
+            audit.log_required(**quantity_row)
+    else:
+        audit.log(**quantity_row)
     if is_fully_complete:
         audit.log_status_change(
             resource_type="work_order_operation",
@@ -6103,44 +6515,26 @@ def complete_operation(
             resource_identifier=operation.operation_number,
             old_status=old_operation_status,
             new_status=OperationStatus.COMPLETE.value,
-            description=(
-                f"Completed operation {operation.operation_number}"
-                + (f" on WO {work_order.work_order_number}" if work_order else "")
-            ),
-        )
-    else:
-        # Record the RESOLVED (evidence-floored) quantity actually stored, and only
-        # include scrap in the diff when it was explicitly provided (DUP-3 scrap).
-        new_values: dict = {"quantity_complete": resolved_quantity}
-        if quantity_scrapped is not None:
-            new_values["quantity_scrapped"] = quantity_scrapped
-            new_values["scrap_reason"] = scrap_reason
-        audit.log_update(
-            resource_type="work_order_operation",
-            resource_id=operation.id,
-            resource_identifier=operation.operation_number,
-            old_values={"quantity_complete": old_quantity_complete},
-            new_values=new_values,
-            description=f"Updated operation {operation.operation_number} progress",
+            description=(f"Completed operation {operation.operation_number} on WO {work_order.work_order_number}"),
+            extra_data=accounting_extra_data(acct),
         )
 
     # Material consumption (incremental): deplete THIS operation's tied material the
     # moment the operation is COMPLETE rather than at work-order completion (one laser
-    # operation = one nest = one sheet). A terminal parent WO was refused with a 409
-    # above, so a finished / cancelled job never consumes. ``work_order`` is 404'd
-    # earlier in this handler, but the guard is kept because every downstream use in
-    # this function is written the same defensive way. Writes NOTHING for an untied
-    # operation; the whole-WO reconcile below stays the self-heal. Placed BEFORE the
-    # work-order-completion block so apply_completion_cost_rollup picks up these ledger
-    # rows on this request. The db.flush() above keeps an autoflush StaleDataError out
-    # of the engine's per-allocation savepoint, where it would be recorded as an
-    # ALLOCATION_CONSUMPTION_FAILED row instead of surfacing as a 409.
-    if is_fully_complete and work_order:
+    # operation = one nest = one sheet). Its input is the accounted count (good + scrap),
+    # never an asserted target. A terminal parent WO was refused with a 409 above, so a
+    # finished / cancelled job never consumes. Writes NOTHING for an untied operation; the
+    # whole-WO reconcile below stays the self-heal. Placed BEFORE the work-order-completion
+    # block so apply_completion_cost_rollup picks up these ledger rows on this request. The
+    # db.flush() above keeps an autoflush StaleDataError out of the engine's per-allocation
+    # savepoint, where it would be recorded as an ALLOCATION_CONSUMPTION_FAILED row instead
+    # of surfacing as a 409.
+    if is_fully_complete:
         apply_operation_completion_inventory_effects(
             db, work_order, operation, user_id=current_user.id, company_id=company_id, audit=audit
         )
 
-    if work_order_completed and work_order:
+    if work_order_completed:
         audit.log_status_change(
             resource_type="work_order",
             resource_id=work_order.id,
@@ -6152,7 +6546,7 @@ def complete_operation(
     # EVT-2: emit the uniform completion OperationalEvents in-process (before the
     # terminal commit). This office op-complete path previously emitted NO
     # OperationalEvent, so AI/realtime consumers never saw a completion from it.
-    if is_fully_complete and work_order:
+    if is_fully_complete:
         emit_operation_completed_event(
             db,
             company_id=company_id,
@@ -6161,7 +6555,7 @@ def complete_operation(
             user_id=current_user.id,
             source_module="work_orders",
         )
-    if work_order_completed and work_order:
+    if work_order_completed:
         emit_work_order_completed_event(
             db,
             company_id=company_id,
@@ -6170,20 +6564,20 @@ def complete_operation(
             source_module="work_orders",
         )
         # Batch 6 / rank 9 (INV-1/INV-2/INV-3/TRACE-2/TRACE-3): FG receipt (always,
-        # lot-only, idempotent) + gated backflush, atomic with this completion.
+        # lot-only, idempotent) + gated backflush, atomic with this completion. The FG
+        # quantity is the header the finalizer set -- after a declared short, what
+        # actually left the last stage.
         apply_completion_inventory_effects(db, work_order, user_id=current_user.id, company_id=company_id, audit=audit)
         # Batch 7 / rank 10 (COST-1/COST-2/COST-4/COST-5): OPT-IN labor hour +
         # actual-cost + JobCost rollup, atomic with this completion. No-op + pre-Batch-7
-        # behavior when the flag is OFF. (This office path does NOT auto-close open
-        # TimeEntries -- they are rolled up by a later clock_out -- so the rollup here is
-        # purely evidence-sourced from already-closed entries.)
+        # behavior when the flag is OFF.
         apply_completion_cost_rollup(db, work_order, company_id=company_id, user_id=current_user.id, audit=audit)
 
     # Batch 4 / rank 7 (QG-1/3, BLK-2): warn-and-record on a true completion only.
     # Read-only evaluation against the locked op + WO; each unsatisfied gate gets a
     # tamper-evident audit row + warning event committed atomically below. Never blocks.
     quality_exceptions: list[QualityException] = []
-    if is_fully_complete and work_order:
+    if is_fully_complete:
         quality_exceptions = evaluate_and_record_completion_quality_exceptions(
             db,
             company_id=company_id,
@@ -6196,7 +6590,7 @@ def complete_operation(
     # Batch 7 data-quality signal (no_labor_recorded): on WO COMPLETE, flag any
     # zero-labor operation on the SAME quality_exceptions channel. Fires REGARDLESS of
     # the cost-rollup flag; warn-only.
-    if work_order_completed and work_order:
+    if work_order_completed:
         quality_exceptions = quality_exceptions + evaluate_and_record_labor_data_quality(
             db,
             company_id=company_id,
@@ -6210,7 +6604,7 @@ def complete_operation(
     # auto-complete the parent (parent/child WOs are not operation-coupled). Fires only
     # when ALL children are terminal, which becomes true exactly once (last child
     # flips); idempotent completion + non-reopening reconcile => records at most once.
-    if work_order_completed and work_order:
+    if work_order_completed:
         parent = find_parent_to_advance(db, work_order, company_id)
         if parent is not None:
             record_parent_children_complete(
@@ -6242,7 +6636,7 @@ def complete_operation(
 
     # EVT-3: on WO COMPLETE, enqueue the tenant-scoped notification + webhook
     # dispatch in the ARQ worker. After commit + best-effort.
-    if work_order_completed and work_order:
+    if work_order_completed:
         enqueue_work_order_completion_signals(work_order_id=work_order.id, company_id=company_id, status="COMPLETE")
 
     safe_broadcast(
@@ -6280,6 +6674,31 @@ def complete_operation(
         )
     return {
         "message": "Operation completed" if is_fully_complete else "Progress updated",
+        # False means "saved, still open": the units still unaccounted are in
+        # operation.quantity_unaccounted, and the client says so instead of "completed".
+        "is_fully_complete": is_fully_complete,
+        "operation": _office_completion_operation_payload(operation, acct),
+        # The open entries a SHORT close the caller acknowledged clocked out ([] otherwise).
+        "closed_time_entries": closed_time_entries,
         # Warn-and-record (Batch 4 / rank 7): unsatisfied quality gates at completion.
         "quality_exceptions": [exc.as_dict() for exc in quality_exceptions],
+    }
+
+
+def _office_completion_operation_payload(operation: WorkOrderOperation, acct: OperationAccounting) -> dict:
+    """The ``operation`` block of the office op-complete response (owner ruling 1).
+
+    ``acct`` is the accounting the call was decided on, so ``upstream_quantity_short``
+    (units of the target that never reached the operation) and ``quantity_unaccounted``
+    (received units still neither good nor scrapped) are the figures the server used.
+    """
+    status_value = operation.status.value if hasattr(operation.status, "value") else operation.status
+    return {
+        "id": operation.id,
+        "status": status_value,
+        "quantity_complete": float(operation.quantity_complete or 0),
+        "quantity_scrapped": float(operation.quantity_scrapped or 0),
+        "upstream_quantity_short": acct.upstream_short,
+        "quantity_unaccounted": acct.unaccounted,
+        "quantity_short_declared": operation.quantity_short_declared,
     }

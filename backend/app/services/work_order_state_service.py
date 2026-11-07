@@ -627,21 +627,30 @@ def operations_worked_out_of_sequence(db: Session, work_order: WorkOrder) -> lis
 #                     release on record): every un-worked READY operation, laser nests
 #                     included (``exempt_laser=False``), because a DRAFT work order must
 #                     not leave cards on the dispatch board and the kiosk.
+#   "blocked_by"   -- POST /work-orders/operations/{id}/reduce-production with
+#                     ``reopen_operation`` (owner ruling 1): a COMPLETE operation an
+#                     over-count correction would leave short goes back to IN_PROGRESS, and
+#                     the un-worked READY operations it NOW blocks -- under the work order's
+#                     own rule (``work_order_allows_same_work_center``), and only those whose
+#                     block is that operation (``blocked_by``) -- return to PENDING. Reached
+#                     through ``reopen_completed_operation``.
 #
-# EXTENSION POINT: a later scope (e.g. "blocked_by" for an office-reduce reopen, demoting
-# what a re-opened operation now blocks under ``work_order_allows_same_work_center``) adds
-# one ``DemotionScope`` literal and one branch in ``_selected_for_demotion`` -- nothing
-# else. Scheduling's ``PUT /scheduling/work-orders/{id}/unschedule`` also writes
-# READY -> PENDING, but that is a transient scheduling reset the next reconciling read
-# re-promotes, not a gate decision; it deliberately does not go through this core.
-DemotionScope = Literal["sequencing", "all_unworked"]
-DEMOTION_SCOPES: tuple[str, ...] = ("sequencing", "all_unworked")
+# A later scope adds one ``DemotionScope`` literal and one branch in
+# ``_selected_for_demotion`` -- nothing else. Scheduling's
+# ``PUT /scheduling/work-orders/{id}/unschedule`` also writes READY -> PENDING, but that is
+# a transient scheduling reset the next reconciling read re-promotes, not a gate decision;
+# it deliberately does not go through this core.
+DemotionScope = Literal["sequencing", "all_unworked", "blocked_by"]
+DEMOTION_SCOPES: tuple[str, ...] = ("sequencing", "all_unworked", "blocked_by")
 
 
 def _selected_for_demotion(
     scope: DemotionScope,
     operation: WorkOrderOperation,
     incomplete: list[WorkOrderOperation],
+    *,
+    allow_same_work_center: bool = True,
+    blocked_by: Optional[WorkOrderOperation] = None,
 ) -> bool:
     """Does ``scope`` take this (READY, un-worked) operation off the board?"""
     if scope == "sequencing":
@@ -651,6 +660,19 @@ def _selected_for_demotion(
         return operation_blocked_by_incomplete_predecessors(operation, incomplete, allow_same_work_center=False)
     if scope == "all_unworked":
         return True
+    if scope == "blocked_by":
+        # Blocked now, under the work order's OWN rule, and only because of the re-opened
+        # operation: without it in the incomplete set the gate would pass. An operation
+        # some other incomplete predecessor already blocks is not this caller's business.
+        assert blocked_by is not None  # guarded by demote_ready_operations
+        if not operation_blocked_by_incomplete_predecessors(
+            operation, incomplete, allow_same_work_center=allow_same_work_center
+        ):
+            return False
+        without = [other for other in incomplete if other.id != blocked_by.id]
+        return not operation_blocked_by_incomplete_predecessors(
+            operation, without, allow_same_work_center=allow_same_work_center
+        )
     raise ValueError(f"unknown demotion scope {scope!r}")  # pragma: no cover - guarded by the caller
 
 
@@ -660,6 +682,7 @@ def demote_ready_operations(
     *,
     scope: DemotionScope,
     exempt_laser: bool = True,
+    blocked_by: Optional[WorkOrderOperation] = None,
 ) -> list[WorkOrderOperation]:
     """READY -> PENDING for un-worked operations ``scope`` selects. THE demotion core.
 
@@ -667,7 +690,8 @@ def demote_ready_operations(
     and op-level resume are actor decisions about one specific operation; this is a rule
     applied to a route). It exists because promotion is strictly forward-only: every
     promotion seam only ever writes PENDING -> READY, so a change that makes READY wrong
-    -- sequencing switched on, a held job resumed to DRAFT -- would otherwise leave those
+    -- sequencing switched on, a held job resumed to DRAFT, a completed operation reopened
+    by an office correction -- would otherwise leave those
     cards on the dispatch board and the kiosk forever. Callers and scopes are listed above
     ``DemotionScope``.
 
@@ -686,6 +710,10 @@ def demote_ready_operations(
     sequencing OFF needs no demotion, promotion heals that direction by itself on the next
     reconciling read.
 
+    The ``"blocked_by"`` scope needs ``blocked_by`` (the re-opened operation, already
+    written back to a not-COMPLETE status) and evaluates the gate with the work order's
+    own ``work_order_allows_same_work_center`` value, resolved once here.
+
     Returns the demoted operations WITH THEIR STATUS ALREADY WRITTEN, so the caller (which
     holds ``current_user`` and an ``AuditService``) can log a status change per row before
     its commit -- invariant 2 (``log_demotions_required`` is the fail-closed emitter). This
@@ -694,10 +722,13 @@ def demote_ready_operations(
     """
     if scope not in DEMOTION_SCOPES:
         raise ValueError(f"unknown demotion scope {scope!r}")
+    if scope == "blocked_by" and blocked_by is None:
+        raise ValueError("the 'blocked_by' demotion scope needs the re-opened operation")
     if exempt_laser and is_laser_dispatch_work_order(work_order):
         return []
     if scope == "sequencing" and work_order_allows_same_work_center(work_order):
         return []
+    allow_same_work_center = work_order_allows_same_work_center(work_order) if scope == "blocked_by" else True
 
     # Invariant 1: scoped to the work order's OWN company_id, off the WO row the caller
     # already resolved tenant-scoped -- this both selects the rows to WRITE and supplies
@@ -721,7 +752,9 @@ def demote_ready_operations(
     for op in candidates:
         if _operation_has_been_worked(op, worked_operation_ids):
             continue
-        if not _selected_for_demotion(scope, op, incomplete):
+        if not _selected_for_demotion(
+            scope, op, incomplete, allow_same_work_center=allow_same_work_center, blocked_by=blocked_by
+        ):
             continue
         op.status = OperationStatus.PENDING
         demoted.append(op)
@@ -1721,6 +1754,167 @@ def upstream_figures_by_operation(
             feed_short=figures.feed_short,
         )
     return result
+
+
+@dataclass(frozen=True)
+class OperationLaborEvidence:
+    """One operation's durable labor record: SUM(quantity_produced) and how many entries."""
+
+    produced: float = 0.0
+    entries: int = 0
+
+
+def operation_labor_evidence(
+    db: Session,
+    company_id: int,
+    operation_ids: Iterable[Optional[int]],
+) -> dict[int, OperationLaborEvidence]:
+    """``{operation_id: OperationLaborEvidence}`` in ONE grouped, tenant-scoped query.
+
+    Any TimeEntry counts, open or closed -- the same existence test the floor's labor gate
+    uses. An operation with no entries is absent from the result. Invariant 1: a foreign
+    company's entry on a colliding operation id never contributes.
+    """
+    ids = sorted({op_id for op_id in operation_ids if op_id is not None})
+    if not ids:
+        return {}
+    rows = (
+        db.query(
+            TimeEntry.operation_id,
+            func.coalesce(func.sum(TimeEntry.quantity_produced), 0.0),
+            func.count(TimeEntry.id),
+        )
+        .filter(TimeEntry.company_id == company_id, TimeEntry.operation_id.in_(ids))
+        .group_by(TimeEntry.operation_id)
+        .all()
+    )
+    return {
+        row[0]: OperationLaborEvidence(produced=float(row[1] or 0.0), entries=int(row[2] or 0))
+        for row in rows
+        if row[0] is not None
+    }
+
+
+def recorded_good_from_evidence(
+    work_order: WorkOrder, operation: WorkOrderOperation, evidence: Optional[OperationLaborEvidence]
+) -> float:
+    """The evidence-floored good an operation has recorded: ``min(target, max(stored, SUM))``.
+
+    The same clamp ``resolve_absolute_operation_quantity`` applies with nothing requested,
+    computed from an already-batched evidence read instead of one query per operation.
+    """
+    floor = max(_qty(operation.quantity_complete), evidence.produced if evidence is not None else 0.0)
+    target = operation_target_quantity(operation, work_order)
+    if target > 0:
+        floor = min(floor, target)
+    return max(0.0, floor)
+
+
+def work_order_completion_bounds_from_evidence(
+    work_order: WorkOrder,
+    operations: Sequence[WorkOrderOperation],
+    evidence: dict[int, OperationLaborEvidence],
+) -> WorkOrderCompletionBounds:
+    """``work_order_completion_bounds`` fed from one ``operation_labor_evidence`` read.
+
+    Shared by the force-complete (``POST /work-orders/{id}/complete``) and the work-order
+    read model (``quantity_accounted_loss`` / ``quantity_deliverable``), so the figure a
+    supervisor is shown is the figure the verb enforces. An operation has evidence when it
+    is COMPLETE, carries any TimeEntry, or has good / scrap above zero.
+    """
+    recorded: dict[int, float] = {}
+    has_evidence: dict[int, bool] = {}
+    for op in operations:
+        if op.id is None:
+            continue
+        op_evidence = evidence.get(op.id)
+        recorded[op.id] = recorded_good_from_evidence(work_order, op, op_evidence)
+        has_evidence[op.id] = (
+            op.status == OperationStatus.COMPLETE
+            or (op_evidence is not None and op_evidence.entries > 0)
+            or _qty(op.quantity_complete) > QTY_EPSILON
+            or _qty(op.quantity_scrapped) > QTY_EPSILON
+        )
+    return work_order_completion_bounds(work_order, operations, recorded, has_evidence)
+
+
+def quantity_ordered_floor(
+    work_order: WorkOrder, operations: Iterable[WorkOrderOperation]
+) -> tuple[float, Optional[WorkOrderOperation]]:
+    """The lowest ``quantity_ordered`` a ``PUT /work-orders/{id}`` may set, and the stage that sets it.
+
+    The largest ``good + scrapped`` any whole-order (main-chain) operation has already
+    accounted for, judged against the CURRENT order (call it before the new value is
+    written). Lowering the order below it would leave that stage holding more units than
+    were ordered -- an after-the-fact short close of everything downstream. Laser pools
+    and line items carry their own targets and set no floor. ``(0.0, None)`` when nothing
+    binds.
+    """
+    floor = 0.0
+    binding: Optional[WorkOrderOperation] = None
+    for op in operations or []:
+        if operation_chain_key(work_order, op) != MAIN_CHAIN_KEY:
+            continue
+        accounted = _qty(op.quantity_complete) + _qty(op.quantity_scrapped)
+        if accounted > floor + QTY_EPSILON:
+            floor = accounted
+            binding = op
+    return floor, binding
+
+
+def later_completed_chain_operation(
+    work_order: WorkOrder,
+    operation: WorkOrderOperation,
+    operations: Iterable[WorkOrderOperation],
+) -> Optional[WorkOrderOperation]:
+    """The lowest-sequence COMPLETE operation AFTER ``operation`` in the same chain, if any.
+
+    The refusal behind re-opening a completed operation: a later stage of the same unit
+    flow already completed with units that passed through it, so it has to be corrected
+    first. Chain membership is ``operation_chain_key`` whether or not the chain is
+    credited -- a pooled whole-order chain still moves the same units. A singleton (line
+    item, laser nest) has no later chain stage.
+    """
+    key = operation_chain_key(work_order, operation)
+    if key is None:
+        return None
+    sequence = operation.sequence or 0
+    later = [
+        other
+        for other in operations or []
+        if other.id != operation.id
+        and other.status == OperationStatus.COMPLETE
+        and (other.sequence or 0) > sequence
+        and operation_chain_key(work_order, other) == key
+    ]
+    return min(later, key=lambda other: ((other.sequence or 0), other.id or 0)) if later else None
+
+
+def reopen_completed_operation(
+    db: Session, work_order: WorkOrder, operation: WorkOrderOperation
+) -> list[WorkOrderOperation]:
+    """COMPLETE -> IN_PROGRESS for an office over-count correction that would leave it short.
+
+    Owner ruling 1: a completed operation cannot be short, so a correction that lowers its
+    good count below what reached it (``POST /work-orders/operations/{id}/reduce-production``
+    with ``reopen_operation``) returns it to the floor instead of leaving a short close
+    behind. Clears ``actual_end`` / ``completed_by`` and the declared short (the next
+    explicit close declares again), points ``current_operation_id`` back at the route, and
+    demotes the un-worked READY operations it now blocks through the ONE demotion core
+    (scope ``"blocked_by"``). Never touches consumed material: consumption never
+    auto-reverses (invariant 6); the reasoned return verb is the walk-back.
+
+    The caller holds the op -> WO locks, has already refused when
+    ``later_completed_chain_operation`` names a later completed stage, and owns the
+    REQUIRED audit rows (``log_required`` status change + ``log_demotions_required``).
+    Writes statuses only -- no audit row, no commit.
+    """
+    operation.status = OperationStatus.IN_PROGRESS
+    operation.actual_end = None
+    operation.completed_by = None
+    operation.quantity_short_declared = None
+    work_order.current_operation_id = _active_operation_id(work_order)
+    return demote_ready_operations(db, work_order, scope="blocked_by", blocked_by=operation)
 
 
 def sync_work_order_quantity_complete(

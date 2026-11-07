@@ -52,6 +52,16 @@ class ProductionReductionRequest(BaseModel):
         description="Optional extra note. On the shop-floor verb it is appended to the caller's "
         "active time entry; on the office verb it is recorded on the audit row only.",
     )
+    # Owner ruling 1: a COMPLETE operation cannot be short. When an office correction would
+    # leave one short, the same request must say reopen_operation -- the operation returns to
+    # IN_PROGRESS (refused while a later stage of its chain is COMPLETE). Office verb only:
+    # the operator's verb refuses true with 422.
+    reopen_operation: bool = Field(
+        False,
+        description="Office verb only. Required when lowering a COMPLETE operation's count would leave it "
+        "short: the operation returns to in progress. Refused while a later operation of the same chain is "
+        "complete. The shop-floor verb rejects true (422).",
+    )
 
     @field_validator("quantity_delta")
     @classmethod

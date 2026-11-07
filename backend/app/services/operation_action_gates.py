@@ -204,6 +204,93 @@ def completed_operation_clock_out_message(operation: WorkOrderOperation) -> str:
     )
 
 
+# The office twins of the floor refusals above (owner ruling 1). Same module, same
+# plain-string contract, same ``operation_label`` naming.
+
+# 422 on the office op-complete when the scrap TOTAL rises without a reason or code --
+# the same sentence the floor schema and the force-complete use.
+MSG_SCRAP_REASON_OR_CODE_REQUIRED = (
+    "scrap_reason or scrap_reason_code_id is required when quantity_scrapped is greater than 0"
+)
+# 422 on the OPERATOR's reduce-production verb: re-opening a completed operation is a
+# supervised correction, never operator self-service.
+MSG_REOPEN_IS_OFFICE_ONLY = "reopen_operation is an office correction"
+# 503 when the reopen's REQUIRED audit rows cannot be written (nothing was changed).
+CORRECTION_AUDIT_UNAVAILABLE = "The correction audit could not be saved; nothing was changed. Please retry."
+
+
+def office_no_change_message(operation: WorkOrderOperation) -> str:
+    """200 on the office op-complete when nothing would change: nothing was written."""
+    return f"No change — {operation_label(operation)} left open"
+
+
+def override_reason_required_message(operation: WorkOrderOperation, recorded: float) -> str:
+    """422: the desk recorded more good than the floor counted without saying why."""
+    return (
+        f"quantity_override_reason is required to record more good than the {_qty_text(recorded)} counted on the "
+        f"floor for {operation_label(operation)}"
+    )
+
+
+def completed_counts_locked_message(operation: WorkOrderOperation) -> str:
+    """409: the generic operation PUT editing a COMPLETE operation's counts or status."""
+    return (
+        f"{operation_label(operation)} is complete; its counts are the completion record. Correct the good count "
+        "with reduce-production (it can reopen the operation)."
+    )
+
+
+def reduce_would_leave_short_message(operation: WorkOrderOperation, delta: float, short: float) -> str:
+    """409: an office over-count correction would leave a COMPLETE operation short."""
+    return (
+        f"Lowering {operation_label(operation)} by {_qty_text(delta)} would leave it {_qty_text(short)} short, and a "
+        "completed operation cannot be short. Resubmit with reopen_operation to reopen it (it returns to in "
+        "progress)."
+    )
+
+
+def reopen_blocked_by_later_message(later: WorkOrderOperation) -> str:
+    """409: a later stage of the same chain already completed with these units."""
+    label = operation_label(later)
+    return f"{label} is already complete with these units; correct {label} first."
+
+
+def quantity_ordered_floor_message(operation: WorkOrderOperation, floor: float) -> str:
+    """409: ``PUT /work-orders/{id}`` lowering the order below what a stage accounted for."""
+    return (
+        f"{operation_label(operation)} has already accounted for {_qty_text(floor)} units; lower the order only by "
+        "units no operation has started."
+    )
+
+
+def force_complete_exceeds_recorded_message(
+    quantity: float, deliverable: float, binding: Optional[WorkOrderOperation]
+) -> str:
+    """409: a force-complete books more than the floor recorded, with no override reason."""
+    where = f" at {operation_label(binding)}" if binding is not None else ""
+    return (
+        f"quantity_complete ({_qty_text(quantity)}) exceeds the {_qty_text(deliverable)} the floor recorded{where}; "
+        "record the pieces there, or give quantity_override_reason"
+    )
+
+
+def force_complete_exceeds_physical_message(quantity: float, physical_max: float, lost: float) -> str:
+    """400: even with an override, more than can exist once declared shorts are out."""
+    return (
+        f"quantity_complete ({_qty_text(quantity)}) exceeds the {_qty_text(physical_max)} that can still be "
+        f"delivered; {_qty_text(lost)} were reported scrapped short"
+    )
+
+
+def force_complete_unaccounted_message(short: float, ordered: float, quantity: float, scrapped: float) -> str:
+    """409: a force-complete would close the work order short with the shortfall unaccounted."""
+    return (
+        f"cannot complete work order: {_qty_text(short)} of {_qty_text(ordered)} unaccounted for "
+        f"({_qty_text(quantity)} complete, {_qty_text(scrapped)} scrapped); report the short as scrap with a "
+        "reason, or leave the work order open"
+    )
+
+
 def _status_value(status: object) -> str:
     """Wire value of a status that may be an enum member or an already-plain string."""
     value = getattr(status, "value", status)

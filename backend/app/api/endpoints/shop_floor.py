@@ -126,6 +126,7 @@ from app.services.operation_action_gates import (
     MSG_NO_LABOR_RECORDED,
     MSG_OPERATION_ON_HOLD_NO_START,
     MSG_PREDECESSORS_INCOMPLETE,
+    MSG_REOPEN_IS_OFFICE_ONLY,
     MSG_WRONG_WORK_CENTER,
     ceiling_exceeded_message,
     completed_operation_clock_out_message,
@@ -168,6 +169,7 @@ from app.services.work_order_blocker_service import blocker_default_title
 from app.services.work_order_state_service import (
     QTY_EPSILON,
     TERMINAL_WO_STATUSES,
+    OperationAccounting,
     StatusTransition,
     WorkOrderStateError,
     accounting_extra_data,
@@ -183,6 +185,7 @@ from app.services.work_order_state_service import (
     report_reconcile_leg_failure,
     resolve_absolute_operation_quantity,
     sync_work_order_quantity_complete,
+    upstream_figures_by_operation,
     validate_operation_quantity,
 )
 
@@ -815,6 +818,40 @@ def _job_guidance_fields(
     }
 
 
+def _short_count_fields(
+    operation: Optional[WorkOrderOperation],
+    work_order: Optional[WorkOrder],
+    acct: Optional[OperationAccounting],
+) -> dict:
+    """The three short-count keys every floor job payload carries (owner ruling 1).
+
+    * ``upstream_quantity_short`` -- units of this operation's target that never reached it,
+      because an upstream close in its chain declared them short (0 almost everywhere);
+    * ``quantity_good_ceiling`` -- the most good the server will accept here;
+    * ``quantity_unaccounted`` -- received units recorded neither good nor scrapped: what a
+      Complete must still account for (record the pieces, or report them as scrap).
+
+    ``acct`` comes from ONE ``upstream_figures_by_operation`` read per poll. Without it the
+    figures are the operation's own counts with no upstream credit -- exact for every
+    uncredited chain; callers on a credited path pass ``acct``. ``quantity_ordered`` keeps
+    its meaning (the target); a client derives received as ``quantity_ordered -
+    upstream_quantity_short``.
+    """
+    if acct is None:
+        if operation is None or work_order is None:
+            return {"upstream_quantity_short": 0.0, "quantity_good_ceiling": None, "quantity_unaccounted": None}
+        acct = OperationAccounting(
+            target=operation_target_quantity(operation, work_order),
+            good=float(operation.quantity_complete or 0),
+            scrapped=float(operation.quantity_scrapped or 0),
+        )
+    return {
+        "upstream_quantity_short": acct.upstream_short,
+        "quantity_good_ceiling": acct.ceiling,
+        "quantity_unaccounted": acct.unaccounted,
+    }
+
+
 def _kiosk_job_row(
     operation: WorkOrderOperation,
     *,
@@ -822,6 +859,7 @@ def _kiosk_job_row(
     roster: list[dict],
     step_counts: dict,
     ties: Optional[Sequence[MaterialTieView]],
+    acct: Optional[OperationAccounting] = None,
 ) -> dict:
     """ONE job card, as the kiosk knows it -- shared by the queue and the held list.
 
@@ -835,6 +873,9 @@ def _kiosk_job_row(
     its gap-free display position, and a held row gets ``None`` because it is not
     in the ranked queue at all (``display_positions`` is computed over queued
     operations only, and a held operation must never take a rank).
+
+    ``acct`` is this operation's short-count accounting from the poll's ONE
+    ``upstream_figures_by_operation`` read (see :func:`_short_count_fields`).
     """
     work_order = operation.work_order
     return {
@@ -893,6 +934,9 @@ def _kiosk_job_row(
         # Crew tally: scrap surfaces next to quantity_complete so the kiosk tally
         # block ("37 of 50 · 2 scrap") is server-derived.
         "quantity_scrapped": operation.quantity_scrapped,
+        # Owner ruling 1: what reached this operation and what a Complete must still
+        # account for -- server-derived, so the kiosk never re-implements chain credit.
+        **_short_count_fields(operation, work_order, acct),
         "priority": work_order.priority,
         "due_date": work_order.due_date,
         "setup_time_hours": operation.setup_time_hours,
@@ -1097,6 +1141,7 @@ def _held_job_row(
     ties: Optional[Sequence[MaterialTieView]],
     hold: HoldContext,
     include_hold_free_text: bool,
+    acct: Optional[OperationAccounting] = None,
 ) -> dict:
     """A held operation, for the kiosk's ``held`` list. Job card + why/who/when.
 
@@ -1117,7 +1162,7 @@ def _held_job_row(
     caller has to state which audience it is building for rather than inherit
     the permissive default.
     """
-    row = _kiosk_job_row(operation, run_order=None, roster=roster, step_counts=step_counts, ties=ties)
+    row = _kiosk_job_row(operation, run_order=None, roster=roster, step_counts=step_counts, ties=ties, acct=acct)
     row["startable"] = False
     row["hold"] = _hold_context_payload(hold, include_free_text=include_hold_free_text, operation=operation)
     return row
@@ -1240,6 +1285,10 @@ def get_my_active_job(
     station's badge session, ShopFloor and ShopFloorSimple), which is what lets "the
     planner changed what runs next at your machine" reach the person clocked in
     there. ``[]`` when nothing changed or nobody is clocked in. One indexed query.
+
+    SHORT COUNT (owner ruling 1). Each job carries ``upstream_quantity_short`` /
+    ``quantity_good_ceiling`` / ``quantity_unaccounted`` for its operation (one batched read
+    for all running jobs), so the kiosk's finish prefill is the server's figure.
     """
     # Eager-load operation, work_order, and work_order.part in a single
     # query so we don't issue 2*N extra SELECTs iterating active entries.
@@ -1285,6 +1334,11 @@ def get_my_active_job(
         db,
         company_id=company_id,
         operation_ids=[entry.operation_id for entry in active_entries if entry.operation_id is not None],
+    )
+    # Short-count accounting (owner ruling 1) for every running job in ONE tenant-scoped
+    # read; each operation's work order is already in the session (joinedload above).
+    accounting = upstream_figures_by_operation(
+        db, company_id, [entry.operation for entry in active_entries if entry.operation is not None]
     )
 
     jobs = []
@@ -1333,6 +1387,11 @@ def get_my_active_job(
                 # figure would under-state the deduction on any job worked
                 # across two shifts. Additive: the existing key is untouched.
                 "operation_quantity_scrapped": (float(operation.quantity_scrapped or 0) if operation else 0.0),
+                # Owner ruling 1: received / ceiling / still-unaccounted for the RUNNING job
+                # (see _short_count_fields), so the finish modal prefills honestly.
+                **_short_count_fields(
+                    operation, work_order, accounting.get(operation.id) if operation is not None else None
+                ),
                 # Kiosk session tiles (AVG PER PC): THIS entry's own session counts,
                 # distinct from the operation totals above.
                 "quantity_produced": float(entry.quantity_produced or 0),
@@ -2637,6 +2696,11 @@ def get_work_center_queue(
     (and the test that pins the station's keys). One indexed query per poll
     (``dispatch_service.latest_dispatch_notices``); it writes nothing.
 
+    SHORT COUNT (owner ruling 1). Every ``queue`` and ``held`` row carries
+    ``upstream_quantity_short`` / ``quantity_good_ceiling`` / ``quantity_unaccounted`` (see
+    ``_short_count_fields``), from ONE tenant-scoped ``upstream_figures_by_operation`` read
+    per poll whatever the card count. Quantities only -- nothing a station may not already see.
+
     Both lists are read-only, and the ``held`` read is bounded
     (``dispatch_service.MAX_HELD_OPERATIONS``, most-recently-held first).
     """
@@ -2762,6 +2826,10 @@ def get_work_center_queue(
         db, company_id=company_id, operation_ids=held_operation_ids
     )
 
+    # Short-count accounting (owner ruling 1) for BOTH lists in ONE tenant-scoped read,
+    # whatever the card count -- the work order rides each row already (contains_eager).
+    accounting = upstream_figures_by_operation(db, company_id, list(operations) + list(held_ops))
+
     def _step_counts_for(op: WorkOrderOperation) -> dict:
         return step_counts.get(op.id, {"steps_total": 0, "steps_recorded": 0})
 
@@ -2772,6 +2840,7 @@ def get_work_center_queue(
             roster=roster_by_operation.get(op.id, []),
             step_counts=_step_counts_for(op),
             ties=material_ties.get(op.id),
+            acct=accounting.get(op.id),
         )
         for op in operations
     ]
@@ -2789,6 +2858,7 @@ def get_work_center_queue(
             ties=material_ties.get(op.id),
             hold=hold_contexts.get(op.id, HoldContext()),
             include_hold_free_text=include_hold_free_text,
+            acct=accounting.get(op.id),
         )
         for op in held_ops
     ]
@@ -3757,6 +3827,9 @@ def get_all_operations(
     client can age it. This is the poll the operator landing page (ShopFloorSimple)
     makes. An unfiltered list carries neither key and is unchanged.
 
+    Each row also carries ``upstream_quantity_short`` / ``quantity_good_ceiling`` /
+    ``quantity_unaccounted`` (owner ruling 1), from ONE batched read per page.
+
     Response includes pagination metadata for building UI controls.
     """
     from app.core.pagination import paginate_query
@@ -3885,6 +3958,8 @@ def get_all_operations(
         if held_ids_on_page
         else {}
     )
+    # Short-count accounting (owner ruling 1) for the page in ONE tenant-scoped read.
+    accounting = upstream_figures_by_operation(db, company_id, operations)
 
     result = []
     for op in operations:
@@ -3944,6 +4019,8 @@ def get_all_operations(
                 "component_quantity": op.component_quantity,
                 "quantity_complete": op.quantity_complete,
                 "quantity_scrapped": op.quantity_scrapped,
+                # Owner ruling 1 -- see _short_count_fields.
+                **_short_count_fields(op, wo, accounting.get(op.id)),
                 "laser_nest": _laser_nest_payload(op),
                 "priority": wo.priority,
                 "due_date": wo.due_date.isoformat() if wo.due_date else None,
@@ -4299,7 +4376,11 @@ def reduce_operation_production(
       (crew-safe: an operator can never walk back another operator's evidence, and
       no entry ever goes below zero). When the shortfall is because some of their
       evidence is already APPROVED, the message says so.
+    * ``reopen_operation: true`` -> 422: re-opening a completed operation is the office
+      verb's supervised correction, never operator self-service.
     """
+    if reduction_data.reopen_operation:
+        raise HTTPException(status_code=422, detail=MSG_REOPEN_IS_OFFICE_ONLY)
     load_operation_for_reduction_or_http(db, operation_id, company_id)
 
     # "Actively working" gate: the caller must hold an open clock-in on this operation.
