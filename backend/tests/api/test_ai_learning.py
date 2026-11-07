@@ -7,6 +7,9 @@ from sqlalchemy.orm import Session
 
 from app.models.ai_learning import AICorrection, AIInteractionEvent, AIRecommendation
 from app.models.company import Company
+from app.models.part import Part
+from app.models.work_order import WorkOrder, WorkOrderStatus
+from app.models.work_order_blocker import WorkOrderBlocker
 from app.services.ai_learning_service import AILearningService
 
 
@@ -421,3 +424,198 @@ class TestAILearningSweep:
         assert summary["snoozed_recommendations_woken"] == 0
         db_session.refresh(recommendation)
         assert recommendation.status == "stale"
+
+
+def _work_order_for_card(db_session: Session, number: str, priority: int = 5) -> WorkOrder:
+    part = Part(
+        part_number=f"P-{number}",
+        name=f"Part {number}",
+        part_type="manufactured",
+        unit_of_measure="each",
+        is_active=True,
+        company_id=1,
+    )
+    db_session.add(part)
+    db_session.flush()
+    work_order = WorkOrder(
+        work_order_number=number,
+        part_id=part.id,
+        quantity_ordered=1,
+        status=WorkOrderStatus.RELEASED,
+        priority=priority,
+        company_id=1,
+    )
+    db_session.add(work_order)
+    db_session.commit()
+    db_session.refresh(work_order)
+    return work_order
+
+
+def _action_card(db_session: Session, work_order: WorkOrder) -> AIRecommendation:
+    return make_recommendation(
+        db_session,
+        source_module="scheduling",
+        recommendation_type="at_risk_delivery",
+        target_entity_type="work_order",
+        target_entity_id=work_order.id,
+        suggested_action={
+            "type": "adjust_work_order_priority",
+            "work_order_id": work_order.id,
+            "priority": 1,
+            "autonomy": "apply_on_accept",
+        },
+    )
+
+
+@pytest.mark.api
+@pytest.mark.requires_db
+class TestRecordOnlyAcceptAndDismiss:
+    """Owner ruling 3: Accept records a decision; only Accept & apply (POST /apply) runs anything."""
+
+    def test_accept_rejects_apply_flag_422(self, client: TestClient, admin_headers: dict, db_session: Session):
+        work_order = _work_order_for_card(db_session, "WO-ACC-422")
+        recommendation = _action_card(db_session, work_order)
+
+        response = client.post(
+            f"/api/v1/ai/recommendations/{recommendation.id}/accept",
+            json={"reason": "Do it", "apply": True},
+            headers=admin_headers,
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+        assert "apply is not accepted here" in str(response.json()["detail"])
+        db_session.refresh(recommendation)
+        db_session.refresh(work_order)
+        assert recommendation.status == "pending"
+        assert work_order.priority == 5
+
+    def test_accept_non_pending_409(self, client: TestClient, admin_headers: dict, db_session: Session):
+        recommendation = make_recommendation(db_session, status="dismissed")
+
+        response = client.post(f"/api/v1/ai/recommendations/{recommendation.id}/accept", headers=admin_headers)
+
+        assert response.status_code == status.HTTP_409_CONFLICT
+        assert response.json()["detail"] == (
+            "This recommendation is already dismissed; it can no longer be accepted. Refresh the Action Inbox."
+        )
+        db_session.refresh(recommendation)
+        assert recommendation.status == "dismissed" and recommendation.accepted_by is None
+
+    def test_dismiss_accepted_409(self, client: TestClient, admin_headers: dict, db_session: Session):
+        recommendation = make_recommendation(db_session, status="accepted")
+
+        response = client.post(f"/api/v1/ai/recommendations/{recommendation.id}/dismiss", headers=admin_headers)
+
+        assert response.status_code == status.HTTP_409_CONFLICT
+        assert response.json()["detail"] == "This recommendation is already accepted; it can no longer be dismissed."
+        db_session.refresh(recommendation)
+        assert recommendation.status == "accepted" and recommendation.dismissed_by is None
+
+    def test_dismiss_snoozed_ok_200(self, client: TestClient, operator_headers: dict, db_session: Session):
+        recommendation = make_recommendation(db_session, status="snoozed")
+
+        response = client.post(
+            f"/api/v1/ai/recommendations/{recommendation.id}/dismiss",
+            json={"reason": "Not relevant"},
+            headers=operator_headers,
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["status"] == "dismissed"
+
+    def test_mark_handled_requires_apply_role(
+        self,
+        client: TestClient,
+        operator_headers: dict,
+        supervisor_headers: dict,
+        db_session: Session,
+        monkeypatch,
+    ):
+        from app.services import llm_client
+
+        work_order = _work_order_for_card(db_session, "WO-HANDLED")
+        card = _action_card(db_session, work_order)
+
+        refused = client.post(f"/api/v1/ai/recommendations/{card.id}/accept", headers=operator_headers)
+        assert refused.status_code == status.HTTP_403_FORBIDDEN
+        assert refused.json()["detail"] == (
+            "Your role (operator) cannot apply this action, so it stays open for Supervisor, Manager or Admin. "
+            "You can snooze it or send feedback."
+        )
+        db_session.refresh(card)
+        assert card.status == "pending"
+
+        # A supervisor may mark it handled even with AI egress off: nothing executes.
+        monkeypatch.setattr(llm_client, "_ai_egress_allowed", lambda company_id=None: False)
+        handled = client.post(
+            f"/api/v1/ai/recommendations/{card.id}/accept", json={"reason": "Done by hand"}, headers=supervisor_headers
+        )
+        assert handled.status_code == status.HTTP_200_OK
+        assert handled.json()["applied"] is False
+        assert handled.json()["recommendation"]["status"] == "accepted"
+        db_session.refresh(work_order)
+        assert work_order.priority == 5
+
+        # Suggest-only cards stay acceptable by anyone.
+        suggest_only = make_recommendation(db_session, suggested_action={"type": "review", "autonomy": "suggest_only"})
+        ok = client.post(f"/api/v1/ai/recommendations/{suggest_only.id}/accept", headers=operator_headers)
+        assert ok.status_code == status.HTTP_200_OK
+
+    def test_list_carries_target_href(self, client: TestClient, admin_headers: dict, db_session: Session):
+        work_order = _work_order_for_card(db_session, "WO-HREF")
+        part = db_session.query(Part).filter(Part.id == work_order.part_id).one()
+        blocker = WorkOrderBlocker(company_id=1, work_order_id=work_order.id, title="Waiting on steel")
+        db_session.add(blocker)
+        db_session.commit()
+        on_work_order = make_recommendation(
+            db_session, target_entity_type="work_order", target_entity_id=work_order.id, title="wo"
+        )
+        on_blocker = make_recommendation(
+            db_session, target_entity_type="work_order_blocker", target_entity_id=blocker.id, title="blocker"
+        )
+        on_part = make_recommendation(db_session, target_entity_type="part", target_entity_id=part.id, title="part")
+        # A caller-supplied href is never trusted: the link comes from the target entity.
+        brief = make_recommendation(
+            db_session,
+            recommendation_type="morning_brief",
+            title="brief",
+            suggested_action={"type": "review_brief", "href": "https://evil.example/", "autonomy": "suggest_only"},
+        )
+
+        rows = {row["id"]: row for row in client.get("/api/v1/ai/recommendations", headers=admin_headers).json()}
+
+        assert rows[on_work_order.id]["target_href"] == f"/work-orders/{work_order.id}"
+        assert rows[on_blocker.id]["target_href"] == f"/work-orders/{work_order.id}"
+        assert rows[on_part.id]["target_href"] == f"/parts/{part.id}"
+        assert rows[brief.id]["target_href"] is None
+        assert all(row["apply_action"] is None for row in rows.values())
+
+    def test_create_rejects_auto_execute_autonomy_422(
+        self, client: TestClient, admin_headers: dict, db_session: Session
+    ):
+        body = {
+            "source_module": "scheduling",
+            "recommendation_type": "agent_suggestion",
+            "title": "Expedite the late job",
+            "summary": "An agent proposes an action.",
+            "confidence_score": 0.7,
+            # Sent explicitly: a create without them 500s on the response schema (pre-existing,
+            # unrelated to the autonomy rule this test pins).
+            "evidence": [{"type": "agent"}],
+            "impact": {"expected": "on time"},
+        }
+        refused = client.post(
+            "/api/v1/ai/recommendations",
+            json={**body, "suggested_action": {"type": "adjust_work_order_priority", "autonomy": "auto_execute"}},
+            headers=admin_headers,
+        )
+        assert refused.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+        assert "there is no auto-execute tier" in str(refused.json()["detail"])
+
+        accepted = client.post(
+            "/api/v1/ai/recommendations",
+            json={**body, "suggested_action": {"type": "adjust_work_order_priority", "autonomy": "apply_on_accept"}},
+            headers=admin_headers,
+        )
+        assert accepted.status_code == status.HTTP_200_OK, accepted.text
+        assert accepted.json()["suggested_action"]["autonomy"] == "apply_on_accept"
