@@ -99,6 +99,11 @@ def _token_headers(client: TestClient, admin_headers: dict, user) -> dict:
 
 
 def _op_state(db: Session, op_id: int):
+    # A re-read starts with expire_all(), which DISCARDS an unflushed change a refusal left
+    # in the shared session (the test client never rolls back) -- so look first. Session.dirty
+    # is optimistic (any SET event); is_modified is the net change.
+    modified = [obj for obj in db.dirty if db.is_modified(obj)]
+    assert not modified and not db.new, f"pending changes in the session: {modified} {db.new}"
     db.expire_all()
     op = db.query(WorkOrderOperation).filter(WorkOrderOperation.id == op_id).one()
     entries = db.query(TimeEntry).filter(TimeEntry.operation_id == op_id).order_by(TimeEntry.id).all()
@@ -532,6 +537,7 @@ class TestOperationPutOnACompleteOperation:
         assert resp.status_code == 409, resp.text
         assert resp.json()["detail"] == completed_counts_locked_message(op)
         assert _op_state(db_session, op.id) == before
+        assert op_audit_rows(db_session, op.id) == []
 
     def test_resending_the_stored_values_and_other_fields_still_land(self, client, db_session, supervisor):
         wc = make_work_center(db_session)
@@ -583,11 +589,15 @@ class TestOfficeReduceReopen:
     def test_leaving_a_complete_operation_short_needs_reopen(self, client, db_session, supervisor):
         wo, op10, op20, entry = self._completed_first_stage(db_session)
         before = _op_state(db_session, op10.id)
+        op20_before = _op_state(db_session, op20.id)
 
         refused = _reduce(client, op10, supervisor, delta=1)
         assert refused.status_code == 409, refused.text
         assert refused.json()["detail"] == reduce_would_leave_short_message(op10, 1, 1)
-        assert _op_state(db_session, op10.id) == before
+        assert _op_state(db_session, op10.id) == before, "the walk never ran: entry and op untouched"
+        assert _op_state(db_session, op20.id) == op20_before
+        assert op_audit_rows(db_session, op10.id) == [] and op_audit_rows(db_session, op20.id) == []
+        assert ledger_rows(db_session) == []
 
     def test_reopen_returns_it_to_the_floor_and_demotes_what_it_now_blocks(self, client, db_session, supervisor):
         wo, op10, op20, entry = self._completed_first_stage(db_session)
@@ -639,12 +649,14 @@ class TestOfficeReduceReopen:
         add_entry(db_session, ann, op10, produced=10)
         set_op(db_session, op10, quantity_complete=10)
         set_op(db_session, op20, quantity_complete=10)
+        before = _op_state(db_session, op10.id)
 
         resp = _reduce(client, op10, supervisor, delta=1, reopen=True)
         assert resp.status_code == 409, resp.text
         assert resp.json()["detail"] == reopen_blocked_by_later_message(op20)
         assert resp.json()["detail"] == "Op 20 is already complete with these units; correct Op 20 first."
-        assert fresh(db_session, WorkOrderOperation, op10.id).status == DONE
+        assert _op_state(db_session, op10.id) == before, "refused before the walk: entry still holds 10"
+        assert op_audit_rows(db_session, op10.id) == []
 
     def test_the_operator_verb_refuses_reopen(self, client, db_session):
         ann = make_user(db_session)

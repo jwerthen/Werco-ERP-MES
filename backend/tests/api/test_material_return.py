@@ -596,11 +596,11 @@ def test_reconcile_on_read_must_not_redraw_returned_material(client: TestClient,
     including reconcile-on-read; if a page load can re-issue the material, the bound is
     not a bound and the two-intent split buys nothing.
 
-    What actually happens today: the reconcile pushes the corrected operation count from
-    3 back to its target of 5, the target-based delta becomes +2, and the engine posts a
-    second ISSUE of 2 sheets attributed to whoever loaded the page. The tie's OWN
-    arithmetic is correct throughout — it is the operation quantity underneath it that
-    moves — which is why this is marked as an open defect rather than a return-verb bug.
+    The historical failure: the reconcile pushed the corrected operation count from 3 back
+    to its target of 5, the target-based delta became +2, and the engine posted a second
+    ISSUE of 2 sheets attributed to whoever loaded the page. Since owner ruling 1 the
+    correction REOPENS the operation (a completed operation cannot be short) and a read
+    never closes a short, so the count underneath the tie cannot be lifted by a GET.
     """
     supervisor, operator, sheet, _lot, wo, _op1, op2, allocation, settled = _corrected_and_returned(client, db_session)
     settled_on_hand = on_hand(db_session, sheet)
@@ -613,6 +613,11 @@ def test_reconcile_on_read_must_not_redraw_returned_material(client: TestClient,
     # Owner ruling 1 makes this leg STRONGER: the correction reopened op1 (a completed
     # operation cannot be short), and a read never closes a short -- so the GET cannot
     # push the corrected count back up to its target, and has nothing to re-draw against.
+    # The read must still really have reconciled THIS work order, or the leg proves
+    # nothing: op2's closed labor evidence is what it completes on the way through.
+    assert (
+        db_session.get(WorkOrderOperation, op2.id).status == OperationStatus.COMPLETE
+    ), "the GET must really have reconciled the work order, or this leg proves nothing"
     assert db_session.get(WorkOrderOperation, _op1.id).status == OperationStatus.IN_PROGRESS
     assert db_session.get(WorkOrderOperation, _op1.id).quantity_complete == 3.0, "the read rewrote the correction"
     assert db_session.get(WorkOrder, wo.id).status != WorkOrderStatus.COMPLETE

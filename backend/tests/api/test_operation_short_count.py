@@ -25,6 +25,7 @@ from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from app.models.inventory import InventoryTransaction, TransactionType
+from app.models.operational_event import OperationalEvent
 from app.models.process_sheet import ProcessSheet, WOOperationStep
 from app.models.time_entry import TimeEntry
 from app.models.user import UserRole
@@ -458,6 +459,11 @@ def _complete(client: TestClient, op, user_or_headers, **body):
 
 
 def _snapshot(db: Session, op_id: int):
+    # A re-read starts with expire_all(), which DISCARDS an unflushed change a refusal left
+    # in the shared session (the test client never rolls back) -- so look first. Session.dirty
+    # is optimistic (any SET event); is_modified is the net change.
+    modified = [obj for obj in db.dirty if db.is_modified(obj)]
+    assert not modified and not db.new, f"pending changes in the session: {modified} {db.new}"
     db.expire_all()
     op = db.query(WorkOrderOperation).filter(WorkOrderOperation.id == op_id).one()
     entries = db.query(TimeEntry).filter(TimeEntry.operation_id == op_id).order_by(TimeEntry.id).all()
@@ -491,6 +497,8 @@ class TestFloorCloseRefusals:
         assert _snapshot(db_session, op.id) == before
         assert op_audit_rows(db_session, op.id) == []
         assert ledger_rows(db_session) == []
+        # No completion / ready event either (the fixtures emit none; a refusal must not).
+        assert db_session.query(OperationalEvent).filter(OperationalEvent.company_id == COMPANY_A).count() == 0
 
     def test_short_with_nothing_declared_is_refused_and_left_open(self, client, db_session, eight_of_ten):
         ann, wo, op = eight_of_ten
@@ -629,6 +637,7 @@ class TestFloorCloseRefusals:
 
     def test_input_validation(self, client, db_session, eight_of_ten):
         ann, _, op = eight_of_ten
+        before = _snapshot(db_session, op.id)
         no_reason = _complete(client, op, ann, quantity_scrapped=2)
         assert no_reason.status_code == 422
         assert SCRAP_REASON_REQUIRED in no_reason.text
@@ -645,8 +654,7 @@ class TestFloorCloseRefusals:
             headers={**user_headers(ann), "Content-Type": "application/json"},
         )
         assert nan.status_code in (400, 422), nan.text
-        assert _snapshot(db_session, op.id)[0] == OperationStatus.IN_PROGRESS
-        assert op_audit_rows(db_session, op.id) == []
+        self._assert_nothing_written(db_session, op, before)
 
     def test_a_held_job_still_gates_a_ready_operation_first(self, client, db_session):
         """Combined pin: the gates' work-order start rung outranks every short-count check."""

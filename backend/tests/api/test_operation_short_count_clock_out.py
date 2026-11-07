@@ -45,6 +45,26 @@ def _no_completion_signal_enqueue(monkeypatch):
     monkeypatch.setattr("app.api.endpoints.shop_floor.enqueue_work_order_completion_signals", lambda **_: None)
 
 
+def _untouched(db: Session, op_id: int, entry_id: int):
+    """Op + entry + audit + ledger, read only after checking nothing is pending in the session."""
+    modified = [obj for obj in db.dirty if db.is_modified(obj)]
+    assert not modified and not db.new, f"pending changes in the session: {modified} {db.new}"
+    op = fresh(db, WorkOrderOperation, op_id)
+    entry = db.query(TimeEntry).filter(TimeEntry.id == entry_id).one()
+    return (
+        op.status,
+        float(op.quantity_complete or 0),
+        float(op.quantity_scrapped or 0),
+        op.actual_end,
+        op.version,
+        entry.clock_out,
+        float(entry.quantity_produced or 0),
+        float(entry.quantity_scrapped or 0),
+        len(op_audit_rows(db, op_id)),
+        len(ledger_rows(db)),
+    )
+
+
 def _clock_out(client: TestClient, user, entry, **body):
     return client.post(CLOCK_OUT_URL.format(entry=entry.id), json=body, headers=user_headers(user))
 
@@ -96,8 +116,10 @@ class TestClockOut:
         ann = make_user(db_session, role=UserRole.OPERATOR)
         _, _, op20 = _upstream_declared(db_session)
         entry = add_entry(db_session, ann, op20, open_entry=True)
+        before = _untouched(db_session, op20.id, entry.id)
         resp = _clock_out(client, ann, entry, quantity_produced=9)
         assert resp.status_code == 400, resp.text
+        assert _untouched(db_session, op20.id, entry.id) == before
         expected = ceiling_exceeded_message(
             op20, 9, OperationAccounting(target=10, good=0, scrapped=0, chain_upstream=2)
         )
@@ -130,8 +152,10 @@ class TestClockOutOnAnAlreadyCompleteOperation:
 
     def test_pieces_are_refused_and_the_entry_stays_open(self, client, db_session):
         bob, op, entry = self._closed_with_bob_in(db_session)
+        before = _untouched(db_session, op.id, entry.id)
         resp = _clock_out(client, bob, entry, quantity_produced=2)
         assert resp.status_code == 409, resp.text
+        assert _untouched(db_session, op.id, entry.id) == before
         assert resp.json()["detail"] == completed_operation_clock_out_message(op)
         assert resp.json()["detail"] == (
             "Op 10 is already complete; clock out with 0 pieces and tell a supervisor about any extra pieces."
@@ -158,12 +182,14 @@ class TestProductionReport:
     def test_production_is_capped_at_the_ceiling(self, client, db_session):
         ann = make_user(db_session, role=UserRole.OPERATOR)
         _, _, op20 = _upstream_declared(db_session)
-        add_entry(db_session, ann, op20, open_entry=True)
+        entry = add_entry(db_session, ann, op20, open_entry=True)
         set_op(db_session, op20, quantity_complete=8)
+        before = _untouched(db_session, op20.id, entry.id)
         resp = client.post(
             PRODUCTION_URL.format(op=op20.id), json={"quantity_complete_delta": 1}, headers=user_headers(ann)
         )
         assert resp.status_code == 400, resp.text
+        assert _untouched(db_session, op20.id, entry.id) == before
         assert resp.json()["detail"].startswith("Quantity (9) exceeds the 8 units that can reach Op 20")
         assert float(fresh(db_session, WorkOrderOperation, op20.id).quantity_complete) == 8
 
