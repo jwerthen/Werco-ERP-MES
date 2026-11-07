@@ -355,6 +355,11 @@ export default function ShopFloor() {
       notify('success', `Clocked in to ${item.work_order_number}`);
     } catch (err: any) {
       notify('error', err.response?.data?.detail || 'Failed to clock in');
+      // A 409 means the queue row was stale (the job was held or put back to draft
+      // since it loaded). The queue is not polled on this page, so re-read it now:
+      // the server's start_blocked_reason disables Start instead of leaving an
+      // enabled button that is refused again until someone refreshes by hand.
+      if (err?.response?.status === 409) await loadQueue(selectedWorkCenter);
     } finally {
       setClockingInOperationId(null);
     }

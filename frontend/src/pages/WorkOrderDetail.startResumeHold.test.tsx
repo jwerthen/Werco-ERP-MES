@@ -218,6 +218,38 @@ describe('WorkOrderDetail — Start', () => {
     await waitFor(() => expect(mockedApi.getWorkOrder.mock.calls.length).toBeGreaterThan(loadsBefore));
   });
 
+  it('re-reads the job on a 400 as well (its status moved under the page)', async () => {
+    mockedApi.startWorkOrder.mockRejectedValue({
+      response: { status: 400, data: { detail: 'Work order must be released to start' } },
+    });
+    renderDetail();
+    await loaded();
+    const loadsBefore = mockedApi.getWorkOrder.mock.calls.length;
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^start$/i }));
+    });
+
+    await expectToast('Work order must be released to start', 'error');
+    await waitFor(() => expect(mockedApi.getWorkOrder.mock.calls.length).toBeGreaterThan(loadsBefore));
+  });
+
+  it('does not re-read the job on a 403 (nothing moved; control)', async () => {
+    mockedApi.startWorkOrder.mockRejectedValue({
+      response: { status: 403, data: { detail: 'Insufficient permissions' } },
+    });
+    renderDetail();
+    await loaded();
+    const loadsBefore = mockedApi.getWorkOrder.mock.calls.length;
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^start$/i }));
+    });
+
+    await expectToast('Insufficient permissions', 'error');
+    expect(mockedApi.getWorkOrder.mock.calls.length).toBe(loadsBefore);
+  });
+
   it('is not offered on a held or draft job', async () => {
     setStatus('on_hold');
     const { unmount } = renderDetail();
@@ -263,9 +295,12 @@ describe('WorkOrderDetail — Resume Work Order', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Resume Work Order' }));
     const dialog = await screen.findByRole('dialog');
     // The copy says where the job can land, and that operation holds stay.
-    expect(dialog).toHaveTextContent(/In Progress/);
-    expect(dialog).toHaveTextContent(/Released/);
-    expect(dialog).toHaveTextContent(/Draft/);
+    // Release record first: a job with work done but no release on record lands in Draft,
+    // so the copy must not promise In Progress for "work had started" alone.
+    expect(dialog).toHaveTextContent(/In Progress if it was released and work had started/);
+    expect(dialog).toHaveTextContent(/Released if it was released but nothing has run/);
+    expect(dialog).toHaveTextContent(/otherwise to Draft/);
+    expect(dialog).not.toHaveTextContent(/In Progress if work had already started/);
     expect(dialog).toHaveTextContent(/Holds on individual operations stay in place/);
     expect(mockedApi.resumeWorkOrder).not.toHaveBeenCalled();
 
@@ -321,6 +356,58 @@ describe('WorkOrderDetail — Resume Work Order', () => {
     await expectToast(audit503, 'error');
     expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
+
+  it('does not re-read the job on a 503 (nothing changed, the retry is beside it)', async () => {
+    setStatus('on_hold');
+    const audit503 = 'The audit record for resuming this work order could not be saved; nothing was changed. Retry.';
+    mockedApi.resumeWorkOrder.mockRejectedValue({ response: { status: 503, data: { detail: audit503 } } });
+    renderDetail();
+    await loaded();
+    const loadsBefore = mockedApi.getWorkOrder.mock.calls.length;
+
+    fireEvent.click(screen.getByRole('button', { name: 'Resume Work Order' }));
+    const dialog = await screen.findByRole('dialog');
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Resume Work Order' }));
+    });
+
+    await expectToast(audit503, 'error');
+    expect(mockedApi.getWorkOrder.mock.calls.length).toBe(loadsBefore);
+  });
+
+  it.each([
+    [400, 'Work order is not on hold'],
+    [409, 'This work order was modified concurrently. Refresh and retry.'],
+  ])(
+    'on a %s (the job moved under the page) closes the dialog and re-reads it, so the header stops offering Resume',
+    async (statusCode, detail) => {
+      // Someone else resumed the job since the page loaded: the next read sees it released.
+      let resumedElsewhere = false;
+      mockedApi.getWorkOrder.mockImplementation(async () =>
+        workOrderFixture(resumedElsewhere ? 'released' : 'on_hold')
+      );
+      mockedApi.resumeWorkOrder.mockImplementation(async () => {
+        resumedElsewhere = true;
+        throw { response: { status: statusCode, data: { detail } } };
+      });
+      renderDetail();
+      await loaded();
+      const loadsBefore = mockedApi.getWorkOrder.mock.calls.length;
+
+      fireEvent.click(screen.getByRole('button', { name: 'Resume Work Order' }));
+      const dialog = await screen.findByRole('dialog');
+      await act(async () => {
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Resume Work Order' }));
+      });
+
+      await expectToast(detail, 'error');
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      await waitFor(() => expect(mockedApi.getWorkOrder.mock.calls.length).toBeGreaterThan(loadsBefore));
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'Resume Work Order' })).not.toBeInTheDocument());
+      expect(screen.getByRole('button', { name: 'Hold Work Order' })).toBeInTheDocument();
+      expect(mockedApi.resumeWorkOrder).toHaveBeenCalledTimes(1);
+    }
+  );
 });
 
 describe('WorkOrderDetail — Hold Work Order', () => {

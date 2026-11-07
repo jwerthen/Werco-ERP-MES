@@ -291,4 +291,51 @@ describe('ShopFloorSimple — a stale payload meets the server gate', () => {
     await waitFor(() => expect(mockedApi.startOperation).toHaveBeenCalledWith(13));
     expect(await screen.findByText(WO_ON_HOLD)).toBeInTheDocument();
   });
+
+  it('re-reads the list after a 409 so the chip and the disabled button appear at once', async () => {
+    // Without the re-read the card keeps an ENABLED Check In until the 30-second poll,
+    // and every tap meets the same refusal.
+    let held = false;
+    const heldSinceLoad = {
+      ...startableOp,
+      can_check_in: false,
+      start_blocked_reason: WO_ON_HOLD,
+      work_order_status: 'on_hold',
+    };
+    mockedApi.getShopFloorOperations.mockImplementation(async () => ({
+      operations: [held ? heldSinceLoad : startableOp],
+    }));
+    mockedApi.startOperation.mockImplementation(async () => {
+      held = true;
+      throw { response: { status: 409, data: { detail: WO_ON_HOLD } } };
+    });
+    renderPage();
+
+    const card = await screen.findByTestId('shop-floor-op-13');
+    const readsBefore = mockedApi.getShopFloorOperations.mock.calls.length;
+    fireEvent.click(within(card).getByRole('button', { name: 'Check In' }));
+
+    const blocked = await within(screen.getByTestId('shop-floor-op-13')).findByRole('button', {
+      name: 'WO on hold',
+    });
+    expect(blocked).toBeDisabled();
+    expect(within(screen.getByTestId('shop-floor-op-13')).getByTestId('shop-floor-start-blocked-13')).toHaveTextContent(
+      WO_ON_HOLD
+    );
+    expect(mockedApi.getShopFloorOperations.mock.calls.length).toBeGreaterThan(readsBefore);
+    expect(mockedApi.startOperation).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not re-read the list on a refusal that is not a 409 (control)', async () => {
+    mockedApi.getShopFloorOperations.mockResolvedValue({ operations: [startableOp] });
+    mockedApi.startOperation.mockRejectedValue({ response: { status: 500, data: { detail: 'Server error' } } });
+    renderPage();
+
+    const card = await screen.findByTestId('shop-floor-op-13');
+    const readsBefore = mockedApi.getShopFloorOperations.mock.calls.length;
+    fireEvent.click(within(card).getByRole('button', { name: 'Check In' }));
+
+    expect(await screen.findByText('Server error')).toBeInTheDocument();
+    expect(mockedApi.getShopFloorOperations.mock.calls.length).toBe(readsBefore);
+  });
 });

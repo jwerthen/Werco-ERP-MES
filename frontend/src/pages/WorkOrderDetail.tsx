@@ -107,12 +107,24 @@ const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
 /** Why Complete is disabled on a READY operation of a held work order (the server refuses it 409). */
 const WORK_ORDER_HOLD_COMPLETE_TITLE = 'Resume the work order first — completing would start this operation';
 
-/** Resume Work Order confirm copy: where the job goes back to is the server's call, made from its release record. */
+/**
+ * Resume Work Order confirm copy: where the job goes back to is the server's call, made
+ * from its release record FIRST — a job with work done but no release on record still
+ * lands in Draft, so the release condition leads each clause rather than the work one.
+ */
 const RESUME_WORK_ORDER_MESSAGE =
   'Lift the hold on this work order?\n\n' +
-  'It goes back to In Progress if work had already started, to Released if a release is on record, ' +
-  'and otherwise to Draft — then release it to put it back on the floor.\n\n' +
+  'It goes back to In Progress if it was released and work had started, to Released if it was released ' +
+  'but nothing has run, and otherwise to Draft — then release it to put it back on the floor.\n\n' +
   'Holds on individual operations stay in place; clear those separately.';
+
+/**
+ * A Start / Resume refusal that means the work order's state moved under the page
+ * (400 wrong status, 404 gone, 409 draft / on hold / concurrent write): the only useful
+ * next step is to re-read it. A 503, 403 or network error is not one — the job is as
+ * the page shows it, and the user may retry or cancel.
+ */
+const isStateMovedRefusal = (err: any): boolean => [400, 404, 409].includes(err?.response?.status);
 
 /** Hold Work Order confirm copy. */
 const HOLD_WORK_ORDER_MESSAGE =
@@ -981,8 +993,9 @@ export default function WorkOrderDetail() {
 
   // Start a RELEASED work order. Non-optimistic: the status shown is whatever the
   // reload returns. A refusal (409 draft / on hold, 400 not released, 403 role)
-  // is shown verbatim and the page is re-read, since a 409 means the job's state
-  // moved under us (e.g. a supervisor held it).
+  // is shown verbatim, and a state refusal (400 / 404 / 409) re-reads the page:
+  // the job's status moved under us (e.g. a supervisor held it), and with
+  // realtime pushes off nothing else would refresh the header.
   const handleStart = async () => {
     if (!workOrder || starting) return;
     setStarting(true);
@@ -994,7 +1007,7 @@ export default function WorkOrderDetail() {
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
       showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to start work order');
-      if (err?.response?.status === 409) await loadWorkOrder();
+      if (isStateMovedRefusal(err)) await loadWorkOrder();
     } finally {
       setStarting(false);
     }
@@ -1004,8 +1017,14 @@ export default function WorkOrderDetail() {
   // job goes back to from its release record and says so in `message`, which is
   // shown verbatim. A DRAFT landing is a `warning`: the call succeeded, but the
   // job is NOT back on the floor until someone releases it — `success` would
-  // hide that, `error` would claim a failure that did not happen. The dialog
-  // closes only on success, so a refusal stays readable beside the action.
+  // hide that, `error` would claim a failure that did not happen.
+  //
+  // On a refusal the toast carries the server's text either way, and then:
+  //  - 400 (not on hold) / 404 / 409 (concurrent write): the job moved under the
+  //    page — someone else resumed or edited it. Retrying can never succeed, so
+  //    close the dialog and re-read, and the header shows the job as it is now.
+  //  - anything else (503 audit not saved — nothing changed, safe to retry; 403;
+  //    a network error): keep the dialog open beside the action that failed.
   const handleConfirmResume = async () => {
     if (!workOrder || resuming) return;
     setResuming(true);
@@ -1018,6 +1037,10 @@ export default function WorkOrderDetail() {
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
       showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to resume work order');
+      if (isStateMovedRefusal(err)) {
+        setResumeConfirmOpen(false);
+        await loadWorkOrder();
+      }
     } finally {
       setResuming(false);
     }
@@ -3745,9 +3768,10 @@ export default function WorkOrderDetail() {
       />
 
       {/* Resume Work Order confirm. Non-optimistic: `pending` refuses backdrop /
-          Escape while the call is on the wire, and the dialog closes only on
-          success, so a refusal (403, 400 not on hold, 503 audit not saved) stays
-          beside the action that caused it. */}
+          Escape while the call is on the wire. A retryable refusal (503 audit not
+          saved, 403, network) keeps the dialog open beside the action; a refusal
+          that means the job moved (400 not on hold, 404, 409) closes it and
+          re-reads the page — see handleConfirmResume. */}
       <ConfirmDialog
         open={resumeConfirmOpen}
         title="Resume Work Order"

@@ -909,6 +909,11 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       }
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || err.message || 'Failed to check in');
+      // A 409 means the row was stale — the job was held or put back to draft since
+      // the list loaded. Re-read it now so the server's start_blocked_reason chip and
+      // the disabled button appear at once, instead of an enabled Check In that will
+      // be refused again until the next poll.
+      if (err?.response?.status === 409) await loadOperations();
     } finally {
       setActionLoading(null);
     }

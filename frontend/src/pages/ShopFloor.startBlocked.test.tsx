@@ -13,7 +13,7 @@
  */
 
 import React from 'react';
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import api from '../services/api';
 import ShopFloor from './ShopFloor';
@@ -142,6 +142,41 @@ describe('ShopFloor Time Clock — work-order start refusal', () => {
     expect(start).toBeDisabled();
     fireEvent.click(start);
     expect(mockedApi.clockIn).not.toHaveBeenCalled();
+  });
+
+  it('re-reads the queue after a 409 so Start disables at once (this queue is not polled)', async () => {
+    // The row loaded as startable; a supervisor held the job before the click.
+    let held = false;
+    mockedApi.getWorkCenterQueue.mockImplementation(async () => ({ queue: [held ? heldWoItem : readyItem] }));
+    mockedApi.clockIn.mockImplementation(async () => {
+      held = true;
+      throw { response: { status: 409, data: { detail: WO_ON_HOLD } } };
+    });
+    renderShopFloor();
+
+    const start = await screen.findByRole('button', { name: /^Start$/ });
+    const readsBefore = mockedApi.getWorkCenterQueue.mock.calls.length;
+    fireEvent.click(start);
+
+    const blocked = await screen.findByRole('button', { name: 'WO on hold' });
+    expect(blocked).toBeDisabled();
+    expect(blocked).toHaveAttribute('title', WO_ON_HOLD);
+    expect(mockedApi.getWorkCenterQueue.mock.calls.length).toBeGreaterThan(readsBefore);
+    expect(mockedApi.clockIn).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not re-read the queue on a refusal that is not a 409 (control)', async () => {
+    mockedApi.getWorkCenterQueue.mockResolvedValue({ queue: [readyItem] });
+    mockedApi.clockIn.mockRejectedValue({ response: { status: 500, data: { detail: 'Server error' } } });
+    renderShopFloor();
+
+    const start = await screen.findByRole('button', { name: /^Start$/ });
+    const readsBefore = mockedApi.getWorkCenterQueue.mock.calls.length;
+    fireEvent.click(start);
+
+    await waitFor(() => expect(mockedApi.clockIn).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Start$/ })).toBeEnabled());
+    expect(mockedApi.getWorkCenterQueue.mock.calls.length).toBe(readsBefore);
   });
 
   it('leaves a released job with an enabled Start (control)', async () => {
