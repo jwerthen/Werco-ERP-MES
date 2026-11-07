@@ -334,9 +334,10 @@ def test_shop_floor_complete_caps_absolute_quantity_at_target(client: TestClient
 
 
 def test_shop_floor_complete_floors_at_evidence_not_lowered(client: TestClient, db_session: Session):
-    """shop_floor complete_operation (absolute): requesting BELOW durable produced
-    evidence stores the evidence, never the lowered request (SFI-5) -- the
-    shop-floor twin of batch3's office assertion."""
+    """shop_floor complete_operation: a quantity BELOW durable produced evidence is never
+    stored (SFI-5) -- and since owner ruling 1 the verb is a CLOSE at the recorded good,
+    so 6 recorded on a target of 10 is SHORT: refused 409, nothing written, the op stays
+    IN_PROGRESS at its evidence. The shop-floor twin of batch3's office assertion."""
     admin = make_user(db_session)
     wo, _ = make_wo(db_session, status_=WorkOrderStatus.IN_PROGRESS, quantity_ordered=10)
     wc = make_work_center(db_session)
@@ -348,11 +349,11 @@ def test_shop_floor_complete_floors_at_evidence_not_lowered(client: TestClient, 
         headers=headers_for(admin),
         json={"quantity_complete": 4},
     )
-    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
+    assert "4 of 10 not yet accounted for (6 good, 0 scrapped)" in resp.json()["detail"]
 
     refreshed = _reload(db_session, WorkOrderOperation, op.id)
     assert refreshed.quantity_complete == 6, "absolute /complete must not drop below produced evidence"
-    # 6 < 10 target -> not fully complete; op stays IN_PROGRESS.
     assert refreshed.status == OperationStatus.IN_PROGRESS
 
 
