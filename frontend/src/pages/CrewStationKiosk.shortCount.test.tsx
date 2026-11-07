@@ -288,7 +288,8 @@ describe('CrewStationKiosk — short count (owner ruling 1)', () => {
     await screen.findByRole('dialog');
     scanBadge('E013');
 
-    expect(await screen.findByText(`Nothing was saved — ${detail}`)).toBeInTheDocument();
+    const nothingSaved = await screen.findByText(`Nothing was saved — ${detail}`);
+    expect(nothingSaved.closest('[role="alert"]')).toHaveClass('text-fd-red');
     expect(mocked.reportProduction).not.toHaveBeenCalled();
   });
 
@@ -306,6 +307,7 @@ describe('CrewStationKiosk — short count (owner ruling 1)', () => {
     await screen.findByRole('dialog');
     scanBadge('E011');
 
-    expect(await screen.findByText(`Saved production, but completing failed: ${detail}`)).toBeInTheDocument();
+    const savedButFailed = await screen.findByText(`Saved production, but completing failed: ${detail}`);
+    expect(savedButFailed.closest('[role="alert"]')).toHaveClass('text-fd-red');
   });
 });

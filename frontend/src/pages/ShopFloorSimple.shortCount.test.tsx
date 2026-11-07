@@ -239,11 +239,11 @@ describe('ShopFloorSimple — short count (owner ruling 1)', () => {
     fireEvent.click(within(dialog).getByLabelText('Complete Op 20 after checking out'));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Check out & complete' }));
 
-    expect(
-      await screen.findByText(
-        'Checked out, but completing failed: Bob T is still clocked in to Op 20 — have them clock out with their count first, or leave the operation open.'
-      )
-    ).toBeInTheDocument();
+    const failed = await screen.findByText(
+      'Checked out, but completing failed: Bob T is still clocked in to Op 20 — have them clock out with their count first, or leave the operation open.'
+    );
+    // An ERROR, not a warning: the check-out landed, the close was refused.
+    expect(failed.closest('[role="alert"]')).toHaveClass('bg-red-600');
   });
 
   it('works from the received count and subtracts recorded scrap in "not yet accounted for"', async () => {

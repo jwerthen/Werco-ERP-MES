@@ -212,7 +212,11 @@ describe('office operation complete', () => {
       fireEvent.click(dialog.getByRole('button', { name: /Save progress · leave open/ }));
     });
     const toast = await screen.findByText('Progress saved — Op 10 left open, 1 pc not yet accounted for');
-    expect(toast.closest('[role="alert"]')).not.toBeNull();
+    // WARNING, specifically: an error toast is role="alert" too, so the role alone cannot
+    // tell "saved but open" from "failed" (the shared Toast's variant is its colour).
+    const toastBox = toast.closest('[role="alert"]');
+    expect(toastBox).toHaveClass('bg-amber-600');
+    expect(toastBox).not.toHaveClass('bg-red-600');
     expect(mockedApi.completeWOOperation).toHaveBeenCalledWith(71, 9, {
       quantityScrapped: null,
       overrideReason: 'Inspector found one more good part',

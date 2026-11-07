@@ -154,7 +154,12 @@ describe('OperatorKiosk — short count (owner ruling 1)', () => {
     key('3');
     fireEvent.click(screen.getByTestId('kiosk-complete-leave-open-confirm'));
 
-    expect(await screen.findByText('Clocked out — Op 20 left open (5 not yet accounted for)')).toBeInTheDocument();
+    const leftOpen = await screen.findByText('Clocked out — Op 20 left open (5 not yet accounted for)');
+    // An INFO notice (status, blue) — never the green "success" a completion would show.
+    const leftOpenToast = leftOpen.closest('[role="status"]');
+    expect(leftOpenToast).not.toBeNull();
+    expect(leftOpenToast).toHaveClass('text-fd-blue');
+    expect(leftOpenToast).not.toHaveClass('text-fd-green');
     expect(mockedApi.clockOut).toHaveBeenCalledWith(501, {
       quantity_produced: 3,
       quantity_scrapped: 0,
@@ -262,9 +267,9 @@ describe('OperatorKiosk — short count (owner ruling 1)', () => {
     fireEvent.click(await screen.findByRole('button', { name: /^complete op$/i }));
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
 
-    expect(
-      await screen.findByText(/^Clocked out, but completing failed: Op 20: 2 of 10 not yet accounted for/)
-    ).toBeInTheDocument();
+    const failed = await screen.findByText(/^Clocked out, but completing failed: Op 20: 2 of 10 not yet accounted for/);
+    // An ERROR (alert): the clock-out landed, the close did not.
+    expect(failed.closest('[role="alert"]')).toHaveClass('text-fd-red');
     expect(mockedApi.completeOperation).toHaveBeenCalledWith(31, { source: 'kiosk' });
     expect(mockedApi.clockIn).not.toHaveBeenCalled();
   });
