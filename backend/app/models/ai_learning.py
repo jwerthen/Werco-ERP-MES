@@ -143,7 +143,8 @@ class AIRecommendation(Base, TenantMixin):
         """
         if isinstance(value, dict):
             autonomy = value.get("autonomy")
-            if autonomy is not None and autonomy not in CANONICAL_AUTONOMY_TIERS:
+            # isinstance first: an unhashable value would make the set lookup raise TypeError.
+            if autonomy is not None and (not isinstance(autonomy, str) or autonomy not in CANONICAL_AUTONOMY_TIERS):
                 raise ValueError(
                     f"suggested_action.autonomy {autonomy!r} is not allowed: a recommendation is "
                     "suggest_only or apply_on_accept; there is no auto-execute tier."

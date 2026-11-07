@@ -2531,6 +2531,30 @@ and writes an `EXPORT` audit row through `AuditService`:
 > This exists because a blocker-triage card is minted once per blocker: an Operator or an agent
 > who accepted it used to retire it for good. Suggest-only cards remain acceptable by anyone.
 >
+> **Dismiss, snooze and feedback deliberately stay open to every authenticated user and every
+> credential**, including on action cards (a design decision for this release). They run
+> nothing, and gating them would leave an Operator unable to clear their own inbox. The gate
+> above is therefore partial: Dismiss retires a card as permanently as Mark handled does (and
+> also records a `rejected` learning signal). Whether Dismiss on an action card should take the
+> same gate (`mark_handled_refusal`) is an open owner question, not an oversight.
+>
+> **The AI-egress gate on Accept & apply is a deliberate reading of ruling 3, pending owner
+> confirmation.** Accept & apply makes no LLM call — it is a deterministic, tenant-local write — so
+> the coupling is to the company's "AI actions" switch, not to data egress. While egress is off
+> (the default) no tenant gets Accept & apply; cards show the plan and anyone whose role could
+> apply it can Mark handled. Dropping the gate is one check in `apply_refusal` plus copy, and is an owner decision.
+>
+> **The AI door is never broader than the record's own route.** Draft PO and blocker writes match
+> their routes (Admin / Manager / Supervisor). Filing an NCR (`POST /quality/ncr`) is open to any
+> authenticated user — `quality_record_service.WRITE_ROLES` (Admin / Manager / Quality) governs
+> NCR *edits*, disposition, void and restore, not filing — so the Quality+ (incl. Supervisor) set
+> for the draft-NCR card is narrower than the direct route, not wider.
+>
+> **What the person reviews is what changes.** An action card whose action names a different work
+> order, part or blocker than the record its "Open record" link points at is refused (409, plan
+> blocked) rather than applied, and a blocker card on a missing, deleted or terminal job is a
+> closed target that is refused the same way.
+>
 > The role sets come from `ACTION_MIN_ROLE` in `backend/app/services/ai_action_applier.py`
 > (Supervisor and up for priority, blocker and PO actions; Quality, Supervisor, Manager and Admin
 > for NCR). The frontend reflects them through the server-computed `apply_action.can_apply` /

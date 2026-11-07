@@ -46,6 +46,7 @@ from app.models.work_order import WorkOrder
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerSeverity, WorkOrderBlockerStatus
 from app.schemas.purchasing import POCreate, POLineCreate
 from app.schemas.work_order_blocker import WorkOrderBlockerUpdate
+from app.services.ai_learning_service import closed_work_order_reason
 from app.services.audit_service import AuditService
 from app.services.erp_draft_commands import PurchaseOrderNumberConflict, create_purchase_order_command
 from app.services.operational_event_service import OperationalEventService
@@ -120,6 +121,10 @@ MARK_HANDLED_CREDENTIAL_DETAIL = (
 )
 MARK_HANDLED_ROLE_DETAIL = (
     "Your role ({role}) cannot apply this action, so it stays open for {roles}. You can snooze it or send feedback."
+)
+TARGET_MISMATCH_DETAIL = (
+    "This recommendation's action and its record name different records, so it will not be applied. Open the "
+    "record and act on it directly."
 )
 PLAN_CHANGED_DETAIL = (
     "This action changed since you loaded it. It would now: {summary}. Review it and click Accept & apply again."
@@ -281,8 +286,23 @@ def _effective_priority(work_order: WorkOrder) -> int:
     return int(work_order.priority) if work_order.priority is not None else _DEFAULT_WO_PRIORITY
 
 
-def _wo_is_live_open(work_order: Optional[WorkOrder]) -> bool:
-    return bool(work_order is not None and not work_order.is_deleted and work_order.status not in TERMINAL_WO_STATUSES)
+def _closed_job_reason(work_order: Optional[WorkOrder], verb: str) -> Optional[str]:
+    """The blocker plans' refusal for a missing, deleted or finished job, else None.
+
+    Worded from :func:`closed_work_order_reason` -- the SAME rule the nightly sweep uses to
+    retire such a card ("Target closed: ...") -- so the list, /apply and the sweep share
+    one definition of a closed target, and no card offers a write the sweep would retire.
+    """
+    closed = closed_work_order_reason(work_order)
+    if closed is None:
+        return None
+    return f"{closed[0].upper()}{closed[1:]}; nothing to {verb}"
+
+
+def _blocker_work_order(db: Session, company_id: int, blocker: WorkOrderBlocker) -> Optional[WorkOrder]:
+    if not blocker.work_order_id:
+        return None
+    return tenant_query(db, WorkOrder, company_id).filter(WorkOrder.id == blocker.work_order_id).first()
 
 
 def _join_clauses(clauses: Iterable[str]) -> str:
@@ -358,24 +378,27 @@ def _plan_escalate_blocker(db: Session, company_id: int, action: Mapping[str, An
     if blocker.status in _CLOSED_BLOCKER_STATUSES:
         return _blocked(kind, generic, f"Blocker '{title}' is already {blocker.status}; nothing to escalate", facts)
 
+    work_order = _blocker_work_order(db, company_id, blocker)
+    if work_order is not None:
+        facts.update(work_order_id=work_order.id, work_order_number=work_order.work_order_number)
+    closed_job = _closed_job_reason(work_order, "escalate")
+    if closed_job:
+        # A blocker on a missing, deleted or finished job is a closed target: the sweep
+        # retires the card, so the plan never writes a status/severity change on it.
+        return _blocked(kind, generic, closed_job, facts)
+
+    assert work_order is not None  # _closed_job_reason refuses a missing work order
     acknowledge = blocker.status == WorkOrderBlockerStatus.OPEN.value
     high_rank = _SEVERITY_RANK[WorkOrderBlockerSeverity.HIGH.value]
     raise_severity = _SEVERITY_RANK.get(blocker.severity or "", 0) < high_rank
-    work_order = (
-        tenant_query(db, WorkOrder, company_id).filter(WorkOrder.id == blocker.work_order_id).first()
-        if blocker.work_order_id
-        else None
-    )
-    current = _effective_priority(work_order) if work_order is not None else None
-    expedite = bool(_wo_is_live_open(work_order) and current is not None and current > _EXPEDITE_PRIORITY)
-    number = work_order.work_order_number if work_order is not None else None
+    current = _effective_priority(work_order)
+    expedite = current > _EXPEDITE_PRIORITY
+    number = work_order.work_order_number
     facts.update(
         {
             "acknowledge": acknowledge,
             "new_severity": WorkOrderBlockerSeverity.HIGH.value if raise_severity else None,
-            "work_order_id": work_order.id if work_order is not None else None,
-            "work_order_number": number,
-            "current_priority": work_order.priority if work_order is not None else None,
+            "current_priority": work_order.priority,
             "expedite_to": _EXPEDITE_PRIORITY if expedite else None,
         }
     )
@@ -392,15 +415,10 @@ def _plan_escalate_blocker(db: Session, company_id: int, action: Mapping[str, An
         clauses.append(f"expedite {number} from P{current} to P{_EXPEDITE_PRIORITY}")
 
     if not clauses:
-        if work_order is None:
-            wo_clause = ""
-        elif work_order.is_deleted:
-            wo_clause = f" and {number} has been deleted"
-        elif work_order.status in TERMINAL_WO_STATUSES:
-            wo_clause = f" and {number} is {_status_text(work_order.status)}"
-        else:
-            wo_clause = f" and {number} is already P{current}"
-        reason = f"Blocker '{title}' is already acknowledged at {blocker.severity}{wo_clause}; nothing to escalate"
+        reason = (
+            f"Blocker '{title}' is already acknowledged at {blocker.severity} and {number} is already "
+            f"P{current}; nothing to escalate"
+        )
         return _blocked(kind, generic, reason, facts)
 
     summary = f"{_join_clauses(clauses)}. {_HOLD_DISCLAIMER}"
@@ -427,6 +445,12 @@ def _plan_acknowledge_blocker(
     facts["acknowledge"] = True
     if blocker.status in _CLOSED_BLOCKER_STATUSES:
         return _blocked(kind, generic, f"Blocker '{title}' is already {blocker.status}; nothing to acknowledge", facts)
+    work_order = _blocker_work_order(db, company_id, blocker)
+    if work_order is not None:
+        facts.update(work_order_id=work_order.id, work_order_number=work_order.work_order_number)
+    closed_job = _closed_job_reason(work_order, "acknowledge")
+    if closed_job:
+        return _blocked(kind, generic, closed_job, facts)
     if blocker.status == WorkOrderBlockerStatus.ACKNOWLEDGED.value:
         return _blocked(kind, generic, f"Blocker '{title}' is already acknowledged", facts)
     return ApplyPlan(action_type=kind, summary=f"Acknowledge blocker '{title}'. {_HOLD_DISCLAIMER}", facts=facts)
@@ -550,6 +574,10 @@ def _plan_draft_po(db: Session, company_id: int, action: Mapping[str, Any], ctx:
         .limit(6)
         .all()
     ]
+    # Part of the FACTS, not only the warning text: an open PO that appears between the
+    # list load and the click changes the fingerprint, so /apply 409s and the card is
+    # re-read with the duplicate-PO warning the person has not yet seen.
+    facts["open_po_numbers"] = open_numbers
     warnings: Tuple[str, ...] = ()
     if open_numbers:
         listed = ", ".join(open_numbers[:5]) + (" and more" if len(open_numbers) > 5 else "")
@@ -593,7 +621,42 @@ def resolve_plan(
         "fallback_title": fallback_title,
         "fallback_description": fallback_description,
     }
-    return resolver(db, company_id, action, ctx)
+    return _check_target_matches(resolver(db, company_id, action, ctx), target_entity_type, target_entity_id)
+
+
+# The plan fact naming the record a card's ``target_entity_type`` links to. ``target_hrefs``
+# builds the card's "Open record" link from the TARGET, so the action must change that
+# same record -- otherwise a person reviews one record and the click changes another.
+_TARGET_FACT_KEYS: Dict[str, str] = {
+    "work_order": "work_order_id",
+    "part": "part_id",
+    "work_order_blocker": "blocker_id",
+}
+
+
+def _check_target_matches(plan: ApplyPlan, target_entity_type: Optional[str], target_entity_id: Any) -> ApplyPlan:
+    """Refuse a plan whose action changes a different record than the card's target.
+
+    Only target types that get an "Open record" link are checked; a card with no linked
+    target (a morning brief, a work center) has no link that could point elsewhere. A
+    plan already blocked before it resolved the record keeps its own reason.
+    """
+    fact_key = _TARGET_FACT_KEYS.get(target_entity_type or "")
+    target_id = _int_id(target_entity_id)
+    if fact_key is None or target_id is None:
+        return plan
+    acted_on = plan.facts.get(fact_key)
+    if acted_on is None and plan.blocked:
+        return plan
+    if acted_on == target_id:
+        return plan
+    return ApplyPlan(
+        action_type=plan.action_type,
+        summary=plan.summary,
+        facts=plan.facts,
+        warnings=plan.warnings,
+        blocked_reason=TARGET_MISMATCH_DETAIL,
+    )
 
 
 def plan_for_recommendation(db: Session, company_id: int, recommendation: AIRecommendation) -> ApplyPlan:
@@ -685,6 +748,12 @@ def annotate_apply_actions(
     """Attach ``apply_action`` to every row (None unless it is a pending action card).
 
     Egress is read lazily, at most once per request, and only when a row reaches that gate.
+
+    Cost (accepted bound): each pending action card resolves its own plan with a few
+    primary-key reads -- about two for a work-order or blocker card, three for a draft PO
+    (part, vendor, open-PO lookup). Non-action rows cost nothing. The Action Inbox asks for
+    25 and the context strip for 3; the list's own ``limit`` cap (100) bounds an API or
+    MCP caller at a few hundred indexed point reads. Batch these before raising that cap.
     """
     egress_cache: Dict[str, bool] = {}
 

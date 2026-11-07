@@ -438,21 +438,102 @@ class TestWhatRunsIsWhatWasShown:
         assert _events(db_session, "ai_recommendation_applied") == []
 
     def test_crafted_label_cannot_mislead(self, client, db_session, admin_headers):
-        shown = _work_order(db_session, "WO-CRAFT-A", priority=5)
+        _work_order(db_session, "WO-CRAFT-A", priority=5)
         acted = _work_order(db_session, "WO-CRAFT-B", priority=5)
         rec = _rec(
             db_session,
             {
                 "type": "adjust_work_order_priority",
                 "work_order_id": acted.id,
-                "work_order_number": "WO-CRAFT-A",
+                "work_order_number": "WO-CRAFT-A",  # a stored label naming a different job
                 "priority": 1,
             },
             target_type="work_order",
-            target_id=shown.id,
+            target_id=acted.id,
         )
-        summary = _listed(client, admin_headers, rec.id)["apply_action"]["summary"]
-        assert summary == "Raise WO-CRAFT-B priority from P5 to P1"
+        action = _listed(client, admin_headers, rec.id)["apply_action"]
+        assert action["summary"] == "Raise WO-CRAFT-B priority from P5 to P1"
+        assert action["can_apply"] is True
+
+
+# The card's "Open record" link is built from its TARGET; the action must change that record.
+_MISMATCH_CASES = ["priority", "draft_po", "escalate_other_blocker", "escalate_blocker_on_another_job"]
+
+
+class TestActionMustChangeTheLinkedRecord:
+    @pytest.mark.parametrize("case", _MISMATCH_CASES)
+    def test_action_and_target_naming_different_records_is_refused(self, client, db_session, supervisor_headers, case):
+        from app.services.ai_action_applier import TARGET_MISMATCH_DETAIL
+
+        shown = _work_order(db_session, f"WO-SHOWN-{case}", priority=6, status_=WorkOrderStatus.IN_PROGRESS)
+        acted = _work_order(db_session, f"WO-ACTED-{case}", priority=6, status_=WorkOrderStatus.IN_PROGRESS)
+        shown_blocker = _blocker(db_session, shown)
+        acted_blocker = _blocker(db_session, acted)
+        vendor = _vendor(db_session, f"VMIS{_MISMATCH_CASES.index(case)}")
+        shown_part = _part(db_session, f"MIS-SHOWN-{case}", primary_supplier_id=vendor.id, reorder_quantity=5)
+        acted_part = _part(db_session, f"MIS-ACTED-{case}", primary_supplier_id=vendor.id, reorder_quantity=5)
+        action, target_type, target_id, href = {
+            "priority": (
+                {"type": "adjust_work_order_priority", "work_order_id": acted.id, "priority": 1},
+                "work_order",
+                shown.id,
+                f"/work-orders/{shown.id}",
+            ),
+            "draft_po": (
+                {"type": "create_draft_po", "part_id": acted_part.id},
+                "part",
+                shown_part.id,
+                f"/parts/{shown_part.id}",
+            ),
+            "escalate_other_blocker": (
+                {"type": "escalate_blocker", "blocker_id": acted_blocker.id},
+                "work_order_blocker",
+                shown_blocker.id,
+                f"/work-orders/{shown.id}",
+            ),
+            # The link goes to the targeted job; the blocker the action names sits on another.
+            "escalate_blocker_on_another_job": (
+                {"type": "escalate_blocker", "blocker_id": acted_blocker.id},
+                "work_order",
+                shown.id,
+                f"/work-orders/{shown.id}",
+            ),
+        }[case]
+        rec = _rec(db_session, action, target_type=target_type, target_id=target_id)
+
+        row = _listed(client, supervisor_headers, rec.id)
+        assert row["target_href"] == href
+        apply_action = row["apply_action"]
+        assert apply_action["blocked_kind"] == "target"
+        assert apply_action["blocked_reason"] == TARGET_MISMATCH_DETAIL
+        assert apply_action["can_apply"] is False
+        assert apply_action["can_mark_handled"] is True
+
+        response = _apply(client, supervisor_headers, rec.id, apply_action["fingerprint"])
+        assert response.status_code == status.HTTP_409_CONFLICT, response.text
+        assert response.json()["detail"] == TARGET_MISMATCH_DETAIL
+
+        db_session.expire_all()
+        assert {wo.priority for wo in db_session.query(WorkOrder).filter(WorkOrder.id.in_([shown.id, acted.id]))} == {6}
+        assert {b.status for b in db_session.query(WorkOrderBlocker)} == {"open"}
+        assert db_session.query(PurchaseOrder).count() == 0
+        assert _audit_rows(db_session, "work_order") == [] and _audit_rows(db_session, "work_order_blocker") == []
+        assert db_session.query(AIRecommendation).filter(AIRecommendation.id == rec.id).one().status == "pending"
+
+    def test_matching_target_and_action_still_apply(self, client, db_session, supervisor_headers):
+        # Negative control: a blocker card targeting its own job's work order is consistent.
+        wo = _work_order(db_session, "WO-MATCH", priority=6, status_=WorkOrderStatus.IN_PROGRESS)
+        blocker = _blocker(db_session, wo)
+        rec = _rec(
+            db_session,
+            {"type": "escalate_blocker", "blocker_id": blocker.id},
+            target_type="work_order",
+            target_id=wo.id,
+        )
+
+        row, response = _list_then_apply(client, supervisor_headers, rec.id)
+        assert row["apply_action"]["can_apply"] is True
+        assert response.status_code == status.HTTP_200_OK, response.text
 
     @pytest.mark.parametrize("suggested", [2, 1])
     def test_priority_never_demotes_and_noop_is_blocked(self, client, db_session, admin_headers, suggested):
@@ -552,18 +633,28 @@ class TestEscalateBlocker:
         db_session.refresh(wo)
         assert wo.priority == 2
 
-    def test_escalate_terminal_wo_skips_expedite(self, client, db_session, supervisor_headers):
+    def test_escalate_on_a_finished_job_is_a_closed_target(self, client, db_session, supervisor_headers):
+        # The nightly sweep retires this card ("Target closed: work order WO-DONE is
+        # complete"); until it runs, the plan must refuse rather than acknowledge a blocker
+        # on a finished job. One definition of a closed target for the list, /apply and sweep.
         wo = _work_order(db_session, "WO-DONE", priority=6, status_=WorkOrderStatus.COMPLETE)
-        blocker = _blocker(db_session, wo, severity="high")
+        blocker = _blocker(db_session, wo, severity="medium")
         rec = _escalate_rec(db_session, blocker)
 
         row, response = _list_then_apply(client, supervisor_headers, rec.id)
-        assert "expedite" not in row["apply_action"]["summary"]
-        assert response.status_code == status.HTTP_200_OK, response.text
+        action = row["apply_action"]
+        assert action["blocked_kind"] == "target"
+        assert action["blocked_reason"] == "Work order WO-DONE is complete; nothing to escalate"
+        assert action["can_mark_handled"] is True
+        assert response.status_code == status.HTTP_409_CONFLICT, response.text
+        assert response.json()["detail"] == "Work order WO-DONE is complete; nothing to escalate"
         db_session.refresh(wo)
         db_session.refresh(blocker)
+        db_session.refresh(rec)
         assert wo.priority == 6
-        assert blocker.status == "acknowledged"
+        assert (blocker.status, blocker.severity) == ("open", "medium")
+        assert _audit_rows(db_session, "work_order_blocker", blocker.id) == []
+        assert rec.status == "pending"
 
     def test_escalate_resolved_blocker_is_blocked_and_not_reopened(self, client, db_session, supervisor_headers):
         wo = _work_order(db_session, "WO-RES", priority=6, status_=WorkOrderStatus.IN_PROGRESS)
@@ -678,6 +769,54 @@ class TestDraftPurchaseOrder:
         action = _listed(client, supervisor_headers, second.id)["apply_action"]
         assert action["can_apply"] is True
         assert action["warnings"] == [f"PO-WARN already has open PO(s): {po_number}"]
+
+    def test_an_open_po_raised_after_the_card_loaded_is_a_plan_change(
+        self, client, db_session, supervisor_user, supervisor_headers
+    ):
+        """The duplicate-PO warning is part of what the person approves, so it is fingerprinted.
+
+        A buyer raises a PO for the part by hand between the list load and the click: the
+        person approved a card that showed no warning, so /apply must 409 and the re-read
+        must show the warning, rather than silently creating a second draft PO.
+        """
+        from decimal import Decimal
+
+        from app.schemas.purchasing import POCreate, POLineCreate
+        from app.services.audit_service import AuditService
+        from app.services.erp_draft_commands import create_purchase_order_command
+
+        vendor = _vendor(db_session, "VRACE")
+        part = _part(db_session, "PO-RACE", primary_supplier_id=vendor.id, reorder_quantity=10)
+        rec = _po_rec(db_session, part)
+        loaded = _listed(client, supervisor_headers, rec.id)["apply_action"]
+        assert loaded["warnings"] == [] and loaded["can_apply"] is True
+
+        manual = create_purchase_order_command(
+            db_session,
+            POCreate(
+                vendor_id=vendor.id,
+                lines=[POLineCreate(part_id=part.id, quantity_ordered=Decimal("3"), unit_price=Decimal("1"))],
+            ),
+            supervisor_user,
+            1,
+            AuditService(db_session, supervisor_user),
+        )
+        db_session.commit()
+
+        response = _apply(client, supervisor_headers, rec.id, loaded["fingerprint"])
+        assert response.status_code == status.HTTP_409_CONFLICT, response.text
+        assert "changed since you loaded it" in response.json()["detail"]
+        assert db_session.query(PurchaseOrder).count() == 1
+        db_session.refresh(rec)
+        assert rec.status == "pending"
+
+        reread = _listed(client, supervisor_headers, rec.id)["apply_action"]
+        assert reread["fingerprint"] != loaded["fingerprint"]
+        assert reread["warnings"] == [f"PO-RACE already has open PO(s): {manual.po_number}"]
+        # Having now seen the warning, the person can still choose to apply.
+        confirmed = _apply(client, supervisor_headers, rec.id, reread["fingerprint"])
+        assert confirmed.status_code == status.HTTP_200_OK, confirmed.text
+        assert db_session.query(PurchaseOrder).count() == 2
 
 
 # =============================================================================================
@@ -868,3 +1007,27 @@ class TestRacesAndRollback:
         targets = {coro for coro, _args, _kwargs in calls}
         assert {broadcast_work_order_update, broadcast_dashboard_update} <= targets
         assert all(kwargs.get("company_id") == 1 for _coro, _args, kwargs in calls)
+
+    def test_a_failing_post_commit_broadcast_never_fails_a_committed_apply(
+        self, client, db_session, supervisor_user, supervisor_headers, monkeypatch
+    ):
+        """The apply is committed before the broadcast: a nudge that raises must not turn it into
+        an error response (the client would say "Nothing was changed" and a retry would 409)."""
+        from app.api.endpoints import ai_learning as ai_learning_endpoint
+
+        def explode(*_args, **_kwargs):
+            raise RuntimeError("websocket fan-out is down")
+
+        monkeypatch.setattr(ai_learning_endpoint, "_broadcast_blocker", explode)
+        wo = _work_order(db_session, "WO-BCAST-FAIL", priority=6, status_=WorkOrderStatus.IN_PROGRESS)
+        blocker = _blocker(db_session, wo)
+        rec = _escalate_rec(db_session, blocker)
+
+        _row, response = _list_then_apply(client, supervisor_headers, rec.id)
+
+        assert response.status_code == status.HTTP_200_OK, response.text
+        assert response.json()["applied"] is True
+        db_session.refresh(rec)
+        db_session.refresh(blocker)
+        assert rec.status == "accepted" and rec.accepted_by == supervisor_user.id
+        assert blocker.status == "acknowledged"

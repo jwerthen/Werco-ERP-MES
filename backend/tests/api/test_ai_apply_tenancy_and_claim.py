@@ -341,9 +341,12 @@ class TestApplyIsTenantScoped:
         assert apply_action["blocked_reason"] == expected
         # Nothing about company 2 leaks into what company 1 is shown.
         assert "FOREIGN" not in apply_action["summary"]
-        assert row["target_href"] in (None, f"/parts/{target_id}", f"/work-orders/{target_id}")
-        if target_type == "work_order_blocker":
-            assert row["target_href"] is None  # company 2's blocker -> company 2's WO id stays hidden
+        # A link only to a record of THIS company: a crafted card naming company 2's work
+        # order, part or blocker gets no link at all (not one that 404s, and company 2's WO
+        # id behind a blocker stays hidden).
+        local_part_ids = {local["po_part"].id, local["ncr_part"].id}
+        expected_href = f"/parts/{target_id}" if target_type == "part" and target_id in local_part_ids else None
+        assert row["target_href"] == expected_href
 
         response = _apply(client, admin_headers, rec.id, apply_action["fingerprint"])
         assert response.status_code == status.HTTP_409_CONFLICT, response.text
@@ -520,12 +523,19 @@ class TestEveryAuditRowCarriesProvenance:
 
 
 class TestSoftDeletedTargets:
-    def test_escalate_never_expedites_a_deleted_work_order(self, client, db_session, admin_user, supervisor_headers):
+    @pytest.mark.parametrize(
+        "action_type,verb", [("escalate_blocker", "escalate"), ("acknowledge_blocker", "acknowledge")]
+    )
+    def test_blocker_cards_on_a_deleted_job_write_nothing(
+        self, client, db_session, admin_user, supervisor_headers, action_type, verb
+    ):
+        # Invariant 3 (new writes validate live parents): a blocker on a tombstoned job is a
+        # closed target -- no status change, no severity row, no event, no expedite.
         work_order = _work_order(db_session, "WO-ESC-GONE", priority=6, status_=WorkOrderStatus.IN_PROGRESS)
         blocker = _blocker(db_session, work_order)
         rec = _rec(
             db_session,
-            {"type": "escalate_blocker", "blocker_id": blocker.id, "work_order_id": work_order.id},
+            {"type": action_type, "blocker_id": blocker.id, "work_order_id": work_order.id},
             target_type="work_order_blocker",
             target_id=blocker.id,
         )
@@ -533,15 +543,25 @@ class TestSoftDeletedTargets:
         db_session.commit()
         db_session.refresh(work_order)
         version_before = work_order.version
+        expected = f"Work order WO-ESC-GONE was deleted; nothing to {verb}"
 
-        action = _listed(client, supervisor_headers, rec.id)["apply_action"]
-        assert "expedite" not in action["summary"]
+        row = _listed(client, supervisor_headers, rec.id)
+        action = row["apply_action"]
+        assert action["blocked_kind"] == "target"
+        assert action["blocked_reason"] == expected
+        assert action["can_mark_handled"] is True
+        assert row["target_href"] is None  # the WO detail page refuses a deleted job
 
         response = _apply(client, supervisor_headers, rec.id, action["fingerprint"])
-        assert response.status_code == status.HTTP_200_OK, response.text
+        assert response.status_code == status.HTTP_409_CONFLICT, response.text
+        assert response.json()["detail"] == expected
         db_session.refresh(work_order)
+        db_session.refresh(blocker)
         assert work_order.priority == 6 and work_order.version == version_before
-        assert db_session.query(AuditLog).filter(AuditLog.resource_type == "work_order").count() == 0
+        assert (blocker.status, blocker.severity) == ("open", "medium")
+        assert _audit_count(db_session, "work_order", "work_order_blocker") == 0
+        assert _event_count(db_session, "work_order_blocker_updated") == 0
+        assert _status_of(db_session, rec.id) == "pending"
 
     def test_draft_ncr_refuses_a_deleted_work_order(self, client, db_session, admin_user, supervisor_headers):
         part = _part(db_session, "NCR-WO-GONE")
@@ -604,3 +624,96 @@ class TestBroadcastAndFingerprintScope:
         assert response.status_code == status.HTTP_200_OK, response.text
         db_session.refresh(work_order)
         assert work_order.priority == 1
+
+
+# =============================================================================================
+# ONE definition of a closed target: the list/apply plan and the nightly sweep agree
+# =============================================================================================
+
+
+_JOB_STATES = ["live", "complete", "cancelled", "deleted"]
+
+
+class TestPlanAndSweepAgreeOnClosedTargets:
+    @pytest.mark.parametrize("state", _JOB_STATES)
+    def test_a_blocker_card_is_applyable_exactly_when_the_sweep_would_keep_it(
+        self, client, db_session, admin_user, supervisor_headers, state
+    ):
+        number = f"WO-PARITY-{state.upper()}"
+        status_ = {"complete": WorkOrderStatus.COMPLETE, "cancelled": WorkOrderStatus.CANCELLED}.get(
+            state, WorkOrderStatus.IN_PROGRESS
+        )
+        work_order = _work_order(db_session, number, priority=6, status_=status_)
+        blocker = _blocker(db_session, work_order)
+        rec = _rec(
+            db_session,
+            {"type": "escalate_blocker", "blocker_id": blocker.id},
+            target_type="work_order_blocker",
+            target_id=blocker.id,
+        )
+        if state == "deleted":
+            work_order.soft_delete(admin_user.id)
+            db_session.commit()
+
+        action = _listed(client, supervisor_headers, rec.id)["apply_action"]
+        AILearningService(db_session).aggregate_learning_signals(company_ids=[1])
+        db_session.commit()
+        swept = db_session.query(AIRecommendation).filter(AIRecommendation.id == rec.id).one()
+
+        if state == "live":
+            assert action["can_apply"] is True
+            assert swept.status == "pending"
+            return
+        closed = {"complete": f"{number} is complete", "cancelled": f"{number} is cancelled"}.get(
+            state, f"{number} was deleted"
+        )
+        assert action["can_apply"] is False
+        assert action["blocked_reason"] == f"Work order {closed}; nothing to escalate"
+        assert swept.status == "stale"
+        assert swept.status_reason == f"Target closed: work order {closed}"
+
+
+# =============================================================================================
+# Record links resolve or are absent
+# =============================================================================================
+
+
+class TestTargetHrefsResolve:
+    def test_links_only_to_records_their_page_will_show(self, db_session, admin_user):
+        live_wo = _work_order(db_session, "WO-LINK-LIVE")
+        gone_wo = _work_order(db_session, "WO-LINK-GONE")
+        gone_wo.soft_delete(admin_user.id)
+        live_part = _part(db_session, "LINK-PART")
+        tombstoned_part = _part(db_session, "LINK-PART-GONE")
+        tombstoned_part.soft_delete(admin_user.id)
+        blocker_on_live = _blocker(db_session, live_wo)
+        blocker_on_gone = _blocker(db_session, gone_wo)
+        db_session.commit()
+
+        recs = {
+            "live_wo": _rec(db_session, {"type": "note"}, target_type="work_order", target_id=live_wo.id),
+            "gone_wo": _rec(db_session, {"type": "note"}, target_type="work_order", target_id=gone_wo.id),
+            "live_part": _rec(db_session, {"type": "note"}, target_type="part", target_id=live_part.id),
+            "tombstoned_part": _rec(db_session, {"type": "note"}, target_type="part", target_id=tombstoned_part.id),
+            "blocker_live": _rec(
+                db_session, {"type": "note"}, target_type="work_order_blocker", target_id=blocker_on_live.id
+            ),
+            "blocker_gone": _rec(
+                db_session, {"type": "note"}, target_type="work_order_blocker", target_id=blocker_on_gone.id
+            ),
+            "company": _rec(db_session, {"type": "note"}, target_type="company", target_id=1),
+            "no_target": _rec(db_session, {"type": "note"}),
+        }
+
+        hrefs = AILearningService(db_session).target_hrefs(1, iter(recs.values()))
+
+        assert {name: hrefs[rec.id] for name, rec in recs.items()} == {
+            "live_wo": f"/work-orders/{live_wo.id}",
+            "gone_wo": None,  # GET /work-orders/{id} 404s a soft-deleted job
+            "live_part": f"/parts/{live_part.id}",
+            "tombstoned_part": f"/parts/{tombstoned_part.id}",  # the part page serves a tombstone
+            "blocker_live": f"/work-orders/{live_wo.id}",
+            "blocker_gone": None,
+            "company": None,
+            "no_target": None,
+        }

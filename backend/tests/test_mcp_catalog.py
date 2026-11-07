@@ -20,6 +20,7 @@ rule rather than "something in 663 tools changed".
 from __future__ import annotations
 
 import copy
+import json
 import re
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Set
 
@@ -153,6 +154,11 @@ class TestMembership:
         assert by_path[("POST", "/api/v1/ai/recommendations/{recommendation_id}/accept")] == (
             "accept_ai_recommendation"
         )
+        # The accept tool still carries the refused-only ``apply`` flag, so its schema must say
+        # so -- an agent reading the tool should never try apply=true.
+        (accept,) = [tool for tool in catalog if tool.name == "accept_ai_recommendation"]
+        apply_flag = json.dumps(accept.input_schema)
+        assert "Must be false" in apply_flag and "Accept & apply" in apply_flag
 
     def test_public_operations_name_exactly_the_unsecured_routes(self, spec):
         unsecured = {

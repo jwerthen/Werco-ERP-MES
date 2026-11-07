@@ -10475,7 +10475,10 @@ audit-logged as described under [Accept & apply](#accept--apply-post-airecommend
 by the server from the target entity — `/work-orders/{id}` for a `work_order` target,
 `/work-orders/{blocker's work_order_id}` for a `work_order_blocker`, `/parts/{id}` for a `part`,
 `null` otherwise. The stored `suggested_action.href` is never used for it (it is caller-supplied
-on create). A row that is pending, has an allowlisted action type (`escalate_blocker`,
+on create). A link is emitted only where its page resolves the id: the target (and a blocker's
+work order) must belong to the active company, and a soft-deleted work order gets `null` because
+`GET /work-orders/{id}` refuses it; a soft-deleted part keeps its link, since the part page serves
+it. A row that is pending, has an allowlisted action type (`escalate_blocker`,
 `acknowledge_blocker`, `adjust_work_order_priority`, `create_draft_ncr`, `create_draft_po`) and
 `apply_on_accept` autonomy — an **action card** — also carries `apply_action`; every other row
 has `apply_action: null`:
@@ -10485,7 +10488,7 @@ has `apply_action: null`:
 | `action_type` | The allowlisted action |
 | `summary` | What Accept & apply would do **right now**, resolved from live, tenant-scoped records — never from the stored labels |
 | `warnings` | e.g. `"{part} already has open PO(s): PO-…"` |
-| `fingerprint` | 16 hex characters hashing the resolved facts; send it back as `expected_fingerprint` |
+| `fingerprint` | 16 hex characters hashing the resolved facts; send it back as `expected_fingerprint`. A draft-PO card's facts include the open PO numbers behind its warning, so a PO raised after the list loaded makes `/apply` a **409** and the re-read shows the new warning |
 | `can_apply` | `true` exactly when `blocked_kind` is `null` |
 | `can_mark_handled` | `true` when the caller is a person in an interactive session, not in a read-only context, whose role could apply the action, and `blocked_kind` is `null`, `egress` or `target` |
 | `blocked_reason` | The refusal `/apply` would return, or the plan's reason |
@@ -10512,7 +10515,7 @@ anything is written:
 | 4 | Not a read-only company context | 403 | `Read-only company context cannot modify data` |
 | 5 | Company AI egress (`allow_ai_egress`) is on | 403 | `AI actions are off for this company (AI egress is off), so nothing will be applied. An Admin can turn AI egress on in Admin Settings > AI Privacy, or you can act on the record directly.` |
 | 6 | The person's role can perform the action — Quality, Supervisor, Manager or Admin for `create_draft_ncr`; Supervisor, Manager or Admin otherwise | 403 | `Your role ({role}) cannot apply this action: {summary}. It needs {roles}.` |
-| 7 | The target still makes sense (the plan is not blocked) | 409 | The plan's reason verbatim, e.g. `Work order {num} has been deleted`, `Cannot change priority on a terminal work order`, `{num} is already P{cur} (the suggestion was P{new}); nothing to apply`, `Blocker '{title}' is already {status}; nothing to escalate`, `{part} has no primary supplier; set one on the part, or create the PO in Purchasing`, `Vendor {name} is inactive; reactivate it or update the part's primary supplier`, `{part} has no reorder quantity; create the PO in Purchasing` |
+| 7 | The target still makes sense (the plan is not blocked) | 409 | The plan's reason verbatim, e.g. `Work order {num} has been deleted`, `Cannot change priority on a terminal work order`, `{num} is already P{cur} (the suggestion was P{new}); nothing to apply`, `Blocker '{title}' is already {status}; nothing to escalate`, `Work order {num} is complete; nothing to escalate` / `Work order {num} was deleted; nothing to acknowledge` (a blocker on a missing, deleted or terminal job — the same closed-target rule the nightly sweep stales the card with), `{part} has no primary supplier; set one on the part, or create the PO in Purchasing`, `Vendor {name} is inactive; reactivate it or update the part's primary supplier`, `{part} has no reorder quantity; create the PO in Purchasing`, and `This recommendation's action and its record name different records, so it will not be applied. Open the record and act on it directly.` (the action would change a different work order, part or blocker than the card's `target_href` points at) |
 | 8 | The plan still matches `expected_fingerprint` | 409 | `This action changed since you loaded it. It would now: {summary}. Review it and click Accept & apply again.` |
 
 After gates 1–6 the route **claims** the recommendation with a compare-and-set from `pending`
@@ -10530,8 +10533,8 @@ always `null` (kept for compatibility; there is no "accepted but not applied" ou
 | `action_type` | Extra `apply_result` keys | Effect |
 |---|---|---|
 | `adjust_work_order_priority` | `work_order_id`, `work_order_number`, `old_priority`, `new_priority` | Raises priority; never demotes and never a no-op |
-| `escalate_blocker` | `blocker_id`, `status`, `severity`; `work_order_id`, `old_priority`, `new_priority` when the WO is expedited | Acknowledges an OPEN blocker, raises severity to high only from below high (critical stays critical), expedites a live, open WO to P2 only from P3 or lower. Never resolves the blocker or lifts its hold |
-| `acknowledge_blocker` | `blocker_id`, `status` | Acknowledge only |
+| `escalate_blocker` | `blocker_id`, `status`, `severity`; `work_order_id`, `old_priority`, `new_priority` when the WO is expedited | Acknowledges an OPEN blocker, raises severity to high only from below high (critical stays critical), expedites the WO to P2 only from P3 or lower. Refused outright (gate 7) when the blocker's work order is missing, soft-deleted or terminal. Never resolves the blocker or lifts its hold |
+| `acknowledge_blocker` | `blocker_id`, `status` | Acknowledge only; refused like `escalate_blocker` on a missing, deleted or terminal job |
 | `create_draft_ncr` | `ncr_id`, `ncr_number`, `status: "open"` | OPEN in-process NCR, locked NCR number; a named part / WO must be this company's and not deleted; emits `ncr_created` |
 | `create_draft_po` | `purchase_order_id`, `po_number`, `vendor_id`, `part_id`, `quantity`, `status: "draft"` | DRAFT PO through the same command as the Purchasing route (locked PO number, full audit snapshot, `purchase_order_created`) to the part's **current** live, active primary supplier — no fallback vendor. Nothing is sent |
 
@@ -10544,7 +10547,8 @@ and action type) become `stale` with `status_reason` `Superseded: recommendation
 by {name}`. After commit the route sends company-scoped realtime nudges (`work_order_update` and
 `dashboard_update` with `event: "work_order_priority_updated"`, the blocker's
 `work_order_blocker_updated`, or `dashboard_update` with `event: "ai_recommendation_applied"` for a
-PO or NCR); they are silent while `REALTIME_BROADCAST_ENABLED=false`.
+PO or NCR); they are silent while `REALTIME_BROADCAST_ENABLED=false`. A nudge that fails is logged
+and never turns the committed apply into an error response.
 
 #### Record-only accept, dismiss and snooze
 

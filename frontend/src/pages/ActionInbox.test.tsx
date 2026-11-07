@@ -450,4 +450,96 @@ describe('ActionInbox AI Accept & apply (ruling 3)', () => {
       '/work-orders/3001'
     );
   });
+
+  it('two cards applied at once each stay disabled until their OWN request settles', async () => {
+    const first = makeActionCard({ id: 91, title: 'Expedite WO-A', score: 0.9 });
+    const second = makeActionCard({
+      id: 92,
+      title: 'Expedite WO-B',
+      score: 0.8,
+      apply_action: makeApplyAction({ summary: 'Raise WO-B priority from P5 to P1', fingerprint: 'bbbbbbbbbbbbbbbb' }),
+    });
+    // Load shows both; the re-read after B's apply still has A; the one after A's has neither.
+    mockApi.getAIRecommendations
+      .mockResolvedValueOnce([first, second])
+      .mockResolvedValueOnce([first])
+      .mockResolvedValue([]);
+    const resolvers: Record<number, (value: AIRecommendationApplyResult) => void> = {};
+    mockApi.applyAIRecommendation.mockImplementation(
+      (id: number) =>
+        new Promise<AIRecommendationApplyResult>(resolve => {
+          resolvers[id] = resolve;
+        })
+    );
+    const done = (rec: AIRecommendation): AIRecommendationApplyResult => ({
+      recommendation: { ...rec, status: 'accepted', apply_action: null },
+      applied: true,
+      apply_result: { action_type: 'adjust_work_order_priority', summary: rec.apply_action?.summary },
+      apply_error: null,
+    });
+
+    renderInbox();
+
+    const hero = await screen.findByRole('region', { name: 'Top 3 today' });
+    const cardOf = (title: string) => within(hero).getByText(title).closest('article') as HTMLElement;
+    fireEvent.click(within(cardOf('Expedite WO-A')).getByRole('button', { name: /accept & apply/i }));
+    fireEvent.click(within(cardOf('Expedite WO-B')).getByRole('button', { name: /accept & apply/i }));
+
+    // Clicking B must not re-enable A while A's apply is still in flight.
+    expect(within(cardOf('Expedite WO-A')).getByRole('button', { name: /applying/i })).toBeDisabled();
+    expect(within(cardOf('Expedite WO-A')).getByRole('button', { name: 'Dismiss' })).toBeDisabled();
+    fireEvent.click(within(cardOf('Expedite WO-A')).getByRole('button', { name: /applying/i }));
+    expect(mockApi.applyAIRecommendation).toHaveBeenCalledTimes(2);
+
+    // B settles first; its cleanup must not clear A's in-flight state.
+    await act(async () => {
+      resolvers[92](done(second));
+    });
+    await waitFor(() => expect(screen.queryByText('Expedite WO-B')).not.toBeInTheDocument());
+    expect(within(cardOf('Expedite WO-A')).getByRole('button', { name: /applying/i })).toBeDisabled();
+
+    await act(async () => {
+      resolvers[91](done(first));
+    });
+    await waitFor(() => expect(screen.queryByText('Expedite WO-A')).not.toBeInTheDocument());
+    expect(mockApi.applyAIRecommendation).toHaveBeenCalledTimes(2);
+  });
+
+  it('a 409 on Mark handled re-reads the list instead of resurrecting a card decided elsewhere', async () => {
+    const detail = 'This recommendation is already accepted; it can no longer be accepted. Refresh the Action Inbox.';
+    const card = makeActionCard({
+      apply_action: makeApplyAction({
+        can_apply: false,
+        can_mark_handled: true,
+        blocked_kind: 'egress',
+        blocked_reason: 'AI actions are off for this company (AI egress is off), so nothing will be applied.',
+      }),
+    });
+    // The server has already closed the card, so the re-read no longer returns it.
+    mockApi.getAIRecommendations.mockResolvedValueOnce([card]).mockResolvedValue([]);
+    mockApi.acceptAIRecommendation.mockRejectedValue({ response: { status: 409, data: { detail } } });
+
+    renderInbox();
+
+    const hero = await screen.findByRole('region', { name: 'Top 3 today' });
+    fireEvent.click(within(hero).getByRole('button', { name: 'Mark handled' }));
+
+    await expectToast(detail, 'error');
+    await waitFor(() => expect(mockApi.getAIRecommendations).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText('Expedite WO-3001')).not.toBeInTheDocument());
+  });
+
+  it('a non-409 dismiss failure rolls the card back without re-reading', async () => {
+    mockApi.getAIRecommendations.mockResolvedValue([makeActionCard()]);
+    mockApi.dismissAIRecommendation.mockRejectedValue({ response: { status: 503, data: { detail: 'Try again' } } });
+
+    renderInbox();
+
+    const hero = await screen.findByRole('region', { name: 'Top 3 today' });
+    fireEvent.click(within(hero).getByRole('button', { name: 'Dismiss' }));
+
+    await expectToast('Try again', 'error');
+    expect(screen.getByText('Expedite WO-3001')).toBeInTheDocument();
+    expect(mockApi.getAIRecommendations).toHaveBeenCalledTimes(1);
+  });
 });

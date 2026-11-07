@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -41,6 +42,8 @@ from app.services.ai_context_service import AIContextService
 from app.services.ai_governance_service import AIGovernanceService
 from app.services.ai_learning_service import AILearningService, RecommendationStateError
 from app.services.audit_service import AuditService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -299,7 +302,14 @@ def apply_ai_recommendation(
     db.commit()
     db.refresh(recommendation)
 
-    _broadcast_applied(db, company_id=company_id, action_type=action_type, result=apply_result)
+    # The apply is COMMITTED: a post-commit nudge must never turn it into an error
+    # response (the client would say "Nothing was changed" and a retry would 409).
+    try:
+        _broadcast_applied(db, company_id=company_id, action_type=action_type, result=apply_result)
+    except Exception:
+        logger.warning(
+            "Post-commit broadcast failed after applying AI recommendation %s", recommendation_id, exc_info=True
+        )
     return AIRecommendationApplyResponse(recommendation=recommendation, applied=True, apply_result=apply_result)
 
 

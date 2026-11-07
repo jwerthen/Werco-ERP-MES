@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.time_utils import to_utc_iso
 from app.models.ai_learning import AICorrection, AIInteractionEvent, AIOutcome, AIRecommendation
 from app.models.company import Company
+from app.models.part import Part
 from app.models.user import User
 from app.models.work_order import WorkOrder
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
@@ -77,6 +78,28 @@ class RecommendationStateError(Exception):
     def __init__(self, message: str, *, current_status: Optional[str] = None):
         super().__init__(message)
         self.current_status = current_status
+
+
+def closed_work_order_reason(work_order: Any) -> Optional[str]:
+    """Why a work order counts as a CLOSED target, or None while it is live and open.
+
+    ONE definition of "closed" for an AI card's work order, shared by the nightly
+    closed-target sweep (which retires the card, prefixing ``"Target closed: "``) and the
+    blocker Accept & apply plans in ``ai_action_applier`` (which refuse to write on such a
+    job). Missing, soft-deleted and terminal (``TERMINAL_WO_STATUSES``) are closed. Takes
+    any object with ``work_order_number`` / ``status`` / ``is_deleted`` (an ORM row or a
+    column tuple), or None for a work order the active company cannot see.
+    """
+    from app.services.work_order_state_service import TERMINAL_WO_STATUSES
+
+    if work_order is None:
+        return "work order no longer exists"
+    if work_order.is_deleted:
+        return f"work order {work_order.work_order_number} was deleted"
+    if work_order.status in TERMINAL_WO_STATUSES:
+        status = getattr(work_order.status, "value", work_order.status)
+        return f"work order {work_order.work_order_number} is {status}"
+    return None
 
 
 def _expire_cached_recommendations(db: Session, recommendation_ids: Collection[int]) -> None:
@@ -715,9 +738,9 @@ class AILearningService:
         terminal or soft-deleted) and ``work_order`` targets (WO terminal, soft-deleted or
         missing). Blocker-triage and stale-blocker cards carry no ``expires_at``, so without
         this they sat pending forever. One conditional UPDATE per reason, no learning event.
+        "Closed" is :func:`closed_work_order_reason` -- the same rule the blocker Accept &
+        apply plans refuse on, so a card the sweep would retire never offers an apply.
         """
-        from app.services.work_order_state_service import TERMINAL_WO_STATUSES
-
         open_rows = (
             self.db.query(AIRecommendation.id, AIRecommendation.target_entity_type, AIRecommendation.target_entity_id)
             .filter(
@@ -750,16 +773,9 @@ class AILearningService:
                 ).filter(WorkOrder.company_id == company_id, WorkOrder.id.in_(work_order_ids))
             }
 
-        def closed_work_order_reason(work_order_id: Optional[int]) -> Optional[str]:
-            row = work_orders.get(work_order_id) if work_order_id else None
-            if row is None:
-                return "Target closed: work order no longer exists"
-            if row.is_deleted:
-                return f"Target closed: work order {row.work_order_number} was deleted"
-            if row.status in TERMINAL_WO_STATUSES:
-                status = getattr(row.status, "value", row.status)
-                return f"Target closed: work order {row.work_order_number} is {status}"
-            return None
+        def closed_target_reason(work_order_id: Optional[int]) -> Optional[str]:
+            closed = closed_work_order_reason(work_orders.get(work_order_id) if work_order_id else None)
+            return f"Target closed: {closed}" if closed else None
 
         by_reason: Dict[str, List[int]] = defaultdict(list)
         for recommendation_id, kind, target_id in open_rows:
@@ -770,9 +786,9 @@ class AILearningService:
                 elif blocker.status in _CLOSED_BLOCKER_STATUSES:
                     reason = f"Target closed: blocker {blocker.status}"
                 else:
-                    reason = closed_work_order_reason(blocker.work_order_id)
+                    reason = closed_target_reason(blocker.work_order_id)
             else:
-                reason = closed_work_order_reason(target_id)
+                reason = closed_target_reason(target_id)
             if reason:
                 by_reason[reason].append(recommendation_id)
 
@@ -822,34 +838,65 @@ class AILearningService:
         """Server-computed record link per recommendation (never the stored, caller-supplied href).
 
         ``work_order`` -> the WO detail page, ``part`` -> the part detail page,
-        ``work_order_blocker`` -> its work order's detail page (one batched, tenant-scoped
-        read); anything else -> None.
+        ``work_order_blocker`` -> its work order's detail page; anything else -> None.
+
+        A link is emitted only where its page will actually resolve the id (CLAUDE.md:
+        "any path the backend deep-links to must resolve"): every target is read in ONE
+        batched, tenant-scoped query per type, so a crafted card naming another company's
+        record gets no link rather than one that 404s. The WO detail page refuses a
+        soft-deleted work order, so a tombstoned WO -- named directly or through a
+        blocker -- gets None too; the part detail page serves a tombstoned part, so a part
+        only has to belong to the active company.
         """
-        recs = list(recommendations)
-        blocker_ids = {
-            rec.target_entity_id
-            for rec in recs
-            if rec.target_entity_type == "work_order_blocker" and rec.target_entity_id is not None
-        }
+        all_recs = list(recommendations)
+        recs = [rec for rec in all_recs if rec.target_entity_id is not None]
+        ids_by_type: Dict[str, set] = defaultdict(set)
+        for rec in recs:
+            ids_by_type[rec.target_entity_type or ""].add(rec.target_entity_id)
+
         blocker_work_orders: Dict[int, int] = {}
-        if blocker_ids:
+        if ids_by_type["work_order_blocker"]:
             blocker_work_orders = {
                 blocker_id: work_order_id
                 for blocker_id, work_order_id in self.db.query(
                     WorkOrderBlocker.id, WorkOrderBlocker.work_order_id
-                ).filter(WorkOrderBlocker.company_id == company_id, WorkOrderBlocker.id.in_(blocker_ids))
+                ).filter(
+                    WorkOrderBlocker.company_id == company_id,
+                    WorkOrderBlocker.id.in_(ids_by_type["work_order_blocker"]),
+                )
+                if work_order_id
             }
-        hrefs: Dict[int, Optional[str]] = {}
+        wanted_work_orders = ids_by_type["work_order"] | set(blocker_work_orders.values())
+        live_work_orders: set = set()
+        if wanted_work_orders:
+            live_work_orders = {
+                row_id
+                for (row_id,) in self.db.query(WorkOrder.id).filter(
+                    WorkOrder.company_id == company_id,
+                    WorkOrder.id.in_(wanted_work_orders),
+                    WorkOrder.is_deleted == False,  # noqa: E712
+                )
+            }
+        tenant_parts: set = set()
+        if ids_by_type["part"]:
+            tenant_parts = {
+                row_id
+                for (row_id,) in self.db.query(Part.id).filter(
+                    Part.company_id == company_id, Part.id.in_(ids_by_type["part"])
+                )
+            }
+
+        hrefs: Dict[int, Optional[str]] = {rec.id: None for rec in all_recs}
         for rec in recs:
             href: Optional[str] = None
-            if rec.target_entity_id is not None:
-                if rec.target_entity_type == "work_order":
-                    href = notification_links.work_order_detail(rec.target_entity_id)
-                elif rec.target_entity_type == "part":
-                    href = notification_links.part_detail(rec.target_entity_id)
-                elif rec.target_entity_type == "work_order_blocker":
-                    work_order_id = blocker_work_orders.get(rec.target_entity_id)
-                    href = notification_links.work_order_detail(work_order_id) if work_order_id else None
+            if rec.target_entity_type == "work_order" and rec.target_entity_id in live_work_orders:
+                href = notification_links.work_order_detail(rec.target_entity_id)
+            elif rec.target_entity_type == "part" and rec.target_entity_id in tenant_parts:
+                href = notification_links.part_detail(rec.target_entity_id)
+            elif rec.target_entity_type == "work_order_blocker":
+                work_order_id = blocker_work_orders.get(rec.target_entity_id)
+                if work_order_id in live_work_orders:
+                    href = notification_links.work_order_detail(work_order_id)
             hrefs[rec.id] = href
         return hrefs
 

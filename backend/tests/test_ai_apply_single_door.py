@@ -45,8 +45,9 @@ def test_applier_has_no_bypass_or_allowlist_override():
     assert not hasattr(AIActionApplier, "can_apply")
 
 
-@pytest.mark.parametrize("tier", ["auto_execute", "execute_controlled", "autonomous"])
+@pytest.mark.parametrize("tier", ["auto_execute", "execute_controlled", "autonomous", ["apply_on_accept"], {"x": 1}, 3])
 def test_an_auto_tier_cannot_be_written(tier):
+    # A non-string (incl. an unhashable list/dict) is refused with ValueError, never a TypeError.
     with pytest.raises(ValueError, match="no auto-execute tier"):
         AIRecommendation(suggested_action={"type": "adjust_work_order_priority", "autonomy": tier})
     rec = AIRecommendation(suggested_action={"type": "x", "autonomy": "suggest_only"})

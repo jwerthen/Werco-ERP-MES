@@ -24,6 +24,7 @@ import {
   OperationalSource,
 } from '../types/operationsInbox';
 import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
+import { useInFlightIds } from '../hooks/useInFlightIds';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { AISuggestionCard, ConfidenceBadge, FeedbackButtons, WhyThisSuggestion } from '../components/ai';
 import { AIRecommendation, recommendationAcceptMode } from '../types/aiLearning';
@@ -492,8 +493,11 @@ export default function ActionInbox() {
   const [aiRecommendations, setAiRecommendations] = useState<AIRecommendation[]>([]);
   const [aiAvailable, setAiAvailable] = useState(true);
   const [loading, setLoading] = useState(true);
-  const [actioningId, setActioningId] = useState<number | null>(null);
-  const [applyingId, setApplyingId] = useState<number | null>(null);
+  // Per-card in-flight state: several cards can be actioned at once, and each card stays
+  // disabled until ITS OWN request settles (a single id slot re-enabled card A the moment
+  // card B was clicked, so A could be applied twice).
+  const actioning = useInFlightIds();
+  const applying = useInFlightIds();
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const { showToast } = useToast();
@@ -718,21 +722,41 @@ export default function ActionInbox() {
 
   const runRemoval = async (recommendation: AIRecommendation, mutate: () => Promise<unknown>) => {
     const index = aiRecommendations.findIndex(item => item.id === recommendation.id);
-    setActioningId(recommendation.id);
+    const owns = actioning.start(recommendation.id);
     inFlightRemovals.current.add(recommendation.id);
+    // A 409 means the card was decided (or changed) elsewhere: rolling it back would show a
+    // card the server has already closed, and every retry would 409 again. Note it here and
+    // re-read the pending list once this card is no longer in flight (the re-read filters
+    // in-flight ids out, so it must run after the cleanup below).
+    let conflicted = false;
+    const guarded = async () => {
+      try {
+        return await mutate();
+      } catch (err) {
+        conflicted = apiErrorStatus(err) === 409;
+        throw err;
+      }
+    };
     try {
-      await removalMutation.run({ recommendation, index: index < 0 ? aiRecommendations.length : index, mutate });
+      await removalMutation.run({
+        recommendation,
+        index: index < 0 ? aiRecommendations.length : index,
+        mutate: guarded,
+      });
     } finally {
       inFlightRemovals.current.delete(recommendation.id);
-      setActioningId(null);
+      if (owns) actioning.finish(recommendation.id);
     }
+    if (conflicted) void reloadAIRecommendations();
   };
 
   const applyRecommendation = async (recommendation: AIRecommendation) => {
     const action = recommendation.apply_action;
     if (!action) return;
-    setActioningId(recommendation.id);
-    setApplyingId(recommendation.id);
+    // Synchronous double-click guard: a second click on THIS card while its apply is in
+    // flight never sends a second request (the server's claim would refuse it anyway).
+    if (!applying.start(recommendation.id)) return;
+    const owns = actioning.start(recommendation.id);
     try {
       const result = await api.applyAIRecommendation(
         recommendation.id,
@@ -750,8 +774,8 @@ export default function ActionInbox() {
       showToast('error', apiErrorDetail(err, 'Accept & apply failed. Nothing was changed.'));
       if (apiErrorStatus(err) === 409) void reloadAIRecommendations();
     } finally {
-      setActioningId(null);
-      setApplyingId(null);
+      if (owns) actioning.finish(recommendation.id);
+      applying.finish(recommendation.id);
     }
   };
 
@@ -776,11 +800,11 @@ export default function ActionInbox() {
   // Feedback does not remove the card from the queue, so it keeps its own simple
   // in-flight state rather than the optimistic-removal path.
   const sendAIFeedback = async (recommendation: AIRecommendation, feedback: string) => {
-    setActioningId(recommendation.id);
+    const owns = actioning.start(recommendation.id);
     try {
       await api.sendAIRecommendationFeedback(recommendation.id, { feedback });
     } finally {
-      setActioningId(null);
+      if (owns) actioning.finish(recommendation.id);
     }
   };
 
@@ -888,8 +912,8 @@ export default function ActionInbox() {
                 key={recommendation.id}
                 recommendation={recommendation}
                 rank={index + 1}
-                disabled={!aiAvailable || actioningId === recommendation.id || applyingId === recommendation.id}
-                accepting={applyingId === recommendation.id}
+                disabled={!aiAvailable || actioning.ids.has(recommendation.id) || applying.ids.has(recommendation.id)}
+                accepting={applying.ids.has(recommendation.id)}
                 onAccept={acceptAIRecommendation}
                 onDismiss={dismissAIRecommendation}
                 onFeedback={sendAIFeedback}
@@ -991,10 +1015,10 @@ export default function ActionInbox() {
                           <FeedbackButtons
                             disabled={
                               !aiAvailable ||
-                              actioningId === item.recommendation.id ||
-                              applyingId === item.recommendation.id
+                              actioning.ids.has(item.recommendation.id) ||
+                              applying.ids.has(item.recommendation.id)
                             }
-                            accepting={applyingId === item.recommendation.id}
+                            accepting={applying.ids.has(item.recommendation.id)}
                             acceptMode={recommendationAcceptMode(item.recommendation)}
                             applySummary={item.recommendation.apply_action?.summary}
                             applyBlockedReason={item.recommendation.apply_action?.blocked_reason}

@@ -193,7 +193,12 @@ One read-only resolver (`resolve_plan`) produces both this summary and what the 
 It resolves every id in the stored action against live, tenant-scoped records and never trusts
 a stored label. The client sends the `fingerprint` back as `expected_fingerprint`; if the
 resolved plan changed in between, `/apply` answers **409** ("This action changed since you
-loaded it. It would now: …") and nothing runs. `blocked_kind` is `credential`, `read_only`,
+loaded it. It would now: …") and nothing runs. A draft-PO plan fingerprints the open PO numbers
+behind its warning too, so a PO raised after the card loaded is a 409, not a silent second draft.
+The action must change the record the card links to: a card whose action names a different work
+order, part or blocker than its target is refused ("This recommendation's action and its record
+name different records …"), so a person never reviews one record and approves a change to
+another. `blocked_kind` is `credential`, `read_only`,
 `egress`, `role` or `target` (the plan itself is refused), or `null` when the caller can apply.
 
 **Gates on `/apply`, in order** (exact messages in [API.md → AI Recommendations](API.md#ai-recommendations-action-inbox)):
@@ -204,7 +209,10 @@ loaded it. It would now: …") and nothing runs. `blocked_kind` is `credential`,
    token gets **403**.
 4. Not a read-only company context — else **403**.
 5. Company AI egress is on — else **403**. Read literally: with egress off, nothing is applied,
-   even by a person.
+   even by a person. This is a **deliberate reading of ruling 3** adopted for this release, not an
+   oversight: Accept & apply itself makes no LLM call, so the coupling is to the company's "AI
+   actions" switch rather than to data egress. It is pending owner confirmation; dropping the gate
+   (one check in `apply_refusal` plus copy) is an owner decision — don't "fix" it in passing.
 6. The person's role can perform the action (table below) — else **403**.
 7. The target still makes sense — else **409** with the plan's reason.
 8. The fingerprint still matches — else **409**.
@@ -238,8 +246,8 @@ failed" outcome any more: a failed apply is a 403/409 and the card stays open.
 | Action | Effect | Min role |
 |---|---|---|
 | `adjust_work_order_priority` | Raises the WO to the suggested priority. Never demotes: refused when the WO is already at that priority or higher (P1 is highest), terminal, or deleted | Supervisor+ |
-| `escalate_blocker` | Acknowledges an OPEN blocker; raises severity to high only if it is below high (a critical blocker stays critical); expedites the WO to P2 only if the WO is live, open and at P3 or lower. Refused when none of those would change anything, or when the blocker is closed. **Never resolves the blocker or lifts its hold** | Supervisor+ |
-| `acknowledge_blocker` | Acknowledge only. Refused when closed or already acknowledged | Supervisor+ |
+| `escalate_blocker` | Acknowledges an OPEN blocker; raises severity to high only if it is below high (a critical blocker stays critical); expedites the WO to P2 only if it is at P3 or lower. Refused when none of those would change anything, when the blocker is closed, or when the blocker's work order is missing, soft-deleted or terminal — the same closed-target rule (`closed_work_order_reason`) the nightly sweep uses to stale the card, so no card offers a write the sweep would retire. **Never resolves the blocker or lifts its hold** | Supervisor+ |
+| `acknowledge_blocker` | Acknowledge only. Refused when closed, already acknowledged, or on a missing, deleted or terminal job | Supervisor+ |
 | `create_draft_ncr` | Opens an OPEN in-process NCR (no disposition) with the locked NCR number. A named part or WO must be this company's and not deleted. Emits `ncr_created`, so the `ncr.created` notification fires as for a hand-raised NCR | Quality, Supervisor, Manager, Admin |
 | `create_draft_po` | Creates a DRAFT PO through `create_purchase_order_command` (locked PO number, full audit snapshot, `purchase_order_created`) to the part's **current** primary supplier, which must exist and be live and active — there is no fallback vendor. Quantity is the suggested quantity, else the part's reorder quantity (refused when neither is positive). Warns when an open PO already has a line for the part. Nothing is sent to the vendor | Supervisor+ |
 
@@ -252,8 +260,12 @@ other secondary NCR creators (CLAUDE.md invariant 2).
 
 **Action cards are closed by someone who could act.** Record-only Accept on an action card is
 limited to a person signed in whose role could apply it (403 for API tokens, agents and lower
-roles). Dismiss, snooze and feedback stay open to everyone; suggest-only cards stay acceptable
-by anyone. In the UI the button reads:
+roles). Dismiss, snooze and feedback stay open to everyone **deliberately** (a design decision
+for this release): they never run anything, and closing them to lower roles would leave
+an Operator no way to clear a card from their own inbox. Dismiss retires a card just as
+permanently as Mark handled, so this gate is partial protection; whether Dismiss on an action
+card should take the same gate is an open owner question. Suggest-only cards stay acceptable by
+anyone. In the UI the button reads:
 
 - **Accept & apply** when `can_apply`, with "Accept & apply will: {summary}" and any warnings;
 - **Mark handled** when `can_mark_handled` but the apply is blocked by egress or the target,

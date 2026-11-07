@@ -5,6 +5,7 @@ import api from '../../services/api';
 import { AIRecommendation, AIRecommendationApplyResult, recommendationAcceptMode } from '../../types/aiLearning';
 import { useToast } from '../ui/Toast';
 import { apiErrorDetail, apiErrorStatus } from '../../utils/apiError';
+import { useInFlightIds } from '../../hooks/useInFlightIds';
 import { AISuggestionCard } from './AISuggestionCard';
 
 interface ContextualAIStripProps {
@@ -40,8 +41,9 @@ export function ContextualAIStrip({
   const { showToast } = useToast();
   const [items, setItems] = useState<AIRecommendation[]>([]);
   const [loading, setLoading] = useState(true);
-  const [actioningId, setActioningId] = useState<number | null>(null);
-  const [applyingId, setApplyingId] = useState<number | null>(null);
+  // Per-card in-flight state, so one card's request never re-enables another's buttons.
+  const actioning = useInFlightIds();
+  const applying = useInFlightIds();
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -80,10 +82,12 @@ export function ContextualAIStrip({
   const onAccept = async (rec: AIRecommendation) => {
     const mode = recommendationAcceptMode(rec);
     if (mode === 'none') return;
-    setActioningId(rec.id);
+    const isApply = mode === 'apply' && Boolean(rec.apply_action);
+    // Synchronous double-click guard for Accept & apply on THIS card.
+    if (isApply && !applying.start(rec.id)) return;
+    const owns = actioning.start(rec.id);
     try {
-      if (mode === 'apply' && rec.apply_action) {
-        setApplyingId(rec.id);
+      if (isApply && rec.apply_action) {
         const result = await api.applyAIRecommendation(
           rec.id,
           rec.apply_action.fingerprint,
@@ -106,41 +110,41 @@ export function ContextualAIStrip({
     } catch (err) {
       reportFailure(err, mode === 'apply' ? 'Accept & apply failed. Nothing was changed.' : 'Accept failed');
     } finally {
-      setActioningId(null);
-      setApplyingId(null);
+      if (owns) actioning.finish(rec.id);
+      if (isApply) applying.finish(rec.id);
     }
   };
 
   const onDismiss = async (rec: AIRecommendation) => {
-    setActioningId(rec.id);
+    const owns = actioning.start(rec.id);
     try {
       await api.dismissAIRecommendation(rec.id, 'Dismissed from context strip');
       removeLocal(rec.id);
     } catch (err) {
       reportFailure(err, 'Dismiss failed');
     } finally {
-      setActioningId(null);
+      if (owns) actioning.finish(rec.id);
     }
   };
 
   const onSnooze = async (rec: AIRecommendation, days: number) => {
-    setActioningId(rec.id);
+    const owns = actioning.start(rec.id);
     try {
       await api.snoozeAIRecommendation(rec.id, days, 'Snoozed from context strip');
       removeLocal(rec.id);
     } catch (err) {
       reportFailure(err, 'Snooze failed');
     } finally {
-      setActioningId(null);
+      if (owns) actioning.finish(rec.id);
     }
   };
 
   const onFeedback = async (rec: AIRecommendation, feedback: string) => {
-    setActioningId(rec.id);
+    const owns = actioning.start(rec.id);
     try {
       await api.sendAIRecommendationFeedback(rec.id, { feedback });
     } finally {
-      setActioningId(null);
+      if (owns) actioning.finish(rec.id);
     }
   };
 
@@ -178,8 +182,8 @@ export function ContextualAIStrip({
           <AISuggestionCard
             key={rec.id}
             recommendation={rec}
-            disabled={actioningId === rec.id || applyingId === rec.id}
-            accepting={applyingId === rec.id}
+            disabled={actioning.ids.has(rec.id) || applying.ids.has(rec.id)}
+            accepting={applying.ids.has(rec.id)}
             showRecordLink={false}
             onAccept={onAccept}
             onDismiss={onDismiss}

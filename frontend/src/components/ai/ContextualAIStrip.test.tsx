@@ -238,4 +238,47 @@ describe('ContextualAIStrip', () => {
     // The strip's own Action Inbox link is unaffected.
     expect(within(region).getByRole('link', { name: 'Open Action Inbox' })).toBeInTheDocument();
   });
+
+  it('keeps each card disabled until its OWN apply settles when two are in flight', async () => {
+    const first = makeRec({ id: 311, title: 'Expedite WO-A' });
+    const second = makeRec({
+      id: 312,
+      title: 'Expedite WO-B',
+      apply_action: applyAction({ summary: 'Raise WO-B priority from P5 to P1', fingerprint: 'fpbbbbbbbbbbbbbb' }),
+    });
+    mockApi.getAIRecommendations
+      .mockResolvedValueOnce([first, second])
+      .mockResolvedValueOnce([first])
+      .mockResolvedValue([]);
+    const resolvers: Record<number, (value: AIRecommendationApplyResult) => void> = {};
+    mockApi.applyAIRecommendation.mockImplementation(
+      (id: number) =>
+        new Promise<AIRecommendationApplyResult>(resolve => {
+          resolvers[id] = resolve;
+        })
+    );
+
+    renderStrip();
+
+    const region = await strip();
+    const cardOf = (title: string) => within(region).getByText(title).closest('article') as HTMLElement;
+    fireEvent.click(within(cardOf('Expedite WO-A')).getByRole('button', { name: /accept & apply/i }));
+    fireEvent.click(within(cardOf('Expedite WO-B')).getByRole('button', { name: /accept & apply/i }));
+
+    expect(within(cardOf('Expedite WO-A')).getByRole('button', { name: /applying/i })).toBeDisabled();
+    fireEvent.click(within(cardOf('Expedite WO-A')).getByRole('button', { name: /applying/i }));
+    expect(mockApi.applyAIRecommendation).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      resolvers[312](applyResult(second));
+    });
+    await waitFor(() => expect(within(region).queryByText('Expedite WO-B')).not.toBeInTheDocument());
+    expect(within(cardOf('Expedite WO-A')).getByRole('button', { name: /applying/i })).toBeDisabled();
+
+    await act(async () => {
+      resolvers[311](applyResult(first));
+    });
+    await waitFor(() => expect(screen.queryByText('Expedite WO-A')).not.toBeInTheDocument());
+    expect(mockApi.applyAIRecommendation).toHaveBeenCalledTimes(2);
+  });
 });

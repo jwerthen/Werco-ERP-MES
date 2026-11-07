@@ -612,6 +612,16 @@ class TestRecordOnlyAcceptAndDismiss:
         assert refused.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
         assert "there is no auto-execute tier" in str(refused.json()["detail"])
 
+        # A non-string tier -- even an unhashable one -- is a 422, never a 500 from the set lookup.
+        for tier in (["apply_on_accept"], {"tier": "auto"}, 1):
+            odd = client.post(
+                "/api/v1/ai/recommendations",
+                json={**body, "suggested_action": {"type": "adjust_work_order_priority", "autonomy": tier}},
+                headers=admin_headers,
+            )
+            assert odd.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT, (tier, odd.text)
+            assert "there is no auto-execute tier" in str(odd.json()["detail"])
+
         accepted = client.post(
             "/api/v1/ai/recommendations",
             json={**body, "suggested_action": {"type": "adjust_work_order_priority", "autonomy": "apply_on_accept"}},

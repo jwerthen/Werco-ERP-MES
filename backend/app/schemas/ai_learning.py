@@ -129,7 +129,9 @@ class AIRecommendationCreate(BaseModel):
         """Owner ruling 3: an agent- or admin-authored card may never carry an auto tier."""
         if value is not None:
             autonomy = value.get("autonomy")
-            if autonomy is not None and autonomy not in CANONICAL_AUTONOMY_TIERS:
+            # isinstance first: an unhashable value (a list, a dict) would make the set
+            # lookup raise TypeError, which Pydantic does not turn into a 422.
+            if autonomy is not None and (not isinstance(autonomy, str) or autonomy not in CANONICAL_AUTONOMY_TIERS):
                 raise ValueError(AUTONOMY_REFUSED_DETAIL)
         return value
 
@@ -202,7 +204,13 @@ class AIRecommendationActionRequest(BaseModel):
 class AIRecommendationAcceptRequest(AIRecommendationActionRequest):
     """Record-only Accept. ``apply=true`` is refused (422): applying is its own door."""
 
-    apply: bool = False
+    apply: bool = Field(
+        False,
+        description=(
+            "Must be false (true is refused with 422). Accept only records your decision; running the "
+            "action is a person's Accept & apply in the Werco app, which agents and API tokens cannot do."
+        ),
+    )
 
     @field_validator("apply")
     @classmethod
