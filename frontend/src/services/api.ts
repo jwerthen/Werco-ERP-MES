@@ -66,6 +66,8 @@ import {
   InventoryCombineResult,
   PartActivationResult,
   ShopFloorCompleteOperationRequest,
+  OfficeOperationCompleteOptions,
+  OfficeOperationCompleteResult,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import {
@@ -1387,7 +1389,8 @@ class ApiService {
     quantityComplete: number,
     quantityScrapped: number | null = 0,
     scrapReason?: string | null,
-    scrapReasonCodeId?: number | null
+    scrapReasonCodeId?: number | null,
+    overrideReason?: string | null
   ) {
     // A scrap reason (code OR non-blank text) is required by the backend
     // (HTTP 422) when scrap > 0 — an AS9100D defect-traceability rule. Only
@@ -1405,6 +1408,11 @@ class ApiService {
     if (quantityScrapped !== null && quantityScrapped > 0 && scrapReasonCodeId != null) {
       params.scrap_reason_code_id = scrapReasonCodeId;
     }
+    // Owner ruling 1: booking more than the floor recorded (the work order's
+    // quantity_deliverable) is refused 409 without a stated reason. Sent only when
+    // non-blank, so a plain completion is byte-identical on the wire.
+    const override = overrideReason?.trim();
+    if (override) params.quantity_override_reason = override;
     const response = await this.api.post(`/work-orders/${id}/complete`, null, { params });
     this.invalidateDashboardCache();
     return response.data;
@@ -1871,23 +1879,42 @@ class ApiService {
     return response.data;
   }
 
+  /**
+   * Office operation complete (owner ruling 1). `quantityComplete` is the absolute GOOD
+   * total; everything else rides `options` (see `OfficeOperationCompleteOptions`).
+   *
+   * `quantityScrapped` defaults to `null`, which OMITS the param: the server then leaves
+   * the operation's recorded scrap untouched. (This used to always send `0`, which
+   * overwrote — and so erased — scrap the floor had recorded.) The server treats it as a
+   * total that never lowers. A scrap reason / code rides only with a positive total, and
+   * the override reason and acknowledgement only when the caller actually supplies them,
+   * so a plain call is the smallest possible request.
+   */
   async completeWOOperation(
     operationId: number,
     quantityComplete: number,
-    quantityScrapped = 0,
-    scrapReason?: string | null
+    options: OfficeOperationCompleteOptions = {}
   ) {
-    // scrap_reason is required by the backend (HTTP 422) when scrap > 0 — an
-    // AS9100D defect-traceability rule. Only send it when there is scrap so the
-    // signature stays backward-compatible for the no-scrap path.
-    const params: Record<string, number | string> = {
+    const { quantityScrapped = null, scrapReason, scrapReasonCodeId, overrideReason, acknowledgeOpenEntries } = options;
+    const params: Record<string, number | string | boolean> = {
       quantity_complete: quantityComplete,
-      quantity_scrapped: quantityScrapped,
     };
-    if (quantityScrapped > 0 && scrapReason) {
-      params.scrap_reason = scrapReason;
+    if (quantityScrapped !== null) params.quantity_scrapped = quantityScrapped;
+    // scrap_reason / scrap_reason_code_id: the backend requires one of them (HTTP 422)
+    // when the scrap total rises — an AS9100D defect-traceability rule.
+    if (quantityScrapped !== null && quantityScrapped > 0) {
+      const reason = scrapReason?.trim();
+      if (reason) params.scrap_reason = reason;
+      if (scrapReasonCodeId != null) params.scrap_reason_code_id = scrapReasonCodeId;
     }
-    const response = await this.api.post(`/work-orders/operations/${operationId}/complete`, null, { params });
+    const override = overrideReason?.trim();
+    if (override) params.quantity_override_reason = override;
+    if (acknowledgeOpenEntries) params.acknowledge_open_entries = true;
+    const response = await this.api.post<OfficeOperationCompleteResult>(
+      `/work-orders/operations/${operationId}/complete`,
+      null,
+      { params }
+    );
     this.invalidateDashboardCache();
     return response.data;
   }
@@ -1896,7 +1923,15 @@ class ApiService {
   // the shop-floor reduceOperationProduction. Same body shape; RBAC and every
   // safety rule are enforced server-side, so call sites stay NON-optimistic and
   // surface the server's verbatim `detail` on refusal.
-  async reduceWOOperationProduction(operationId: number, data: { quantity_delta: number; reason: string; notes?: string; source?: string }) {
+  //
+  // `reopen_operation` (office only — the operator twin refuses it 422): owner ruling 1
+  // forbids a COMPLETE operation from being short, so a correction that would leave one
+  // short is refused 409 unless the caller explicitly reopens it (back to in progress).
+  // Send it only after the user has read that refusal and confirmed.
+  async reduceWOOperationProduction(
+    operationId: number,
+    data: { quantity_delta: number; reason: string; notes?: string; source?: string; reopen_operation?: boolean }
+  ) {
     const response = await this.api.post(`/work-orders/operations/${operationId}/reduce-production`, data);
     this.invalidateDashboardCache();
     return response.data;

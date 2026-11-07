@@ -81,7 +81,9 @@ it.each(['', '&group=customer', '&group=part', '&group=status'])(
   async group => {
     renderList(`?status=in_progress${group}`);
     const dialog = await openCompletion();
-    expect(within(dialog).getByLabelText(/Quantity completed/)).toHaveValue(10);
+    // Owner ruling 1: the good total prefills with the RECORDED header (3), never
+    // the order; the summary row carries no recorded scrap, so 0 keeps it.
+    expect(within(dialog).getByLabelText(/Quantity completed/)).toHaveValue(3);
     expect(within(dialog).getByLabelText('Quantity scrapped')).toHaveValue(0);
     expect(within(dialog).getByText(/completes all remaining operations/i)).toBeInTheDocument();
     expect(within(dialog).getByLabelText('Quantity scrapped')).toHaveAccessibleDescription(
@@ -92,9 +94,10 @@ it.each(['', '&group=customer', '&group=part', '&group=status'])(
     expect(mockedApi.completeWorkOrder).not.toHaveBeenCalled();
     expect(screen.getByLabelText('Current location')).toHaveTextContent(`/work-orders?status=in_progress${group}`);
 
+    fireEvent.change(within(dialog).getByLabelText(/Quantity completed/), { target: { value: '10' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Complete' }));
     expect(await screen.findByText('WO-0042 completed')).toBeInTheDocument();
-    expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 10, null, undefined, undefined);
+    expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 10, null, undefined, undefined, undefined);
     expect(mockedApi.completeWorkOrder).toHaveBeenCalledTimes(1);
     expect(mockedApi.browseWorkOrders).toHaveBeenCalledTimes(2);
     expect(mockedApi.getWorkOrder).not.toHaveBeenCalled();
@@ -107,11 +110,12 @@ it('offers the same quick-complete flow from a mobile card', async () => {
   window.innerWidth = 390;
   renderList();
   const dialog = await openCompletion();
-  expect(within(dialog).getByLabelText(/Quantity completed/)).toHaveValue(10);
+  expect(within(dialog).getByLabelText(/Quantity completed/)).toHaveValue(3);
   expect(mockedApi.getWorkOrder).not.toHaveBeenCalled();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Use full count (10)' }));
   fireEvent.click(within(dialog).getByRole('button', { name: 'Complete' }));
   expect(await screen.findByText('WO-0042 completed')).toBeInTheDocument();
-  expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 10, null, undefined, undefined);
+  expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 10, null, undefined, undefined, undefined);
   expect(screen.getByLabelText('Current location')).toHaveTextContent('/work-orders?status=in_progress');
 });
 
@@ -177,7 +181,7 @@ it('requires a scrap reason and forwards the entered completion quantities', asy
   fireEvent.mouseDown(screen.getByRole('option', { name: 'Out of tolerance' }));
   fireEvent.click(form.getByRole('button', { name: 'Complete' }));
   expect(await screen.findByText('WO-0042 completed')).toBeInTheDocument();
-  expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 8, 2, 'Out of tolerance', undefined);
+  expect(mockedApi.completeWorkOrder).toHaveBeenCalledWith(42, 8, 2, 'Out of tolerance', undefined, undefined);
 });
 
 it('prevents repeat submission and dismissal until completion and list refresh finish', async () => {
@@ -228,7 +232,7 @@ it('keeps a server refusal and entered quantities in the dialog for a safe retry
   expect(screen.queryByText('WO-0042 completed')).not.toBeInTheDocument();
   fireEvent.click(form.getByRole('button', { name: 'Complete' }));
   expect(await screen.findByText('WO-0042 completed')).toBeInTheDocument();
-  expect(mockedApi.completeWorkOrder).toHaveBeenNthCalledWith(2, 42, 8, null, undefined, undefined);
+  expect(mockedApi.completeWorkOrder).toHaveBeenNthCalledWith(2, 42, 8, null, undefined, undefined, undefined);
   expect(mockedApi.getWorkOrder).not.toHaveBeenCalled();
 });
 
@@ -259,4 +263,66 @@ it('preserves the server notice when completion bypasses required step records',
   const notice = await screen.findByText('Completed with 1 step record bypassed: Measure slot');
   expect(notice.closest('[role="status"]')).not.toBeNull();
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});
+
+describe('owner ruling 1 — the list knows only the summary', () => {
+  it('reads a shortfall as ADVISORY when the floor loss is unknown, and lets the server decide', async () => {
+    renderList();
+    const dialog = await openCompletion();
+    const form = within(dialog);
+    fireEvent.change(form.getByLabelText(/Quantity completed/), { target: { value: '8' } });
+    // The summary has no accounted loss: the floor may already have reported the 2
+    // as scrap, so the readout explains instead of refusing.
+    const readout = form.getByTestId('complete-work-short');
+    expect(readout).toHaveTextContent('2 below the order with no scrap entered here');
+    expect(form.getByRole('button', { name: 'Complete' })).toBeEnabled();
+    fireEvent.click(form.getByRole('button', { name: 'Set scrap to 2' }));
+    expect(form.getByLabelText('Quantity scrapped')).toHaveValue(2);
+    expect(form.queryByTestId('complete-work-short')).not.toBeInTheDocument();
+    // A scrap rise needs a reason before it can be sent.
+    expect(form.getByRole('button', { name: 'Complete' })).toBeDisabled();
+  });
+
+  it('turns the override reason on, required, when the server says the floor recorded less', async () => {
+    mockedApi.completeWorkOrder.mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: {
+          detail:
+            'quantity_complete (10) exceeds the 6 the floor recorded at Op 20; record the pieces there, or give quantity_override_reason',
+        },
+      },
+    });
+    renderList();
+    const dialog = await openCompletion();
+    const form = within(dialog);
+    fireEvent.change(form.getByLabelText(/Quantity completed/), { target: { value: '10' } });
+    expect(form.queryByLabelText(/Why record more than the floor counted/)).not.toBeInTheDocument();
+    fireEvent.click(form.getByRole('button', { name: 'Complete' }));
+
+    expect(await form.findByRole('alert')).toHaveTextContent('exceeds the 6 the floor recorded at Op 20');
+    const reason = form.getByLabelText(/Why record more than the floor counted/);
+    expect(reason).toBeRequired();
+    expect(form.getByRole('button', { name: 'Complete' })).toBeDisabled();
+    fireEvent.change(reason, { target: { value: 'Op 20 finished the last 4, never clocked out' } });
+    // A later, different refusal must not take the reason field away again.
+    mockedApi.completeWorkOrder.mockRejectedValueOnce({
+      response: { status: 409, data: { detail: 'cannot complete work order: operation 20 is on hold; resolve the hold first' } },
+    });
+    fireEvent.click(form.getByRole('button', { name: 'Complete' }));
+    expect(await form.findByText(/operation 20 is on hold/)).toBeInTheDocument();
+    expect(form.getByLabelText(/Why record more than the floor counted/)).toHaveValue(
+      'Op 20 finished the last 4, never clocked out'
+    );
+    fireEvent.click(form.getByRole('button', { name: 'Complete' }));
+    expect(await screen.findByText('WO-0042 completed')).toBeInTheDocument();
+    expect(mockedApi.completeWorkOrder).toHaveBeenLastCalledWith(
+      42,
+      10,
+      null,
+      undefined,
+      undefined,
+      'Op 20 finished the last 4, never clocked out'
+    );
+  });
 });

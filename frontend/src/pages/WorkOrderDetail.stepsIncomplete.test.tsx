@@ -134,11 +134,22 @@ function renderDetail() {
   );
 }
 
-/** Open the per-row operation CompleteWorkModal and submit it with the defaults. */
+/**
+ * Open the per-row operation CompleteWorkModal and submit a full count.
+ *
+ * Owner ruling 1: the totals prefill with what is RECORDED (0 here), and an
+ * unchanged short submit is disabled, so the desk books the full 10. The operation
+ * is IN_PROGRESS — the floor may have clocked labor — so booking more than it
+ * recorded needs the override reason.
+ */
 async function submitOperationCompletion() {
   const rowButton = await screen.findByTitle('Complete Operation');
   fireEvent.click(rowButton);
   const dialog = await screen.findByRole('dialog');
+  fireEvent.change(within(dialog).getByLabelText(/Quantity completed/), { target: { value: '10' } });
+  fireEvent.change(within(dialog).getByLabelText(/Why record more than the floor counted/), {
+    target: { value: 'Inspector counted the tray' },
+  });
   // act-wrap the submit so the mutation's promise continuations (toast, panel
   // open, in-flight reset) flush inside the act boundary.
   await act(async () => {
@@ -191,6 +202,10 @@ describe('WorkOrderDetail STEPS_INCOMPLETE completion refusal', () => {
     // Server-gated + non-optimistic: the completion modal is gone, nothing "completed".
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(mockedApi.completeWOOperation).toHaveBeenCalledTimes(1);
+    expect(mockedApi.completeWOOperation).toHaveBeenCalledWith(71, 10, {
+      quantityScrapped: null,
+      overrideReason: 'Inspector counted the tray',
+    });
   });
 
   it('surfaces a plain string 409 verbatim and does NOT open the evidence panel', async () => {
@@ -201,7 +216,9 @@ describe('WorkOrderDetail STEPS_INCOMPLETE completion refusal', () => {
     renderDetail();
     const dialog = await submitOperationCompletion();
 
-    expect(await screen.findByText('Operation is on hold and cannot be completed')).toBeInTheDocument();
+    // Owner ruling 1 build: the refusal now stays INLINE in the dialog, beside the
+    // totals the user entered.
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Operation is on hold and cannot be completed');
     expect(screen.queryByTestId('operation-steps-panel')).not.toBeInTheDocument();
     expect(mockedApi.getOperationSteps).not.toHaveBeenCalled();
 

@@ -141,7 +141,13 @@ describe('FEPERF-1: dashboard cache invalidation', () => {
       { name: 'resumeWorkOrder', verb: 'post', run: () => api.resumeWorkOrder(1) },
       { name: 'completeWorkOrder', verb: 'post', run: () => api.completeWorkOrder(1, 5, 0) },
       { name: 'startWOOperation', verb: 'post', run: () => api.startWOOperation(1) },
-      { name: 'completeWOOperation', verb: 'post', run: () => api.completeWOOperation(1, 5, 0) },
+      { name: 'completeWOOperation', verb: 'post', run: () => api.completeWOOperation(1, 5) },
+      {
+        name: 'reduceWOOperationProduction',
+        verb: 'post',
+        run: () =>
+          api.reduceWOOperationProduction(1, { quantity_delta: 1, reason: 'miscount', reopen_operation: true }),
+      },
       {
         name: 'clockIn',
         verb: 'post',

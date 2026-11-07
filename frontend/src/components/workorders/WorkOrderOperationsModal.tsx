@@ -3,9 +3,11 @@ import { Link } from 'react-router-dom';
 import { ArrowPathIcon, ArrowTopRightOnSquareIcon, CheckCircleIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import api from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
-import type { WorkOrder, WorkOrderOperation } from '../../types';
+import type { OfficeOperationCompleteResult, WorkOrder, WorkOrderOperation } from '../../types';
 import { hasPermission } from '../../utils/permissions';
 import { formatOperationLabel, operationNumberText, sortOperationsForDisplay } from '../../utils/operationLabel';
+import { SHORT_EPSILON, formatShortQuantity, shortUnitLabel } from '../../utils/shortCount';
+import { joinOperatorNames, operationMayHaveLabor, operationUnaccountedChip } from '../../utils/officeCompletion';
 import {
   extractApiErrorDetail,
   extractStepsBypassed,
@@ -25,6 +27,7 @@ interface WorkOrderOperationsModalProps {
 
 type CompletionTarget = { kind: 'work_order' } | { kind: 'operation'; operation: WorkOrderOperation };
 
+/** The operation TARGET (runs on a nest) — the server's `operation_target_quantity`. */
 function operationTarget(operation: WorkOrderOperation, workOrder: WorkOrder) {
   return Number(operation.laser_nest?.planned_runs || operation.component_quantity || workOrder.quantity_ordered || 0);
 }
@@ -60,7 +63,9 @@ export default function WorkOrderOperationsModal({
   const [target, setTarget] = useState<CompletionTarget | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [completionError, setCompletionError] = useState<string | null>(null);
-  const [notice, setNotice] = useState('');
+  // A SAVED-BUT-STILL-OPEN result (owner ruling 1) is a partial success: the warning
+  // tone, announced as an alert — never the plain "completed" status.
+  const [notice, setNotice] = useState<{ text: string; tone: 'info' | 'warning' } | null>(null);
   const request = useRef(0);
   const pending = useRef(false);
 
@@ -87,7 +92,7 @@ export default function WorkOrderOperationsModal({
 
   const openCompletion = (next: CompletionTarget) => {
     setCompletionError(null);
-    setNotice('');
+    setNotice(null);
     setTarget(next);
   };
   const submitCompletion = async (values: CompleteWorkSubmit) => {
@@ -96,29 +101,53 @@ export default function WorkOrderOperationsModal({
     setSubmitting(true);
     setCompletionError(null);
     try {
-      const { quantityComplete, quantityScrapped, scrapReason, scrapReasonCodeId } = values;
-      let message: string;
+      const { quantityComplete, quantityScrapped, scrapReason, scrapReasonCodeId, overrideReason } = values;
+      let message: { text: string; tone: 'info' | 'warning' };
       if (target.kind === 'operation') {
-        const result = await api.completeWOOperation(
-          target.operation.id,
-          quantityComplete,
+        const operation = target.operation;
+        const result: OfficeOperationCompleteResult = await api.completeWOOperation(operation.id, quantityComplete, {
           quantityScrapped,
-          scrapReason
-        );
-        message =
-          result?.message === 'Operation completed'
-            ? `Operation ${operationNumberText(target.operation.operation_number, target.operation.sequence)} (${target.operation.name}) completed.`
-            : `Progress saved for operation ${operationNumberText(target.operation.operation_number, target.operation.sequence)} (${target.operation.name}).`;
+          scrapReason,
+          scrapReasonCodeId,
+          overrideReason,
+          acknowledgeOpenEntries: values.acknowledgeOpenEntries,
+        });
+        const identity = `operation ${operationNumberText(operation.operation_number, operation.sequence)} (${operation.name})`;
+        if (result?.is_fully_complete === false) {
+          const serverMessage = typeof result.message === 'string' ? result.message : '';
+          const left = Math.max(0, Number(result.operation?.quantity_unaccounted ?? 0));
+          message = serverMessage.startsWith('No change')
+            ? { text: serverMessage, tone: 'info' }
+            : {
+                text:
+                  left > SHORT_EPSILON
+                    ? `Progress saved — ${identity} left open, ${formatShortQuantity(left)} ${shortUnitLabel(!!operation.laser_nest, left)} not yet accounted for.`
+                    : `Progress saved — ${identity} left open.`,
+                tone: 'warning',
+              };
+        } else {
+          const closedNames = joinOperatorNames((result?.closed_time_entries ?? []).map(entry => entry.operator_name));
+          message = {
+            text: closedNames
+              ? `Operation ${operationNumberText(operation.operation_number, operation.sequence)} (${operation.name}) completed — clocked out ${closedNames}.`
+              : `Operation ${operationNumberText(operation.operation_number, operation.sequence)} (${operation.name}) completed.`,
+            tone: 'info',
+          };
+        }
       } else {
         const result: unknown = await api.completeWorkOrder(
           workOrder.id,
           quantityComplete,
           quantityScrapped,
           scrapReason,
-          scrapReasonCodeId
+          scrapReasonCodeId,
+          overrideReason
         );
         const bypassed = extractStepsBypassed(result);
-        message = bypassed ? stepsBypassedMessage(bypassed) : `${workOrder.work_order_number} completed.`;
+        message = {
+          text: bypassed ? stepsBypassedMessage(bypassed) : `${workOrder.work_order_number} completed.`,
+          tone: 'info',
+        };
       }
       setTarget(null);
       setNotice(message);
@@ -175,11 +204,16 @@ export default function WorkOrderOperationsModal({
         </div>
 
         <div className="min-h-0 overflow-y-auto p-4 sm:p-6 space-y-4">
-          {notice && (
-            <p role="status" className="rounded border border-fd-blue/30 bg-fd-blue/10 p-3 text-sm text-fd-body">
-              {notice}
-            </p>
-          )}
+          {notice &&
+            (notice.tone === 'warning' ? (
+              <p role="alert" className="rounded border border-fd-amber/50 bg-fd-amber/10 p-3 text-sm text-fd-body">
+                {notice.text}
+              </p>
+            ) : (
+              <p role="status" className="rounded border border-fd-blue/30 bg-fd-blue/10 p-3 text-sm text-fd-body">
+                {notice.text}
+              </p>
+            ))}
           {loadError && (
             <ErrorState
               title="Could not refresh operations"
@@ -255,6 +289,7 @@ export default function WorkOrderOperationsModal({
                 >
                   {operations.map(operation => {
                     const blockReason = completionBlockReason(operation, workOrder);
+                    const unaccounted = operationUnaccountedChip(operation, operationTarget(operation, workOrder));
                     return (
                       <li
                         key={operation.id}
@@ -273,6 +308,9 @@ export default function WorkOrderOperationsModal({
                             {operation.quantity_complete} / {operationTarget(operation, workOrder)}{' '}
                             {operation.laser_nest ? 'runs' : 'completed'}
                             {operation.quantity_scrapped > 0 ? ` · ${operation.quantity_scrapped} scrapped` : ''}
+                            {unaccounted > SHORT_EPSILON && (
+                              <span className="text-fd-amber"> · {formatShortQuantity(unaccounted)} unaccounted</span>
+                            )}
                           </p>
                           {blockReason && active && operation.status !== 'complete' && (
                             <p className="text-xs text-fd-amber">{blockReason}</p>
@@ -331,14 +369,31 @@ export default function WorkOrderOperationsModal({
               ? `Complete operation "${target.operation.name}"`
               : `Complete work order ${workOrderNumber}`
           }
-          subtitle={
-            target.kind === 'operation'
-              ? `Target: ${operationTarget(target.operation, workOrder)}${target.operation.laser_nest ? ' runs' : ''}. Enter the total completed quantity, including work already recorded.`
-              : `Ordered: ${workOrder.quantity_ordered}. This completes all remaining operations and may bypass required process-step records.`
-          }
-          defaultQuantityComplete={
-            target.kind === 'operation' ? operationTarget(target.operation, workOrder) : workOrder.quantity_ordered
-          }
+          // Owner ruling 1: totals prefilled with what is RECORDED, judged against
+          // the server's own figures (see CompleteWorkModal).
+          {...(target.kind === 'operation'
+            ? {
+                mode: 'operation' as const,
+                subtitle: `Target: ${operationTarget(target.operation, workOrder)}${target.operation.laser_nest ? ' runs' : ''}. Enter the totals, including work already recorded.`,
+                target: operationTarget(target.operation, workOrder),
+                recordedComplete: Number(target.operation.quantity_complete || 0),
+                recordedScrapped: Number(target.operation.quantity_scrapped || 0),
+                upstreamShort: target.operation.upstream_quantity_short,
+                goodCeiling: target.operation.quantity_good_ceiling,
+                laborRecorded: operationMayHaveLabor(target.operation),
+                isNest: !!target.operation.laser_nest,
+                subjectLabel: formatOperationLabel(target.operation.operation_number, target.operation.sequence),
+              }
+            : {
+                mode: 'work_order' as const,
+                subtitle: `Ordered: ${workOrder.quantity_ordered}. This completes all remaining operations and may bypass required process-step records.`,
+                target: Number(workOrder.quantity_ordered || 0),
+                recordedComplete: Number(workOrder.quantity_complete || 0),
+                recordedScrapped: Number(workOrder.quantity_scrapped || 0),
+                accountedLoss: workOrder.quantity_accounted_loss,
+                deliverable: workOrder.quantity_deliverable,
+                subjectLabel: workOrderNumber,
+              })}
         />
       )}
     </>
