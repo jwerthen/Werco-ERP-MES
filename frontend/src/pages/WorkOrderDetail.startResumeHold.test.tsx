@@ -138,6 +138,31 @@ async function loaded() {
   await screen.findAllByText(/Laser Cut|Deburr/);
 }
 
+type ToastVariant = 'success' | 'error' | 'warning' | 'info';
+const TOAST_CLASS: Record<ToastVariant, string> = {
+  success: 'bg-green-600',
+  error: 'bg-red-600',
+  warning: 'bg-amber-600',
+  info: 'bg-blue-600',
+};
+
+/**
+ * Assert a toast's TEXT and its VARIANT together. Text alone passes for a success
+ * toast on a failed call, and `role="alert"` alone cannot tell `error` from
+ * `warning` (both interrupt the screen reader) — so pin the variant's colour too,
+ * and that no other variant's colour is on the same panel.
+ */
+async function expectToast(text: string, variant: ToastVariant) {
+  const node = await screen.findByText(text);
+  const panel = node.closest('[role="alert"], [role="status"]') as HTMLElement | null;
+  expect(panel).not.toBeNull();
+  expect(panel!.getAttribute('role')).toBe(variant === 'error' || variant === 'warning' ? 'alert' : 'status');
+  (Object.keys(TOAST_CLASS) as ToastVariant[]).forEach(other => {
+    if (other === variant) expect(panel!.className).toContain(TOAST_CLASS[other]);
+    else expect(panel!.className).not.toContain(TOAST_CLASS[other]);
+  });
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockUser = { id: 1, role: 'supervisor', is_superuser: false };
@@ -174,19 +199,23 @@ describe('WorkOrderDetail — Start', () => {
     expect(mockedApi.startWorkOrder).toHaveBeenCalledTimes(1);
     expect(mockedApi.startWorkOrder).toHaveBeenCalledWith(42);
     await waitFor(() => expect(mockedApi.getWorkOrder.mock.calls.length).toBeGreaterThan(loadsBefore));
-    expect(await screen.findByText('Work order started')).toBeInTheDocument();
+    await expectToast('Work order started', 'success');
   });
 
-  it('shows a 409 refusal verbatim in a toast', async () => {
+  it('shows a 409 refusal verbatim in an ERROR toast and re-reads the job', async () => {
     mockedApi.startWorkOrder.mockRejectedValue({ response: { status: 409, data: { detail: WO_ON_HOLD } } });
     renderDetail();
     await loaded();
+    const loadsBefore = mockedApi.getWorkOrder.mock.calls.length;
 
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /^start$/i }));
     });
 
-    expect(await screen.findByText(WO_ON_HOLD)).toBeInTheDocument();
+    await expectToast(WO_ON_HOLD, 'error');
+    expect(screen.queryByText('Work order started')).not.toBeInTheDocument();
+    // A 409 means the job's state moved under the page (e.g. it was held): re-read it.
+    await waitFor(() => expect(mockedApi.getWorkOrder.mock.calls.length).toBeGreaterThan(loadsBefore));
   });
 
   it('is not offered on a held or draft job', async () => {
@@ -247,9 +276,10 @@ describe('WorkOrderDetail — Resume Work Order', () => {
 
     expect(mockedApi.resumeWorkOrder).toHaveBeenCalledTimes(1);
     expect(mockedApi.resumeWorkOrder).toHaveBeenCalledWith(42);
-    expect(await screen.findByText(RESUMED_TO_DRAFT)).toBeInTheDocument();
-    // A draft landing SUCCEEDED but left the job off the floor: warning, not success.
-    expect(screen.getByText(RESUMED_TO_DRAFT).closest('[role="alert"]')).not.toBeNull();
+    // A draft landing SUCCEEDED but left the job off the floor: warning — not success
+    // (hides the shortfall) and not error (claims a failure that did not happen). Both
+    // warning and error carry role="alert", so the colour is what pins the variant.
+    await expectToast(RESUMED_TO_DRAFT, 'warning');
     await waitFor(() => expect(mockedApi.getWorkOrder.mock.calls.length).toBeGreaterThan(loadsBefore));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
@@ -272,8 +302,7 @@ describe('WorkOrderDetail — Resume Work Order', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Resume Work Order' }));
     });
 
-    expect(await screen.findByText(RESUMED_TO_IN_PROGRESS)).toBeInTheDocument();
-    expect(screen.getByText(RESUMED_TO_IN_PROGRESS).closest('[role="alert"]')).toBeNull();
+    await expectToast(RESUMED_TO_IN_PROGRESS, 'success');
   });
 
   it('keeps the dialog open and shows a refusal verbatim', async () => {
@@ -289,7 +318,7 @@ describe('WorkOrderDetail — Resume Work Order', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Resume Work Order' }));
     });
 
-    expect(await screen.findByText(audit503)).toBeInTheDocument();
+    await expectToast(audit503, 'error');
     expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 });
@@ -313,6 +342,30 @@ describe('WorkOrderDetail — Hold Work Order', () => {
     expect(mockedApi.updateWorkOrder).toHaveBeenCalledTimes(1);
     expect(mockedApi.updateWorkOrder).toHaveBeenCalledWith(42, { status: 'on_hold', version: 3 });
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    await expectToast('WO-0042 is on hold. Resume Work Order puts it back on the floor.', 'success');
+  });
+
+  it('keeps the dialog open, shows a refusal verbatim, and re-reads on a 409 (non-optimistic)', async () => {
+    // e.g. a stale version, or the job was put back to draft since the page loaded.
+    const refusal =
+      'A draft work order has not been released, so there is nothing on the floor to hold. Leave it in draft until it is ready, then release it.';
+    mockedApi.updateWorkOrder.mockRejectedValue({ response: { status: 409, data: { detail: refusal } } });
+    renderDetail();
+    await loaded();
+    const loadsBefore = mockedApi.getWorkOrder.mock.calls.length;
+
+    fireEvent.click(screen.getByRole('button', { name: 'Hold Work Order' }));
+    const dialog = await screen.findByRole('dialog');
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Hold Work Order' }));
+    });
+
+    await expectToast(refusal, 'error');
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(screen.queryByText(/is on hold\. Resume Work Order/)).not.toBeInTheDocument();
+    await waitFor(() => expect(mockedApi.getWorkOrder.mock.calls.length).toBeGreaterThan(loadsBefore));
+    // Non-optimistic: the header still shows the released job's controls, not a held one's.
+    expect(screen.queryByRole('button', { name: 'Resume Work Order' })).not.toBeInTheDocument();
   });
 
   it.each(['draft', 'on_hold'])('is not offered on a %s job', async status => {

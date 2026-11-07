@@ -24,6 +24,7 @@ import pytest
 from sqlalchemy.orm import Session
 
 from app.db.ledger_filter import OPERATION_REFERENCE_TYPE
+from app.models.audit_log import AuditLog
 from app.models.inventory import InventoryItem, InventoryTransaction
 from app.models.part import Part
 from app.models.time_entry import TimeEntry, TimeEntryType
@@ -122,6 +123,19 @@ def consumption(db: Session, op_id: int) -> list[InventoryTransaction]:
     )
 
 
+def op_audit_rows(db: Session, op_id: int) -> list[AuditLog]:
+    """Every audit row about this operation -- both verbs write at least one on success."""
+    return (
+        db.query(AuditLog).filter(AuditLog.resource_type == "work_order_operation", AuditLog.resource_id == op_id).all()
+    )
+
+
+def on_hand(db: Session, part_id: int) -> float:
+    return float(
+        sum(row.quantity_on_hand or 0 for row in db.query(InventoryItem).filter(InventoryItem.part_id == part_id).all())
+    )
+
+
 def office_complete(client, op, user):
     return client.post(
         f"/api/v1/work-orders/operations/{op.id}/complete",
@@ -159,20 +173,30 @@ def test_completing_a_ready_operation_on_a_held_or_draft_job_is_refused_and_move
     operator, supervisor = people
     wc = make_work_center(db_session)
     wo, op = make_wo_with_operation(db_session, work_center=wc, wo_status=wo_status, quantity_ordered=QTY)
-    tie_material(db_session, wo, op)
+    sheet = tie_material(db_session, wo, op)
     closed_entry(db_session, operator, op)  # the floor verb's labor gate must not be what refuses it
+    version_before = wo.version
 
     resp = office_complete(client, op, supervisor) if verb == "office" else floor_complete(client, op, operator)
 
     assert resp.status_code == 409, resp.text
     assert resp.json()["detail"] == REASON_BY_STATUS[wo_status]
+    # The app shares this session with autoflush off: a gate that ran AFTER the auto-start
+    # write would leave dirty state that _rows()' expire_all() silently discards.
+    assert not db_session.dirty and not db_session.new
     wo_row, op_row = _rows(db_session, wo, op)
     assert op_row.status == OperationStatus.READY
     assert float(op_row.quantity_complete or 0) == 0
     assert op_row.actual_start is None
     assert consumption(db_session, op.id) == []
+    assert on_hand(db_session, sheet.id) == 100.0
+    # Keyed on THIS operation; the positive control below runs the identical query and
+    # finds the completion's row(s), so the empty list is evidence and not a swallowed
+    # AuditService.log failure.
+    assert op_audit_rows(db_session, op.id) == []
     # It is the only operation: a completion here would have completed the work order.
     assert wo_row.status == wo_status
+    assert wo_row.version == version_before
 
 
 @pytest.mark.parametrize("verb", ["office", "floor"])
@@ -184,7 +208,7 @@ def test_positive_control_the_same_completion_on_a_released_job_consumes_and_com
     wo, op = make_wo_with_operation(
         db_session, work_center=wc, wo_status=WorkOrderStatus.RELEASED, quantity_ordered=QTY
     )
-    tie_material(db_session, wo, op)
+    sheet = tie_material(db_session, wo, op)
     closed_entry(db_session, operator, op)
 
     resp = office_complete(client, op, supervisor) if verb == "office" else floor_complete(client, op, operator)
@@ -193,6 +217,8 @@ def test_positive_control_the_same_completion_on_a_released_job_consumes_and_com
     wo_row, op_row = _rows(db_session, wo, op)
     assert op_row.status == OperationStatus.COMPLETE
     assert consumption(db_session, op.id), "the tie must consume on a released job, or the negative proves nothing"
+    assert on_hand(db_session, sheet.id) == 100.0 - QTY
+    assert op_audit_rows(db_session, op.id), "the identical audit query must find the completion's row"
     assert wo_row.status == WorkOrderStatus.COMPLETE
 
 

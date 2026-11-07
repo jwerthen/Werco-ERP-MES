@@ -24,6 +24,7 @@ from app.models.audit_log import AuditLog
 from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.user import UserRole
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus, WorkOrderType
+from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
 from app.services.audit_service import AuditService
 from app.services.operation_action_gates import MSG_WORK_ORDER_NOT_RELEASED, MSG_WORK_ORDER_ON_HOLD
 from app.services.work_order_state_service import (
@@ -180,6 +181,9 @@ class TestStartWorkOrder:
 
         assert resp.status_code == code
         assert resp.json()["detail"] == detail
+        # The app shares this session (autoflush off): a refusal raised after the status
+        # write would leave dirty state that reread()'s expire_all() silently discards.
+        assert not db_session.dirty and not db_session.new
         row = reread(db_session, WorkOrder, wo.id)
         assert row.status == status_ and row.version == version and row.actual_start is None
         # The identical query finds exactly one row on success (the test above).
@@ -368,6 +372,42 @@ class TestResumeWorkOrder:
         assert resp.json()["operations_returned_to_pending"] == 0
         assert reread(db_session, WorkOrderOperation, op.id).status == OperationStatus.IN_PROGRESS
 
+    @pytest.mark.parametrize("stamped", [False, True], ids=["to_draft", "to_released"])
+    def test_operation_level_holds_and_their_blockers_are_untouched(self, client, db_session, stamped):
+        """Resume lifts the WORK-ORDER hold only: an operation's own hold (and its open
+        blocker) stays exactly as it was, whether the job lands DRAFT or RELEASED."""
+        wc = make_work_center(db_session)
+        supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
+        wo, held_op = make_wo_with_operation(
+            db_session, work_center=wc, wo_status=WorkOrderStatus.ON_HOLD, op_status=OperationStatus.ON_HOLD
+        )
+        ready_op = add_op(db_session, wo, wc, sequence=20, status=OperationStatus.READY)
+        blocker = WorkOrderBlocker(
+            work_order_id=wo.id,
+            operation_id=held_op.id,
+            title="Gauge out for calibration",
+            status=WorkOrderBlockerStatus.OPEN.value,
+            company_id=wo.company_id,
+        )
+        db_session.add(blocker)
+        db_session.commit()
+        if stamped:
+            stamp(db_session, wo, supervisor)
+
+        resp = client.post(resume_url(wo.id), headers=user_headers(supervisor))
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == ("released" if stamped else "draft")
+        assert reread(db_session, WorkOrderOperation, held_op.id).status == OperationStatus.ON_HOLD
+        assert reread(db_session, WorkOrderBlocker, blocker.id).status == WorkOrderBlockerStatus.OPEN.value
+        assert op_status_rows(db_session, held_op.id) == []
+        # Control in the same request: the un-worked READY sibling IS demoted on a DRAFT
+        # landing (and only then), through the same audited path the held op skipped.
+        expected = OperationStatus.READY if stamped else OperationStatus.PENDING
+        assert reread(db_session, WorkOrderOperation, ready_op.id).status == expected
+        assert len(op_status_rows(db_session, ready_op.id)) == (0 if stamped else 1)
+        assert resp.json()["operations_returned_to_pending"] == (0 if stamped else 1)
+
     def test_audit_failure_fails_closed_with_503_and_changes_nothing(self, client, db_session, monkeypatch):
         wc = make_work_center(db_session)
         supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
@@ -385,6 +425,37 @@ class TestResumeWorkOrder:
         assert row.status == WorkOrderStatus.ON_HOLD and row.version == version
         # Unstamped, so the DRAFT branch would have demoted this READY op -- it must not have.
         assert reread(db_session, WorkOrderOperation, op.id).status == OperationStatus.READY
+
+    def test_a_failed_demotion_audit_rolls_back_the_work_order_row_already_written(
+        self, client, db_session, monkeypatch
+    ):
+        """All-or-nothing: the WO's STATUS_CHANGE row is written FIRST, then one row per
+        demoted operation. When a per-operation row fails, the WO row, the status write and
+        every demotion roll back together -- no orphan "resumed" evidence for a resume that
+        did not happen."""
+        wc = make_work_center(db_session)
+        supervisor = make_user(db_session, role=UserRole.SUPERVISOR)
+        wo, op = make_wo_with_operation(db_session, work_center=wc, wo_status=WorkOrderStatus.ON_HOLD)
+        real_log = AuditService.log
+        written: list[str] = []
+
+        def flaky_log(self, *args, **kwargs):
+            if kwargs.get("resource_type") == "work_order_operation":
+                return None  # the demotion row cannot be saved
+            entry = real_log(self, *args, **kwargs)
+            written.append(kwargs.get("resource_type"))
+            return entry
+
+        monkeypatch.setattr(AuditService, "log", flaky_log)
+
+        resp = client.post(resume_url(wo.id), headers=user_headers(supervisor))
+
+        assert resp.status_code == 503, resp.text
+        assert written == ["work_order"], "the WO row must have been written before the failing op row"
+        assert reread(db_session, WorkOrder, wo.id).status == WorkOrderStatus.ON_HOLD
+        assert reread(db_session, WorkOrderOperation, op.id).status == OperationStatus.READY
+        assert wo_status_rows(db_session, wo.id) == []
+        assert op_status_rows(db_session, op.id) == []
 
     def test_end_to_end_held_job_refuses_clock_in_until_resumed(self, client, db_session):
         wc = make_work_center(db_session)

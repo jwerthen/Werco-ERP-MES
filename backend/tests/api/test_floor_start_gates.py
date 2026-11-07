@@ -125,6 +125,18 @@ def time_entries(db: Session, op_id: int) -> list[TimeEntry]:
     return db.query(TimeEntry).filter(TimeEntry.operation_id == op_id).all()
 
 
+def assert_no_pending_writes(db: Session) -> None:
+    """Call right after a REFUSED request, before :func:`snapshot`.
+
+    The app runs on this very session (conftest's get_db override) with autoflush off, so
+    a refusal raised AFTER an in-memory mutation leaves dirty, unflushed state -- which
+    snapshot()'s expire_all() would silently discard, letting "row unchanged" pass against
+    a gate that runs too late.
+    """
+    assert not db.dirty, f"refused request left unflushed changes: {db.dirty!r}"
+    assert not db.new, f"refused request left unflushed new rows: {db.new!r}"
+
+
 def snapshot(db: Session, wo: WorkOrder, op: WorkOrderOperation) -> tuple:
     db.expire_all()
     op_row = db.query(WorkOrderOperation).filter(WorkOrderOperation.id == op.id).one()
@@ -157,6 +169,7 @@ def test_start_verbs_refuse_draft_and_on_hold_work_orders_and_write_nothing(
 
     assert resp.status_code == 409, resp.text
     assert resp.json()["detail"] == REASON_BY_STATUS[wo_status]
+    assert_no_pending_writes(db_session)
     assert snapshot(db_session, wo, op) == before
     assert time_entries(db_session, op.id) == []
     if verb in START_AUDIT_ACTION:
@@ -305,6 +318,7 @@ def test_start_verbs_refuse_an_operation_on_hold_instead_of_lifting_it(client, d
 
     assert resp.status_code == 409, resp.text
     assert resp.json()["detail"] == MSG_OPERATION_ON_HOLD_NO_START
+    assert_no_pending_writes(db_session)
     assert snapshot(db_session, wo, op) == before
     assert before[0] == OperationStatus.ON_HOLD
     assert db_session.query(WorkOrderBlocker).filter(WorkOrderBlocker.id == blocker.id).one().status == "open"
@@ -399,6 +413,7 @@ def test_office_start_refuses_a_complete_operation(client, db_session, floor):
 
     assert resp.status_code == 400
     assert resp.json()["detail"] == MSG_ALREADY_COMPLETE
+    assert_no_pending_writes(db_session)
     db_session.expire_all()
     row = db_session.query(WorkOrderOperation).filter(WorkOrderOperation.id == op.id).one()
     assert row.status == OperationStatus.COMPLETE
@@ -421,6 +436,7 @@ def test_office_start_refuses_an_operation_already_in_progress_without_restampin
 
     assert resp.status_code == 400
     assert resp.json()["detail"] == MSG_ALREADY_IN_PROGRESS
+    assert_no_pending_writes(db_session)
     db_session.expire_all()
     row = db_session.query(WorkOrderOperation).filter(WorkOrderOperation.id == op.id).one()
     assert row.started_by == operator_a.id

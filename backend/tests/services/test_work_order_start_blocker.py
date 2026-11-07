@@ -37,21 +37,25 @@ EXPECTED = {
 }
 
 
+@pytest.mark.unit
 def test_every_status_is_covered():
     """A new WorkOrderStatus member must be decided here, not silently treated as startable."""
     assert set(EXPECTED) == set(WorkOrderStatus)
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("status_", list(WorkOrderStatus))
 def test_enum_valued_status(status_):
     assert work_order_start_blocker(SimpleNamespace(status=status_)) == EXPECTED[status_]
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("status_", list(WorkOrderStatus))
 def test_string_valued_status(status_):
     assert work_order_start_blocker(SimpleNamespace(status=status_.value)) == EXPECTED[status_]
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("status_", [WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED])
 def test_terminal_text_is_byte_identical_to_the_old_inline_f_string(status_):
     work_order = SimpleNamespace(status=status_)
@@ -59,6 +63,7 @@ def test_terminal_text_is_byte_identical_to_the_old_inline_f_string(status_):
     assert work_order_start_blocker(work_order) == legacy
 
 
+@pytest.mark.unit
 def test_no_work_order_is_the_resolvers_404_not_a_refusal():
     assert work_order_start_blocker(None) is None
 
