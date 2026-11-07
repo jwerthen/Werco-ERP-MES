@@ -354,7 +354,7 @@ def test_office_complete_with_inspection_incomplete_warns_not_blocks(client: Tes
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -394,7 +394,7 @@ def test_no_quality_exceptions_when_gates_clear(client: TestClient, db_session: 
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -453,7 +453,7 @@ def test_mark_inspected_clears_the_completion_gate(client: TestClient, db_sessio
     assert insp.status_code == status.HTTP_200_OK, insp.text
 
     comp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(quality),
     )
     assert comp.status_code == status.HTTP_200_OK, comp.text
@@ -511,7 +511,7 @@ def test_open_ncr_warns_on_completion(client: TestClient, db_session: Session):
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -529,7 +529,7 @@ def test_closed_ncr_does_not_warn(client: TestClient, db_session: Session):
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -547,7 +547,7 @@ def test_non_passed_fai_warns_passed_fai_clears(client: TestClient, db_session: 
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -559,7 +559,7 @@ def test_non_passed_fai_warns_passed_fai_clears(client: TestClient, db_session: 
     make_fai(db_session, wo2, part, status_=FAIStatus.PASSED)
     db_session.commit()
     resp2 = client.post(
-        f"/api/v1/work-orders/operations/{op2.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op2.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp2.status_code == status.HTTP_200_OK, resp2.text
@@ -592,7 +592,7 @@ def test_other_company_ncr_does_not_warn(client: TestClient, db_session: Session
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op_a.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op_a.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin_a),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -614,7 +614,7 @@ def test_open_blocker_warns_on_completion(client: TestClient, db_session: Sessio
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -807,7 +807,7 @@ def test_open_ncr_full_matrix_on_completion(client: TestClient, db_session: Sess
     ncr_id = ncr.id
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     # (i) + (ii)
@@ -869,7 +869,7 @@ def test_fai_not_passed_full_matrix_on_completion(client: TestClient, db_session
     fai_id = fai.id
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -899,7 +899,7 @@ def test_missing_required_fai_is_not_detectable(client: TestClient, db_session: 
     db_session.commit()  # no FAI created
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -922,7 +922,7 @@ def test_open_blocker_full_matrix_on_completion(client: TestClient, db_session: 
     blocker_id = blocker.id
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -948,7 +948,7 @@ def test_acknowledged_blocker_warns_on_completion(client: TestClient, db_session
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -965,7 +965,7 @@ def test_resolved_blocker_does_not_warn(client: TestClient, db_session: Session)
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -1012,7 +1012,7 @@ def test_all_gates_satisfied_no_exception_recorded(client: TestClient, db_sessio
     db_session.commit()
 
     resp = client.post(
-        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5",
+        f"/api/v1/work-orders/operations/{op.id}/complete?quantity_complete=5&quantity_override_reason=desk+count",
         headers=headers_for(admin),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text

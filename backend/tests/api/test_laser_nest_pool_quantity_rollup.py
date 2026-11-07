@@ -549,7 +549,7 @@ class TestPoolAllCompleteThroughEndpoints:
         assert wo.status == WorkOrderStatus.COMPLETE
         assert float(wo.quantity_complete) == 21.0 == float(wo.quantity_ordered)
 
-    def test_no_endpoint_path_completes_a_nest_short(self, client, db_session):
+    def test_office_partial_below_planned_runs_leaves_nest_open(self, client, db_session):
         """The office /complete with quantity below the nest's planned runs is
         PARTIAL progress -- the op stays open, so the all-complete branch can
         only ever be reached with real per-nest counts (the honesty rule's
@@ -571,6 +571,33 @@ class TestPoolAllCompleteThroughEndpoints:
         assert float(op.quantity_complete) == 3.0
         assert _header(db_session, child["id"]) == 3.0
         assert db_session.get(WorkOrder, child["id"]).status != WorkOrderStatus.COMPLETE
+
+    def test_a_nest_closed_short_with_scrap_books_the_pooled_sum_not_the_order(self, client, db_session):
+        """Owner ruling 1: a short covered by scrap with a reason DOES close a nest -- and
+        the pool header still never snaps: it is the pooled sum of real per-nest counts,
+        so the 2 runs scrapped on nest 2 are never asserted as cut (INT11)."""
+        admin = make_user(db_session)
+        wc = make_laser_work_center(db_session)
+        child = _import_pool_wo(client, admin, wc, [9, 5, 7])
+        ops = _ops_by_sequence(child)
+
+        for op_row, good, scrap in ((ops[0], 9, 0), (ops[1], 3, 2), (ops[2], 7, 0)):
+            params = {"quantity_complete": good}
+            if scrap:
+                params.update(quantity_scrapped=scrap, scrap_reason="burned through")
+            resp = client.post(
+                f"/api/v1/work-orders/operations/{op_row['id']}/complete", params=params, headers=headers_for(admin)
+            )
+            assert resp.status_code == status.HTTP_200_OK, resp.text
+            assert resp.json()["is_fully_complete"] is True, resp.text
+
+        db_session.expire_all()
+        nest = db_session.get(WorkOrderOperation, ops[1]["id"])
+        assert nest.status == OperationStatus.COMPLETE
+        assert float(nest.quantity_short_declared) == 2.0
+        wo = db_session.get(WorkOrder, child["id"])
+        assert wo.status == WorkOrderStatus.COMPLETE
+        assert float(wo.quantity_complete) == 19.0, "the pooled sum of real counts -- never the ordered 21"
 
 
 class TestStuckHeaderHealsOnNextProductionPost:

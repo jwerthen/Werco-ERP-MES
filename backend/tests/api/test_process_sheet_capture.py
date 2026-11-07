@@ -1039,7 +1039,7 @@ class TestOfficeCompletionGating:
 
         response = client.post(
             self.OFFICE_COMPLETE_URL.format(op=operation.id),
-            params={"quantity_complete": 10},
+            params={"quantity_complete": 10, "quantity_override_reason": "desk count"},
             headers=headers,
         )
         assert response.status_code == status.HTTP_409_CONFLICT, response.text
@@ -1060,7 +1060,7 @@ class TestOfficeCompletionGating:
 
         response = client.post(
             self.OFFICE_COMPLETE_URL.format(op=operation.id),
-            params={"quantity_complete": 10},
+            params={"quantity_complete": 10, "quantity_override_reason": "desk count"},
             headers=headers,
         )
         assert response.status_code == 200, response.text
@@ -1073,7 +1073,7 @@ class TestOfficeCompletionGating:
 
         response = client.post(
             self.OFFICE_COMPLETE_URL.format(op=operation.id),
-            params={"quantity_complete": 4},
+            params={"quantity_complete": 4, "quantity_override_reason": "desk count"},
             headers=headers,
         )
         assert response.status_code == 200, response.text
@@ -1091,7 +1091,7 @@ class TestOfficeCompletionGating:
 
         blocked = client.post(
             self.OFFICE_COMPLETE_URL.format(op=operation.id),
-            params={"quantity_complete": 10},
+            params={"quantity_complete": 10, "quantity_override_reason": "desk count"},
             headers=headers,
         )
         assert blocked.status_code == status.HTTP_409_CONFLICT
@@ -1112,14 +1112,18 @@ class TestOfficeCompletionGating:
             COMPLETE_URL.format(op=operation.id), json={"quantity_complete": 10}, headers=headers
         )
         office_blocked = client.post(
-            self.OFFICE_COMPLETE_URL.format(op=operation.id), params={"quantity_complete": 10}, headers=headers
+            self.OFFICE_COMPLETE_URL.format(op=operation.id),
+            params={"quantity_complete": 10, "quantity_override_reason": "desk count"},
+            headers=headers,
         )
         assert shop_blocked.status_code == office_blocked.status_code == status.HTTP_409_CONFLICT
         assert shop_blocked.json()["detail"] == office_blocked.json()["detail"]  # byte-for-byte parity
 
         assert client.post(record_url, json={"value_bool": True}, headers=headers).status_code == 201
         done = client.post(
-            self.OFFICE_COMPLETE_URL.format(op=operation.id), params={"quantity_complete": 10}, headers=headers
+            self.OFFICE_COMPLETE_URL.format(op=operation.id),
+            params={"quantity_complete": 10, "quantity_override_reason": "desk count"},
+            headers=headers,
         )
         assert done.status_code == 200, done.text
         db_session.expire_all()
@@ -1129,7 +1133,9 @@ class TestOfficeCompletionGating:
         work_order2, operation2, user2, headers2 = _capture_fixture(db_session)
         step2 = _add_wo_step(db_session, operation2, step_type="checkbox", config=None, label="Cross gate 2")
         blocked2 = client.post(
-            self.OFFICE_COMPLETE_URL.format(op=operation2.id), params={"quantity_complete": 10}, headers=headers2
+            self.OFFICE_COMPLETE_URL.format(op=operation2.id),
+            params={"quantity_complete": 10, "quantity_override_reason": "desk count"},
+            headers=headers2,
         )
         assert blocked2.status_code == status.HTTP_409_CONFLICT
         assert blocked2.json()["detail"]["code"] == "STEPS_INCOMPLETE"

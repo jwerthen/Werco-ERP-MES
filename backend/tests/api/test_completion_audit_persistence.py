@@ -283,11 +283,15 @@ def test_office_complete_operation_partial_emits_committed_update_audit(client: 
         db_session, resource_type="work_order_operation", resource_id=op.id, action="UPDATE"
     )
     assert len(update_rows) == 1, "expected a committed UPDATE row for the partial progress"
-    # Batch 3 / DUP-3: scrap is no longer written when the param is omitted, so it
-    # is absent from the audit diff (the office path can no longer zero accumulated
-    # scrap with a defaulted-0 query param). The stored quantity is the resolved,
-    # evidence-floored value.
-    assert update_rows[0].new_values == {"quantity_complete": 4}
+    # Batch 3 / DUP-3: scrap is no longer written when the param is omitted (the office
+    # path can no longer zero accumulated scrap with a defaulted-0 query param), so the
+    # row's diff names quantity_complete alone. Owner ruling 1: the row now carries the
+    # full before/after snapshot (scrap, reason, code, declared short) plus the accounting.
+    # The stored quantity is the resolved, evidence-floored value.
+    assert update_rows[0].new_values["quantity_complete"] == 4
+    assert update_rows[0].new_values["quantity_scrapped"] == 0
+    assert set(update_rows[0].extra_data["changes"]) == {"quantity_complete"}
+    assert update_rows[0].extra_data["unaccounted_after"] == 6
 
     status_rows = _committed_audit_rows(
         db_session, resource_type="work_order_operation", resource_id=op.id, action="STATUS_CHANGE"

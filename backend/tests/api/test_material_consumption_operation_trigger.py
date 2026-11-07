@@ -726,7 +726,15 @@ def _scenario(db: Session, user: User, wc: WorkCenter, *, handler: str):
     three per-operation handlers keep the laser shape (dispatch pools are exempt from
     the predecessor gate, which is what lets one operation complete in isolation).
     """
-    wo = make_wo(db, make_part(db, standard_cost=9.0), quantity_ordered=4, laser=(handler != "force_complete"))
+    # Owner ruling 1: force-complete is bounded at the work-order grain, so its single
+    # operation carries the whole order (a 2-of-4 completion would be a short nobody
+    # scrapped, and is refused). The per-operation handlers keep two nests of 2.
+    wo = make_wo(
+        db,
+        make_part(db, standard_cost=9.0),
+        quantity_ordered=(2 if handler == "force_complete" else 4),
+        laser=(handler != "force_complete"),
+    )
     op1 = make_op(db, wo, wc, sequence=10, runs=2.0)
     if handler != "force_complete":
         make_op(db, wo, wc, sequence=20, runs=2.0)
@@ -978,11 +986,13 @@ def test_reduce_after_operation_consumption_is_a_no_op(client: TestClient, db_se
 
     # (b) the supervisor/office verb -- ALLOWED since PR 3, and it still moves no stock.
     # Correcting the count is what opens the bounded return allowance; the material
-    # itself only comes back through the explicit, reasoned RETURN verb.
+    # itself only comes back through the explicit, reasoned RETURN verb. Owner ruling 1: a
+    # completed operation cannot be short, so the correction reopens it -- and a reopen
+    # moves no stock either.
     office_response = client.post(
         f"/api/v1/work-orders/operations/{op.id}/reduce-production",
         headers=headers_for(supervisor),
-        json={"quantity_delta": 2, "reason": "double-scanned the tray"},
+        json={"quantity_delta": 2, "reason": "double-scanned the tray", "reopen_operation": True},
     )
     assert office_response.status_code == status.HTTP_200_OK, office_response.text
 
