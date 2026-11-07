@@ -526,6 +526,57 @@ cd backend; python -m pytest tests/ -v
 cd frontend; npm test
 ```
 
+### Wave 2 rollout
+
+**Floor gates for draft / on-hold work orders (owner ruling 2026-11-05).** No migration and no
+environment variable. After this deploy, clock-in, both operation-start verbs and completing a
+READY operation refuse **409** on a work order that is DRAFT or ON_HOLD (so does a hand-set
+`status: in_progress` through `PUT /api/v1/work-orders/operations/{id}`), and a held work order goes
+back to the floor through **Resume Work Order** (`POST /api/v1/work-orders/{id}/resume`), which
+resumes to DRAFT when no release is on record. Before deploying, run these two **read-only** queries against
+production (Supabase SQL editor; status enum labels are stored uppercase) and have a supervisor
+clear what they find. Operators already clocked in are not affected: clock-out, production reports
+and completing an IN_PROGRESS operation stay allowed on a held job.
+
+1. **Draft or held jobs that still carry floor work.** These become un-joinable the moment the
+   deploy lands. Release each DRAFT one (Work Order detail → **Release**) or, after the deploy,
+   resume each held one.
+
+   ```sql
+   SELECT wo.company_id, wo.id, wo.work_order_number, wo.status,
+     count(DISTINCT op.id) FILTER (WHERE op.status IN ('READY','IN_PROGRESS')) AS ready_or_running_ops,
+     count(DISTINCT te.id) FILTER (WHERE te.clock_out IS NULL) AS open_time_entries
+   FROM work_orders wo
+   LEFT JOIN work_order_operations op ON op.work_order_id = wo.id AND op.company_id = wo.company_id
+   LEFT JOIN time_entries te ON te.work_order_id = wo.id AND te.company_id = wo.company_id
+   WHERE wo.is_deleted = false AND wo.status IN ('DRAFT','ON_HOLD')
+   GROUP BY wo.company_id, wo.id, wo.work_order_number, wo.status
+   HAVING count(DISTINCT op.id) FILTER (WHERE op.status IN ('READY','IN_PROGRESS')) > 0
+       OR count(DISTINCT te.id) FILTER (WHERE te.clock_out IS NULL) > 0
+   ORDER BY wo.company_id, wo.work_order_number;
+   ```
+
+2. **Held jobs with no release record.** These resume to **DRAFT** (their un-worked READY
+   operations return to PENDING) and then need a **Release** click. Expect older laser nest
+   packages, MRP auto-released work orders and work orders released through a raw `PUT` here.
+
+   ```sql
+   SELECT company_id, id, work_order_number, work_order_type, updated_at
+   FROM work_orders
+   WHERE is_deleted = false AND status = 'ON_HOLD' AND released_at IS NULL AND released_by IS NULL
+   ORDER BY company_id, work_order_number;
+   ```
+
+3. **Training handouts.** The onboarding markdown (`docs/onboarding/02-operator-shop-floor.md`,
+   `04-planner-supervisor-manager.md`) describes the new "Not released" / "WO on hold" refusals and
+   Start / Hold / Resume Work Order, but the committed PDFs in `docs/onboarding/pdf/` were **not**
+   regenerated — no generator in the repo produces them (they are Chrome print-to-PDF renders of the
+   markdown; `docs/onboarding/generate_onboarding_pdfs.py` builds only `quick-reference/`). Before
+   handing the operator or supervisor guide to anyone after this deploy, re-print those two PDFs from
+   the current markdown (once, after the short-count PR if it ships in the same window).
+
+See `docs/API.md` → Work Orders → "Draft and on-hold work orders refuse every start".
+
 ---
 
 ## Standard Deployment

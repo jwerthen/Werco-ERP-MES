@@ -561,6 +561,25 @@ export interface WorkOrderRestoreResponse {
 }
 
 /**
+ * `POST /work-orders/{id}/resume` — "Resume Work Order" (Admin/Manager/Supervisor).
+ *
+ * Where a held job goes back to is decided by the server from the RELEASE RECORD,
+ * never guessed: `in_progress` when the job was released and work had started,
+ * `released` when it was released but nothing ran, and `draft` when no release is
+ * on record — in which case its un-worked READY operations are returned to
+ * PENDING and the job needs a Release click before the floor can start it. Show
+ * `message` verbatim; it already says which of the three happened.
+ */
+export interface WorkOrderResumeResponse {
+  work_order_id: number;
+  message: string;
+  status: 'in_progress' | 'released' | 'draft';
+  restore_basis: 'release_record_with_work' | 'release_record' | 'no_release_record';
+  /** Non-zero only when the job returned to DRAFT. */
+  operations_returned_to_pending: number;
+}
+
+/**
  * What USING a work order template would produce, read LIVE off the source work
  * order on every request.
  *
@@ -1583,6 +1602,23 @@ export interface QueueItem {
    * the kiosks render server order and only DISPLAY this rank.
    */
   run_order?: number | null;
+  /**
+   * The WORK ORDER's status (`draft`, `released`, `in_progress`, `on_hold`, …).
+   * Rides every queue and held row so a floor screen can say WHY a job cannot be
+   * started without a second request. Optional: an SPA bundle can be live
+   * against a backend that predates the field.
+   */
+  work_order_status?: string | null;
+  /**
+   * The server's verbatim refusal text when the WORK ORDER blocks every start —
+   * not released yet (draft), held by a supervisor (on hold), or terminal. Render
+   * it as-is; `utils/startBlock.ts` only picks the short button label.
+   *
+   * `null`/absent means "no work-order refusal", NEVER "startable": the
+   * operation's own status, predecessors, the work center and open entries are
+   * still decided by the server at the moment of the action.
+   */
+  start_blocked_reason?: string | null;
 }
 
 /**
@@ -1604,6 +1640,12 @@ export interface HeldQueueItem extends QueueItem {
    * purpose: whether a QUEUED operation may actually start is decided by the
    * server gates at the moment of the action, so a poll asserting
    * `startable: true` would make a claim this read cannot honor.
+   *
+   * The same holds for `start_blocked_reason` (inherited from `QueueItem`): a
+   * held row carries it too, and a null reason means "no work-order refusal",
+   * never "startable". A WORK-ORDER hold does not move rows onto this list — a
+   * READY operation of an on-hold work order stays on `queue` with the reason
+   * set; only an OPERATION-level hold lands here.
    */
   startable?: false;
   /**

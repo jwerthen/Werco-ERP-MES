@@ -117,12 +117,15 @@ from app.services.laser_nest_service import active_laser_nest, sync_laser_nest_f
 from app.services.material_tie_view import MaterialTieView, tie_views_for_operations
 from app.services.operation_action_gates import (
     CLOCK_IN_ALLOWED_STATUSES,
+    MSG_ALREADY_IN_PROGRESS,
     MSG_NO_LABOR_RECORDED,
+    MSG_OPERATION_ON_HOLD_NO_START,
     MSG_PREDECESSORS_INCOMPLETE,
     MSG_WRONG_WORK_CENTER,
     get_open_time_entry,
     operation_blocked_by_predecessors,
     operation_has_labor_evidence,
+    work_order_start_blocker,
 )
 from app.services.operation_hold_view import HoldBlockerView, HoldContext
 from app.services.operational_event_service import OperationalEventService
@@ -605,7 +608,20 @@ def _is_open_time_entry_violation(exc: IntegrityError) -> bool:
 
 
 def _operation_check_in_state(db: Session, operation: WorkOrderOperation) -> dict:
+    """The desk/phone check-in hints for one operation row.
+
+    ``start_blocked_reason`` is the WORK-ORDER half of the start gate
+    (``operation_action_gates.work_order_start_blocker``): the exact text the start verbs
+    and clock-in 409 with when the work order is DRAFT ("release first"), ON_HOLD
+    ("Resume Work Order") or terminal -- so the screen can show WHY instead of the
+    predecessor copy. ``None`` is not a claim the row is startable; the write verb still
+    decides at the moment of the action. ``work_order_status`` is the input it was
+    computed from, for the client's chip label. No extra query: every caller has the
+    work order loaded.
+    """
     blocked = operation_blocked_by_predecessors(db, operation)
+    work_order = operation.work_order
+    start_blocked_reason = work_order_start_blocker(work_order) if work_order is not None else None
     can_check_in = (
         operation.status
         in [
@@ -615,10 +631,15 @@ def _operation_check_in_state(db: Session, operation: WorkOrderOperation) -> dic
             OperationStatus.ON_HOLD,
         ]
         and not blocked
+        and start_blocked_reason is None
     )
     return {
         "can_check_in": can_check_in,
         "blocked_by_previous_operations": blocked,
+        "start_blocked_reason": start_blocked_reason,
+        "work_order_status": (
+            getattr(work_order.status, "value", work_order.status) if work_order is not None else None
+        ),
     }
 
 
@@ -853,6 +874,13 @@ def _kiosk_job_row(
         # chip; it never gates a start.
         "run_order": run_order,
         "status": operation.status,
+        # The work-order half of the start gate, as static server text (never free
+        # text, so safe for a crew-STATION principal): DRAFT -> "release first",
+        # ON_HOLD -> "Resume Work Order". The row stays LISTED -- membership is the
+        # dispatch queue's business -- but the floor shows the chip and disables start
+        # instead of discovering the 409. None is not a "startable" claim.
+        "work_order_status": getattr(work_order.status, "value", work_order.status),
+        "start_blocked_reason": work_order_start_blocker(work_order),
         "quantity_ordered": operation_target_quantity(operation, work_order),
         "work_order_quantity_ordered": work_order.quantity_ordered,
         "component_quantity": operation.component_quantity,
@@ -1566,7 +1594,18 @@ def clock_in(
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Clock in to a work order operation"""
+    """Clock in to a work order operation (starts it when it is PENDING / READY).
+
+    Refusal order, every one before any write (no TimeEntry, no status flip, no audit
+    row): already clocked in to it (400), unknown operation (404), operation not on that
+    work order (400), wrong work center (400), work order missing or soft-deleted (404),
+    then the WORK-ORDER status gate -- **409** when the work order is a draft ("release
+    first": release_work_order), on hold (lift it with work_orders_resume_work_order --
+    resuming or clearing an OPERATION's hold does not), or complete / closed / cancelled --
+    then operation not startable (400, including an operation-level hold) and earlier
+    operations incomplete (400). A paper back-entry (``source='backfill'``) is refused
+    exactly like a live clock-in: there is no exemption.
+    """
     # Prevent duplicate clock-ins for the same operation (A0.4: shared gate helper --
     # the scanner resolve-action endpoint consults the same predicate).
     existing = get_open_time_entry(db, current_user.id, clock_in_data.operation_id)
@@ -1596,13 +1635,27 @@ def clock_in(
         # Shared constant so the scanner resolver's blocker text can never drift.
         raise HTTPException(status_code=400, detail=MSG_WRONG_WORK_CENTER)
 
+    # Resolved BEFORE the operation-status rung so the work-order gate below can run
+    # ahead of it. A soft-deleted work order is gone (invariant 3): its operations must
+    # not take labor.
+    work_order = operation.work_order
+    if not work_order or work_order.is_deleted:
+        raise HTTPException(status_code=404, detail="Work order not found")
+
+    # Owner ruling 2026-11-05: no labor on a job that is not released, or that a
+    # supervisor has put on hold -- and none on a finished job either (clock-in had no
+    # terminal rung before). THE shared helper, so the scanner, the read payloads' chip
+    # and both start verbs say exactly this. 409, never 400: the crew station reads a
+    # clock-in 400 as "already clocked in". No back-entry exemption -- the server accepts
+    # the backfill channel from any caller.
+    start_blocked_reason = work_order_start_blocker(work_order)
+    if start_blocked_reason:
+        raise HTTPException(status_code=409, detail=start_blocked_reason)
+
     if operation.status not in CLOCK_IN_ALLOWED_STATUSES:
         raise HTTPException(status_code=400, detail="Operation is not ready to start")
 
     # Prevent out-of-sequence starts
-    work_order = operation.work_order
-    if not work_order:
-        raise HTTPException(status_code=404, detail="Work order not found")
     if operation_blocked_by_predecessors(db, operation):
         raise HTTPException(status_code=400, detail="Previous operations must be completed first")
 
@@ -3895,7 +3948,14 @@ def start_operation(
     - Sets status to IN_PROGRESS
     - Records actual_start_time
     - Creates a TimeEntry so the dashboard shows the operator on this job
-    - Updates work order status if needed
+    - Lifts a RELEASED work order to IN_PROGRESS (never a draft one)
+
+    Open to any authenticated user (the operator's verb). Refused before any write:
+    unknown operation (404); already complete / already in progress (400); work order
+    missing or soft-deleted (404); **409** when the work order is a draft ("release
+    first": release_work_order), on hold (work_orders_resume_work_order lifts it), or
+    complete / closed / cancelled; **409** when the OPERATION is on hold -- starting does
+    not lift a hold, Resume / Clear Hold does; earlier operations incomplete (400).
     """
     operation = (
         db.query(WorkOrderOperation)
@@ -3915,21 +3975,26 @@ def start_operation(
         raise HTTPException(status_code=400, detail="Operation is already complete")
 
     if operation.status == OperationStatus.IN_PROGRESS:
-        raise HTTPException(status_code=400, detail="Operation is already in progress")
+        raise HTTPException(status_code=400, detail=MSG_ALREADY_IN_PROGRESS)
 
     work_order = operation.work_order
-    if not work_order:
+    if not work_order or work_order.is_deleted:
         raise HTTPException(status_code=404, detail="Work order not found")
 
-    # G6-A: refuse to START new work on a TERMINAL parent WO (CANCELLED/CLOSED/COMPLETE)
-    # before any mutation -- mirrors the guard in complete_operation. You can never
-    # legitimately begin a new operation on a finished/cancelled job, and refusing it
-    # traps nothing (no open time entry is created yet).
-    if work_order.status in TERMINAL_WO_STATUSES:
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot start operation: work order is {work_order.status.value}",
-        )
+    # The work-order half of the start gate, before any mutation: terminal (G6-A -- you
+    # can never legitimately begin a new operation on a finished/cancelled job; the text
+    # is byte-identical to the inline f-string this replaced), DRAFT ("release first" --
+    # this verb used to lift a DRAFT straight to IN_PROGRESS, a live Release bypass) and
+    # ON_HOLD (owner ruling 2026-11-05). THE shared helper -- see its docstring.
+    start_blocked_reason = work_order_start_blocker(work_order)
+    if start_blocked_reason:
+        raise HTTPException(status_code=409, detail=start_blocked_reason)
+
+    # Starting is not how an operation's hold is lifted: this verb used to flip an
+    # ON_HOLD operation straight to IN_PROGRESS, silently clearing the hold and leaving
+    # its blocker OPEN. Resume (kiosk) / Clear Hold (desk) is the door.
+    if operation.status == OperationStatus.ON_HOLD:
+        raise HTTPException(status_code=409, detail=MSG_OPERATION_ON_HOLD_NO_START)
 
     # THE shared predecessor gate -- the same one clock-in, the office verbs and the
     # scanner resolver call. This used to be an INLINE copy hard-coding
@@ -3947,8 +4012,10 @@ def start_operation(
     operation.started_by = current_user.id
     operation.updated_at = datetime.utcnow()
 
-    # Update work order status if needed
-    if work_order.status in [WorkOrderStatus.DRAFT, WorkOrderStatus.RELEASED]:
+    # Update work order status if needed. RELEASED only: a DRAFT work order is refused
+    # above, and this branch used to lift one straight to IN_PROGRESS -- a release with
+    # no Release verb and no record of who authorized it.
+    if work_order.status == WorkOrderStatus.RELEASED:
         work_order.status = WorkOrderStatus.IN_PROGRESS
         if not work_order.actual_start:
             work_order.actual_start = datetime.utcnow()
@@ -4346,6 +4413,12 @@ def complete_operation(
     matching the office `/work-orders/operations/{id}/complete` twin -- so the
     completion path can no longer silently lift a quality / material hold.
 
+    Work-order gate on the auto-start: completing a READY operation starts it first, so
+    a READY operation under a **draft** work order is refused **409** ("release first")
+    and under an **on-hold** one **409** (resume the work order first) -- the start
+    verbs' exact text, before any write or inventory effect. An IN_PROGRESS operation is
+    not gated: work already running when a job is held stays completable.
+
     Labor-evidence gate (floor only): an operation with **no TimeEntry at all** is
     refused **400** ("Clock in to this operation before completing it -- no one has
     clocked in to it yet."). ANY entry satisfies it, open or closed -- it is NOT
@@ -4431,6 +4504,17 @@ def complete_operation(
             raise HTTPException(status_code=409, detail="Operation is on hold and cannot be completed")
         raise HTTPException(status_code=400, detail=f"Cannot complete operation with status: {operation.status.value}")
 
+    # Completing a READY operation STARTS it (the auto-start below), so it passes the
+    # start gate first: a READY operation under a DRAFT or ON_HOLD work order is refused
+    # 409 with the start verbs' exact text, before any quantity check and before any
+    # write or inventory effect. An IN_PROGRESS operation is NOT gated -- work already
+    # running when a job is held stays completable (the kiosk finishes it after clock-out).
+    # Terminal work orders were refused above with the completion text.
+    if operation.status != OperationStatus.IN_PROGRESS:
+        start_blocked_reason = work_order_start_blocker(work_order)
+        if start_blocked_reason:
+            raise HTTPException(status_code=409, detail=start_blocked_reason)
+
     ordered_qty = operation_target_quantity(operation, work_order)
     try:
         validate_operation_quantity(completion_data.quantity_complete, ordered_qty)
@@ -4494,7 +4578,8 @@ def complete_operation(
                 },
             )
 
-    # Auto-start if not already in progress
+    # Auto-start if not already in progress. This IS a start -- which is why the
+    # work-order start gate runs above for a READY operation.
     if operation.status != OperationStatus.IN_PROGRESS:
         operation.status = OperationStatus.IN_PROGRESS
         if not operation.actual_start:

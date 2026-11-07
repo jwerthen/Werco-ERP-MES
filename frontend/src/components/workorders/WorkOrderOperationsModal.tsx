@@ -32,7 +32,9 @@ function operationTarget(operation: WorkOrderOperation, workOrder: WorkOrder) {
 function completionBlockReason(operation: WorkOrderOperation, workOrder: WorkOrder): string | null {
   if (operation.cancelled_nest_id != null) return 'This nest is cancelled.';
   if (operation.status === 'on_hold') return 'Clear the operation hold before completing.';
-  if (workOrder.status === 'on_hold') return 'Clear the work order hold before completing.';
+  // A WORK-ORDER hold is lifted with "Resume Work Order" on the work order's
+  // page — never "Clear Hold", which names the operation-level action above.
+  if (workOrder.status === 'on_hold') return 'Resume the work order (Resume Work Order on its page) before completing.';
   if (workOrder.sequential_operations && workOrder.work_order_type !== 'laser_cutting') {
     const previous = workOrder.operations
       .filter(candidate => candidate.sequence < operation.sequence && candidate.status !== 'complete')
@@ -227,7 +229,19 @@ export default function WorkOrderOperationsModal({
                 <p className="text-sm text-fd-mute">Release this work order before completing operations.</p>
               )}
               {workOrder.status === 'on_hold' && (
-                <p className="text-sm text-fd-mute">Clear the work order hold before completing operations.</p>
+                <p className="text-sm text-fd-mute">
+                  Resume the work order (
+                  <Link
+                    to={`/work-orders/${workOrderId}`}
+                    onClick={event => {
+                      if (pending.current) event.preventDefault();
+                    }}
+                    className="text-fd-blue underline hover:text-blue-300"
+                  >
+                    Resume Work Order on its page
+                  </Link>
+                  ) before completing operations.
+                </p>
               )}
               {operations.length === 0 ? (
                 <EmptyState

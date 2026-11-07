@@ -117,7 +117,13 @@ URL is all the station setup there is.
    `POST /shop-floor/clock-in` (entry type `run`). When the operation carries
    process-sheet steps, the confirm card adds a **REVIEW STEPS 2/6** button so the
    operator can read the steps before starting (see
-   [Process steps](#process-steps-process-sheets-capture)).
+   [Process steps](#process-steps-process-sheets-capture)). A job whose **work order** is not
+   released or is on hold stays in the queue with a **NOT RELEASED** / **WO ON HOLD** chip (from the
+   row's `start_blocked_reason`); its card still opens, but the confirm card shows the server's reason
+   in a status panel and CLOCK IN is disabled and relabelled. If the hold lands while the confirm card
+   is open, the clock-in's **409** is toasted verbatim and the kiosk returns to the queue and
+   refreshes. A supervisor clears it — **Release** or **Resume Work Order** on the work order — never
+   the operator; resuming an *operation's* hold does not lift a work-order hold.
 2. **Running-job panel** (the split hero's left column while clocked in): WO number, part +
    **REV** chip (the new `part_revision` payload), quantity + progress bar, the job's written
    guidance (compact — [Job instructions on screen](#job-instructions-on-screen)), the laser-nest
@@ -168,7 +174,8 @@ URL is all the station setup there is.
      normal complete (captioned `QUICK ADD TO GOOD · MAX n`, or `· OPERATION IS ALREADY AT ITS
      TARGET` when nothing remains): it is there for rebuilding a partial count after clearing
      the field, and recording MORE than the target is an office over-count, not a tap here.
-     When the queue holds a next job the CTA chains it — after a
+     When the queue holds a next job the CTA chains it — skipping any job carrying a
+     `start_blocked_reason` (draft or on-hold work order) — after a
      successful complete the kiosk attempts clock-in to that job, and a refusal is surfaced
      verbatim (non-optimistic) with the operator landing on the queue. If the clock-out
      lands but the completion is refused, the kiosk says so — labor is closed either way.
@@ -220,8 +227,8 @@ entry on the floor); the crew station gets them off its queue payload instead (s
 text satisfies the server's scrap-requires-a-reason rule.
 
 **What operators cannot do.** No overrides: backend gating (operation sequence /
-predecessor not complete, on-hold, optimistic-lock 409s, qualification warnings,
-no-labor-recorded) is
+predecessor not complete, on-hold, a work order that is not released or is on hold,
+optimistic-lock 409s, qualification warnings, no-labor-recorded) is
 surfaced **verbatim** in the error toast and never suppressed or retried around. There is
 no resume-from-hold, inspection, or labor-approval verb on the kiosk.
 
@@ -261,8 +268,8 @@ the queue card and the crew job card, numbered 1..N with no gaps. Unranked jobs 
 sort **after** every ranked job, and carry no chip. With no work-order plan set, the order is exactly
 what it was before the plan existed. The rank is
 **advisory**: it tells the operator what the shop wants run next, but **any** queued job can still
-be started. The rank itself never gates a clock-in; the existing backend gating (sequence /
-predecessor, on-hold, locks) is unchanged and stays the only thing that refuses one, still surfaced
+be started. The rank itself never gates a clock-in; the backend gating (sequence /
+predecessor, on-hold, a draft or on-hold work order, locks) stays the only thing that refuses one, still surfaced
 verbatim as described above. Moving an operation to a different machine clears its machine rank; it
 lands at the bottom of its own work order's block at the new machine when that work order is in the
 plan, otherwise unranked at the tail of the new work center's queue until a manager re-ranks it
@@ -585,6 +592,11 @@ rows**, so nothing client-side re-merges them and no code path that renders a st
 can reach a held row. Held rows additionally carry `startable: false` (stated, with no `true` twin
 on queue rows — whether a *queued* operation may actually start is decided by the server gates at
 the moment of the action, which a poll cannot honestly predict) and `run_order: null`.
+
+`held` is **operation** holds only. A job whose *work order* is on hold (or still a draft) is not
+moved here: it stays in the queue with the **WO ON HOLD** / **NOT RELEASED** chip and a disabled
+CLOCK IN, and RESUME on the kiosk cannot lift it — a supervisor runs **Resume Work Order** on the
+work order (see `docs/API.md` → Work Orders → "Draft and on-hold work orders refuse every start").
 
 The held card is deliberately **not** a `KioskQueueCard`: it is inert markup with exactly one
 interactive element, **RESUME**. A held job must never be startable, and the operator has to lift
@@ -1387,9 +1399,13 @@ measurement.
   reason). Otherwise it's a **JOIN** (`POST /shop-floor/clock-in`, entry type **Run** by default
   with a **Setup** toggle). Joining while clocked in elsewhere is allowed — the kiosk shows an
   informational "also clocked in at …" toast, never a block. A stale-roster double join gets the
-  server's 400 ("already clocked in") as an info toast plus a refresh. **Badge-first** also
-  works: scanning a badge at the board opens that operator's sheet — their open entries (tap to
-  clock out) and the joinable jobs at this station.
+  server's 400 ("already clocked in") as an info toast plus a refresh. A job whose work order is a
+  draft or on hold shows the same **NOT RELEASED** / **WO ON HOLD** chip on its board card; the card
+  stays tappable so a crew member already on it can still **LEAVE**, and a JOIN is refused **409**
+  with the server's reason shown inline under the badge prompt (a 409 never reaches the "already
+  clocked in" 400 branch). **Badge-first** also works: scanning a badge at the board opens that
+  operator's sheet — their open entries (tap to clock out) and the joinable jobs at this station;
+  a job carrying a start-blocked reason is listed disabled with the reason as secondary text.
 - **REPORT PRODUCTION (badge-first).** The verb opens a **badge scan**, and the scan opens a
   quantity screen bound to that operator; everything recorded there posts under that badge's token
   (`POST /shop-floor/operations/{id}/production`) with no second signature screen. This is the shape

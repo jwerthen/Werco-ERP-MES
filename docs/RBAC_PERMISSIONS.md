@@ -142,6 +142,9 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 | View deleted work orders (the restore view) | ✓ | ✓ | | | | | |
 | Restore a deleted work order | ✓ | ✓ | | | | | |
 | Release | ✓ | ✓ | ✓ | | | | |
+| Start work order (released only) | ✓ | ✓ | ✓ | | | | |
+| Hold work order (`PUT` `status: on_hold`; released / in-progress only) | ✓ | ✓ | ✓ | | | | |
+| Resume work order (lift a work-order hold) | ✓ | ✓ | ✓ | | | | |
 | Start operation (office verb) | ✓ | ✓ | ✓ | | ✓ | | |
 | Start operation (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Complete (office verb) | ✓ | ✓ | ✓ | | ✓ | | |
@@ -225,10 +228,50 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > is deliberate: a matrix that claimed a gate here would be worse than one that admits there isn't one.
 > Closing it means `require_role([...])` on those two verbs — an open owner decision, tracked, not done.
 >
-> No role gained anything. The office verb has **no UI caller today** — the app's only Start control
-> (`ShopFloorSimple`) calls the shop-floor verb — so the gate closes an API-reachable hole rather than
-> hiding a button; wire any future office Start control to `work_orders:edit` so the hidden control
-> and the refused call agree. See `docs/API.md` → Work Orders.
+> No role gained anything. The office operation-start verb has **no UI caller today** — the floor's
+> operation Start / Check In controls (`ShopFloorSimple`, the Time Clock, both kiosks) call
+> `POST /shop-floor/clock-in` or the shop-floor start verb, and Work Order detail's **Start** button is
+> the *work-order* start (`POST /work-orders/{id}/start`, below), not this verb — so the gate closes an
+> API-reachable hole rather than hiding a button; wire any future office operation-Start control to
+> `work_orders:edit` so the hidden control and the refused call agree. See `docs/API.md` → Work Orders.
+
+> **Start / Hold / Resume work order — Admin / Manager / Supervisor (owner ruling 2026-11-05).**
+> - `POST /api/v1/work-orders/{id}/start` is now enforced in code to
+>   `require_role([ADMIN, MANAGER, SUPERVISOR])`. It previously took a bare `get_current_user`, so
+>   **any** authenticated tenant user — Operator, Quality, Shipping and Viewer included — could move a
+>   released work order to IN_PROGRESS **and lift a work-order hold** with it (the verb accepted
+>   ON_HOLD). Those four roles **lose** that capability on purpose: the verb now accepts RELEASED only
+>   and refuses 409 on a draft or held job.
+> - **Hold work order** is the existing `PUT /api/v1/work-orders/{id}` (already Admin / Manager /
+>   Supervisor) with `status: on_hold`; it now refuses 409 on a **draft**, so a hold is only ever
+>   placed on released work.
+> - **Resume work order** is the new `POST /api/v1/work-orders/{id}/resume`,
+>   `require_role([ADMIN, MANAGER, SUPERVISOR])`, with required (fail-closed) audit rows. It never
+>   releases a job: with no release on record the job returns to DRAFT and goes back through
+>   **Release**.
+>   It is also the MCP tool `work_orders_resume_work_order`, and a standing per-user API token
+>   holding one of those roles may call it — the same posture as `release_work_order` (**owner
+>   decision 2026-11-07**: an agent may lift a work-order hold; each call is audited as the token's
+>   user with `extra_data.credential`).
+>
+> Work Order detail shows **Start** (released), **Hold Work Order** (released / in progress) and
+> **Resume Work Order** (on hold) only to users holding `work_orders:edit` (or a superuser) — the same
+> Admin / Manager / Supervisor set — so a hidden control and a refused call agree; `customPermissions`
+> can still diverge at runtime, and the server stays authoritative (a mismatch surfaces as the
+> verbatim 403). Superuser and Platform Admin pass through `require_role` as everywhere else. See
+> `docs/API.md` → Work Orders → "Draft and on-hold work orders refuse every start".
+
+> **The shop-floor verbs stay operator-open, but now refuse draft and on-hold work orders.**
+> `POST /shop-floor/clock-in`, `PUT /shop-floor/operations/{id}/start` and the READY auto-start inside
+> both operation-complete verbs refuse **409** for **every** role — Admin included — when the
+> operation's work order is DRAFT ("release first") or ON_HOLD ("Resume Work Order"). This is a
+> state gate, not a role gate: no role cell above changed, and a supervisor's only way past it is the
+> audited door (**Release** or **Resume Work Order**). The office verbs carry the same state gate:
+> `POST /work-orders/operations/{id}/start`, and the generic `PUT /work-orders/operations/{id}`
+> (Admin / Manager / Supervisor) when it hand-sets `status: in_progress` — or `status: ready` on a
+> draft — so the generic edit cannot stand in for the start verb it sits beside. Paper back-entry has
+> no exemption. Labor already running when a job is held stays closable (clock-out, production
+> report, completing an IN_PROGRESS operation).
 
 > **Hold / resume are operator-facing; resolving the blocker behind a hold is not.** Both rows above
 > are new to this matrix; **neither gate changed**. `PUT /api/v1/shop-floor/operations/{id}/hold` and

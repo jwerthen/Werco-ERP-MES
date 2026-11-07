@@ -173,6 +173,23 @@ def test_cancelled_and_out_of_window_wos_excluded(db_session: Session):
     assert result.summary.littles_law_throughput_days is None
 
 
+def test_a_draft_carrying_a_release_stamp_is_not_wip(db_session: Session):
+    """A DRAFT with ``released_at`` was released and put back (the MCP nest import with
+    ``release=false`` stamps the release, then hands the job back as DRAFT). It is not on
+    the floor, and nothing records when it left, so -- like CANCELLED -- it never enters
+    the Little's-law WIP count. The released control proves the same query counts it."""
+    part = make_part(db_session)
+    make_wo(db_session, part, status_=WorkOrderStatus.DRAFT, released_at=datetime(2026, 6, 1, 0, 0))
+
+    alone = get_flow_metrics(db_session, COMPANY_A, WINDOW_START, WINDOW_END)
+    assert alone.summary.avg_wip is None
+
+    # Control: the identical stamp on a RELEASED job is open all 10 days -> avg WIP 1.0.
+    make_wo(db_session, part, status_=WorkOrderStatus.RELEASED, released_at=datetime(2026, 6, 1, 0, 0))
+    with_control = get_flow_metrics(db_session, COMPANY_A, WINDOW_START, WINDOW_END)
+    assert with_control.summary.avg_wip == pytest.approx(1.0)
+
+
 def test_queue_time_event_predecessor_and_release_anchors(db_session: Session):
     """Queue time prefers the operation_ready event, then falls back to the
     predecessor's actual_end, then to the WO's released_at for a first op."""
