@@ -94,8 +94,8 @@ because Postgres has already aborted the caller's transaction. The API answers *
 (`docs/API.md` → Conflict (409)), and the app-wide handler reports the race to Sentry, grouped by
 route and SQLSTATE, since it usually points at a lock-order defect. When the victim is a
 `log_required` write, the API answers **503** instead: the route's own text, or the app-wide
-`Unable to save audit record` when the route does not translate the error (`docs/API.md` → Required
-audit record unavailable (503)). An engine-level COMMIT guard (`app/db/database.py`) also refuses
+`Unable to save audit record (reference: <correlation id>)` when the route does not translate the
+error (`docs/API.md` → Required audit record unavailable (503)). An engine-level COMMIT guard (`app/db/database.py`) also refuses
 to commit any transaction Postgres already aborted. Before 2026-11-08 the error was swallowed, and
 such a request could answer **200** for a write that was never saved and had no audit row.
 `scripts/verify_audit_deadlock_postgres.py` reproduces the cycle on real Postgres in `e2e.yml`.

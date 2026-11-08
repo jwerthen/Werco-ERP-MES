@@ -4557,12 +4557,14 @@ def update_work_order(
         # Flush the demotions BEFORE the first audit call, and this ordering is load-bearing
         # (invariant 4). WorkOrderOperation maps version_id_col, so a concurrent clock-in or
         # hold on one of these rows makes the UPDATE stale. AuditService.log() flushes the
-        # whole session as it opens a begin_nested() savepoint and swallows every exception
-        # there but a database (DBAPIError) one, so if the first log_status_change is what
-        # flushes them, the StaleDataError is eaten there, the savepoint is left deactivated,
+        # whole session as it opens a begin_nested() savepoint -- in the caller's transaction,
+        # before the savepoint exists -- and swallows every exception there but a database
+        # (DBAPIError) one. So if the first log_status_change is what flushes them, the
+        # StaleDataError is eaten there, the caller's transaction is left needing a rollback,
         # and the terminal flush below raises PendingRollbackError -- which no handler
-        # matches, turning the 409 this endpoint promises into an opaque 500. Flushing here raises StaleDataError to the app-wide
-        # handler instead, and mints audit rows only for demotions that actually landed.
+        # matches, turning the 409 this endpoint promises into an opaque 500. Flushing here
+        # raises StaleDataError to the app-wide handler instead, and mints audit rows only
+        # for demotions that actually landed.
         db.flush()
     for demoted_op in demoted_operations:
         # Invariant 2: a rule-driven status change still gets an audit row, and this

@@ -943,18 +943,28 @@ def _report_lost_lock_race(request: Request, exc: DBAPIError, pgcode: Any) -> No
 # 500. Nothing commits: FastAPI exits the route's yield dependencies BEFORE it calls an exception
 # handler (``fastapi.routing.request_response`` closes both dependency exit stacks inside
 # ``wrap_app_handling_exceptions``), so ``get_db`` has already rolled the session back and closed it,
-# and this handler touches no session. Reported like the 500 it replaces, so audit loss stays visible.
+# and this handler touches no session. Reported like the 500 it replaces, so audit loss stays visible,
+# and the body keeps the 500's quotable reference: the SPA shows ``detail`` verbatim, and the same id
+# is on the ``X-Correlation-ID`` header, the log line and the Sentry event.
 @app.exception_handler(AuditWriteError)
 async def required_audit_unavailable_handler(request: Request, exc: AuditWriteError):
-    correlation_id = getattr(request.state, "correlation_id", None)
+    correlation_id = _request_correlation_id(request)
     capture_exception_to_sentry(exc, context={"correlation_id": correlation_id})
     logger.error(
-        f"Required audit record could not be saved on {request.method} {request.url.path}; "
-        f"its transaction was rolled back and the request answered {REQUIRED_AUDIT_UNAVAILABLE_STATUS}: {exc}",
+        f"Required audit record could not be saved [correlation_id={correlation_id}] on {request.method} "
+        f"{request.url.path}; its transaction was rolled back and the request answered "
+        f"{REQUIRED_AUDIT_UNAVAILABLE_STATUS}: {exc}",
         exc_info=True,
     )
     response = JSONResponse(
-        status_code=REQUIRED_AUDIT_UNAVAILABLE_STATUS, content={"detail": REQUIRED_AUDIT_UNAVAILABLE_DETAIL}
+        status_code=REQUIRED_AUDIT_UNAVAILABLE_STATUS,
+        content={
+            "detail": f"{REQUIRED_AUDIT_UNAVAILABLE_DETAIL} (reference: {correlation_id})",
+            "correlation_id": correlation_id,
+        },
+        # CorrelationIdMiddleware sets this same id on the way out (this handler runs inside it);
+        # set here too so body and header agree even on a request that never passed through it.
+        headers={CorrelationIdMiddleware.HEADER_NAME: correlation_id},
     )
     return add_cors_headers(response, request.headers.get("origin"))
 

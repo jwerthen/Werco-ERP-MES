@@ -731,8 +731,8 @@ class AuditService:
         that translates the error itself (``app.api.audit_guard.required_audit``
         or its own ``except AuditWriteError``) rolls back and answers its own 503
         text, and one that lets it escape gets ``app.main``'s app-wide handler,
-        which answers 503 "Unable to save audit record" after ``get_db``'s
-        teardown has rolled the session back. The exception is a caller that
+        which answers 503 "Unable to save audit record (reference: <id>)" after
+        ``get_db``'s teardown has rolled the session back. The exception is a caller that
         absorbs it on purpose: the user CSV import records it as that row's error
         and carries on. A non-HTTP caller (a job, a script) must roll back itself.
         """

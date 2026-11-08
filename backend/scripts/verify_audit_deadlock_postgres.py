@@ -21,9 +21,12 @@ that B's write landed, and that a retry succeeds on the same pool with its audit
 2. ``PUT /scheduling/work-centers/{id}/calendar`` (an INSERT, audited with ``log_create``).
 2b. ``POST /work-orders/`` (an INSERT whose creation audit commits in the same transaction as
    the work order). The request holds a key-share lock on the part its new work order references
-   (the foreign-key check) while it waits on the chain lock, and B wants that part row. The
-   victim's work order must not exist afterwards: before the fix the work order committed first
-   and only its audit row was written later, so a 409 there left a work order a retry duplicated.
+   (the foreign-key check) while it waits on the chain lock, and B wants that part row. This pins
+   that the create is now ONE transaction, so the victim saves no work order and a retry is not a
+   duplicate. It does not reproduce the old defect: the route used to commit the work order first
+   (releasing that key-share lock) and audit it in a later transaction, so no cycle formed here
+   and the request answered 201. The old 409-for-a-saved-work-order shape is pinned on SQLite by
+   ``test_create_work_order_victim_answers_409_and_saves_no_work_order``.
    In 1, 2 and 2b the request must fail at the audit write itself, because ``AuditService.log``
    re-raises the 40P01; the COMMIT guard must not have had to act.
 3. The COMMIT guard on its own: the same priority request with ``AuditService.log`` wrapped in

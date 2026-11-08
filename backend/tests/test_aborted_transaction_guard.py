@@ -774,7 +774,13 @@ def test_a_non_race_database_error_is_not_reported_as_a_lost_race(routed, monkey
     _swallowing_log(monkeypatch)
     response = _put_priority(routed, TestClient(app, raise_server_exceptions=False))
     assert response.status_code == 500
-    assert all("fingerprint" not in scope_kwargs for _exc, scope_kwargs in sentry_spy.captured)
+    # Exactly one report, and it is the 500 handler's: an empty capture list must fail here too,
+    # or this test could not tell "reported without the race fingerprint" from "never reported".
+    [(exc, scope_kwargs)] = sentry_spy.captured
+    assert isinstance(exc, AbortedTransactionCommitError)
+    assert getattr(exc.orig, "pgcode", None) == FakeQueryCanceled.pgcode
+    assert not is_lost_lock_race(exc)
+    assert "fingerprint" not in scope_kwargs
 
 
 # --------------------------------------------------------------------------------------------
@@ -972,12 +978,19 @@ def test_an_untranslated_audit_write_error_answers_503_and_saves_nothing(routed,
 
     ``POST /shipping/`` lets ``AuditWriteError`` escape; it used to reach the global handler as a
     generic 500. ``app.main``'s handler now answers the standard 503, after ``get_db`` rolled back.
+    The body keeps the reference the 500 gave the user to quote (the SPA shows ``detail``
+    verbatim), and it is the same id as the ``X-Correlation-ID`` header and the log line.
     """
     if failure == "audit_row_not_written":
         _audit_row_not_written(monkeypatch)
     response, saved = _create_shipment(routed, TestClient(app, raise_server_exceptions=False))
     assert response.status_code == 503, response.text
-    assert response.json() == {"detail": "Unable to save audit record"}
+    reference = response.headers["X-Correlation-ID"]
+    assert reference
+    assert response.json() == {
+        "detail": f"Unable to save audit record (reference: {reference})",
+        "correlation_id": reference,
+    }
     assert not saved
     with Session(routed.engine) as session:
         assert session.query(AuditLog).filter(AuditLog.resource_type == "shipment").count() == 0
@@ -1046,6 +1059,67 @@ async def test_a_failed_tenant_does_not_poison_the_next_one(
     result = await getattr(module, task)()
     assert result["companies_processed"] == 1
     assert result["runs"] == [{"company_id": 2}]
+
+
+class _RollbackRaisesOnce:
+    """A job's shared session whose first ``rollback()`` resets the real session and THEN raises.
+
+    The shape of a rollback that fails on a dead connection (``Connection._rollback_impl``
+    re-raises what the driver raised). The real rollback still runs first, so a loop that
+    survives the raise finds a usable session for the next tenant.
+    """
+
+    def __init__(self, real: Session) -> None:
+        self._real = real
+        self.rollback_raised = False
+
+    def rollback(self) -> None:
+        self._real.rollback()
+        if not self.rollback_raised:
+            self.rollback_raised = True
+            raise OperationalError("ROLLBACK", {}, Exception("server closed the connection unexpectedly"))
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "module_name, runner, task",
+    [
+        ("mrp_jobs", "_run_mrp_for_company", "run_mrp_task"),
+        ("scheduling_jobs", "_run_scheduling_for_company", "run_scheduling_task"),
+    ],
+)
+async def test_a_failed_rollback_does_not_stop_the_tenant_loop(
+    db_session: Session, monkeypatch, caplog, module_name, runner, task
+):
+    """The reset after a failed tenant must not itself end the run (``reset_session_after_failure``).
+
+    A bare ``db.rollback()`` in the loop's ``except`` raises out of the loop, so every tenant after
+    the failed one is skipped -- the outcome the reset exists to prevent.
+    """
+    import importlib
+
+    module = importlib.import_module(f"app.jobs.{module_name}")
+    db_session.add(Company(id=2, name="Second tenant", slug=f"second-{next(_ids)}", is_active=True))
+    db_session.commit()
+    session = _RollbackRaisesOnce(db_session)
+
+    async def fake_runner(db, company_id, **_kwargs):
+        if company_id == 1:
+            raise RuntimeError("tenant 1 fails")
+        db.query(Company).count()
+        return {"company_id": company_id}
+
+    monkeypatch.setattr(module, "SessionLocal", lambda: session)
+    monkeypatch.setattr(module, runner, fake_runner)
+    with caplog.at_level(logging.ERROR, logger="app.db.session"):
+        result = await getattr(module, task)()
+
+    assert session.rollback_raised
+    assert result["runs"] == [{"company_id": 2}]
+    assert any("Could not roll back the shared session" in r.getMessage() for r in caplog.records)
 
 
 class _PoisoningSession:

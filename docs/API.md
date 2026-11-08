@@ -12143,16 +12143,20 @@ PostgreSQL already aborted. When the abort was not a lost lock race, the request
 ### Required audit record unavailable (503)
 ```json
 {
-  "detail": "Unable to save audit record"
+  "detail": "Unable to save audit record (reference: 3f9a1c2e)",
+  "correlation_id": "3f9a1c2e"
 }
 ```
 
 A write whose audit row is required (`AuditService.log_required`) is rolled back when that row
-cannot be saved, a lost lock race inside the audit write included. Most such routes answer **503**
-with their own text, which says what was not changed. Any route that lets the failure escape gets
-this app-wide body, also **503** (`app/main.py`), reported to Sentry like the **500** those routes
-answered until 2026-11-08. An import that reports failures per row, such as the user CSV import,
-records it as that row's error and carries on.
+cannot be saved, a lost lock race inside the audit write included. Many such routes answer **503**
+with their own text: often just `"Unable to save audit record"`, and some add what was not changed
+(`"... No changes were committed."`). Any route that lets the failure escape gets this app-wide
+body, also **503** (`app/main.py`), reported to Sentry like the **500** those routes answered until
+2026-11-08. Like that 500, it carries the request's correlation id in `detail`, in
+`correlation_id` and in the `X-Correlation-ID` header, so the reference the user quotes finds the
+log line and the Sentry event. An import that reports failures per row, such as the user CSV
+import, records it as that row's error and carries on.
 
 ### Internal Server Error (500)
 ```json
