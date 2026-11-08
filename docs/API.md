@@ -648,23 +648,40 @@ bot permission — the token is exactly as powerful as the user it belongs to, a
 > log in and mint tokens. The real boundary is the bound user's role — give a bot the narrowest role
 > that does its job.
 >
-> **One credential rule on top of the role: an API token never declares scrap and never closes work
-> short (owner decision 2026-11-07).** Only a person — at the kiosk, with a crew badge, or signed in
-> at a desk — declares scrap, because a scrap count is quality evidence someone has to have seen.
-> Whatever its user's role, an API-token request (`app.core.credentials.is_api_token_credential`)
-> that would raise a recorded `quantity_scrapped` answers **403** `"Scrap must be reported by a
-> person (at the kiosk, with a crew badge, or signed in at a desk), not an API token: …"` before any
-> write or audit row — on clock-out, `/production`, the Hank `report_production` task, both
-> operation-complete verbs, force-complete and both generic `PUT`s — and a short close by either
-> operation-complete verb, or a force-complete below the order, answers **403** `"Closing work short
-> must be done by a person signed in to the app, not an API token."`. A full-count close, a good-only
-> production report and a zero-scrap clock-out are unaffected. This PR applies the same principle to
-> more judgments (changing a scrap reason; good above the floor's record; operation and work-order
-> header count edits; every correction through either reduce-production verb; lowering an order once
-> work is recorded — **403**); the owner was asked about scrap, not these. A crew-station
-> badge token is a person and passes; an interactive JWT, including one an MCP client carries, is
-> the person's own session and is not refused. See Work Orders → "Short count at completion" → "API
-> tokens may not declare scrap or make count judgments".
+> **Credential rules on top of the role (judgment writes).** A few writes that record a person's
+> judgment refuse an API token whatever its user's role, before any write or audit row. The full
+> list — and the judgment writes the owner decided to leave open to a token — is
+> [RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes);
+> in short:
+>
+> - **AI recommendations (owner ruling 3).** AI **Accept & apply** (`POST /ai/recommendations/{id}/apply`
+>   — also not an MCP tool) and **Mark handled** on an action card (record-only
+>   `POST /ai/recommendations/{id}/accept`) answer **403** to an API token, and to a kiosk badge or
+>   station token (`is_interactive_person`). See AI Recommendations (Action Inbox).
+> - **Scrap and short closes (owner decision 2026-11-07).** Only a person — at the kiosk, with a crew
+>   badge, or signed in at a desk — declares scrap, because a scrap count is quality evidence someone
+>   has to have seen. An API-token request (`app.core.credentials.is_api_token_credential`) that would
+>   raise a recorded `quantity_scrapped` answers **403** `"Scrap must be reported by a person (at the
+>   kiosk, with a crew badge, or signed in at a desk), not an API token: …"` — on clock-out,
+>   `/production`, the Hank `report_production` task, both operation-complete verbs, force-complete
+>   and both generic `PUT`s — and a short close by either operation-complete verb, or a force-complete
+>   below the order, answers **403** `"Closing work short must be done by a person signed in to the
+>   app, not an API token."`. A full-count close, a good-only production report and a zero-scrap
+>   clock-out are unaffected.
+> - **This PR's extension of that decision** (the owner was asked about scrap and short closes, not
+>   these): writing or changing a scrap reason or code; good above the floor's record; operation and
+>   work-order header count edits; every correction through either reduce-production verb; lowering an
+>   order once work is recorded — **403**. See Work Orders → "Short count at completion" → "API tokens
+>   may not declare scrap or make count judgments".
+> - **Left open by the owner (2026-11-07).** **Resume Work Order** (`POST /work-orders/{id}/resume`):
+>   a token whose user holds Admin / Manager / Supervisor may lift a work-order hold, audited as that
+>   user with `extra_data.credential`. Dismiss, snooze and feedback on a recommendation stay open to
+>   every credential.
+>
+> A crew-station badge token is a person and passes the scrap, short-close and count rules. An
+> interactive JWT, including one an MCP client carries, is the person's own session and is not
+> refused by any of them — that is current behavior, not part of the 2026-11-07 decision, which
+> covered standing API tokens only.
 >
 > **The row wins over the claims.** The `api_tokens` row — never the JWT — says who and which
 > company: the JWT's `user_id` / `company_id` must equal the row's or the token is refused, the active
@@ -1569,10 +1586,13 @@ company-scoped.
 > On a successful **ON** flip the endpoint also **demotes** the un-worked operations the pooled rule had
 > already promoted: READY → PENDING, one `audit_log` **status-change** row per operation
 > (`extra_data.transition = "sequential_operations_enabled"`), and the count on the `work_order_updated`
-> event payload as `operations_returned_to_pending`. It is one of the two callers of the **one** rule
-> that moves an operation backwards (`work_order_state_service.demote_ready_operations`; the other is
-> `POST /work-orders/{id}/resume` landing a held job at DRAFT — holds and operation resume are actor
-> decisions about one operation, and unschedule's READY → PENDING is transient), and it exists because
+> event payload as `operations_returned_to_pending`. It is one of the callers of the **one** rule
+> that moves an operation backwards (`work_order_state_service.demote_ready_operations`, one scope per
+> caller: this flip is `sequencing`; `POST /work-orders/{id}/resume` landing a held job at DRAFT is
+> `all_unworked`; the office reduce-production `reopen_operation` (`reopen_completed_operation`) is
+> `blocked_by`, demoting only the un-worked READY operations the reopened one now blocks, audited
+> `extra_data.transition = "predecessor_reopened"`. Holds and operation resume are actor decisions
+> about one operation, and unschedule's READY → PENDING is transient), and it exists because
 > promotion is forward-only: without it, turning the setting on would fix only the *next*
 > work order, never the one being looked at. It never touches a worked operation, and it only demotes
 > what the new rule actually blocks — so the lowest startable operation stays READY and the floor is
@@ -2084,9 +2104,12 @@ company-scoped.
 >   refuses **409** RAISING it once any whole-order or component operation has COMPLETED (that stage
 >   would become a completed operation that is short — open a new work order for the extra units).
 >
-> **API tokens may not declare scrap or make count judgments.** All three refusals below apply to a
-> standing per-user API token (`app.core.credentials.is_api_token_credential`) whatever its user's
-> role, and are raised before any write and before any audit row.
+> **API tokens may not declare scrap or make count judgments.** The refusals below (three texts)
+> apply to a standing per-user API token (`app.core.credentials.is_api_token_credential`) whatever
+> its user's role, and are raised before any write and before any audit row. This block says where
+> each sits on its route; the policy list across all credential rules — the AI ones included, and the
+> writes the owner left open to a token — is
+> [RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes).
 >
 > - **Scrap — owner decision 2026-11-07.** A standing API token may not declare scrap, anywhere: only
 >   a person (kiosk, crew badge, desk) does, because a scrap count is quality evidence someone has to
@@ -2156,7 +2179,8 @@ company-scoped.
 >
 > A crew-station badge token is a person and passes all three (it cannot reach `/work-orders` or
 > `/hank` at all). An interactive JWT — including one an MCP client carries — is the person's own
-> session and is not refused. `tests/api/test_api_token_scrap_refusal.py` enumerates every scrap
+> session and is not refused: current behavior, not part of the 2026-11-07 decision, which covered
+> standing API tokens only. `tests/api/test_api_token_scrap_refusal.py` enumerates every scrap
 > writer three ways (ORM writes, request schemas, MCP tools), so a new one fails CI until it is
 > guarded or listed as exempt with a reason.
 >
@@ -6851,7 +6875,10 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > per-row query; a row whose accounting is missing falls back to its own counts with no credit
 > (exact for every uncredited chain). The scanner's operation summary
 > (`POST /scanner/resolve-action`) carries `upstream_quantity_short` and `quantity_unaccounted` on
-> the evidence-floored good. Definitions: Work Orders → "Short count at completion".
+> the evidence-floored good. A client that checks out from `my-active-job` uses that job's four keys,
+> preferring them over a list row it loaded earlier — the desktop Operations page does, for a Check
+> Out from its "checked into" banner or My Work whose operation is not on the loaded list.
+> Definitions: Work Orders → "Short count at completion".
 
 > **Material ties on operator reads (`/work-center-queue/{id}`, `/my-active-job`).** Both payloads
 > gained a **`material_ties`** array so the kiosk can state what leaves inventory — it rides these
