@@ -120,7 +120,10 @@ def work_order_start_blocker(work_order: Optional[WorkOrder]) -> Optional[str]:
     ``POST /work-orders/operations/{id}/complete`` -- completing a READY operation STARTS
     it first), the generic ``PUT /work-orders/operations/{id}`` when it writes ``status``
     IN_PROGRESS (a hand-set start; READY on a DRAFT is refused there with
-    :data:`MSG_WORK_ORDER_NOT_RELEASED` as well), :func:`clock_in_blockers` and
+    :data:`MSG_WORK_ORDER_NOT_RELEASED` as well) or RAISES ``quantity_complete`` on an
+    operation it leaves PENDING / READY of a DRAFT / ON_HOLD job (the reconciling read
+    treats that count as a start -- and that read withholds the lift on such a job too,
+    inline, because this module imports the state service), :func:`clock_in_blockers` and
     :func:`complete_blockers` (the scanner), and the floor read payloads'
     ``start_blocked_reason`` (``/shop-floor/operations`` rows,
     ``/shop-floor/operations/{id}``, the kiosk queue and held rows).
