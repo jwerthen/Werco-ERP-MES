@@ -52,6 +52,7 @@ from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.part import Part
 from app.models.quality import NonConformanceReport
+from app.models.shipping import Shipment
 from app.models.user import User, UserRole
 from app.models.work_order import WorkOrder
 from app.services import audit_service as audit_module
@@ -849,6 +850,51 @@ def test_required_audit_doors_answer_503_on_a_lost_chain_lock_race(routed, caplo
     with Session(routed.engine) as session:
         assert session.query(AuditLog).count() == 0
     assert _guard_refusals(caplog) == 0
+
+
+def _create_shipment(routed, client: TestClient):
+    """A ``log_required`` caller with NO local translation: ``POST /shipping/`` (``create_shipment_command``)."""
+    with Session(routed.engine) as session:
+        shipped = WorkOrder(
+            company_id=1,
+            work_order_number=f"WO-GUARD-SHIP-{next(_ids)}",
+            quantity_ordered=5,
+            quantity_complete=5,
+            status="complete",
+            work_order_type="laser_cutting",
+        )
+        session.add(shipped)
+        session.commit()
+        work_order_id = shipped.id
+    response = client.post(
+        "/api/v1/shipping/", json={"work_order_id": work_order_id, "quantity_shipped": 2}, headers=routed.headers
+    )
+    with Session(routed.engine) as session:
+        saved = session.query(Shipment).filter(Shipment.work_order_id == work_order_id).count() > 0
+    return response, saved
+
+
+def _audit_row_not_written(monkeypatch) -> None:
+    """``log`` returns None (it could not write the row) -- the other way ``log_required`` raises."""
+    monkeypatch.setattr(AuditService, "_acquire_chain_lock", lambda self: None)
+    monkeypatch.setattr(AuditService, "log", lambda self, *args, **kwargs: None)
+
+
+@pytest.mark.parametrize("failure", ["lost_chain_lock_race", "audit_row_not_written"])
+def test_an_untranslated_audit_write_error_answers_503_and_saves_nothing(routed, monkeypatch, failure):
+    """Every ``log_required`` door answers 503 (invariant 2), not only the ones that translate it.
+
+    ``POST /shipping/`` lets ``AuditWriteError`` escape; it used to reach the global handler as a
+    generic 500. ``app.main``'s handler now answers the standard 503, after ``get_db`` rolled back.
+    """
+    if failure == "audit_row_not_written":
+        _audit_row_not_written(monkeypatch)
+    response, saved = _create_shipment(routed, TestClient(app, raise_server_exceptions=False))
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": "Unable to save audit record"}
+    assert not saved
+    with Session(routed.engine) as session:
+        assert session.query(AuditLog).filter(AuditLog.resource_type == "shipment").count() == 0
 
 
 @pytest.mark.parametrize("method", ["log", "log_create", "log_update", "log_status_change"])

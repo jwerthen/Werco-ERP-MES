@@ -16,6 +16,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from app.api.audit_guard import REQUIRED_AUDIT_UNAVAILABLE_DETAIL, REQUIRED_AUDIT_UNAVAILABLE_STATUS
 from app.api.router import api_router
 from app.core.cache import cache, init_cache
 from app.core.config import settings
@@ -36,6 +37,7 @@ from app.middleware.logging_middleware import (
 # Import for side effects: attaches the transactional-outbox SQLAlchemy Session listeners
 # so operational events committed on the request path tee into the notification pipeline.
 from app.services import notification_outbox  # noqa: F401
+from app.services.audit_service import AuditWriteError
 
 # Configure structured logging with correlation IDs
 configure_logging()
@@ -929,6 +931,32 @@ def _report_lost_lock_race(request: Request, exc: DBAPIError, pgcode: Any) -> No
         )
     except Exception:  # reporting must never change the answer
         logger.debug("Could not report a lost lock race to Sentry", exc_info=True)
+
+
+# Required-audit handler. ``AuditService.log_required`` raises ``AuditWriteError`` when the evidence a
+# caller opted in to could not be written -- including a database error ``AuditService.log`` re-raised
+# (a lost lock race at the audit write among them). The mutation must not land without that row, and
+# the contract (CLAUDE.md invariant 2, ``log_required``'s docstring) is a 503. Most callers translate
+# it themselves (``app.api.audit_guard.required_audit`` or a hand-rolled ``except AuditWriteError``)
+# into an ``HTTPException`` with their own text, which never reaches this handler, so their answer
+# is unchanged. This is the net for every caller that lets it escape, which used to answer a generic
+# 500. Nothing commits: FastAPI exits the route's yield dependencies BEFORE it calls an exception
+# handler (``fastapi.routing.request_response`` closes both dependency exit stacks inside
+# ``wrap_app_handling_exceptions``), so ``get_db`` has already rolled the session back and closed it,
+# and this handler touches no session. Reported like the 500 it replaces, so audit loss stays visible.
+@app.exception_handler(AuditWriteError)
+async def required_audit_unavailable_handler(request: Request, exc: AuditWriteError):
+    correlation_id = getattr(request.state, "correlation_id", None)
+    capture_exception_to_sentry(exc, context={"correlation_id": correlation_id})
+    logger.error(
+        f"Required audit record could not be saved on {request.method} {request.url.path}; "
+        f"its transaction was rolled back and the request answered {REQUIRED_AUDIT_UNAVAILABLE_STATUS}: {exc}",
+        exc_info=True,
+    )
+    response = JSONResponse(
+        status_code=REQUIRED_AUDIT_UNAVAILABLE_STATUS, content={"detail": REQUIRED_AUDIT_UNAVAILABLE_DETAIL}
+    )
+    return add_cors_headers(response, request.headers.get("origin"))
 
 
 # HTTP exception handler - ensures CORS headers on HTTP errors (401, 403, 404, etc.)

@@ -689,8 +689,14 @@ class AuditService:
         it neither commits nor rolls back the caller's outer transaction itself.
 
         A database error that ``log()`` re-raises (it aborted the transaction) is
-        reported as ``AuditWriteError`` too, chained to that error. Every
-        ``log_required`` caller already turns this error into a rollback and a 503.
+        reported as ``AuditWriteError`` too, chained to that error. On an HTTP
+        request the answer is always a 503 with nothing saved: a caller that
+        translates the error itself (``app.api.audit_guard.required_audit`` or its
+        own ``except AuditWriteError``) rolls back and answers its own 503 text,
+        and one that lets it escape gets ``app.main``'s app-wide handler, which
+        answers 503 "Unable to save audit record" after ``get_db``'s teardown has
+        rolled the session back. A non-HTTP caller (a job, a script) must roll
+        back itself.
         """
         try:
             entry = self.log(action=action, resource_type=resource_type, **kwargs)
