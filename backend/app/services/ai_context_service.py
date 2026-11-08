@@ -175,6 +175,7 @@ class AIContextService:
         limit: int = 5,
     ) -> List[Dict[str, Any]]:
         from app.models.ai_learning import AIRecommendation
+        from app.services.ai_action_applier import effective_autonomy
 
         rows = (
             self.db.query(AIRecommendation)
@@ -196,7 +197,9 @@ class AIContextService:
                 "priority": r.priority,
                 "confidence": r.confidence_score,
                 "action_type": (r.suggested_action or {}).get("type"),
-                "autonomy": (r.suggested_action or {}).get("autonomy"),
+                # Normalized: a legacy "auto_execute" tag reads as apply_on_accept (a person's
+                # click), so Hank and Copilot never describe an auto tier that no longer exists.
+                "autonomy": effective_autonomy(r.suggested_action),
             }
             for r in rows
         ]

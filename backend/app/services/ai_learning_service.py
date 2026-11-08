@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Collection, Dict, Iterable, List, Optional
 
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
@@ -10,7 +11,10 @@ from sqlalchemy.orm import Session
 from app.core.time_utils import to_utc_iso
 from app.models.ai_learning import AICorrection, AIInteractionEvent, AIOutcome, AIRecommendation
 from app.models.company import Company
+from app.models.part import Part
 from app.models.user import User
+from app.models.work_order import WorkOrder
+from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
 from app.schemas.ai_learning import (
     AICorrectionCreate,
     AIInteractionEventCreate,
@@ -18,6 +22,7 @@ from app.schemas.ai_learning import (
     AIRecommendationCreate,
     AIRecommendationFeedbackRequest,
 )
+from app.services import notification_links
 
 SENSITIVE_KEY_PARTS = {
     "authorization",
@@ -56,9 +61,105 @@ SCORING_FETCH_LIMIT = 500  # pre-ranked candidate window scored in Python before
 SNOOZE_MIN_DAYS = 1
 SNOOZE_MAX_DAYS = 30
 
+# A recommendation a person can still act on. Every sweep that retires a card by fact
+# (expiry, closed target, superseded sibling) moves only these.
+OPEN_STATUSES = ("pending", "snoozed")
+_CLOSED_BLOCKER_STATUSES = (WorkOrderBlockerStatus.RESOLVED.value, WorkOrderBlockerStatus.DISMISSED.value)
+SUGGEST_ONLY_NOTE = "Suggest-only status change; no controlled ERP record was mutated."
+
 
 class RecommendationStateError(Exception):
-    """Raised when a recommendation is in a status that does not allow the requested transition."""
+    """Raised when a recommendation is in a status that does not allow the requested transition.
+
+    ``current_status`` is the row's status as re-read after the refused compare-and-set,
+    so a route can say what happened ("already accepted") rather than guess.
+    """
+
+    def __init__(self, message: str, *, current_status: Optional[str] = None):
+        super().__init__(message)
+        self.current_status = current_status
+
+
+def closed_work_order_reason(work_order: Any) -> Optional[str]:
+    """Why a work order counts as a CLOSED target, or None while it is live and open.
+
+    ONE definition of "closed" for an AI card's work order, shared by the nightly
+    closed-target sweep (which retires the card, prefixing ``"Target closed: "``) and the
+    blocker Accept & apply plans in ``ai_action_applier`` (which refuse to write on such a
+    job). Missing, soft-deleted and terminal (``TERMINAL_WO_STATUSES``) are closed. Takes
+    any object with ``work_order_number`` / ``status`` / ``is_deleted`` (an ORM row or a
+    column tuple), or None for a work order the active company cannot see.
+    """
+    from app.services.work_order_state_service import TERMINAL_WO_STATUSES
+
+    if work_order is None:
+        return "work order no longer exists"
+    if work_order.is_deleted:
+        return f"work order {work_order.work_order_number} was deleted"
+    if work_order.status in TERMINAL_WO_STATUSES:
+        status = getattr(work_order.status, "value", work_order.status)
+        return f"work order {work_order.work_order_number} is {status}"
+    return None
+
+
+def _expire_cached_recommendations(db: Session, recommendation_ids: Collection[int]) -> None:
+    """Expire identity-map copies of rows a ``synchronize_session=False`` UPDATE just changed."""
+    if not recommendation_ids:
+        return
+    wanted = set(recommendation_ids)
+    for obj in list(db.identity_map.values()):
+        if isinstance(obj, AIRecommendation) and obj.id in wanted:
+            db.expire(obj)
+
+
+def stale_open_recommendations(
+    db: Session,
+    *,
+    company_id: int,
+    reason: str,
+    recommendation_ids: Optional[Collection[int]] = None,
+    target_entity_type: Optional[str] = None,
+    target_entity_id: Optional[int] = None,
+    now: Optional[datetime] = None,
+) -> int:
+    """Retire OPEN (pending/snoozed) recommendations to ``stale`` in ONE conditional UPDATE.
+
+    Selected either by id or by target. The ``status IN (pending, snoozed)`` predicate is
+    the compare-and-set: a row a person accepted or dismissed in the meantime is never
+    touched. No interaction event is written -- nobody rejected anything; the target moved
+    on, so this is not a learning signal.
+    """
+    if recommendation_ids is None and (target_entity_type is None or target_entity_id is None):
+        raise ValueError("stale_open_recommendations needs recommendation ids or a target")
+    query = db.query(AIRecommendation).filter(
+        AIRecommendation.company_id == company_id,
+        AIRecommendation.status.in_(OPEN_STATUSES),
+    )
+    if recommendation_ids is not None:
+        ids = list(recommendation_ids)
+        if not ids:
+            return 0
+        query = query.filter(AIRecommendation.id.in_(ids))
+    else:
+        ids = [
+            row_id
+            for (row_id,) in db.query(AIRecommendation.id).filter(
+                AIRecommendation.company_id == company_id,
+                AIRecommendation.target_entity_type == target_entity_type,
+                AIRecommendation.target_entity_id == target_entity_id,
+                AIRecommendation.status.in_(OPEN_STATUSES),
+            )
+        ]
+        if not ids:
+            return 0
+        query = query.filter(AIRecommendation.id.in_(ids))
+    stamp = now or datetime.utcnow()
+    count = query.update(
+        {"status": "stale", "status_reason": redact_learning_payload(reason), "updated_at": stamp},
+        synchronize_session=False,
+    )
+    _expire_cached_recommendations(db, ids)
+    return int(count or 0)
 
 
 def _normalize_status(value: str) -> str:
@@ -300,6 +401,52 @@ class AILearningService:
         )
         return recommendations[:limit]
 
+    def get_recommendation(self, recommendation_id: int, company_id: int) -> AIRecommendation:
+        """Tenant-scoped read; raises ``ValueError('AI recommendation not found')`` (a 404)."""
+        return self._get_recommendation_or_raise(recommendation_id, company_id)
+
+    def _transition_status(
+        self,
+        recommendation_id: int,
+        company_id: int,
+        *,
+        from_statuses: Collection[str],
+        values: Dict[str, Any],
+    ) -> AIRecommendation:
+        """The ONE status-transition implementation: a single conditional UPDATE (compare-and-set).
+
+        ``UPDATE ... WHERE id = :id AND company_id = :company AND status IN (:from)``. On
+        Postgres the UPDATE's row lock serializes racers: the loser re-evaluates the predicate
+        after the winner commits and matches 0 rows. Whoever reaches 0 rows gets
+        ``RecommendationStateError`` carrying the CURRENT status (or ``ValueError`` when the
+        row does not exist for this company). A stale identity-map copy can never overwrite
+        a decision, because the predicate is evaluated by the database, not in Python.
+        """
+        updated = (
+            self.db.query(AIRecommendation)
+            .filter(
+                AIRecommendation.id == recommendation_id,
+                AIRecommendation.company_id == company_id,
+                AIRecommendation.status.in_(list(from_statuses)),
+            )
+            .update(values, synchronize_session=False)
+        )
+        if updated != 1:
+            current = (
+                self.db.query(AIRecommendation.status)
+                .filter(AIRecommendation.id == recommendation_id, AIRecommendation.company_id == company_id)
+                .scalar()
+            )
+            if current is None:
+                raise ValueError("AI recommendation not found")
+            raise RecommendationStateError(
+                f"AI recommendation is already {current}",
+                current_status=_normalize_status(current),
+            )
+        recommendation = self._get_recommendation_or_raise(recommendation_id, company_id)
+        self.db.refresh(recommendation)
+        return recommendation
+
     def set_recommendation_status(
         self,
         *,
@@ -307,19 +454,32 @@ class AILearningService:
         company_id: int,
         user: User,
         status: str,
+        expected_statuses: Collection[str],
         reason: Optional[str] = None,
+        event_note: Optional[str] = None,
     ) -> AIRecommendation:
-        recommendation = self._get_recommendation_or_raise(recommendation_id, company_id)
+        """Accept or dismiss, atomically, only from ``expected_statuses``.
+
+        Raises ``RecommendationStateError`` when the row is no longer in one of them.
+        """
         normalized = _normalize_status(status)
-        recommendation.status = normalized
-        recommendation.status_reason = redact_learning_payload(reason)
-        recommendation.acted_at = _now()
-        recommendation.updated_at = _now()
+        now = _now()
+        values: Dict[str, Any] = {
+            "status": normalized,
+            "status_reason": redact_learning_payload(reason),
+            "acted_at": now,
+            "updated_at": now,
+        }
         if normalized == "accepted":
-            recommendation.accepted_by = user.id
+            values["accepted_by"] = user.id
         elif normalized == "dismissed":
-            recommendation.dismissed_by = user.id
-        self.db.flush()
+            values["dismissed_by"] = user.id
+        recommendation = self._transition_status(
+            recommendation_id,
+            company_id,
+            from_statuses={_normalize_status(item) for item in expected_statuses},
+            values=values,
+        )
 
         event_type = "accepted" if normalized == "accepted" else "rejected"
         self.record_interaction(
@@ -335,7 +495,7 @@ class AILearningService:
                 context_summary=reason,
                 event_payload={
                     "status": normalized,
-                    "note": "Suggest-only status change; no controlled ERP record was mutated.",
+                    "note": event_note or SUGGEST_ONLY_NOTE,
                 },
                 confidence_score=recommendation.confidence_score,
             ),
@@ -361,20 +521,27 @@ class AILearningService:
             # plain ValueError keeps a defensive guard for internal callers without posing as
             # a 409-shaped recommendation-state conflict.
             raise ValueError(f"Snooze duration must be between {SNOOZE_MIN_DAYS} and {SNOOZE_MAX_DAYS} days")
-        recommendation = self._get_recommendation_or_raise(recommendation_id, company_id)
-        if _normalize_status(recommendation.status) != "pending":
-            raise RecommendationStateError("Only pending recommendations can be snoozed")
-
         now = _now()
         snoozed_until = now + timedelta(days=days)
         status_reason = f"Snoozed until {to_utc_iso(snoozed_until)}"
         if reason:
             status_reason = f"{status_reason} — {reason}"
-        recommendation.status = "snoozed"
-        recommendation.status_reason = redact_learning_payload(status_reason)
-        recommendation.acted_at = now
-        recommendation.updated_at = now
-        self.db.flush()
+        try:
+            recommendation = self._transition_status(
+                recommendation_id,
+                company_id,
+                from_statuses={"pending"},
+                values={
+                    "status": "snoozed",
+                    "status_reason": redact_learning_payload(status_reason),
+                    "acted_at": now,
+                    "updated_at": now,
+                },
+            )
+        except RecommendationStateError as exc:
+            raise RecommendationStateError(
+                "Only pending recommendations can be snoozed", current_status=exc.current_status
+            ) from exc
 
         self.record_interaction(
             company_id=company_id,
@@ -391,7 +558,7 @@ class AILearningService:
                     "status": "snoozed",
                     "snoozed_until": to_utc_iso(snoozed_until),
                     "snooze_days": days,
-                    "note": "Suggest-only status change; no controlled ERP record was mutated.",
+                    "note": SUGGEST_ONLY_NOTE,
                 },
                 confidence_score=recommendation.confidence_score,
             ),
@@ -464,7 +631,12 @@ class AILearningService:
         return outcome
 
     def aggregate_learning_signals(self, *, company_ids: Optional[Iterable[int]] = None) -> Dict[str, int]:
-        from app.services.ai_auto_execute_service import auto_execute_pending_recommendations
+        """Mint and sweep recommendations. NEVER applies one and makes no LLM call.
+
+        Owner ruling 3 (2026-11-05): nothing AI-driven executes without a named person
+        clicking Accept & apply. The always-on auto-execute step that used to run last here
+        is gone; this job only expires, wakes, retires closed-target cards and mints.
+        """
         from app.services.ai_learners import run_domain_learners
         from app.services.ai_sensors import run_domain_sensors
         from app.services.ai_sensors.morning_brief import run_morning_brief_sensor
@@ -477,13 +649,13 @@ class AILearningService:
         woken_count = 0
         sensor_created = 0
         learner_created = 0
-        auto_executed = 0
-        auto_failed = 0
+        closed_target_staled = 0
         for company_id in companies:
             # Tenant-scoped fan-out: each sweep only ever touches the company being processed,
             # so a tenant-triggered run (/ai/aggregate) cannot write across tenants.
             stale_count += self._expire_recommendations_for_company(company_id, now)
             woken_count += self._wake_snoozed_recommendations_for_company(company_id, now)
+            closed_target_staled += self._stale_recommendations_for_closed_targets(company_id, now)
             created += self._recommend_from_recent_friction(company_id)
             created += self._recommend_from_repeated_corrections(company_id)
             # Phase 1 always-on sensors: late WOs, inventory risk, scrap trends.
@@ -500,18 +672,6 @@ class AILearningService:
             company_learner_total = sum(learner_counts.values())
             learner_created += company_learner_total
             created += company_learner_total
-            # Phase 5: Claude auto-execute allowlisted actions (existing Anthropic stack)
-            try:
-                exec_summary = auto_execute_pending_recommendations(self.db, company_id)
-                auto_executed += int(exec_summary.get("executed") or 0)
-                auto_failed += int(exec_summary.get("failed") or 0)
-            except Exception:
-                # Never fail the whole aggregation on agent errors
-                import logging
-
-                logging.getLogger(__name__).exception(
-                    "auto_execute_pending_recommendations failed company %s", company_id
-                )
 
         self.db.flush()
         return {
@@ -521,8 +681,7 @@ class AILearningService:
             "snoozed_recommendations_woken": woken_count,
             "sensor_recommendations_created": sensor_created,
             "learner_recommendations_created": learner_created,
-            "auto_executed": auto_executed,
-            "auto_execute_failed": auto_failed,
+            "closed_target_recommendations_staled": closed_target_staled,
         }
 
     def _expire_recommendations_for_company(self, company_id: int, now: datetime) -> int:
@@ -540,25 +699,206 @@ class AILearningService:
         return int(count or 0)
 
     def _wake_snoozed_recommendations_for_company(self, company_id: int, now: datetime) -> int:
-        """Return snoozed recommendations to pending once their snooze window has elapsed."""
+        """Return snoozed recommendations to pending once their snooze window has elapsed.
+
+        Each wake is a compare-and-set from ``snoozed`` only: a row accepted or dismissed
+        after the snoozed ids were read is skipped, never resurrected to pending (which is
+        how a stale snooze plus the nightly wake could re-arm an applied card).
+        """
         woken = 0
-        snoozed = (
-            self.db.query(AIRecommendation)
-            .filter(AIRecommendation.company_id == company_id, AIRecommendation.status == "snoozed")
-            .all()
-        )
-        if not snoozed:
+        snoozed_ids = [
+            row_id
+            for (row_id,) in self.db.query(AIRecommendation.id).filter(
+                AIRecommendation.company_id == company_id, AIRecommendation.status == "snoozed"
+            )
+        ]
+        if not snoozed_ids:
             return woken
-        wake_times = self._snoozed_until_by_recommendation(company_id, [rec.id for rec in snoozed])
-        for recommendation in snoozed:
-            snoozed_until = wake_times.get(recommendation.id)
+        wake_times = self._snoozed_until_by_recommendation(company_id, snoozed_ids)
+        for recommendation_id in snoozed_ids:
+            snoozed_until = wake_times.get(recommendation_id)
             if snoozed_until is not None and snoozed_until > now:
                 continue
-            recommendation.status = "pending"
-            recommendation.status_reason = None
-            recommendation.updated_at = now
+            try:
+                self._transition_status(
+                    recommendation_id,
+                    company_id,
+                    from_statuses={"snoozed"},
+                    values={"status": "pending", "status_reason": None, "updated_at": now},
+                )
+            except (RecommendationStateError, ValueError):
+                continue
             woken += 1
         return woken
+
+    def _stale_recommendations_for_closed_targets(self, company_id: int, now: datetime) -> int:
+        """Retire open cards whose target is gone: a closed blocker, a finished or deleted WO.
+
+        Covers ``work_order_blocker`` targets (blocker resolved/dismissed/missing, or its WO
+        terminal or soft-deleted) and ``work_order`` targets (WO terminal, soft-deleted or
+        missing). Blocker-triage and stale-blocker cards carry no ``expires_at``, so without
+        this they sat pending forever. One conditional UPDATE per reason, no learning event.
+        "Closed" is :func:`closed_work_order_reason` -- the same rule the blocker Accept &
+        apply plans refuse on, so a card the sweep would retire never offers an apply.
+        """
+        open_rows = (
+            self.db.query(AIRecommendation.id, AIRecommendation.target_entity_type, AIRecommendation.target_entity_id)
+            .filter(
+                AIRecommendation.company_id == company_id,
+                AIRecommendation.status.in_(OPEN_STATUSES),
+                AIRecommendation.target_entity_type.in_(["work_order_blocker", "work_order"]),
+                AIRecommendation.target_entity_id.isnot(None),
+            )
+            .all()
+        )
+        if not open_rows:
+            return 0
+        blocker_ids = {target_id for _id, kind, target_id in open_rows if kind == "work_order_blocker"}
+        blockers: Dict[int, Any] = {}
+        if blocker_ids:
+            blockers = {
+                row.id: row
+                for row in self.db.query(
+                    WorkOrderBlocker.id, WorkOrderBlocker.status, WorkOrderBlocker.work_order_id
+                ).filter(WorkOrderBlocker.company_id == company_id, WorkOrderBlocker.id.in_(blocker_ids))
+            }
+        work_order_ids = {target_id for _id, kind, target_id in open_rows if kind == "work_order"}
+        work_order_ids |= {row.work_order_id for row in blockers.values() if row.work_order_id}
+        work_orders: Dict[int, Any] = {}
+        if work_order_ids:
+            work_orders = {
+                row.id: row
+                for row in self.db.query(
+                    WorkOrder.id, WorkOrder.work_order_number, WorkOrder.status, WorkOrder.is_deleted
+                ).filter(WorkOrder.company_id == company_id, WorkOrder.id.in_(work_order_ids))
+            }
+
+        def closed_target_reason(work_order_id: Optional[int]) -> Optional[str]:
+            closed = closed_work_order_reason(work_orders.get(work_order_id) if work_order_id else None)
+            return f"Target closed: {closed}" if closed else None
+
+        by_reason: Dict[str, List[int]] = defaultdict(list)
+        for recommendation_id, kind, target_id in open_rows:
+            if kind == "work_order_blocker":
+                blocker = blockers.get(target_id)
+                if blocker is None:
+                    reason: Optional[str] = "Target closed: blocker no longer exists"
+                elif blocker.status in _CLOSED_BLOCKER_STATUSES:
+                    reason = f"Target closed: blocker {blocker.status}"
+                else:
+                    reason = closed_target_reason(blocker.work_order_id)
+            else:
+                reason = closed_target_reason(target_id)
+            if reason:
+                by_reason[reason].append(recommendation_id)
+
+        return sum(
+            stale_open_recommendations(self.db, company_id=company_id, reason=reason, recommendation_ids=ids, now=now)
+            for reason, ids in by_reason.items()
+        )
+
+    def supersede_open_siblings(self, recommendation: AIRecommendation, user: User) -> int:
+        """After an apply, retire OPEN cards with the same target and the same action type.
+
+        ``suggested_action`` is plain JSON, so the type is compared in Python over the few
+        rows that share the target. They go to ``stale`` (not dismissed: nobody rejected them).
+        """
+        if recommendation.target_entity_type is None or recommendation.target_entity_id is None:
+            return 0
+        action_type = str((recommendation.suggested_action or {}).get("type") or "")
+        if not action_type:
+            return 0
+        candidates = (
+            self.db.query(AIRecommendation.id, AIRecommendation.suggested_action)
+            .filter(
+                AIRecommendation.company_id == recommendation.company_id,
+                AIRecommendation.target_entity_type == recommendation.target_entity_type,
+                AIRecommendation.target_entity_id == recommendation.target_entity_id,
+                AIRecommendation.id != recommendation.id,
+                AIRecommendation.status.in_(OPEN_STATUSES),
+            )
+            .all()
+        )
+        sibling_ids = [
+            row_id
+            for row_id, action in candidates
+            if isinstance(action, dict) and str(action.get("type") or "") == action_type
+        ]
+        if not sibling_ids:
+            return 0
+        who = getattr(user, "full_name", None) or getattr(user, "email", None) or f"user #{user.id}"
+        return stale_open_recommendations(
+            self.db,
+            company_id=recommendation.company_id,
+            reason=f"Superseded: recommendation #{recommendation.id} was applied by {who}",
+            recommendation_ids=sibling_ids,
+        )
+
+    def target_hrefs(self, company_id: int, recommendations: Iterable[AIRecommendation]) -> Dict[int, Optional[str]]:
+        """Server-computed record link per recommendation (never the stored, caller-supplied href).
+
+        ``work_order`` -> the WO detail page, ``part`` -> the part detail page,
+        ``work_order_blocker`` -> its work order's detail page; anything else -> None.
+
+        A link is emitted only where its page will actually resolve the id (CLAUDE.md:
+        "any path the backend deep-links to must resolve"): every target is read in ONE
+        batched, tenant-scoped query per type, so a crafted card naming another company's
+        record gets no link rather than one that 404s. The WO detail page refuses a
+        soft-deleted work order, so a tombstoned WO -- named directly or through a
+        blocker -- gets None too; the part detail page serves a tombstoned part, so a part
+        only has to belong to the active company.
+        """
+        all_recs = list(recommendations)
+        recs = [rec for rec in all_recs if rec.target_entity_id is not None]
+        ids_by_type: Dict[str, set] = defaultdict(set)
+        for rec in recs:
+            ids_by_type[rec.target_entity_type or ""].add(rec.target_entity_id)
+
+        blocker_work_orders: Dict[int, int] = {}
+        if ids_by_type["work_order_blocker"]:
+            blocker_work_orders = {
+                blocker_id: work_order_id
+                for blocker_id, work_order_id in self.db.query(
+                    WorkOrderBlocker.id, WorkOrderBlocker.work_order_id
+                ).filter(
+                    WorkOrderBlocker.company_id == company_id,
+                    WorkOrderBlocker.id.in_(ids_by_type["work_order_blocker"]),
+                )
+                if work_order_id
+            }
+        wanted_work_orders = ids_by_type["work_order"] | set(blocker_work_orders.values())
+        live_work_orders: set = set()
+        if wanted_work_orders:
+            live_work_orders = {
+                row_id
+                for (row_id,) in self.db.query(WorkOrder.id).filter(
+                    WorkOrder.company_id == company_id,
+                    WorkOrder.id.in_(wanted_work_orders),
+                    WorkOrder.is_deleted == False,  # noqa: E712
+                )
+            }
+        tenant_parts: set = set()
+        if ids_by_type["part"]:
+            tenant_parts = {
+                row_id
+                for (row_id,) in self.db.query(Part.id).filter(
+                    Part.company_id == company_id, Part.id.in_(ids_by_type["part"])
+                )
+            }
+
+        hrefs: Dict[int, Optional[str]] = {rec.id: None for rec in all_recs}
+        for rec in recs:
+            href: Optional[str] = None
+            if rec.target_entity_type == "work_order" and rec.target_entity_id in live_work_orders:
+                href = notification_links.work_order_detail(rec.target_entity_id)
+            elif rec.target_entity_type == "part" and rec.target_entity_id in tenant_parts:
+                href = notification_links.part_detail(rec.target_entity_id)
+            elif rec.target_entity_type == "work_order_blocker":
+                work_order_id = blocker_work_orders.get(rec.target_entity_id)
+                if work_order_id in live_work_orders:
+                    href = notification_links.work_order_detail(work_order_id)
+            hrefs[rec.id] = href
+        return hrefs
 
     def _snoozed_until_by_recommendation(self, company_id: int, recommendation_ids: List[int]) -> Dict[int, datetime]:
         """Batch-read wake-up times from snooze interaction events (one query for the whole sweep).

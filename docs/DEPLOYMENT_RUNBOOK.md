@@ -333,6 +333,7 @@ statement, writes no row, and adds no environment variable, secret, cron or work
 
 1. [Quick Reference](#quick-reference)
 2. [Pre-Deployment Checklist](#pre-deployment-checklist)
+   - [Wave 2 rollout](#wave-2-rollout) (owner rulings of 2026-11-05; one-off steps)
 3. [Standard Deployment](#standard-deployment)
 4. [Hotfix Deployment](#hotfix-deployment)
 5. [Rollback Procedures](#rollback-procedures)
@@ -576,6 +577,82 @@ and completing an IN_PROGRESS operation stay allowed on a held job.
    the current markdown (once, after the short-count PR if it ships in the same window).
 
 See `docs/API.md` → Work Orders → "Draft and on-hold work orders refuse every start".
+
+---
+
+## Wave 2 rollout
+
+One-off steps for the PRs that implement the owner rulings of 2026-11-05. They merge in this
+order: AI governance (ruling 3) first, then the floor gates (ruling 2), then the short-count
+completion rule (ruling 1). Each PR appends its own steps below, in merge order. **Production
+auto-deploys from `main`** ([Change Control](#change-control--production-deploy-model)), so every
+"before merging" step must be finished before that PR's merge button is clicked.
+
+### 1. AI governance — remove AI auto-execute (ruling 3)
+
+Ruling 3: nothing AI-driven executes without a named person clicking Accept. Until this PR serves,
+production runs an always-on agent that applies Action Inbox recommendations (priority changes,
+blocker escalations, draft POs and NCRs) with no person involved. It runs at the end of the
+nightly `aggregate_ai_learning_job` (05:30, worker time zone) and of every
+`POST /api/v1/ai/aggregate`, which any Admin, Manager or Supervisor can call, including an agent
+through MCP. It is **on by default**, and it keeps running even with company AI egress off (it
+falls back to a confidence threshold). See
+[AI_ALWAYS_ON.md → Phase 5](AI_ALWAYS_ON.md#phase-5--claude-auto-execute-retired-2026-11-05).
+
+**Before merging (an operator, not code):**
+
+1. On Railway, set `AI_AUTO_EXECUTE_ENABLED=false` on **both** `werco-api` and `werco-worker`.
+   The old code reads it at import, so each service must restart; saving a Railway variable
+   redeploys the service. One service is not enough: the API runs the agent for
+   `POST /ai/aggregate`, the worker for the nightly job.
+2. Confirm the agent has stopped. After both services have restarted, the next nightly worker
+   log line `AI learning aggregation complete: {…}` must show `'auto_executed': 0`. This
+   read-only query must also show no `last_auto_executed` after the time you set the variable:
+
+   ```sql
+   SELECT company_id,
+          COUNT(*)        AS auto_executed_total,
+          MAX(acted_at)   AS last_auto_executed
+     FROM ai_recommendations
+    WHERE status = 'accepted'
+      AND status_reason = 'Auto-executed by Claude always-on agent'
+    GROUP BY company_id;
+   ```
+
+   Keep the result. Those rows, and the audit rows the agent wrote, are attributed to a borrowed
+   Admin / Manager / Supervisor account, not to a person who decided. Any "who approved" review
+   must exclude them.
+
+**Merging deploys the API and the worker together, and must.** The release changes `backend/`,
+so the CI run that deploys `werco-api` also deploys `werco-worker` from the same commit. It fails
+with "This release changes the worker, but its reviewed production deploy path is disabled"
+unless the `DEPLOY_WORKER_PRODUCTION` repository variable is `true`. Do not run either service on
+the new commit alone. An old worker image still contains the agent. That agent also picks up
+`apply_on_accept` cards, which this release mints for a person's click. Keep
+`AI_AUTO_EXECUTE_ENABLED=false` on both services until both serve this release.
+
+**After the deploy:**
+
+1. Check that `Verify production is serving this commit` and `Verify the active worker has this
+   release and a fresh heartbeat` both passed in the CI run.
+2. After the next nightly run, the worker's `AI learning aggregation complete:` summary has **no**
+   `auto_executed` key and has `closed_target_recommendations_staled`. The first run after the
+   deploy can retire a backlog of cards whose blocker is closed or whose work order is finished
+   or deleted.
+3. Only then **delete** the retired variables from both services: `AI_AUTO_EXECUTE_ENABLED`,
+   `AI_AUTO_EXECUTE_MIN_CONFIDENCE`, `AI_AUTO_EXECUTE_FALLBACK_MIN_CONFIDENCE`,
+   `AI_AUTO_EXECUTE_MAX_BATCH`, `AI_AUTO_EXECUTE_LLM_TIMEOUT` and `ANTHROPIC_AUTO_EXECUTE_MODEL`.
+   The new code ignores them, and the nightly job logs one `Ignoring retired setting(s) …`
+   WARNING while any is still set. Deleting `AI_AUTO_EXECUTE_ENABLED` any earlier would re-arm the
+   agent in an old image, because it defaults to on.
+4. Tell the floor leads what changed: with company AI egress **off** (the default), no one can
+   Accept & apply. Cards show what they would do, and a person who could apply one can
+   **Mark handled**. Operators, Quality users (except on NCR cards) and API tokens can no longer
+   close action cards with Accept. Agents cannot apply recommendations at all.
+
+**Rollback:** rolling back to an image older than this PR **re-arms the agent** unless
+`AI_AUTO_EXECUTE_ENABLED=false` is set on that service. Set it before redeploying the older
+commit. No migration is involved.
 
 ---
 

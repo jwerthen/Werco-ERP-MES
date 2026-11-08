@@ -97,7 +97,7 @@ def run_quality_trend_sensor(db: Session, company_id: int) -> int:
                 ),
                 "quantity_affected": max(scrapped, 1.0),
                 "href": f"/quality?part={part_number}",
-                "autonomy": "auto_execute",
+                "autonomy": "apply_on_accept",
                 "dedupe_key": f"quality_trend:part:{part_id}",
             },
             evidence=[

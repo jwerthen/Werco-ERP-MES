@@ -9998,7 +9998,10 @@ The active company's own profile and self-managed settings. Mounted under `/comp
 > recorded on the tamper-evident audit trail as both a field update and an
 > `ai_egress_enabled` / `ai_egress_disabled` **status change**. While OFF, AI features (PO/quote,
 > BOM, QMS, routing, laser-nest PDF extraction, Copilot, NL search) **degrade gracefully** — no
-> request leaves the boundary (laser-nest extraction falls back to filename-only). New companies are
+> request leaves the boundary (laser-nest extraction falls back to filename-only). It is also the
+> per-company switch for applying AI recommendations (owner ruling 3, 2026-11-05): while OFF,
+> `POST /ai/recommendations/{id}/apply` is refused **403** and nothing an AI recommendation proposes
+> is applied — see [AI Recommendations](#ai-recommendations-action-inbox). New companies are
 > created **OFF**; existing companies were grandfathered **ON**. The toggle is **Admin-only**
 > (`require_role([ADMIN])`), matching the sibling `allow_carrier_egress` / `allow_print_egress`
 > controls. It is exposed in the UI at
@@ -10592,26 +10595,133 @@ permission, or automatic release policy is introduced.
 
 ### AI Recommendations (Action Inbox)
 
-Suggest-only recommendations that feed the **Action Inbox** (`/action-inbox`) — they never mutate
-controlled ERP records. All routes are scoped to the caller's active company
-(`get_current_company_id`); status changes flow through the learning service, which records an
-`AIInteractionEvent` per transition (telemetry, not the `audit_log` hash chain).
+Recommendations that feed the **Action Inbox** (`/action-inbox`). **Owner ruling 3
+(2026-11-05): nothing AI-driven executes without a named person clicking Accept.** A
+recommendation never changes a record by itself, and nothing runs from the nightly job,
+`POST /ai/aggregate` or an agent. The one executor is `POST /ai/recommendations/{id}/apply`
+(**Accept & apply**), a signed-in person's click, which runs the allowlisted action as that
+person. All routes are scoped to the caller's active company (`get_current_company_id`); status
+changes flow through the learning service, which records an `AIInteractionEvent` per transition
+(telemetry, not the `audit_log` hash chain). The ERP writes an applied action makes are
+audit-logged as described under [Accept & apply](#accept--apply-post-airecommendationsidapply).
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/ai/recommendations` | List recommendations sorted by the deterministic score (see below) | Yes |
-| POST | `/ai/recommendations` | Create a suggest-only recommendation | Admin / Manager / Supervisor |
-| POST | `/ai/recommendations/{id}/accept` | Mark accepted; body `{ reason?, apply? }` — with `apply=true` runs allowlisted `AIActionApplier` | Yes |
-| POST | `/ai/recommendations/{id}/apply` | Accept + apply convenience (`apply=true`) | Yes |
-| POST | `/ai/recommendations/{id}/dismiss` | Dismiss with optional reason | Yes |
+| GET | `/ai/recommendations` | List recommendations sorted by the deterministic score (see below). Each row carries `target_href`; a pending action card also carries `apply_action` | Yes |
+| POST | `/ai/recommendations` | Create a recommendation. `suggested_action.autonomy`, if present, must be `suggest_only` or `apply_on_accept` (**422** otherwise — there is no auto tier). Creating one changes nothing else | Admin / Manager / Supervisor |
+| POST | `/ai/recommendations/{id}/accept` | **Record-only** accept; body `{ reason? }`. Never runs the action — `apply: true` is **422**. On an action card, needs a person whose role could apply it (see below) | Yes |
+| POST | `/ai/recommendations/{id}/apply` | **Accept & apply** — the only executor; body `{ reason?, expected_fingerprint }`. Not an MCP tool | Person in an interactive session; role per action; company AI egress on |
+| POST | `/ai/recommendations/{id}/dismiss` | Dismiss a **pending or snoozed** recommendation with optional reason (**409** otherwise) | Yes |
 | POST | `/ai/recommendations/{id}/snooze` | Snooze a **pending** recommendation; body `{ "days": 1–30, "reason"? }` | Yes |
 | POST | `/ai/recommendations/{id}/feedback` | Attach free-text feedback / rating | Yes |
-| POST | `/ai/aggregate` | Run learning aggregation + domain sensors + expiry/snooze sweep for the active tenant | Admin / Manager / Supervisor |
+| POST | `/ai/aggregate` | Run learning aggregation + domain sensors + expiry/snooze/closed-target sweep for the active tenant. Mints and sweeps recommendations; **never applies one** and makes no LLM call | Admin / Manager / Supervisor |
+| GET | `/ai/governance` | Autonomy tiers, approval rules, allowlist and 30-day trust metrics. `mode` is `apply_on_accept`; `ai_egress_enabled` reports the company switch, which also enables or disables the `apply_on_accept` tier | Yes |
+| GET | `/ai/context` | Minimized tenant-scoped context for embedded copilots. A recommendation's autonomy is reported as `suggest_only` or `apply_on_accept` (legacy auto tags read as `apply_on_accept`) | Yes |
 | POST | `/ai/outcomes` | Manually record a downstream outcome (most plant outcomes are auto-captured — see below) | Yes |
 | POST | `/ai/events` | Record an AI interaction / correction signal | Yes |
 
 **List query parameters:** `status` — `pending` (default) | `accepted` | `dismissed` | `stale` |
 `snoozed`; `source_module`, `target_entity_type`, `target_entity_id`, `limit` (1–100, default 50).
+
+**`target_href` and `apply_action` (list only).** Every listed row carries `target_href`, computed
+by the server from the target entity — `/work-orders/{id}` for a `work_order` target,
+`/work-orders/{blocker's work_order_id}` for a `work_order_blocker`, `/parts/{id}` for a `part`,
+`null` otherwise. The stored `suggested_action.href` is never used for it (it is caller-supplied
+on create). A link is emitted only where its page resolves the id: the target (and a blocker's
+work order) must belong to the active company, and a soft-deleted work order gets `null` because
+`GET /work-orders/{id}` refuses it; a soft-deleted part keeps its link, since the part page serves
+it. A row that is pending, has an allowlisted action type (`escalate_blocker`,
+`acknowledge_blocker`, `adjust_work_order_priority`, `create_draft_ncr`, `create_draft_po`) and
+`apply_on_accept` autonomy — an **action card** — also carries `apply_action`; every other row
+has `apply_action: null`:
+
+| Field | Meaning |
+|---|---|
+| `action_type` | The allowlisted action |
+| `summary` | What Accept & apply would do **right now**, resolved from live, tenant-scoped records — never from the stored labels |
+| `warnings` | e.g. `"{part} already has open PO(s): PO-…"` |
+| `fingerprint` | 16 hex characters hashing the resolved facts; send it back as `expected_fingerprint`. A draft-PO card's facts include the open PO numbers behind its warning, so a PO raised after the list loaded makes `/apply` a **409** and the re-read shows the new warning |
+| `can_apply` | `true` exactly when `blocked_kind` is `null` |
+| `can_mark_handled` | `true` when the caller is a person in an interactive session, not in a read-only context, whose role could apply the action, and `blocked_kind` is `null`, `egress` or `target` |
+| `blocked_reason` | The refusal `/apply` would return, or the plan's reason |
+| `blocked_kind` | `credential` / `read_only` / `egress` / `role` / `target` / `null` |
+
+The Action Inbox labels the button **Accept & apply** when `can_apply`, **Mark handled** when only
+`can_mark_handled`, shows no accept button when `apply_action` is set but neither flag is, and
+plain **Accept** when `apply_action` is `null`. Rows written before 2026-11-05 with
+`autonomy: auto_execute` / `execute_controlled` are read as `apply_on_accept`; they are not
+rewritten. `target_href` and `apply_action` are `null` on the single-recommendation responses.
+
+#### Accept & apply (`POST /ai/recommendations/{id}/apply`)
+
+Body: `{ "reason"?: string (≤ 2000), "expected_fingerprint": string (8–64, required) }`. A missing
+body or fingerprint is **422**; a stray `apply` key is ignored. Gates, **in this order**, before
+anything is written:
+
+| # | Gate | Status | Detail |
+|---|---|---|---|
+| — | Recommendation exists in the active company | 404 | `AI recommendation not found` |
+| 1 | It is pending | 409 | `This recommendation is already {status}; it can no longer be accepted. Refresh the Action Inbox.` |
+| 2 | It has an action to apply (allowlisted type, `apply_on_accept`) | 409 | `This recommendation has no action to apply. Accept it to record your decision, or act on the record directly.` |
+| 3 | A person in their own interactive session — not an API token, not a kiosk/station badge token | 403 | `Accept & apply needs a person signed in to Werco. API tokens and agents can read, dismiss or snooze a recommendation but cannot apply it.` |
+| 4 | Not a read-only company context | 403 | `Read-only company context cannot modify data` |
+| 5 | Company AI egress (`allow_ai_egress`) is on | 403 | `AI actions are off for this company (AI egress is off), so nothing will be applied. An Admin can turn AI egress on in Admin Settings > AI Privacy, or you can act on the record directly.` |
+| 6 | The person's role can perform the action — Quality, Supervisor, Manager or Admin for `create_draft_ncr`; Supervisor, Manager or Admin otherwise | 403 | `Your role ({role}) cannot apply this action: {summary}. It needs {roles}.` |
+| 7 | The target still makes sense (the plan is not blocked) | 409 | The plan's reason verbatim, e.g. `Work order {num} has been deleted`, `Cannot change priority on a terminal work order`, `{num} is already P{cur} (the suggestion was P{new}); nothing to apply`, `Blocker '{title}' is already {status}; nothing to escalate`, `Work order {num} is complete; nothing to escalate` / `Work order {num} was deleted; nothing to acknowledge` (a blocker on a missing, deleted or terminal job — the same closed-target rule the nightly sweep stales the card with), `{part} has no primary supplier; set one on the part, or create the PO in Purchasing`, `Vendor {name} is inactive; reactivate it or update the part's primary supplier`, `{part} has no reorder quantity; create the PO in Purchasing`, and `This recommendation's action and its record name different records, so it will not be applied. Open the record and act on it directly.` (the action would change a different work order, part or blocker than the card's `target_href` points at) |
+| 8 | The plan still matches `expected_fingerprint` | 409 | `This action changed since you loaded it. It would now: {summary}. Review it and click Accept & apply again.` |
+
+After gates 1–6 the route **claims** the recommendation with a compare-and-set from `pending`
+(a concurrent accept, dismiss or second click gets the gate-1 409) **before** any ERP write, then
+runs the action as the clicking person in the same transaction. Gates 7–8 run inside that
+transaction. Any refusal or error rolls everything back, the claim included, so the card stays
+pending; a concurrent edit of the same work order is the app-wide **409**. On a 409 the client
+should re-read the list.
+
+**Response (200)** — `{ recommendation, applied: true, apply_result, apply_error: null }`.
+`recommendation.status` is `accepted` and `accepted_by` is the clicking user. `apply_error` is
+always `null` (kept for compatibility; there is no "accepted but not applied" outcome).
+`apply_result` is `{ action_type, summary, … }` plus:
+
+| `action_type` | Extra `apply_result` keys | Effect |
+|---|---|---|
+| `adjust_work_order_priority` | `work_order_id`, `work_order_number`, `old_priority`, `new_priority` | Raises priority; never demotes and never a no-op |
+| `escalate_blocker` | `blocker_id`, `status`, `severity`; `work_order_id`, `old_priority`, `new_priority` when the WO is expedited | Acknowledges an OPEN blocker, raises severity to high only from below high (critical stays critical), expedites the WO to P2 only from P3 or lower. Refused outright (gate 7) when the blocker's work order is missing, soft-deleted or terminal. Never resolves the blocker or lifts its hold |
+| `acknowledge_blocker` | `blocker_id`, `status` | Acknowledge only; refused like `escalate_blocker` on a missing, deleted or terminal job |
+| `create_draft_ncr` | `ncr_id`, `ncr_number`, `status: "open"` | OPEN in-process NCR, locked NCR number; a named part / WO must be this company's and not deleted; emits `ncr_created` |
+| `create_draft_po` | `purchase_order_id`, `po_number`, `vendor_id`, `part_id`, `quantity`, `status: "draft"` | DRAFT PO through the same command as the Purchasing route (locked PO number, full audit snapshot, `purchase_order_created`) to the part's **current** live, active primary supplier — no fallback vendor. Nothing is sent |
+
+Every audit row an applied action writes is written as the clicking user and carries
+`extra_data` `{source: "ai_recommendation", recommendation_id, recommendation_type,
+source_module, action_type, approved_by, plan_fingerprint, prompt_version, model_version}`; a
+severity escalation writes its own `work_order_blocker` update row. An `ai_recommendation_applied`
+operational event is emitted. After a successful apply, open sibling recommendations (same target
+and action type) become `stale` with `status_reason` `Superseded: recommendation #{id} was applied
+by {name}`. After commit the route sends company-scoped realtime nudges (`work_order_update` and
+`dashboard_update` with `event: "work_order_priority_updated"`, the blocker's
+`work_order_blocker_updated`, or `dashboard_update` with `event: "ai_recommendation_applied"` for a
+PO or NCR); they are silent while `REALTIME_BROADCAST_ENABLED=false`. A nudge that fails is logged
+and never turns the committed apply into an error response.
+
+#### Record-only accept, dismiss and snooze
+
+- **`/accept`** records the decision and changes nothing else. `apply: true` → **422** (`apply is
+  not accepted here: Accept only records your decision. …`). Not pending → **409** (same text as
+  gate 1 above). On an **action card** ("Mark handled" in the UI) it additionally requires a
+  person in an interactive session — API token / station token → **403** `API tokens and agents
+  cannot mark an action card handled; a person who can apply it must.` — whose role could apply the
+  action — else **403** `Your role ({role}) cannot apply this action, so it stays open for {roles}.
+  You can snooze it or send feedback.` Egress is not required, because nothing executes. A
+  suggest-only recommendation stays acceptable by any authenticated user. The response is
+  `{ recommendation, applied: false, apply_result: null, apply_error: null }`.
+- **`/dismiss`** is allowed from `pending` or `snoozed` by any authenticated user; otherwise **409**
+  `This recommendation is already {status}; it can no longer be dismissed.`
+- **`/snooze`** is unchanged: **409** `Only pending recommendations can be snoozed` otherwise.
+- Every status change — accept, apply, dismiss, snooze, the nightly wake, and the staling paths
+  below — is a single conditional `UPDATE` (compare-and-set), so a stale write can never overwrite
+  or resurrect a decided recommendation.
+- Closing a blocker (`PUT /work-order-blockers/{id}` to resolved/dismissed, or `POST
+  /work-order-blockers/{id}/resolve`) stales its open recommendations in the same transaction
+  (`Blocker {status}; nothing left to escalate`).
 
 **Scoring.** Each listed recommendation carries an additive `score` field, computed at read time
 (never persisted): `priority_weight × confidence × age_decay × impact_magnitude` — priority
@@ -10627,10 +10737,17 @@ single-recommendation responses (accept/dismiss/snooze).
 wake-up time is recorded on the snooze interaction event — no schema change). The nightly
 AI-learning job (5:30 AM, and `POST /ai/aggregate` for the active tenant) is a tenant-scoped
 fan-out that marks pending/snoozed recommendations past `expires_at` as `stale`, returns
-elapsed snoozes to `pending`, and runs **domain sensors** (late/at-risk WOs, inventory risk,
-quality scrap trends) that mint suggest-only Action Inbox items without a human prompt. Its
-summary reports `companies_processed`, `recommendations_created`, `stale_recommendations`,
-`snoozed_recommendations_woken`, and `sensor_recommendations_created`.
+elapsed snoozes to `pending`, retires open recommendations whose target closed (blocker
+resolved, dismissed or gone; work order terminal or deleted → `stale`, `status_reason`
+`Target closed: …`), and runs **domain sensors** (late/at-risk WOs, inventory risk, quality scrap
+trends) and learners that mint Action Inbox items without a human prompt. It **never applies a
+recommendation** and makes no LLM call. Its summary reports `companies_processed`,
+`recommendations_created`, `stale_recommendations`, `snoozed_recommendations_woken`,
+`sensor_recommendations_created`, `learner_recommendations_created` and
+`closed_target_recommendations_staled`; the `auto_executed` / `auto_execute_failed` keys are gone.
+The nightly run also mints at most one `stale_blocker_escalation` card per blocker open for more
+than 24 hours on a live job (`stale_blockers_escalated` in its logged summary), skipped when
+escalating would change nothing.
 
 **Always-on outcomes.** Completing a work order (via `emit_work_order_completed_event`)
 auto-records `on_time_delivery`, `scrap_rate`, and optional `cost_variance` outcomes. Terminal
@@ -11843,12 +11960,15 @@ What matters from this file's point of view:
   routers with the caller's own bearer token. The router is the boundary: the same `require_role`
   gates, tenant scoping, audit rows, optimistic-locking 409s and per-endpoint size caps apply, and a
   401/403/409/422 comes back verbatim as an `is_error` tool result carrying the server's `detail`.
-- **The catalog is this API.** 662 tools are generated from `app.openapi()` at startup — every
+- **The catalog is this API.** 746 tools are generated from `app.openapi()` at startup — every
   secured operation except the `Authentication`, `Carrier Webhooks`, `Error Logging` (and its router-level `errors` twin) and `WebSocket` tags, the
   unauthenticated health/station-login routes (named one by one in `catalog.PUBLIC_OPERATIONS`) and
-  the two Excel-cutover loaders (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import`,
-  `catalog.EXCLUDED_OPERATIONS`: they mint work orders RELEASED / IN_PROGRESS and POs SENT, a record
-  of a past system rather than a user action) — plus 15 fixed-name convenience tools that shadow 16
+  the three operations in `catalog.EXCLUDED_OPERATIONS`: the two Excel-cutover loaders
+  (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import` — they mint work orders
+  RELEASED / IN_PROGRESS and POs SENT, a record of a past system rather than a user action) and
+  AI Accept & apply (`POST /ai/recommendations/{recommendation_id}/apply` — owner ruling 3: only a
+  person signed in to the app runs an AI recommendation's action; the route also refuses API
+  tokens) — plus 15 fixed-name convenience tools that shadow 16
   raw routes (`POST /work-orders/`, `PUT /work-orders/{id}`, `POST /work-orders/{id}/release`, the two
   nest-package imports, the manual nest add, `GET /search/`, …) to enforce agent rules the routes do
   not: create/duplicate always land DRAFT, release is a separate explicit tool and the generic update

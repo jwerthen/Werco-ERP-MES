@@ -175,6 +175,9 @@ export default function AIEgressTab() {
               natural-language search. This content may be CUI under some DoD contracts — obtain CUI /
               data-egress sign-off before enabling. When OFF, no document content leaves the system boundary
               and AI features degrade gracefully (e.g. laser-nest extraction falls back to filename-only).
+              AI egress also gates applying Action Inbox recommendations (Accept &amp; apply), and nothing is
+              ever applied without a person clicking it. When OFF, recommendation cards still show what they
+              would do, and a Supervisor can Mark handled.
               Off by default for new companies; toggling it is recorded on the tamper-evident audit trail.
             </span>
           </label>
@@ -197,8 +200,9 @@ export default function AIEgressTab() {
           <p className="text-sm text-surface-700">
             Enabling AI egress will transmit uploaded document content to the Anthropic AI provider for
             extraction and assistance. This content may be CUI under some DoD contracts and requires CUI /
-            data-egress sign-off. The change is recorded on the tamper-evident audit trail and takes effect
-            immediately company-wide.
+            data-egress sign-off. It also allows a person to Accept &amp; apply Action Inbox recommendations;
+            nothing is ever applied without a person clicking it. The change is recorded on the
+            tamper-evident audit trail and takes effect immediately company-wide.
           </p>
         </div>
         <div className="modal-footer flex justify-end gap-2 p-5 pt-0">
@@ -247,8 +251,9 @@ function EgressBanner({ enabled }: { enabled: boolean }) {
         <p className="text-surface-500 mt-0.5">
           No document content leaves the system boundary to the AI provider. AI-backed extraction, Hank’s chat,
           and natural-language search are degraded (e.g. laser-nest extraction falls back to filename-only).
-          Enabling egress transmits document content to a third-party AI provider and requires CUI /
-          data-egress sign-off first.
+          Action Inbox recommendations are not applied: cards show what they would do, and a Supervisor
+          can Mark handled. Enabling egress transmits document content to a third-party AI provider and
+          requires CUI / data-egress sign-off first.
         </p>
       </div>
     </div>

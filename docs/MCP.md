@@ -2,15 +2,16 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **763 tools** — 15 hand-written *convenience* tools plus
-**748 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **762 tools** — 15 hand-written *convenience* tools plus
+**747 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app.
 
 This is the runbook: how to run it, how to authenticate, what the tools are called, which rules
 the convenience tools enforce, what a result looks like, and what to do when a call fails.
 
-**Counts and names were re-checked with `python -m app.mcp --print-catalog` on 2026-11-07, for the
-draft / on-hold floor gates** (15 convenience + 748 generated tools, 16 shadowed raw operations).
+**Counts and names were re-checked with `python -m app.mcp --print-catalog` on 2026-11-07, after AI
+Accept & apply left the catalog and the draft / on-hold floor gates added `work_orders_resume_work_order`**
+(15 convenience + 747 generated tools, 16 shadowed raw operations).
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -180,7 +181,7 @@ routes authenticate every call; in IN-PROCESS mode it uses the real `ErpTokenVer
  "generated_tools":   [{"name": "...", "method": "GET", "path": "/api/v1/...", "tag": "...",
                         "function": "...", "annotations": {...}, "deprecated": false}],
  "shadowed_operations": [["GET", "/api/v1/inventory/"], ...],
- "counts": {"convenience": 15, "generated": 662, "shadowed": 16}
+ "counts": {"convenience": 15, "generated": 746, "shadowed": 16}
 }
 ```
 
@@ -325,7 +326,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | SPA page (route) | OpenAPI tag(s) | Representative tools |
 |---|---|---|
 | `Dashboard` (`/`) | Shop Floor, Scheduling, Calibration, Inventory, Quality Management | `get_shop_floor_dashboard`★, `get_scheduled_jobs`, `get_equipment_due_soon`, `get_low_stock_alerts`, `get_quality_summary` |
-| `ActionInbox` (`/action-inbox`) | AI Learning, Setup & Readiness | `list_ai_recommendations`, `accept_ai_recommendation`, `dismiss_ai_recommendation`, `snooze_ai_recommendation`, `get_setup_health` |
+| `ActionInbox` (`/action-inbox`) | AI Learning, Setup & Readiness | `list_ai_recommendations`, `accept_ai_recommendation` (record-only; on an action card it needs a role that could apply the action and is refused for an API token), `dismiss_ai_recommendation`, `snooze_ai_recommendation`, `get_setup_health` — **Accept & apply is not a tool**: `POST /ai/recommendations/{recommendation_id}/apply` is in `EXCLUDED_OPERATIONS` (§6.1) |
 | `Notifications` (`/notifications`) | Notifications | `list_notifications`, `get_unread_count`, `mark_notification_read`, `mark_all_read` |
 | `MySettings` (`/settings`) | Users (self-service) | `get_current_user_info`, `get_my_notification_preferences`, `update_my_notification_preferences`, `update_my_phone`, `send_test_sms`, `change_own_password` |
 | `SetupWizard` (`/setup`) | Setup & Readiness | `get_setup_health`, `get_part_readiness` |
@@ -416,13 +417,21 @@ minus two further, named sets:
   They are listed **by name** rather than skipped silently, so a new route that forgets its
   `security` dependency — even under a tag that already has tools — fails the coverage guard
   (`catalog.unaccounted_operations`, §14) until it is either secured or named there.
-- **`EXCLUDED_OPERATIONS`** — the two Excel-cutover loaders, `POST /work-orders/import` and
-  `POST /purchasing/purchase-orders/import` (`migration_import_service`). They record a *past*
-  system's state rather than perform a user action: the work-order loader mints work orders
-  RELEASED / IN_PROGRESS with operations READY / COMPLETE on no labor evidence, the PO loader
-  mints purchase orders SENT — exactly the side door around "create lands DRAFT, release is
-  explicit" (§9) and "never fake shop-floor time" that the convenience tools exist to close.
-  They stay an Import Center action for an admin at cutover (`EXCEL_MIGRATION_RUNBOOK.md`).
+- **`EXCLUDED_OPERATIONS`** — three operations, none with a convenience twin:
+  - The two Excel-cutover loaders, `POST /work-orders/import` and
+    `POST /purchasing/purchase-orders/import` (`migration_import_service`). They record a *past*
+    system's state rather than perform a user action: the work-order loader mints work orders
+    RELEASED / IN_PROGRESS with operations READY / COMPLETE on no labor evidence, the PO loader
+    mints purchase orders SENT — exactly the side door around "create lands DRAFT, release is
+    explicit" (§9) and "never fake shop-floor time" that the convenience tools exist to close.
+    They stay an Import Center action for an admin at cutover (`EXCEL_MIGRATION_RUNBOOK.md`).
+  - AI **Accept & apply**, `POST /ai/recommendations/{recommendation_id}/apply`. Owner ruling 3
+    (2026-11-05): nothing AI-driven executes without a named person clicking Accept, so running a
+    recommendation's action is a person's click in the app, never an agent's tool call. The route
+    also refuses API tokens (403) on its own, so the exclusion is not the only fence. Agents keep
+    the record-only accept, dismiss, snooze and feedback tools, and may create recommendations;
+    on an action card the record-only accept is refused for an API token and for a role that could
+    not apply the action. See [API.md → AI Recommendations](API.md#ai-recommendations-action-inbox).
 
 The `Import Batches` tag also excludes the recoverable Import Center review, receipt,
 correction and commit routes. These wrap the same cutover loaders, including their
@@ -590,8 +599,8 @@ the only door to them (`convenience.SHADOWED_OPERATIONS`):
 Every other operation stays generated — including the neighbours of the shadowed ones
 (`work_orders_start_work_order`, `work_orders_update_operation`, `preview_laser_nest_package_import`,
 `get_work_order_by_number`, `update_laser_nest`, `get_inventory_summary`, `get_purchase_order`, …) —
-except the two cutover loaders in `EXCLUDED_OPERATIONS` (§6.1), which have no tool and no
-replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
+except the operations in `EXCLUDED_OPERATIONS` (§6.1) — the two cutover loaders and AI Accept &
+apply — which have no tool and no replacement. Adding a convenience tool whose route is *not* in the shadow set is a build error
 (`build_registry` refuses a duplicate name) rather than a silent win.
 
 ---
@@ -904,7 +913,8 @@ hold with `work_orders_resume_work_order` first).
 - Tests (all in the default `pytest tests/` run, so in CI's required "Backend Tests" job):
   - `backend/tests/test_mcp_catalog.py` (no DB) — membership against the live `app.openapi()` (every
     secured, unshadowed, unexcluded operation is exactly one tool; `PUBLIC_OPERATIONS` names exactly
-    the unsecured routes; `EXCLUDED_OPERATIONS` are the two loaders), names (unique, wire-valid,
+    the unsecured routes; `EXCLUDED_OPERATIONS` are exactly the two loaders and the AI apply route,
+    and the record-only accept stays a tool), names (unique, wire-valid,
     ≤ 64, collisions prefixed, the numeric-suffix fallback proven on synthetic input and unused on
     the live catalog), schemas (`$ref`-free, `additionalProperties: false`, every JSON body's
     property set equal to the document's — the `title` field included), and the two convenience
