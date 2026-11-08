@@ -446,7 +446,10 @@ a parity test holds it to the Python):
   supervisor decides. Never record steps for a part that was scrapped.
 - **No NCR and nothing automatic.** "Report n as scrap" only fills the scrap field the operator then
   confirms with a reason; filing an NCR stays the operator's explicit OPEN NCR toggle on REPORT
-  PRODUCTION. A standing API token may not close work short at all (403).
+  PRODUCTION. A standing API token may not report scrap or close work short at all (403, owner
+  decision 2026-11-07: a scrap count is quality evidence someone has to have seen). The kiosk and the
+  crew station are people — a crew badge's scoped token is not an API token — so nothing here changes
+  for them.
 - **Scrap found after a close.** A completed operation refuses a clock-out carrying pieces (clock
   out with 0); a supervisor can add the scrap, with a reason, from the work order.
 

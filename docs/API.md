@@ -648,15 +648,22 @@ bot permission — the token is exactly as powerful as the user it belongs to, a
 > log in and mint tokens. The real boundary is the bound user's role — give a bot the narrowest role
 > that does its job.
 >
-> **One credential rule on top of the role: an API token never closes work short (owner ruling 1,
-> 2026-11-05).** Declaring where missing pieces went is a judgment a named person makes, so a short
-> close by either operation-complete verb and a force-complete below the order answer **403**
-> `"Closing work short must be done by a person signed in to the app, not an API token."` for an API
-> token, whatever its user's role (`app.core.credentials.is_api_token_credential`); a full-count close
-> is unaffected, and a crew-station badge token is a person and may close short. It is the
-> short-count rule's own refusal and reads together with ruling 3 as "standing API tokens may not make
-> judgment writes" — owner confirmation of that combined reading is pending. See Work Orders → "Short
-> count at completion".
+> **One credential rule on top of the role: an API token never declares scrap and never closes work
+> short (owner decision 2026-11-07).** Only a person — at the kiosk, with a crew badge, or signed in
+> at a desk — declares scrap, because a scrap count is quality evidence someone has to have seen.
+> Whatever its user's role, an API-token request (`app.core.credentials.is_api_token_credential`)
+> that would raise a recorded `quantity_scrapped` answers **403** `"Scrap must be reported by a
+> person (at the kiosk, with a crew badge, or signed in at a desk), not an API token: …"` before any
+> write or audit row — on clock-out, `/production`, the Hank `report_production` task, both
+> operation-complete verbs, force-complete and both generic `PUT`s — and a short close by either
+> operation-complete verb, or a force-complete below the order, answers **403** `"Closing work short
+> must be done by a person signed in to the app, not an API token."`. A full-count close, a good-only
+> production report and a zero-scrap clock-out are unaffected. This PR applies the same principle to
+> three more count judgments (good above the floor's record, operation count edits, lowering an
+> order once work is recorded — **403**); the owner was asked about scrap, not these. A crew-station
+> badge token is a person and passes; an interactive JWT, including one an MCP client carries, is
+> the person's own session and is not refused. See Work Orders → "Short count at completion" → "API
+> tokens may not declare scrap or make count judgments".
 >
 > **The row wins over the claims.** The `api_tokens` row — never the JWT — says who and which
 > company: the JWT's `user_id` / `company_id` must equal the row's or the token is refused, the active
@@ -1397,18 +1404,18 @@ company-scoped.
 | POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) and the optional `unit_number` (≤ 50 chars — see "Unit #" below) | Yes |
 | GET | `/work-orders/{id}` | Get work order by ID | Yes |
 | GET | `/work-orders/{id}/timeline` | Chronological job history with category, actor and time filters; opaque cursor, `limit` 1–100 (default 30). Returns business events and source links, not raw audit payloads | Yes |
-| PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below). **`status: on_hold` on a DRAFT work order returns 409** (a draft has nothing on the floor to hold — release it first); this `PUT` is the "Hold Work Order" write for a released / in-progress job, and the door that puts a held job back on the floor is `POST /work-orders/{id}/resume` (this `PUT` can still move a held job to `draft` or `cancelled`, which keeps it off the floor; its blind move to `released` / `in_progress` is a known gap — see "Draft and on-hold work orders refuse every start" below). **Lowering `quantity_ordered` below what a whole-order operation has already accounted for (its good + scrap) returns 409** naming the operation, before any field is written — lower the order only by units no operation has started; **raising** it once a whole-order or component operation has completed returns 409 too; whole-order targets restated as `component_quantity` move with the order (audited); an API token lowering it once work is recorded gets 403; and a `sequential_operations` flip that would re-interpret a declared short returns 409 (see "Short count at completion" below) | Admin / Manager / Supervisor |
+| PUT | `/work-orders/{id}` | Update work order (body requires the WO's current `version` — stale → 409; also 409 if it moves a terminal WO back to a non-terminal status, **or sets `status` to COMPLETE/CLOSED from any status other than COMPLETE/CLOSED** — see "Terminal-state lock" below). **`due_date` is the one non-`status` field that IS status-gated: changing it on a COMPLETE/CLOSED/CANCELLED work order returns 409** (see "Due date on a finished job" below). Other non-`status` fields such as `notes` / `special_instructions` / `unit_number` carry **no status gate**: they are editable at any status, including terminal ones (send `unit_number: null` — or `""`, which is trimmed to NULL — to clear it). **The flip verb for `sequential_operations`** — turning it *on* returns **409** on a laser nest WO, and **409 naming the operations** when work is already under way out of sequence; otherwise it demotes un-worked blocked operations READY → PENDING, one audit row each (see "READY promotion" below). **`status: on_hold` on a DRAFT work order returns 409** (a draft has nothing on the floor to hold — release it first); this `PUT` is the "Hold Work Order" write for a released / in-progress job, and the door that puts a held job back on the floor is `POST /work-orders/{id}/resume` (this `PUT` can still move a held job to `draft` or `cancelled`, which keeps it off the floor; its blind move to `released` / `in_progress` is a known gap — see "Draft and on-hold work orders refuse every start" below). **Lowering `quantity_ordered` below what a whole-order operation has already accounted for (its good + scrap) returns 409** naming the operation, before any field is written — lower the order only by units no operation has started; **raising** it once a whole-order or component operation has completed returns 409 too; whole-order targets restated as `component_quantity` move with the order (audited); an API token lowering it once work is recorded gets 403, as does an API token raising the header's `quantity_scrapped` (only a person declares scrap — owner decision 2026-11-07); and a `sequential_operations` flip that would re-interpret a declared short returns 409 (see "Short count at completion" below) | Admin / Manager / Supervisor |
 | DELETE | `/work-orders/{id}` | Delete work order (soft by default; `hard_delete=true` only for draft/cancelled, and refused **409** when ledger-backed ties or saved templates reference it) | Admin / Manager |
 | POST | `/work-orders/{id}/restore` | Restore a soft-deleted work order (**400** if it is not deleted). Re-opens the ties the delete cancelled — **except** any whose part has since been reclassified into one the shop produces. Returns an **envelope** (`message` + `skipped_material_allocations`), not a bare message; see "Restoring a work order" below. Reached from Work Orders → **Deleted** (`deleted_only=true` above) | Admin / Manager |
 | POST | `/work-orders/{id}/release` | Release to production (**404** when missing or soft-deleted) | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/start` | Start production: a **RELEASED** work order → IN_PROGRESS. **409** on a DRAFT (release first) or ON_HOLD (resume it — this verb no longer lifts a hold) work order, **400** on any other non-released status, **404** when missing or soft-deleted, **409** on a concurrent write | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/resume` | **Resume Work Order** — lift a *work-order* hold. Never releases: the target comes from the release record (`released_at` / `released_by`) — IN_PROGRESS when released and worked, RELEASED when released and unworked, **DRAFT** when no release is on record (un-worked READY operations, laser nests included, return to PENDING). **400** when not on hold, **404** when missing or soft-deleted, **503** (nothing changed) when the required audit rows cannot be written. Operation-level holds are untouched. See "Draft and on-hold work orders refuse every start" below | Admin / Manager / Supervisor |
-| POST | `/work-orders/{id}/complete` | Force-complete a work order (privileged override), booking `quantity_complete` as its finished count — the header is **set** to it. **409** if the WO is CANCELLED or an open operation is on hold. **403** first for an API token completing short or above what the floor recorded. **409** when `quantity_complete` exceeds what the floor recorded (naming the binding operation) unless `quantity_override_reason` is sent, and **400** above what can still exist once declared shorts and covered scrap are out, even with a reason; **409** when the shortfall below the order is not covered by floor-reported scrap or `quantity_scrapped` (with a reason); **503** (nothing saved) when the required audit row cannot be written. See "Short count at completion" below | Admin / Manager / Supervisor / Quality |
+| POST | `/work-orders/{id}/complete` | Force-complete a work order (privileged override), booking `quantity_complete` as its finished count — the header is **set** to it. **409** if the WO is CANCELLED or an open operation is on hold. **403** for an API token sending a `quantity_scrapped` above the header's recorded scrap (owner decision 2026-11-07: only a person declares scrap), and first among the quantity refusals for an API token completing short or above what the floor recorded. **409** when `quantity_complete` exceeds what the floor recorded (naming the binding operation) unless `quantity_override_reason` is sent, and **400** above what can still exist once declared shorts and covered scrap are out, even with a reason; **409** when the shortfall below the order is not covered by floor-reported scrap or `quantity_scrapped` (with a reason); **503** (nothing saved) when the required audit row cannot be written. See "Short count at completion" below | Admin / Manager / Supervisor / Quality |
 | POST | `/work-orders/{id}/duplicate` | **Duplicate a work order** — copy its *plan* (operations, laser nests, open material ties, re-snapshotted process-sheet steps) onto a new **DRAFT** WO. Body `{quantity_ordered, due_date}`; **201** returning an **envelope**, not a bare work order. See "Duplicating a work order" below | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/operations` | Add an operation to a work order | Admin / Manager / Supervisor |
-| PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below). **409** if it sets `status` to COMPLETE on a not-yet-complete operation — completion goes through the completion endpoints (see "Terminal-state lock"). **409** with the start gate's text if it sets `status` to IN_PROGRESS on an operation of a draft, on-hold or complete / closed / cancelled work order, and **409** "release first" if it sets `status` to READY on a draft — both before any field is written; re-sending the operation's current status is not a transition (see "Draft and on-hold work orders refuse every start"). **On a COMPLETE operation, changing `quantity_complete` or `status`, or lowering `quantity_scrapped`, returns 409** — those are the completion record; correct the good count with `…/reduce-production`, which can reopen the operation (re-sending the stored values, and every other field, is still accepted; scrap found after the close may be **added** with a reason, as required audit evidence). On an open operation, raising `quantity_complete` above the good ceiling or the floor's labor record returns 409; an API token may not change the counts (403). See "Short count at completion" | Admin / Manager / Supervisor |
+| PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below). **409** if it sets `status` to COMPLETE on a not-yet-complete operation — completion goes through the completion endpoints (see "Terminal-state lock"). **409** with the start gate's text if it sets `status` to IN_PROGRESS on an operation of a draft, on-hold or complete / closed / cancelled work order, and **409** "release first" if it sets `status` to READY on a draft — both before any field is written; re-sending the operation's current status is not a transition (see "Draft and on-hold work orders refuse every start"). **On a COMPLETE operation, changing `quantity_complete` or `status`, or lowering `quantity_scrapped`, returns 409** — those are the completion record; correct the good count with `…/reduce-production`, which can reopen the operation (re-sending the stored values, and every other field, is still accepted; scrap found after the close may be **added** with a reason, as required audit evidence). On an open operation, raising `quantity_complete` above the good ceiling or the floor's labor record returns 409; an API token may not change the counts (403 — a `quantity_scrapped` rise gets the scrap text, owner decision 2026-11-07). See "Short count at completion" | Admin / Manager / Supervisor |
 | POST | `/work-orders/operations/{id}/start` | Start an operation (**office** verb — operators start work through `PUT /shop-floor/operations/{id}/start` and the kiosk, which stay operator-open). Refused before any write, in the shop-floor twin's order: **400** already complete / already in progress (it never re-opens or re-stamps one), **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **409** operation on hold (starting does not lift a hold), **400** predecessors | Admin / Manager / Supervisor / Quality |
-| POST | `/work-orders/operations/{id}/complete` | Record an operation's good and scrap **totals** from the office. It **closes only when good + scrap cover every unit that reached the operation**; otherwise it saves progress and stays open (a submit that changes nothing is a **200** "No change" that writes nothing). 409 if the parent WO is terminal; **409 for a READY operation on a draft or on-hold WO** — completing it would start it. Query params `quantity_scrapped` (a total that never lowers), `scrap_reason` / `scrap_reason_code_id`, `quantity_override_reason`, `acknowledge_open_entries` — see "Short count at completion" below. **Office** verb — the shop-floor twin is the operator path | Admin / Manager / Supervisor / Quality |
+| POST | `/work-orders/operations/{id}/complete` | Record an operation's good and scrap **totals** from the office. It **closes only when good + scrap cover every unit that reached the operation**; otherwise it saves progress and stays open (a submit that changes nothing is a **200** "No change" that writes nothing). 409 if the parent WO is terminal; **409 for a READY operation on a draft or on-hold WO** — completing it would start it. Query params `quantity_scrapped` (a total that never lowers), `scrap_reason` / `scrap_reason_code_id`, `quantity_override_reason`, `acknowledge_open_entries` — see "Short count at completion" below. **403** for an API token raising the scrap total (owner decision 2026-11-07: only a person declares scrap). **Office** verb — the shop-floor twin is the operator path | Admin / Manager / Supervisor / Quality |
 | POST | `/work-orders/operations/{id}/reduce-production` | Supervisor/office over-count correction — walk back good-count across **any** operator's **unapproved** labor on the operation; **a COMPLETE operation is correctable here** (unlike the operator's twin), a terminal WO is not; no clock-in required. A correction that would leave a COMPLETE operation short is **409** unless the body sends `reopen_operation: true`, which returns it to in progress (see note below) | Admin / Manager / Supervisor |
 | GET | `/work-orders/{id}/material-allocations` | List the work order's material ties (`include_inactive`, default `true`) | Yes |
 | POST | `/work-orders/{id}/material-allocations` | Tie a material part to the work order or one of its operations (**201**) | Admin / Manager / Supervisor |
@@ -1966,8 +1973,10 @@ company-scoped.
 > order: **400** non-finite quantity; **404**; **409** terminal work order; **400** predecessors
 > incomplete; **400** bad quantity / missing target; **400** already complete; **409** operation on
 > hold (**400** other non-startable status); **409** a READY operation under a draft / on-hold work
-> order; **400** negative scrap; **404** / **422** unknown / inactive scrap code; **422** a scrap rise
-> with no reason; **400** good above the `ceiling`; **409** a scrap rise submitted with a
+> order; **400** negative scrap; **403** an API token raising the scrap total (owner decision
+> 2026-11-07 — see "API tokens may not declare scrap" below); **404** / **422** unknown / inactive
+> scrap code; **422** a scrap rise with no reason; **400** good above the `ceiling`; **409** a scrap
+> rise submitted with a
 > `quantity_complete` below the good the floor has since recorded (a stale screen — the scrap would
 > cover units that are now good); **403** an API token recording good above the floor's labor
 > evidence; **422** good above the floor's labor evidence with no `quantity_override_reason` — only
@@ -2001,8 +2010,10 @@ company-scoped.
 > Please retry.`
 >
 > **Force-complete — `POST /work-orders/{id}/complete`** (Admin / Manager / Supervisor / Quality) is
-> held to the rule at the **work-order** grain. After its existing checks (cancelled **409**, an open
-> operation on hold **409**, the scrap-reason **422**) and before any write, one grouped,
+> held to the rule at the **work-order** grain. After its existing checks (cancelled **409**; an API
+> token sending a `quantity_scrapped` above the header's recorded scrap **403**, right after the
+> number checks — owner decision 2026-11-07; the scrap-reason **422**; an open operation on hold
+> **409**) and before any write, one grouped,
 > tenant-scoped TimeEntry read feeds `work_order_completion_bounds`: `deliverable` (the most the
 > floor's recorded good supports at the binding operation), `physical_max` (the most that can exist
 > once declared shorts are out) and `floor_loss` (units the floor already accounted as lost). It
@@ -2063,20 +2074,52 @@ company-scoped.
 >   refuses **409** RAISING it once any whole-order or component operation has COMPLETED (that stage
 >   would become a completed operation that is short — open a new work order for the extra units).
 >
-> **API tokens may not make count judgments.** A standing per-user API token
-> (`app.core.credentials.is_api_token_credential`) is refused **403** `Closing work short must be
-> done by a person signed in to the app, not an API token.` on a short close by either operation
-> verb and on a force-complete below the order, and **403** `Recording more good than the floor
-> counted, editing an operation's counts, or lowering the order after work was recorded must be done by
-> a person signed in to the app, not an API token.` on: good above the floor's record (office verb and
-> force-complete, override reason or not); any change to `quantity_complete` / `quantity_scrapped` /
-> `scrap_reason` through `PUT /work-orders/operations/{id}`; and lowering `quantity_ordered` once any
-> operation has recorded good, scrap or labor. A full-count close by the same token is unchanged, as
-> are scrap reports through clock-out and `/production`. A crew-station badge token is a person and
-> passes. These refusals are the short-count rule's own; they read together with ruling 3 as
-> "standing API tokens may not make judgment writes", and owner confirmation of that combined reading
-> is **pending**. An interactive JWT — including one an MCP client carries — is the person's own
-> session and is not refused.
+> **API tokens may not declare scrap or make count judgments.** All three refusals below apply to a
+> standing per-user API token (`app.core.credentials.is_api_token_credential`) whatever its user's
+> role, and are raised before any write and before any audit row.
+>
+> - **Scrap — owner decision 2026-11-07.** A standing API token may not declare scrap, anywhere: only
+>   a person (kiosk, crew badge, desk) does, because a scrap count is quality evidence someone has to
+>   have seen. A request that would **raise** a recorded scrap quantity — an operation's, a time
+>   entry's or the work-order header's `quantity_scrapped` — is refused **403** `Scrap must be
+>   reported by a person (at the kiosk, with a crew badge, or signed in at a desk), not an API token:
+>   a scrap count is quality evidence someone has to have seen. Record good pieces only, or leave the
+>   work open for that person.` (`operation_action_gates.API_TOKEN_SCRAP`, one predicate
+>   `api_token_declares_scrap` for every route). Where it sits on each route:
+>
+>   | Route | Refused when | Ahead of / behind |
+>   |---|---|---|
+>   | `POST /shop-floor/clock-out/{id}` | `quantity_scrapped > 0` | After the 404, the already-clocked-out 400 and the negative 400; before source / scrap-code resolution, the row locks, the completed-operation 409 and the ceiling 400. The time entry stays open |
+>   | `POST /shop-floor/operations/{id}/production` (with or without `open_ncr`) | `quantity_scrapped_delta > 0` | After the not-found / not-in-progress / not-clocked-in / bad-number / both-zero checks; before scrap-code resolution, the row locks and the ceiling checks — no NCR, no production receipt, no audit row. An idempotent replay still returns its saved result first |
+>   | `POST /hank/tasks`, `POST /hank/tasks/{id}/execute` (kind `report_production`) | `quantity_scrapped_delta > 0` | In the preview, so at preparation (no task row, no audit row) and again at execution (the task stays `awaiting_review`); after the 404 / not-in-progress / not-clocked-in checks, before the scrap-code check |
+>   | `POST /shop-floor/operations/{id}/complete` | declared `quantity_scrapped` delta `> 0` | Right after the scrap NaN / negative 400s (the work-order start rung and the state / labor / source checks still answer first); before the scrap-reason 422, scrap-code 404 / 422 and every quantity / accounting 409 |
+>   | `POST /work-orders/operations/{id}/complete` | `quantity_scrapped` above the operation's stored scrap | Right after the negative-scrap 400; before scrap-code 404 / 422, the reason 422, the ceiling 400, the stale-scrap 409 and the override checks. Re-sending the recorded scrap is no rise |
+>   | `POST /work-orders/{id}/complete` | `quantity_scrapped` above the header's recorded scrap (it overwrites the header) | Right after the non-finite / negative 400s; before the scrap-reason 422, the scrap-code checks, the exceeds-ordered 400, the held 409 and the short / above-recorded 403. Omitting it, or sending the recorded value, is not a declaration; the already-COMPLETE no-op and the CANCELLED 409 still come first |
+>   | `PUT /work-orders/operations/{id}` | `quantity_scrapped` above the stored scrap, on an open or a COMPLETE operation | Right after the stale-version 409; any other count change keeps the count-judgment text below |
+>   | `PUT /work-orders/{id}` | `quantity_scrapped` above the header's recorded scrap | Right after the stale-version 409; before the status / due-date / `quantity_ordered` / sequencing refusals. Re-sending the recorded value, or omitting it, works (the `update_work_order` MCP tool calls this route) |
+>
+>   A delta that is not a finite number counts as a declaration (the predicate fails closed: a
+>   token's `quantity_scrapped: NaN` on clock-out is **403**); `null`, zero and a lowering never do.
+>   A request that declares no new scrap — a good-only production report or clock-out, a full-count
+>   close, re-sending the recorded scrap — is byte-identical to before.
+> - **Short close — the same decision.** The question was about closing work short by reporting the
+>   missing pieces as scrap, and the answer leaves a token only the full-count close. A short close
+>   by either operation verb whose scrap is already on record (the request declares none), and a
+>   force-complete below the order, are refused **403** `Closing work short must be done by a person
+>   signed in to the app, not an API token.`
+> - **The other count judgments — this PR's extension of the same rule** (the owner was asked about
+>   scrap, not these). **403** `Recording more good than the floor counted, editing an operation's
+>   counts, or lowering the order after work was recorded must be done by a person signed in to the
+>   app, not an API token.` on: good above the floor's record (office verb and force-complete,
+>   override reason or not); any change through `PUT /work-orders/operations/{id}` to
+>   `quantity_complete`, `scrap_reason` or a `quantity_scrapped` that is not a rise; and lowering
+>   `quantity_ordered` once any operation has recorded good, scrap or labor.
+>
+> A crew-station badge token is a person and passes all three (it cannot reach `/work-orders` or
+> `/hank` at all). An interactive JWT — including one an MCP client carries — is the person's own
+> session and is not refused. `tests/api/test_api_token_scrap_refusal.py` enumerates every scrap
+> writer three ways (ORM writes, request schemas, MCP tools), so a new one fails CI until it is
+> guarded or listed as exempt with a reason.
 >
 > **Read models.** `WorkOrderOperationResponse` (every response built through
 > `_enrich_work_order_operations` — `GET /work-orders/{id}`, by-number, create, duplicate, both
@@ -2103,6 +2146,7 @@ company-scoped.
 > | Office verb | 409 | `Op N now records {recorded} good, more than the {entered} entered; the scrap was worked out against an older count. Refresh and re-enter.` |
 > | Both close verbs (short close) | 409 | `{A and B} {is/are} still clocked in to Op N — have them clock out with their count first, or leave the operation open.` — the office verb appends ` Resubmit with acknowledge_open_entries to clock them out; pieces they have not reported will not be counted.` |
 > | Both close verbs (short close) | 409 | `Op N is {n} short on a serialized work order and required step records are missing for {SN-1, SN-2 / this operation}. Scrapped serials can't be recorded yet — leave the operation open and ask a supervisor. Never record steps for a part that was scrapped.` |
+> | Clock-out, `/production`, Hank `report_production` task, both close verbs, force-complete, `PUT /work-orders/operations/{id}`, `PUT /work-orders/{id}` — an API token raising recorded scrap | 403 | `Scrap must be reported by a person (at the kiosk, with a crew badge, or signed in at a desk), not an API token: a scrap count is quality evidence someone has to have seen. Record good pieces only, or leave the work open for that person.` |
 > | Both close verbs, force-complete | 403 | `Closing work short must be done by a person signed in to the app, not an API token.` |
 > | Office verb, force-complete, `PUT /work-orders/operations/{id}`, `PUT /work-orders/{id}` | 403 | `Recording more good than the floor counted, editing an operation's counts, or lowering the order after work was recorded must be done by a person signed in to the app, not an API token.` |
 > | Floor close verb | 409 | `quantity_complete ({q}) exceeds the {good} good recorded on Op N; record the pieces through clock-out or Report production, or report the shortfall as scrap with a reason.` |
@@ -5798,11 +5842,11 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | GET | `/shop-floor/operations/{id}/documents` | Kiosk doc-viewer discovery: the operation's controlled part drawing, live nest reference PDF, nest material, and critical SPC characteristics (see note below) | Yes |
 | GET | `/shop-floor/documents/{id}/inline` | Serve a kiosk-viewable document PDF inline — DRAWING-type or live-nest-referenced only, tenant-scoped, uniform **404** on any miss (see note below) | Yes |
 | POST | `/shop-floor/clock-in` | Clock in to operation (starts a PENDING / READY one). Refusal order, all before any write: **400** already clocked in, **404** operation, **400** operation not on that work order, **400** wrong work center, **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **400** `Operation is not ready to start` (incl. an operation-level hold), **400** predecessors. A back-entry (`source = "backfill"`) is refused exactly like a live clock-in | Yes |
-| POST | `/shop-floor/clock-out/{id}` | Clock out with production data. Completes the operation on its own only on a **full good count** of the units that can reach it (the hard good ceiling; scrap never counts); the response's `operation_status` says whether it did. **400** when the good it adds goes above the good ceiling (a 0-piece clock-out always closes the entry); on an operation someone already completed it is labor-only — **409** when it carries pieces, the entry staying open (see "Short-count figures on floor reads" and the Clock Out Schema below) | Yes |
+| POST | `/shop-floor/clock-out/{id}` | Clock out with production data. Completes the operation on its own only on a **full good count** of the units that can reach it (the hard good ceiling; scrap never counts); the response's `operation_status` says whether it did. **400** when the good it adds goes above the good ceiling (a 0-piece clock-out always closes the entry); on an operation someone already completed it is labor-only — **409** when it carries pieces, the entry staying open (see "Short-count figures on floor reads" and the Clock Out Schema below). **403** for an API token reporting `quantity_scrapped > 0` (owner decision 2026-11-07: only a person declares scrap) — the entry stays open; its zero-scrap clock-out is unchanged | Yes |
 | PUT | `/shop-floor/operations/{id}/start` | Start an operation (**operator** verb — deliberately open to any authenticated user; the office twin `POST /work-orders/operations/{id}/start` is role-gated). Refusal order: **404** operation, **400** already complete / already in progress, **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **409** operation on hold (starting no longer lifts a hold), **400** predecessors. Lifts a RELEASED work order to IN_PROGRESS — never a draft one | Yes |
-| POST | `/shop-floor/operations/{id}/production` | Add produced/scrapped quantity while staying clocked in (**400** above the operation's good ceiling — see Work Orders → "Short count at completion") | Yes |
+| POST | `/shop-floor/operations/{id}/production` | Add produced/scrapped quantity while staying clocked in (**400** above the operation's good ceiling — see Work Orders → "Short count at completion"). **403** for an API token reporting `quantity_scrapped_delta > 0`, with or without `open_ncr` — nothing written, no NCR (owner decision 2026-11-07: only a person declares scrap); a good-only report is unchanged | Yes |
 | POST | `/shop-floor/operations/{id}/reduce-production` | Correct (walk back) good-count an operator OVER-reported on their **own unapproved** labor (open clock-in first, then their own earlier unapproved sessions), **before** the operation/WO is complete — a miscount fix, **not** scrap (see note + schema below) | Yes |
-| POST | `/shop-floor/operations/{id}/complete` | **Close** an operation at the good count the floor already recorded — there is no partial branch, so a **200** always means COMPLETE. Refused **409**, writing nothing, while recorded good + scrap leave any received unit unaccounted (declare the lost pieces with `quantity_scrapped` + a reason, or leave it open), **403** for an API token closing short, **409** for a READY operation on a draft or on-hold work order (completing it would start it); an IN_PROGRESS one stays completable under the same rules. See "Floor completion contract" below | Yes |
+| POST | `/shop-floor/operations/{id}/complete` | **Close** an operation at the good count the floor already recorded — there is no partial branch, so a **200** always means COMPLETE. Refused **409**, writing nothing, while recorded good + scrap leave any received unit unaccounted (declare the lost pieces with `quantity_scrapped` + a reason, or leave it open), **403** for an API token declaring scrap (owner decision 2026-11-07: only a person declares scrap) or closing short, **409** for a READY operation on a draft or on-hold work order (completing it would start it); an IN_PROGRESS one stays completable under the same rules. See "Floor completion contract" below | Yes |
 | PUT | `/shop-floor/operations/{id}/hold` | Put an operation on hold and close open time entries. For a live laser nest, optional category/severity/note are saved on the hold event and **do not create a blocker**; Resume/Clear Hold is sufficient. Non-nest categorized holds retain their structured blocker behavior. Cancelled nests return **409** and must be restored first | Yes |
 | PUT | `/shop-floor/operations/{id}/resume` | Take an operation **off** hold. **Restores, never promotes**: `IN_PROGRESS` if it ever started, else `PENDING` — lifted to `READY` only where the shared promotion rule would grant it (parent WO released and non-terminal, no incomplete predecessor — which predecessors count is the work order's `sequential_operations` setting: cross-work-center only on a pool, any earlier-sequence operation on a routing), so `pending` is a normal success status. **409** if the operation backs a **cancelled (soft-deleted) laser nest** — that is a tombstone, not a hold; **400** if it is not `ON_HOLD`; cross-tenant id → **404**. Deliberately does **not** resolve the blocker that caused the hold (that stays with the blocker resolve/dismiss flow); the response carries `open_blockers` so the caller can warn (BLK-4) — each `{ id, category, severity, status, has_note, free_text_withheld }`, plus the caller-supplied `title` **only** for a non-station caller (withheld from a badge-minted crew-station token, same rule as `held`). Each `PENDING → READY` flip it does cause emits `operation_ready` (`user_id: null`). Audited **`STATUS_CHANGE`** (old→new status; `extra_data.transition = "resume_operation"`). Reachable by a badge-minted kiosk token — see "Held work" below | Yes |
 | POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
@@ -7009,6 +7053,11 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > reasonless scrap that the kiosk/desktop UIs already block. Since owner ruling 1 the same rule, with
 > the same 422 text and either a code or text, also guards the scrap a close declares on
 > `POST /shop-floor/operations/{id}/complete` (`OperationCompleteRequest.quantity_scrapped`).
+> Separately, a **standing API token** may not report scrap on any of these verbs (**403**, owner
+> decision 2026-11-07 — only a person declares scrap; see Work Orders → "Short count at completion"
+> → "API tokens may not declare scrap or make count judgments"). On clock-out and `/production` the
+> reason rule is a schema check, so a token's reasonless scrap still gets this **422** first and a
+> reasoned one the **403**; on the floor close the **403** comes first.
 >
 > **Scrap → NCR on the production report (Foundry redesign).**
 > `POST /shop-floor/operations/{id}/production` (`ProductionReportRequest`) also accepts
@@ -7048,12 +7097,15 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > operation on hold **409** (other non-startable status **400**); a READY operation under a draft /
 > on-hold work order **409**; bad `quantity_complete` / missing target **400**; predecessors **400**;
 > no labor ever recorded **400** (below); `source` `import` **422**; bad scrap number **400**; scrap
+> declared by an API token **403** (owner decision 2026-11-07 — only a person declares scrap; a
+> token's zero-scrap close goes on unchanged); scrap
 > without a reason **422** (checked in the handler, so a READY operation on a held or draft job answers
 > with the work-order rung's 409 first); unknown / inactive scrap code **404** / **422**;
 > `quantity_complete` above recorded good **409**; recorded good above what can reach the operation
 > after an upstream short close **409** (correct the count at the desk); scrap above unaccounted
 > **409**; units still unaccounted **409** — the operation stays open; then, on a short close only, an
-> API token **403**, others clocked in without acknowledgement **409**, an APPROVED open time entry
+> API token **403** (the short's scrap already on record), others clocked in without acknowledgement
+> **409**, an APPROVED open time entry
 > **409**, a serialized work order with missing per-serial step records **409**, a later stage already
 > holding more good than the declaration lets through **409**; finally **409** `STEPS_INCOMPLETE`.
 > Texts: Work Orders → "Short count at completion" → Refusal texts.
@@ -7258,7 +7310,9 @@ let a supervisor sign off on shop-floor labor (G5-A). Approve sets `approved` (t
 > predefined code from `GET /quality/scrap-reason-codes`) or a non-blank free-text `scrap_reason`;
 > neither present returns **422**. Both stay optional when no scrap is reported. See "A scrap reason
 > is required when scrap is reported" and "Structured scrap reason CODE" under the shop-floor notes
-> above.
+> above. A standing API token sending `quantity_scrapped > 0` is refused **403** (owner decision
+> 2026-11-07 — only a person declares scrap) before any lock or write, and the entry stays open; a
+> non-finite value from a token is refused the same way. Its zero-scrap clock-out is unchanged.
 >
 > The response (`TimeEntryResponse`) carries **`operation_status`** — the operation's status after
 > this clock-out (`"complete"` when the clock-out itself completed it at a full good count; `null` on
@@ -10758,7 +10812,7 @@ authority as its eventual action:
 | `draft_purchase_order` | `vendor_id`, 1–50 `lines` with `part_id`, positive `quantity_ordered`, nonnegative `unit_price`; optional PO dates/address/method/notes and line date/notes; source imports additionally require the source/version, printed number, line indices and stocking units described above | Admin/Manager/Supervisor plus effective `purchasing:view` and `purchasing:create`; normally creates a **draft**. A reviewed existing-document import can record **sent** for Receiving with Admin/Manager and `purchasing:approve`; never emails a vendor or receives material |
 | `attach_document` | `document_id`, `work_order_id` | Admin/Manager/Quality plus effective `work_orders:view`; links an existing PDF using the document workflow, without approving its contents |
 | `receive_delivery` | `purchase_order_id`, 1–50 receipt lines; each requires `po_line_id`, positive actual `quantity_received` and explicit `requires_inspection`; optional lot/heat/serial/certificate/location/over-receipt details | Admin/Manager/Supervisor plus `receiving:view` + `receiving:create`; canonical atomic delivery/stock posting, with no automatic printing |
-| `report_production` | `operation_id`, nonnegative good/scrap deltas (at least one positive), scrap reason/code when reporting scrap; optional NCR details and reasoned hold | Admin/Manager/Supervisor/Operator/Quality plus `work_orders:view` + `work_orders:complete`; caller must have an open clock on the operation; no implicit job/operation completion |
+| `report_production` | `operation_id`, nonnegative good/scrap deltas (at least one positive), scrap reason/code when reporting scrap; optional NCR details and reasoned hold | Admin/Manager/Supervisor/Operator/Quality plus `work_orders:view` + `work_orders:complete`; caller must have an open clock on the operation; no implicit job/operation completion. A standing API token may report good only: a scrap delta is refused **403** in the preview, so at preparation (no task saved) and again at execution (the task stays `awaiting_review`, nothing written) — owner decision 2026-11-07, only a person declares scrap |
 | `draft_shipment` | `work_order_id`, positive `quantity_shipped`, optional destination/carrier/package details; `cert_of_conformance` must be false | Admin/Manager/Supervisor/Shipping plus `shipping:view` + `shipping:create` + `work_orders:view`; reserves available completed units in a pending shipment, without dispatch/CoC/carrier purchase |
 
 Existing Superuser/Platform Admin bypass, active-company and token fences remain. A read-only

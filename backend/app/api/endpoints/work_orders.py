@@ -5221,10 +5221,11 @@ def complete_work_order(
         None,
     )
     completing_short = ordered_qty > 0 and requested_complete < ordered_qty - QTY_EPSILON
-    # This PR's credential rule, FIRST among the quantity refusals so a standing API token is
-    # never told to add a scrap reason or an override reason only to be refused for it next:
-    # completing short and booking more than the floor recorded are both judgments a named
-    # person makes (a crew-station badge token is a person and passes).
+    # The credential rule, FIRST among the quantity refusals so a standing API token is
+    # never told to add an override reason only to be refused for it next: completing short
+    # (the owner decision of 2026-11-07, its close half) and booking more than the floor
+    # recorded (this PR's extension of it) are both judgments a named person makes (a
+    # crew-station badge token is a person and passes).
     if is_api_token_credential(current_user) and (completing_short or asserted_above_recorded):
         raise HTTPException(
             status_code=403,
@@ -6557,9 +6558,10 @@ def complete_operation(
     open_entries: list[TimeEntry] = []
     missing_steps: Optional[list] = None
     if closing_short:
-        # Ruling 1 / this PR's own credential rule: a standing API token may close a full
-        # count, but declaring where missing pieces went is a judgment a named person
-        # makes. (``is_api_token_credential`` -- a crew-station badge token is a person.)
+        # Owner decision 2026-11-07 (its close half): a standing API token may close a full
+        # count, never short. Reached only when the short's scrap is already on record -- a
+        # scrap rise was refused API_TOKEN_SCRAP above. (``is_api_token_credential`` -- a
+        # crew-station badge token is a person.)
         if is_api_token_credential(current_user):
             raise HTTPException(status_code=403, detail=API_TOKEN_SHORT_CLOSE)
         # SF4: a short close must not land while anyone is still clocked in -- their

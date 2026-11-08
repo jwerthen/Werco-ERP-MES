@@ -85,8 +85,8 @@ tier, that tier stands — this rule is a floor, never a loosening.
 Agents reach the API through the MCP server in `backend/app/mcp/` ([docs/MCP.md](MCP.md)) —
 either the Streamable HTTP door at `/mcp` (off by default, `WERCO_MCP_HTTP_ENABLED`) or the stdio
 bridge `python -m app.mcp`. **Nothing in this document changes for them** (one credential rule —
-an API token may not make the short-count judgment writes: closing work short, recording more good
-than the floor counted, editing an operation's counts, lowering an order once work was recorded — is
+an API token may not declare scrap or close work short (owner decision 2026-11-07), nor record more
+good than the floor counted, edit an operation's counts, or lower an order once work was recorded — is
 below the Work Orders matrix, and applies to an API token however it is presented). Every tool call is a
 real request dispatched through the same routers with a real user's bearer — a 15-minute access JWT
 or a long-lived, Admin-issued **API token** bound to one user (see the API tokens callout under
@@ -302,18 +302,32 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 >   `PUT /work-orders/operations/{id}` refuses good / status edits and scrap LOWERING on a COMPLETE
 >   operation (**409**) — the same Admin / Manager / Supervisor gate may still ADD scrap found after
 >   the close, with a reason, as required audit evidence.
-> - **An API token may not make count judgments** — a credential rule, not a role rule. A standing
->   per-user API token (`app.core.credentials.is_api_token_credential`) is refused **403**, whatever
->   its user's role, on: a short close by either complete verb; a force-complete below the order or
->   above what the floor recorded; recording good above the floor's labor count on the office verb
->   (override reason or not); any count edit (`quantity_complete` / `quantity_scrapped` /
->   `scrap_reason`) through `PUT /work-orders/operations/{id}`; and lowering `quantity_ordered` once
->   any operation has recorded good, scrap or labor. A full-count close by the same token, and scrap
->   reported through clock-out / `/production`, are unaffected; a **crew-station badge token is a
->   person** and passes. These are the short-count rule's own refusals; read together with ruling 3 as
->   "standing API tokens may not make judgment writes", owner confirmation of that combined reading is
->   **pending** — including whether an agent using a person's interactive JWT (an MCP client) may
->   close short, which today it may: that JWT is the person's own session and is not refused.
+> - **An API token may not declare scrap or make count judgments** — a credential rule, not a role
+>   rule; no role cell changed. A standing per-user API token
+>   (`app.core.credentials.is_api_token_credential`) is refused **403**, whatever its user's role.
+>   - **Scrap (owner decision 2026-11-07).** A standing API token may not declare scrap, anywhere:
+>     only a person — at the kiosk, with a crew badge, or signed in at a desk — declares scrap,
+>     because a scrap count is quality evidence someone has to have seen. Any token request that
+>     would raise a recorded scrap quantity (an operation's, a time entry's or a work order header's
+>     `quantity_scrapped`) is refused **403** before any write and before any audit row, on
+>     `POST /shop-floor/clock-out/{id}`, `POST /shop-floor/operations/{id}/production` (with or
+>     without `open_ncr`), the Hank `report_production` task (`POST /hank/tasks` and
+>     `POST /hank/tasks/{id}/execute`), both operation-complete verbs, force-complete
+>     (`POST /work-orders/{id}/complete`), `PUT /work-orders/operations/{id}` and
+>     `PUT /work-orders/{id}`. The question was about closing work short by reporting the missing
+>     pieces as scrap, and the answer leaves a token only the full-count close: a short close by
+>     either complete verb (also one whose scrap is already on record) and a force-complete below the
+>     order are refused too. A request that declares no new scrap — a good-only production report or
+>     clock-out, a full-count close, re-sending the recorded scrap value — works exactly as before.
+>   - **The other count judgments (this PR's extension of the same rule, not part of the question
+>     the owner answered).** A token is also refused recording good above the floor's labor count
+>     (office verb, override reason or not, and force-complete), any other count edit through
+>     `PUT /work-orders/operations/{id}` (`quantity_complete`, `scrap_reason`, or a
+>     `quantity_scrapped` change that is not a rise), and lowering `quantity_ordered` once any
+>     operation has recorded good, scrap or labor.
+>
+>   A **crew-station badge token is a person** and passes every one of these. An agent using a
+>   person's interactive JWT (an MCP client) is that person's own session and is not refused.
 >
 > See `docs/API.md` → Work Orders → "Short count at completion".
 

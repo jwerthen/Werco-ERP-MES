@@ -4821,9 +4821,10 @@ def complete_operation(
 
     missing_steps: Optional[list] = None
     if closing_short:
-        # Ruling 3 / this PR's own rule: a standing API token may close a full count, but
-        # declaring where missing pieces went is a judgment a named person makes. A
-        # crew-station badge token is a person and passes.
+        # Owner decision 2026-11-07 (its close half): a standing API token may close a full
+        # count, never short. Reached only when the short's scrap is already on record -- a
+        # token declaring scrap was refused API_TOKEN_SCRAP above. A crew-station badge
+        # token is a person and passes.
         if is_api_token_credential(current_user):
             raise HTTPException(status_code=403, detail=API_TOKEN_SHORT_CLOSE)
         # SF1: the auto-close below clocks everyone out WITHOUT counting what they have not

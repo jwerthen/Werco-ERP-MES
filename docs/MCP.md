@@ -61,9 +61,11 @@ quote against the live catalog, so a name that shifts fails CI instead of going 
   refused on a job that is not released (`release_work_order` first) or is on hold
   (`work_orders_resume_work_order` first). **Nothing closes short** (owner ruling 1):
   `shop_floor_complete_operation` closes at the good the floor already recorded and is refused
-  **409** while any unit is unaccounted, and an **API token** may not close work short through any
-  completion tool, book more good than the floor counted, edit an operation's counts, or lower an
-  order once work is recorded (**403**). The agent instructions say what to do with that 409: leave the work open
+  **409** while any unit is unaccounted. An **API token** may not report scrap through any tool
+  (owner decision 2026-11-07 — only a person declares scrap), may not close work short through any
+  completion tool, and may not book more good than the floor counted, edit an operation's counts,
+  or lower an order once work is recorded (**403**); good-only reports, zero-scrap clock-outs and
+  full-count closes still work. The agent instructions say what to do with that 409: leave the work open
   and tell the user — never invent scrap, a reason or a quantity to make a close succeed.
 
 ---
@@ -292,17 +294,31 @@ or mint, list or revoke tokens, including through the three tools that front tho
 (`create_api_token`, `list_api_tokens`, `revoke_api_token`: Admin only, with an interactive JWT).
 The fence blocks those direct verbs only: an **Admin**-held token is still an Admin on `/users`
 (`create_user`, `update_user`, `reset_user_password`), so the bound user's role is the real
-boundary. One credential rule sits on top of the role: an API token may not **close work short** —
-`shop_floor_complete_operation` / `work_orders_complete_operation` on a short close and
-`work_orders_complete_work_order` below the order answer **403** `"Closing work short must be done
-by a person signed in to the app, not an API token."` whatever the user's role (a full-count close
-is unaffected) — nor make the related count judgments: good above the floor's record
-(`work_orders_complete_operation`, `work_orders_complete_work_order`), count edits through
-`work_orders_update_operation`, and lowering `quantity_ordered` (`update_work_order`) once work is
-recorded answer **403** `"Recording more good than the floor counted, editing an operation's counts,
-or lowering the order after work was recorded must be done by a person signed in to the app, not an
-API token."`. These are the short-count rule's own refusals; read together with ruling 3 as "standing
-API tokens may not make judgment writes", it awaits owner confirmation. An interactive access JWT —
+boundary. One credential rule sits on top of the role, whatever the user's role — a standing API
+token does not make these judgments; a person does:
+- **An API token may not declare scrap (owner decision 2026-11-07).** Only a person — at the kiosk,
+  with a crew badge, or signed in at a desk — declares scrap, because a scrap count is quality
+  evidence someone has to have seen. Every tool whose call would raise a recorded scrap quantity
+  answers **403** `"Scrap must be reported by a person (at the kiosk, with a crew badge, or signed in
+  at a desk), not an API token: a scrap count is quality evidence someone has to have seen. Record
+  good pieces only, or leave the work open for that person."` and writes nothing: `clock_out`,
+  `report_operation_production` (with or without `open_ncr`), `prepare_task` / `execute_task` for a
+  `report_production` task, `shop_floor_complete_operation`, `work_orders_complete_operation`,
+  `work_orders_complete_work_order`, `work_orders_update_operation` and `update_work_order`. The same
+  call with no new scrap — a good-only report, a zero-scrap clock-out, a full-count close,
+  re-sending the recorded scrap value — works as before.
+- **Nor close work short** (the same decision: a token keeps only the full-count close) —
+  `shop_floor_complete_operation` / `work_orders_complete_operation` on a short close whose scrap is
+  already on record, and `work_orders_complete_work_order` below the order, answer **403**
+  `"Closing work short must be done by a person signed in to the app, not an API token."`.
+- **Nor make the related count judgments** (this PR's extension of the same rule; the owner was
+  asked about scrap, not these): good above the floor's record (`work_orders_complete_operation`,
+  `work_orders_complete_work_order`), any other count edit through `work_orders_update_operation`,
+  and lowering `quantity_ordered` (`update_work_order`) once work is recorded answer **403**
+  `"Recording more good than the floor counted, editing an operation's counts, or lowering the order
+  after work was recorded must be done by a person signed in to the app, not an API token."`.
+
+An interactive access JWT —
 the person's own session, which the MCP client approves call by call — is not refused. No token is ever bound to a superuser / `platform_admin` (409 at mint, refused at use),
 deactivating a token's user revokes it, and every audit row a token writes carries
 `extra_data.credential` naming the token.
@@ -562,7 +578,7 @@ with a 422 that names it, never accepted-and-ignored.
 | `create_work_order` | `POST /work-orders/` | `part_id`, `quantity_ordered` (required); `work_order_type`, `parent_work_order_id`, `priority`, `due_date`, `customer_name`, `customer_po`, `unit_number`, `notes`, `special_instructions`, `sequential_operations`, `serial_numbers`, `auto_routing` (query, default `true`). **No `status` argument** — passing one is a 422 | See [DRAFT guarantees](#9-draft-guarantees). Refuses `work_order_type: "laser_cutting"` **before** calling, with the API's own wording |
 | `add_operation` | `POST /work-orders/{id}/operations` | `work_order_id`, `name`, `work_center` (required; **int id or name/code string**); `sequence` (10–990, multiple of 10); passthrough `operation_number`, `description`, `setup_instructions`, `run_instructions`, `setup_time_hours`, `run_time_hours`, `run_time_per_piece`, `requires_inspection`, `inspection_type`, `component_part_id`, `component_quantity`, `operation_group`. `quantity` is accepted by the schema only to be **refused 422 with an explanation** | **Name guard** (below). Work center by name: exact match on name or code → substring → refuses **404** on none, **409** naming the candidates on more than one ("Pass the id"). `sequence` omitted → `GET /work-orders/{id}` and use the next multiple of 10 after the current maximum (10 on an empty plan). **An operation has no quantity of its own** — it runs the work order's `quantity_ordered`; `component_quantity` is the BOM component demand for the step (the per-operation piece target on a batch job), not an operation quantity, so the spec's `quantity` is not aliased to it. Not for laser WOs (the route refuses 400) |
 | `get_work_order` | `GET /work-orders/{id}` or `/work-orders/by-number/{n}` | `work_order_id` **or** `work_order_number` (percent-encoded into the path, so `../` or `?` cannot steer the call onto another route) | Full `WorkOrderResponse`: operations, nests (`operations[].laser_nest`), status, `version` |
-| `update_work_order` | `PUT /work-orders/{id}` | `work_order_id`, `version` (required); `quantity_ordered`, `priority`, `status`, `sequential_operations`, `due_date`, `customer_name`, `customer_po`, `unit_number`, `notes`, `special_instructions`, `quantity_complete`, `quantity_scrapped`, `scrap_reason` — every `WorkOrderUpdate` field, pinned to the route's own schema by a catalog test | The header edit verb, version-gated (409 when stale). **`status` accepts `draft` / `on_hold` / `cancelled` only** (and `on_hold` only on a released or in-progress job — the route refuses a draft **409**, it has nothing on the floor to hold): `released` and `in_progress` are refused **422** naming the real verbs (`release_work_order`, `work_orders_start_work_order`; the `in_progress` refusal also names `work_orders_resume_work_order`, because the start verb takes released jobs only and a hold is lifted by the resume tool) — the route's blind `setattr` would accept them with no `released_at` / `released_by` and no operation promotion; `complete` / `closed` are refused by the route itself. `status: "draft"` is how a released-but-unstarted job is put back (the nest tools use the same PUT) |
+| `update_work_order` | `PUT /work-orders/{id}` | `work_order_id`, `version` (required); `quantity_ordered`, `priority`, `status`, `sequential_operations`, `due_date`, `customer_name`, `customer_po`, `unit_number`, `notes`, `special_instructions`, `quantity_complete`, `quantity_scrapped`, `scrap_reason` — every `WorkOrderUpdate` field, pinned to the route's own schema by a catalog test | The header edit verb, version-gated (409 when stale). **`status` accepts `draft` / `on_hold` / `cancelled` only** (and `on_hold` only on a released or in-progress job — the route refuses a draft **409**, it has nothing on the floor to hold): `released` and `in_progress` are refused **422** naming the real verbs (`release_work_order`, `work_orders_start_work_order`; the `in_progress` refusal also names `work_orders_resume_work_order`, because the start verb takes released jobs only and a hold is lifted by the resume tool) — the route's blind `setattr` would accept them with no `released_at` / `released_by` and no operation promotion; `complete` / `closed` are refused by the route itself. `status: "draft"` is how a released-but-unstarted job is put back (the nest tools use the same PUT). With an API token, a `quantity_scrapped` above the header's recorded scrap is refused **403** by the route (owner decision 2026-11-07 — a person reports scrap); omitting it or re-sending the recorded value works |
 | `duplicate_work_order` | `POST /work-orders/{id}/duplicate` | `work_order_id`, `quantity_ordered` (both required — the route requires the quantity; a laser job ignores it and derives its own from the copied nests), `due_date` | Copies the *plan* onto a new DRAFT (`WORK_ORDER_TEMPLATES.md` / duplicate service); post-checks DRAFT |
 | `release_work_order` | `POST /work-orders/{id}/release` | `work_order_id` | Explicit only; the route refuses anything not DRAFT. The **only** tool that releases work |
 | `import_laser_nest_package` | `POST /work-orders/laser-nest-packages/standalone/import` or `POST /work-orders/{id}/laser-nest-packages/import` | `work_order_id` (omit for standalone), `file` `{filename, content_base64, content_type?}` **or** `source_path`, `rows` (list → sent as the JSON string the route expects, or a string), `work_center_id`, `due_date` (standalone only), `sheet_match_provenance`, `release` (default `false`) | See [Nest import demotion](#10-nest-import-demotion). Returns `{import, work_order, demoted_to_draft, operations_returned_to_pending, note}` |
@@ -896,7 +912,9 @@ count, in which case there is nothing left to close.
 | `{"status": 409, "detail": "This work order has not been released — release first…"}` or `"This work order is on hold…"` from `clock_in`, `shop_floor_start_operation`, `work_orders_start_operation`, `work_orders_start_work_order`, a complete of a READY operation, or `work_orders_update_operation` setting `status: in_progress` (or `status: ready` on a draft) | The work order is DRAFT or ON_HOLD — the floor cannot start work on it | A person with the role decides: `release_work_order` for a draft, `work_orders_resume_work_order` for a held job (Admin / Manager / Supervisor) |
 | `{"status": 409, "detail": "A draft work order has not been released, so there is nothing on the floor to hold…"}` from `update_work_order` | `status: on_hold` on a DRAFT | Leave it in draft; hold only released / in-progress work |
 | `{"status": 409, "detail": "Op 20: 2 of 10 not yet accounted for (8 good, 0 scrapped)…"}` from `shop_floor_complete_operation`, or `"…unaccounted for…"` from `work_orders_complete_work_order` | The count is short and nobody has said where the missing pieces went (owner ruling 1) — nothing was written | Leave the work open and tell the user. Recording the pieces, or reporting them as scrap with a reason, is a decision for the person who knows; never invent scrap, a reason or a quantity to make the close succeed |
+| `{"status": 403, "detail": "Scrap must be reported by a person (at the kiosk, with a crew badge, or signed in at a desk), not an API token…"}` from `clock_out`, `report_operation_production`, `prepare_task` / `execute_task` (`report_production`), a complete tool, `work_orders_update_operation` or `update_work_order` | An API token tried to report scrap (owner decision 2026-11-07) — nothing was written | Record good pieces only (send no scrap), or leave the work open and tell the user — a person reports the scrap. Nothing an API token holds changes this |
 | `{"status": 403, "detail": "Closing work short must be done by a person signed in to the app, not an API token."}` | An API token tried to close an operation or a work order short | A person closes it in the app; nothing an API token holds changes this |
+| `{"status": 403, "detail": "Recording more good than the floor counted, editing an operation's counts, or lowering the order after work was recorded…"}` | An API token tried to book good above the floor's record, edit an operation's counts, or lower an order once work was recorded | A person makes that correction in the app; nothing an API token holds changes this |
 | `{"status": 409, "detail": "… is complete; its counts are the completion record…"}` from `work_orders_update_operation` | A count or status edit on a COMPLETE operation | Corrections go through `reduce_operation_production_office` (Admin / Manager / Supervisor), which can reopen the operation — a person's decision |
 | `{"status": 422, ...}` `"Additional properties are not allowed ('serach' was unexpected)"` | A misspelled argument — every schema is strict (§6.3) | Fix the argument name; nothing was dispatched |
 | `{"status": 409, ...}` from `add_operation` naming several work centers | Ambiguous `work_center` string | Pass the `id` (from `list_work_centers`) or a more specific name |

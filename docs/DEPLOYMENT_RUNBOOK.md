@@ -582,7 +582,7 @@ variable. After this deploy a short count at operation completion is reported as
 or the operation stays open: `POST /api/v1/shop-floor/operations/{id}/complete` closes at the good
 the floor recorded and refuses **409** (writing nothing) while units are unaccounted, the office
 operation complete and force-complete apply the same rule, and an API token may not close work short
-(**403**).
+or report scrap anywhere (**403**; owner decision 2026-11-07).
 
 1. **Migration `117_operation_short_declared`** (down-revision `116_business_keys_per_company`) adds
    one nullable `Float` column, `work_order_operations.quantity_short_declared` — no default, no
@@ -636,7 +636,10 @@ operation complete and force-complete apply the same rule, and an API token may 
    kiosk and floor tablet after the deploy. An MCP agent or script that relied on a partial floor
    `/complete` now gets 409, and any standing API token that closed work short, booked good above
    the floor's count, edited operation counts or lowered an order after work was recorded now gets
-   403.
+   403. So does any standing API token that reported scrap — through clock-out, a production report
+   (incl. scrap → NCR and the Hank `report_production` task), either close verb, force-complete, or
+   a `PUT` that raises `quantity_scrapped` (owner decision 2026-11-07: only a person declares scrap).
+   Its good-only reports, zero-scrap clock-outs and full-count closes are unchanged.
    One deliberate read-path change on old data: a work order whose operations all completed but whose
    header sits ABOVE its order is lowered to the order at the next reconciling read (and its
    finished-goods receipt posts at the order) — the header is now clamped to `quantity_ordered`. To
