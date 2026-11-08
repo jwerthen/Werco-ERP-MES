@@ -5318,6 +5318,12 @@ def update_operation(
     refused **409** too (it would put unreleased work on the dispatch board). Both are
     raised before any field is written. Re-sending the operation's current status is
     not a transition and is accepted.
+
+    Raising ``quantity_complete`` on an operation that is (or this write leaves) PENDING
+    or READY is refused **409** with the same start-gate text when the work order is a
+    draft or on hold: recorded good quantity on a not-started operation is what the next
+    reconciling read treats as a start. Returns **404** when the operation's work order is
+    missing or soft-deleted.
     """
     operation = (
         db.query(WorkOrderOperation)
@@ -5326,6 +5332,15 @@ def update_operation(
     )
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
+    # Invariant 3: an operation of a soft-deleted work order is part of a tombstone, and
+    # soft delete leaves the work order's status (e.g. RELEASED) as it was -- so without
+    # this the start gate below passes and a supervisor could hand-start, re-count or
+    # re-route a deleted job. Refused for the WHOLE verb, before the version check, the
+    # start gate and the first setattr, exactly as every other start door 404s (clock-in,
+    # both start verbs, /start, /release). The records-vs-selection exceptions do not
+    # cover editing a deleted job's routing.
+    if operation.work_order is None or operation.work_order.is_deleted:
+        raise HTTPException(status_code=404, detail="Work order not found")
 
     # Capture old values for audit. This generic update writes domain data (including
     # quantity_scrapped/scrap_reason) via a blind setattr loop; previously it committed
@@ -5384,6 +5399,28 @@ def update_operation(
                 status_blocked_reason = MSG_WORK_ORDER_NOT_RELEASED
         if status_blocked_reason:
             raise HTTPException(status_code=409, detail=status_blocked_reason)
+
+    # The same gate's other door: a quantity_complete RAISE on an operation nobody has
+    # started. The reconciling read lifts a PENDING / READY operation carrying good
+    # quantity to IN_PROGRESS, and the office complete verb then accepts it ungated -- so
+    # without this, "PUT a count, GET, complete" started and finished work (tied material
+    # included) on a job nobody released or a supervisor stopped. The read now withholds
+    # that lift on a DRAFT / ON_HOLD job too (reconcile_work_orders_from_completion_
+    # evidence); this refusal also covers readers that never reconcile. Narrow on purpose:
+    # only a RAISE of good quantity, only on an operation this write leaves PENDING / READY,
+    # only on a DRAFT / ON_HOLD work order (a terminal one is not this gate's business,
+    # and scrap never triggers the lift). The text is the start gate's own (no inline twin).
+    work_order_for_gate = operation.work_order
+    if (
+        work_order_for_gate.status in (WorkOrderStatus.DRAFT, WorkOrderStatus.ON_HOLD)
+        and update_data.get("quantity_complete") is not None
+        and float(update_data["quantity_complete"]) > float(operation.quantity_complete or 0)
+        and (new_op_status if new_op_status is not None else operation.status)
+        in (OperationStatus.PENDING, OperationStatus.READY)
+    ):
+        count_blocked_reason = work_order_start_blocker(work_order_for_gate)
+        if count_blocked_reason:
+            raise HTTPException(status_code=409, detail=count_blocked_reason)
 
     # Work-center reassignment (planner action, e.g. re-dispatching a laser nest to
     # another laser -- but legitimate for any operation between compatible work

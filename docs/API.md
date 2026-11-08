@@ -1396,7 +1396,7 @@ company-scoped.
 | POST | `/work-orders/{id}/complete` | Complete work order (409 if the WO is CANCELLED) | Yes |
 | POST | `/work-orders/{id}/duplicate` | **Duplicate a work order** — copy its *plan* (operations, laser nests, open material ties, re-snapshotted process-sheet steps) onto a new **DRAFT** WO. Body `{quantity_ordered, due_date}`; **201** returning an **envelope**, not a bare work order. See "Duplicating a work order" below | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/operations` | Add an operation to a work order | Admin / Manager / Supervisor |
-| PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below). **409** if it sets `status` to COMPLETE on a not-yet-complete operation — completion goes through the completion endpoints (see "Terminal-state lock"). **409** with the start gate's text if it sets `status` to IN_PROGRESS on an operation of a draft, on-hold or complete / closed / cancelled work order, and **409** "release first" if it sets `status` to READY on a draft — both before any field is written; re-sending the operation's current status is not a transition (see "Draft and on-hold work orders refuse every start") | Admin / Manager / Supervisor |
+| PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below). **409** if it sets `status` to COMPLETE on a not-yet-complete operation — completion goes through the completion endpoints (see "Terminal-state lock"). **409** with the start gate's text if it sets `status` to IN_PROGRESS on an operation of a draft, on-hold or complete / closed / cancelled work order, and **409** "release first" if it sets `status` to READY on a draft — both before any field is written; re-sending the operation's current status is not a transition. **409** with the same text when it **raises** `quantity_complete` on an operation that is (or this write leaves) PENDING / READY of a draft or on-hold work order. **404** `Work order not found` when the operation's work order is soft-deleted (see "Draft and on-hold work orders refuse every start") | Admin / Manager / Supervisor |
 | POST | `/work-orders/operations/{id}/start` | Start an operation (**office** verb — operators start work through `PUT /shop-floor/operations/{id}/start` and the kiosk, which stay operator-open). Refused before any write, in the shop-floor twin's order: **400** already complete / already in progress (it never re-opens or re-stamps one), **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **409** operation on hold (starting does not lift a hold), **400** predecessors | Admin / Manager / Supervisor / Quality |
 | POST | `/work-orders/operations/{id}/complete` | Complete an operation (or record partial progress; 409 if the parent WO is terminal; **409 for a READY operation on a draft or on-hold WO** — completing it would start it). **Office** verb — the shop-floor twin is the operator path | Admin / Manager / Supervisor / Quality |
 | POST | `/work-orders/operations/{id}/reduce-production` | Supervisor/office over-count correction — walk back good-count across **any** operator's **unapproved** labor on the operation; **a COMPLETE operation is correctable here** (unlike the operator's twin), a terminal WO is not; no clock-in required (see note below) | Admin / Manager / Supervisor |
@@ -1762,8 +1762,19 @@ company-scoped.
 >   and re-sending the operation's current status in an unrelated edit is not a transition, so it
 >   still lands. Hand-setting READY on a held job's operation stays the supervisor override it was —
 >   every start verb still refuses that operation until the work order resumes.
-> - **A soft-deleted work order is 404** on clock-in, both start verbs, `POST /work-orders/{id}/start`
->   and `POST /work-orders/{id}/release`.
+> - **Nor is a count.** Recorded good quantity on a not-started operation is what a reconciling read
+>   treats as a start (it lifts a PENDING / READY operation carrying `quantity_complete > 0` to
+>   IN_PROGRESS), so `PUT /work-orders/operations/{id}` refuses **409** with the table's `draft` /
+>   `on_hold` text a `quantity_complete` **raise** on an operation that is — or that write leaves —
+>   PENDING or READY, on a draft or on-hold work order, before any field is written. And the read
+>   itself no longer performs that lift on a draft or on-hold job: quantities still reconcile, the
+>   operation stays PENDING / READY, and the first read after Release / Resume lifts it. Together they
+>   close the "`PUT` a count, read, office-complete" path. Deliberately narrow: lowering a count,
+>   scrap changes, and counts on an IN_PROGRESS or COMPLETE operation are unaffected, and so is a
+>   terminal work order.
+> - **A soft-deleted work order is 404** on clock-in, both start verbs, `POST /work-orders/{id}/start`,
+>   `POST /work-orders/{id}/release` and the generic `PUT /work-orders/operations/{id}` (the whole verb:
+>   no field of a deleted job's operation is editable through it).
 > - **A laser child does not inherit its assembly parent's draft or hold** — the gate reads the
 >   operation's own work order. Hold the laser work order itself to stop its nests.
 > - **List membership does not change.** Draft and held jobs stay on the kiosk queue, the crew station,

@@ -1833,6 +1833,13 @@ def reconcile_work_orders_from_completion_evidence(
 
     step_gated_operation_ids = gated_operation_ids(db, operations)
 
+    # Ruling 2: a read never STARTS work on a job the start gate refuses -- the same reason
+    # ``_promote_stranded_ready_operations`` skips DRAFT. Checked inline off the status
+    # (operation_action_gates imports this module, so its helper cannot be imported here).
+    start_withheld_work_order_ids = {
+        wo.id for wo in non_terminal_work_orders if wo.status in (WorkOrderStatus.DRAFT, WorkOrderStatus.ON_HOLD)
+    }
+
     for operation in operations:
         produced_qty, scrapped_qty = produced_by_operation.get(operation.id, (0.0, 0.0))
         if produced_qty > float(operation.quantity_complete or 0):
@@ -1847,6 +1854,7 @@ def reconcile_work_orders_from_completion_evidence(
             latest_entry_by_operation.get(operation.id),
             closed_produced_by_operation.get(operation.id, 0.0) >= operation_target_quantity(operation),
             completion_gated=operation.id in step_gated_operation_ids,
+            start_withheld=operation.work_order_id in start_withheld_work_order_ids,
         )
         if (
             op_changed
@@ -1921,6 +1929,7 @@ def _sync_operation_status_from_quantity(
     latest_entry: Optional[TimeEntry] = None,
     has_closed_completion_evidence: bool = False,
     completion_gated: bool = False,
+    start_withheld: bool = False,
 ) -> bool:
     """Reconcile an operation's status from its quantities + closed labor evidence.
 
@@ -1929,6 +1938,13 @@ def _sync_operation_status_from_quantity(
     withheld (quantities and the PENDING/READY -> IN_PROGRESS lift still apply), so
     the read-time reconcile can never complete an operation the /complete endpoints
     and the clock-out path would refuse.
+
+    ``start_withheld`` (ruling 2): True when the operation's work order is DRAFT or
+    ON_HOLD. The PENDING/READY -> IN_PROGRESS lift IS a start, and a read must not start
+    work the start gate (``operation_action_gates.work_order_start_blocker``) refuses --
+    otherwise "record a count on a not-started operation, read, complete" walked round
+    the gate. Only the lift is withheld; quantities still reconcile and the next read
+    after Release / Resume performs it.
     """
     target_qty = operation_target_quantity(operation)
     if target_qty <= 0:
@@ -1963,7 +1979,11 @@ def _sync_operation_status_from_quantity(
         # MS-5: free the schedule reservation for a reconcile-driven completion too.
         release_operation_schedule_reservation(operation)
         changed = True
-    elif quantity_complete > 0 and operation.status in (OperationStatus.PENDING, OperationStatus.READY):
+    elif (
+        quantity_complete > 0
+        and operation.status in (OperationStatus.PENDING, OperationStatus.READY)
+        and not start_withheld
+    ):
         operation.status = OperationStatus.IN_PROGRESS
         operation.actual_start = operation.actual_start or (latest_entry.clock_in if latest_entry else None)
         operation.started_by = operation.started_by or (latest_entry.user_id if latest_entry else None)
