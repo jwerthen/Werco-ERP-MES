@@ -132,6 +132,7 @@ from app.services.operation_action_gates import (
     MSG_SCRAP_REASON_OR_CODE_REQUIRED,
     MSG_WRONG_WORK_CENTER,
     accounting_strand_message,
+    api_token_changes_scrap_reason,
     api_token_declares_scrap,
     approved_open_entry_message,
     ceiling_exceeded_message,
@@ -153,6 +154,7 @@ from app.services.operator_qualification_service import evaluate_and_record_oper
 from app.services.production_receipt_service import find_production_replay
 from app.services.production_reduction_service import (
     approved_produced_total,
+    assert_reduction_credential_or_http,
     eligible_reduction_entries,
     load_operation_for_reduction_or_http,
     perform_production_reduction,
@@ -1906,12 +1908,20 @@ def clock_out(
     audit: AuditService = Depends(get_audit_service),
 ):
     """Clock out from a work order operation, adding the pieces made and any scrap (scrap needs
-    scrap_reason or scrap_reason_code_id). A standing API token may not report scrap (403); its
-    zero-scrap clock-out works as before, and a crew-station badge is a person and may.
+    scrap_reason or scrap_reason_code_id). A clock-out whose good count reaches every unit that
+    can reach the operation (the order, less any short declared upstream) COMPLETES it: the
+    result's operation_status is then 'complete'. Good above that is refused 400, and pieces on
+    an operation already complete 409. A standing API token may not report scrap or write a
+    scrap reason (403); its zero-scrap clock-out works as before.
 
-    The scrap refusal (owner decision 2026-11-07: a scrap count is quality evidence someone has
-    to have seen) runs after the not-found / already-clocked-out / negative-quantity checks and
-    before any lock, write or audit row.
+    Refused before any lock, write or audit row, in order: not found **404**; already clocked
+    out **400**; a quantity that is not a finite number **400** ``Quantity must be a valid
+    number`` (for everyone -- NaN used to commit and then 500); a negative quantity **400**;
+    then, for a standing API token only, scrap **403** (owner decision 2026-11-07: a scrap count
+    is quality evidence someone has to have seen) and a ``scrap_reason`` /
+    ``scrap_reason_code_id`` that would change the one on its time entry **403** (the same text;
+    re-categorizing scrap is the same judgment -- this PR's extension of that decision). A
+    crew-station badge is a person and passes both.
     """
     time_entry = (
         db.query(TimeEntry)
@@ -1936,6 +1946,12 @@ def clock_out(
         # happens at clock-in time, but don't 500 if a bad row slipped in.
         raise HTTPException(status_code=500, detail="Time entry is missing clock_in")
 
+    # NaN / infinity pass every ``< 0`` / ``> 0`` comparison below unseen (and the schema's
+    # scrap-reason rule with them), so a non-finite clock-out used to close the entry, commit
+    # NaN into the labor record and then 500 serializing it. Refused for everyone, like
+    # /production, the floor close and force-complete.
+    if not (math.isfinite(clock_out_data.quantity_produced) and math.isfinite(clock_out_data.quantity_scrapped)):
+        raise HTTPException(status_code=400, detail="Quantity must be a valid number")
     if clock_out_data.quantity_produced < 0 or clock_out_data.quantity_scrapped < 0:
         raise HTTPException(status_code=400, detail="Quantities cannot be negative")
 
@@ -1944,6 +1960,23 @@ def clock_out(
     # refused here, before any lock, write or audit row. A zero-scrap clock-out by a token
     # is unchanged, and a crew-station badge token is a person (``api_token_declares_scrap``).
     if api_token_declares_scrap(current_user, clock_out_data.quantity_scrapped):
+        raise HTTPException(status_code=403, detail=API_TOKEN_SCRAP)
+    # Nor may it re-label the scrap on its time entry: the clock-out writes a sent reason or
+    # code onto the entry even with zero scrap, and that entry can carry scrap the same user
+    # reported earlier as a person. Judged on what the write below would store (a falsy
+    # reason / omitted code keeps the stored one), before the code is resolved.
+    if api_token_changes_scrap_reason(
+        current_user,
+        (clock_out_data.scrap_reason or time_entry.scrap_reason, time_entry.scrap_reason),
+        (
+            (
+                clock_out_data.scrap_reason_code_id
+                if clock_out_data.scrap_reason_code_id is not None
+                else time_entry.scrap_reason_code_id
+            ),
+            time_entry.scrap_reason_code_id,
+        ),
+    ):
         raise HTTPException(status_code=403, detail=API_TOKEN_SCRAP)
 
     # A0.1 adoption-telemetry channel for this write (kiosk-token forcing + import
@@ -4390,7 +4423,8 @@ def reduce_operation_production(
     Correct (walk back) good-count quantity an operator OVER-reported on an
     operation, BEFORE it is complete. This is the inverse of
     ``report_operation_production`` -- a miscount correction, not a scrap move and
-    not a completion.
+    not a completion. A standing API token may not correct counts (403); a crew-station
+    badge is a person and may.
 
     Scope (operator self-service): the walk-back is bounded to the CALLER'S OWN
     UNAPPROVED evidence on this operation -- their open clock-in first, then their
@@ -4421,10 +4455,16 @@ def reduce_operation_production(
       evidence is already APPROVED, the message says so.
     * ``reopen_operation: true`` -> 422: re-opening a completed operation is the office
       verb's supervised correction, never operator self-service.
+    * A standing API token -> 403 (this PR's extension of the 2026-11-07 decision, not part
+      of it: a count correction is a person's judgment), right after the 404 / 409 above and
+      before the clock-in check, any lock or any write.
     """
     if reduction_data.reopen_operation:
         raise HTTPException(status_code=422, detail=MSG_REOPEN_IS_OFFICE_ONLY)
-    load_operation_for_reduction_or_http(db, operation_id, company_id)
+    scoped_operation, scoped_work_order = load_operation_for_reduction_or_http(db, operation_id, company_id)
+    assert_reduction_credential_or_http(
+        current_user, scoped_work_order, scoped_operation, reduction_data.quantity_delta
+    )
 
     # "Actively working" gate: the caller must hold an open clock-in on this operation.
     open_entry = (
@@ -4892,6 +4932,9 @@ def complete_operation(
         )
 
     # ---- Every refusal is above this line; the mutation starts here. ----
+    # The work order's status BEFORE the finalizer may complete it -- the old side of the
+    # work-order STATUS_CHANGE row written below when this close finishes the job.
+    old_work_order_status = work_order.status.value if work_order.status else None
     old_values = {
         "status": operation.status.value if operation.status else None,
         "quantity_complete": float(operation.quantity_complete or 0),
@@ -5038,6 +5081,21 @@ def complete_operation(
             audit.log_required(**audit_kwargs)
     else:
         audit.log(**audit_kwargs)
+    # When this close finished the work order's last open operation the finalizer flipped
+    # the WORK ORDER to COMPLETE too, and its twins (clock-out, the office close) each record
+    # that transition. This verb used to write only the operation row, so a job closed from
+    # the floor -- including one on hold or in draft, whose running work stays closable --
+    # reached COMPLETE (FG receipt included) with nothing on the work order's own chain.
+    # Same tier as the twins: best-effort.
+    if work_order_completed:
+        audit.log_status_change(
+            resource_type="work_order",
+            resource_id=work_order.id,
+            resource_identifier=work_order.work_order_number,
+            old_status=old_work_order_status,
+            new_status=WorkOrderStatus.COMPLETE.value,
+            description=f"Completed work order {work_order.work_order_number} via shop-floor completion",
+        )
 
     # Material consumption (incremental): deplete THIS operation's tied material as soon
     # as the operation is COMPLETE -- one laser operation is one nest, and its sheet leaves

@@ -559,11 +559,12 @@ class TestOperationPutOnACompleteOperation:
         self, client, db_session, supervisor, fields, expected
     ):
         """Scrap found after an office close has no other operation-level door (the clock-out
-        refuses pieces on a completed operation): it can be added, never lowered, and the
-        correction is REQUIRED evidence -- it cannot make a completed operation short."""
+        refuses pieces on a completed operation): it can be added into what is still
+        unaccounted (a legacy close at 9 of 10 leaves 1), never lowered, and the correction is
+        REQUIRED evidence -- it cannot make a completed operation short."""
         wc = make_work_center(db_session)
         _, (op, _) = make_routing(db_session, work_centers=[wc, make_work_center(db_session)], statuses=[DONE, READY])
-        set_op(db_session, op, quantity_complete=10, scrap_reason="original")
+        set_op(db_session, op, quantity_complete=9, scrap_reason="original")
         resp = client.put(
             OPERATION_PUT_URL.format(op=op.id),
             json={"version": op.version, **fields},
@@ -572,7 +573,7 @@ class TestOperationPutOnACompleteOperation:
         assert resp.status_code == 200, resp.text
         row = fresh(db_session, WorkOrderOperation, op.id)
         assert (float(row.quantity_scrapped or 0), row.scrap_reason) == expected
-        assert (row.status, float(row.quantity_complete)) == (DONE, 10.0)
+        assert (row.status, float(row.quantity_complete)) == (DONE, 9.0)
         (audit_row,) = op_audit_rows(db_session, op.id)
         assert audit_row.extra_data["transition"] == "completed_operation_scrap_correction"
         assert audit_row.new_values["scrap_reason"] == expected[1]
@@ -582,7 +583,8 @@ class TestOperationPutOnACompleteOperation:
     ):
         wc = make_work_center(db_session)
         _, (op, _) = make_routing(db_session, work_centers=[wc, make_work_center(db_session)], statuses=[DONE, READY])
-        set_op(db_session, op, quantity_complete=10)
+        # A legacy close at 9 of 10: 1 unit still unaccounted, which is what scrap may fill.
+        set_op(db_session, op, quantity_complete=9)
         before = _op_state(db_session, op.id)
         monkeypatch.setattr(AuditService, "log", lambda self, *a, **k: None)
         resp = client.put(

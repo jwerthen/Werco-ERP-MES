@@ -159,7 +159,7 @@ class TestClockOutOnAnAlreadyCompleteOperation:
         assert resp.json()["detail"] == completed_operation_clock_out_message(op)
         assert resp.json()["detail"] == (
             "Op 10 is already complete; clock out with 0 pieces and tell a supervisor about any extra pieces "
-            "(a supervisor can add scrap to a completed operation, with a reason, from the work order)."
+            "(a supervisor corrects a completed operation's counts from the work order)."
         )
         assert fresh(db_session, TimeEntry, entry.id).clock_out is None
 

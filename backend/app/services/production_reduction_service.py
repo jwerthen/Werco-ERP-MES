@@ -34,6 +34,12 @@ RE-STAMPED (REQUIRED audit) so the later stages are credited with the real loss 
 re-stamp is judged by ``accounting_change_strands`` too, so a change can never strand a
 COMPLETE operation in another chain (a component chain feeds the assembly chain).
 
+A standing API token may not correct counts on either verb (**403**, before any lock or
+write -- ``api_token_reduction_refusal``). That is this PR's extension of the owner's
+2026-11-07 decision, which covered scrap and short closes only: a reopen erases a person's
+close and a re-stamp re-declares its short, and the operation PUT already refuses any count
+edit by a token. A crew-station badge token is a person and still corrects its own count.
+
 The quantity math itself lives in
 ``work_order_state_service.reduce_operation_produced_quantity`` (the walk across
 eligible entries + the recomputed WO rollup); this module owns eligibility,
@@ -53,12 +59,15 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.api.audit_guard import required_audit
+from app.core.credentials import is_api_token_credential
 from app.models.time_entry import TimeEntry
 from app.models.user import User
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.services.audit_service import AuditService
 from app.services.laser_nest_service import sync_laser_nest_from_operation
 from app.services.operation_action_gates import (
+    API_TOKEN_COUNT_JUDGMENT,
+    API_TOKEN_SHORT_CLOSE,
     CORRECTION_AUDIT_UNAVAILABLE,
     accounting_strand_message,
     reduce_would_leave_short_message,
@@ -68,6 +77,7 @@ from app.services.operational_event_service import OperationalEventService
 from app.services.work_order_state_service import (
     QTY_EPSILON,
     TERMINAL_WO_STATUSES,
+    OperationAccounting,
     OperationQuantityReduction,
     accounting_change_strands,
     accounting_extra_data,
@@ -125,6 +135,71 @@ def _assert_reduction_in_scope(
         raise HTTPException(status_code=409, detail=MSG_TERMINAL_WORK_ORDER)
     if operation.status == OperationStatus.COMPLETE and not allow_completed_operation:
         raise HTTPException(status_code=409, detail=MSG_COMPLETED_WORK)
+
+
+def _corrected_accounting(
+    work_order: WorkOrder,
+    operation: WorkOrderOperation,
+    active_operations: list[WorkOrderOperation],
+    delta: float,
+) -> OperationAccounting:
+    """A COMPLETE operation's accounting at the good count the correction would leave."""
+    corrected_good = max(0.0, float(operation.quantity_complete or 0) - float(delta))
+    return operation_accounting(work_order, operation, active_operations, good=corrected_good)
+
+
+def _redeclared_short(acct: OperationAccounting) -> Optional[float]:
+    """The declaration an accounted COMPLETE operation would close with after the correction."""
+    return acct.closing_short if acct.closing_short > QTY_EPSILON else None
+
+
+def _declaration_changes(new_declared: Optional[float], old_declared: Optional[float]) -> bool:
+    return abs(float(new_declared or 0) - float(old_declared or 0)) > QTY_EPSILON
+
+
+def api_token_reduction_refusal(
+    actor: User, work_order: WorkOrder, operation: WorkOrderOperation, delta: float
+) -> Optional[str]:
+    """The **403** text when a standing API token asks for a correction, else ``None``.
+
+    This PR's extension of the owner's 2026-11-07 decision (that decision covered scrap and
+    short closes; this one is not part of it): lowering a recorded good count is a judgment
+    about where pieces went, made by a person -- the same reading under which
+    ``PUT /work-orders/operations/{id}`` refuses ANY count edit by a token. So EVERY
+    reduction by an API token is refused, on both verbs, not only the two branches that are
+    plainly short closes in disguise: a REOPEN (it clears the short a person declared and
+    walks other operators' labor down) and a RE-STAMP (it re-declares the short the later
+    stages are credited with). A re-stamp that would SET a declaration gets
+    ``API_TOKEN_SHORT_CLOSE`` -- it is a short close by another door; everything else gets
+    ``API_TOKEN_COUNT_JUDGMENT``. A crew-station badge token is a person and passes
+    (``is_api_token_credential``), as does an interactive session.
+
+    Both routes call this on the unlocked rows right after their 404 / scope checks (so the
+    refusal precedes every lock, eligibility query and write), and
+    ``perform_production_reduction`` calls it again under the row locks -- the same text
+    selection, because it reuses the core's own re-stamp arithmetic.
+    """
+    if not is_api_token_credential(actor):
+        return None
+    if operation.status == OperationStatus.COMPLETE:
+        acct = _corrected_accounting(work_order, operation, active_work_order_operations(work_order), delta)
+        new_declared = _redeclared_short(acct)
+        if (
+            acct.unaccounted <= QTY_EPSILON
+            and new_declared is not None
+            and _declaration_changes(new_declared, operation.quantity_short_declared)
+        ):
+            return API_TOKEN_SHORT_CLOSE
+    return API_TOKEN_COUNT_JUDGMENT
+
+
+def assert_reduction_credential_or_http(
+    actor: User, work_order: WorkOrder, operation: WorkOrderOperation, delta: float
+) -> None:
+    """Raise the **403** of ``api_token_reduction_refusal``; nothing when the actor may correct."""
+    refusal = api_token_reduction_refusal(actor, work_order, operation, delta)
+    if refusal is not None:
+        raise HTTPException(status_code=403, detail=refusal)
 
 
 def load_operation_for_reduction_or_http(
@@ -335,6 +410,11 @@ def perform_production_reduction(
     # half this re-check exists for -- is not.)
     _assert_reduction_in_scope(work_order, operation, allow_completed_operation=allow_completed_operation)
 
+    # A standing API token may not correct counts (this PR's extension of the 2026-11-07
+    # decision). Both routes already refused it before their first lock; this is the same
+    # check under the locks, ahead of every other refusal and the first write.
+    assert_reduction_credential_or_http(actor, work_order, operation, delta)
+
     target_qty = operation_target_quantity(operation, work_order)
 
     # Siblings loaded under the WO row lock so the service can RECOMPUTE the rollup
@@ -354,9 +434,9 @@ def perform_production_reduction(
     # with scrap that never happened there.
     restamp: Optional[tuple[Optional[float], Optional[float]]] = None
     if operation.status == OperationStatus.COMPLETE:
-        corrected_good = max(0.0, float(operation.quantity_complete or 0) - delta)
         active_operations = active_work_order_operations(work_order)
-        reopen_accounting = operation_accounting(work_order, operation, active_operations, good=corrected_good)
+        reopen_accounting = _corrected_accounting(work_order, operation, active_operations, delta)
+        corrected_good = reopen_accounting.good
         if reopen_accounting.unaccounted > QTY_EPSILON:
             if not reopen_operation:
                 raise HTTPException(
@@ -381,9 +461,9 @@ def perform_production_reduction(
                 raise HTTPException(status_code=409, detail=accounting_strand_message(strand))
             reopening = True
         else:
-            new_declared = reopen_accounting.closing_short if reopen_accounting.closing_short > QTY_EPSILON else None
+            new_declared = _redeclared_short(reopen_accounting)
             old_declared = operation.quantity_short_declared
-            if abs(float(new_declared or 0) - float(old_declared or 0)) > QTY_EPSILON:
+            if _declaration_changes(new_declared, old_declared):
                 strand = accounting_change_strands(
                     work_order,
                     active_operations,

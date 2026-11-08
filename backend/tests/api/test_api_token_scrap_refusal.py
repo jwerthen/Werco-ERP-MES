@@ -291,9 +291,9 @@ class TestClockOut:
         assert float(fresh(db_session, WorkOrderOperation, op.id).quantity_scrapped) == 1
 
     def test_a_token_sending_nan_scrap_at_clock_out_is_refused_writing_nothing(self, client, db_session, admin_headers):
-        """NaN slips past every ``< 0`` / ``> 0`` guard, and clock-out has no non-finite check of
-        its own: without the predicate failing closed, the entry would be clocked out and its
-        (and the operation's) recorded scrap overwritten with NaN (NULL on SQLite)."""
+        """NaN slips past every ``< 0`` / ``> 0`` guard. Clock-out now refuses a non-finite
+        quantity 400 for EVERYONE before the token rule is asked (the predicate's fail-closed
+        branch is the backstop): the entry stays open and nothing is overwritten with NaN."""
         ann = make_user(db_session)
         _, _, op, entry = _running_op(db_session, ann)
         headers = {**_token(client, admin_headers, ann), "Content-Type": "application/json"}
@@ -304,7 +304,9 @@ class TestClockOut:
             content=b'{"quantity_produced": 1, "quantity_scrapped": NaN}',
             headers=headers,
         )
-        _assert_refused_writing_nothing(db_session, resp, before)
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"] == "Quantity must be a valid number"
+        assert _world(db_session) == before
 
     def test_the_refusal_comes_before_the_completed_operation_refusal(self, client, db_session, admin_headers):
         """Scrap onto an operation already closed is a person's 409; a token is told 403 first."""
@@ -802,7 +804,9 @@ class TestNonFiniteScrapFromAToken:
             content=b'{"quantity_produced": 1, "quantity_scrapped": ' + value + b', "scrap_reason": "x"}',
             headers=headers,
         )
-        _assert_refused_writing_nothing(db_session, resp, before)
+        # The route's own non-finite 400 (for everyone) now answers before the token rule.
+        assert resp.status_code == 400, resp.text
+        assert _world(db_session) == before
 
     @pytest.mark.parametrize("value", [b"NaN", b"Infinity"])
     def test_production_report(self, client, db_session, admin_headers, value):

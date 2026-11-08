@@ -114,9 +114,12 @@ MSG_DRAFT_CANNOT_BE_HELD = (
 # A crew-station badge token is a person (``_token_scope == "kiosk"``, no
 # ``_api_token_id``) and is never refused here. ``tests/api/test_api_token_scrap_refusal.py``
 # enumerates every scrap writer (ORM writes, request schemas, MCP tools): a new one fails CI.
-# Known residual, left open for an owner decision because closing it changes zero-scrap
-# behavior: a zero-scrap request that only re-labels a recorded scrap REASON (clock-out,
-# PUT /work-orders/{id}, force-complete) is not refused -- docs/API.md, "Known residual".
+# This PR's extension of the decision (not part of it): a scrap REASON is the same evidence
+# (the scrap Pareto groups by it), so a token's request that would write or change one --
+# even with no new scrap -- is refused with the same text through
+# ``api_token_changes_scrap_reason``: clock-out onto the caller's own time entry,
+# PUT /work-orders/{id}, force-complete re-sending the recorded scrap, and the operation PUT.
+# A token's request that sends no reason, or re-sends the stored one, is untouched.
 API_TOKEN_SCRAP = (
     "Scrap must be reported by a person (at the kiosk, with a crew badge, or signed in at a desk), not an API "
     "token: a scrap count is quality evidence someone has to have seen. Record good pieces only, or leave the "
@@ -128,11 +131,15 @@ API_TOKEN_SCRAP = (
 # none); a short close that declares new scrap is refused API_TOKEN_SCRAP first.
 API_TOKEN_SHORT_CLOSE = "Closing work short must be done by a person signed in to the app, not an API token."
 # The count judgments that are not scrap, refused under the same principle (a person makes
-# the judgment, not a standing token): booking more good than the floor recorded,
-# hand-editing an operation's counts through its PUT (any change but a scrap rise, which is
-# API_TOKEN_SCRAP), and lowering the order once work has been recorded against it. The
-# 2026-11-07 question asked about scrap and short closes; these three are this PR's
-# reading of the same rule.
+# the judgment, not a standing token): booking more good than the floor recorded;
+# hand-editing an operation's counts through its PUT (any change but a scrap rise or a
+# reason change, which are API_TOKEN_SCRAP); hand-editing the work-order header's
+# ``quantity_complete`` / ``quantity_scrapped`` through its PUT, in either direction (a
+# scrap rise is API_TOKEN_SCRAP); lowering the order once work has been recorded against
+# it; and EVERY over-count correction through either reduce-production verb -- a reopen
+# erases a person's close, a re-stamp re-declares its short (API_TOKEN_SHORT_CLOSE when it
+# would set one). The 2026-11-07 question asked about scrap and short closes only; these
+# are this PR's extension of the same rule, not part of the owner's decision.
 API_TOKEN_COUNT_JUDGMENT = (
     "Recording more good than the floor counted, editing an operation's counts, or lowering the order "
     "after work was recorded must be done by a person signed in to the app, not an API token."
@@ -149,11 +156,10 @@ def api_token_declares_scrap(user: Any, scrap_delta: Optional[float]) -> bool:
     a person and is never refused (``is_api_token_credential``).
 
     A delta that is not a finite number FAILS CLOSED. NaN slips past every ``> 0`` / ``< 0``
-    comparison, and clock-out has no non-finite check of its own, so a token's
-    ``quantity_scrapped: NaN`` would otherwise close the entry and overwrite its (and the
-    operation's) recorded scrap with NaN. Every other caller refuses a non-finite number for
-    everyone before it asks (a 400 in the handler, a 422 in its schema) or, at the office
-    close, never derives one, so only that hole changes.
+    comparison, so a caller that forgot its own non-finite check would otherwise write NaN
+    scrap. Every caller today refuses a non-finite number for everyone before it asks (a 400
+    in the handler -- clock-out included -- or a 422 in its schema) or, at the office close,
+    never derives one; this is the backstop, not the gate.
 
     ANY positive delta counts -- deliberately ``> 0``, not ``> QTY_EPSILON``. The writers
     behind this predicate store scrap, overwrite its reason and file an NCR at ``> 0``
@@ -174,6 +180,24 @@ def api_token_declares_scrap(user: Any, scrap_delta: Optional[float]) -> bool:
     if not math.isfinite(delta):
         return True
     return delta > 0
+
+
+def api_token_changes_scrap_reason(user: Any, *writes: tuple[Any, Any]) -> bool:
+    """True when a standing API token's request would write a scrap reason or code that differs
+    from the one stored.
+
+    The scrap-REASON half of API_TOKEN_SCRAP (this PR's extension of the 2026-11-07 decision:
+    re-categorizing scrap a person declared is the same quality judgment, and the scrap
+    Pareto groups by the code). Each ``writes`` pair is ``(value the request would store,
+    value stored now)`` for one ``scrap_reason`` / ``scrap_reason_code_id`` column; the caller
+    passes what its own write would put there (an omitted field stores the current value, an
+    overwrite stores ``None`` when nothing was sent). Text compares exactly, so blanking a
+    reason is a change; a request that sends no reason, or re-sends the stored one, never
+    counts. A crew-station badge token and an interactive session are never refused.
+    """
+    if not is_api_token_credential(user):
+        return False
+    return any(new != old for new, old in writes)
 
 
 # The floor completion audit row is REQUIRED evidence on a short close or a scrap
@@ -286,7 +310,38 @@ def completed_operation_clock_out_message(operation: WorkOrderOperation) -> str:
     """409: a quantity-carrying clock-out on an operation someone already completed."""
     return (
         f"{operation_label(operation)} is already complete; clock out with 0 pieces and tell a supervisor about any "
-        "extra pieces (a supervisor can add scrap to a completed operation, with a reason, from the work order)."
+        "extra pieces (a supervisor corrects a completed operation's counts from the work order)."
+    )
+
+
+def completed_scrap_over_received_message(operation: WorkOrderOperation, acct: OperationAccounting) -> str:
+    """409: the generic operation PUT raising a COMPLETE operation's scrap past what reached it.
+
+    ``acct`` is the operation's accounting at its STORED counts: the rise may fill only its
+    ``unaccounted`` remainder (zero on an accounted close).
+    """
+    return (
+        f"{operation_label(operation)} is complete with {_qty_text(acct.good)} good and {_qty_text(acct.scrapped)} "
+        f"scrapped of the {_qty_text(acct.received)} that reached it, so only {_qty_text(acct.unaccounted)} more can "
+        "be recorded as scrap. Pieces counted good and later found bad: lower the good count with "
+        "reduce-production (reopen the operation), then complete it again with the scrap and a reason."
+    )
+
+
+def nest_planned_runs_raise_message(nest_label: str, planned_runs: float, work_order_status: Optional[str]) -> str:
+    """409: ``PATCH /laser-nests/{id}`` raising planned_runs on a finished nest or job.
+
+    ``work_order_status`` is the laser work order's status value when IT is terminal (the
+    nest may not be complete -- a cancelled job), else ``None`` (the nest itself is complete).
+    """
+    if work_order_status is not None:
+        return (
+            f"This laser work order is {work_order_status}; {nest_label}'s planned runs can no longer be raised. "
+            "Open a new work order for the extra runs."
+        )
+    return (
+        f"{nest_label} is already complete at {_qty_text(planned_runs)} runs; raising its planned runs would leave a "
+        "completed operation short. Add a nest for the extra runs."
     )
 
 
