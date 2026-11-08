@@ -661,15 +661,19 @@ class TestApiTokenNestReimportOverRecordedWork:
         assert resp.json()["detail"] == STALE_WRITE_CONFLICT_DETAIL
         assert _nest_world(db_session) == before
 
-    def _header_bumped_during_extraction(self, db: Session, monkeypatch, work_order_id: int) -> list:
-        """Someone else saves the laser work order's header while the upload is being extracted.
-        (The request holds its loaded work order throughout, so it stays stale in the identity map.)
-        Returns the audit rows the import then asks for: the conflict must be found before the first."""
+    def _header_bumped_during_extraction(
+        self, db: Session, monkeypatch, work_order_id: int, *, also_set: str = ""
+    ) -> list:
+        """Someone else saves the laser work order's header while the upload is being extracted
+        (``also_set`` is any column they change with it). The request holds its loaded work order
+        throughout, so it stays stale in the identity map. Returns the audit rows the import then
+        asks for: the conflict must be found before the first."""
         original = work_orders_endpoint.extract_laser_nest_zip
+        assignments = "version = version + 1" + (f", {also_set}" if also_set else "")
 
         def _someone_saves_the_header(*args, **kwargs):
             result = original(*args, **kwargs)
-            db.execute(text("UPDATE work_orders SET version = version + 1 WHERE id = :id"), {"id": work_order_id})
+            db.execute(text(f"UPDATE work_orders SET {assignments} WHERE id = :id"), {"id": work_order_id})
             return result
 
         monkeypatch.setattr(work_orders_endpoint, "extract_laser_nest_zip", _someone_saves_the_header)
@@ -683,7 +687,7 @@ class TestApiTokenNestReimportOverRecordedWork:
         monkeypatch.setattr(AuditService, "log", _recording_log)
         return audit_calls
 
-    @pytest.mark.parametrize("header", ["counts", "draft", "rederived"])
+    @pytest.mark.parametrize("header", ["counts", "draft", "rederived", "same_total"])
     def test_a_header_changed_under_a_persons_import_answers_409_refresh(
         self, client, db_session, admin_user, header, no_ai, monkeypatch
     ):
@@ -692,18 +696,26 @@ class TestApiTokenNestReimportOverRecordedWork:
         savepoint swallowed the StaleDataError and left the next statement to fail as the 400 for
         a conflicting nest row: zeroing a hand-set count or releasing a draft (written before the
         first audit row), and re-deriving ``quantity_ordered`` (written after the rebuild, inside
-        the work-order audit row's flush) when the header was otherwise unchanged."""
+        the work-order audit row's flush) when the header was otherwise unchanged.
+
+        ``same_total`` is the shape only the locked version READ catches, because the import never
+        writes the header at all (released, stamped, zero counts, the same 5 planned runs): someone
+        saves a count of 2 mid-import, and without the read that count survived the import's
+        zeroing with a 200 -- a silent success, not merely the wrong status code."""
         laser = self._standalone(client, db_session, admin_user)  # 2 nests, 5 planned runs
         if header == "counts":
             laser.quantity_complete = 2.0
         elif header == "draft":
             laser.status = WorkOrderStatus.DRAFT
         db_session.commit()
-        audit_calls = self._header_bumped_during_extraction(db_session, monkeypatch, laser.id)
+        audit_calls = self._header_bumped_during_extraction(
+            db_session, monkeypatch, laser.id, also_set="quantity_complete = 2" if header == "same_total" else ""
+        )
         before = _nest_world(db_session)
 
-        # One nest of 1 run: the import re-derives quantity_ordered from 5 to 1 in every shape.
-        resp = _import(client, user_headers(admin_user), WO_IMPORT_URL.format(wo=laser.id), _cnc_zip("N9.nc"))
+        # One nest of 1 run re-derives quantity_ordered from 5 to 1; same_total re-imports 5 runs.
+        package = _cnc_zip("N8_QTY5.nc") if header == "same_total" else _cnc_zip("N9.nc")
+        resp = _import(client, user_headers(admin_user), WO_IMPORT_URL.format(wo=laser.id), package)
         assert resp.status_code == 409, resp.text
         assert resp.json()["detail"] == STALE_WRITE_CONFLICT_DETAIL
         assert audit_calls == [], "the header conflict is found before the first audit row"
@@ -729,19 +741,11 @@ class TestApiTokenNestReimportOverRecordedWork:
         assert audit_calls == [], "the header conflict is found before the first audit row"
         assert _nest_world(db_session) == before
 
-    @pytest.mark.parametrize("header", ["counts", "clean"])
-    def test_the_header_is_flushed_and_locked_before_the_first_audit_row(
-        self, client, db_session, admin_user, header, no_ai, monkeypatch
-    ):
-        """Invariant 4's order, no race needed: a header with a write pending (a hand-set count to
-        zero) is flushed before the import's first audit row, and the ``work_orders`` row lock
-        comes before the global audit-chain lock even on a header with nothing pending until after
-        the rebuild (released, stamped, zero counts), where the flush sends no UPDATE. The lock is
-        pinned by DIALECT-COMPILING the statements the import sends: SQLite renders no FOR UPDATE."""
-        laser = self._standalone(client, db_session, admin_user)
-        if header == "counts":
-            laser.quantity_complete = 2.0
-            db_session.commit()
+    def _import_statement_order(self, client, db: Session, monkeypatch, headers, url: str, package: bytes):
+        """Run one import and record, in order, every ``work_orders`` row lock it takes
+        (``header_lock``), every UPDATE it sends to ``work_orders`` (``header_write``) and every
+        audit row it asks for (``audit:<resource_type>``, appended BEFORE ``AuditService.log``
+        runs, so a write that log's own savepoint flushes lands after its audit entry)."""
         order: list = []
 
         def _record_header_locks(state):
@@ -757,26 +761,78 @@ class TestApiTokenNestReimportOverRecordedWork:
         original_log = AuditService.log
 
         def _recording_log(service, *args, **kwargs):
-            order.append("audit")
+            order.append(f"audit:{kwargs.get('resource_type')}")
             return original_log(service, *args, **kwargs)
 
         monkeypatch.setattr(AuditService, "log", _recording_log)
-        engine = db_session.get_bind()
-        event.listen(db_session, "do_orm_execute", _record_header_locks)
+        engine = db.get_bind()
+        event.listen(db, "do_orm_execute", _record_header_locks)
         event.listen(engine, "before_cursor_execute", _record_header_writes)
         try:
-            resp = _import(client, user_headers(admin_user), WO_IMPORT_URL.format(wo=laser.id), _cnc_zip("N9.nc"))
+            resp = _import(client, headers, url, package)
         finally:
-            event.remove(db_session, "do_orm_execute", _record_header_locks)
+            event.remove(db, "do_orm_execute", _record_header_locks)
             event.remove(engine, "before_cursor_execute", _record_header_writes)
+        return resp, order
+
+    @pytest.mark.parametrize("header", ["counts", "clean", "same_total"])
+    def test_the_header_is_flushed_and_locked_before_the_first_audit_row(
+        self, client, db_session, admin_user, header, no_ai, monkeypatch
+    ):
+        """Invariant 4's order, no race needed: a header with a write pending (a hand-set count to
+        zero) is flushed before the import's first audit row, and the ``work_orders`` row lock
+        comes before the global audit-chain lock even on a header with nothing pending until after
+        the rebuild (released, stamped, zero counts), where the flush sends no UPDATE. The lock is
+        pinned by DIALECT-COMPILING the statements the import sends: SQLite renders no FOR UPDATE.
+
+        The rebuild's own header write (the re-derived ``quantity_ordered``) is flushed before the
+        work-order audit row too, not inside it. ``same_total`` writes the header NOT AT ALL -- the
+        shape only the locked version read guards (see the race test of the same name)."""
+        laser = self._standalone(client, db_session, admin_user)  # 5 planned runs
+        if header == "counts":
+            laser.quantity_complete = 2.0
+            db_session.commit()
+        package = _cnc_zip("N8_QTY5.nc") if header == "same_total" else _cnc_zip("N9.nc")
+        resp, order = self._import_statement_order(
+            client, db_session, monkeypatch, user_headers(admin_user), WO_IMPORT_URL.format(wo=laser.id), package
+        )
         assert resp.status_code == 200, resp.text
-        first_audit = order.index("audit")
+        first_audit = next(i for i, entry in enumerate(order) if entry.startswith("audit:"))
         assert "header_lock" in order[:first_audit], order
+        if header == "same_total":
+            assert "header_write" not in order, "the import has nothing to write to this header"
+            assert "audit:work_order" not in order, "and its work-order audit row skips itself as unchanged"
+            return
+        work_order_audit = order.index("audit:work_order")
+        last_write = max(i for i, entry in enumerate(order) if entry == "header_write")
+        assert last_write < work_order_audit, f"the header write is flushed before its audit row: {order}"
         if header == "counts":
             assert "header_write" in order[:first_audit], order
         else:
             assert "header_write" not in order[:first_audit], "nothing was pending to flush"
             assert "header_write" in order[first_audit:], "quantity_ordered is re-derived after the rebuild"
+
+    def test_a_standalone_import_flushes_its_rederived_header_before_the_create_row(
+        self, client, db_session, admin_user, no_ai, monkeypatch
+    ):
+        """The fresh standalone job is inserted at quantity 1, stamped by the header check's flush,
+        and re-derived to its 5 planned runs by the rebuild. That last UPDATE is flushed before the
+        work order's CREATE audit row, not inside that row's savepoint, where a failure would be
+        swallowed and resurface as the 400."""
+        _laser_center(db_session)
+        resp, order = self._import_statement_order(
+            client,
+            db_session,
+            monkeypatch,
+            user_headers(admin_user),
+            STANDALONE_IMPORT_URL,
+            _cnc_zip("N1_QTY2.nc", "N2_QTY3.nc"),
+        )
+        assert resp.status_code == 200, resp.text
+        assert float(resp.json()["child_work_order"]["quantity_ordered"]) == 5
+        assert order.count("header_write") == 2, f"the release stamp, then quantity_ordered: {order}"
+        last_write = max(i for i, entry in enumerate(order) if entry == "header_write")
+        assert last_write < order.index("audit:work_order"), order
 
     def test_a_persons_parent_addressed_import_never_resolves_the_laser_child_early(
         self, client, db_session, admin_user, admin_headers, supervisor, no_ai, monkeypatch

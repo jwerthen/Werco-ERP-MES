@@ -1531,14 +1531,21 @@ def _check_laser_header_before_audit(db: Session, *, work_order: WorkOrder, comp
 
     * ``db.flush()`` sends what the header has pending (the session is ``autoflush=False``), so
       its version-checked ``UPDATE`` raises ``StaleDataError`` here, outside the audit service;
-    * a ``FOR UPDATE`` read of the stored ``version`` covers a header with nothing pending yet,
-      whose first ``UPDATE`` would otherwise come after the rebuild, flushed inside the work-order
-      audit row's savepoint. A mismatch is the same concurrent edit, raised as the same error.
+    * a ``FOR UPDATE`` read of the stored ``version`` covers a header with nothing pending yet.
+      Its first ``UPDATE`` may come only after the rebuild (a re-derived ``quantity_ordered``),
+      or never: a re-import with the same total planned runs onto a released, stamped job with
+      zero counts writes nothing to the header at all. Without the read, a count someone saved
+      mid-import would then survive the IMPORT-REPLACES-EVERYTHING zeroing with a 200, and the
+      work-order audit row would skip itself as unchanged. A mismatch is the same concurrent
+      edit, raised as the same error -- so that shape now answers 409, deliberately, where it
+      used to answer 200.
 
     Either step takes the ``work_orders`` row lock before the global audit-chain lock (invariant
-    4), and once it is held nobody else can save the header before commit, so the post-rebuild
-    ``UPDATE`` cannot go stale. The read is column-only, so it never refreshes the loaded row --
-    which would hide the very mismatch it checks. It writes nothing the import would not have.
+    4), and once it is held nobody else can save the header before commit. The post-rebuild
+    ``UPDATE`` is still flushed by the caller before the work-order audit row, so a failure there
+    is never swallowed inside the audit service either. The read is column-only, so it never
+    refreshes the loaded row -- which would hide the very mismatch it checks. It writes nothing
+    the import would not have.
     """
     db.flush()
     stored_version = (
@@ -3419,6 +3426,13 @@ async def _run_laser_nest_import(
                     row_material_parts=row_material_parts,
                     audit=audit,
                 )
+                # The rebuild re-derives quantity_ordered (and, for a classic child, the parent
+                # link) after its last flush. Flush it HERE, before the work-order audit row below
+                # (or the standalone CREATE row): AuditService.log flushes inside a savepoint and
+                # swallows every error, so a failed header UPDATE would otherwise surface on the
+                # next statement as the 400 for a conflicting nest row (invariant 4: flush before
+                # audit). The row lock is already held from the header check above.
+                db.flush()
 
                 if pre_import_wo_values is not None:
                     # Audit the WO-level effect of the (re)import on an EXISTING
