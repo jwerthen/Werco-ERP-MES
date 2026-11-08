@@ -60,10 +60,9 @@ engine = create_engine(
 #
 # The guard closes that for every writer on this engine, not only the audit service. Right
 # before the DBAPI COMMIT is sent, it reads libpq's transaction status. That is a local call with
-# no round trip. If the transaction is already aborted, the guard raises
-# ``AbortedTransactionCommitError`` instead of committing. The caller's error handling then sees
-# a failure, and its rollback (``get_db``, ``atomic_transaction``) really ends the server
-# transaction. ``app/main.py`` answers a lost lock race (``app.db.locks.is_lost_lock_race``) with
+# no round trip. If the transaction is already aborted, the guard rolls it back (exactly what the
+# COMMIT would have done) and raises ``AbortedTransactionCommitError`` instead of reporting
+# success. The caller's error handling then sees a failure, and nothing claims it was saved. ``app/main.py`` answers a lost lock race (``app.db.locks.is_lost_lock_race``) with
 # the app-wide 409 and anything else with the usual 500.
 
 # libpq's PQTRANS_INERROR: "idle, in a failed transaction block". psycopg2 names it
@@ -157,7 +156,17 @@ def _refuse_commit_of_aborted_transaction(conn: Connection) -> None:
     pooled = _pool_connection(conn)
     if pooled is None or not _dbapi_transaction_in_error(pooled.dbapi_connection):
         return
-    pgcode, cause = pooled.info.get(_ABORT_CAUSE_KEY, (None, None))
+    pgcode, cause = pooled.info.pop(_ABORT_CAUSE_KEY, (None, None))
+    # End the server transaction here, as the COMMIT would have (Postgres answers it with a
+    # ROLLBACK). SQLAlchemy has already marked its transaction inactive, so a caller that
+    # only CLOSES the session afterwards sends no ROLLBACK of its own, and the pool skips its
+    # reset-on-return for a connection whose transaction it believes was reset. Without this,
+    # that connection would go back to the pool still aborted, and the next checkout --
+    # possibly another tenant's job -- would fail with 25P02.
+    try:
+        pooled.dbapi_connection.rollback()
+    except Exception:  # pragma: no cover - the refusal below matters more than this cleanup
+        logger.warning("Could not roll back an aborted transaction before refusing its COMMIT", exc_info=True)
     logger.error(
         "Refused COMMIT of a PostgreSQL transaction that was already aborted (cause: %s, SQLSTATE %s). "
         "Some code swallowed that database error; the request fails instead of reporting success.",

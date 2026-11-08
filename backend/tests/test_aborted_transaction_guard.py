@@ -293,6 +293,28 @@ def test_the_connection_is_usable_after_the_refusal_and_the_cause_does_not_leak(
         assert database._ABORT_CAUSE_KEY not in conn.connection.info
 
 
+def test_a_session_only_closed_after_the_refusal_returns_a_clean_connection(libpq_like):
+    """Close-only cleanup (``with SessionLocal() as db:``, ``finally: db.close()``) sends no ROLLBACK.
+
+    SQLAlchemy marks the transaction inactive when the COMMIT raises, and the pool then skips its
+    reset-on-return. The guard rolls the DBAPI connection back itself, so the next checkout --
+    possibly another tenant's job -- does not inherit an aborted transaction (25P02).
+    """
+    _make_table(libpq_like.engine)
+    session = libpq_like.sessions()
+    session.execute(text("INSERT INTO notes (body) VALUES ('lost')"))
+    with pytest.raises(OperationalError):
+        session.execute(text(DEADLOCK_SQL))
+    with pytest.raises(AbortedTransactionCommitError):
+        session.commit()
+    session.close()  # no rollback() first
+    assert libpq_like.dbapi.info.transaction_status != INERROR
+    with libpq_like.sessions() as next_session:
+        next_session.execute(text("INSERT INTO notes (body) VALUES ('kept')"))
+        next_session.commit()
+    assert _count_notes(libpq_like.engine) == 1
+
+
 def test_a_savepoint_rollback_un_aborts_the_transaction(libpq_like):
     """An error a savepoint contains is not an aborted transaction: the commit goes through."""
     _make_table(libpq_like.engine)
@@ -680,3 +702,51 @@ def test_hank_required_audit_reports_a_reraised_database_error_as_audit_write_er
     with pytest.raises(AuditWriteError) as raised:
         getattr(required, method)("work_order", 1, "WO-1")
     assert raised.value.__cause__.orig.pgcode == "40P01"
+
+
+# --------------------------------------------------------------------------------------------
+# Per-tenant job loops share one session: a failed tenant must not sink the ones after it
+# --------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "module_name, runner, task",
+    [
+        ("mrp_jobs", "_run_mrp_for_company", "run_mrp_task"),
+        ("scheduling_jobs", "_run_scheduling_for_company", "run_scheduling_task"),
+    ],
+)
+async def test_a_failed_tenant_does_not_poison_the_next_one(
+    db_session: Session, monkeypatch, module_name, runner, task
+):
+    """Each loop catches a tenant's failure and moves on, so it must reset the shared session.
+
+    A refused COMMIT leaves it "prepared" and a database error leaves it needing a rollback;
+    either way every later tenant would fail too. The first tenant here fails a flush, the
+    session-poisoning shape SQLite can produce.
+    """
+    import importlib
+
+    module = importlib.import_module(f"app.jobs.{module_name}")
+    db_session.add(Company(id=2, name="Second tenant", slug=f"second-{next(_ids)}", is_active=True))
+    db_session.commit()
+    processed = []
+
+    async def fake_runner(db, company_id, **_kwargs):
+        if not processed and company_id == 1:
+            number = f"ABORT-JOB-{next(_ids)}"
+            for name in ("first", "duplicate"):
+                db.add(
+                    Part(part_number=number, name=name, part_type="manufactured", unit_of_measure="each", company_id=1)
+                )
+            processed.append("failed")
+            db.flush()  # IntegrityError: the session now needs a rollback
+        db.query(Company).count()  # PendingRollbackError here if the loop did not reset the session
+        processed.append(company_id)
+        return {"company_id": company_id}
+
+    monkeypatch.setattr(module, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(module, runner, fake_runner)
+    result = await getattr(module, task)()
+    assert result["companies_processed"] == 1
+    assert result["runs"] == [{"company_id": 2}]

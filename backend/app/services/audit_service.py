@@ -509,14 +509,18 @@ class AuditService:
              best-effort contract (log + return ``None``) with the session left
              un-poisoned.
 
-        Best-effort, with one exception. A failure the savepoint contains, or one
-        that never reaches the database, is logged and returns ``None``, and the
-        caller's write proceeds. A database error (``DBAPIError``) that no
-        savepoint contained is RE-RAISED. On PostgreSQL that error has already
-        aborted the caller's transaction, so the caller's write cannot be saved
-        whatever happens next, and swallowing it would only hide that. The chain
-        lock's deadlock victim (40P01) is the case that matters. See the
-        ``except DBAPIError`` below and ``app.db.database``'s COMMIT guard.
+        Best-effort, with one exception. A sequence collision the savepoint
+        retries past (or exhausts), the paused-mode ``nextval`` / resync failures
+        their own savepoints contain, and any failure that never reaches the
+        database are logged and return ``None``, and the caller's write proceeds.
+        Every other database error (``DBAPIError``) is RE-RAISED. On PostgreSQL an
+        error outside a savepoint has already aborted the caller's transaction, so
+        the caller's write cannot be saved whatever happens next, and swallowing
+        it would only hide that; the chain lock's deadlock victim (40P01) is the
+        case that matters. Any other failure of the audit INSERT itself (e.g. a
+        value too long) already left the session unusable before this was
+        re-raised, so the caller failed then too. See the ``except DBAPIError``
+        below and ``app.db.database``'s COMMIT guard.
         """
         try:
             # Credential marker (API-token requests only) -- folded in here so
