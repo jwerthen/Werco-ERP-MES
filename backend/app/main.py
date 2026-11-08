@@ -24,8 +24,8 @@ from app.core.media_types import is_json_media_type, is_text_plain_media_type
 from app.core.observability import capture_exception_to_sentry
 from app.core.observability import init_sentry as _init_sentry
 from app.core.queue import log_redis_target as _log_redis_target
+from app.db import locks as db_locks
 from app.db.database import Base, engine
-from app.db.locks import is_lost_lock_race
 from app.db.mixins import STALE_WRITE_CONFLICT_DETAIL
 from app.middleware.fabrication_quote_body_limit import FabricationQuoteBodyLimitMiddleware
 from app.middleware.logging_middleware import (
@@ -887,7 +887,7 @@ async def stale_data_exception_handler(request: Request, exc: StaleDataError):
 # above answers 500 with a correlation id.
 @app.exception_handler(DBAPIError)
 async def lost_lock_race_exception_handler(request: Request, exc: DBAPIError):
-    if not is_lost_lock_race(exc):
+    if not db_locks.is_lost_lock_race(exc):
         raise exc
     logger.warning(
         f"Lost lock race (SQLSTATE {getattr(exc.orig, 'pgcode', None)}) on {request.method} {request.url.path}; "
