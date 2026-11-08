@@ -16,8 +16,9 @@
   over un-worked nests, are byte-identical to before. Review fixes pinned there too: the refusal has
   its own text (``API_TOKEN_NEST_REIMPORT``); an office start (``actual_start``) and the header counts
   the import zeroes are recorded work; the re-check reads the database, not the first check's loaded
-  rows; a row changed mid-import answers 409 refresh-and-retry; a person's import never resolves the
-  laser child for the token check.
+  rows; a row changed mid-import -- the laser work order's own header included, which is flushed,
+  version-checked and row-locked before the first audit row -- answers the app-wide 409 text; a
+  person's import never resolves the laser child for the token check.
 
 Every refusal is pinned as writing NOTHING.
 """
@@ -30,10 +31,12 @@ from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session
 
 import app.api.endpoints.work_orders as work_orders_endpoint
+from app.db.mixins import STALE_WRITE_CONFLICT_DETAIL
 from app.main import app
 from app.mcp.catalog import build_catalog
 from app.mcp.convenience import CONVENIENCE_TOOL_NAMES, SHADOWED_OPERATIONS
@@ -45,6 +48,7 @@ from app.models.time_entry import TimeEntry, TimeEntryType
 from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
+from app.services.audit_service import AuditService
 from app.services.laser_nest_service import import_would_wipe_recorded_work, laser_import_wipe_operation_ids
 from app.services.operation_action_gates import (
     API_TOKEN_COUNT_JUDGMENT,
@@ -654,8 +658,125 @@ class TestApiTokenNestReimportOverRecordedWork:
 
         resp = _import(client, user_headers(admin_user), WO_IMPORT_URL.format(wo=laser.id), _cnc_zip("N9.nc"))
         assert resp.status_code == 409, resp.text
-        assert resp.json()["detail"] == "This work order was modified concurrently. Refresh and retry."
+        assert resp.json()["detail"] == STALE_WRITE_CONFLICT_DETAIL
         assert _nest_world(db_session) == before
+
+    def _header_bumped_during_extraction(self, db: Session, monkeypatch, work_order_id: int) -> list:
+        """Someone else saves the laser work order's header while the upload is being extracted.
+        (The request holds its loaded work order throughout, so it stays stale in the identity map.)
+        Returns the audit rows the import then asks for: the conflict must be found before the first."""
+        original = work_orders_endpoint.extract_laser_nest_zip
+
+        def _someone_saves_the_header(*args, **kwargs):
+            result = original(*args, **kwargs)
+            db.execute(text("UPDATE work_orders SET version = version + 1 WHERE id = :id"), {"id": work_order_id})
+            return result
+
+        monkeypatch.setattr(work_orders_endpoint, "extract_laser_nest_zip", _someone_saves_the_header)
+        audit_calls: list = []
+        original_log = AuditService.log
+
+        def _recording_log(service, *args, **kwargs):
+            audit_calls.append((kwargs.get("action"), kwargs.get("resource_type")))
+            return original_log(service, *args, **kwargs)
+
+        monkeypatch.setattr(AuditService, "log", _recording_log)
+        return audit_calls
+
+    @pytest.mark.parametrize("header", ["counts", "draft", "rederived"])
+    def test_a_header_changed_under_a_persons_import_answers_409_refresh(
+        self, client, db_session, admin_user, header, no_ai, monkeypatch
+    ):
+        """The laser WORK ORDER itself is saved by someone else mid-import. Every shape of the
+        import's header write must reach the version check outside the audit service, whose
+        savepoint swallowed the StaleDataError and left the next statement to fail as the 400 for
+        a conflicting nest row: zeroing a hand-set count or releasing a draft (written before the
+        first audit row), and re-deriving ``quantity_ordered`` (written after the rebuild, inside
+        the work-order audit row's flush) when the header was otherwise unchanged."""
+        laser = self._standalone(client, db_session, admin_user)  # 2 nests, 5 planned runs
+        if header == "counts":
+            laser.quantity_complete = 2.0
+        elif header == "draft":
+            laser.status = WorkOrderStatus.DRAFT
+        db_session.commit()
+        audit_calls = self._header_bumped_during_extraction(db_session, monkeypatch, laser.id)
+        before = _nest_world(db_session)
+
+        # One nest of 1 run: the import re-derives quantity_ordered from 5 to 1 in every shape.
+        resp = _import(client, user_headers(admin_user), WO_IMPORT_URL.format(wo=laser.id), _cnc_zip("N9.nc"))
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == STALE_WRITE_CONFLICT_DETAIL
+        assert audit_calls == [], "the header conflict is found before the first audit row"
+        assert _nest_world(db_session) == before
+
+    def test_a_header_changed_under_a_tokens_allowed_import_answers_409_refresh(
+        self, client, db_session, admin_user, admin_headers, supervisor, no_ai, monkeypatch
+    ):
+        """The same race on an import a standing API token IS allowed (no nest worked, a zero
+        header), onto the DRAFT laser work order the MCP tool's default path leaves behind: the
+        import writes the release onto that header before its first audit row."""
+        laser = self._standalone(client, db_session, admin_user)
+        laser.status = WorkOrderStatus.DRAFT
+        db_session.commit()
+        assert import_would_wipe_recorded_work(db_session, laser_work_order=laser, company_id=COMPANY_A) is False
+        headers = _token(client, admin_headers, supervisor)
+        audit_calls = self._header_bumped_during_extraction(db_session, monkeypatch, laser.id)
+        before = _nest_world(db_session)
+
+        resp = _import(client, headers, WO_IMPORT_URL.format(wo=laser.id), _cnc_zip("N9.nc"))
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == STALE_WRITE_CONFLICT_DETAIL
+        assert audit_calls == [], "the header conflict is found before the first audit row"
+        assert _nest_world(db_session) == before
+
+    @pytest.mark.parametrize("header", ["counts", "clean"])
+    def test_the_header_is_flushed_and_locked_before_the_first_audit_row(
+        self, client, db_session, admin_user, header, no_ai, monkeypatch
+    ):
+        """Invariant 4's order, no race needed: a header with a write pending (a hand-set count to
+        zero) is flushed before the import's first audit row, and the ``work_orders`` row lock
+        comes before the global audit-chain lock even on a header with nothing pending until after
+        the rebuild (released, stamped, zero counts), where the flush sends no UPDATE. The lock is
+        pinned by DIALECT-COMPILING the statements the import sends: SQLite renders no FOR UPDATE."""
+        laser = self._standalone(client, db_session, admin_user)
+        if header == "counts":
+            laser.quantity_complete = 2.0
+            db_session.commit()
+        order: list = []
+
+        def _record_header_locks(state):
+            if state.is_select:
+                sql = str(state.statement.compile(dialect=postgresql.dialect()))
+                if "FOR UPDATE" in sql and "FROM work_orders" in sql:
+                    order.append("header_lock")
+
+        def _record_header_writes(conn, cursor, statement, parameters, context, executemany):
+            if statement.lstrip().upper().startswith("UPDATE WORK_ORDERS "):
+                order.append("header_write")
+
+        original_log = AuditService.log
+
+        def _recording_log(service, *args, **kwargs):
+            order.append("audit")
+            return original_log(service, *args, **kwargs)
+
+        monkeypatch.setattr(AuditService, "log", _recording_log)
+        engine = db_session.get_bind()
+        event.listen(db_session, "do_orm_execute", _record_header_locks)
+        event.listen(engine, "before_cursor_execute", _record_header_writes)
+        try:
+            resp = _import(client, user_headers(admin_user), WO_IMPORT_URL.format(wo=laser.id), _cnc_zip("N9.nc"))
+        finally:
+            event.remove(db_session, "do_orm_execute", _record_header_locks)
+            event.remove(engine, "before_cursor_execute", _record_header_writes)
+        assert resp.status_code == 200, resp.text
+        first_audit = order.index("audit")
+        assert "header_lock" in order[:first_audit], order
+        if header == "counts":
+            assert "header_write" in order[:first_audit], order
+        else:
+            assert "header_write" not in order[:first_audit], "nothing was pending to flush"
+            assert "header_write" in order[first_audit:], "quantity_ordered is re-derived after the rebuild"
 
     def test_a_persons_parent_addressed_import_never_resolves_the_laser_child_early(
         self, client, db_session, admin_user, admin_headers, supervisor, no_ai, monkeypatch

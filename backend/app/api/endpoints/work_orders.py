@@ -44,7 +44,8 @@ from app.core.websocket import (
 )
 from app.db.database import atomic_transaction, get_db
 from app.db.locks import acquire_generator_lock
-from app.db.tenant_filter import tenant_query
+from app.db.mixins import STALE_WRITE_CONFLICT_DETAIL
+from app.db.tenant_filter import tenant_filter, tenant_query
 from app.models.bom import BOM, BOMItem
 from app.models.laser_nest import LaserNest
 from app.models.part import Part, PartType, UnitOfMeasure, uom_label
@@ -1515,6 +1516,42 @@ def _release_laser_work_order_for_nests(work_order: WorkOrder, *, released_by: i
         work_order.released_by = released_by
         work_order.released_at = datetime.utcnow()
     work_order.status = WorkOrderStatus.RELEASED
+
+
+def _check_laser_header_before_audit(db: Session, *, work_order: WorkOrder, company_id: int) -> None:
+    """Version-check and row-lock the import's laser work order BEFORE its first audit row.
+
+    The package import writes this header twice: the release and the zeroed counts just before
+    this runs (a draft, an unstamped or a hand-counted job), and ``quantity_ordered`` re-derived
+    after the rebuild. ``AuditService.log`` flushes the whole session inside a ``begin_nested()``
+    savepoint and swallows every exception, so when an audit call is what flushes a header someone
+    else saved mid-import, the ``StaleDataError`` is eaten there and the next statement fails as a
+    ``PendingRollbackError`` -- answered as the 400 for a conflicting nest row, the wrong cause.
+    So, before any audit row:
+
+    * ``db.flush()`` sends what the header has pending (the session is ``autoflush=False``), so
+      its version-checked ``UPDATE`` raises ``StaleDataError`` here, outside the audit service;
+    * a ``FOR UPDATE`` read of the stored ``version`` covers a header with nothing pending yet,
+      whose first ``UPDATE`` would otherwise come after the rebuild, flushed inside the work-order
+      audit row's savepoint. A mismatch is the same concurrent edit, raised as the same error.
+
+    Either step takes the ``work_orders`` row lock before the global audit-chain lock (invariant
+    4), and once it is held nobody else can save the header before commit, so the post-rebuild
+    ``UPDATE`` cannot go stale. The read is column-only, so it never refreshes the loaded row --
+    which would hide the very mismatch it checks. It writes nothing the import would not have.
+    """
+    db.flush()
+    stored_version = (
+        tenant_filter(db.query(WorkOrder.version), WorkOrder, company_id)
+        .filter(WorkOrder.id == work_order.id)
+        .with_for_update()
+        .scalar()
+    )
+    if stored_version != work_order.version:
+        raise StaleDataError(
+            f"work_orders row {work_order.id} is at version {stored_version}; "
+            f"this request loaded version {work_order.version}"
+        )
 
 
 # The closed vocabulary for how each imported row's sheet part came to be chosen:
@@ -3318,6 +3355,12 @@ async def _run_laser_nest_import(
                 _release_laser_work_order_for_nests(child_work_order, released_by=current_user.id)
                 child_work_order.quantity_complete = 0
                 child_work_order.quantity_scrapped = 0
+                # The one point that covers every pending change to the header: the standalone
+                # job and a freshly created classic child are already flushed, the target and
+                # work-center resolution above only read, and the release and zeroing are the
+                # writes just made. Before the first audit row, so a header someone else saved
+                # mid-import answers the 409 below rather than the 400 -- see the helper.
+                _check_laser_header_before_audit(db, work_order=child_work_order, company_id=company_id)
                 parent_work_order_id = parent_work_order.id if parent_work_order is not None else None
 
                 # IMPORT-REPLACES-EVERYTHING wipes ALL prior non-deleted nests on
@@ -3489,16 +3532,14 @@ async def _run_laser_nest_import(
         except StaleDataError as exc:
             # A row the rebuild deletes or rewrites (a nest operation, the laser work
             # order) was changed by someone else after this request read it -- the
-            # version_id_col check on the flush. That is a concurrent edit, not a bad
-            # row, so it answers the app's 409 "refresh and retry" rather than the
-            # 400 below, whose text would send the caller hunting for a row conflict.
-            # StaleDataError is an SQLAlchemyError, so it must be caught first.
+            # version_id_col check on the flush, or the header check before the first
+            # audit row. That is a concurrent edit, not a bad row, so it answers the
+            # app-wide handler's 409 and text rather than the 400 below, whose text
+            # would send the caller hunting for a row conflict. StaleDataError is an
+            # SQLAlchemyError, so it must be caught first.
             _reap_saved_blobs()
             logger.warning("Laser-nest import hit a concurrent edit: %s", exc)
-            raise HTTPException(
-                status_code=409,
-                detail="This work order was modified concurrently. Refresh and retry.",
-            ) from exc
+            raise HTTPException(status_code=409, detail=STALE_WRITE_CONFLICT_DETAIL) from exc
         except (IntegrityError, SQLAlchemyError) as exc:
             # The transaction rolled back, so the just-written nest-PDF blobs are
             # now orphaned -- reap them. Translate the DB/constraint fault to a
