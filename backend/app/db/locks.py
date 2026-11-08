@@ -1,7 +1,9 @@
 """
 Database lock helpers used to serialize hot read-modify-write paths such
 as number generation (work order, PO, NCR, receipt) where two concurrent
-requests could otherwise generate the same number.
+requests could otherwise generate the same number -- plus
+``is_lost_lock_race``, which recognizes the error Postgres raises on the
+transaction it rolls back when two writers' locks conflict.
 
 Uses Postgres advisory locks scoped to the current transaction. They are
 released automatically when the transaction commits or rolls back, so no
@@ -15,7 +17,27 @@ from __future__ import annotations
 import zlib
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
+
+# The SQLSTATEs Postgres raises on the transaction it ROLLS BACK to settle a lock conflict:
+# ``deadlock_detected`` (40P01, one side of a lock cycle chosen as the victim) and
+# ``serialization_failure`` (40001). Both mean "another writer won; nothing of yours committed",
+# so the caller's correct advice is to refresh and retry -- never "your input is invalid".
+LOST_LOCK_RACE_SQLSTATES = frozenset({"40P01", "40001"})
+
+
+def is_lost_lock_race(exc: BaseException) -> bool:
+    """True when ``exc`` is the DBAPI error of a transaction Postgres rolled back to break a lock race.
+
+    Judged on the driver error's ``pgcode`` alone (``LOST_LOCK_RACE_SQLSTATES``), so every other
+    ``OperationalError`` -- a dropped connection, a statement timeout, a NOWAIT miss -- keeps
+    whatever answer its caller already gives it. SQLite raises neither code, so this is never
+    true on the test backend unless a test raises one on purpose.
+    """
+    if not isinstance(exc, DBAPIError):
+        return False
+    return getattr(exc.orig, "pgcode", None) in LOST_LOCK_RACE_SQLSTATES
 
 
 def _stable_key(name: str) -> int:

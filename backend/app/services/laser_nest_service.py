@@ -512,8 +512,9 @@ def laser_import_wipe_operation_ids(db: Session, *, child_work_order: WorkOrder,
     operation a nest (live or tombstoned) points at -- ops derive ``operation_group`` from
     THEIR work center, so a nest op on an unusually-named work center may not carry group
     ``LASER``, and the id list keeps the wipe exhaustive regardless. One definition, read by
-    the wipe itself and by the import route's API-token refusal, so the two can never judge
-    different sets. A pure, tenant-scoped read: it writes nothing.
+    the wipe itself, by the import route's operation lock (taken first, in the floor's SFI-1
+    order) and by its API-token refusal, so the three can never judge different sets. A pure,
+    tenant-scoped read: it writes nothing.
     """
     nest_backed_operation_ids = [
         row[0]
@@ -562,8 +563,11 @@ def import_would_wipe_recorded_work(db: Session, *, laser_work_order: Optional[W
     before the upload is unpacked and again under the import's lock, in one request
     transaction, so without ``populate_existing()`` the re-check would reuse the first check's
     loaded operations and miss a desk edit committed in between (the header is read as plain
-    columns, which never touch the identity map). Nothing has written to these rows earlier in
-    the request, so refreshing them discards nothing.
+    columns, which never touch the identity map). The route's re-check runs right after the
+    import has row-locked and refreshed this same set (``_lock_laser_import_wipe_operations``
+    in ``work_orders.py``, the first thing its transaction does), so it judges the locked rows,
+    which nobody can change before the wipe; and since nothing writes these rows before that
+    lock, refreshing them here discards nothing.
 
     ``None`` (no laser work order yet: a standalone import, or a classic parent with no live
     laser child) wipes nothing. A pure read: callers raise the refusal before any write and

@@ -18,7 +18,10 @@
   the import zeroes are recorded work; the re-check reads the database, not the first check's loaded
   rows; a row changed mid-import -- the laser work order's own header included, which is flushed,
   version-checked and row-locked before the first audit row -- answers the app-wide 409 text; a
-  person's import never resolves the laser child for the token check.
+  person's import never resolves the laser child for the token check. The import locks in the
+  floor's SFI-1 order -- the operations it replaces, then the work order, then the audit chain --
+  so the token re-check judges the locked rows, and a lock race it loses on Postgres (40P01 /
+  40001) answers the same 409 rather than the 400 for a conflicting nest row.
 
 Every refusal is pinned as writing NOTHING.
 """
@@ -33,9 +36,12 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import event, text
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import StaleDataError
 
 import app.api.endpoints.work_orders as work_orders_endpoint
+from app.db.locks import is_lost_lock_race
 from app.db.mixins import STALE_WRITE_CONFLICT_DETAIL
 from app.main import app
 from app.mcp.catalog import build_catalog
@@ -354,6 +360,36 @@ def _nest_world(db: Session) -> dict:
     }
 
 
+NEST_PACKAGE_CONFLICT = (
+    "Could not import the nest package; a nest conflicts with an existing record "
+    "or a value is invalid. Review the rows and try again."
+)
+
+
+class _DriverError(Exception):
+    """A stand-in for a psycopg2 error: SQLAlchemy wraps the driver's exception and keeps it as ``.orig``."""
+
+    def __init__(self, pgcode):
+        super().__init__(f"driver error {pgcode}")
+        self.pgcode = pgcode
+
+
+@pytest.mark.parametrize(
+    "exc, lost",
+    [
+        (OperationalError("SELECT 1", {}, _DriverError("40P01")), True),
+        (OperationalError("SELECT 1", {}, _DriverError("40001")), True),
+        (OperationalError("SELECT 1", {}, _DriverError("57014")), False),
+        (OperationalError("SELECT 1", {}, _DriverError(None)), False),
+        (OperationalError("SELECT 1", {}, Exception("no pgcode attribute")), False),
+        (StaleDataError("version mismatch"), False),
+        (ValueError("40P01"), False),
+    ],
+)
+def test_is_lost_lock_race_reads_the_driver_sqlstate_only(exc, lost):
+    assert is_lost_lock_race(exc) is lost
+
+
 @pytest.fixture
 def no_ai(monkeypatch):
     monkeypatch.setattr(
@@ -636,9 +672,41 @@ class TestApiTokenNestReimportOverRecordedWork:
     def test_a_row_changed_under_a_persons_import_answers_409_refresh(
         self, client, db_session, admin_user, no_ai, monkeypatch
     ):
-        """A nest operation the wipe deletes is changed by someone else after this request loaded
-        it: the version check on the delete is a concurrent edit, so the answer is the app's 409
+        """A nest operation the wipe deletes is changed by someone else after this request LOCKED
+        it. On Postgres that write cannot land -- the import row-locks the wipe set first (SFI-1
+        order) and the other writer queues until the import ends -- so this pins the backstop
+        behind the lock: SQLite renders no FOR UPDATE, which lets the write land past the identity
+        map, and the version check on the delete is a concurrent edit, answered with the app's 409
         "refresh and retry" -- not the 400 that sends the caller looking for a conflicting row."""
+        laser = self._standalone(client, db_session, admin_user)
+        target_id = _nest_ops(db_session, laser.id)[0].id
+        original_lock = work_orders_endpoint._lock_laser_import_wipe_operations
+        held: list = []  # keeps the locked copies in the weak-referencing identity map until the delete
+
+        def _someone_edits_after_the_lock(db, **kwargs):
+            locked = original_lock(db, **kwargs)
+            held.extend(locked)
+            assert target_id in [op.id for op in locked]
+            db.execute(text("UPDATE work_order_operations SET version = version + 1 WHERE id = :id"), {"id": target_id})
+            return locked
+
+        monkeypatch.setattr(work_orders_endpoint, "_lock_laser_import_wipe_operations", _someone_edits_after_the_lock)
+        before = _nest_world(db_session)
+
+        resp = _import(client, user_headers(admin_user), WO_IMPORT_URL.format(wo=laser.id), _cnc_zip("N9.nc"))
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == STALE_WRITE_CONFLICT_DETAIL
+        assert _nest_world(db_session) == before
+
+    def test_a_row_changed_before_the_lock_is_judged_fresh_and_replaced(
+        self, client, db_session, admin_user, no_ai, monkeypatch
+    ):
+        """The other half of the same race: someone saves a nest operation while the package is
+        still unpacking, BEFORE the import's transaction locks it, and this request holds a copy
+        it loaded earlier. The lock re-reads the row (``populate_existing``), so the import judges
+        and replaces what is stored -- for a person, IMPORT REPLACES EVERYTHING -- instead of
+        tripping the delete's version check on the stale copy. (A token is refused over the same
+        write when it is recorded work: see the desk-count test above.)"""
         laser = self._standalone(client, db_session, admin_user)
         target_id = _nest_ops(db_session, laser.id)[0].id
         original = work_orders_endpoint.extract_laser_nest_zip
@@ -647,19 +715,18 @@ class TestApiTokenNestReimportOverRecordedWork:
         def _someone_edits_during_extraction(*args, **kwargs):
             result = original(*args, **kwargs)
             held.append(db_session.get(WorkOrderOperation, target_id))
-            assert held[0].version is not None
             db_session.execute(
-                text("UPDATE work_order_operations SET version = version + 1 WHERE id = :id"), {"id": target_id}
+                text("UPDATE work_order_operations SET description = 'desk', version = version + 1 WHERE id = :id"),
+                {"id": target_id},
             )
             return result
 
         monkeypatch.setattr(work_orders_endpoint, "extract_laser_nest_zip", _someone_edits_during_extraction)
-        before = _nest_world(db_session)
 
         resp = _import(client, user_headers(admin_user), WO_IMPORT_URL.format(wo=laser.id), _cnc_zip("N9.nc"))
-        assert resp.status_code == 409, resp.text
-        assert resp.json()["detail"] == STALE_WRITE_CONFLICT_DETAIL
-        assert _nest_world(db_session) == before
+        assert resp.status_code == 200, resp.text
+        [op] = _nest_ops(db_session, laser.id)
+        assert "N9" in op.name and op.description != "desk"
 
     def _header_bumped_during_extraction(
         self, db: Session, monkeypatch, work_order_id: int, *, also_set: str = ""
@@ -741,10 +808,13 @@ class TestApiTokenNestReimportOverRecordedWork:
         assert audit_calls == [], "the header conflict is found before the first audit row"
         assert _nest_world(db_session) == before
 
-    def _import_statement_order(self, client, db: Session, monkeypatch, headers, url: str, package: bytes):
-        """Run one import and record, in order, every ``work_orders`` row lock it takes
-        (``header_lock``), every UPDATE it sends to ``work_orders`` (``header_write``) and every
-        audit row it asks for (``audit:<resource_type>``, appended BEFORE ``AuditService.log``
+    def _import_statement_order(
+        self, client, db: Session, monkeypatch, headers, url: str, package: bytes, *, rows=None, locks_sql=None
+    ):
+        """Run one import and record, in order, every ``work_order_operations`` row lock it takes
+        (``ops_lock``, its Postgres SQL appended to ``locks_sql`` when given), every ``work_orders``
+        row lock (``header_lock``), every UPDATE it sends to ``work_orders`` (``header_write``) and
+        every audit row it asks for (``audit:<resource_type>``, appended BEFORE ``AuditService.log``
         runs, so a write that log's own savepoint flushes lands after its audit entry)."""
         order: list = []
 
@@ -753,6 +823,10 @@ class TestApiTokenNestReimportOverRecordedWork:
                 sql = str(state.statement.compile(dialect=postgresql.dialect()))
                 if "FOR UPDATE" in sql and "FROM work_orders" in sql:
                     order.append("header_lock")
+                if "FOR UPDATE" in sql and "FROM work_order_operations" in sql:
+                    order.append("ops_lock")
+                    if locks_sql is not None:
+                        locks_sql.append(sql)
 
         def _record_header_writes(conn, cursor, statement, parameters, context, executemany):
             if statement.lstrip().upper().startswith("UPDATE WORK_ORDERS "):
@@ -769,7 +843,7 @@ class TestApiTokenNestReimportOverRecordedWork:
         event.listen(db, "do_orm_execute", _record_header_locks)
         event.listen(engine, "before_cursor_execute", _record_header_writes)
         try:
-            resp = _import(client, headers, url, package)
+            resp = _import(client, headers, url, package, rows=rows)
         finally:
             event.remove(db, "do_orm_execute", _record_header_locks)
             event.remove(engine, "before_cursor_execute", _record_header_writes)
@@ -833,6 +907,148 @@ class TestApiTokenNestReimportOverRecordedWork:
         assert order.count("header_write") == 2, f"the release stamp, then quantity_ordered: {order}"
         last_write = max(i for i, entry in enumerate(order) if entry == "header_write")
         assert last_write < order.index("audit:work_order"), order
+
+    @pytest.mark.parametrize("shape", ["counts", "clean", "same_total", "pdf_rows", "parent"])
+    def test_the_operations_are_locked_before_the_work_order_and_the_first_audit_row(
+        self, client, db_session, admin_user, shape, no_ai, monkeypatch
+    ):
+        """SFI-1, the order every floor completion, production report and clock-out locks in --
+        operation, then work order, then the audit chain -- and now the import's too. No race
+        needed: the import row-locks every operation its wipe deletes, ascending id, in one
+        statement, before it locks the ``work_orders`` row (the header check), and both before its
+        first audit row takes the global chain lock; no operation lock comes after that. The old
+        order (work order, chain, then the operations by deleting them) is what deadlocked a nest
+        completion landing mid-import on Postgres. Pinned by DIALECT-COMPILING the statements the
+        import sends: SQLite renders no FOR UPDATE. Every import shape onto an existing laser work
+        order shares the path: a hand-counted header, a clean one, one the import never writes, the
+        PDF confirm-and-commit rows, and a parent-addressed import onto its classic laser child."""
+        if shape == "parent":
+            parent, laser = self._classic(client, db_session, admin_user)
+            url = WO_IMPORT_URL.format(wo=parent.id)
+        else:
+            laser = self._standalone(client, db_session, admin_user)  # 2 nests, 5 planned runs
+            url = WO_IMPORT_URL.format(wo=laser.id)
+        if shape == "counts":
+            laser.quantity_complete = 2.0
+            db_session.commit()
+        wipe_ids = sorted(laser_import_wipe_operation_ids(db_session, child_work_order=laser, company_id=COMPANY_A))
+        assert wipe_ids and wipe_ids == sorted(op.id for op in _nest_ops(db_session, laser.id))
+        rows = None
+        package = _cnc_zip("N9.nc")
+        if shape == "same_total":
+            package = _cnc_zip("N8_QTY5.nc")
+        elif shape == "pdf_rows":
+            package = _pdf_zip("n1.pdf")
+            rows = [{"source_file": "n1.pdf", "cnc_number": "N1", "planned_runs": 2}]
+        locked: list = []
+        original_lock = work_orders_endpoint._lock_laser_import_wipe_operations
+
+        def _spy(db, **kwargs):
+            result = original_lock(db, **kwargs)
+            locked.append([op.id for op in result])
+            return result
+
+        monkeypatch.setattr(work_orders_endpoint, "_lock_laser_import_wipe_operations", _spy)
+        locks_sql: list = []
+        resp, order = self._import_statement_order(
+            client, db_session, monkeypatch, user_headers(admin_user), url, package, rows=rows, locks_sql=locks_sql
+        )
+        assert resp.status_code == 200, resp.text
+        assert locked == [wipe_ids], "every operation the wipe deletes, ascending"
+        assert order.count("ops_lock") == 1, order
+        first_audit = next(i for i, entry in enumerate(order) if entry.startswith("audit:"))
+        assert order.index("ops_lock") < order.index("header_lock") < first_audit, order
+        assert "ops_lock" not in order[first_audit:], f"no operation row lock after the chain lock: {order}"
+        assert "ORDER BY work_order_operations.id ASC" in locks_sql[0], locks_sql[0]
+        assert "work_order_operations.company_id = " in locks_sql[0], "tenant-scoped"
+
+    def test_the_token_recheck_judges_the_rows_the_import_just_locked(
+        self, client, db_session, admin_user, admin_headers, supervisor, no_ai, monkeypatch
+    ):
+        """The token re-check runs AFTER the operation lock and on the rows it locked: a desk count
+        reaching the database while the package unpacks -- past the copy this request loaded for
+        the early check -- is already on that copy when the re-check starts, because the lock
+        re-read it. Refused 403 with nothing written, as before; the only change is that what it
+        judges can no longer move before the wipe."""
+        laser = self._standalone(client, db_session, admin_user)
+        wipe_ids = sorted(laser_import_wipe_operation_ids(db_session, child_work_order=laser, company_id=COMPANY_A))
+        target_id = wipe_ids[0]
+        headers = _token(client, admin_headers, supervisor)
+        held: list = []  # keeps the request's loaded row in the weak-referencing identity map
+        original_extract = work_orders_endpoint.extract_laser_nest_zip
+
+        def _desk_records_during_extraction(*args, **kwargs):
+            result = original_extract(*args, **kwargs)
+            held.append(db_session.get(WorkOrderOperation, target_id))
+            assert float(held[0].quantity_complete or 0) == 0
+            db_session.execute(
+                text("UPDATE work_order_operations SET quantity_complete = 5, version = version + 1 WHERE id = :id"),
+                {"id": target_id},
+            )
+            return result
+
+        calls: list = []
+        original_lock = work_orders_endpoint._lock_laser_import_wipe_operations
+        original_check = work_orders_endpoint.import_would_wipe_recorded_work
+
+        def _spy_lock(db, **kwargs):
+            result = original_lock(db, **kwargs)
+            calls.append(("lock", [op.id for op in result]))
+            return result
+
+        def _spy_check(db, **kwargs):
+            # What the request's copy of the worked row says when the check STARTS, before its own read.
+            calls.append(("check", float(held[0].quantity_complete or 0) if held else None))
+            return original_check(db, **kwargs)
+
+        monkeypatch.setattr(work_orders_endpoint, "extract_laser_nest_zip", _desk_records_during_extraction)
+        monkeypatch.setattr(work_orders_endpoint, "_lock_laser_import_wipe_operations", _spy_lock)
+        monkeypatch.setattr(work_orders_endpoint, "import_would_wipe_recorded_work", _spy_check)
+        before = _nest_world(db_session)
+
+        resp = _import(client, headers, WO_IMPORT_URL.format(wo=laser.id), _cnc_zip("N9_QTY1.nc"))
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["detail"] == API_TOKEN_NEST_REIMPORT
+        assert calls == [("check", None), ("lock", wipe_ids), ("check", 5.0)], calls
+        assert _nest_world(db_session) == before
+
+    @pytest.mark.parametrize("pgcode, status", [("40P01", 409), ("40001", 409), ("57014", 400), (None, 400)])
+    @pytest.mark.parametrize("shape", ["cnc", "pdf_rows"])
+    def test_a_lock_race_lost_inside_the_rebuild_answers_409_refresh(
+        self, client, db_session, admin_user, shape, pgcode, status, no_ai, monkeypatch, tmp_path
+    ):
+        """Postgres settles a lock cycle (40P01 ``deadlock_detected``) or a serialization conflict
+        (40001) by rolling one transaction back. When that is the import, nothing of it commits and
+        the other writer's change stands, so the advice is the app's 409 "refresh and retry" -- not
+        the 400 telling the caller their nest rows are wrong. Raised AFTER the rebuild has deleted
+        and flushed (and, for PDF rows, stored a blob), so the rollback and the blob reap are both
+        pinned. Any other database error keeps the 400: a cancelled statement (57014, also an
+        ``OperationalError``) and an error carrying no code at all."""
+        laser = self._standalone(client, db_session, admin_user)
+        original_build = work_orders_endpoint.build_laser_nest_child_work_order
+        blobs_written: list = []
+
+        def _rebuild_then_lose_the_race(db, **kwargs):
+            original_build(db, **kwargs)
+            blobs_written.append(len(kwargs["saved_storage_keys"]))
+            raise OperationalError("DELETE FROM work_order_operations", {}, _DriverError(pgcode))
+
+        monkeypatch.setattr(work_orders_endpoint, "build_laser_nest_child_work_order", _rebuild_then_lose_the_race)
+        rows = None
+        package = _cnc_zip("N9.nc")
+        if shape == "pdf_rows":
+            package = _pdf_zip("n1.pdf")
+            rows = [{"source_file": "n1.pdf", "cnc_number": "N1", "planned_runs": 2}]
+        before = _nest_world(db_session)
+        files_before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file())
+
+        resp = _import(client, user_headers(admin_user), WO_IMPORT_URL.format(wo=laser.id), package, rows=rows)
+        assert resp.status_code == status, resp.text
+        assert resp.json()["detail"] == (STALE_WRITE_CONFLICT_DETAIL if status == 409 else NEST_PACKAGE_CONFLICT)
+        assert blobs_written == [1 if shape == "pdf_rows" else 0], "the race is lost after the rebuild ran"
+        assert _nest_world(db_session) == before
+        files_after = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file())
+        assert files_after == files_before, "no orphaned blob or package dir"
 
     def test_a_persons_parent_addressed_import_never_resolves_the_laser_child_early(
         self, client, db_session, admin_user, admin_headers, supervisor, no_ai, monkeypatch

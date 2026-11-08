@@ -3987,7 +3987,7 @@ mixed**:
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | POST | `/work-orders/{id}/laser-nest-packages/preview` | Preview nests detected from a zipped package, a bare nest-report PDF (single- or multi-page), or a server folder (writes nothing). PDF uploads run AI extraction per sheet; every row carries an advisory `sheet_suggestion` | Admin / Manager / Supervisor |
-| POST | `/work-orders/{id}/laser-nest-packages/import` | Import a package — creates/rebuilds the child laser WO (or rebuilds the addressed WO directly when it is itself `laser_cutting`), one nest operation per CNC file (or per confirmed PDF row). Sets the laser WO RELEASED and records the release as the caller's when it was a draft or unstamped; an **on-hold** laser WO stays on hold (see "Package import replaces everything"). `child_work_order.status` can therefore come back `on_hold`. Optional `sheet_match_provenance`. **403** (`Re-importing a nest package replaces nests that already have recorded work …`) for a standing API token when any nest operation the import would replace has recorded good, scrap, a start or any labor, or the laser work order's header already carries good or scrap — before anything is unpacked or written (this PR's extension of the 2026-11-07 decision; see Work Orders → "Short count at completion"); a person's re-import is unchanged. **409** (`This record was modified by someone else. Refresh and try again.`, the app-wide optimistic-lock text) when the laser work order itself, or a row the rebuild deletes or rewrites, was changed by someone else mid-import | Admin / Manager / Supervisor |
+| POST | `/work-orders/{id}/laser-nest-packages/import` | Import a package — creates/rebuilds the child laser WO (or rebuilds the addressed WO directly when it is itself `laser_cutting`), one nest operation per CNC file (or per confirmed PDF row). Sets the laser WO RELEASED and records the release as the caller's when it was a draft or unstamped; an **on-hold** laser WO stays on hold (see "Package import replaces everything"). `child_work_order.status` can therefore come back `on_hold`. Optional `sheet_match_provenance`. **403** (`Re-importing a nest package replaces nests that already have recorded work …`) for a standing API token when any nest operation the import would replace has recorded good, scrap, a start or any labor, or the laser work order's header already carries good or scrap — before anything is unpacked or written (this PR's extension of the 2026-11-07 decision; see Work Orders → "Short count at completion"); a person's re-import is unchanged. **409** (`This record was modified by someone else. Refresh and try again.`, the app-wide optimistic-lock text) on a concurrent edit to the job (the laser work order saved by someone else mid-import), or when the import loses a lock race with another writer and Postgres rolls it back (deadlock `40P01`, serialization failure `40001`): nothing of the import commits, so refresh and retry. The import row-locks the operations it replaces before the work order, the same order the floor's completion and clock-out verbs lock in | Admin / Manager / Supervisor |
 | POST | `/work-orders/laser-nest-packages/standalone/preview` | Same preview with **no work order in the path** — used before a standalone import (same `sheet_suggestion` on every row) | Admin / Manager / Supervisor |
 | POST | `/work-orders/laser-nest-packages/standalone/import` | Import a package into a **fresh standalone laser WO** — creates a released, part-less `laser_cutting` work order with the release recorded as the importer's (`released_by` / `released_at`) (no parent; quantity = total planned sheet runs; optional `due_date`, optional `sheet_match_provenance`) | Admin / Manager / Supervisor |
 | POST | `/laser-nests/extract` | Auto-extract nest fields (CNC #, material, size) from a single uploaded nest PDF. Stateless — no DB write, no audit | Admin / Manager / Supervisor |
@@ -4041,9 +4041,18 @@ environment variable or deployment configuration change is needed.
 > order's header already carries good or scrap — judged on exactly what the import erases
 > (`laser_nest_service.import_would_wipe_recorded_work`: the wipe's own operation set, and the
 > header counts it zeroes), before anything is unpacked or written. This PR's extension, not the
-> owner's decision; a person's re-import behaves exactly as above. For anyone, a row the rebuild
-> deletes or rewrites that someone else changed mid-import answers **409** (refresh and retry),
-> not the 400 for a conflicting nest row.
+> owner's decision; a person's re-import behaves exactly as above. For anyone, a concurrent edit to
+> the job (the laser work order saved by someone else mid-import), or a lock race the import loses
+> (Postgres rolls it back as a deadlock victim, `40P01`, or on a serialization failure, `40001`),
+> answers **409** (refresh and retry), not the 400 for a conflicting nest row; nothing of the import
+> commits. The import locks in the floor's order (SFI-1): first every operation it is about to
+> replace (ascending id), then the laser work order, and only then the audit-chain lock for its
+> first audit row — the order the floor's completion, production-report and clock-out verbs use. A
+> nest completion or clock-out landing mid-import therefore queues behind the import instead of
+> deadlocking it, and the import judges the operations (the API-token refusal above included) as
+> they stand once locked. Not every writer uses that order yet — force-complete locks the work
+> order before its operations — so a lock race is still possible; when the import is the side
+> Postgres rolls back, it answers the 409.
 >
 > **The import records the release it performs, and keeps a hold.** Moving the laser WO into
 > RELEASED stamps `released_by` (the caller) and `released_at` when the WO was DRAFT or carried no

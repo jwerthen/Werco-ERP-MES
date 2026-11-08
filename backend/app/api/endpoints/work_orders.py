@@ -43,7 +43,7 @@ from app.core.websocket import (
     broadcast_work_order_update,
 )
 from app.db.database import atomic_transaction, get_db
-from app.db.locks import acquire_generator_lock
+from app.db.locks import acquire_generator_lock, is_lost_lock_race
 from app.db.mixins import STALE_WRITE_CONFLICT_DETAIL
 from app.db.tenant_filter import tenant_filter, tenant_query
 from app.models.bom import BOM, BOMItem
@@ -119,6 +119,7 @@ from app.services.laser_nest_service import (
     create_nest_material_allocation,
     extract_laser_nest_zip,
     import_would_wipe_recorded_work,
+    laser_import_wipe_operation_ids,
     manual_nest_response_dict,
     package_has_pdfs,
     parse_laser_nest_folder,
@@ -1518,6 +1519,42 @@ def _release_laser_work_order_for_nests(work_order: WorkOrder, *, released_by: i
     work_order.status = WorkOrderStatus.RELEASED
 
 
+def _lock_laser_import_wipe_operations(
+    db: Session, *, laser_work_order: WorkOrder, company_id: int
+) -> list[WorkOrderOperation]:
+    """Row-lock every operation the package import will DELETE, before the work order and the audit chain.
+
+    SFI-1 is the lock order every floor and office completion, production report and clock-out
+    takes: the OPERATION row (``SELECT ... FOR UPDATE``) first, then the WORK ORDER row, then --
+    for its audit row -- the global audit-chain lock. The import used to take the work order's row
+    lock (``_check_laser_header_before_audit``) and the chain lock (the superseded-nest
+    ``log_delete`` rows) first and only reach the operations when the rebuild DELETEd them, so a
+    nest completion landing mid-import closed a lock cycle Postgres breaks by rolling one side
+    back (40P01). Locking the wipe set here -- right after the target is resolved, before any other
+    row lock and any write to an existing job -- puts the import on the floor's order: operations
+    -> work order -> audit chain (invariant 4: row locks before the global chain lock).
+
+    The set is ``laser_nest_service.laser_import_wipe_operation_ids`` -- the one definition the
+    rebuild deletes and the API-token refusal judges -- locked in ascending id order, tenant-scoped.
+    ``populate_existing()`` refreshes the session's copies from the locked rows, so the token
+    re-check that follows and the rebuild's version-checked DELETEs judge exactly what is locked.
+    That discards nothing: called first in the import's transaction, no write to these rows is
+    pending yet. Writes nothing. Returns the locked operations. A standalone job or a classic
+    parent's freshly created child has no operations, so there is nothing to lock.
+    """
+    operation_ids = laser_import_wipe_operation_ids(db, child_work_order=laser_work_order, company_id=company_id)
+    if not operation_ids:
+        return []
+    return (
+        tenant_query(db, WorkOrderOperation, company_id)
+        .filter(WorkOrderOperation.id.in_(operation_ids))
+        .order_by(WorkOrderOperation.id.asc())
+        .with_for_update()
+        .populate_existing()
+        .all()
+    )
+
+
 def _check_laser_header_before_audit(db: Session, *, work_order: WorkOrder, company_id: int) -> None:
     """Version-check and row-lock the import's laser work order BEFORE its first audit row.
 
@@ -1540,7 +1577,8 @@ def _check_laser_header_before_audit(db: Session, *, work_order: WorkOrder, comp
       edit, raised as the same error -- so that shape now answers 409, deliberately, where it
       used to answer 200.
 
-    Either step takes the ``work_orders`` row lock before the global audit-chain lock (invariant
+    Either step takes the ``work_orders`` row lock after the operation locks
+    (``_lock_laser_import_wipe_operations``, SFI-1) and before the global audit-chain lock (invariant
     4), and once it is held nobody else can save the header before commit. The post-rebuild
     ``UPDATE`` is still flushed by the caller before the work-order audit row, so a failure there
     is never swallowed inside the audit service either. The read is column-only, so it never
@@ -3164,9 +3202,15 @@ async def _run_laser_nest_import(
 
     Both paths refuse a standing API token (403 API_TOKEN_NEST_REIMPORT) when the wipe
     would delete an operation with recorded work or zero a header count above zero --
-    checked first, and again under the import's advisory lock before the first write
-    (``_refuse_api_token_reimport_over_recorded_work``). The standalone path wipes nothing
-    and is never refused here.
+    checked first, and again under the import's advisory lock and operation locks before the
+    first write (``_refuse_api_token_reimport_over_recorded_work``). The standalone path wipes
+    nothing and is never refused here.
+
+    Lock order on an existing laser work order is the floor's (SFI-1): the operations the wipe
+    deletes (``_lock_laser_import_wipe_operations``), then the work order
+    (``_check_laser_header_before_audit``), then the audit chain. A concurrent edit to the job,
+    or a lock race Postgres settles by rolling this import back (40P01 / 40001), answers 409
+    with the app-wide "refresh and try again" text; nothing of the import commits.
     """
     # This PR's extension (see the helper): a standing API token may not re-import over nest
     # operations that carry recorded work. Checked FIRST -- before the rows parse, the upload
@@ -3333,8 +3377,17 @@ async def _run_laser_nest_import(
                     parent_work_order, child_work_order = _resolve_laser_target(
                         db, work_order=target_work_order, company_id=company_id
                     )
-                    # The token refusal again, now under the import's advisory lock and
-                    # before the first write to this work order and the first audit row.
+                    # SFI-1: row-lock every operation the wipe deletes FIRST, before the work
+                    # order's row lock (the header check below) and the audit-chain lock (the
+                    # first audit row) -- the floor's order, so a nest completion landing
+                    # mid-import queues behind the import instead of deadlocking it. Nothing
+                    # between here and the header check writes an operation: the token
+                    # re-check and the work-center pick only read, and the release and the
+                    # zeroing below write the header alone.
+                    _lock_laser_import_wipe_operations(db, laser_work_order=child_work_order, company_id=company_id)
+                    # The token refusal again, now under the import's advisory lock and the
+                    # operation locks, judged on the rows just locked, and before the first
+                    # write to this work order and the first audit row.
                     _refuse_api_token_reimport_over_recorded_work(
                         db, current_user=current_user, laser_work_order=child_work_order, company_id=company_id
                     )
@@ -3556,9 +3609,20 @@ async def _run_laser_nest_import(
             raise HTTPException(status_code=409, detail=STALE_WRITE_CONFLICT_DETAIL) from exc
         except (IntegrityError, SQLAlchemyError) as exc:
             # The transaction rolled back, so the just-written nest-PDF blobs are
-            # now orphaned -- reap them. Translate the DB/constraint fault to a
-            # clean 400 (a poisoned session must not surface as a 500).
+            # now orphaned -- reap them.
             _reap_saved_blobs()
+            if is_lost_lock_race(exc):
+                # Postgres rolled this import back to settle a lock conflict with another
+                # writer (40P01 deadlock victim, 40001 serialization failure): nothing of it
+                # committed, and the other writer's change stands. That is a concurrent edit,
+                # so it gets the same 409 "refresh and retry" as the StaleDataError branch --
+                # not the 400 below, which tells the caller their rows are wrong. Checked
+                # first because both are SQLAlchemyErrors; every other database error keeps
+                # the 400.
+                logger.warning("Laser-nest import lost a lock race and was rolled back: %s", exc)
+                raise HTTPException(status_code=409, detail=STALE_WRITE_CONFLICT_DETAIL) from exc
+            # Translate the DB/constraint fault to a clean 400 (a poisoned session must
+            # not surface as a 500).
             logger.warning("Laser-nest import failed on a database/constraint error: %s", exc)
             raise HTTPException(
                 status_code=400,
@@ -3727,7 +3791,7 @@ async def import_laser_nest_package(
     is unpacked, before any write and before any audit row. A person's re-import is unchanged,
     and so is a token's import onto a job none of whose nest operations has been worked and
     whose header counts are zero. A row changed by someone else while the package is being
-    rebuilt answers **409** (refresh and retry).
+    rebuilt, or a lock race the import loses, answers **409** (refresh and retry).
     """
     target_work_order = _load_parent_work_order(db, work_order_id, company_id)
     return await _run_laser_nest_import(
