@@ -736,3 +736,88 @@ describe('CrewStationKiosk', () => {
     });
   });
 });
+
+/**
+ * Owner ruling 2026-11-05: the floor never starts work on a job a supervisor has
+ * not released or has put on hold. A WORK-ORDER refusal stays on `queue` (unlike
+ * an operation hold, which moves to `held`) with `start_blocked_reason` set, and
+ * the server refuses JOIN with a 409 — deliberately not a 400, because this page
+ * turns every clock-in 400 into "already clocked in".
+ */
+describe('CrewStationKiosk — a job the work order refuses', () => {
+  const WO_ON_HOLD =
+    "This work order is on hold — work cannot start until a supervisor resumes it (Resume Work Order on the work order). Resuming or clearing an operation's hold does not lift it.";
+  const HELD_ITEM = { ...ITEM, work_order_status: 'on_hold', start_blocked_reason: WO_ON_HOLD };
+
+  beforeEach(() => {
+    unlockedStation();
+    mocked.getQueue.mockResolvedValue({ ...QUEUE_RES, queue: [HELD_ITEM] });
+  });
+
+  it('chips the board card and keeps it tappable', async () => {
+    renderKiosk();
+
+    const card = await screen.findByRole('button', { name: /WO-2026-0142/i });
+    expect(within(card).getByTestId('kiosk-start-blocked-chip')).toHaveTextContent('WO on hold');
+    expect(card).toBeEnabled();
+  });
+
+  it('job-first JOIN: the 409 renders inline on the scan screen, never as "already clocked in"', async () => {
+    mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
+    mocked.clockIn.mockRejectedValue(new KioskApiError(409, WO_ON_HOLD, WO_ON_HOLD));
+    renderKiosk();
+
+    await openJobDetail();
+    fireEvent.click(screen.getByRole('button', { name: /join \/ leave/i }));
+    scanBadge('E013');
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(WO_ON_HOLD);
+    // Still on the scan screen — the 400 branch would have moved to the job view.
+    expect(screen.getByText(/scan badge to join or leave/i)).toBeInTheDocument();
+    expect(screen.queryByText('Already clocked in.')).not.toBeInTheDocument();
+  });
+
+  it('job-first LEAVE stays available to a rostered badge on a held job (no pre-block)', async () => {
+    mocked.mintBadgeToken.mockResolvedValue(BOB_MINT);
+    renderKiosk();
+
+    await openJobDetail();
+    fireEvent.click(screen.getByRole('button', { name: /join \/ leave/i }));
+    scanBadge('E011');
+
+    expect(await screen.findByText(/clock out — bob t/i)).toBeInTheDocument();
+    expect(mocked.clockIn).not.toHaveBeenCalled();
+  });
+
+  it('operator sheet: lists the held job disabled, with the server reason as secondary text', async () => {
+    mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
+    renderKiosk();
+
+    await screen.findByRole('button', { name: /WO-2026-0142/i });
+    scanBadge('E013');
+
+    expect(await screen.findByRole('region', { name: /your jobs/i })).toBeInTheDocument();
+    const row = screen.getByTestId('crew-join-row-31');
+    expect(row).toBeDisabled();
+    expect(row).toHaveTextContent(WO_ON_HOLD);
+    expect(row).toHaveTextContent(/WO on hold/i);
+    expect(row).not.toHaveTextContent(/tap to join/i);
+
+    fireEvent.click(row);
+    expect(mocked.clockIn).not.toHaveBeenCalled();
+  });
+
+  it('operator sheet: a released job keeps its enabled "Tap to join" row (control)', async () => {
+    mocked.getQueue.mockResolvedValue(QUEUE_RES);
+    mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
+    renderKiosk();
+
+    await screen.findByRole('button', { name: /WO-2026-0142/i });
+    scanBadge('E013');
+
+    await screen.findByRole('region', { name: /your jobs/i });
+    const row = screen.getByTestId('crew-join-row-31');
+    expect(row).toBeEnabled();
+    expect(row).toHaveTextContent(/tap to join \(run\)/i);
+  });
+});

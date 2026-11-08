@@ -164,3 +164,27 @@ describe('KioskCrewJobCard moved-up chip (Dispatch v2)', () => {
     expect(screen.getByRole('button')).toHaveAccessibleName('Work order WO-2026-0142, operation Weld, 2 clocked in');
   });
 });
+
+describe('KioskCrewJobCard work-order start refusal chip', () => {
+  it('renders nothing on an ordinary row', () => {
+    render(<KioskCrewJobCard item={ITEM} nowMs={NOW_MS} onSelect={jest.fn()} />);
+    expect(screen.queryByTestId('kiosk-start-blocked-chip')).not.toBeInTheDocument();
+  });
+
+  it('chips a held work order and keeps the card enabled (a roster must still be able to LEAVE)', () => {
+    const reason = 'This work order is on hold — work cannot start until a supervisor resumes it.';
+    render(
+      <KioskCrewJobCard
+        item={{ ...ITEM, work_order_status: 'on_hold', start_blocked_reason: reason }}
+        nowMs={NOW_MS}
+        onSelect={jest.fn()}
+      />
+    );
+    const chip = screen.getByTestId('kiosk-start-blocked-chip');
+    expect(chip).toHaveTextContent('WO on hold');
+    expect(chip).toHaveAttribute('title', reason);
+    const card = screen.getByRole('button');
+    expect(card).toBeEnabled();
+    expect(card).toHaveAccessibleName(/wo on hold$/i);
+  });
+});

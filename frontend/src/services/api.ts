@@ -50,6 +50,7 @@ import {
   BOMUomMismatchReport,
   WorkOrderDuplicateResult,
   WorkOrderRestoreResponse,
+  WorkOrderResumeResponse,
   WorkOrderTemplate,
   WorkOrderTemplateCreatePayload,
   WorkOrderTemplateListResult,
@@ -1366,6 +1367,16 @@ class ApiService {
 
   async startWorkOrder(id: number) {
     const response = await this.api.post(`/work-orders/${id}/start`);
+    this.invalidateDashboardCache();
+    return response.data;
+  }
+
+  // "Resume Work Order" — lifts a WORK-ORDER hold (Admin/Manager/Supervisor).
+  // The server picks the restore target from the release record; the response's
+  // `message` names it, and a `draft` result means the job needs a Release click.
+  // Operation-level holds are untouched (that is resumeOperation / Clear Hold).
+  async resumeWorkOrder(id: number): Promise<WorkOrderResumeResponse> {
+    const response = await this.api.post<WorkOrderResumeResponse>(`/work-orders/${id}/resume`);
     this.invalidateDashboardCache();
     return response.data;
   }

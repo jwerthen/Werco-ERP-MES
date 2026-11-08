@@ -29,6 +29,7 @@ import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import ShopFloorSimple from './ShopFloorSimple';
 import api from '../services/api';
 import { WorkCenter } from '../types';
+import { WORK_ORDER_ON_HOLD_REASON } from '../components/kiosk/heldOperationFixtures';
 
 jest.mock('../services/api', () => ({
   __esModule: true,
@@ -237,6 +238,30 @@ describe('ShopFloorSimple Clear Hold', () => {
     const toast = await screen.findByRole('alert');
     expect(toast).toHaveTextContent('1 blocker still open');
     expect(toast).toHaveTextContent('Machine Down: OP20 Laser Cut');
+  });
+
+  it('WARNS, in the server words, when the work order itself is still on hold', async () => {
+    // Clear Hold lifts the OPERATION's hold. Under a held work order the job
+    // comes back still refused, so "hold cleared" in green would report it as
+    // ready to run. The row carries the work order's refusal; the toast uses it.
+    mockedApi.getShopFloorOperations.mockResolvedValue({
+      operations: [
+        {
+          ...HELD_OP,
+          work_order_status: 'on_hold',
+          start_blocked_reason: WORK_ORDER_ON_HOLD_REASON,
+          can_check_in: false,
+        },
+      ],
+    });
+    renderShopFloor();
+    await screen.findByTestId('shop-floor-op-202');
+
+    fireEvent.click(clearHoldButton());
+
+    const toast = await screen.findByRole('alert');
+    expect(toast).toHaveTextContent(`WO-2026-0042 operation hold lifted — ${WORK_ORDER_ON_HOLD_REASON}`);
+    expect(toast).not.toHaveTextContent(/hold cleared/i);
   });
 
   it('surfaces a server refusal verbatim and leaves the card held', async () => {

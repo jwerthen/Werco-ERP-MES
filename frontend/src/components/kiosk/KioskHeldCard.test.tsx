@@ -15,9 +15,13 @@ import userEvent from '@testing-library/user-event';
 import KioskHeldCard from './KioskHeldCard';
 import {
   BARE_HOLD,
+  CREW_HELD_ROW_ON_HELD_WORK_ORDER,
   HELD_ROW,
+  HELD_ROW_ON_HELD_WORK_ORDER,
   HOLD_WITH_BLOCKER_STATION,
   UNRECORDED_HOLD,
+  WORK_ORDER_NOT_RELEASED_REASON,
+  WORK_ORDER_ON_HOLD_REASON,
   heldRowWith,
 } from './heldOperationFixtures';
 
@@ -218,5 +222,56 @@ describe('KioskHeldCard accessible name', () => {
 
   it('still prefers the operation NAME when the server sends one', () => {
     expect(resumeNameFor('Op 20', 'Deburr')).toBe('Resume work order WO-HELD-0001, operation Deburr');
+  });
+});
+
+/**
+ * An operation hold can sit under a held (or unreleased) WORK ORDER. Resume
+ * lifts the operation's hold only, so the card names the work order's refusal
+ * too — the same chip the queue card wears — or the operator lifts the hold
+ * expecting the job to run and finds it still refused.
+ */
+describe('KioskHeldCard work-order start refusal', () => {
+  it('wears the WO ON HOLD chip, with the server text verbatim as its title', () => {
+    render(<KioskHeldCard item={HELD_ROW_ON_HELD_WORK_ORDER} onResume={jest.fn()} />);
+
+    const chip = screen.getByTestId('kiosk-start-blocked-chip');
+    expect(chip).toHaveTextContent('WO on hold');
+    expect(chip).toHaveAttribute('title', WORK_ORDER_ON_HOLD_REASON);
+    // Resume stays the one verb, and stays live: lifting the operation hold is
+    // still allowed — it is the START the work order refuses.
+    expect(screen.getAllByRole('button')).toHaveLength(1);
+    expect(screen.getByTestId('kiosk-held-resume')).toBeEnabled();
+    expect(screen.getByTestId('kiosk-held-resume')).toHaveAccessibleName(
+      'Resume work order WO-HELD-0001, operation Deburr, wo on hold'
+    );
+  });
+
+  it('names an unreleased work order', () => {
+    render(
+      <KioskHeldCard
+        item={{ ...HELD_ROW, work_order_status: 'draft', start_blocked_reason: WORK_ORDER_NOT_RELEASED_REASON }}
+        onResume={jest.fn()}
+      />
+    );
+    expect(screen.getByTestId('kiosk-start-blocked-chip')).toHaveTextContent('Not released');
+  });
+
+  it('renders it at crew-station density too', () => {
+    render(<KioskHeldCard item={CREW_HELD_ROW_ON_HELD_WORK_ORDER} onResume={jest.fn()} size="crew" />);
+    expect(screen.getByTestId('kiosk-start-blocked-chip')).toHaveTextContent('WO on hold');
+  });
+
+  it('renders no chip, and the same accessible name, on a released job', () => {
+    render(
+      <KioskHeldCard
+        item={{ ...HELD_ROW, work_order_status: 'released', start_blocked_reason: null }}
+        onResume={jest.fn()}
+      />
+    );
+    expect(screen.queryByTestId('kiosk-start-blocked-chip')).not.toBeInTheDocument();
+    expect(screen.getByTestId('kiosk-held-resume')).toHaveAccessibleName(
+      'Resume work order WO-HELD-0001, operation Deburr'
+    );
   });
 });

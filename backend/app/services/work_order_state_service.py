@@ -4,7 +4,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Iterable, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Iterable, Literal, Optional, Sequence, Union
 
 from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import PendingRollbackError
@@ -20,6 +20,9 @@ from app.models.work_order import (
     WorkOrderStatus,
     WorkOrderType,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; this module writes no audit rows itself
+    from app.services.audit_service import AuditService
 
 logger = logging.getLogger(__name__)
 
@@ -478,7 +481,21 @@ def promote_ready_operations(
     anchors on the EARLIEST event (``flow_metrics_service._ready_times_by_operation``
     is ``func.min(occurred_at)``). Do not rewrite a consumer to last-wins without
     dealing with this -- it would silently erase queue time on every held job.
+
+    NEVER PROMOTES A DRAFT OR TERMINAL WORK ORDER -- the rule itself, at all four seams, not
+    only the read heal. Release is the authorization step and the record of who put work on
+    the floor, so nothing but Release (which writes RELEASED *before* it calls
+    ``release_first_ready_operation``) may put a draft's operations on the dispatch board and
+    the kiosk. This is what keeps resume-to-DRAFT's required, audited demotions demoted: a
+    job resumed to DRAFT can still carry labor that was running when it was held (that
+    labor stays closable, by rule), and finishing it reaches the completion seam
+    (``release_next_ready_operation``) -- which used to promote the successors, and on a
+    laser pool every demoted nest, straight back onto the board with no audit row. ON_HOLD
+    keeps promoting, as documented: a held work order is not a terminal one, and every start
+    verb still refuses its operations until Resume Work Order.
     """
+    if work_order.status == WorkOrderStatus.DRAFT or work_order.status in TERMINAL_WO_STATUSES:
+        return []
     company_id = work_order.company_id
     scoped_ops = [
         op
@@ -608,38 +625,88 @@ def operations_worked_out_of_sequence(db: Session, work_order: WorkOrder) -> lis
     ]
 
 
-def demote_operations_for_sequencing(db: Session, work_order: WorkOrder) -> list[WorkOrderOperation]:
-    """READY -> PENDING for work the pooled rule promoted that a sequenced routing forbids.
+# The rule-driven ways an operation can move BACKWARDS (READY -> PENDING). One core,
+# ``demote_ready_operations``, with an explicit scope per caller -- never a second copy of
+# the "has anyone worked it?" test or of the tenant-scoped candidate read.
+#
+#   "sequencing"   -- PUT /work-orders/{id} turning ``sequential_operations`` ON: demote
+#                     only what the strict routing rule now blocks (via the thin wrapper
+#                     ``demote_operations_for_sequencing``, whose call site is unchanged).
+#   "all_unworked" -- POST /work-orders/{id}/resume landing a held job back at DRAFT (no
+#                     release on record), and PUT /work-orders/{id} moving a non-DRAFT job
+#                     to ``status: draft``: every un-worked READY operation, laser nests
+#                     included (``exempt_laser=False``), because a DRAFT work order must
+#                     not leave cards on the dispatch board and the kiosk.
+#
+# EXTENSION POINT: a later scope (e.g. "blocked_by" for an office-reduce reopen, demoting
+# what a re-opened operation now blocks under ``work_order_allows_same_work_center``) adds
+# one ``DemotionScope`` literal and one branch in ``_selected_for_demotion`` -- nothing
+# else. Scheduling's ``PUT /scheduling/work-orders/{id}/unschedule`` also writes
+# READY -> PENDING, but that is a transient scheduling reset the next reconciling read
+# re-promotes, not a gate decision; it deliberately does not go through this core.
+DemotionScope = Literal["sequencing", "all_unworked"]
+DEMOTION_SCOPES: tuple[str, ...] = ("sequencing", "all_unworked")
 
-    THE ONE PLACE anything in this system moves an operation BACKWARDS as a rule (holds
-    and resume are actor decisions about a specific operation; this is a rule change
-    applied to a route). It exists because promotion is strictly forward-only: every seam
-    only ever writes PENDING -> READY, so switching ``sequential_operations`` on would
-    otherwise leave the operations the pooled rule already promoted sitting READY
-    forever -- the exact rows the owner is trying to take off the board. Turning the flag
-    on without this fixes only the NEXT work order, never the one being looked at.
 
-    Refuses to demote anything that has been WORKED. An operation is left alone when it is
-    not READY (IN_PROGRESS / ON_HOLD / COMPLETE / already PENDING are all somebody else's
-    state to own), when it carries an ``actual_start``, when it has booked good or scrapped
-    quantity, or when ANY TimeEntry exists against it -- open or closed, the same
-    existence-only evidence test the floor's completion gate uses. Demoting worked
-    material would strand real labor behind a gate the operator already passed.
+def _selected_for_demotion(
+    scope: DemotionScope,
+    operation: WorkOrderOperation,
+    incomplete: list[WorkOrderOperation],
+) -> bool:
+    """Does ``scope`` take this (READY, un-worked) operation off the board?"""
+    if scope == "sequencing":
+        # The strict rule, unconditionally (allow_same_work_center=False): the lowest
+        # startable operation of the route stays READY, so the floor is never left with a
+        # work order it cannot start at all.
+        return operation_blocked_by_incomplete_predecessors(operation, incomplete, allow_same_work_center=False)
+    if scope == "all_unworked":
+        return True
+    raise ValueError(f"unknown demotion scope {scope!r}")  # pragma: no cover - guarded by the caller
 
-    Only demotes what the NEW rule actually blocks: the gate runs with
-    ``allow_same_work_center=False``, so the lowest startable operation of the route stays
-    READY and the floor is never left with a work order it cannot start at all.
 
-    Laser dispatch pools are exempt (the flag is inert there), and a pooled work order is
-    a no-op -- switching sequencing OFF needs no demotion, promotion heals that direction
-    by itself on the next reconciling read.
+def demote_ready_operations(
+    db: Session,
+    work_order: WorkOrder,
+    *,
+    scope: DemotionScope,
+    exempt_laser: bool = True,
+) -> list[WorkOrderOperation]:
+    """READY -> PENDING for un-worked operations ``scope`` selects. THE demotion core.
+
+    The only rule-driven way anything in this system moves an operation BACKWARDS (holds
+    and op-level resume are actor decisions about one specific operation; this is a rule
+    applied to a route). It exists because promotion is strictly forward-only: every
+    promotion seam only ever writes PENDING -> READY, so a change that makes READY wrong
+    -- sequencing switched on, a held job resumed to DRAFT -- would otherwise leave those
+    cards on the dispatch board and the kiosk forever. Callers and scopes are listed above
+    ``DemotionScope``.
+
+    Refuses to demote anything that has been WORKED, in every scope. An operation is left
+    alone when it is not READY (IN_PROGRESS / ON_HOLD / COMPLETE / already PENDING are all
+    somebody else's state to own), when it carries an ``actual_start``, when it has booked
+    good or scrapped quantity, or when ANY TimeEntry exists against it -- open or closed,
+    the same existence-only evidence test the floor's completion gate uses. Demoting
+    worked material would strand real labor behind a gate the operator already passed.
+
+    ``exempt_laser`` (default True) makes a laser dispatch pool a no-op -- the sequencing
+    flag is inert there. The two DRAFT callers (resume-to-DRAFT, PUT to draft) pass
+    ``False``: a DRAFT nest package must not leave READY nests on the floor's board either.
+
+    The ``"sequencing"`` scope is also a no-op on a POOLED work order: switching
+    sequencing OFF needs no demotion, promotion heals that direction by itself on the next
+    reconciling read.
 
     Returns the demoted operations WITH THEIR STATUS ALREADY WRITTEN, so the caller (which
     holds ``current_user`` and an ``AuditService``) can log a status change per row before
-    its commit -- invariant 2. This function writes no audit row itself, the same division
-    of labor ``reconcile_work_orders_from_completion_evidence`` uses via StatusTransition.
+    its commit -- invariant 2 (``log_demotions_required`` is the fail-closed emitter). This
+    function writes no audit row itself, the same division of labor
+    ``reconcile_work_orders_from_completion_evidence`` uses via StatusTransition.
     """
-    if is_laser_dispatch_work_order(work_order) or work_order_allows_same_work_center(work_order):
+    if scope not in DEMOTION_SCOPES:
+        raise ValueError(f"unknown demotion scope {scope!r}")
+    if exempt_laser and is_laser_dispatch_work_order(work_order):
+        return []
+    if scope == "sequencing" and work_order_allows_same_work_center(work_order):
         return []
 
     # Invariant 1: scoped to the work order's OWN company_id, off the WO row the caller
@@ -664,11 +731,160 @@ def demote_operations_for_sequencing(db: Session, work_order: WorkOrder) -> list
     for op in candidates:
         if _operation_has_been_worked(op, worked_operation_ids):
             continue
-        if not operation_blocked_by_incomplete_predecessors(op, incomplete, allow_same_work_center=False):
+        if not _selected_for_demotion(scope, op, incomplete):
             continue
         op.status = OperationStatus.PENDING
         demoted.append(op)
     return demoted
+
+
+def demote_operations_for_sequencing(db: Session, work_order: WorkOrder) -> list[WorkOrderOperation]:
+    """READY -> PENDING for work the pooled rule promoted that a sequenced routing forbids.
+
+    A thin wrapper over :func:`demote_ready_operations` (scope ``"sequencing"``, laser
+    pools exempt), kept so the ``PUT /work-orders/{id}`` flip's call site and every test
+    pinning it stay byte-identical. Turning the flag on without this fixes only the NEXT
+    work order, never the one being looked at.
+
+    Only demotes what the NEW rule actually blocks: the gate runs with
+    ``allow_same_work_center=False``, so the lowest startable operation of the route stays
+    READY and the floor is never left with a work order it cannot start at all. A pooled
+    work order is a no-op. Never touches worked operations -- see the core's docstring.
+    """
+    return demote_ready_operations(db, work_order, scope="sequencing")
+
+
+def log_demotions_required(
+    audit: "AuditService",
+    operations: Sequence[WorkOrderOperation],
+    *,
+    reason: str,
+    extra: Optional[dict[str, Any]] = None,
+) -> None:
+    """One REQUIRED ``STATUS_CHANGE`` ready -> pending audit row per demoted operation.
+
+    The fail-closed emitter for :func:`demote_ready_operations`: ``log_required`` raises
+    ``AuditWriteError`` when a row cannot be written, and the caller must roll the WHOLE
+    unit back (``app.api.audit_guard.required_audit`` turns that into a 503). ``reason``
+    is the human sentence recorded as the row's description; ``extra`` is merged into
+    ``extra_data`` beside ``operation_number`` / ``sequence`` (every other
+    work_order_operation audit row identifies the operation by operation_number, so a
+    filter on that identifier still finds the demotion beside its history).
+
+    CALLERS FLUSH FIRST. ``WorkOrderOperation`` maps ``version_id_col``; if the first
+    audit write is what flushes the demotions, a concurrent writer's StaleDataError is
+    swallowed inside ``AuditService.log``'s savepoint instead of reaching the app-wide 409
+    handler (the invariant-4 note in ``work_orders.update_work_order``).
+
+    The sequencing flip keeps its own BEST-EFFORT rows (``log_status_change``) on purpose;
+    this emitter is for callers whose demotion must not land without evidence.
+    """
+    for op in operations:
+        work_order = op.work_order
+        work_order_number = work_order.work_order_number if work_order is not None else str(op.work_order_id)
+        audit.log_required(
+            action=audit.ACTIONS["STATUS_CHANGE"],
+            resource_type="work_order_operation",
+            resource_id=op.id,
+            resource_identifier=f"{work_order_number} OP{op.sequence}",
+            description=f"Operation returned to pending: {reason}",
+            old_values={"status": OperationStatus.READY.value},
+            new_values={"status": OperationStatus.PENDING.value},
+            extra_data={
+                **(extra or {}),
+                "operation_number": op.operation_number,
+                "sequence": op.sequence,
+            },
+        )
+
+
+# Where POST /work-orders/{id}/resume sends a held work order, and why.
+HoldRestoreBasis = Literal["release_record_with_work", "release_record", "no_release_record"]
+
+
+def work_order_hold_restore_target(
+    work_order: WorkOrder,
+    operations: Sequence[WorkOrderOperation],
+    worked_operation_ids: set[int],
+) -> tuple[WorkOrderStatus, HoldRestoreBasis]:
+    """The status an ON_HOLD work order resumes to, and the basis it was decided on. Pure.
+
+    Resume must never RELEASE a job: Release is the authorization step and the record of
+    who put work on the floor. So a non-DRAFT target requires a RELEASE RECORD
+    (``released_at`` or ``released_by``):
+
+    * release record + work evidence -> IN_PROGRESS (``"release_record_with_work"``);
+    * release record, no work evidence -> RELEASED (``"release_record"``);
+    * no release record -> DRAFT (``"no_release_record"``) -- the caller demotes its
+      un-worked READY operations and the job goes back through Release.
+
+    Work evidence is any of: ``work_order.actual_start``, any COMPLETE operation, or any
+    operation :func:`_operation_has_been_worked` reports (IN_PROGRESS, ``actual_start``,
+    booked good/scrap quantity, any TimeEntry -- ``worked_operation_ids`` from
+    :func:`_worked_operation_ids`). ``actual_start`` alone would be wrong: the read heal
+    lifts RELEASED -> IN_PROGRESS without stamping it.
+
+    No laser carve-out and no audit-row lookup: a best-effort audit row is not a state
+    source (it can be missing), and since ``PUT /work-orders/{id}`` refuses DRAFT ->
+    ON_HOLD every hold placed now is on released work. A legacy unstamped hold resumes to
+    DRAFT -- the restrictive answer, one Release click to fix and immediately visible.
+    """
+    has_release_record = work_order.released_at is not None or work_order.released_by is not None
+    if not has_release_record:
+        return WorkOrderStatus.DRAFT, "no_release_record"
+    has_work = work_order.actual_start is not None or any(
+        op.status == OperationStatus.COMPLETE or _operation_has_been_worked(op, worked_operation_ids)
+        for op in operations
+    )
+    if has_work:
+        return WorkOrderStatus.IN_PROGRESS, "release_record_with_work"
+    return WorkOrderStatus.RELEASED, "release_record"
+
+
+@dataclass(frozen=True)
+class WorkOrderResumeOutcome:
+    """What :func:`apply_work_order_resume` wrote (nothing audited, nothing committed)."""
+
+    previous_status: WorkOrderStatus
+    status: WorkOrderStatus
+    restore_basis: HoldRestoreBasis
+    demoted_operations: list[WorkOrderOperation]
+    # Every work center the work order's operations sit at (sorted, de-duplicated) -- the
+    # shop-floor channels the caller broadcasts ``work_order_resumed`` on, taken from the
+    # operations this function already read so the route issues no second query.
+    work_center_ids: tuple[int, ...] = ()
+
+
+def apply_work_order_resume(db: Session, work_order: WorkOrder) -> WorkOrderResumeOutcome:
+    """Lift a work-order hold: write the restore target and, for DRAFT, the demotions.
+
+    The caller (``POST /work-orders/{id}/resume``) has already refused a work order that
+    is not ON_HOLD and holds the actor: it flushes, writes the REQUIRED audit rows and
+    commits. This function writes statuses only -- no audit row, no commit, no event.
+
+    Reads the operations tenant-scoped off the work order's own ``company_id`` (invariant
+    1) and the TimeEntry evidence in ONE query. A DRAFT target demotes every un-worked
+    READY operation, laser nests included, through the one demotion core.
+    """
+    operations = (
+        tenant_query(db, WorkOrderOperation, work_order.company_id)
+        .filter(WorkOrderOperation.work_order_id == work_order.id)
+        .all()
+    )
+    worked_operation_ids = _worked_operation_ids(db, work_order.company_id, operations)
+    target, basis = work_order_hold_restore_target(work_order, operations, worked_operation_ids)
+    previous_status = WorkOrderStatus(getattr(work_order.status, "value", work_order.status))
+    work_order.status = target
+    demoted: list[WorkOrderOperation] = []
+    if target == WorkOrderStatus.DRAFT:
+        demoted = demote_ready_operations(db, work_order, scope="all_unworked", exempt_laser=False)
+    return WorkOrderResumeOutcome(
+        previous_status=previous_status,
+        status=target,
+        restore_basis=basis,
+        demoted_operations=demoted,
+        work_center_ids=tuple(sorted({op.work_center_id for op in operations if op.work_center_id})),
+    )
 
 
 def release_first_ready_operation(
@@ -1632,6 +1848,13 @@ def reconcile_work_orders_from_completion_evidence(
 
     step_gated_operation_ids = gated_operation_ids(db, operations)
 
+    # Ruling 2: a read never STARTS work on a job the start gate refuses -- the same reason
+    # ``_promote_stranded_ready_operations`` skips DRAFT. Checked inline off the status
+    # (operation_action_gates imports this module, so its helper cannot be imported here).
+    start_withheld_work_order_ids = {
+        wo.id for wo in non_terminal_work_orders if wo.status in (WorkOrderStatus.DRAFT, WorkOrderStatus.ON_HOLD)
+    }
+
     for operation in operations:
         produced_qty, scrapped_qty = produced_by_operation.get(operation.id, (0.0, 0.0))
         if produced_qty > float(operation.quantity_complete or 0):
@@ -1646,6 +1869,7 @@ def reconcile_work_orders_from_completion_evidence(
             latest_entry_by_operation.get(operation.id),
             closed_produced_by_operation.get(operation.id, 0.0) >= operation_target_quantity(operation),
             completion_gated=operation.id in step_gated_operation_ids,
+            start_withheld=operation.work_order_id in start_withheld_work_order_ids,
         )
         if (
             op_changed
@@ -1720,6 +1944,7 @@ def _sync_operation_status_from_quantity(
     latest_entry: Optional[TimeEntry] = None,
     has_closed_completion_evidence: bool = False,
     completion_gated: bool = False,
+    start_withheld: bool = False,
 ) -> bool:
     """Reconcile an operation's status from its quantities + closed labor evidence.
 
@@ -1728,6 +1953,13 @@ def _sync_operation_status_from_quantity(
     withheld (quantities and the PENDING/READY -> IN_PROGRESS lift still apply), so
     the read-time reconcile can never complete an operation the /complete endpoints
     and the clock-out path would refuse.
+
+    ``start_withheld`` (ruling 2): True when the operation's work order is DRAFT or
+    ON_HOLD. The PENDING/READY -> IN_PROGRESS lift IS a start, and a read must not start
+    work the start gate (``operation_action_gates.work_order_start_blocker``) refuses --
+    otherwise "record a count on a not-started operation, read, complete" walked round
+    the gate. Only the lift is withheld; quantities still reconcile and the next read
+    after Release / Resume performs it.
     """
     target_qty = operation_target_quantity(operation)
     if target_qty <= 0:
@@ -1762,7 +1994,11 @@ def _sync_operation_status_from_quantity(
         # MS-5: free the schedule reservation for a reconcile-driven completion too.
         release_operation_schedule_reservation(operation)
         changed = True
-    elif quantity_complete > 0 and operation.status in (OperationStatus.PENDING, OperationStatus.READY):
+    elif (
+        quantity_complete > 0
+        and operation.status in (OperationStatus.PENDING, OperationStatus.READY)
+        and not start_withheld
+    ):
         operation.status = OperationStatus.IN_PROGRESS
         operation.actual_start = operation.actual_start or (latest_entry.clock_in if latest_entry else None)
         operation.started_by = operation.started_by or (latest_entry.user_id if latest_entry else None)

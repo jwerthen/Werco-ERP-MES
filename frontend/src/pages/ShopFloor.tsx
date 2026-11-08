@@ -35,6 +35,7 @@ import {
 import { QueueListIcon, DocumentTextIcon, ArrowTopRightOnSquareIcon } from '@heroicons/react/24/outline';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId, isKioskMode } from '../utils/kiosk';
 import { formatOperationLabel, operationNumberText } from '../utils/operationLabel';
+import { startBlockedLabel } from '../utils/startBlock';
 import { Modal } from '../components/ui/Modal';
 
 interface WorkOrderDetails {
@@ -354,6 +355,11 @@ export default function ShopFloor() {
       notify('success', `Clocked in to ${item.work_order_number}`);
     } catch (err: any) {
       notify('error', err.response?.data?.detail || 'Failed to clock in');
+      // A 409 means the queue row was stale (the job was held or put back to draft
+      // since it loaded). The queue is not polled on this page, so re-read it now:
+      // the server's start_blocked_reason disables Start instead of leaving an
+      // enabled button that is refused again until someone refreshes by hand.
+      if (err?.response?.status === 409) await loadQueue(selectedWorkCenter);
     } finally {
       setClockingInOperationId(null);
     }
@@ -366,8 +372,10 @@ export default function ShopFloor() {
    * The toast is composed from what the SERVER returned, not from the fact that
    * the call did not throw: resume RESTORES the operation and deliberately does
    * not resolve the blocker, and it lands PENDING (off the board) whenever the
-   * parent is unreleased or a predecessor is incomplete. `clearHoldToast` folds
-   * both shortfalls into a single `warning`; only a clean lift is `success`.
+   * parent is unreleased or a predecessor is incomplete. And it lifts only the
+   * OPERATION's hold: a work order that is itself on hold still refuses every
+   * start, which the held row's `start_blocked_reason` says. `clearHoldToast`
+   * folds every shortfall into a single `warning`; only a clean lift is `success`.
    */
   const handleClearHold = async (item: HeldQueueItem) => {
     if (clearingHoldOperationId !== null) return;
@@ -380,7 +388,9 @@ export default function ShopFloor() {
       if (selectedWorkCenter) {
         await loadQueue(selectedWorkCenter);
       }
-      const { type, message } = clearHoldToast(result, item.work_order_number);
+      // The held row's own start_blocked_reason: an operation hold can sit under
+      // a held (or unreleased) WORK ORDER, which this resume does not lift.
+      const { type, message } = clearHoldToast(result, item.work_order_number, item.start_blocked_reason);
       notify(type, message);
     } catch (err: any) {
       notify('error', err.response?.data?.detail || 'Failed to clear the hold');
@@ -905,6 +915,30 @@ export default function ShopFloor() {
                                 <CheckCircleIcon className="h-5 w-5" />
                                 Active
                               </span>
+                            ) : item.start_blocked_reason ? (
+                              // The WORK ORDER refuses every start (not released /
+                              // on hold). Disabled for back-entry too: the server
+                              // refuses a source=backfill clock-in exactly like a
+                              // live one, so a supervisor resumes the job first.
+                              // The reason is the server's text, verbatim.
+                              <>
+                                <button
+                                  type="button"
+                                  disabled
+                                  className="btn-success btn-sm w-full"
+                                  title={item.start_blocked_reason}
+                                  aria-describedby={`time-clock-start-blocked-${item.operation_id}`}
+                                >
+                                  <PauseCircleIcon className="h-4 w-4 mr-1.5" />
+                                  {startBlockedLabel(item.work_order_status)}
+                                </button>
+                                <span
+                                  id={`time-clock-start-blocked-${item.operation_id}`}
+                                  className="block max-w-[14rem] text-xs text-amber-700"
+                                >
+                                  {item.start_blocked_reason}
+                                </span>
+                              </>
                             ) : (
                               <button
                                 onClick={() => handleClockIn(item)}

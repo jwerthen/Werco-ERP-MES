@@ -430,13 +430,16 @@ def create_nest_material_allocation(
     **This seam does NOT re-check the terminal-work-order refusal that
     ``POST .../material-allocations`` enforces (409, "a tie that can never consume is a
     lie").** It does not need to, but the reason is a COUPLING rather than a guard, so it
-    is written down here: both nest callers force ``work_order.status = RELEASED`` inside
-    the same transaction before reaching this function (the import at
+    is written down here: both nest callers run ``work_orders._release_laser_work_order_for_nests``
+    inside the same transaction before reaching this function (the import at
     ``work_orders._run_laser_nest_import``, the manual route at
-    ``create_manual_laser_nest_endpoint``), so a terminal work order is unreachable by
-    construction. That coupling is invisible from this signature -- if a third caller is
-    ever added, or either existing one stops forcing the status, this function will
-    happily create a tie that can never consume. Add the explicit check then.
+    ``create_manual_laser_nest_endpoint``), which forces the work order RELEASED -- or,
+    for an ON_HOLD job, deliberately KEEPS it on hold (a corrective re-import must not lift
+    a hold). Both outcomes are non-terminal, so a terminal work order is unreachable by
+    construction and the tie stays consumable once the hold is lifted. That coupling is
+    invisible from this signature -- if a third caller is ever added, or either existing
+    one stops forcing the status, this function will happily create a tie that can never
+    consume. Add the explicit check then.
 
     Ships UNPINNED by design: no ``pinned_inventory_item_id``, so FIFO picks the lot at
     consume time. Operator/planner lot-picking is deliberately deferred.

@@ -104,6 +104,34 @@ import {
 
 const CURRENT_WORK_ORDER_STATUSES = ['released', 'in_progress', 'on_hold'];
 
+/** Why Complete is disabled on a READY operation of a held work order (the server refuses it 409). */
+const WORK_ORDER_HOLD_COMPLETE_TITLE = 'Resume the work order first — completing would start this operation';
+
+/**
+ * Resume Work Order confirm copy: where the job goes back to is the server's call, made
+ * from its release record FIRST — a job with work done but no release on record still
+ * lands in Draft, so the release condition leads each clause rather than the work one.
+ */
+const RESUME_WORK_ORDER_MESSAGE =
+  'Lift the hold on this work order?\n\n' +
+  'It goes back to In Progress if it was released and work had started, to Released if it was released ' +
+  'but nothing has run, and otherwise to Draft — then release it to put it back on the floor.\n\n' +
+  'Holds on individual operations stay in place; clear those separately.';
+
+/**
+ * A Start / Resume refusal that means the work order's state moved under the page
+ * (400 wrong status, 404 gone, 409 draft / on hold / concurrent write): the only useful
+ * next step is to re-read it. A 503, 403 or network error is not one — the job is as
+ * the page shows it, and the user may retry or cancel.
+ */
+const isStateMovedRefusal = (err: any): boolean => [400, 404, 409].includes(err?.response?.status);
+
+/** Hold Work Order confirm copy. */
+const HOLD_WORK_ORDER_MESSAGE =
+  'Put this work order on hold?\n\n' +
+  'The floor cannot check in to or start any of its operations until it is resumed. ' +
+  'Operators already clocked in can still clock out and record what they made.';
+
 /**
  * Cap for the inline Notes / Special Instructions editor.
  *
@@ -484,6 +512,12 @@ export default function WorkOrderDetail() {
   // SUPERVISOR). Named separately so the gate reads at its call site.
   const canEditNotes = canCorrectCount;
   const canEditUnitNumber = canCorrectCount;
+  // Start / Resume Work Order / Hold Work Order are all ADMIN/MANAGER/SUPERVISOR
+  // on the backend (`POST /work-orders/{id}/start`, `POST /work-orders/{id}/resume`,
+  // and the `PUT /work-orders/{id}` status write) — exactly what work_orders:edit
+  // maps to. Named separately so the gate reads at its call site: an operator
+  // offered Start would only meet a 403.
+  const canStartWorkOrder = canCorrectCount;
   // Material-tie PATCH/untie is require_role([ADMIN, MANAGER, SUPERVISOR]) on
   // the backend — the same tier work_orders:edit maps to. Reads are open to any
   // authenticated tenant user, so the panel itself is not gated.
@@ -548,6 +582,15 @@ export default function WorkOrderDetail() {
   const [error, setError] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  // Work-order Start / Resume / Hold. All three are server-GATED (the server may
+  // refuse: a draft, a hold, a stale version, the role), so each keeps its own
+  // in-flight flag and the page reflects only what the server returns after a
+  // reload — never an optimistic status flip.
+  const [starting, setStarting] = useState(false);
+  const [resumeConfirmOpen, setResumeConfirmOpen] = useState(false);
+  const [resuming, setResuming] = useState(false);
+  const [holdConfirmOpen, setHoldConfirmOpen] = useState(false);
+  const [holding, setHolding] = useState(false);
   const [duplicateOpen, setDuplicateOpen] = useState(false);
   const [saveTemplateOpen, setSaveTemplateOpen] = useState(false);
   // In-flight flag for the "Sequential operations" switch. It ONLY drives the
@@ -948,12 +991,77 @@ export default function WorkOrderDetail() {
     }
   };
 
+  // Start a RELEASED work order. Non-optimistic: the status shown is whatever the
+  // reload returns. A refusal (409 draft / on hold, 400 not released, 403 role)
+  // is shown verbatim, and a state refusal (400 / 404 / 409) re-reads the page:
+  // the job's status moved under us (e.g. a supervisor held it), and with
+  // realtime pushes off nothing else would refresh the header.
   const handleStart = async () => {
+    if (!workOrder || starting) return;
+    setStarting(true);
     try {
-      await api.startWorkOrder(workOrder!.id);
-      loadWorkOrder();
+      const result = await api.startWorkOrder(workOrder.id);
+      const message = typeof result?.message === 'string' && result.message ? result.message : 'Work order started';
+      showToast('success', message);
+      await loadWorkOrder();
     } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Failed to start work order');
+      const detail = err?.response?.data?.detail;
+      showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to start work order');
+      if (isStateMovedRefusal(err)) await loadWorkOrder();
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  // "Resume Work Order" — lifts a WORK-ORDER hold. The server decides where the
+  // job goes back to from its release record and says so in `message`, which is
+  // shown verbatim. A DRAFT landing is a `warning`: the call succeeded, but the
+  // job is NOT back on the floor until someone releases it — `success` would
+  // hide that, `error` would claim a failure that did not happen.
+  //
+  // On a refusal the toast carries the server's text either way, and then:
+  //  - 400 (not on hold) / 404 / 409 (concurrent write): the job moved under the
+  //    page — someone else resumed or edited it. Retrying can never succeed, so
+  //    close the dialog and re-read, and the header shows the job as it is now.
+  //  - anything else (503 audit not saved — nothing changed, safe to retry; 403;
+  //    a network error): keep the dialog open beside the action that failed.
+  const handleConfirmResume = async () => {
+    if (!workOrder || resuming) return;
+    setResuming(true);
+    try {
+      const result = await api.resumeWorkOrder(workOrder.id);
+      const message = result?.message || 'Work order resumed';
+      showToast(result?.status === 'draft' ? 'warning' : 'success', message);
+      setResumeConfirmOpen(false);
+      await loadWorkOrder();
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      showToast('error', typeof detail === 'string' && detail ? detail : 'Failed to resume work order');
+      if (isStateMovedRefusal(err)) {
+        setResumeConfirmOpen(false);
+        await loadWorkOrder();
+      }
+    } finally {
+      setResuming(false);
+    }
+  };
+
+  // "Hold Work Order" — the existing version-gated PUT (status: on_hold), through
+  // the page's one shared writer so the stale-version 409 is handled in one place.
+  const handleConfirmHold = async () => {
+    if (!workOrder || holding) return;
+    setHolding(true);
+    try {
+      await saveWorkOrderPatch(
+        { status: 'on_hold' },
+        {
+          successMessage: `${workOrder.work_order_number} is on hold. Resume Work Order puts it back on the floor.`,
+          failureMessage: 'Failed to put the work order on hold',
+          onSuccess: () => setHoldConfirmOpen(false),
+        }
+      );
+    } finally {
+      setHolding(false);
     }
   };
 
@@ -1948,11 +2056,37 @@ export default function WorkOrderDetail() {
               Release
             </Button>
           )}
-          {workOrder.status === 'released' && (
-            <button onClick={handleStart} className="btn-success flex items-center">
-              <PlayIcon className="h-5 w-5 mr-2" />
+          {workOrder.status === 'released' && canStartWorkOrder && (
+            <LoadingButton
+              type="button"
+              onClick={handleStart}
+              loading={starting}
+              loadingText="Starting..."
+              className="btn-success flex items-center"
+            >
+              <PlayIcon className="h-5 w-5 mr-2" aria-hidden="true" />
               Start
-            </button>
+            </LoadingButton>
+          )}
+          {/* Work-order hold controls. "Resume Work Order", never "Clear Hold":
+              that label already names the OPERATION-level action on the
+              operations table below, and the two lift different holds. */}
+          {workOrder.status === 'on_hold' && canStartWorkOrder && (
+            <Button type="button" onClick={() => setResumeConfirmOpen(true)} className="flex items-center">
+              <PlayIcon className="h-5 w-5 mr-2" aria-hidden="true" />
+              Resume Work Order
+            </Button>
+          )}
+          {(workOrder.status === 'released' || workOrder.status === 'in_progress') && canStartWorkOrder && (
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setHoldConfirmOpen(true)}
+              className="flex items-center"
+            >
+              <PauseIcon className="h-5 w-5 mr-2" aria-hidden="true" />
+              Hold Work Order
+            </Button>
           )}
           {workOrder.status === 'in_progress' && (
             <Button
@@ -2299,6 +2433,13 @@ export default function WorkOrderDetail() {
                         ? `Previous operations must be completed first — this work order runs its operations in sequence, and operation ${operationNumberText(lowestIncompleteOperation.operation_number, lowestIncompleteOperation.sequence)} (${lowestIncompleteOperation.name}) is not complete.`
                         : null;
 
+                    // Completing a READY operation STARTS it first, and the server
+                    // refuses a start on a held work order (409). Mirrored here so
+                    // the button does not offer what the server will refuse. An
+                    // IN_PROGRESS operation stays completable on a held job: work
+                    // already running when it was held must always be closable.
+                    const workOrderHoldBlocksComplete = op.status === 'ready' && workOrder.status === 'on_hold';
+
                     // WHY this row is held, for the compact in-row disclosure below.
                     // Computed once and reused by the confirm dialog's copy so the
                     // pre-click reason and the in-dialog reason cannot diverge.
@@ -2534,9 +2675,17 @@ export default function WorkOrderDetail() {
                             {canCompleteOperation && !cancelledNest && op.status !== 'complete' && workOrder.status !== 'draft' && (
                               <button
                                 onClick={() => handleCompleteOperation(op)}
-                                disabled={completingOpId === op.id || sequenceBlockReason !== null}
+                                disabled={
+                                  completingOpId === op.id ||
+                                  sequenceBlockReason !== null ||
+                                  workOrderHoldBlocksComplete
+                                }
                                 className="text-green-600 hover:text-green-300 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                                title={sequenceBlockReason ?? 'Complete Operation'}
+                                title={
+                                  workOrderHoldBlocksComplete
+                                    ? WORK_ORDER_HOLD_COMPLETE_TITLE
+                                    : sequenceBlockReason ?? 'Complete Operation'
+                                }
                               >
                                 {completingOpId === op.id ? (
                                   <>
@@ -3617,6 +3766,40 @@ export default function WorkOrderDetail() {
             ? Number(completeTarget.operation.component_quantity || workOrder.quantity_ordered || 0)
             : workOrder.quantity_ordered
         }
+      />
+
+      {/* Resume Work Order confirm. Non-optimistic: `pending` refuses backdrop /
+          Escape while the call is on the wire. A retryable refusal (503 audit not
+          saved, 403, network) keeps the dialog open beside the action; a refusal
+          that means the job moved (400 not on hold, 404, 409) closes it and
+          re-reads the page — see handleConfirmResume. */}
+      <ConfirmDialog
+        open={resumeConfirmOpen}
+        title="Resume Work Order"
+        message={RESUME_WORK_ORDER_MESSAGE}
+        confirmLabel="Resume Work Order"
+        cancelLabel="Keep it on hold"
+        pending={resuming}
+        variant="warning"
+        onConfirm={handleConfirmResume}
+        onCancel={() => {
+          if (!resuming) setResumeConfirmOpen(false);
+        }}
+      />
+
+      {/* Hold Work Order confirm — the version-gated PUT; closes only on success. */}
+      <ConfirmDialog
+        open={holdConfirmOpen}
+        title="Hold Work Order"
+        message={HOLD_WORK_ORDER_MESSAGE}
+        confirmLabel="Hold Work Order"
+        cancelLabel="Cancel"
+        pending={holding}
+        variant="warning"
+        onConfirm={handleConfirmHold}
+        onCancel={() => {
+          if (!holding) setHoldConfirmOpen(false);
+        }}
       />
 
       {/* Resolve-blocker note (replaces the native prompt) */}

@@ -2,7 +2,8 @@ import React from 'react';
 import { PauseCircleIcon } from '@heroicons/react/24/solid';
 import { KioskQueueItem, formatOperationLabel, operationNumberText } from './kioskConstants';
 import { UnitBadge } from '../ui';
-import { KioskRunOrderChip } from './KioskQueueCard';
+import { KioskRunOrderChip, KioskStartBlockedChip } from './KioskQueueCard';
+import { startBlockedLabel } from '../../utils/startBlock';
 import {
   formatHoldAttribution,
   hasHoldReason,
@@ -57,6 +58,12 @@ interface KioskHeldCardProps {
  *   the server never infers a holder it wasn't given.
  * - **Amber, matching PLACE ON HOLD.** The same colour the hold overlay uses,
  *   so held work reads as stopped at a glance and never as startable blue/green.
+ * - **A WORK-ORDER refusal is named too.** Held rows carry the server's
+ *   `start_blocked_reason` like queue rows do, and an operation hold can sit
+ *   under a held (or unreleased) work order. Resume lifts only the operation's
+ *   hold, so without the "WO on hold" chip here the operator would lift it
+ *   expecting the job to run and find it still refused. Same chip as the queue
+ *   card; the resume confirm spells the reason out verbatim.
  */
 export default function KioskHeldCard({
   item,
@@ -101,6 +108,7 @@ export default function KioskHeldCard({
           <PauseCircleIcon className={crew ? 'h-4 w-4' : 'h-3 w-3'} aria-hidden="true" />
           On hold
         </span>
+        <KioskStartBlockedChip item={item} size={crew ? 'crew' : 'kiosk'} />
         {severity && (
           <span
             data-testid="kiosk-held-severity"
@@ -212,7 +220,7 @@ export default function KioskHeldCard({
         // row announced "operation Op 10" beside a new row's "operation 10".
         aria-label={`Resume work order ${item.work_order_number}, operation ${
           item.operation_name || operationNumberText(item.operation_number) || ''
-        }`}
+        }${item.start_blocked_reason ? `, ${startBlockedLabel(item.work_order_status).toLowerCase()}` : ''}`}
         onClick={() => onResume(item)}
         className={`mt-2.5 w-full rounded-[4px] border border-fd-amber bg-fd-amber/15 font-mono font-bold uppercase tracking-[0.1em] text-fd-amber transition-transform duration-150 ease-out active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 ${
           crew ? 'min-h-16 text-xl' : 'min-h-11 text-[13px]'

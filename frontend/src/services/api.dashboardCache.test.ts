@@ -138,6 +138,7 @@ describe('FEPERF-1: dashboard cache invalidation', () => {
     const mutations: Mutation[] = [
       { name: 'releaseWorkOrder', verb: 'post', run: () => api.releaseWorkOrder(1) },
       { name: 'startWorkOrder', verb: 'post', run: () => api.startWorkOrder(1) },
+      { name: 'resumeWorkOrder', verb: 'post', run: () => api.resumeWorkOrder(1) },
       { name: 'completeWorkOrder', verb: 'post', run: () => api.completeWorkOrder(1, 5, 0) },
       { name: 'startWOOperation', verb: 'post', run: () => api.startWOOperation(1) },
       { name: 'completeWOOperation', verb: 'post', run: () => api.completeWOOperation(1, 5, 0) },

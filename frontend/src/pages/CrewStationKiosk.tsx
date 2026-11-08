@@ -33,6 +33,7 @@ import ProductionRecoveryNotice from '../components/kiosk/ProductionRecoveryNoti
 import { useProductionReportRequest } from '../components/kiosk/useProductionReportRequest';
 import { KioskApiError } from '../services/kioskStationClient';
 import { getKioskStationId } from '../utils/kiosk';
+import { startBlockedLabel } from '../utils/startBlock';
 import { useKioskIdleLogout } from '../hooks/useKioskIdleLogout';
 import { usePageTitle } from '../hooks/usePageTitle';
 import { useWakeLock } from '../hooks/useWakeLock';
@@ -167,7 +168,15 @@ type CrewView =
   | { name: 'resumeSign'; operationId: number }
   // Resume landed but left blockers OPEN. NO operationId on purpose — same as
   // ncrFiled: the ghost-guard must not yank this off the screen mid-read.
-  | { name: 'blockerStillOpen'; blockers: ResumeOpenBlocker[]; jobLabel: string }
+  | {
+      name: 'blockerStillOpen';
+      blockers: ResumeOpenBlocker[];
+      jobLabel: string;
+      // The held row's work-order start refusal (verbatim) and status, frozen
+      // at the resume: only the operation's hold came off.
+      startBlockedReason?: string | null;
+      workOrderStatus?: string | null;
+    }
   | { name: 'operatorSheet'; operator: OperatorSession; openJobs: OperatorOpenJob[] }
   // Process steps: a badge scan gates entry so every record is attributed to
   // the badge-identified operator (5-minute token; a 401 mid-flow re-scans).
@@ -739,6 +748,12 @@ export default function CrewStationKiosk() {
         showToast('success', `${operator.user.full_name} joined ${item.work_order_number}`);
         setView({ name: 'job', operationId: item.operation_id });
       } catch (err) {
+        // 400 only. A WORK-ORDER refusal (not released / on hold / closed) is a
+        // 409 on purpose so it never lands here and reads as "already clocked
+        // in": it is re-thrown, and the callers render it verbatim — inline on
+        // the badge-scan screen (setBadgeError) or as an error toast from the
+        // operator sheet. The job-first scan path does not pre-block a blocked
+        // job, so a roster on a just-held job can still badge out (LEAVE).
         if (err instanceof KioskApiError && err.status === 400) {
           // e.g. "already clocked in" — roster was stale; refresh sorts it out.
           showToast('info', kioskErrorMessage(err, 'Already clocked in.'));
@@ -1204,12 +1219,21 @@ export default function CrewStationKiosk() {
         const result = await kioskClient.resumeOperation(minted.access_token, item.operation_id);
         const open = stillOpenBlockers(result);
         if (open.length > 0) {
-          setView({ name: 'blockerStillOpen', blockers: open, jobLabel: crewJobLabel(item) });
+          setView({
+            name: 'blockerStillOpen',
+            blockers: open,
+            jobLabel: crewJobLabel(item),
+            startBlockedReason: item.start_blocked_reason ?? null,
+            workOrderStatus: item.work_order_status ?? null,
+          });
         } else {
           // Not always "resumed": a hold lifted off a PENDING operation lands
-          // back on PENDING and the job does not rejoin the queue. resumeToast
-          // says which happened rather than claiming a card that will not appear.
-          const toast = resumeToast(result, item.work_order_number);
+          // back on PENDING and the job does not rejoin the queue, and a job
+          // whose WORK ORDER is on hold (or unreleased) comes back still refused.
+          // resumeToast says which happened — the second from the held row's own
+          // start_blocked_reason (read live by findItem), since the resume
+          // response does not carry it.
+          const toast = resumeToast(result, item.work_order_number, item.start_blocked_reason);
           showToast(toast.type, toast.message);
           resetToBoard();
         }
@@ -2262,6 +2286,8 @@ export default function CrewStationKiosk() {
             blockers={view.blockers}
             jobLabel={view.jobLabel}
             doneLabel="Back to board"
+            startBlockedReason={view.startBlockedReason}
+            workOrderStatus={view.workOrderStatus}
             onDone={resetToBoard}
           />
         )}
@@ -2368,12 +2394,22 @@ export default function CrewStationKiosk() {
                 <ul className="space-y-2">
                   {queue
                     .filter((q) => !(q.roster || []).some((r) => r.user_id === view.operator.user.id))
-                    .map((item) => (
+                    .map((item) => {
+                      // A WORK-ORDER refusal (not released / on hold) stays on
+                      // `queue` — unlike an operation hold — so the row is listed
+                      // with the server's reason but cannot be tapped: JOIN would
+                      // only come back 409 with that same text.
+                      const startBlockedReason = item.start_blocked_reason || null;
+                      const reasonId = `crew-join-blocked-${item.operation_id}`;
+                      return (
                       <li key={item.operation_id}>
                         <button
                           type="button"
-                          disabled={mutationsBlocked}
-                          aria-describedby={!online ? OFFLINE_HINT_ID : undefined}
+                          disabled={mutationsBlocked || startBlockedReason !== null}
+                          aria-describedby={
+                            !online ? OFFLINE_HINT_ID : startBlockedReason ? reasonId : undefined
+                          }
+                          data-testid={`crew-join-row-${item.operation_id}`}
                           onClick={async () => {
                             setBusy(true);
                             try {
@@ -2394,13 +2430,25 @@ export default function CrewStationKiosk() {
                               {formatOperationLabel(item.operation_number)} ·{' '}
                               {item.operation_name || 'Operation'}
                             </span>
+                            {startBlockedReason && (
+                              <span id={reasonId} className="mt-1 block text-base text-fd-amber">
+                                {startBlockedReason}
+                              </span>
+                            )}
                           </span>
-                          <span className="shrink-0 text-sm font-bold uppercase tracking-wider text-fd-blue">
-                            Tap to join (run)
-                          </span>
+                          {startBlockedReason ? (
+                            <span className="shrink-0 text-sm font-bold uppercase tracking-wider text-fd-amber">
+                              {startBlockedLabel(item.work_order_status)}
+                            </span>
+                          ) : (
+                            <span className="shrink-0 text-sm font-bold uppercase tracking-wider text-fd-blue">
+                              Tap to join (run)
+                            </span>
+                          )}
                         </button>
                       </li>
-                    ))}
+                      );
+                    })}
                 </ul>
               )}
             </div>

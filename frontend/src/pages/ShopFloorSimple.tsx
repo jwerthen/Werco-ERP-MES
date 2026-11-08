@@ -50,6 +50,7 @@ import {
 import { useScrapReasonCodes } from '../hooks/useScrapReasonCodes';
 import { getKioskDept, getKioskWorkCenterCode, getKioskWorkCenterId, isKioskMode } from '../utils/kiosk';
 import { formatOperationLabel } from '../utils/operationLabel';
+import { startBlockedLabel } from '../utils/startBlock';
 import { ScanResolveResult } from '../types/scan';
 import { useAuth } from '../context/AuthContext';
 import { useCompany } from '../context/CompanyContext';
@@ -96,6 +97,16 @@ interface Operation {
   requires_inspection: boolean;
   can_check_in?: boolean;
   blocked_by_previous_operations?: boolean;
+  /**
+   * The server's verbatim refusal text when the WORK ORDER blocks every start
+   * (not released, on hold, terminal) — and the work order's status, which only
+   * picks the short button label. `can_check_in` is false whenever this is set,
+   * so it is checked FIRST: otherwise the card would blame earlier operations
+   * for a refusal that is really "a supervisor has not released this job".
+   * Null/absent is "no work-order refusal", never "startable".
+   */
+  start_blocked_reason?: string | null;
+  work_order_status?: string | null;
   laser_nest?: LaserNestInfo | null;
   /**
    * WHY this operation is held, WHO placed it and WHEN — sent by
@@ -403,6 +414,10 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
           requires_inspection: false,
           can_check_in: item.can_check_in,
           blocked_by_previous_operations: item.blocked_by_previous_operations,
+          // Kiosk queue rows carry no `can_check_in`, so without these two a
+          // draft or held job would render an ENABLED Check In on this path.
+          start_blocked_reason: item.start_blocked_reason ?? null,
+          work_order_status: item.work_order_status ?? null,
           laser_nest: item.laser_nest,
           run_order: item.run_order ?? null,
         }));
@@ -675,18 +690,6 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
     () => (actionableOnly ? operations.filter(op => actionableStatuses.has(op.status)) : operations),
     [actionableOnly, operations, actionableStatuses]
   );
-  // Operations render in SERVER order — no client re-sort. GET
-  // /shop-floor/operations returns the canonical dispatch order (manager-dictated
-  // run_order first, then priority/due date/sequence, grouped by work center), so
-  // a single-work-center filter shows EXACTLY the work-center-queue order the
-  // kiosks honor. Re-sorting here (the old dispatch-score sort) broke the
-  // Dispatch Board's promise that its run order is what operators see.
-  const priorityFocusQueue = useMemo(() => {
-    return visibleOperations
-      .filter((op) => ['pending', 'ready', 'in_progress', 'on_hold'].includes(op.status))
-      .slice(0, 5);
-  }, [visibleOperations]);
-
   const selectedWorkCenter = useMemo(
     () => workCenters.find((wc) => wc.id === workCenterId) || null,
     [workCenters, workCenterId]
@@ -717,6 +720,27 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       activeJobs.find((job) => isActiveJobOperation(job, operation)) || null,
     [activeJobs]
   );
+
+  // Operations render in SERVER order — no client re-sort. GET
+  // /shop-floor/operations returns the canonical dispatch order (manager-dictated
+  // run_order first, then priority/due date/sequence, grouped by work center), so
+  // a single-work-center filter shows EXACTLY the work-center-queue order the
+  // kiosks honor. Re-sorting here (the old dispatch-score sort) broke the
+  // Dispatch Board's promise that its run order is what operators see.
+  //
+  // Filtering is not re-sorting: a row the WORK ORDER refuses (not released, on
+  // hold) is dropped from this strip, because server order is not keyed on
+  // work-order status and the phone's only "Next Job" would otherwise be a job
+  // nobody can start. Two blocked rows stay, because their button is not a start:
+  // an op-level hold (its button is Clear Hold) and a job this operator is already
+  // checked in to (its button is Check Out — labor must always be closable). The
+  // full grid still lists every blocked row with its reason.
+  const priorityFocusQueue = useMemo(() => {
+    return visibleOperations
+      .filter((op) => ['pending', 'ready', 'in_progress', 'on_hold'].includes(op.status))
+      .filter((op) => !(op.start_blocked_reason && op.status !== 'on_hold' && !getActiveJobForOperation(op)))
+      .slice(0, 5);
+  }, [visibleOperations, getActiveJobForOperation]);
 
   const selectCurrentJob = (job: ActiveJob) => {
     updateWorkspace({ selectedOperationId: job.operation_id || null, activeTimeEntryId: job.time_entry_id, view: 'my-work' });
@@ -813,8 +837,10 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
    * The toast is composed from what the SERVER returned, never from the absence
    * of a throw: resume RESTORES the operation and deliberately does not resolve
    * the blocker, and it lands PENDING (off the board) when the parent is
-   * unreleased or a predecessor is incomplete. `clearHoldToast` folds both
-   * shortfalls into ONE warning; only a clean lift is `success`.
+   * unreleased or a predecessor is incomplete. And it lifts only the
+   * OPERATION's hold: a work order that is itself on hold still refuses every
+   * start, which the row's `start_blocked_reason` says. `clearHoldToast` folds
+   * every shortfall into ONE warning; only a clean lift is `success`.
    */
   const handleClearHold = async (operation: Operation) => {
     if (actionLoading !== null || productionSave.mutationsBlocked) return;
@@ -826,7 +852,9 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       // moved it. Clear Hold is server-GATED (409 on a cancelled-nest tombstone,
       // 400 when the operation is not actually held).
       await Promise.all([loadOperations(), loadActiveJobs(), loadDashboardCounts()]);
-      const { type, message } = clearHoldToast(result, operation.work_order_number);
+      // The row's own start_blocked_reason: an operation hold can sit under a
+      // held (or unreleased) WORK ORDER, which this resume does not lift.
+      const { type, message } = clearHoldToast(result, operation.work_order_number, operation.start_blocked_reason);
       showToast(type, message);
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || err.message || 'Failed to clear the hold');
@@ -844,6 +872,16 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
     // and a silent fall-through would put the old two-write path back.
     if (operation.status === 'on_hold') {
       showToast('info', 'This operation is on hold — clear the hold before checking in.');
+      return;
+    }
+
+    // The WORK ORDER refuses every start (not released / on hold / terminal).
+    // Checked before `can_check_in`, which the server also sets false here, so
+    // the operator reads the real reason — the server's text, verbatim — rather
+    // than the predecessor message. The server still refuses 409 on its own if
+    // this payload is stale.
+    if (operation.start_blocked_reason) {
+      showToast('info', operation.start_blocked_reason);
       return;
     }
 
@@ -875,6 +913,11 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
       }
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || err.message || 'Failed to check in');
+      // A 409 means the row was stale — the job was held or put back to draft since
+      // the list loaded. Re-read it now so the server's start_blocked_reason chip and
+      // the disabled button appear at once, instead of an enabled Check In that will
+      // be refused again until the next poll.
+      if (err?.response?.status === 409) await loadOperations();
     } finally {
       setActionLoading(null);
     }
@@ -1946,7 +1989,10 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
 
       {/* Mobile Next Job */}
       {priorityFocusQueue[0] && (
-        <div className="md:hidden rounded-sm border border-werco-500/30 bg-werco-500/10 p-4">
+        <div
+          data-testid="shop-floor-next-job"
+          className="md:hidden rounded-sm border border-werco-500/30 bg-werco-500/10 p-4"
+        >
           {(() => {
             const op = priorityFocusQueue[0];
             const activeJob = getActiveJobForOperation(op);
@@ -2061,6 +2107,11 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
             const overdue = isOverdue(op.due_date);
             const activeJob = getActiveJobForOperation(op);
             const canCheckIn = op.can_check_in !== false;
+            // The WORK ORDER refuses every start (not released / on hold). Read
+            // before `canCheckIn` — the server sets that false too — so the card
+            // never blames earlier operations for a supervisor's release or hold.
+            const startBlockedReason = op.start_blocked_reason || null;
+            const startBlockedReasonId = `shop-floor-start-blocked-${op.id}`;
             const showCheckIn = op.status === 'pending' || op.status === 'ready' || (op.status === 'in_progress' && !activeJob);
             const remainingQuantity = getRemainingQuantity(op);
             const targetReached = Boolean(activeJob && op.status === 'in_progress' && remainingQuantity <= 0);
@@ -2225,7 +2276,16 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
                   </div>
                 </div>
                 
-                {showCheckIn && !canCheckIn && (
+                {showCheckIn && startBlockedReason && (
+                  <p
+                    id={startBlockedReasonId}
+                    data-testid={startBlockedReasonId}
+                    className="mb-3 text-sm text-amber-300"
+                  >
+                    {startBlockedReason}
+                  </p>
+                )}
+                {showCheckIn && !startBlockedReason && !canCheckIn && (
                   <p className="mb-3 text-sm text-amber-300">
                     Waiting for earlier operations on this work order to be completed. Open Details to review the routing.
                   </p>
@@ -2264,12 +2324,26 @@ function ShopFloorWorkspace({ user }: { user: User | null }) {
                   {showCheckIn && (
                     <button
                       onClick={() => handleCheckIn(op)}
-                      disabled={actionLoading === op.id || productionSave.mutationsBlocked || !canCheckIn}
+                      disabled={
+                        actionLoading === op.id || productionSave.mutationsBlocked || !canCheckIn || !!startBlockedReason
+                      }
                       className="flex-1 btn-primary text-base sm:text-sm py-3 sm:py-2.5 w-full disabled:opacity-50 disabled:cursor-not-allowed"
-                      title={canCheckIn ? 'Check in' : 'Waiting for earlier operations on this work order'}
+                      title={
+                        startBlockedReason
+                          ? startBlockedReason
+                          : canCheckIn
+                            ? 'Check in'
+                            : 'Waiting for earlier operations on this work order'
+                      }
+                      aria-describedby={startBlockedReason ? startBlockedReasonId : undefined}
                     >
                       {actionLoading === op.id ? (
                         <ArrowPathIcon className="h-4 w-4 animate-spin mx-auto" />
+                      ) : startBlockedReason ? (
+                        <>
+                          <PauseIcon className="h-4 w-4 mr-1.5" />
+                          <span>{startBlockedLabel(op.work_order_status)}</span>
+                        </>
                       ) : !canCheckIn ? (
                         <>
                           <ClockIcon className="h-4 w-4 mr-1.5" />

@@ -21,7 +21,7 @@ from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 from app.models.time_entry import TimeEntry
-from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
+from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.services.work_order_state_service import (
     TERMINAL_WO_STATUSES,
     has_incomplete_predecessors,
@@ -54,6 +54,107 @@ MSG_NOT_ON_HOLD = "Operation is not on hold"
 # clocked out -- telling them "you must be clocked in" there would send them looking for
 # a state they correctly left. Worded as the action to take, not the row that is missing.
 MSG_NO_LABOR_RECORDED = "Clock in to this operation before completing it — no one has clocked in to it yet."
+# Verbatim from PUT /shop-floor/operations/{id}/start, now shared with its office twin.
+MSG_ALREADY_IN_PROGRESS = "Operation is already in progress"
+
+# Work-order status gates (owner ruling 2026-11-05: the floor cannot start work on a job a
+# supervisor has not released, or on one a supervisor has put on hold). Static strings on
+# purpose -- no work-order number interpolated -- so the scanner resolver's blocker text,
+# the read payloads' ``start_blocked_reason`` and every write verb's 409 are byte-identical
+# and a doc can quote them exactly. Every surface renders a plain-string ``detail``
+# verbatim, so these are what the operator reads.
+MSG_WORK_ORDER_NOT_RELEASED = (
+    "This work order has not been released — release first. Work cannot start until a supervisor releases it."
+)
+MSG_WORK_ORDER_ON_HOLD = (
+    "This work order is on hold — work cannot start until a supervisor resumes it (Resume Work Order on the "
+    "work order). Resuming or clearing an operation's hold does not lift it."
+)
+# Both start verbs used to flip an ON_HOLD operation straight to IN_PROGRESS, silently
+# lifting the hold (and leaving its blocker open). Starting is not how a hold is lifted.
+MSG_OPERATION_ON_HOLD_NO_START = (
+    "This operation is on hold — lift it with Resume (kiosk) or Clear Hold (desk) first. "
+    "Starting it does not lift a hold."
+)
+# PUT /work-orders/{id} {status: on_hold} on a DRAFT. Every hold placed from now on is on
+# RELEASED work, which is what lets POST /work-orders/{id}/resume decide where a held job
+# goes back to without guessing whether it was ever authorized for the floor.
+MSG_DRAFT_CANNOT_BE_HELD = (
+    "A draft work order has not been released, so there is nothing on the floor to hold. "
+    "Leave it in draft until it is ready, then release it."
+)
+# PUT /work-orders/{id} {status: draft} on a released / in-progress / held job returns its
+# un-worked READY operations to PENDING (a draft leaves no cards on the dispatch board or the
+# kiosk) with one REQUIRED audit row each. When those rows cannot be written the whole PUT is
+# rolled back (503) -- the same fail-closed posture as POST /work-orders/{id}/resume.
+MSG_RETURN_TO_DRAFT_AUDIT_UNAVAILABLE = (
+    "The audit record for taking this work order's operations off the floor could not be saved; nothing was "
+    "changed. Retry."
+)
+
+
+def _status_value(status: object) -> str:
+    """Wire value of a status that may be an enum member or an already-plain string."""
+    value = getattr(status, "value", status)
+    return str(value)
+
+
+def work_order_start_blocker(work_order: Optional[WorkOrder]) -> Optional[str]:
+    """Why NO operation of this work order may be STARTED right now, or ``None``.
+
+    THE one copy of the work-order-status half of the start gate. Add no inline twins:
+    copies of a gate are how the office and floor rules drifted apart before.
+
+    * terminal (COMPLETE / CLOSED / CANCELLED) -> ``"cannot start operation: work order
+      is <status>"``, byte-identical to the f-string the shop-floor start verb has always
+      raised;
+    * DRAFT -> :data:`MSG_WORK_ORDER_NOT_RELEASED` -- Release is the authorization step
+      and the record of who put the job on the floor, so the floor never starts work the
+      release has not authorized (and never releases it as a side effect);
+    * ON_HOLD -> :data:`MSG_WORK_ORDER_ON_HOLD` -- put back on the floor by
+      ``POST /work-orders/{id}/resume`` ("Resume Work Order"), never by starting.
+
+    ``None`` means "no WORK-ORDER refusal", never "startable": the operation's own
+    status, the predecessor gate, the work center and open entries are decided by the
+    write verb at the moment of the action. A soft-deleted work order is the RESOLVER's
+    404, not this helper's business. ``work_order=None`` returns ``None`` for the same
+    reason -- the caller's resolver owns that 404.
+
+    Callers (every one of them, so a reader can check the rule is one rule):
+    ``POST /shop-floor/clock-in`` (kiosk, crew JOIN, desk Check In, Time Clock, paper
+    back-entry -- no exemption), ``PUT /shop-floor/operations/{id}/start``,
+    ``POST /work-orders/operations/{id}/start``, the READY auto-start branch of BOTH
+    complete verbs (``POST /shop-floor/operations/{id}/complete`` and
+    ``POST /work-orders/operations/{id}/complete`` -- completing a READY operation STARTS
+    it first), the generic ``PUT /work-orders/operations/{id}`` when it writes ``status``
+    IN_PROGRESS (a hand-set start; READY on a DRAFT is refused there with
+    :data:`MSG_WORK_ORDER_NOT_RELEASED` as well) or RAISES ``quantity_complete`` on an
+    operation it leaves PENDING / READY of a DRAFT / ON_HOLD job (the reconciling read
+    treats that count as a start -- and that read withholds the lift on such a job too,
+    inline, because this module imports the state service), :func:`clock_in_blockers` and
+    :func:`complete_blockers` (the scanner), and the floor read payloads'
+    ``start_blocked_reason`` (``/shop-floor/operations`` rows,
+    ``/shop-floor/operations/{id}``, the kiosk queue and held rows).
+
+    Deliberately NOT called by: op-level resume, blocker resolve/dismiss, production
+    reporting, completing an operation that is already IN_PROGRESS, and clock-out.
+    Labor already running when a job is held must always be closable, and the kiosk's
+    finish flow completes an IN_PROGRESS operation after clocking out.
+
+    It reads only THIS operation's work order: a laser child does NOT inherit its
+    assembly parent's DRAFT or ON_HOLD (the child is born RELEASED by the nest routes).
+    Hold the laser work order itself to stop its nests.
+    """
+    if work_order is None:
+        return None
+    status = work_order.status
+    if status in TERMINAL_WO_STATUSES:
+        return f"cannot start operation: work order is {_status_value(status)}"
+    if status == WorkOrderStatus.DRAFT:
+        return MSG_WORK_ORDER_NOT_RELEASED
+    if status == WorkOrderStatus.ON_HOLD:
+        return MSG_WORK_ORDER_ON_HOLD
+    return None
 
 
 def get_open_time_entry(db: Session, user_id: int, operation_id: int) -> Optional[TimeEntry]:
@@ -167,7 +268,8 @@ def clock_in_blockers(
     """Reasons POST /shop-floor/clock-in would refuse this user on this operation.
 
     Mirrors the handler's gate order: duplicate open entry -> work center ->
-    status -> predecessors. Empty list == the clock-in gates pass.
+    work-order status (:func:`work_order_start_blocker`: terminal / draft / on hold) ->
+    operation status -> predecessors. Empty list == the clock-in gates pass.
 
     ``work_center_id`` is the station the caller would clock in FROM (the
     handler's ``clock_in_data.work_center_id``); when provided and it differs
@@ -180,6 +282,9 @@ def clock_in_blockers(
         reasons.append(MSG_ALREADY_CLOCKED_IN)
     if work_center_id is not None and operation.work_center_id != work_center_id:
         reasons.append(MSG_WRONG_WORK_CENTER)
+    work_order_reason = work_order_start_blocker(operation.work_order)
+    if work_order_reason:
+        reasons.append(work_order_reason)
     if operation.status not in CLOCK_IN_ALLOWED_STATUSES:
         reasons.append(MSG_NOT_READY_TO_START)
     if operation_blocked_by_predecessors(db, operation):
@@ -208,6 +313,12 @@ def complete_blockers(db: Session, operation: WorkOrderOperation, work_order: Wo
     labor-evidence gate below -- a supervisor or quality user closing an operation from
     the desk, including cleanup of work that was never clocked, is a decision the owner
     kept. Do not "align" the two; the asymmetry is the point and a test pins it.
+
+    Completing a READY operation STARTS it first (both complete verbs auto-start it), so a
+    READY operation under a DRAFT or ON_HOLD work order reports the start refusal
+    (:func:`work_order_start_blocker`) -- the same 409 both verbs raise. An IN_PROGRESS
+    operation does not: work already running when a job is held stays completable. A
+    terminal work order is reported once, by its own completion text above it.
     """
     reasons: List[str] = []
     if work_order.status in TERMINAL_WO_STATUSES:
@@ -221,6 +332,10 @@ def complete_blockers(db: Session, operation: WorkOrderOperation, work_order: Wo
         else:
             status_value = operation.status.value if hasattr(operation.status, "value") else str(operation.status)
             reasons.append(f"Cannot complete operation with status: {status_value}")
+    if operation.status == OperationStatus.READY and work_order.status not in TERMINAL_WO_STATUSES:
+        start_reason = work_order_start_blocker(work_order)
+        if start_reason:
+            reasons.append(start_reason)
     if operation_blocked_by_predecessors(db, operation):
         reasons.append(MSG_PREDECESSORS_INCOMPLETE)
     if operation.id is not None and not operation_has_labor_evidence(db, operation.id, company_id):

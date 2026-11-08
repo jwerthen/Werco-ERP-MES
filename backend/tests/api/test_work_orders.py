@@ -839,6 +839,21 @@ class TestWorkOrdersAPI:
         data = response.json()
         assert data["status"] == "released"
 
+    def test_release_refuses_a_soft_deleted_work_order(
+        self, client: TestClient, auth_headers: dict, db_session, test_work_order: WorkOrder, test_user
+    ):
+        """Invariant 3: releasing a tombstone would put its operations on the floor's board."""
+        test_work_order.soft_delete(test_user.id)
+        db_session.commit()
+
+        response = client.post(f"/api/v1/work-orders/{test_work_order.id}/release", headers=auth_headers)
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        db_session.expire_all()
+        row = db_session.query(WorkOrder).filter(WorkOrder.id == test_work_order.id).one()
+        assert row.status == WorkOrderStatus.DRAFT
+        assert row.released_at is None and row.released_by is None
+
     def test_search_work_orders(self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder):
         """Test searching work orders by customer name."""
         response = client.get(
@@ -854,6 +869,11 @@ class TestWorkOrdersAPI:
         self, client: TestClient, auth_headers: dict, test_work_order: WorkOrder
     ):
         """Started/completed operator IDs should be visible on work order operations."""
+        # The fixture work order is DRAFT, and starting an operation of a draft is refused
+        # 409 (ruling 2: release first) -- release it the way the floor would get it.
+        release_response = client.post(f"/api/v1/work-orders/{test_work_order.id}/release", headers=auth_headers)
+        assert release_response.status_code == status.HTTP_200_OK, release_response.text
+
         work_order_response = client.get(f"/api/v1/work-orders/{test_work_order.id}", headers=auth_headers)
         assert work_order_response.status_code == status.HTTP_200_OK
         operation_id = work_order_response.json()["operations"][0]["id"]
