@@ -176,10 +176,12 @@ def _count_notes(engine) -> int:
 # --------------------------------------------------------------------------------------------
 
 
+@pytest.mark.unit
 def test_libpq_inerror_constant_matches_psycopg2():
     assert LIBPQ_TRANSACTION_INERROR == psycopg2.extensions.TRANSACTION_STATUS_INERROR
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "dbapi_connection, expected",
     [
@@ -195,11 +197,13 @@ def test_transaction_status_reader(dbapi_connection, expected):
     assert database._dbapi_transaction_in_error(dbapi_connection) is expected
 
 
+@pytest.mark.unit
 def test_app_engine_carries_the_guard():
     for identifier, listener in database._GUARD_LISTENERS:
         assert event.contains(database.engine, identifier, listener), identifier
 
 
+@pytest.mark.unit
 def test_install_is_idempotent(libpq_like):
     install_aborted_transaction_guard(libpq_like.engine)
     install_aborted_transaction_guard(libpq_like.engine)
@@ -209,6 +213,7 @@ def test_install_is_idempotent(libpq_like):
         assert not event.contains(libpq_like.engine, identifier, listener), identifier
 
 
+@pytest.mark.unit
 def test_control_without_the_guard_commit_silently_loses_the_write(libpq_like):
     """The fake reproduces the defect: an aborted transaction's COMMIT returns normally."""
     for identifier, listener in database._GUARD_LISTENERS:
@@ -222,6 +227,7 @@ def test_control_without_the_guard_commit_silently_loses_the_write(libpq_like):
     assert _count_notes(libpq_like.engine) == 0
 
 
+@pytest.mark.unit
 def test_commit_of_an_aborted_transaction_is_refused_with_its_cause(libpq_like):
     _make_table(libpq_like.engine)
     with libpq_like.sessions() as session:
@@ -240,6 +246,7 @@ def test_commit_of_an_aborted_transaction_is_refused_with_its_cause(libpq_like):
     assert _count_notes(libpq_like.engine) == 0
 
 
+@pytest.mark.unit
 def test_a_core_connection_commit_is_refused_too(libpq_like):
     """The guard is on the engine, not the Session: an ``engine.begin()`` block cannot silently lose a write."""
     _make_table(libpq_like.engine)
@@ -254,6 +261,7 @@ def test_a_core_connection_commit_is_refused_too(libpq_like):
     assert _count_notes(libpq_like.engine) == 0
 
 
+@pytest.mark.unit
 def test_the_first_error_is_the_cause_not_its_25p02_echoes(libpq_like):
     _make_table(libpq_like.engine)
     with libpq_like.sessions() as session:
@@ -268,6 +276,7 @@ def test_the_first_error_is_the_cause_not_its_25p02_echoes(libpq_like):
     assert refused.value.orig.pgcode == "40P01"
 
 
+@pytest.mark.unit
 def test_a_non_race_cause_is_refused_but_not_called_a_lost_race(libpq_like):
     _make_table(libpq_like.engine)
     libpq_like.dbapi.next_failure = FakeQueryCanceled
@@ -281,6 +290,7 @@ def test_a_non_race_cause_is_refused_but_not_called_a_lost_race(libpq_like):
     assert not is_lost_lock_race(refused.value)
 
 
+@pytest.mark.unit
 def test_the_connection_is_usable_after_the_refusal_and_the_cause_does_not_leak(libpq_like):
     """The rollback after a refusal ends the transaction; the next one commits, uncontaminated."""
     _make_table(libpq_like.engine)
@@ -297,6 +307,7 @@ def test_the_connection_is_usable_after_the_refusal_and_the_cause_does_not_leak(
         assert database._ABORT_CAUSE_KEY not in conn.connection.info
 
 
+@pytest.mark.unit
 def test_a_session_only_closed_after_the_refusal_returns_a_clean_connection(libpq_like):
     """Close-only cleanup (``with SessionLocal() as db:``, ``finally: db.close()``) sends no ROLLBACK.
 
@@ -319,6 +330,7 @@ def test_a_session_only_closed_after_the_refusal_returns_a_clean_connection(libp
     assert _count_notes(libpq_like.engine) == 1
 
 
+@pytest.mark.unit
 def test_a_savepoint_rollback_un_aborts_the_transaction(libpq_like):
     """An error a savepoint contains is not an aborted transaction: the commit goes through."""
     _make_table(libpq_like.engine)
@@ -332,6 +344,7 @@ def test_a_savepoint_rollback_un_aborts_the_transaction(libpq_like):
     assert _count_notes(libpq_like.engine) == 1
 
 
+@pytest.mark.unit
 def test_a_cause_recorded_inside_a_rolled_back_savepoint_is_forgotten(libpq_like):
     """After recovering from one error, a later abort reports ITS cause, not the recovered one."""
     _make_table(libpq_like.engine)
@@ -349,6 +362,7 @@ def test_a_cause_recorded_inside_a_rolled_back_savepoint_is_forgotten(libpq_like
     assert refused.value.orig.pgcode == "57014"
 
 
+@pytest.mark.unit
 def test_an_unrecorded_cause_is_still_refused():
     """An abort that never passed through SQLAlchemy has no SQLSTATE; the COMMIT is refused anyway."""
     error = AbortedTransactionCommitError("COMMIT", None, TransactionAlreadyAborted(None, None))
@@ -356,6 +370,7 @@ def test_an_unrecorded_cause_is_still_refused():
     assert not is_lost_lock_race(error)
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("pgcode, expected", [("40P01", True), ("40001", True), ("57014", False), (None, False)])
 def test_lost_lock_race_classification(pgcode, expected):
     driver_error = type("DriverError", (Exception,), {"pgcode": pgcode})("boom")
@@ -383,6 +398,7 @@ def _chain_lock_that_loses(pgcode: str):
     return lose
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("pgcode", ["40P01", "57014"])
 def test_log_reraises_a_chain_lock_error(db_session: Session, monkeypatch, pgcode):
     monkeypatch.setattr(settings, "AUDIT_HASH_CHAIN_ENABLED", True)
@@ -393,6 +409,7 @@ def test_log_reraises_a_chain_lock_error(db_session: Session, monkeypatch, pgcod
     assert is_lost_lock_race(raised.value) is (pgcode == "40P01")
 
 
+@pytest.mark.unit
 def test_log_reraises_a_tail_read_error(db_session: Session, monkeypatch):
     monkeypatch.setattr(settings, "AUDIT_HASH_CHAIN_ENABLED", True)
 
@@ -404,6 +421,7 @@ def test_log_reraises_a_tail_read_error(db_session: Session, monkeypatch):
         AuditService(db_session, company_id=1).log(action="UPDATE", resource_type="part", resource_id=1)
 
 
+@pytest.mark.unit
 def test_log_reraises_the_callers_own_failed_flush(db_session: Session):
     """``begin_nested`` flushes the caller's pending rows; that failure is the caller's, not the audit's.
 
@@ -426,6 +444,7 @@ def test_log_reraises_the_callers_own_failed_flush(db_session: Session):
     db_session.rollback()
 
 
+@pytest.mark.unit
 def test_a_python_side_audit_failure_stays_best_effort(db_session: Session, monkeypatch):
     """A failure that never reaches the database leaves the transaction intact: log, return None."""
 
@@ -444,6 +463,7 @@ def test_a_python_side_audit_failure_stays_best_effort(db_session: Session, monk
     assert db_session.query(Part).filter(Part.part_number == number).count() == 1
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("unbindable", [Decimal("1.50"), date(2026, 11, 8)], ids=["decimal", "date"])
 @pytest.mark.parametrize("chain_enabled", [True, False], ids=["chain", "paused"])
 def test_an_unbindable_audit_value_stays_best_effort_and_keeps_the_callers_write(
@@ -473,6 +493,7 @@ def test_an_unbindable_audit_value_stays_best_effort_and_keeps_the_callers_write
     assert db_session.query(AuditLog).count() == audit_rows_before
 
 
+@pytest.mark.unit
 def test_an_unbindable_value_in_the_callers_own_pending_row_still_fails_the_caller(db_session: Session, monkeypatch):
     """The documented edge: ``begin_nested`` flushes the CALLER's pending rows outside any savepoint.
 
@@ -491,6 +512,7 @@ def test_an_unbindable_value_in_the_callers_own_pending_row_still_fails_the_call
     db_session.rollback()
 
 
+@pytest.mark.unit
 def test_paused_chain_takes_no_lock_so_its_failure_cannot_reach_log(db_session: Session, monkeypatch):
     monkeypatch.setattr(settings, "AUDIT_HASH_CHAIN_ENABLED", False)
     monkeypatch.setattr(AuditService, "_acquire_chain_lock", _chain_lock_that_loses("40P01"))
@@ -499,6 +521,7 @@ def test_paused_chain_takes_no_lock_so_its_failure_cannot_reach_log(db_session: 
     db_session.commit()
 
 
+@pytest.mark.unit
 def test_log_required_reports_the_database_error_as_audit_write_error(db_session: Session, monkeypatch):
     """Every ``log_required`` caller maps ``AuditWriteError`` to rollback + 503; that contract holds."""
     monkeypatch.setattr(settings, "AUDIT_HASH_CHAIN_ENABLED", True)
@@ -615,6 +638,7 @@ def _guard_refusals(caplog) -> int:
     return sum("Refused COMMIT" in record.getMessage() for record in caplog.records)
 
 
+@pytest.mark.api
 def test_route_victim_answers_409_and_saves_nothing(routed, caplog):
     """The audit write itself raises (``log`` re-raises the 40P01); the guard never has to act."""
     response = _put_priority(routed, TestClient(app))
@@ -625,6 +649,7 @@ def test_route_victim_answers_409_and_saves_nothing(routed, caplog):
     assert _guard_refusals(caplog) == 0
 
 
+@pytest.mark.api
 def test_route_victim_behind_a_swallowing_caller_is_refused_at_commit(routed, monkeypatch, caplog):
     """Only the COMMIT guard stands between this request and a silent 200."""
     _swallowing_log(monkeypatch)
@@ -636,6 +661,7 @@ def test_route_victim_behind_a_swallowing_caller_is_refused_at_commit(routed, mo
     assert _guard_refusals(caplog) == 1
 
 
+@pytest.mark.api
 def test_route_control_without_the_guard_answers_a_silent_200(routed, monkeypatch):
     """The defect, reproduced on the fake: 200, yet neither the priority nor an audit row was saved."""
     _swallowing_log(monkeypatch)
@@ -647,6 +673,7 @@ def test_route_control_without_the_guard_answers_a_silent_200(routed, monkeypatc
     assert _work_order_audit_rows(routed) == 0
 
 
+@pytest.mark.api
 def test_route_non_race_abort_is_a_500_not_a_409(routed, monkeypatch):
     routed.dbapi.next_failure = FakeQueryCanceled
     _swallowing_log(monkeypatch)
@@ -656,6 +683,7 @@ def test_route_non_race_abort_is_a_500_not_a_409(routed, monkeypatch):
     assert _priority(routed) == 5
 
 
+@pytest.mark.api
 def test_non_race_database_errors_keep_their_500_path(routed, monkeypatch):
     """The lost-race handler re-raises everything else, so the error still reaches the 500 handler."""
     routed.dbapi.next_failure = FakeQueryCanceled
@@ -665,6 +693,7 @@ def test_non_race_database_errors_keep_their_500_path(routed, monkeypatch):
     assert _priority(routed) == 5
 
 
+@pytest.mark.api
 def test_route_retry_after_the_lost_race_succeeds_with_its_audit_row(routed, monkeypatch):
     client = TestClient(app)
     assert _put_priority(routed, client).status_code == 409
@@ -695,6 +724,7 @@ def sentry_spy(monkeypatch):
     return spy
 
 
+@pytest.mark.api
 def test_a_lost_lock_race_is_reported_to_sentry_grouped_by_route_and_sqlstate(routed, sentry_spy):
     """A 409 must not hide a lock-order bug: before the 409 handler, the 500 handler reported it."""
     response = TestClient(app).put(
@@ -719,6 +749,7 @@ def test_a_lost_lock_race_is_reported_to_sentry_grouped_by_route_and_sqlstate(ro
     }
 
 
+@pytest.mark.api
 def test_a_failing_sentry_report_never_changes_the_409(routed, monkeypatch):
     import app.main as app_main
 
@@ -736,6 +767,7 @@ def test_a_failing_sentry_report_never_changes_the_409(routed, monkeypatch):
     assert _priority(routed) == 5
 
 
+@pytest.mark.api
 def test_a_non_race_database_error_is_not_reported_as_a_lost_race(routed, monkeypatch, sentry_spy):
     """Only the 500 handler reports it (once), with its own grouping -- never the race fingerprint."""
     routed.dbapi.next_failure = FakeQueryCanceled
@@ -777,6 +809,7 @@ def _created_work_orders(routed, part_id: int) -> list:
     return orders, creates
 
 
+@pytest.mark.api
 def test_create_work_order_victim_answers_409_and_saves_no_work_order(routed, caplog, monkeypatch):
     """The 409 is true: the work order rolls back with its lost audit write, so a retry is not a duplicate.
 
@@ -805,6 +838,7 @@ def test_create_work_order_victim_answers_409_and_saves_no_work_order(routed, ca
     assert new_values["version"] == 1 and new_values["quantity_ordered"] == 3.0
 
 
+@pytest.mark.api
 def test_create_work_order_reconcile_race_after_commit_still_answers_201(
     client: TestClient, db_session: Session, auth_headers: dict, test_part: Part, monkeypatch
 ):
@@ -882,6 +916,7 @@ def _unlock_a_locked_user(routed, client: TestClient):
     return response, saved
 
 
+@pytest.mark.api
 @pytest.mark.parametrize(
     "door", [_create_ncr, _unlock_a_locked_user], ids=["log_required", "RequiredSecurityAudit.log"]
 )
@@ -930,6 +965,7 @@ def _audit_row_not_written(monkeypatch) -> None:
     monkeypatch.setattr(AuditService, "log", lambda self, *args, **kwargs: None)
 
 
+@pytest.mark.api
 @pytest.mark.parametrize("failure", ["lost_chain_lock_race", "audit_row_not_written"])
 def test_an_untranslated_audit_write_error_answers_503_and_saves_nothing(routed, monkeypatch, failure):
     """Every ``log_required`` door answers 503 (invariant 2), not only the ones that translate it.
@@ -947,6 +983,7 @@ def test_an_untranslated_audit_write_error_answers_503_and_saves_nothing(routed,
         assert session.query(AuditLog).filter(AuditLog.resource_type == "shipment").count() == 0
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("method", ["log", "log_create", "log_update", "log_status_change"])
 def test_hank_required_audit_reports_a_reraised_database_error_as_audit_write_error(method):
     """``_RequiredCreateAudit`` makes every legacy audit call in a Hank action required: a re-raised
@@ -967,6 +1004,7 @@ def test_hank_required_audit_reports_a_reraised_database_error_as_audit_write_er
 # --------------------------------------------------------------------------------------------
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "module_name, runner, task",
     [
@@ -1048,6 +1086,7 @@ def _job_failures(caplog, company_id: int) -> list:
     ]
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "module_name, task, first_query",
     [
@@ -1085,6 +1124,7 @@ async def test_a_failed_tenant_does_not_fail_the_next_one_in_the_digest_and_trac
     assert _job_failures(caplog, 2) == []
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("failing_step", ["get_tracking", "apply"])
 async def test_a_failed_shipment_does_not_fail_the_next_one_in_the_tracking_poll(
     db_session: Session, monkeypatch, test_work_order, failing_step
