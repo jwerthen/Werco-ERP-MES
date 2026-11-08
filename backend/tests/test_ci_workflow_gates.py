@@ -191,6 +191,68 @@ class TestDeploymentHygieneAndLandingGates:
         assert "--audit-level=high" in scripts["audit:ci"]
 
 
+# The real-PostgreSQL verifiers e2e.yml must keep running. A floor, not the full set:
+# a new verifier step is welcome without touching this list.
+E2E_POSTGRES_VERIFIERS = (
+    "verify_operations_postgres",
+    "verify_fabrication_quoting_postgres",
+    "verify_fresh_bootstrap_postgres",
+    "verify_audit_deadlock_postgres",
+)
+_POSTGRES_VERIFIER_RE = re.compile(r"\b(verify_\w+_postgres)\b")
+_NODE_TOOLCHAIN_RE = re.compile(r"\b(npm|npx|node|playwright)\b")
+
+
+def _postgres_verifier_order(workflow: dict) -> Tuple[set, list]:
+    """Return (verifier scripts found, steps where a verifier runs after a Node/browser step).
+
+    Checked per job, so moving the verifiers into a job of their own also passes.
+    """
+    found: set = set()
+    offenders = []
+    for job_key, job in (workflow.get("jobs") or {}).items():
+        first_toolchain = None
+        for index, step in enumerate(job.get("steps") or []):
+            script = step.get("run") or ""
+            uses = step.get("uses") or ""
+            verifiers = _POSTGRES_VERIFIER_RE.findall(script)
+            found.update(verifiers)
+            if verifiers and first_toolchain is not None:
+                offenders.append(
+                    f"job={job_key} step {index + 1} {step.get('name', '?')!r} runs after "
+                    f"step {first_toolchain[0] + 1} {first_toolchain[1]!r}"
+                )
+            if first_toolchain is None and (uses.startswith("actions/setup-node") or _NODE_TOOLCHAIN_RE.search(script)):
+                first_toolchain = (index, step.get("name") or uses)
+    return found, offenders
+
+
+class TestE2EPostgresVerifiersRunFirst:
+    """e2e.yml's real-Postgres verifiers must not run behind a Node or browser step.
+
+    They are the only place CI runs this app on PostgreSQL (CLAUDE.md, Migrations), and they
+    need only the backend install and the Postgres service. Until 2026-11-08 they sat after
+    ``npx playwright install``. When that install broke on the runner image, every run died
+    before reaching them, so the verifiers were skipped. That included PR #317's deadlock
+    verifier, which never ran in CI. The skip looked like any other red E2E run. With
+    the verifiers ahead of every frontend-toolchain step, a Node/npm/browser break cannot
+    skip them again.
+
+    Validated both ways: run against the pre-change e2e.yml, the order check fails on all
+    four verifier steps.
+    """
+
+    def test_every_postgres_verifier_runs_before_any_node_or_browser_step(self) -> None:
+        found, offenders = _postgres_verifier_order(_load_workflow("e2e.yml"))
+
+        missing = sorted(set(E2E_POSTGRES_VERIFIERS) - found)
+        assert not missing, f"e2e.yml no longer runs these real-Postgres verifiers: {missing}"
+        assert not offenders, (
+            "These e2e.yml Postgres verifiers run after a Node/npm/browser step, so a frontend "
+            "toolchain failure would skip them:\n  " + "\n  ".join(offenders)
+        )
+
+
 class TestPrCheckDoesNotDuplicateTheBackendSuite:
     """The backend gate must live in exactly ONE place, and it must still exist.
 
