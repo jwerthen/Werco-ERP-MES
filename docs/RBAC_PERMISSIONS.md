@@ -153,18 +153,6 @@ Recommendations):
 | **Closing work short** — a short close by either operation-complete verb whose scrap is already on record (one declaring new scrap gets `API_TOKEN_SCRAP` first), a force-complete below the order, and an office reduce-production re-stamp that would set a declared short | `is_api_token_credential` (reduce-production through `production_reduction_service.api_token_reduction_refusal`) | **403** `API_TOKEN_SHORT_CLOSE` (`Closing work short must be done by a person …`) | Owner decision 2026-11-07 (a token keeps only the full-count close); the re-stamp case is **this PR's extension** |
 | **The other count judgments** — good above the floor's labor record (office operation complete, override reason or not; force-complete above `deliverable`); `PUT /work-orders/operations/{id}` changing `quantity_complete` or a `quantity_scrapped` that is not a rise; `PUT /work-orders/{id}` changing the header's `quantity_complete` / `quantity_scrapped` in either direction; **every** correction through `POST /work-orders/operations/{id}/reduce-production` or `POST /shop-floor/operations/{id}/reduce-production`; lowering `quantity_ordered` once any operation has recorded good, scrap or labor | `is_api_token_credential` (reduce-production through `api_token_reduction_refusal`, re-checked under the row locks) | **403** `API_TOKEN_COUNT_JUDGMENT` (`Recording more good than the floor counted, …`) | **This PR's extension** of the same principle — the owner was asked about scrap and short closes, not these |
 
-The role gate still applies after the credential check: the person must hold a role that could
-apply the action. `hank_task_service.py` and its siblings carry older inline copies of the stricter
-predicate.
-
-Judgment-shaped writes the owner decided to leave open, so no predicate applies (the role gate and
-the route's own fences still do):
-
-| Write | Open to | Decision |
-|---|---|---|
-| **Resume Work Order** — `POST /work-orders/{id}/resume` (lifts a work-order hold) | Any credential of a user holding Admin / Manager / Supervisor, a standing **API token** included (the MCP tool `work_orders_resume_work_order`); kiosk badge and station tokens are refused by their path fence, as on every `/work-orders` route. Each call's required audit rows are written as the token's user with `extra_data.credential` | Owner decision 2026-11-07: an agent may lift a work-order hold |
-| **Dismiss**, snooze and feedback on a recommendation, action cards included | Every authenticated user and every credential | A design decision of the AI governance change; for Dismiss on an action card, confirmed by the owner 2026-11-07 (it does not take the Mark handled gate) — see [AI recommendations (Action Inbox)](#ai-recommendations-action-inbox) |
-
 Deliberately **not** refused — current behavior, not owner decisions:
 
 - A **crew-station badge token** is a person standing at the kiosk with their own badge, so it
@@ -180,6 +168,18 @@ Deliberately **not** refused — current behavior, not owner decisions:
   planning allowance. Neither is refused. `tests/api/test_api_token_scrap_refusal.py` lists both as
   exempt with their reasons, and fails CI on any new scrap writer that is neither guarded nor
   listed.
+
+The role gate still applies after the credential check: the person must hold a role that could
+apply the action. `hank_task_service.py` and its siblings carry older inline copies of the stricter
+predicate.
+
+Judgment-shaped writes the owner decided to leave open, so no predicate applies (the role gate and
+the route's own fences still do):
+
+| Write | Open to | Decision |
+|---|---|---|
+| **Resume Work Order** — `POST /work-orders/{id}/resume` (lifts a work-order hold) | Any credential of a user holding Admin / Manager / Supervisor, a standing **API token** included (the MCP tool `work_orders_resume_work_order`); kiosk badge and station tokens are refused by their path fence, as on every `/work-orders` route. Each call's required audit rows are written as the token's user with `extra_data.credential` | Owner decision 2026-11-07: an agent may lift a work-order hold |
+| **Dismiss**, snooze and feedback on a recommendation, action cards included | Every authenticated user and every credential | A design decision of the AI governance change; for Dismiss on an action card, confirmed by the owner 2026-11-07 (it does not take the Mark handled gate) — see [AI recommendations (Action Inbox)](#ai-recommendations-action-inbox) |
 
 ## Permission Matrix
 
