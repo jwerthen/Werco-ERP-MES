@@ -1141,19 +1141,25 @@ export default function CrewStationKiosk() {
             //    releases first; then the crew can JOIN, or the office records them. No
             //    new completion door on drafts (an open owner question).
             //  - a refusal startBlockKind does not recognise: generic, no button named.
-            const qty = formatShortQuantity(good);
+            // Scrap entered alongside the good is named too: nothing is sent, so when the
+            // supervisor has to record it, the scrap and its reason have to be given again.
+            const qty =
+              scrap > 0
+                ? `${formatShortQuantity(good)} good and ${formatShortQuantity(scrap)} scrap`
+                : `${formatShortQuantity(good)} good`;
+            const nothingSaved = scrap > 0 ? ' Nothing was saved, including the scrap reason.' : '';
             const nobodyClockedIn = (item.roster || []).length === 0;
             const blockKind = startBlockKind(item.work_order_status, item.start_blocked_reason);
             setBadgeError(
               blockKind === null
-                ? `This badge is not clocked in to this job — scan a badge that is, or JOIN first, to record the ${qty} good.`
+                ? `This badge is not clocked in to this job — scan a badge that is, or JOIN first, to record the ${qty}.`
                 : !nobodyClockedIn
-                  ? `This badge is not clocked in to this job — scan a badge that is clocked in to this job to record the ${qty} good.`
+                  ? `This badge is not clocked in to this job — scan a badge that is clocked in to this job to record the ${qty}.`
                   : blockKind === 'on_hold'
-                    ? `No one is clocked in to this job, and it can't be joined while it is on hold. Ask a supervisor to record the ${qty} good from the work order page.`
+                    ? `No one is clocked in to this job, and it can't be joined while it is on hold. Ask a supervisor to record the ${qty} from the work order page.${nothingSaved}`
                     : blockKind === 'draft'
-                      ? `No one is clocked in to this job, and it can't be joined while it is in draft. Ask a supervisor to release the work order first — then the ${qty} good can be recorded here or from the work order page.`
-                      : `No one is clocked in to this job, and it can't be joined right now. Ask a supervisor how to record the ${qty} good.`
+                      ? `No one is clocked in to this job, and it can't be joined while it is in draft. Ask a supervisor to release the work order first — then the ${qty} can be recorded here or from the work order page.${nothingSaved}`
+                      : `No one is clocked in to this job, and it can't be joined right now. Ask a supervisor how to record the ${qty}.${nothingSaved}`
             );
             return;
           }

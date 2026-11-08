@@ -13,7 +13,11 @@
   package over nest operations with recorded work: IMPORT REPLACES EVERYTHING deletes them and zeroes
   the laser work order's counts, erasing a person's good, scrap and any declared short. This PR's
   extension of the 2026-11-07 decision, not part of it. A person's re-import, and a token's import
-  over un-worked nests, are byte-identical to before.
+  over un-worked nests, are byte-identical to before. Review fixes pinned there too: the refusal has
+  its own text (``API_TOKEN_NEST_REIMPORT``); an office start (``actual_start``) and the header counts
+  the import zeroes are recorded work; the re-check reads the database, not the first check's loaded
+  rows; a row changed mid-import answers 409 refresh-and-retry; a person's import never resolves the
+  laser child for the token check.
 
 Every refusal is pinned as writing NOTHING.
 """
@@ -26,6 +30,7 @@ from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 import app.api.endpoints.work_orders as work_orders_endpoint
@@ -43,11 +48,13 @@ from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.services.laser_nest_service import import_would_wipe_recorded_work, laser_import_wipe_operation_ids
 from app.services.operation_action_gates import (
     API_TOKEN_COUNT_JUDGMENT,
+    API_TOKEN_NEST_REIMPORT,
     MSG_WORK_ORDER_NOT_RELEASED,
     MSG_WORK_ORDER_ON_HOLD,
     completed_counts_locked_message,
     open_count_above_ceiling_message,
     open_count_above_recorded_message,
+    operation_has_recorded_work,
 )
 from app.services.work_order_state_service import operation_accounting
 from tests.api.kiosk_test_helpers import COMPANY_A, make_user, make_work_center, user_headers
@@ -409,7 +416,7 @@ class TestApiTokenNestReimportOverRecordedWork:
 
         resp = _import(client, headers, WO_IMPORT_URL.format(wo=laser.id), _cnc_zip("N9_QTY1.nc"))
         assert resp.status_code == 403, resp.text
-        assert resp.json()["detail"] == API_TOKEN_COUNT_JUDGMENT
+        assert resp.json()["detail"] == API_TOKEN_NEST_REIMPORT
         assert _nest_world(db_session) == before
         assert extraction_calls == [], "refused before the package was unpacked"
 
@@ -425,7 +432,7 @@ class TestApiTokenNestReimportOverRecordedWork:
         rows = [{"source_file": "n1.pdf", "cnc_number": "N1", "planned_runs": 2}]
         resp = _import(client, headers, WO_IMPORT_URL.format(wo=laser.id), _pdf_zip("n1.pdf"), rows=rows)
         assert resp.status_code == 403, resp.text
-        assert resp.json()["detail"] == API_TOKEN_COUNT_JUDGMENT
+        assert resp.json()["detail"] == API_TOKEN_NEST_REIMPORT
         assert _nest_world(db_session) == before
         assert extraction_calls == []
 
@@ -439,7 +446,7 @@ class TestApiTokenNestReimportOverRecordedWork:
 
         resp = _import(client, headers, WO_IMPORT_URL.format(wo=parent.id), _cnc_zip("N7.nc"))
         assert resp.status_code == 403, resp.text
-        assert resp.json()["detail"] == API_TOKEN_COUNT_JUDGMENT
+        assert resp.json()["detail"] == API_TOKEN_NEST_REIMPORT
         assert _nest_world(db_session) == before
 
     def test_work_recorded_while_the_package_unpacks_is_refused_under_the_lock(
@@ -462,7 +469,7 @@ class TestApiTokenNestReimportOverRecordedWork:
 
         resp = _import(client, headers, WO_IMPORT_URL.format(wo=laser.id), _cnc_zip("N9_QTY1.nc"))
         assert resp.status_code == 403, resp.text
-        assert resp.json()["detail"] == API_TOKEN_COUNT_JUDGMENT
+        assert resp.json()["detail"] == API_TOKEN_NEST_REIMPORT
         after = _nest_world(db_session)
         assert len(after["entries"]) == len(before["entries"]) + 1, "only the floor's own clock-in landed"
         after["entries"] = before["entries"]
@@ -521,6 +528,159 @@ class TestApiTokenNestReimportOverRecordedWork:
         # The labor read is tenant-scoped: under another tenant's id the wipe set itself is empty.
         assert import_would_wipe_recorded_work(db_session, laser_work_order=laser, company_id=2) is False
 
+    # ----------------------------------------------------------------------- #
+    # Review fixes on F3 (each fails with its source change switched off)
+    # ----------------------------------------------------------------------- #
+    def test_the_refusal_names_the_reimport_and_what_to_do(self):
+        """Its own text: the count-judgment text names three actions an importer never attempted."""
+        assert API_TOKEN_NEST_REIMPORT != API_TOKEN_COUNT_JUDGMENT
+        assert "Re-importing a nest package" in API_TOKEN_NEST_REIMPORT
+        assert "Leave the re-import for that person." in API_TOKEN_NEST_REIMPORT
+
+    def test_an_office_start_on_a_nest_later_held_is_recorded_work(
+        self, client, db_session, admin_user, admin_headers, supervisor, no_ai, extraction_calls
+    ):
+        """Started from the office (``actual_start`` / ``started_by`` stamped, no labor, no counts),
+        then held: the status no longer reads IN_PROGRESS, but the start record is still work a
+        person did -- the same signal the sequencing flip and the resume target read."""
+        laser = self._standalone(client, db_session, admin_user)
+        op = _nest_ops(db_session, laser.id)[0]
+        set_op(
+            db_session, op, status=HELD, actual_start=datetime.utcnow() - timedelta(hours=1), started_by=supervisor.id
+        )
+        assert db_session.query(TimeEntry).filter(TimeEntry.operation_id == op.id).count() == 0
+        assert operation_has_recorded_work(db_session, fresh(db_session, WorkOrderOperation, op.id), COMPANY_A)
+        headers = _token(client, admin_headers, supervisor)
+        extraction_calls.clear()
+        before = _nest_world(db_session)
+
+        resp = _import(client, headers, WO_IMPORT_URL.format(wo=laser.id), _cnc_zip("N9_QTY1.nc"))
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["detail"] == API_TOKEN_NEST_REIMPORT
+        assert _nest_world(db_session) == before
+        assert extraction_calls == []
+
+    @pytest.mark.parametrize("field", ["quantity_complete", "quantity_scrapped"])
+    def test_header_counts_the_import_would_zero_are_recorded_work(
+        self, client, db_session, admin_user, admin_headers, supervisor, field, no_ai, extraction_calls
+    ):
+        """No nest operation has been worked, but the laser work order's header carries a count a
+        person set by hand: the import zeroes it unconditionally, so a token is refused too."""
+        laser = self._standalone(client, db_session, admin_user)
+        setattr(laser, field, 2.0)
+        db_session.commit()
+        ops = _nest_ops(db_session, laser.id)
+        assert not any(operation_has_recorded_work(db_session, op, COMPANY_A) for op in ops)
+        assert import_would_wipe_recorded_work(db_session, laser_work_order=laser, company_id=COMPANY_A) is True
+        headers = _token(client, admin_headers, supervisor)
+        extraction_calls.clear()
+        before = _nest_world(db_session)
+
+        resp = _import(client, headers, WO_IMPORT_URL.format(wo=laser.id), _cnc_zip("N9_QTY1.nc"))
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["detail"] == API_TOKEN_NEST_REIMPORT
+        assert _nest_world(db_session) == before
+        assert extraction_calls == []
+
+    def test_the_predicate_reads_the_database_not_the_loaded_operations(self, client, db_session, admin_user, no_ai):
+        """The route asks twice in ONE transaction. A count that reached the database after the
+        first ask (here written past the identity map) must be seen by the second."""
+        laser = self._standalone(client, db_session, admin_user)
+        ops = _nest_ops(db_session, laser.id)
+        assert import_would_wipe_recorded_work(db_session, laser_work_order=laser, company_id=COMPANY_A) is False
+        db_session.execute(
+            text("UPDATE work_order_operations SET quantity_complete = 5, version = version + 1 WHERE id = :id"),
+            {"id": ops[0].id},
+        )
+        assert float(ops[0].quantity_complete or 0) == 0, "the loaded row is stale by construction"
+        assert import_would_wipe_recorded_work(db_session, laser_work_order=laser, company_id=COMPANY_A) is True
+        db_session.rollback()
+
+    def test_a_desk_count_landing_while_the_package_unpacks_is_refused_under_the_lock(
+        self, client, db_session, admin_user, admin_headers, supervisor, no_ai, monkeypatch
+    ):
+        """The early check LOADS the nest operations; a desk count reaches the database while the
+        upload is extracted. The re-check must see it and answer the documented 403 -- reusing the
+        loaded zero let the wipe run into the version check instead, a conflict naming neither
+        cause. (One test session serves the request, so the desk write goes past the identity map.)"""
+        laser = self._standalone(client, db_session, admin_user)
+        target_id = _nest_ops(db_session, laser.id)[0].id
+        headers = _token(client, admin_headers, supervisor)
+        original = work_orders_endpoint.extract_laser_nest_zip
+        # The identity map is weak-referencing: hold the request's loaded row, as a request that
+        # still references it would, so it stays in the map (stale) until the re-check.
+        held: list = []
+
+        def _desk_records_during_extraction(*args, **kwargs):
+            result = original(*args, **kwargs)
+            held.append(db_session.get(WorkOrderOperation, target_id))
+            assert float(held[0].quantity_complete or 0) == 0
+            db_session.execute(
+                text("UPDATE work_order_operations SET quantity_complete = 5, version = version + 1 WHERE id = :id"),
+                {"id": target_id},
+            )
+            return result
+
+        monkeypatch.setattr(work_orders_endpoint, "extract_laser_nest_zip", _desk_records_during_extraction)
+        before = _nest_world(db_session)
+
+        resp = _import(client, headers, WO_IMPORT_URL.format(wo=laser.id), _cnc_zip("N9_QTY1.nc"))
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["detail"] == API_TOKEN_NEST_REIMPORT
+        assert _nest_world(db_session) == before
+
+    def test_a_row_changed_under_a_persons_import_answers_409_refresh(
+        self, client, db_session, admin_user, no_ai, monkeypatch
+    ):
+        """A nest operation the wipe deletes is changed by someone else after this request loaded
+        it: the version check on the delete is a concurrent edit, so the answer is the app's 409
+        "refresh and retry" -- not the 400 that sends the caller looking for a conflicting row."""
+        laser = self._standalone(client, db_session, admin_user)
+        target_id = _nest_ops(db_session, laser.id)[0].id
+        original = work_orders_endpoint.extract_laser_nest_zip
+        held: list = []  # keeps the request's loaded row in the weak-referencing identity map
+
+        def _someone_edits_during_extraction(*args, **kwargs):
+            result = original(*args, **kwargs)
+            held.append(db_session.get(WorkOrderOperation, target_id))
+            assert held[0].version is not None
+            db_session.execute(
+                text("UPDATE work_order_operations SET version = version + 1 WHERE id = :id"), {"id": target_id}
+            )
+            return result
+
+        monkeypatch.setattr(work_orders_endpoint, "extract_laser_nest_zip", _someone_edits_during_extraction)
+        before = _nest_world(db_session)
+
+        resp = _import(client, user_headers(admin_user), WO_IMPORT_URL.format(wo=laser.id), _cnc_zip("N9.nc"))
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == "This work order was modified concurrently. Refresh and retry."
+        assert _nest_world(db_session) == before
+
+    def test_a_persons_parent_addressed_import_never_resolves_the_laser_child_early(
+        self, client, db_session, admin_user, admin_headers, supervisor, no_ai, monkeypatch
+    ):
+        """The credential is tested before the target is resolved: a person's import does no
+        throw-away read of the laser child; a token's still does (the spy is live)."""
+        parent, _child = self._classic(client, db_session, admin_user)
+        calls: list = []
+        original = work_orders_endpoint._existing_laser_target
+
+        def _spy(*args, **kwargs):
+            calls.append(kwargs.get("work_order"))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(work_orders_endpoint, "_existing_laser_target", _spy)
+
+        resp = _import(client, user_headers(admin_user), WO_IMPORT_URL.format(wo=parent.id), _cnc_zip("N7.nc"))
+        assert resp.status_code == 200, resp.text
+        assert calls == []
+
+        token = _token(client, admin_headers, supervisor)
+        resp = _import(client, token, WO_IMPORT_URL.format(wo=parent.id), _cnc_zip("N8.nc"))
+        assert resp.status_code == 200, resp.text
+        assert len(calls) == 1
+
 
 @pytest.fixture(scope="module")
 def mcp_catalog():
@@ -556,6 +716,6 @@ class TestMcpImportSurfacesTheRefusal:
         assert result.is_error, result.content
         assert (result.structured_content["status"], result.structured_content["detail"]) == (
             403,
-            API_TOKEN_COUNT_JUDGMENT,
+            API_TOKEN_NEST_REIMPORT,
         )
         assert _nest_world(db_session) == before

@@ -281,11 +281,12 @@ describe('CrewStationKiosk — short count (owner ruling 1)', () => {
    * (never "once a supervisor resumes it" — a hold is not lifted just to close running
    * work), while a draft offers no Complete in the office at all, so it is released first.
    */
-  const nobodyClockedInAlert = async (row: Partial<KioskCrewQueueItem>) => {
+  const nobodyClockedInAlert = async (row: Partial<KioskCrewQueueItem>, enter?: () => void) => {
     mocked.getQueue.mockResolvedValue(queueWith({ ...ITEM, roster: [], ...row }));
     mocked.mintBadgeToken.mockResolvedValue(ALICE_MINT);
     renderKiosk();
     await openComplete();
+    enter?.();
     fireEvent.click(screen.getByTestId('kiosk-qty-confirm'));
     await screen.findByRole('dialog');
     scanBadge('E013');
@@ -318,6 +319,38 @@ describe('CrewStationKiosk — short count (owner ruling 1)', () => {
     expect(alert).not.toHaveTextContent(/on hold/);
     expect(mocked.reportProduction).not.toHaveBeenCalled();
     expect(mocked.completeOperation).not.toHaveBeenCalled();
+  });
+
+  it('scrap entered with the good on a HELD job is named too, and the lead is told nothing was saved', async () => {
+    const alert = await nobodyClockedInAlert(
+      { work_order_status: 'on_hold', start_blocked_reason: WORK_ORDER_ON_HOLD_REASON },
+      enterCoveredShort
+    );
+    expect(alert).toHaveTextContent(
+      "No one is clocked in to this job, and it can't be joined while it is on hold. Ask a supervisor to record the 4 good and 2 scrap from the work order page. Nothing was saved, including the scrap reason."
+    );
+    expect(mocked.reportProduction).not.toHaveBeenCalled();
+    expect(mocked.completeOperation).not.toHaveBeenCalled();
+  });
+
+  it('scrap entered with the good on a DRAFT job is named too, and the lead is told nothing was saved', async () => {
+    const alert = await nobodyClockedInAlert(
+      { work_order_status: 'draft', start_blocked_reason: WORK_ORDER_NOT_RELEASED_REASON },
+      enterCoveredShort
+    );
+    expect(alert).toHaveTextContent(
+      "No one is clocked in to this job, and it can't be joined while it is in draft. Ask a supervisor to release the work order first — then the 4 good and 2 scrap can be recorded here or from the work order page. Nothing was saved, including the scrap reason."
+    );
+    expect(mocked.reportProduction).not.toHaveBeenCalled();
+    expect(mocked.completeOperation).not.toHaveBeenCalled();
+  });
+
+  it('with no scrap entered, the advice says nothing about scrap', async () => {
+    const alert = await nobodyClockedInAlert({
+      work_order_status: 'on_hold',
+      start_blocked_reason: WORK_ORDER_ON_HOLD_REASON,
+    });
+    expect(alert).not.toHaveTextContent(/scrap|Nothing was saved/);
   });
 
   it('a row without work_order_status still tells draft from held by the server reason text', async () => {

@@ -70,7 +70,7 @@ DEFAULT_INSTRUCTIONS = (
     "scrap, since a scrap count is quality evidence someone has to have seen) or change a scrap reason; nor may it "
     "close work short, record more good than the floor counted, edit an operation's or a work order header's "
     "counts, correct a count with either reduce-production tool, lower an order (or a laser nest's planned "
-    "runs) once work was recorded, or re-import a nest package over nests with recorded work (403). "
+    "runs) once work was recorded, or re-import a nest package onto a laser job with recorded work (403). "
     "Good-only reports, zero-scrap clock-outs and full-count closes still work.\n"
     "- Reads are broad: the generated tools mirror the whole API. Start with the convenience tools (search, "
     "list_*, get_work_order, get_shop_floor_dashboard). Large results are truncated with a note; narrow them with "

@@ -671,9 +671,9 @@ bot permission — the token is exactly as powerful as the user it belongs to, a
 > - **This PR's extension of that decision** (the owner was asked about scrap and short closes, not
 >   these): writing or changing a scrap reason or code; good above the floor's record; operation and
 >   work-order header count edits; every correction through either reduce-production verb; lowering an
->   order, or a laser nest's planned runs, once work is recorded; re-importing a nest package over
->   nest operations with recorded work — **403**. See Work Orders → "Short count at completion" → "API tokens
->   may not declare scrap or make count judgments".
+>   order, or a laser nest's planned runs, once work is recorded; re-importing a nest package onto a
+>   laser job with recorded work (its own refusal text) — **403**. See Work Orders → "Short count at
+>   completion" → "API tokens may not declare scrap or make count judgments".
 > - **Left open.** **Resume Work Order** (`POST /work-orders/{id}/resume`): a token whose user holds
 >   Admin / Manager / Supervisor may lift a work-order hold, audited as that user with
 >   `extra_data.credential` (owner decision 2026-11-07). Dismiss, snooze and feedback on a
@@ -2258,12 +2258,16 @@ company-scoped.
 >   the operation's target and the laser work order's order is derived from them, so the next read
 >   could otherwise complete the nest and the job at what was recorded; and re-importing a nest
 >   package (`POST /work-orders/{id}/laser-nest-packages/import`, either import shape) when any
->   operation the import would delete has — the import replaces every nest operation and zeroes the
->   laser work order's counts, erasing a person's good, scrap and any declared short. All three read
->   one per-operation rule, `operation_action_gates.operation_has_recorded_work` (good, scrap, a
->   start, or any `TimeEntry`). The re-import is refused before the upload is unpacked and again
->   under the import's lock before the first write; a person's re-import, a token's import onto a job
->   with no worked nest operation, and the standalone import (which wipes nothing) are unchanged.
+>   operation the import would delete has, or the laser work order's header already carries good or
+>   scrap — the import replaces every nest operation and zeroes the header counts, erasing a person's
+>   good, scrap and any declared short (that refusal has its own text, below, so the caller is told
+>   which action was refused). All three read one per-operation rule,
+>   `operation_action_gates.operation_has_recorded_work` (good, scrap, a start — IN_PROGRESS /
+>   COMPLETE status or a stamped `actual_start` — or any `TimeEntry`). The re-import is refused
+>   before the upload is unpacked and again under the import's lock before the first write, the
+>   second read taken from the database rather than the rows the first one loaded; a person's
+>   re-import, a token's import onto a job with no worked nest operation and zero header counts, and
+>   the standalone import (which wipes nothing) are unchanged.
 >
 > A crew-station badge token is a person and passes all three (it cannot reach `/work-orders` or
 > `/hank` at all). An interactive JWT — including one an MCP client carries — is the person's own
@@ -2300,7 +2304,8 @@ company-scoped.
 > | Clock-out, `/production`, Hank `report_production` task, both close verbs, force-complete, `PUT /work-orders/operations/{id}`, `PUT /work-orders/{id}` — an API token raising recorded scrap | 403 | `Scrap must be reported by a person (at the kiosk, with a crew badge, or signed in at a desk), not an API token: a scrap count is quality evidence someone has to have seen. Record good pieces only, or leave the work open for that person.` |
 > | Clock-out, force-complete, `PUT /work-orders/operations/{id}`, `PUT /work-orders/{id}` — an API token writing or changing a scrap reason or code | 403 | the same scrap text |
 > | Both close verbs, force-complete, office reduce-production (a re-stamp that would set a declared short) | 403 | `Closing work short must be done by a person signed in to the app, not an API token.` |
-> | Office verb, force-complete, `PUT /work-orders/operations/{id}`, `PUT /work-orders/{id}`, both reduce-production verbs, `PATCH /laser-nests/{id}` (lowering `planned_runs` on a worked nest), `POST /work-orders/{id}/laser-nest-packages/import` (re-importing over worked nest operations) | 403 | `Recording more good than the floor counted, editing an operation's counts, or lowering the order after work was recorded must be done by a person signed in to the app, not an API token.` |
+> | Office verb, force-complete, `PUT /work-orders/operations/{id}`, `PUT /work-orders/{id}`, both reduce-production verbs, `PATCH /laser-nests/{id}` (lowering `planned_runs` on a worked nest) | 403 | `Recording more good than the floor counted, editing an operation's counts, or lowering the order after work was recorded must be done by a person signed in to the app, not an API token.` |
+> | `POST /work-orders/{id}/laser-nest-packages/import` — an API token re-importing onto a laser job with recorded work | 403 | `Re-importing a nest package replaces nests that already have recorded work (good, scrap, a start or labor) and resets the job's counts, so it must be done by a person signed in to the app, not an API token. Leave the re-import for that person.` |
 > | Floor close verb | 409 | `quantity_complete ({q}) exceeds the {good} good recorded on Op N; record the pieces through clock-out or Report production, or report the shortfall as scrap with a reason.` |
 > | Floor close verb | 409 | `Op N has only {u} unaccounted; declaring {d} scrap would over-state it. Refresh and re-enter; extra scrap belongs on clock-out or Report production.` |
 > | Clock-out | 409 | `Op N is already complete; clock out with 0 pieces and tell a supervisor about any extra pieces.` |
@@ -3982,7 +3987,7 @@ mixed**:
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | POST | `/work-orders/{id}/laser-nest-packages/preview` | Preview nests detected from a zipped package, a bare nest-report PDF (single- or multi-page), or a server folder (writes nothing). PDF uploads run AI extraction per sheet; every row carries an advisory `sheet_suggestion` | Admin / Manager / Supervisor |
-| POST | `/work-orders/{id}/laser-nest-packages/import` | Import a package — creates/rebuilds the child laser WO (or rebuilds the addressed WO directly when it is itself `laser_cutting`), one nest operation per CNC file (or per confirmed PDF row). Sets the laser WO RELEASED and records the release as the caller's when it was a draft or unstamped; an **on-hold** laser WO stays on hold (see "Package import replaces everything"). `child_work_order.status` can therefore come back `on_hold`. Optional `sheet_match_provenance`. **403** (`Recording more good than the floor counted, …`) for a standing API token when any nest operation the import would replace has recorded good, scrap, a start or any labor — before anything is unpacked or written (this PR's extension of the 2026-11-07 decision; see Work Orders → "Short count at completion"); a person's re-import is unchanged | Admin / Manager / Supervisor |
+| POST | `/work-orders/{id}/laser-nest-packages/import` | Import a package — creates/rebuilds the child laser WO (or rebuilds the addressed WO directly when it is itself `laser_cutting`), one nest operation per CNC file (or per confirmed PDF row). Sets the laser WO RELEASED and records the release as the caller's when it was a draft or unstamped; an **on-hold** laser WO stays on hold (see "Package import replaces everything"). `child_work_order.status` can therefore come back `on_hold`. Optional `sheet_match_provenance`. **403** (`Re-importing a nest package replaces nests that already have recorded work …`) for a standing API token when any nest operation the import would replace has recorded good, scrap, a start or any labor, or the laser work order's header already carries good or scrap — before anything is unpacked or written (this PR's extension of the 2026-11-07 decision; see Work Orders → "Short count at completion"); a person's re-import is unchanged. **409** (`This work order was modified concurrently. Refresh and retry.`) when a row the rebuild deletes or rewrites was changed by someone else mid-import | Admin / Manager / Supervisor |
 | POST | `/work-orders/laser-nest-packages/standalone/preview` | Same preview with **no work order in the path** — used before a standalone import (same `sheet_suggestion` on every row) | Admin / Manager / Supervisor |
 | POST | `/work-orders/laser-nest-packages/standalone/import` | Import a package into a **fresh standalone laser WO** — creates a released, part-less `laser_cutting` work order with the release recorded as the importer's (`released_by` / `released_at`) (no parent; quantity = total planned sheet runs; optional `due_date`, optional `sheet_match_provenance`) | Admin / Manager / Supervisor |
 | POST | `/laser-nests/extract` | Auto-extract nest fields (CNC #, material, size) from a single uploaded nest PDF. Stateless — no DB write, no audit | Admin / Manager / Supervisor |
@@ -4031,10 +4036,14 @@ environment variable or deployment configuration change is needed.
 > to **RELEASED**, `quantity_complete`/`quantity_scrapped` zeroed, `quantity_ordered` re-derived to
 > the package's total planned runs. The audit rows commit atomically with the rebuild.
 > Because that wipe erases a person's recorded counts, a **standing API token** is refused **403**
-> (the count-judgment text) when any operation it would delete has recorded good, scrap, a start or
-> any labor — judged on exactly the set the wipe deletes
-> (`laser_nest_service.import_would_wipe_recorded_work`), before anything is unpacked or written.
-> This PR's extension, not the owner's decision; a person's re-import behaves exactly as above.
+> (`Re-importing a nest package replaces nests that already have recorded work …`) when any
+> operation it would delete has recorded good, scrap, a start or any labor, or the laser work
+> order's header already carries good or scrap — judged on exactly what the import erases
+> (`laser_nest_service.import_would_wipe_recorded_work`: the wipe's own operation set, and the
+> header counts it zeroes), before anything is unpacked or written. This PR's extension, not the
+> owner's decision; a person's re-import behaves exactly as above. For anyone, a row the rebuild
+> deletes or rewrites that someone else changed mid-import answers **409** (refresh and retry),
+> not the 400 for a conflicting nest row.
 >
 > **The import records the release it performs, and keeps a hold.** Moving the laser WO into
 > RELEASED stamps `released_by` (the caller) and `released_at` when the WO was DRAFT or carried no

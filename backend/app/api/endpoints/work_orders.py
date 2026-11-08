@@ -134,6 +134,7 @@ from app.services.material_tie_part_gate import assert_part_is_tieable_material
 from app.services.migration_import_service import import_open_work_orders
 from app.services.operation_action_gates import (
     API_TOKEN_COUNT_JUDGMENT,
+    API_TOKEN_NEST_REIMPORT,
     API_TOKEN_SCRAP,
     API_TOKEN_SHORT_CLOSE,
     COMPLETION_AUDIT_UNAVAILABLE,
@@ -1295,23 +1296,24 @@ def _live_laser_child_work_order(db: Session, *, parent_work_order: WorkOrder, c
 def _refuse_api_token_reimport_over_recorded_work(
     db: Session, *, current_user: User, laser_work_order: Optional[WorkOrder], company_id: int
 ) -> None:
-    """403 API_TOKEN_COUNT_JUDGMENT when a standing API token's package import would wipe recorded work.
+    """403 API_TOKEN_NEST_REIMPORT when a standing API token's package import would wipe recorded work.
 
     This PR's extension of the 2026-11-07 decision (NOT part of it -- the owner was asked about
     scrap and short closes): IMPORT REPLACES EVERYTHING deletes every nest operation on the laser
     work order and zeroes its header counts, so a re-import over a nest someone worked erases a
     person's good count, scrap and any declared short -- strictly more than the ``planned_runs``
-    lowering ``PATCH /laser-nests/{id}`` already refuses a token. Judged on exactly the set the
-    wipe deletes (``laser_nest_service.import_would_wipe_recorded_work``). A person's re-import,
-    a crew-station badge (which cannot reach this route anyway), and a token's import onto a job
-    with no worked nest operation are untouched. ``None`` -- a standalone import, or a parent
-    with no live laser child yet -- wipes nothing. Pure: writes nothing, so a refusal leaves
-    every row and the audit chain as they were.
+    lowering ``PATCH /laser-nests/{id}`` already refuses a token. Judged on exactly what the
+    import erases (``laser_nest_service.import_would_wipe_recorded_work``): the operations the
+    wipe deletes, and the header counts it zeroes. A person's re-import, a crew-station badge
+    (which cannot reach this route anyway), and a token's import onto a job with no worked nest
+    operation and a zero header are untouched. ``None`` -- a standalone import, or a parent with
+    no live laser child yet -- wipes nothing. Pure: writes nothing, so a refusal leaves every row
+    and the audit chain as they were.
     """
     if not is_api_token_credential(current_user):
         return
     if import_would_wipe_recorded_work(db, laser_work_order=laser_work_order, company_id=company_id):
-        raise HTTPException(status_code=403, detail=API_TOKEN_COUNT_JUDGMENT)
+        raise HTTPException(status_code=403, detail=API_TOKEN_NEST_REIMPORT)
 
 
 def _ensure_laser_child_work_order(
@@ -3116,9 +3118,9 @@ async def _run_laser_nest_import(
     recorded before the rebuild and each created nest is recorded after. The
     standalone path additionally audits the CREATE of the fresh work order.
 
-    Both paths refuse a standing API token (403 API_TOKEN_COUNT_JUDGMENT) when the wipe
-    would delete an operation with recorded work -- checked first, and again under the
-    import's advisory lock before the first write
+    Both paths refuse a standing API token (403 API_TOKEN_NEST_REIMPORT) when the wipe
+    would delete an operation with recorded work or zero a header count above zero --
+    checked first, and again under the import's advisory lock before the first write
     (``_refuse_api_token_reimport_over_recorded_work``). The standalone path wipes nothing
     and is never refused here.
     """
@@ -3127,8 +3129,9 @@ async def _run_laser_nest_import(
     # copy / extraction and any write -- against the laser work order the import would rebuild,
     # resolved read-only (the classic flow's live child; nothing is created here). Re-checked
     # under the import's advisory lock inside the transaction, since the floor may record work
-    # while the package is being extracted.
-    if target_work_order is not None:
+    # while the package is being extracted. The credential is tested before the target is
+    # resolved, so a person's import onto an assembly parent never reads its laser child here.
+    if target_work_order is not None and is_api_token_credential(current_user):
         _refuse_api_token_reimport_over_recorded_work(
             db,
             current_user=current_user,
@@ -3483,6 +3486,19 @@ async def _run_laser_nest_import(
                         "source": "pdf_import" if is_pdf_import else "cnc_files",
                     },
                 )
+        except StaleDataError as exc:
+            # A row the rebuild deletes or rewrites (a nest operation, the laser work
+            # order) was changed by someone else after this request read it -- the
+            # version_id_col check on the flush. That is a concurrent edit, not a bad
+            # row, so it answers the app's 409 "refresh and retry" rather than the
+            # 400 below, whose text would send the caller hunting for a row conflict.
+            # StaleDataError is an SQLAlchemyError, so it must be caught first.
+            _reap_saved_blobs()
+            logger.warning("Laser-nest import hit a concurrent edit: %s", exc)
+            raise HTTPException(
+                status_code=409,
+                detail="This work order was modified concurrently. Refresh and retry.",
+            ) from exc
         except (IntegrityError, SQLAlchemyError) as exc:
             # The transaction rolled back, so the just-written nest-PDF blobs are
             # now orphaned -- reap them. Translate the DB/constraint fault to a
@@ -3649,11 +3665,14 @@ async def import_laser_nest_package(
     creates a tie.
 
     The import REPLACES every nest operation on the laser work order and zeroes its
-    produced counts, so a standing API token is refused **403** (the count-judgment text,
-    this PR's extension of the 2026-11-07 decision) when any operation it would delete has
-    recorded good, scrap, a start or any labor -- before the upload is unpacked, before any
-    write and before any audit row. A person's re-import is unchanged, and so is a token's
-    import onto a job none of whose nest operations has been worked.
+    produced counts, so a standing API token is refused **403** ("Re-importing a nest package
+    replaces nests that already have recorded work ...", this PR's extension of the 2026-11-07
+    decision) when any operation it would delete has recorded good, scrap, a start or any
+    labor, or the laser work order's header already carries good or scrap -- before the upload
+    is unpacked, before any write and before any audit row. A person's re-import is unchanged,
+    and so is a token's import onto a job none of whose nest operations has been worked and
+    whose header counts are zero. A row changed by someone else while the package is being
+    rebuilt answers **409** (refresh and retry).
     """
     target_work_order = _load_parent_work_order(db, work_order_id, company_id)
     return await _run_laser_nest_import(

@@ -147,16 +147,28 @@ API_TOKEN_SHORT_CLOSE = "Closing work short must be done by a person signed in t
 # scrap rise is API_TOKEN_SCRAP); lowering the order once work has been recorded against
 # it -- the work order's ``quantity_ordered`` once any operation has, or a laser nest's
 # ``planned_runs`` (its operation's target, from which the laser work order's order is
-# derived) once that nest has (both ``operation_has_recorded_work``); re-importing a nest
-# package over nest operations with recorded work (the import deletes them and zeroes the
-# laser work order's counts); and EVERY over-count correction
-# through either reduce-production verb -- a reopen
+# derived) once that nest has (both ``operation_has_recorded_work``); and EVERY over-count
+# correction through either reduce-production verb -- a reopen
 # erases a person's close, a re-stamp re-declares its short (API_TOKEN_SHORT_CLOSE when it
 # would set one). The 2026-11-07 question asked about scrap and short closes only; these
 # are this PR's extension of the same rule, not part of the owner's decision.
 API_TOKEN_COUNT_JUDGMENT = (
     "Recording more good than the floor counted, editing an operation's counts, or lowering the order "
     "after work was recorded must be done by a person signed in to the app, not an API token."
+)
+# This PR's extension too (NOT part of the owner's 2026-11-07 decision): a token's nest
+# package re-import (``POST /work-orders/{id}/laser-nest-packages/import``, the MCP tool
+# ``import_laser_nest_package`` with a ``work_order_id``) onto a laser job with recorded work
+# -- a nest operation the import would delete has ``operation_has_recorded_work``, or the
+# laser work order's header already carries good or scrap -- because IMPORT REPLACES
+# EVERYTHING deletes those operations and zeroes the header (judged by
+# ``laser_nest_service.import_would_wipe_recorded_work``). Its own text rather than
+# API_TOKEN_COUNT_JUDGMENT's, so the caller is told which action was refused and what to do
+# instead: the count-judgment text names three actions an importer did not attempt.
+API_TOKEN_NEST_REIMPORT = (
+    "Re-importing a nest package replaces nests that already have recorded work (good, scrap, a start or labor) "
+    "and resets the job's counts, so it must be done by a person signed in to the app, not an API token. Leave "
+    "the re-import for that person."
 )
 
 
@@ -650,11 +662,15 @@ def get_open_time_entry(db: Session, user_id: int, operation_id: int) -> Optiona
 def operation_has_recorded_work(db: Session, operation: Optional[WorkOrderOperation], company_id: int) -> bool:
     """True when anything has been recorded against ``operation``: good, scrap, a start, or labor.
 
-    THE one "once work was recorded" test behind three API_TOKEN_COUNT_JUDGMENT refusals: a
-    laser nest's ``planned_runs`` lowering (``PATCH /laser-nests/{id}``, for its own operation),
-    ``PUT /work-orders/{id}`` lowering ``quantity_ordered`` (for each active operation), and a
-    nest package re-import (``POST /work-orders/{id}/laser-nest-packages/import``, for each
-    operation the import would delete -- ``laser_nest_service.import_would_wipe_recorded_work``).
+    THE one "once work was recorded" test behind three API-token refusals: a laser nest's
+    ``planned_runs`` lowering (``PATCH /laser-nests/{id}``, for its own operation) and
+    ``PUT /work-orders/{id}`` lowering ``quantity_ordered`` (for each active operation), both
+    API_TOKEN_COUNT_JUDGMENT, and a nest package re-import (API_TOKEN_NEST_REIMPORT,
+    ``POST /work-orders/{id}/laser-nest-packages/import``, for each operation the import would
+    delete -- ``laser_nest_service.import_would_wipe_recorded_work``). "A start" is the status
+    (IN_PROGRESS / COMPLETE) OR a stamped ``actual_start``: an operation started from the office
+    and then held, or resumed back to PENDING, keeps its start record and no longer shows the
+    status -- the same signal ``work_order_state_service._operation_has_been_worked`` reads.
     Any ``TimeEntry`` counts (a clock-in with zero pieces is still work someone did), read
     tenant-scoped. Add no inline twins. ``None`` (a nest with no operation) has nothing recorded.
     """
@@ -663,6 +679,8 @@ def operation_has_recorded_work(db: Session, operation: Optional[WorkOrderOperat
     if float(operation.quantity_complete or 0) > QTY_EPSILON or float(operation.quantity_scrapped or 0) > QTY_EPSILON:
         return True
     if operation.status in (OperationStatus.IN_PROGRESS, OperationStatus.COMPLETE):
+        return True
+    if operation.actual_start is not None:
         return True
     return operation_has_labor_evidence(db, operation.id, company_id)
 

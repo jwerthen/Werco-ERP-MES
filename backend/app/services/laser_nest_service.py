@@ -33,6 +33,7 @@ from app.services.material_consumption_service import cancel_allocations_for_ope
 from app.services.operation_action_gates import operation_has_recorded_work
 from app.services.storage_service import get_storage, resolve_upload_dir, sanitize_ext
 from app.services.work_center_type_service import get_work_center_group
+from app.services.work_order_state_service import QTY_EPSILON
 
 if TYPE_CHECKING:
     from app.schemas.work_order import LaserNestManualCreate
@@ -543,29 +544,54 @@ def laser_import_wipe_operation_ids(db: Session, *, child_work_order: WorkOrder,
 
 
 def import_would_wipe_recorded_work(db: Session, *, laser_work_order: Optional[WorkOrder], company_id: int) -> bool:
-    """True when a package import onto ``laser_work_order`` would delete an operation with recorded work.
+    """True when a package import onto ``laser_work_order`` would erase recorded work.
 
-    "Recorded work" is ``operation_action_gates.operation_has_recorded_work`` -- good, scrap, a
-    start, or ANY tenant-scoped ``TimeEntry`` -- the one per-operation rule the
-    ``planned_runs`` and ``quantity_ordered`` lowerings use, so the three API-token refusals
-    behind API_TOKEN_COUNT_JUDGMENT read one rule. ``None`` (no laser work order yet: a
-    standalone import, or a classic parent with no live laser child) wipes nothing. A pure
-    read: callers raise the refusal before any write and before any audit row.
+    The predicate behind the route's API_TOKEN_NEST_REIMPORT refusal (this PR's extension of
+    the 2026-11-07 decision, not part of it). IMPORT REPLACES EVERYTHING does two destructive
+    things, and each is judged:
+
+    * it DELETES every operation in ``laser_import_wipe_operation_ids`` -- refused when any of
+      them has ``operation_action_gates.operation_has_recorded_work`` (good, scrap, a start, or
+      ANY tenant-scoped ``TimeEntry``), the one per-operation rule the ``planned_runs`` and
+      ``quantity_ordered`` lowerings use too;
+    * it ZEROES the laser work order's header ``quantity_complete`` / ``quantity_scrapped``
+      unconditionally -- refused when either is already above zero, which covers counts a
+      person set on the header by hand and work recorded on an operation outside the wipe set.
+
+    Both reads come from the DATABASE, not the session's identity map: the route asks once
+    before the upload is unpacked and again under the import's lock, in one request
+    transaction, so without ``populate_existing()`` the re-check would reuse the first check's
+    loaded operations and miss a desk edit committed in between (the header is read as plain
+    columns, which never touch the identity map). Nothing has written to these rows earlier in
+    the request, so refreshing them discards nothing.
+
+    ``None`` (no laser work order yet: a standalone import, or a classic parent with no live
+    laser child) wipes nothing. A pure read: callers raise the refusal before any write and
+    before any audit row.
     """
     if laser_work_order is None:
         return False
     operation_ids = laser_import_wipe_operation_ids(db, child_work_order=laser_work_order, company_id=company_id)
-    if not operation_ids:
-        return False
-    operations = (
-        db.query(WorkOrderOperation)
-        .filter(
-            WorkOrderOperation.company_id == company_id,
-            WorkOrderOperation.id.in_(operation_ids),
+    if operation_ids:
+        operations = (
+            db.query(WorkOrderOperation)
+            .filter(
+                WorkOrderOperation.company_id == company_id,
+                WorkOrderOperation.id.in_(operation_ids),
+            )
+            .populate_existing()
+            .all()
         )
-        .all()
+        if any(operation_has_recorded_work(db, operation, company_id) for operation in operations):
+            return True
+    header = (
+        db.query(WorkOrder.quantity_complete, WorkOrder.quantity_scrapped)
+        .filter(WorkOrder.company_id == company_id, WorkOrder.id == laser_work_order.id)
+        .first()
     )
-    return any(operation_has_recorded_work(db, operation, company_id) for operation in operations)
+    if header is None:
+        return False
+    return float(header[0] or 0) > QTY_EPSILON or float(header[1] or 0) > QTY_EPSILON
 
 
 def build_laser_nest_child_work_order(
