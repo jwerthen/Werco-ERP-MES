@@ -1,10 +1,18 @@
 from datetime import datetime
 
 from sqlalchemy import JSON, Column, DateTime, Float, ForeignKey, Index, Integer, String, Text
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, validates
 
 from app.db.database import Base
 from app.db.mixins import TenantMixin
+
+# The only autonomy tiers a recommendation may be WRITTEN with (owner ruling 3,
+# 2026-11-05: nothing AI-driven executes without a named person clicking Accept).
+# ``suggest_only`` = informational; ``apply_on_accept`` = a person's Accept & apply
+# runs the allowlisted action. There is no auto tier. Legacy rows that still carry
+# ``auto_execute`` / ``execute_controlled`` READ as apply_on_accept through
+# ``ai_action_applier.effective_autonomy`` -- the guard below never fires on load.
+CANONICAL_AUTONOMY_TIERS = frozenset({"suggest_only", "apply_on_accept"})
 
 
 class AIInteractionEvent(Base, TenantMixin):
@@ -74,7 +82,12 @@ class AICorrection(Base, TenantMixin):
 
 
 class AIRecommendation(Base, TenantMixin):
-    """Suggest-only AI recommendation that never mutates controlled records by itself."""
+    """AI recommendation. It never mutates a record by itself.
+
+    A person's Accept & apply (``POST /api/v1/ai/recommendations/{id}/apply``) is the
+    only thing that runs a recommendation's allowlisted action, as that person, in that
+    request's transaction. Nothing nightly, no agent and no API token applies one.
+    """
 
     __tablename__ = "ai_recommendations"
     __table_args__ = (
@@ -117,6 +130,26 @@ class AIRecommendation(Base, TenantMixin):
     events = relationship("AIInteractionEvent", back_populates="recommendation")
     corrections = relationship("AICorrection", back_populates="recommendation")
     outcomes = relationship("AIOutcome", back_populates="recommendation")
+
+    @validates("suggested_action")
+    def _validate_suggested_action(self, _key, value):
+        """Refuse an auto tier at WRITE time (ruling 3), whoever the producer is.
+
+        Runs on attribute set (and constructor kwargs) only, never on load, so a legacy
+        row tagged ``auto_execute`` still reads. Backstops every direct-ORM producer --
+        the sensors, the blocker-triage and stale-blocker minting -- that bypasses the
+        ``AIRecommendationCreate`` schema validator. A missing or null ``autonomy``
+        reads as suggest-only and is allowed.
+        """
+        if isinstance(value, dict):
+            autonomy = value.get("autonomy")
+            # isinstance first: an unhashable value would make the set lookup raise TypeError.
+            if autonomy is not None and (not isinstance(autonomy, str) or autonomy not in CANONICAL_AUTONOMY_TIERS):
+                raise ValueError(
+                    f"suggested_action.autonomy {autonomy!r} is not allowed: a recommendation is "
+                    "suggest_only or apply_on_accept; there is no auto-execute tier."
+                )
+        return value
 
 
 class AIOutcome(Base, TenantMixin):

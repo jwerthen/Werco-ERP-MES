@@ -173,7 +173,7 @@ is set**, so "6 AM" means 06:00 UTC = **01:00 Central**.
 | `check_quote_expiring_job` | 09:00 daily | One per quote expiring within 7 days, to `department = 'Sales'` users. **Digest-only** — no direct email. Window-bounded. |
 | `check_low_stock_job` | 07:30 daily | **One aggregated** message per tenant to `department` `Purchasing` + `Inventory`. **Digest-only.** Low blast radius. |
 | `send_daily_digest_job` | 08:00 daily | One digest email per opted-in user. |
-| `aggregate_ai_learning_job` | 05:30 daily | Writes `AIRecommendation` rows and emits `work_order_blocker_escalated` events, which re-enter the outbox and generate more notifications. |
+| `aggregate_ai_learning_job` | 05:30 daily | Writes `AIRecommendation` rows and emits `work_order_blocker_escalated` events, which re-enter the outbox and generate more notifications. Never applies a recommendation and makes no LLM call (the auto-execute agent was removed 2026-11-05). |
 | `run_oee_auto_calc_job` | 02:30 daily | Writes `OEERecord` (`calculation_source='auto'`) for **yesterday only**; never overwrites `manual`. No backfill. Quiet. |
 | `cleanup_runtime_metrics_job` | Daily 02:15 | **Physical DELETEs**: anonymous browser performance samples older than 30 days. No business records or audit logs. |
 | `cleanup_old_logs_job` | Sun 02:00 | **Physical DELETEs**: completed jobs, notification logs, read notifications >90 d. Audit logs explicitly excluded. |
@@ -410,7 +410,7 @@ block was the starting point; the ones marked ★ are additional and were missin
 | `WEBHOOK_ENCRYPTION_KEY` | Outbound webhook secrets. |
 | ★ `INTEGRATION_ENCRYPTION_KEY` | Carrier secrets; config **fails loudly** without it in production. |
 | ★ `STORAGE_BACKEND` + `S3_*`/`AWS_*` | Label and document jobs write Documents; Railway has no persistent volume by default. |
-| `ANTHROPIC_*` | `aggregate_ai_learning_job`. |
+| `ANTHROPIC_*` | `process_hank_intake_file_job` (saved Hank PDF intake). `aggregate_ai_learning_job` makes no LLM calls. |
 | ★ `AUDIT_ARCHIVE_DIR` | Only if you arm the monthly archive cron — see §8. |
 | `TWILIO_*`, `SMS_DEFAULT_REGION` | Only if SMS is in use. |
 | ★ `TZ` | Decide deliberately. Unset ⇒ UTC ⇒ "6 AM" is 01:00 Central. |

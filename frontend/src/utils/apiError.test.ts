@@ -6,6 +6,8 @@
  */
 
 import {
+  apiErrorDetail,
+  apiErrorStatus,
   formatValidationErrorArray,
   importTimeoutMessage,
   isTimeoutError,
@@ -123,5 +125,30 @@ describe('toDisplayString', () => {
   it('handles null/number without throwing', () => {
     expect(toDisplayString(null)).toBe('');
     expect(toDisplayString(7)).toBe('7');
+  });
+});
+
+describe('apiErrorDetail', () => {
+  it('returns the server detail verbatim', () => {
+    const err = {
+      response: { status: 409, data: { detail: 'This recommendation is already accepted.' } },
+      message: 'x',
+    };
+    expect(apiErrorDetail(err, 'fallback')).toBe('This recommendation is already accepted.');
+  });
+
+  it('falls back to the error message, then to the fallback', () => {
+    expect(apiErrorDetail({ message: 'Network Error' }, 'fallback')).toBe('Network Error');
+    expect(apiErrorDetail({ response: { data: { detail: '   ' } } }, 'fallback')).toBe('fallback');
+    expect(apiErrorDetail(null, 'fallback')).toBe('fallback');
+    expect(apiErrorDetail(undefined, 'fallback')).toBe('fallback');
+  });
+});
+
+describe('apiErrorStatus', () => {
+  it('reads the HTTP status, or undefined when there was no response', () => {
+    expect(apiErrorStatus({ response: { status: 409 } })).toBe(409);
+    expect(apiErrorStatus({ message: 'Network Error' })).toBeUndefined();
+    expect(apiErrorStatus(null)).toBeUndefined();
   });
 });

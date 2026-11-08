@@ -24,10 +24,13 @@ import {
   OperationalSource,
 } from '../types/operationsInbox';
 import { useOptimisticMutation } from '../hooks/useOptimisticMutation';
+import { useInFlightIds } from '../hooks/useInFlightIds';
 import { MiniStat, MiniStatStrip } from '../components/cockpit';
 import { AISuggestionCard, ConfidenceBadge, FeedbackButtons, WhyThisSuggestion } from '../components/ai';
-import { AIRecommendation, recommendationIsApplyable } from '../types/aiLearning';
+import { AIRecommendation, recommendationAcceptMode } from '../types/aiLearning';
 import { formatCentralDateTime, toDate } from '../utils/centralTime';
+import { useToast } from '../components/ui/Toast';
+import { apiErrorDetail, apiErrorStatus } from '../utils/apiError';
 
 type Severity = 'high' | 'medium' | 'low' | 'info';
 type ItemSource = 'setup' | 'master-data' | 'ai';
@@ -490,9 +493,20 @@ export default function ActionInbox() {
   const [aiRecommendations, setAiRecommendations] = useState<AIRecommendation[]>([]);
   const [aiAvailable, setAiAvailable] = useState(true);
   const [loading, setLoading] = useState(true);
-  const [actioningId, setActioningId] = useState<number | null>(null);
+  // Per-card in-flight state: several cards can be actioned at once, and each card stays
+  // disabled until ITS OWN request settles (a single id slot re-enabled card A the moment
+  // card B was clicked, so A could be applied twice).
+  const actioning = useInFlightIds();
+  const applying = useInFlightIds();
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
+  const { showToast } = useToast();
+  // Sequence for every read of the pending AI list (full load or AI-only refetch), so
+  // an older response can never overwrite a newer one.
+  const aiRequest = useRef(0);
+  // Cards whose optimistic removal is still in flight: a refetch that lands before the
+  // server has recorded the dismissal must not resurrect them.
+  const inFlightRemovals = useRef(new Set<number>());
   const requestedFilter = params.get('filter');
   const filter: FilterKey =
     requestedFilter && Object.prototype.hasOwnProperty.call(filterLabels, requestedFilter)
@@ -518,6 +532,7 @@ export default function ActionInbox() {
 
   const loadInbox = async () => {
     const seq = ++request.current;
+    const aiSeq = ++aiRequest.current;
     setLoading(true);
     setError(null);
 
@@ -534,14 +549,33 @@ export default function ActionInbox() {
       setError('Setup health could not be refreshed. Any setup and master-data items below are last verified results.');
     }
 
-    if (aiResult.status === 'fulfilled') {
-      setAiRecommendations(Array.isArray(aiResult.value) ? aiResult.value : []);
-      setAiAvailable(true);
-    } else {
-      setAiAvailable(false);
+    if (aiSeq === aiRequest.current) {
+      if (aiResult.status === 'fulfilled') {
+        setAiRecommendations(Array.isArray(aiResult.value) ? aiResult.value : []);
+        setAiAvailable(true);
+      } else {
+        setAiAvailable(false);
+      }
     }
 
     setLoading(false);
+  };
+
+  // Re-read only the pending AI list (not setup health), without the page-level loading
+  // state: used after an Accept & apply, and after any 409, so a changed plan, a closed
+  // blocker or a card decided elsewhere is reflected instead of silently left stale.
+  const reloadAIRecommendations = async () => {
+    const seq = ++aiRequest.current;
+    try {
+      const data = await api.getAIRecommendations({ status: 'pending', limit: 25 });
+      if (seq !== aiRequest.current) return;
+      const rows = Array.isArray(data) ? data : [];
+      setAiRecommendations(rows.filter(row => !inFlightRemovals.current.has(row.id)));
+      setAiAvailable(true);
+    } catch {
+      if (seq !== aiRequest.current) return;
+      setAiAvailable(false);
+    }
   };
 
   useEffect(() => {
@@ -602,6 +636,9 @@ export default function ActionInbox() {
               : 'medium',
       title: recommendation.title,
       detail: recommendation.summary,
+      // Server-computed from the target entity (never the stored suggested_action.href),
+      // so the queue "Open" link and the hero "Review affected records" link always resolve.
+      href: recommendation.target_href ?? undefined,
       timestamp: recommendation.created_at,
       recommendation,
     }));
@@ -650,14 +687,20 @@ export default function ActionInbox() {
     persistDismissed(next);
   };
 
-  // Accept / dismiss / snooze all optimistically REMOVE the recommendation from the
-  // queue the moment the operator acts, then call the server. These actions are
-  // effectively never server-rejected (they record a decision on a pending row), so
-  // the snappy removal is safe; on the rare failure the hook re-inserts the card at
-  // its original position and toasts the verbatim server error — it never reports
-  // success for a failed call. The per-call removal descriptor is threaded through
-  // run(ctx), so each card's rollback restores THAT card even when two cards are
-  // actioned in quick succession (per-card disabled lets two be in flight).
+  // Record-only accept ("Accept" on a suggest-only card, "Mark handled" on an action
+  // card), dismiss and snooze optimistically REMOVE the recommendation from the queue
+  // the moment the operator acts, then call the server. They only record a decision on
+  // a pending row and are rarely rejected, so the snappy removal is safe; on the rare
+  // failure the hook re-inserts the card at its original position and toasts the
+  // verbatim server error — it never reports success for a failed call. The per-call
+  // removal descriptor is threaded through run(ctx), so each card's rollback restores
+  // THAT card even when two cards are actioned in quick succession (per-card disabled
+  // lets two be in flight).
+  //
+  // Accept & apply is the exception and is deliberately NOT optimistic: it is
+  // server-GATED (role, signed-in person, AI egress, a live plan the fingerprint must
+  // still match), and the whole point is that the server may refuse. The card stays,
+  // disabled with a spinner, until the server answers, and only then leaves.
   type RemovalCtx = { recommendation: AIRecommendation; index: number; mutate: () => Promise<unknown> };
 
   const removalMutation = useOptimisticMutation<unknown, RemovalCtx>({
@@ -679,22 +722,71 @@ export default function ActionInbox() {
 
   const runRemoval = async (recommendation: AIRecommendation, mutate: () => Promise<unknown>) => {
     const index = aiRecommendations.findIndex(item => item.id === recommendation.id);
-    setActioningId(recommendation.id);
+    const owns = actioning.start(recommendation.id);
+    inFlightRemovals.current.add(recommendation.id);
+    // A 409 means the card was decided (or changed) elsewhere: rolling it back would show a
+    // card the server has already closed, and every retry would 409 again. Note it here and
+    // re-read the pending list once this card is no longer in flight (the re-read filters
+    // in-flight ids out, so it must run after the cleanup below).
+    let conflicted = false;
+    const guarded = async () => {
+      try {
+        return await mutate();
+      } catch (err) {
+        conflicted = apiErrorStatus(err) === 409;
+        throw err;
+      }
+    };
     try {
-      await removalMutation.run({ recommendation, index: index < 0 ? aiRecommendations.length : index, mutate });
+      await removalMutation.run({
+        recommendation,
+        index: index < 0 ? aiRecommendations.length : index,
+        mutate: guarded,
+      });
     } finally {
-      setActioningId(null);
+      inFlightRemovals.current.delete(recommendation.id);
+      if (owns) actioning.finish(recommendation.id);
+    }
+    if (conflicted) void reloadAIRecommendations();
+  };
+
+  const applyRecommendation = async (recommendation: AIRecommendation) => {
+    const action = recommendation.apply_action;
+    if (!action) return;
+    // Synchronous double-click guard: a second click on THIS card while its apply is in
+    // flight never sends a second request (the server's claim would refuse it anyway).
+    if (!applying.start(recommendation.id)) return;
+    const owns = actioning.start(recommendation.id);
+    try {
+      const result = await api.applyAIRecommendation(
+        recommendation.id,
+        action.fingerprint,
+        'Accepted & applied from Action Inbox'
+      );
+      setAiRecommendations(current => current.filter(item => item.id !== recommendation.id));
+      const applied = result.apply_result?.summary;
+      showToast('success', `Applied: ${typeof applied === 'string' ? applied : action.summary}`);
+      // Applying supersedes sibling cards on the same target and can change other cards'
+      // plans (a raised priority), so re-read what is still open.
+      void reloadAIRecommendations();
+    } catch (err) {
+      // The card stays: nothing was applied and it is still pending. Always say why.
+      showToast('error', apiErrorDetail(err, 'Accept & apply failed. Nothing was changed.'));
+      if (apiErrorStatus(err) === 409) void reloadAIRecommendations();
+    } finally {
+      if (owns) actioning.finish(recommendation.id);
+      applying.finish(recommendation.id);
     }
   };
 
   const acceptAIRecommendation = (recommendation: AIRecommendation) => {
-    const apply = recommendationIsApplyable(recommendation);
-    // Accept always removes the card; apply errors are non-fatal (status is already accepted).
+    const mode = recommendationAcceptMode(recommendation);
+    if (mode === 'apply') return applyRecommendation(recommendation);
+    if (mode === 'none') return Promise.resolve();
     return runRemoval(recommendation, () =>
       api.acceptAIRecommendation(
         recommendation.id,
-        apply ? 'Accepted & applied from Action Inbox' : 'Accepted from Action Inbox',
-        apply
+        mode === 'mark_handled' ? 'Marked handled from Action Inbox' : 'Accepted from Action Inbox'
       )
     );
   };
@@ -708,11 +800,11 @@ export default function ActionInbox() {
   // Feedback does not remove the card from the queue, so it keeps its own simple
   // in-flight state rather than the optimistic-removal path.
   const sendAIFeedback = async (recommendation: AIRecommendation, feedback: string) => {
-    setActioningId(recommendation.id);
+    const owns = actioning.start(recommendation.id);
     try {
       await api.sendAIRecommendationFeedback(recommendation.id, { feedback });
     } finally {
-      setActioningId(null);
+      if (owns) actioning.finish(recommendation.id);
     }
   };
 
@@ -820,7 +912,8 @@ export default function ActionInbox() {
                 key={recommendation.id}
                 recommendation={recommendation}
                 rank={index + 1}
-                disabled={!aiAvailable || actioningId === recommendation.id}
+                disabled={!aiAvailable || actioning.ids.has(recommendation.id) || applying.ids.has(recommendation.id)}
+                accepting={applying.ids.has(recommendation.id)}
                 onAccept={acceptAIRecommendation}
                 onDismiss={dismissAIRecommendation}
                 onFeedback={sendAIFeedback}
@@ -920,8 +1013,16 @@ export default function ActionInbox() {
                             impact={item.recommendation.impact || {}}
                           />
                           <FeedbackButtons
-                            disabled={!aiAvailable || actioningId === item.recommendation.id}
-                            applyable={recommendationIsApplyable(item.recommendation as AIRecommendation)}
+                            disabled={
+                              !aiAvailable ||
+                              actioning.ids.has(item.recommendation.id) ||
+                              applying.ids.has(item.recommendation.id)
+                            }
+                            accepting={applying.ids.has(item.recommendation.id)}
+                            acceptMode={recommendationAcceptMode(item.recommendation)}
+                            applySummary={item.recommendation.apply_action?.summary}
+                            applyBlockedReason={item.recommendation.apply_action?.blocked_reason}
+                            applyWarnings={item.recommendation.apply_action?.warnings || []}
                             onAccept={() => acceptAIRecommendation(item.recommendation as AIRecommendation)}
                             onDismiss={() => dismissAIRecommendation(item.recommendation as AIRecommendation)}
                             onFeedback={feedback => sendAIFeedback(item.recommendation as AIRecommendation, feedback)}

@@ -41,10 +41,16 @@ EXCLUDED_TAGS: FrozenSet[str] = frozenset(
 # lands DRAFT, release is explicit" (brief rule 5) and "never fake shop-floor time"
 # (rule 8) that the convenience tools exist to close. They stay an Import Center
 # action for an admin at cutover (docs/EXCEL_MIGRATION_RUNBOOK.md).
+#
+# And AI Accept & apply. Owner ruling 3 (2026-11-05): nothing AI-driven executes without
+# a NAMED PERSON clicking Accept, so running a recommendation's action is a person's click
+# in the app, never an agent's tool call (the route also refuses API tokens). Agents keep
+# the record-only accept, dismiss and snooze tools.
 EXCLUDED_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
     {
         ("POST", "/api/v1/work-orders/import"),
         ("POST", "/api/v1/purchasing/purchase-orders/import"),
+        ("POST", "/api/v1/ai/recommendations/{recommendation_id}/apply"),
     }
 )
 
@@ -540,7 +546,7 @@ def build_catalog(
     ``shadowed`` is the set of ``(METHOD, path)`` pairs a convenience tool replaces;
     their generated twins are dropped so the convenience tool is the only door to
     that route (it is where the DRAFT / demote / name-guard rules live).
-    ``excluded_operations`` are dropped with NO replacement (the cutover loaders).
+    ``excluded_operations`` are dropped with NO replacement (the cutover loaders, AI Accept & apply).
 
     Names are assigned over EVERY secured operation BEFORE the shadowed and excluded
     pairs are dropped, so neither ever renames a neighbour: the Routing router's

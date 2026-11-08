@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.models.ai_learning import AIInteractionEvent, AIRecommendation
 from app.models.operational_event import OperationalEvent
 from app.models.work_order_blocker import WorkOrderBlocker, WorkOrderBlockerStatus
+from app.services import llm_client
 from app.services.ai_action_applier import DEFAULT_APPLY_ALLOWLIST
 
 
@@ -25,7 +26,9 @@ class AIGovernanceService:
         "scheduling",
     }
 
-    AUTONOMY_TIERS = [
+    # Ruling 3 (2026-11-05): there is no auto tier. ``apply_on_accept`` is built per call,
+    # because whether it is enabled is the company's AI egress switch.
+    BASE_AUTONOMY_TIERS: List[Dict[str, Any]] = [
         {
             "tier": "observe",
             "description": "AI may read tenant-scoped context and summarize it.",
@@ -41,38 +44,12 @@ class AIGovernanceService:
             "description": "AI may create Action Inbox recommendations with evidence and confidence.",
             "requires_approval": True,
         },
-        {
-            "tier": "apply_on_accept",
-            "description": (
-                "On explicit human accept with apply=true, allowlisted actions may mutate "
-                "ERP records via AIActionApplier (audit-logged)."
-            ),
-            "requires_approval": True,
-            "enabled": True,
-            "allowlist": sorted(DEFAULT_APPLY_ALLOWLIST),
-        },
-        {
-            "tier": "auto_execute",
-            "description": (
-                "Nightly Claude agent (existing run_llm_task / Anthropic) selects and executes "
-                "allowlisted actions without a human prompt. Falls back to high-confidence "
-                "deterministic execute when AI egress is off."
-            ),
-            "requires_approval": False,
-            "enabled": True,
-            "allowlist": sorted(DEFAULT_APPLY_ALLOWLIST),
-        },
-        {
-            "tier": "execute_controlled",
-            "description": (
-                "Allowlisted ERP mutations (draft NCR/PO, priority, blockers) may auto-execute; "
-                "controlled-record soft-gate is not enforced on the allowlist."
-            ),
-            "requires_approval": False,
-            "enabled": True,
-            "allowlist": sorted(DEFAULT_APPLY_ALLOWLIST),
-        },
     ]
+
+    APPLY_ON_ACCEPT_DESCRIPTION = (
+        "A named person clicks Accept & apply; the server shows what will run, then runs it as that "
+        "person, audit-logged. Never automatic. Off when company AI egress is off."
+    )
 
     def __init__(self, db: Session):
         self.db = db
@@ -124,18 +101,33 @@ class AIGovernanceService:
             .all()
         )
 
+        egress_enabled = llm_client.ai_egress_allowed(company_id)
+        autonomy_tiers = [dict(tier) for tier in self.BASE_AUTONOMY_TIERS] + [
+            {
+                "tier": "apply_on_accept",
+                "description": self.APPLY_ON_ACCEPT_DESCRIPTION,
+                "requires_approval": True,
+                "enabled": egress_enabled,
+                "allowlist": sorted(DEFAULT_APPLY_ALLOWLIST),
+            }
+        ]
+
         return {
-            "mode": "auto_execute_allowlisted",
+            "mode": "apply_on_accept",
+            "ai_egress_enabled": egress_enabled,
             "controlled_records": sorted(self.CONTROLLED_RECORDS),
-            "autonomy_tiers": self.AUTONOMY_TIERS,
+            "autonomy_tiers": autonomy_tiers,
             "apply_allowlist": sorted(DEFAULT_APPLY_ALLOWLIST),
             "approval_rules": [
-                "Allowlisted actions may auto-execute via the Claude always-on agent (existing Anthropic run_llm_task).",
+                "Nothing AI-driven executes without a named person clicking Accept & apply (owner ruling 2026-11-05).",
+                "Accept & apply runs only from a signed-in person's session -- never from the nightly job, an "
+                "agent or an API token -- and only when that person's role could perform the action.",
+                "The server shows exactly what will run before the click and refuses if it changed since.",
+                "When company AI egress is off, nothing is applied; cards can still be marked handled.",
                 "Only allowlisted action types may apply; review-only types stay in Action Inbox.",
                 "Every recommendation must include confidence, evidence, expected impact, and a target entity when applicable.",
                 "Prompt/model versions and redacted context are retained for learning events and recommendations.",
-                "Applied actions are audit-logged on the tamper-evident chain when AuditService is available.",
-                "Toggle with AI_AUTO_EXECUTE_ENABLED; Claude path still respects company allow_ai_egress.",
+                "Applied actions are audit-logged as the accepting person, marked with the recommendation they came from.",
             ],
             "metrics": {
                 "window_days": 30,
