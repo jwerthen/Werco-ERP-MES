@@ -625,6 +625,98 @@ def test_route_retry_after_the_lost_race_succeeds_with_its_audit_row(routed, mon
 
 
 # --------------------------------------------------------------------------------------------
+# POST /work-orders/: the creation audit commits WITH the work order, so a 409 saved nothing
+# --------------------------------------------------------------------------------------------
+
+
+def _new_part_id(routed) -> int:
+    with Session(routed.engine) as session:
+        part = Part(
+            part_number=f"ABORT-GUARD-WO-{next(_ids)}",
+            name="Guard part",
+            part_type="manufactured",
+            unit_of_measure="each",
+            company_id=1,
+        )
+        session.add(part)
+        session.commit()
+        return part.id
+
+
+def _created_work_orders(routed, part_id: int) -> list:
+    """(work order id, number) for every work order on ``part_id``, and every CREATE audit row's."""
+    with Session(routed.engine) as session:
+        orders = [(wo.id, wo.work_order_number) for wo in session.query(WorkOrder).filter(WorkOrder.part_id == part_id)]
+        creates = [
+            (row.resource_id, row.resource_identifier, row.new_values)
+            for row in session.query(AuditLog).filter(
+                AuditLog.resource_type == "work_order", AuditLog.action == "CREATE"
+            )
+        ]
+    return orders, creates
+
+
+def test_create_work_order_victim_answers_409_and_saves_no_work_order(routed, caplog, monkeypatch):
+    """The 409 is true: the work order rolls back with its lost audit write, so a retry is not a duplicate.
+
+    The creation audit used to be written in a transaction AFTER the work order had committed; a
+    lost race there answered "refresh and try again" for a work order that existed.
+    """
+    part_id = _new_part_id(routed)
+    client = TestClient(app)
+    body = {"part_id": part_id, "quantity_ordered": 3}
+
+    response = client.post("/api/v1/work-orders/", json=body, headers=routed.headers)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == STALE_WRITE_CONFLICT_DETAIL
+    assert _created_work_orders(routed, part_id) == ([], [])
+    assert _guard_refusals(caplog) == 0
+
+    monkeypatch.setattr(AuditService, "_acquire_chain_lock", lambda self: None)
+    retry = client.post("/api/v1/work-orders/", json=body, headers=routed.headers)
+    assert retry.status_code == 201, retry.text
+    orders, creates = _created_work_orders(routed, part_id)
+    assert orders == [(retry.json()["id"], retry.json()["work_order_number"])]
+    [(resource_id, identifier, new_values)] = creates
+    assert (resource_id, identifier) == orders[0]
+    # The snapshot is the stored row, as when it was taken after the commit.
+    assert new_values["id"] == resource_id and new_values["status"] == "draft"
+    assert new_values["version"] == 1 and new_values["quantity_ordered"] == 3.0
+
+
+def test_create_work_order_reconcile_race_after_commit_still_answers_201(
+    client: TestClient, db_session: Session, auth_headers: dict, test_part: Part, monkeypatch
+):
+    """The defensive reconcile runs after the work order and its audit row committed.
+
+    A lost race there must not answer the "nothing was saved" 409: the work order exists, and a
+    retry would duplicate it. It rolls back only the reconcile and the creation answers 201.
+    """
+    from app.api.endpoints import work_orders as work_orders_endpoint
+
+    def reconcile_loses(*_args, **_kwargs):
+        raise _driver_error("40P01")
+
+    monkeypatch.setattr(work_orders_endpoint, "reconcile_work_orders_from_completion_evidence", reconcile_loses)
+    response = client.post(
+        "/api/v1/work-orders/", json={"part_id": test_part.id, "quantity_ordered": 2}, headers=auth_headers
+    )
+    assert response.status_code == 201, response.text
+    work_order_id = response.json()["id"]
+    db_session.rollback()
+    db_session.expire_all()
+    assert db_session.get(WorkOrder, work_order_id) is not None
+    creates = (
+        db_session.query(AuditLog)
+        .filter(
+            AuditLog.resource_type == "work_order", AuditLog.resource_id == work_order_id, AuditLog.action == "CREATE"
+        )
+        .count()
+    )
+    assert creates == 1
+
+
+# --------------------------------------------------------------------------------------------
 # Required-audit doors: required evidence lost to the race is audit loss, so rollback + 503
 # --------------------------------------------------------------------------------------------
 

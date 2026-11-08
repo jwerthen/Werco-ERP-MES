@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from sqlalchemy import func, or_
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.orm.exc import StaleDataError
@@ -35,6 +35,7 @@ from app.api.endpoints.bom import tenant_parts_by_id
 from app.api.endpoints.user_workspaces import require_workspace_access
 from app.core.cache import invalidate_work_centers_cache
 from app.core.credentials import is_api_token_credential
+from app.core.observability import report_absorbed_exception
 from app.core.realtime import safe_broadcast
 from app.core.time_utils import to_utc_iso
 from app.core.websocket import (
@@ -2623,39 +2624,10 @@ def create_work_order(
             operation = WorkOrderOperation(work_order_id=work_order.id, company_id=company_id, **op_data.model_dump())
             db.add(operation)
 
-    db.commit()
-    work_order = (
-        db.query(WorkOrder)
-        .options(
-            joinedload(WorkOrder.part),
-            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.component_part),
-            selectinload(WorkOrder.operations).selectinload(WorkOrderOperation.work_center),
-            selectinload(WorkOrder.operations)
-            .selectinload(WorkOrderOperation.laser_nest)
-            .selectinload(LaserNest.document),
-        )
-        .filter(WorkOrder.id == work_order.id, WorkOrder.company_id == company_id)
-        .first()
-    )
-    # The WORK ORDER itself is already durably committed above. The reconcile
-    # below mutates version-mapped operation rows and could (in theory) hit a
-    # concurrent-version conflict on its commit; guard it in its OWN commit so a
-    # StaleDataError rolls back ONLY the reconcile -- it must NOT drop the
-    # creation audit row, which is committed atomically in the separate terminal
-    # commit below. (For a brand-new WO the completion-evidence reconcile is a
-    # no-op; this guard is defensive and keeps the POST off the 500 path.)
-    try:
-        _reconcile_operation_component_quantities(db, work_order, company_id)
-        # AUD-3 N/A here: a brand-new WO has no TimeEntry evidence, so this reconcile
-        # can drive no terminal status transition -- nothing to audit. Pass no
-        # transitions accumulator to keep this the documented no-op it has always been.
-        reconcile_work_orders_from_completion_evidence(db, [work_order])
-        db.commit()
-    except StaleDataError:
-        db.rollback()
-        db.expire_all()
-        # Re-load the freshest committed state for the audit snapshot below.
-        work_order = (
+    work_order_id = work_order.id
+
+    def load_created_work_order() -> WorkOrder:
+        return (
             db.query(WorkOrder)
             .options(
                 joinedload(WorkOrder.part),
@@ -2665,15 +2637,22 @@ def create_work_order(
                 .selectinload(WorkOrderOperation.laser_nest)
                 .selectinload(LaserNest.document),
             )
-            .filter(WorkOrder.id == work_order.id, WorkOrder.company_id == company_id)
-            .first()
+            .filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id)
+            .one()
         )
 
-    # Audit log for work order creation. Logged BEFORE the terminal commit so the audit
-    # row commits atomically with the work order — AuditService.log() only flushes, and
-    # the request session never commits on teardown, so an audit call placed after the
-    # final commit would be silently discarded.
-    db.flush()  # ensure work_order (and any reconciled changes) are flushed; PK is real
+    # The creation audit row commits in the SAME transaction as the work order (invariant 2).
+    # It used to be written in a later transaction, after the work order had committed: a lost
+    # lock race there answered the app-wide 409 ("nothing was saved") for a work order that
+    # existed, so a retry duplicated it, and any audit failure left the creation unaudited. Now
+    # a lost race at the audit write rolls back the work order with it, so the 409 is true.
+    #
+    # The snapshot reads the STORED row, exactly as it did when it was taken after the commit:
+    # flush everything this request created, expire the identity map, and reload, so the values
+    # are the ones the database holds (defaults applied), not the request's Python objects.
+    db.flush()
+    db.expire_all()
+    work_order = load_created_work_order()
     audit.log_create(
         resource_type="work_order",
         resource_id=work_order.id,
@@ -2690,6 +2669,34 @@ def create_work_order(
         },
     )
     db.commit()
+
+    # Defensive reconcile, in its OWN transaction after the work order and its audit row are
+    # durably committed. For a brand-new work order it is a no-op in practice (no TimeEntry
+    # evidence, so no status transition to audit -- AUD-3 N/A, no transitions accumulator).
+    # A concurrent conflict here -- a stale version or a lost lock race -- rolls back ONLY the
+    # reconcile: answering 409 now would tell the client nothing was saved, and a retry would
+    # duplicate the work order. Any other error still propagates.
+    try:
+        _reconcile_operation_component_quantities(db, work_order, company_id)
+        reconcile_work_orders_from_completion_evidence(db, [work_order])
+        db.commit()
+    except StaleDataError:
+        db.rollback()
+        db.expire_all()
+        work_order = load_created_work_order()
+    except DBAPIError as exc:
+        if not is_lost_lock_race(exc):
+            raise
+        db.rollback()
+        report_absorbed_exception(
+            logger,
+            "Post-create reconcile lost a lock race; the work order and its audit row are already committed",
+            exc,
+            context={"work_order_id": work_order_id, "company_id": company_id},
+        )
+        db.expire_all()
+        work_order = load_created_work_order()
+
     _enrich_work_order_operations(work_order, db=db, company_id=company_id)
 
     safe_broadcast(
