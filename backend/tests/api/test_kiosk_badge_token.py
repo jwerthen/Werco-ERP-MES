@@ -17,6 +17,7 @@ Headline invariants:
 4. **Rate limit** — 30/minute per IP (station-token-gated, so generous is safe).
 """
 
+import json
 from datetime import datetime, timedelta
 
 import jwt
@@ -275,7 +276,17 @@ def test_the_409_audit_row_is_station_keyed_and_uses_the_existing_action(client:
     ], f"the 409 must reuse the route's existing failure action: {[row.action for row in rows]}"
     (row,) = rows
     assert row.resource_identifier == station.label
-    assert scanned not in (row.resource_identifier or ""), "the scanned badge must not be logged here"
+    # '4242424' cannot occur in a counter-numbered label, so the whole row can be searched: the
+    # scanned badge must not reach ANY text column of the audit row, not just the identifier.
+    for text in (
+        row.resource_identifier,
+        row.description,
+        row.error_message,
+        json.dumps(row.extra_data),
+        json.dumps(row.old_values),
+        json.dumps(row.new_values),
+    ):
+        assert scanned not in (text or ""), "the scanned badge must not be logged in the audit row"
     assert row.error_message == _AUDIT_ERROR_EMPLOYEE_ID_AMBIGUOUS
 
 

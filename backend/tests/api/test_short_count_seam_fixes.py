@@ -26,7 +26,8 @@
   takes the audit-chain lock as its own statement before the first audit row, so a lock race it
   loses on Postgres (40P01 / 40001) -- at the chain lock included -- answers the same 409 rather
   than the 400 for a conflicting nest row; an import that replaces nothing (standalone, a parent's
-  first import) leaves the chain lock to its first audit row, after the rebuild.
+  first import) leaves the chain lock to its first audit row -- inside the rebuild from the first
+  material-tied nest on, otherwise after it.
 
 Every refusal is pinned as writing NOTHING.
 """
@@ -1382,7 +1383,8 @@ class TestApiTokenNestReimportOverRecordedWork:
         writer that holds the chain waits for one of them. An import that replaces nothing holds no
         operation lock -- a standalone import, a classic parent's first import onto the child it
         creates, a laser job with no nest operation yet -- so it takes no chain lock of its own and
-        leaves it to its first audit row, after the rebuild. Taking it early there held the global,
+        leaves it to its first audit row (inside the rebuild from the first material-tied nest on,
+        otherwise after it). Taking it early there held the global,
         all-tenant lock across every operation insert and every nest PDF's blob write, and put it
         ahead of the work-center ``KEY SHARE`` those inserts take: a cycle with any writer that locks
         the work center and then audits, which ``AuditService.log`` would have swallowed on that

@@ -4050,8 +4050,13 @@ environment variable or deployment configuration change is needed.
 > (ascending id), then the laser work order, then the audit-chain lock — the order the floor's
 > completion, production-report and clock-out verbs use. The import takes that chain lock early, as
 > its own statement before its first audit row, only when it is replacing existing nest operations; a
-> standalone import or a first import onto a new laser child leaves it to its first audit row, after
-> the rebuild. This order removes a deadlock that predates it: the import used to take the audit-chain
+> standalone import, a first import onto a new laser child, or a re-import onto a job with nothing to
+> replace leaves it to its first audit row — inside the rebuild from the first material-tied nest on,
+> otherwise after it. (On that last shape the import still holds the laser work order's row lock, so
+> a floor verb that takes the audit-chain lock first and then waits on that work order can meet the
+> import at its first audit row; the import's loss there answers the 400, not the 409, with nothing
+> committed. It needs a laser job with no nest operation that the floor is writing at that moment.)
+> This order removes a deadlock that predates it: the import used to take the audit-chain
 > lock before the operations, so a nest completion, Report production or clock-out landing mid-import
 > could deadlock it. Such a writer now queues behind the import, and the import judges the operations
 > (the API-token refusal above included) as they stand once locked. Writers that take the work order

@@ -1644,10 +1644,15 @@ def _lock_laser_import_rows(db: Session, *, laser_work_order: WorkOrder, company
     job has none to replace. The caller takes the global audit-chain lock early -- as its own
     statement, before its first audit row (``AuditService.acquire_chain_lock``) -- only on True:
     that lock is there for the race in which the import holds these operations while a writer
-    holding the chain waits for one of them, and with no operation locked the import cannot be on
-    either side of it. On False the chain lock is left to the first audit row, so the import never
-    holds that all-tenant lock across the rebuild's operation inserts and nest-PDF blob writes for
-    nothing.
+    holding the chain waits for one of them. On False the chain lock is left to the first audit row,
+    so the import does not hold that all-tenant lock across the rebuild's operation inserts and
+    nest-PDF blob writes before it needs to. One shape stays exposed, deliberately: an EXISTING
+    laser job with nothing to replace still holds its work order's row lock from the header check,
+    so a writer that takes the chain first and then waits on that work order (a shop-floor start
+    on a non-nest operation of the job, say) can meet the import at the import's first audit row.
+    The import's loss there happens inside ``AuditService.log`` and answers the 400, not the 409;
+    nothing of it commits. That needs a laser job with no nest operation that the floor is
+    writing at the same moment.
     """
     for attempt in range(1, _LASER_IMPORT_LOCK_ATTEMPTS + 1):
         try:
@@ -3339,11 +3344,14 @@ async def _run_laser_nest_import(
     (``AuditService.acquire_chain_lock``). That early chain lock is taken only when the import is
     replacing existing operations, i.e. holds their row locks; a standalone import, a classic
     parent's first import (a freshly created child) and a job with nothing to replace leave the
-    chain lock to their first audit row (after the rebuild, or inside it for a material-tied nest),
-    so the global all-tenant lock is not held across the build's nest-PDF blob writes for nothing on
-    those paths. A concurrent edit to the job, a work order that stays busy through every try, or a
-    lock race Postgres settles by rolling this import back (40P01 / 40001) answers 409 with the
-    app-wide "refresh and try again" text; nothing of the import commits.
+    chain lock to their first audit row (after the rebuild, or inside it from the first
+    material-tied nest on), so on those paths the global all-tenant lock is not held across the
+    nest-PDF blob writes that come before it. A concurrent edit to the job, a work order that stays
+    busy through every try, or a lock race Postgres settles by rolling this import back
+    (40P01 / 40001) answers 409 with the app-wide "refresh and try again" text; nothing of the
+    import commits. The one exception: on an existing job with nothing to replace, a race lost at
+    the first audit row is lost inside ``AuditService.log`` and answers the 400 (see
+    ``_lock_laser_import_rows``).
     """
     # This PR's extension (see the helper): a standing API token may not re-import over nest
     # operations that carry recorded work. Checked FIRST -- before the rows parse, the upload
@@ -3570,7 +3578,9 @@ async def _run_laser_nest_import(
                 # audit rows stack on the lock (it is re-entrant). With nothing replaced there is no
                 # operation lock for such a writer to wait on: a standalone job or a freshly created
                 # classic child is not yet visible to any other writer, and an existing job with no
-                # nest operation holds only the work order's row lock from the header check. Taking
+                # nest operation holds only the work order's row lock from the header check (a writer
+                # holding the chain and waiting on that row can still meet the import at its first
+                # audit row; the import's loss there answers the 400 -- see the helper). Taking
                 # the all-tenant lock here would then only hold it across the whole rebuild -- every
                 # nest PDF's blob write included -- and put it ahead of the work-center KEY SHARE the
                 # rebuild's operation inserts take. There the first audit row takes it (a material
