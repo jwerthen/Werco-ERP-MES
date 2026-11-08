@@ -84,12 +84,11 @@ tier, that tier stands — this rule is a floor, never a loosening.
 
 Agents reach the API through the MCP server in `backend/app/mcp/` ([docs/MCP.md](MCP.md)) —
 either the Streamable HTTP door at `/mcp` (off by default, `WERCO_MCP_HTTP_ENABLED`) or the stdio
-bridge `python -m app.mcp`. **Nothing in this document changes for them** (one credential rule —
-an API token may not declare scrap or close work short (owner decision 2026-11-07), nor change a scrap
-reason, record more good than the floor counted, edit an operation's or a work-order header's counts,
-correct a count through either reduce-production verb, or lower an order once work was recorded (this
-PR's extension of that decision) — is below the Work Orders matrix, and applies to an API token
-however it is presented). Every tool call is a
+bridge `python -m app.mcp`. **Nothing in this document changes for them** (the credential rules on
+top of the role — the writes an API token is refused whatever its user's role, such as declaring
+scrap or closing work short, and the judgment writes the owner left open to one — are listed once,
+in [Credential policy for judgment writes](#credential-policy-for-judgment-writes), and apply to an
+API token however it is presented). Every tool call is a
 real request dispatched through the same routers with a real user's bearer — a 15-minute access JWT
 or a long-lived, Admin-issued **API token** bound to one user (see the API tokens callout under
 [Admin](#admin)): `get_current_user` resolves the user, tenancy comes from the token's active
@@ -128,25 +127,59 @@ and `/api-tokens` so it can never mint another credential.
 ### Credential policy for judgment writes
 
 A few writes record a **person's judgment** — not just a permitted action — and the owner rulings
-of 2026-11-05 restrict which *credential* may carry them, on top of the role gate. The predicates
-live once, in `backend/app/core/credentials.py`, and read the credential `get_current_user`
-stamped on the request:
+of 2026-11-05 restrict which *credential* may carry them, on top of the role gate. This section is
+the **one list** of those credential rules — what refuses a credential, what the owner left open,
+and what is deliberately not refused — across the AI governance (ruling 3), floor-gates (ruling 2)
+and short-count (ruling 1) changes; other documents point here. The predicates live once, in
+`backend/app/core/credentials.py`, and read the credential `get_current_user` stamped on the
+request:
 
 | Predicate | Refuses | Allows |
 |---|---|---|
 | `is_interactive_person` | A long-lived **API token**, and any station- or badge-scoped (`kiosk`) token | A person signed in with their own access JWT |
 | `is_api_token_credential` (the write is refused when true) | A long-lived **API token** | An interactive session, and a crew-station badge token (a person standing at the kiosk) |
 
-Writes that apply them:
+Writes that apply them — each refused before any write and before any audit row (the 403 texts
+live in `ai_action_applier.py` and `operation_action_gates.py`; where each sits in its route's
+check order is in `docs/API.md` → Work Orders → "Short count at completion" and → AI
+Recommendations):
 
-| Write | Predicate | Refusal |
-|---|---|---|
-| AI **Accept & apply** — `POST /ai/recommendations/{id}/apply` (owner ruling 3) | `is_interactive_person` | **403**; also not an MCP tool |
-| **Mark handled** — record-only `POST /ai/recommendations/{id}/accept` on an AI action card (owner ruling 3) | `is_interactive_person` | **403** |
+| Write | Predicate | Refusal | Decided by |
+|---|---|---|---|
+| AI **Accept & apply** — `POST /ai/recommendations/{id}/apply` | `is_interactive_person` | **403**; also not an MCP tool | Owner ruling 3 |
+| **Mark handled** — record-only `POST /ai/recommendations/{id}/accept` on an AI action card | `is_interactive_person` | **403** | Owner ruling 3 |
+| **Declaring scrap** — any request that would raise a recorded `quantity_scrapped` (an operation's, a time entry's or a work-order header's), by any positive amount: `POST /shop-floor/clock-out/{id}`, `POST /shop-floor/operations/{id}/production` (with or without `open_ncr`), the Hank `report_production` task (`POST /hank/tasks` and `…/execute`), both operation-complete verbs, force-complete (`POST /work-orders/{id}/complete`), `PUT /work-orders/operations/{id}` and `PUT /work-orders/{id}` | `is_api_token_credential`, through `operation_action_gates.api_token_declares_scrap` (a non-finite delta fails closed) | **403** `API_TOKEN_SCRAP` (`Scrap must be reported by a person …`) | Owner decision 2026-11-07: only a person — kiosk, crew badge, desk — declares scrap, because a scrap count is quality evidence someone has to have seen |
+| **Writing or changing a scrap reason or code** (`scrap_reason` / `scrap_reason_code_id`), even with no new scrap: clock-out (onto the caller's own time entry), `PUT /work-orders/{id}`, force-complete re-sending the recorded scrap with a different reason or code (or with none over a recorded one), `PUT /work-orders/operations/{id}`. Sending no reason, or the stored one, is no change | `is_api_token_credential`, through `api_token_changes_scrap_reason` | **403** `API_TOKEN_SCRAP` | **This PR's extension** of the 2026-11-07 decision: re-categorizing a person's scrap is the same evidence (the scrap Pareto groups by the code) |
+| **Closing work short** — a short close by either operation-complete verb whose scrap is already on record (one declaring new scrap gets `API_TOKEN_SCRAP` first), a force-complete below the order, and an office reduce-production re-stamp that would set a declared short | `is_api_token_credential` (reduce-production through `production_reduction_service.api_token_reduction_refusal`) | **403** `API_TOKEN_SHORT_CLOSE` (`Closing work short must be done by a person …`) | Owner decision 2026-11-07 (a token keeps only the full-count close); the re-stamp case is **this PR's extension** |
+| **The other count judgments** — good above the floor's labor record (office operation complete, override reason or not; force-complete above `deliverable`); `PUT /work-orders/operations/{id}` changing `quantity_complete` or a `quantity_scrapped` that is not a rise; `PUT /work-orders/{id}` changing the header's `quantity_complete` / `quantity_scrapped` in either direction; **every** correction through `POST /work-orders/operations/{id}/reduce-production` or `POST /shop-floor/operations/{id}/reduce-production`; lowering `quantity_ordered` once any operation has recorded good, scrap or labor | `is_api_token_credential` (reduce-production through `api_token_reduction_refusal`, re-checked under the row locks) | **403** `API_TOKEN_COUNT_JUDGMENT` (`Recording more good than the floor counted, …`) | **This PR's extension** of the same principle — the owner was asked about scrap and short closes, not these |
 
 The role gate still applies after the credential check: the person must hold a role that could
-apply the action. Dismiss, snooze and feedback on a recommendation stay open to any credential.
-`hank_task_service.py` and its siblings carry older inline copies of the stricter predicate.
+apply the action. `hank_task_service.py` and its siblings carry older inline copies of the stricter
+predicate.
+
+Judgment-shaped writes the owner decided to leave open, so no predicate applies (the role gate and
+the route's own fences still do):
+
+| Write | Open to | Decision |
+|---|---|---|
+| **Resume Work Order** — `POST /work-orders/{id}/resume` (lifts a work-order hold) | Any credential of a user holding Admin / Manager / Supervisor, a standing **API token** included (the MCP tool `work_orders_resume_work_order`); kiosk badge and station tokens are refused by their path fence, as on every `/work-orders` route. Each call's required audit rows are written as the token's user with `extra_data.credential` | Owner decision 2026-11-07: an agent may lift a work-order hold |
+| **Dismiss**, snooze and feedback on a recommendation, action cards included | Every authenticated user and every credential | A design decision of the AI governance change; for Dismiss on an action card, confirmed by the owner 2026-11-07 (it does not take the Mark handled gate) — see [AI recommendations (Action Inbox)](#ai-recommendations-action-inbox) |
+
+Deliberately **not** refused — current behavior, not owner decisions:
+
+- A **crew-station badge token** is a person standing at the kiosk with their own badge, so it
+  passes every `is_api_token_credential` rule above. (`is_interactive_person` refuses it, and its
+  path fence keeps it on `/api/v1/shop-floor` anyway.)
+- An agent presenting a **person's own interactive access JWT** (an MCP client signed in as that
+  person) is that person's session to both predicates and is not refused. The 2026-11-07 decision
+  covered standing API tokens only; whether an agent on a person's JWT may make these writes was
+  not part of it.
+- Scrap fields that are not production scrap records: `POST /fabrication-quotes/{quote_id}/actuals`
+  (the MCP tool `record_actuals`) takes a `scrap_quantity` but stores it as a quoting-calibration
+  observation (`FabricationQuoteActual.observation_json`), and a BOM line's `scrap_factor` is a
+  planning allowance. Neither is refused. `tests/api/test_api_token_scrap_refusal.py` lists both as
+  exempt with their reasons, and fails CI on any new scrap writer that is neither guarded nor
+  listed.
 
 ## Permission Matrix
 
@@ -334,44 +367,14 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 >   the close, with a reason, as required audit evidence, but only into units still unaccounted
 >   (zero on an accounted close; a rise past that is **409** — pieces counted good and later found
 >   bad go through reduce-production with `reopen_operation`, then a re-close with the scrap).
-> - **An API token may not declare scrap or make count judgments** — a credential rule, not a role
->   rule; no role cell changed. A standing per-user API token
->   (`app.core.credentials.is_api_token_credential`) is refused **403**, whatever its user's role.
->   - **Scrap (owner decision 2026-11-07).** A standing API token may not declare scrap, anywhere:
->     only a person — at the kiosk, with a crew badge, or signed in at a desk — declares scrap,
->     because a scrap count is quality evidence someone has to have seen. Any token request that
->     would raise a recorded scrap quantity (an operation's, a time entry's or a work order header's
->     `quantity_scrapped`) is refused **403** before any write and before any audit row, on
->     `POST /shop-floor/clock-out/{id}`, `POST /shop-floor/operations/{id}/production` (with or
->     without `open_ncr`), the Hank `report_production` task (`POST /hank/tasks` and
->     `POST /hank/tasks/{id}/execute`), both operation-complete verbs, force-complete
->     (`POST /work-orders/{id}/complete`), `PUT /work-orders/operations/{id}` and
->     `PUT /work-orders/{id}`. The question was about closing work short by reporting the missing
->     pieces as scrap, and the answer leaves a token only the full-count close: a short close by
->     either complete verb (also one whose scrap is already on record) and a force-complete below the
->     order are refused too. Any positive scrap counts, however small (no rounding tolerance). A
->     request that declares no new scrap — a good-only production report or clock-out, a full-count
->     close, re-sending the recorded scrap value — works exactly as before.
->   - **Scrap reasons (this PR's extension of the same decision).** Re-categorizing scrap a person
->     declared is the same quality evidence (the scrap Pareto groups by the code), so a token request
->     that would write or change a `scrap_reason` / `scrap_reason_code_id` is refused with the same
->     **403**, even with no new scrap: clock-out (onto the caller's own time entry), `PUT
->     /work-orders/{id}`, force-complete re-sending the recorded `quantity_scrapped` with a different
->     reason or code — or with none over a recorded one — and `PUT /work-orders/operations/{id}`.
->     Sending no reason, or re-sending the stored one, still works.
->   - **The other count judgments (this PR's extension of the same rule, not part of the question
->     the owner answered).** A token is also refused recording good above the floor's labor count
->     (office verb, override reason or not, and force-complete), any other count edit through
->     `PUT /work-orders/operations/{id}` (`quantity_complete`, or a `quantity_scrapped` change that
->     is not a rise), any change to the header's `quantity_complete` / `quantity_scrapped` through
->     `PUT /work-orders/{id}` (either direction), **every** correction through either
->     reduce-production verb (`POST /work-orders/operations/{id}/reduce-production` and
->     `POST /shop-floor/operations/{id}/reduce-production` — a re-stamp that would set a declared
->     short gets the short-close text), and lowering `quantity_ordered` once any operation has
->     recorded good, scrap or labor.
->
->   A **crew-station badge token is a person** and passes every one of these. An agent using a
->   person's interactive JWT (an MCP client) is that person's own session and is not refused.
+> - **An API token may not declare scrap, change a scrap reason, close work short or make the
+>   related count judgments** — a credential rule, not a role rule; no role cell changed. A standing
+>   per-user API token (`app.core.credentials.is_api_token_credential`) is refused **403** on those
+>   writes whatever its user's role, and a crew-station badge token is a person and passes. Which
+>   routes, which 403 text, and which parts the owner decided on 2026-11-07 (scrap, short closes)
+>   versus which this PR extends (scrap reasons, the other count judgments, every reduce-production
+>   correction) are listed once, in
+>   [Credential policy for judgment writes](#credential-policy-for-judgment-writes).
 >
 > See `docs/API.md` → Work Orders → "Short count at completion".
 
