@@ -154,6 +154,7 @@ from app.services.operation_action_gates import (
     force_complete_exceeds_physical_message,
     force_complete_exceeds_recorded_message,
     force_complete_unaccounted_message,
+    no_labor_reduction_exceeds_message,
     office_no_change_message,
     open_count_above_ceiling_message,
     open_count_above_recorded_message,
@@ -5717,10 +5718,12 @@ def update_operation(
     after the close may be ADDED (with ``scrap_reason``) into what is still unaccounted -- units
     that reached it and were recorded neither good nor scrapped, zero on an accounted close -- and
     the reason text corrected; neither can make it short, and a rise past that is refused **409**
-    (it would account for more units than reached the operation and consume tied material for
-    runs that never happened). Both are written as REQUIRED audit evidence (**503**, nothing saved,
-    when it cannot be). Pieces counted good and found bad later: lower the good count with
-    reduce-production (reopen), then complete the operation again with the scrap.
+    (it would count a piece the close counted good as scrap too, and consume its tied material a
+    second time). Both are written as REQUIRED audit evidence (**503**, nothing saved, when it
+    cannot be). Pieces counted good and found bad later, on a live work order: lower the good
+    count with reduce-production (reopen), then complete the operation again with the scrap. On a
+    complete / closed / cancelled work order no operation-level correction exists (the 409 says to
+    record them as a nonconformance instead).
 
     On an OPEN operation, raising ``quantity_complete`` above what can reach it after an
     upstream short close, or above the good the floor's labor record shows (when anyone ever
@@ -5820,10 +5823,16 @@ def update_operation(
             raise HTTPException(status_code=409, detail=completed_counts_locked_message(operation))
         # A rise may only fill units that reached the operation and are recorded neither good
         # nor scrapped (zero on an accounted close, positive on a legacy short close). Past
-        # that, good + scrap would exceed what was received: the next stage is credited with
-        # nothing for it, and the whole-WO consumption reconcile would deplete tied material for
-        # runs that never happened (consumption never auto-reverses). Pieces counted good and
-        # found bad later go through reduce-production (reopen), then a re-close with scrap.
+        # that, this door would count a piece the close already counted GOOD as scrap as well:
+        # good + scrap above what was received, and the whole-WO consumption reconcile would
+        # deplete tied material a second time for it (consumption never auto-reverses). Pieces
+        # counted good and found bad later go through reduce-production (reopen), then a
+        # re-close with scrap -- on a live work order only (reduce-production refuses a terminal
+        # one, so the text names an NCR there instead). This bounds the AFTER-CLOSE door only:
+        # while an operation is open, scrap past what reached it is still accepted on every door
+        # (clock-out, /production, this PUT, the office close) as replacement runs -- whether
+        # that should be bounded the same way, and where unrecorded replacement scrap goes once
+        # the operation is complete, are open owner questions, not settled by this check.
         if (
             "quantity_scrapped" in count_changes
             and update_data["quantity_scrapped"] is not None
@@ -5832,8 +5841,14 @@ def update_operation(
             stored_acct = operation_accounting(operation.work_order, operation)
             scrap_rise = float(update_data["quantity_scrapped"]) - float(operation.quantity_scrapped or 0)
             if scrap_rise > stored_acct.unaccounted + QTY_EPSILON:
+                terminal_status = (
+                    str(getattr(operation.work_order.status, "value", operation.work_order.status))
+                    if operation.work_order.status in TERMINAL_WO_STATUSES
+                    else None
+                )
                 raise HTTPException(
-                    status_code=409, detail=completed_scrap_over_received_message(operation, stored_acct)
+                    status_code=409,
+                    detail=completed_scrap_over_received_message(operation, stored_acct, terminal_status),
                 )
         completed_scrap_correction = bool(count_changes)
     elif "quantity_complete" in count_changes and update_data["quantity_complete"] is not None:
@@ -6063,7 +6078,11 @@ def reduce_operation_production_office(
     immutability boundary (G5-A) and are excluded from the allowance -- unapprove
     them first via ``POST /shop-floor/time-entries/{id}/unapprove`` (the audited
     segregation-of-duties front door), then reduce. No open clock-in is required --
-    the supervisor is correcting from the office, not working the operation.
+    the supervisor is correcting from the office, not working the operation. An
+    operation **nobody ever clocked in to** (no TimeEntry at all, open or closed --
+    the office's labor-less close) has no evidence to walk: its good count is the
+    office's own entry, so the correction lowers it directly, up to that count (400
+    above it), with the same reopen, strand and audit rules.
 
     Scope difference from the operator's twin: a **COMPLETE operation is correctable
     here** (``allow_completed_operation=True``). It used to 409 on both verbs, on the
@@ -6127,7 +6146,21 @@ def reduce_operation_production_office(
     entries = eligible_reduction_entries(db, operation_id=operation_id, company_id=company_id, user_id=None)
     allowance = sum(float(e.quantity_produced or 0) for e in entries)
 
-    if reduction_data.quantity_delta > allowance:
+    # An operation nobody ever clocked in to (no TimeEntry at all -- the office's labor-less
+    # close, which the owner kept on purpose) has no evidence to walk: its good count IS the
+    # office's own entry, and the read-path reconcile has nothing to re-raise it from. So the
+    # office corrects it directly, up to that count. Without this, pieces later found bad on
+    # such an operation had no door at all once it completed: the operation PUT refuses its
+    # good count and bounds a scrap rise to what is unaccounted. The shared core re-checks
+    # both facts under the row locks.
+    no_labor_recorded = not entries and not operation_has_labor_evidence(db, operation_id, company_id)
+    if no_labor_recorded:
+        recorded_good = float(scoped_operation.quantity_complete or 0)
+        if reduction_data.quantity_delta > recorded_good + QTY_EPSILON:
+            raise HTTPException(
+                status_code=400, detail=no_labor_reduction_exceeds_message(scoped_operation, recorded_good)
+            )
+    elif reduction_data.quantity_delta > allowance:
         approved_qty = approved_produced_total(db, operation_id=operation_id, company_id=company_id, user_id=None)
         if approved_qty > 0:
             detail = (
@@ -6162,6 +6195,7 @@ def reduce_operation_production_office(
         # locks, so relaxing only one of the two would refuse under the lock instead.
         allow_completed_operation=True,
         reopen_operation=reduction_data.reopen_operation,
+        no_labor_recorded=no_labor_recorded,
     )
     operation = outcome.operation
     work_order = outcome.work_order

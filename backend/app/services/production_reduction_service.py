@@ -34,6 +34,11 @@ RE-STAMPED (REQUIRED audit) so the later stages are credited with the real loss 
 re-stamp is judged by ``accounting_change_strands`` too, so a change can never strand a
 COMPLETE operation in another chain (a component chain feeds the assembly chain).
 
+The office verb also corrects an operation nobody ever clocked in to (no TimeEntry at all --
+the office's labor-less close): there is no evidence to walk, so the good count the office
+entered is lowered directly, bounded by it (``no_labor_recorded``, re-checked under the locks),
+with the same reopen, re-stamp, strand and audit rules.
+
 A standing API token may not correct counts on either verb (**403**, before any lock or
 write -- ``api_token_reduction_refusal``). That is this PR's extension of the owner's
 2026-11-07 decision, which covered scrap and short closes only: a reopen erases a person's
@@ -70,6 +75,7 @@ from app.services.operation_action_gates import (
     API_TOKEN_SHORT_CLOSE,
     CORRECTION_AUDIT_UNAVAILABLE,
     accounting_strand_message,
+    operation_has_labor_evidence,
     reduce_would_leave_short_message,
     reopen_blocked_by_later_message,
 )
@@ -328,6 +334,7 @@ def perform_production_reduction(
     path: str,
     allow_completed_operation: bool = False,
     reopen_operation: bool = False,
+    no_labor_recorded: bool = False,
 ) -> ProductionReductionOutcome:
     """The shared transactional body of both reduce-production endpoints.
 
@@ -375,6 +382,12 @@ def perform_production_reduction(
     refused 409 before anything is written. With it, the operation returns to IN_PROGRESS
     and the un-worked READY operations it now blocks to PENDING, with REQUIRED audit rows
     (503 and nothing saved when they cannot be written).
+
+    ``no_labor_recorded`` (office only) says the caller found NO TimeEntry on the operation at
+    all, so ``entries`` is empty and the correction lowers the office's own good count
+    directly (bounded by it, not by evidence). Both facts are re-checked under the row locks
+    -- a clock-in or another correction landing in between is a 409, nothing written. The
+    default ``False`` leaves every other call byte-identical.
     """
     # SFI-1: same locks, same order as report_operation_production / complete_operation.
     operation = (
@@ -414,6 +427,19 @@ def perform_production_reduction(
     # decision). Both routes already refused it before their first lock; this is the same
     # check under the locks, ahead of every other refusal and the first write.
     assert_reduction_credential_or_http(actor, work_order, operation, delta)
+
+    # The labor-less correction's two facts, re-read under the locks: still nobody clocked in,
+    # and still at least ``delta`` good on record. A walk over an empty ``entries`` list would
+    # otherwise lower a count that a concurrent clock-in now backs, or below zero.
+    if no_labor_recorded and (
+        entries
+        or operation_has_labor_evidence(db, operation.id, company_id)
+        or delta > float(operation.quantity_complete or 0) + QTY_EPSILON
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="This operation was modified concurrently. Refresh and retry.",
+        )
 
     target_qty = operation_target_quantity(operation, work_order)
 
@@ -572,7 +598,9 @@ def perform_production_reduction(
     # lowered by a positive delta, so log_update's empty-diff skip can never fire and a
     # correction can never commit unaudited (defense-in-depth). Per-entry before/after
     # slices ride extra_data so a reviewer can reconstruct exactly which evidence rows
-    # were walked down, by how much, and in what order.
+    # were walked down, by how much, and in what order. On an operation nobody clocked in to
+    # (``no_labor_recorded``) no entry is walked, but quantity_complete itself drops by the
+    # positive delta (bounded by it under the lock), so the diff is never empty there either.
     audit.log_update(
         resource_type="work_order_operation",
         resource_id=operation.id,
@@ -606,6 +634,9 @@ def perform_production_reduction(
             # F5: disambiguate the two correction verbs on the audit chain.
             "path": path,
             "reopened_operation": reopening,
+            # An operation nobody clocked in to: no evidence was walked, the office's own good
+            # count was lowered (the diff's quantity_complete carries it). Absent otherwise.
+            **({"no_labor_recorded": True} if no_labor_recorded else {}),
         },
     )
 

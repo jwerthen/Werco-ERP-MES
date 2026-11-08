@@ -28,7 +28,8 @@ class ProductionReductionRequest(BaseModel):
         gt=0,
         description="Good-count quantity to REMOVE from this operation. Must be > 0 and no greater "
         "than the unapproved evidence the endpoint may walk down (the caller's own entries for the "
-        "shop-floor verb; any operator's for the office verb).",
+        "shop-floor verb; any operator's for the office verb -- or, on an operation nobody ever "
+        "clocked in to, the office verb's bound is its recorded good count).",
     )
     # Correction reason for the tamper-evident audit trail -- this is NOT a scrap reason
     # (no scrap moves here). Required and non-blank so every walk-back is explainable.

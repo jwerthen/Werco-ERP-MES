@@ -26,6 +26,7 @@ from app.core.credentials import is_api_token_credential
 from app.models.time_entry import TimeEntry
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.services.work_order_state_service import (
+    QTY_EPSILON,
     TERMINAL_WO_STATUSES,
     AccountingStrand,
     OperationAccounting,
@@ -136,7 +137,10 @@ API_TOKEN_SHORT_CLOSE = "Closing work short must be done by a person signed in t
 # reason change, which are API_TOKEN_SCRAP); hand-editing the work-order header's
 # ``quantity_complete`` / ``quantity_scrapped`` through its PUT, in either direction (a
 # scrap rise is API_TOKEN_SCRAP); lowering the order once work has been recorded against
-# it; and EVERY over-count correction through either reduce-production verb -- a reopen
+# it -- the work order's ``quantity_ordered``, or a laser nest's ``planned_runs`` (its
+# operation's target, from which the laser work order's order is derived) once that nest
+# has recorded work (``operation_has_recorded_work``); and EVERY over-count correction
+# through either reduce-production verb -- a reopen
 # erases a person's close, a re-stamp re-declares its short (API_TOKEN_SHORT_CLOSE when it
 # would set one). The 2026-11-07 question asked about scrap and short closes only; these
 # are this PR's extension of the same rule, not part of the owner's decision.
@@ -307,24 +311,55 @@ def scrap_overdeclare_message(operation: WorkOrderOperation, unaccounted: float,
 
 
 def completed_operation_clock_out_message(operation: WorkOrderOperation) -> str:
-    """409: a quantity-carrying clock-out on an operation someone already completed."""
+    """409: a quantity-carrying clock-out on an operation someone already completed.
+
+    Only raised on a live work order (a terminal one makes the clock-out labor-only). It
+    promises no particular correction: pieces counted good and later found bad can be
+    corrected from the work order (Correct count, which reopens the operation), but scrap
+    from extra runs nobody recorded before the close has no operation-level door yet.
+    """
     return (
         f"{operation_label(operation)} is already complete; clock out with 0 pieces and tell a supervisor about any "
-        "extra pieces (a supervisor corrects a completed operation's counts from the work order)."
+        "extra pieces."
     )
 
 
-def completed_scrap_over_received_message(operation: WorkOrderOperation, acct: OperationAccounting) -> str:
+def completed_scrap_over_received_message(
+    operation: WorkOrderOperation, acct: OperationAccounting, work_order_status: Optional[str] = None
+) -> str:
     """409: the generic operation PUT raising a COMPLETE operation's scrap past what reached it.
 
     ``acct`` is the operation's accounting at its STORED counts: the rise may fill only its
-    ``unaccounted`` remainder (zero on an accounted close).
+    ``unaccounted`` remainder (zero on an accounted close). The remedy depends on the work
+    order: on a live one, pieces counted good and later found bad are corrected by lowering
+    the good count (reduce-production, which reopens the operation -- an operation nobody
+    clocked in to included) and closing it again with the scrap. ``work_order_status`` is the
+    work order's status value when it is COMPLETE / CLOSED / CANCELLED: reduce-production
+    refuses every terminal work order, so the text names the record that still exists -- a
+    nonconformance (NCR) against the finished work -- instead of a door that is shut.
     """
-    return (
+    message = (
         f"{operation_label(operation)} is complete with {_qty_text(acct.good)} good and {_qty_text(acct.scrapped)} "
         f"scrapped of the {_qty_text(acct.received)} that reached it, so only {_qty_text(acct.unaccounted)} more can "
-        "be recorded as scrap. Pieces counted good and later found bad: lower the good count with "
-        "reduce-production (reopen the operation), then complete it again with the scrap and a reason."
+        "be recorded as scrap."
+    )
+    if work_order_status is not None:
+        return message + (
+            f" This work order is {work_order_status}, so its recorded production can no longer be corrected: "
+            "record pieces later found bad as a nonconformance (NCR) against the finished work or its lot, not on "
+            "the operation."
+        )
+    return message + (
+        " Pieces counted good and later found bad: lower the good count with reduce-production (reopen the "
+        "operation), then complete it again with the scrap and a reason."
+    )
+
+
+def no_labor_reduction_exceeds_message(operation: WorkOrderOperation, recorded_good: float) -> str:
+    """400: the office correction lowering an operation nobody clocked in to by more than its good count."""
+    return (
+        f"Only {_qty_text(recorded_good)} good piece(s) are recorded on {operation_label(operation)}, which nobody "
+        "clocked in to; the correction cannot exceed them."
     )
 
 
@@ -597,6 +632,24 @@ def get_open_time_entry(db: Session, user_id: int, operation_id: int) -> Optiona
         )
         .first()
     )
+
+
+def operation_has_recorded_work(db: Session, operation: Optional[WorkOrderOperation], company_id: int) -> bool:
+    """True when anything has been recorded against ``operation``: good, scrap, a start, or labor.
+
+    The "once work was recorded" test behind API_TOKEN_COUNT_JUDGMENT on a laser nest's
+    ``planned_runs`` lowering (``PATCH /laser-nests/{id}``) -- the per-nest reading of the rule
+    ``PUT /work-orders/{id}`` applies to ``quantity_ordered`` across a work order's operations,
+    plus any ``TimeEntry`` (a clock-in with zero pieces is still work someone did). ``None``
+    (a nest with no operation) has nothing recorded.
+    """
+    if operation is None:
+        return False
+    if float(operation.quantity_complete or 0) > QTY_EPSILON or float(operation.quantity_scrapped or 0) > QTY_EPSILON:
+        return True
+    if operation.status in (OperationStatus.IN_PROGRESS, OperationStatus.COMPLETE):
+        return True
+    return operation_has_labor_evidence(db, operation.id, company_id)
 
 
 def operation_has_labor_evidence(db: Session, operation_id: int, company_id: int) -> bool:
