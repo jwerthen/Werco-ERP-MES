@@ -648,6 +648,14 @@ bot permission — the token is exactly as powerful as the user it belongs to, a
 > log in and mint tokens. The real boundary is the bound user's role — give a bot the narrowest role
 > that does its job.
 >
+> **Judgment writes.** A few writes that record a person's judgment refuse an API token whatever its
+> user's role (AI **Accept & apply** and **Mark handled**, **403**). The full list, and the writes the
+> owner decided to leave open to a token, are in
+> [RBAC → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes).
+> **Resume Work Order** (`POST /work-orders/{id}/resume`) is one of the open ones: a token whose user
+> holds Admin / Manager / Supervisor may lift a work-order hold (owner decision 2026-11-07), audited as
+> that user with `extra_data.credential`.
+>
 > **The row wins over the claims.** The `api_tokens` row — never the JWT — says who and which
 > company: the JWT's `user_id` / `company_id` must equal the row's or the token is refused, the active
 > company is pinned to the row's `company_id` (a platform admin's switched context never applies, and
@@ -1507,7 +1515,9 @@ company-scoped.
 > remaining (so it also covers the shop-floor and reconcile-on-read completion paths); the **read path**
 > (see "A read heals a stranded work order" below); and `PUT /shop-floor/operations/{id}/resume`, which
 > lands the resumed operation at PENDING and delegates any lift back to READY to this same rule. Each
-> resolves the work order's mode **once per call**. The predecessor gate behind every *action* —
+> resolves the work order's mode **once per call**, and none of the four promotes a **DRAFT** or
+> terminal work order: the rule itself returns nothing for one (see "DRAFT is never promoted by a read
+> — or by anything else" below). The predecessor gate behind every *action* —
 > `operation_action_gates.operation_blocked_by_predecessors`, used by `POST /shop-floor/clock-in`, both
 > office verbs, both shop-floor verbs, the queue's check-in-state read, and `POST
 > /scanner/resolve-action` — resolves it from the **same** function on the **same** work order. So an
@@ -1551,10 +1561,11 @@ company-scoped.
 > On a successful **ON** flip the endpoint also **demotes** the un-worked operations the pooled rule had
 > already promoted: READY → PENDING, one `audit_log` **status-change** row per operation
 > (`extra_data.transition = "sequential_operations_enabled"`), and the count on the `work_order_updated`
-> event payload as `operations_returned_to_pending`. It is one of the two callers of the **one** rule
-> that moves an operation backwards (`work_order_state_service.demote_ready_operations`; the other is
-> `POST /work-orders/{id}/resume` landing a held job at DRAFT — holds and operation resume are actor
-> decisions about one operation, and unschedule's READY → PENDING is transient), and it exists because
+> event payload as `operations_returned_to_pending`. It is one of the three callers of the **one** rule
+> that moves an operation backwards (`work_order_state_service.demote_ready_operations`; the others are
+> `POST /work-orders/{id}/resume` landing a held job at DRAFT and this same `PUT` moving a job to
+> `status: draft` — holds and operation resume are actor decisions about one operation, and
+> unschedule's READY → PENDING is transient), and it exists because
 > promotion is forward-only: without it, turning the setting on would fix only the *next*
 > work order, never the one being looked at. It never touches a worked operation, and it only demotes
 > what the new rule actually blocks — so the lowest startable operation stays READY and the floor is
@@ -1729,7 +1740,8 @@ company-scoped.
 > crew JOIN, desk Check In, Time Clock, and paper back-entry — `source = "backfill"` has **no**
 > exemption), `PUT /shop-floor/operations/{id}/start`, `POST /work-orders/operations/{id}/start`, the
 > READY auto-start branch of **both** complete verbs, the generic `PUT /work-orders/operations/{id}`
-> when it writes `status: in_progress` (a hand-set start), the scanner resolver (`clock_in_blockers` /
+> when it writes `status: in_progress` (a hand-set start) or raises a not-started operation's
+> `quantity_complete`, the scanner resolver (`clock_in_blockers` /
 > `complete_blockers`, so `POST /scanner/resolve-action` reports the same text), and the floor read
 > payloads' `start_blocked_reason`. Every refusal happens before any write (no TimeEntry, no status
 > flip, no audit row) and is a **409** with a plain-string `detail` — never a 400, because the crew
@@ -1763,9 +1775,9 @@ company-scoped.
 >   an IN_PROGRESS operation with no work-order gate, by design) started *and* completed work, tied
 >   material included, on a job nobody released or a supervisor stopped. `status: ready` on a **draft**
 >   is refused **409** with the `draft` text too (it would put unreleased work on the dispatch board;
->   resume-to-DRAFT demotes exactly those rows). Both are raised before the first field is written,
->   and re-sending the operation's current status in an unrelated edit is not a transition, so it
->   still lands. Hand-setting READY on a held job's operation stays the supervisor override it was —
+>   resume-to-DRAFT and a `PUT` back to draft demote exactly those rows). Both are raised before the
+>   first field is written, and re-sending the operation's current status in an unrelated edit is not
+>   a transition, so it still lands. Hand-setting READY on a held job's operation stays the supervisor override it was —
 >   every start verb still refuses that operation until the work order resumes.
 > - **Nor is a count.** Recorded good quantity on a not-started operation is what a reconciling read
 >   treats as a start (it lifts a PENDING / READY operation carrying `quantity_complete > 0` to
@@ -1803,9 +1815,10 @@ company-scoped.
 > job's READY cards off the floor — see "Returning a job to draft" below). **Known gap, a follow-up:** the
 > `PUT`'s blind DRAFT / ON_HOLD → RELEASED / IN_PROGRESS status writes are still accepted from the API
 > (the MCP `update_work_order` tool refuses them), `POST /work-orders/{id}/complete` has no
-> draft / on-hold gate, and finishing the last running operation of a draft or held job completes the
-> work order (labor stays closable by rule; whether such a job may complete is the owner's call). The
-> hold itself is recorded by the `PUT`'s best-effort `log_update`.
+> draft / on-hold gate, and finishing the last running operation of a draft or held job **still
+> completes the work order** — decided for this change: labor already running is always closable, so
+> no completion verb refuses it; whether a job with no release record, or one on hold, may complete
+> this way is the owner's call. The hold itself is recorded by the `PUT`'s best-effort `log_update`.
 >
 > **Returning a job to draft** is the same `PUT` with `{"status": "draft", "version"}` on a released,
 > in-progress or held job. A draft leaves no cards on the dispatch board or the kiosk, and every
@@ -1839,9 +1852,12 @@ company-scoped.
 > the promotion rule never promotes a draft, so finishing labor that was still running when the job was
 > held (it stays closable, by rule) completes that operation without re-promoting its successors or the
 > demoted nests. Release it with `POST /work-orders/{id}/release`. **Finishing the last running
-> operation of a draft or held job completes the work order** — the always-closable-labor rule wins,
-> the completion is audited like any other, and whether a job with no release record (or one on hold)
-> may complete this way is an open owner follow-up beside `POST /work-orders/{id}/complete`'s missing
+> operation of a draft or held job completes the work order** — the always-closable-labor rule wins.
+> Clock-out and the office complete verb record that work-order transition (`draft` / `on_hold` →
+> `complete`) as a `STATUS_CHANGE` row; `POST /shop-floor/operations/{id}/complete` records the
+> operation's completion but writes no work-order row, as on every work-order completion through
+> that verb (pre-existing, a follow-up). Whether a job with no release record (or one on hold) may
+> complete this way is an open owner follow-up beside `POST /work-orders/{id}/complete`'s missing
 > draft / on-hold gate. A legacy hold with no stamp (an older laser package, an MRP
 > auto-released or `PUT`-released job) therefore resumes to DRAFT: restrictive, visible, one Release
 > click to fix. Operation-level holds are untouched (lift them with Resume / Clear Hold). Refusals:
@@ -1858,7 +1874,10 @@ company-scoped.
 > and back on the floor.` / `No release is on record for this work order, so it returned to DRAFT —
 > release it to put it back on the floor.`). It broadcasts `work_order_resumed` on the work-order,
 > dashboard and each affected work center's shop-floor channels. The MCP tool is
-> `work_orders_resume_work_order`.
+> `work_orders_resume_work_order`. A standing API token whose user holds Admin / Manager / Supervisor
+> may call it (**owner decision 2026-11-07**: an agent may lift a work-order hold); the required rows
+> it writes carry `extra_data.credential` naming the token, as every token write does (see
+> [API tokens](#api-tokens-bots-and-mcp-clients)).
 >
 > **Before deploying this change**, run the two read-only queries in
 > [`DEPLOYMENT_RUNBOOK.md` → Wave 2 rollout](DEPLOYMENT_RUNBOOK.md#wave-2-rollout): draft or held jobs
@@ -3578,8 +3597,9 @@ environment variable or deployment configuration change is needed.
 >
 > Two consequences of stamping at the route, both deliberate and recorded on the audit chain:
 > (a) the MCP `import_laser_nest_package` / `add_laser_nest` tools with the default `release=false`
-> put the job back to DRAFT *after* the route stamped it, so that DRAFT keeps a `released_by` /
-> `released_at` for a release the caller chose not to keep. The stamp is inert — `PUT` refuses
+> put the job back to DRAFT *after* the route stamped it (both leave an ON_HOLD job on hold, as the
+> route does), so that DRAFT keeps a `released_by` / `released_at` for a release the caller chose not
+> to keep. The stamp is inert — `PUT` refuses
 > DRAFT → ON_HOLD, Release re-stamps, and the Little's-law average WIP on `GET /analytics/flow` leaves
 > DRAFT work orders out (as it does CANCELLED) — but any new reader of `released_at` should filter
 > DRAFT the same way. (b) A legacy RELEASED / IN_PROGRESS laser job that never carried a stamp gets
@@ -3678,8 +3698,8 @@ environment variable or deployment configuration change is needed.
 > when a package's nests are spread over multiple lasers. The exemption keys off the WO type
 > through one shared predicate (`is_laser_dispatch_work_order` in `work_order_state_service`), and
 > all **four** promotion seams promote **all** PENDING laser ops to READY (not just the lowest
-> sequence) — a pre-existing laser WO imported before whole-package-ready self-heals (its stranded
-> PENDING nests go READY) on its next release/lifecycle event, or, if it was already released and
+> sequence) on any laser WO that is not a draft or terminal — a pre-existing laser WO imported before
+> whole-package-ready self-heals (its stranded PENDING nests go READY) on its next release/lifecycle event, or, if it was already released and
 > so can never be released again, on its next **reconciling read** (see "A read heals a stranded
 > work order" under Work Orders).
 >
@@ -6624,7 +6644,10 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > draft or on-hold work order it is refused **409** like any clock-in, with no TimeEntry and no audit
 > row, because the server accepts the `backfill` channel from any caller. To file paper labor for a
 > held job, a supervisor resumes the work order (**Resume Work Order**), keys the labor, then holds it
-> again (**Hold Work Order**).
+> again (**Hold Work Order**). If Resume returns the job to **DRAFT** (no release on record), the
+> back-entry is refused "release first" and a draft cannot be held, so **Release** it first
+> (`POST /work-orders/{id}/release`), key the labor, then hold it again immediately: Release puts its
+> unstarted operations back on the dispatch board and the kiosk until the hold lands.
 >
 > **Structured scrap reason on in-shift production reports (A0.3).**
 > `POST /shop-floor/operations/{id}/production` accepts a `scrap_reason` string — the

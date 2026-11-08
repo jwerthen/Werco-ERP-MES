@@ -103,8 +103,9 @@ an API token is accepted, as the one user it is bound to. The one thing
 the MCP layer *adds* is stricter, not looser: its hand-written tools force new and duplicated work
 orders to land DRAFT, keep release an explicit separate call (the header-update tool refuses
 `status: released` / `in_progress`, which the raw `PUT` would have accepted with no release stamp),
-set an imported or hand-keyed nest package back to DRAFT with its operations pending, never mix
-manual nests with a package import, and refuse operation names that are file names — see
+set an imported or hand-keyed nest package back to DRAFT with its operations pending (a job on hold
+is left on hold), never mix manual nests with a package import, and refuse operation names that are
+file names — see
 [MCP.md → DRAFT guarantees](MCP.md#9-draft-guarantees). The two Excel-cutover loaders are not
 tools at all, and neither is AI **Accept & apply** (`POST /ai/recommendations/{id}/apply`): under
 owner ruling 3 only a person signed in to the app runs an AI recommendation's action, so it is in
@@ -140,8 +141,16 @@ Writes that apply them:
 | **Mark handled** — record-only `POST /ai/recommendations/{id}/accept` on an AI action card (owner ruling 3) | `is_interactive_person` | **403** |
 
 The role gate still applies after the credential check: the person must hold a role that could
-apply the action. Dismiss, snooze and feedback on a recommendation stay open to any credential.
-`hank_task_service.py` and its siblings carry older inline copies of the stricter predicate.
+apply the action. `hank_task_service.py` and its siblings carry older inline copies of the stricter
+predicate.
+
+Judgment-shaped writes the owner decided to leave open, so no predicate applies (the role gate and
+the route's own fences still do):
+
+| Write | Open to | Decision |
+|---|---|---|
+| **Resume Work Order** — `POST /work-orders/{id}/resume` (lifts a work-order hold) | Any credential of a user holding Admin / Manager / Supervisor, a standing **API token** included (the MCP tool `work_orders_resume_work_order`); kiosk badge and station tokens are refused by their path fence, as on every `/work-orders` route. Each call's required audit rows are written as the token's user with `extra_data.credential` | Owner decision 2026-11-07: an agent may lift a work-order hold |
+| **Dismiss**, snooze and feedback on a recommendation, action cards included | Every authenticated user and every credential | A design decision of the AI governance change; for Dismiss on an action card, confirmed by the owner 2026-11-07 (it does not take the Mark handled gate) — see [AI recommendations (Action Inbox)](#ai-recommendations-action-inbox) |
 
 ## Permission Matrix
 
@@ -297,8 +306,8 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 > audited door (**Release** or **Resume Work Order**). The office verbs carry the same state gate:
 > `POST /work-orders/operations/{id}/start`, and the generic `PUT /work-orders/operations/{id}`
 > (Admin / Manager / Supervisor) when it hand-sets `status: in_progress` — or `status: ready` on a
-> draft — so the generic edit cannot stand in for the start verb it sits beside. Paper back-entry has
-> no exemption. Labor already running when a job is held stays closable (clock-out, production
+> draft, or raises `quantity_complete` on a not-started operation — so the generic edit cannot stand
+> in for the start verb it sits beside. Paper back-entry has no exemption. Labor already running when a job is held stays closable (clock-out, production
 > report, completing an IN_PROGRESS operation).
 
 > **Hold / resume are operator-facing; resolving the blocker behind a hold is not.** Both rows above

@@ -288,7 +288,9 @@ The fence blocks those direct verbs only: an **Admin**-held token is still an Ad
 (`create_user`, `update_user`, `reset_user_password`), so the bound user's role is the real
 boundary. No token is ever bound to a superuser / `platform_admin` (409 at mint, refused at use),
 deactivating a token's user revokes it, and every audit row a token writes carries
-`extra_data.credential` naming the token.
+`extra_data.credential` naming the token. A few judgment writes refuse a token whatever its role,
+and the owner left others open to one — `work_orders_resume_work_order` among them (2026-11-07): see
+[RBAC_PERMISSIONS.md → Credential policy for judgment writes](RBAC_PERMISSIONS.md#credential-policy-for-judgment-writes).
 Full reference: [API.md → API tokens](API.md#api-tokens-bots-and-mcp-clients).
 
 | Surface | Where the token comes from | On 401 |
@@ -707,12 +709,13 @@ the JSON string the multipart route expects; `due_date` is sent only on the stan
 The upload decodes on the bridge side under `WERCO_MCP_MAX_UPLOAD_BYTES` (413-shaped tool error
 over it) and is then subject to the route's own `LASER_UPLOAD_MAX_BYTES` (50 MB).
 
-**What this is not.** The demote is the owner's rule for the *MCP* layer; it does not close the
-application's own gap that `PUT /shop-floor/operations/{id}/start` accepts an operation whose work
-order is DRAFT and flips the job to IN_PROGRESS with no work-order status-change audit row. With
-the operations at PENDING the kiosk and the dispatch board no longer show them, which is what makes
-the DRAFT real from the floor's side; a 409 on a DRAFT parent in that shop-floor route would close
-the hole for every path, and is an owner decision rather than something made here.
+**What this is not.** The demote is the owner's rule for the *MCP* layer, not what makes a draft
+unstartable. That is the application's own gate (owner ruling 2026-11-05): clock-in and every start
+verb refuse **409** on a DRAFT work order, `PUT /shop-floor/operations/{id}/start` no longer lifts a
+DRAFT job to IN_PROGRESS, and the header `PUT` to `draft` takes un-worked READY operations off the
+board itself. What the tool adds is the default — a freshly imported job comes back un-released —
+and a final sweep of any operation the route leaves READY, so a job it hands back DRAFT is listed
+nowhere on the floor rather than showing a card every start refuses.
 
 ---
 
@@ -888,7 +891,7 @@ hold with `work_orders_resume_work_order` first).
 | `{"status": 403, "detail": "Insufficient permissions"}` | The user's role does not allow that route (`require_role`) — the SPA would refuse too | Use a user with the right role; nothing in MCP can widen it |
 | `{"status": 409, ...}` on `update_work_order` | Stale `version` (optimistic locking) | `get_work_order` → resend with the current `version` |
 | `{"status": 422, ...}` from `update_work_order` naming `release_work_order` / `work_orders_start_work_order` | `status: released` or `in_progress` was written through the header update | Call the named verb; the header update never releases or starts work (§9). To lift a work-order hold, call `work_orders_resume_work_order` |
-| `{"status": 409, "detail": "This work order has not been released — release first…"}` or `"This work order is on hold…"` from `clock_in`, `shop_floor_start_operation`, `work_orders_start_operation`, `work_orders_start_work_order`, a complete of a READY operation, or `work_orders_update_operation` setting `status: in_progress` (or `status: ready` on a draft) | The work order is DRAFT or ON_HOLD — the floor cannot start work on it | A person with the role decides: `release_work_order` for a draft, `work_orders_resume_work_order` for a held job (Admin / Manager / Supervisor) |
+| `{"status": 409, "detail": "This work order has not been released — release first…"}` or `"This work order is on hold…"` from `clock_in`, `shop_floor_start_operation`, `work_orders_start_operation`, `work_orders_start_work_order`, a complete of a READY operation, or `work_orders_update_operation` setting `status: in_progress` (or `status: ready` on a draft, or raising `quantity_complete` on a not-started operation) | The work order is DRAFT or ON_HOLD — the floor cannot start work on it | A user with the role decides — an agent's API token included: `release_work_order` for a draft, `work_orders_resume_work_order` for a held job (Admin / Manager / Supervisor) |
 | `{"status": 409, "detail": "A draft work order has not been released, so there is nothing on the floor to hold…"}` from `update_work_order` | `status: on_hold` on a DRAFT | Leave it in draft; hold only released / in-progress work |
 | `{"status": 422, ...}` `"Additional properties are not allowed ('serach' was unexpected)"` | A misspelled argument — every schema is strict (§6.3) | Fix the argument name; nothing was dispatched |
 | `{"status": 409, ...}` from `add_operation` naming several work centers | Ambiguous `work_center` string | Pass the `id` (from `list_work_centers`) or a more specific name |

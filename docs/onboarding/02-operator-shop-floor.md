@@ -98,8 +98,9 @@ If the **Check In** button is greyed out or shows **Waiting**, the job isn't rea
   release it.
 - **The button says "WO on hold".** A supervisor has put the whole **work order** on hold. You can't
   check in to or start any of its steps until a supervisor resumes it (**Resume Work Order** on the
-  work order). Resuming an operation's hold won't lift it. If you were already clocked in when the
-  hold landed, you can still clock out and record what you made.
+  work order). Resuming an operation's hold won't lift it: the screen says **operation hold lifted**
+  and names the work-order hold, and the job comes back to your list still marked **WO on hold**. If
+  you were already clocked in when the hold landed, you can still clock out and record what you made.
 - **The job is blocked.** There may be a reported problem (missing material, machine down, quality hold) stopping it.
 
 What to do: pick the next job in the list and let your supervisor know the top job is stuck — but if

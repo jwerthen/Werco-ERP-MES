@@ -633,7 +633,8 @@ def operations_worked_out_of_sequence(db: Session, work_order: WorkOrder) -> lis
 #                     only what the strict routing rule now blocks (via the thin wrapper
 #                     ``demote_operations_for_sequencing``, whose call site is unchanged).
 #   "all_unworked" -- POST /work-orders/{id}/resume landing a held job back at DRAFT (no
-#                     release on record): every un-worked READY operation, laser nests
+#                     release on record), and PUT /work-orders/{id} moving a non-DRAFT job
+#                     to ``status: draft``: every un-worked READY operation, laser nests
 #                     included (``exempt_laser=False``), because a DRAFT work order must
 #                     not leave cards on the dispatch board and the kiosk.
 #
@@ -688,8 +689,8 @@ def demote_ready_operations(
     worked material would strand real labor behind a gate the operator already passed.
 
     ``exempt_laser`` (default True) makes a laser dispatch pool a no-op -- the sequencing
-    flag is inert there. The resume-to-DRAFT caller passes ``False``: a DRAFT nest package
-    must not leave READY nests on the floor's board either.
+    flag is inert there. The two DRAFT callers (resume-to-DRAFT, PUT to draft) pass
+    ``False``: a DRAFT nest package must not leave READY nests on the floor's board either.
 
     The ``"sequencing"`` scope is also a no-op on a POOLED work order: switching
     sequencing OFF needs no demotion, promotion heals that direction by itself on the next
