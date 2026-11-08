@@ -621,6 +621,9 @@ class TestSinglePromotionImplementation:
         monkeypatch.setattr(shop_floor_endpoint, "promote_ready_operations", counting_promote)
 
         if seam == "release":
+            # Exactly as POST /work-orders/{id}/release does it: RELEASED is written FIRST,
+            # then the seam promotes -- the rule never promotes a DRAFT work order.
+            wo.status = WorkOrderStatus.RELEASED
             work_order_state_service.release_first_ready_operation(wo, db_session)
         elif seam == "completion":
             work_order_state_service.release_next_ready_operation(db_session, wo, ops[0])
