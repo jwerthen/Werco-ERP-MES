@@ -15,6 +15,7 @@ The blocker MESSAGES are kept verbatim from the endpoints so a kiosk that shows
 a resolver blocker and a kiosk that gets the endpoint's 400 show the same text.
 """
 
+import math
 import re
 from typing import Any, Iterable, List, Optional, Sequence
 
@@ -108,10 +109,12 @@ MSG_DRAFT_CANNOT_BE_HELD = (
 # and with it attach a scrap reason to new scrap, is refused 403 with API_TOKEN_SCRAP
 # before any write and before any audit row: clock-out, /production (whose command the
 # Hank production task also runs -- refused there at preparation and at execution), both
-# close verbs, force-complete and both generic PUTs. ``api_token_declares_scrap`` is the one predicate they all call. A request
-# whose scrap delta is zero is untouched, so a token's full-count close, good-only
-# production report and good-only clock-out still work. A crew-station badge token is a
-# person (``_token_scope == "kiosk"``, no ``_api_token_id``) and is never refused here.
+# close verbs, force-complete and both generic PUTs. ``api_token_declares_scrap`` is the
+# one predicate they all call. A request whose scrap delta is zero is untouched, so a
+# token's full-count close, good-only production report and good-only clock-out still work.
+# A crew-station badge token is a person (``_token_scope == "kiosk"``, no
+# ``_api_token_id``) and is never refused here. ``tests/api/test_api_token_scrap_refusal.py``
+# enumerates every scrap writer (ORM writes, request schemas, MCP tools): a new one fails CI.
 API_TOKEN_SCRAP = (
     "Scrap must be reported by a person (at the kiosk, with a crew badge, or signed in at a desk), not an API "
     "token: a scrap count is quality evidence someone has to have seen. Record good pieces only, or leave the "
@@ -138,17 +141,28 @@ def api_token_declares_scrap(user: Any, scrap_delta: Optional[float]) -> bool:
     """True when a standing API token's request would RAISE a recorded scrap quantity.
 
     The one predicate behind API_TOKEN_SCRAP (owner decision 2026-11-07). ``scrap_delta``
-    is how much the request would ADD to the stored scrap it writes: zero, a negative (a
-    lowering, which the verbs that refuse it refuse for everyone) and a non-number never
-    count, so a token's zero-scrap request is untouched. A crew-station badge token is a
-    person and is never refused (``is_api_token_credential``).
+    is how much the request would ADD to the stored scrap it writes: ``None`` (omitted),
+    zero and a negative (a lowering, which the verbs that refuse it refuse for everyone)
+    never count, so a token's zero-scrap request is untouched. A crew-station badge token is
+    a person and is never refused (``is_api_token_credential``).
+
+    A delta that is not a finite number FAILS CLOSED. NaN slips past every ``> 0`` / ``< 0``
+    comparison, and clock-out has no non-finite check of its own, so a token's
+    ``quantity_scrapped: NaN`` would otherwise close the entry and overwrite its (and the
+    operation's) recorded scrap with NaN. Every other caller refuses a non-finite number for
+    everyone before it asks (a 400 in the handler, a 422 in its schema) or, at the office
+    close, never derives one, so only that hole changes.
     """
     if not is_api_token_credential(user):
         return False
-    try:
-        delta = float(scrap_delta or 0)
-    except (TypeError, ValueError):
+    if scrap_delta is None:
         return False
+    try:
+        delta = float(scrap_delta)
+    except (TypeError, ValueError):
+        return True
+    if not math.isfinite(delta):
+        return True
     return delta > QTY_EPSILON
 
 
