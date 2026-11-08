@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 import { useToast } from '../components/ui/Toast';
+import { apiErrorDetail } from '../utils/apiError';
 
 /**
  * useOptimisticMutation — generalizes the optimistic-update + rollback pattern
@@ -53,13 +54,7 @@ import { useToast } from '../components/ui/Toast';
  *   // in a handler: run({ row, index });
  */
 
-const serverErrorDetail = (err: unknown, fallback: string): string => {
-  const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-  if (typeof detail === 'string' && detail.trim()) return detail;
-  const message = (err as { message?: unknown })?.message;
-  if (typeof message === 'string' && message.trim()) return message;
-  return fallback;
-};
+const serverErrorDetail = apiErrorDetail;
 
 export interface UseOptimisticMutationOptions<T, Ctx = void> {
   /** Apply the optimistic UI change. Runs synchronously, before `mutate()` is awaited. */

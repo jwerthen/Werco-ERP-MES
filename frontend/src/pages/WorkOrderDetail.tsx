@@ -2232,6 +2232,7 @@ export default function WorkOrderDetail() {
         entityType="work_order"
         entityId={workOrder.id}
         title="AI for this work order"
+        onApplied={() => loadWorkOrder()}
       />
 
       {/* Work Order Information — compact KPI strip */}

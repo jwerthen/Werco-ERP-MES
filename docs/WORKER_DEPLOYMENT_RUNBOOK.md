@@ -421,7 +421,7 @@ this deliberately (§8).
 |---|---|---|---|
 | `cleanup_old_logs_job` | Sun 02:00 | **Physical DELETEs**: completed `Job` rows and `NotificationLog` rows older than 90 days; read `Notification` rows older than 90 days; unread notifications of deactivated users. **Audit logs are explicitly excluded** and are never touched. | No. |
 | `archive_aged_audit_logs_job` | 1st of month, 03:00 | Exports audit rows past their retention window to NDJSON in `AUDIT_ARCHIVE_DIR`. **Exports only — never deletes.** Needs durable storage or the export vanishes with the container (§8). | No. |
-| `aggregate_ai_learning_job` | 05:30 daily | Writes `AIRecommendation` rows and emits `work_order_blocker_escalated` events — **which re-enter the notification outbox and generate further notifications.** Guarded against duplicating an existing pending recommendation. | Indirectly, via the events it emits. |
+| `aggregate_ai_learning_job` | 05:30 daily | Writes `AIRecommendation` rows and emits `work_order_blocker_escalated` events — **which re-enter the notification outbox and generate further notifications.** At most one escalation card per blocker (a pending, snoozed, accepted or dismissed one suppresses another); skipped when escalating would change nothing or the work order is terminal or deleted; the event fires only when a card is minted. Never applies a recommendation and makes no LLM call. | Indirectly, via the events it emits. |
 | `check_hank_watches_job` | every 5 min | Checks at most 100 due personal watches. Rechecks live owner/company/access and current alert preference, commits each task independently, and saves a terminal receipt with any enabled notification atomically. | Only the watch owner, in-app once on a matched condition when alerts are enabled; no email/SMS. |
 
 #### Group 3 — EMAILS REAL PEOPLE. These are the ones to stage carefully.
@@ -660,7 +660,7 @@ easy to miss.
 | `WEBHOOK_ENCRYPTION_KEY` | Outbound webhook secrets. |
 | ★ `INTEGRATION_ENCRYPTION_KEY` | Carrier secrets; config **fails loudly** without it in production. |
 | ★ `STORAGE_BACKEND` + `S3_*` / `AWS_*` | Label and document jobs write Documents; Railway has no persistent volume by default. |
-| `ANTHROPIC_API_KEY` | `aggregate_ai_learning_job`. |
+| `ANTHROPIC_API_KEY` | `process_hank_intake_file_job` (saved Hank PDF intake). `aggregate_ai_learning_job` makes no LLM calls. |
 | ★ `AUDIT_ARCHIVE_DIR` | Only when you arm the monthly archive cron — and only pointing at durable storage (§8). |
 | `TWILIO_*`, `SMS_DEFAULT_REGION` | Only if SMS is in use. |
 | ★ `TZ` | Unset ⇒ UTC ⇒ "6 AM" is 01:00 Central. |

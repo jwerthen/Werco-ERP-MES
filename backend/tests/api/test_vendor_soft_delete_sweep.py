@@ -489,31 +489,36 @@ def _po_recommendation(db: Session, part_id: int, *, vendor_id: int = None) -> A
 def test_ai_draft_po_fallback_vendor_skips_deleted_vendor(db_session: Session):
     """The fallback branch had NO mask of any kind: ``order_by(Vendor.id.asc()).first()``
     happily returned the tenant's oldest vendor, deleted or not -- for this shop, VND-001
-    from the 100-supplier ASL load."""
+    from the 100-supplier ASL load.
+
+    Owner ruling 3 removed the fallback outright: an arbitrary oldest vendor is not a
+    supplier choice a person can meaningfully approve with Accept & apply. A part with no
+    primary supplier is now refused, so no vendor -- removed OR live -- is ever named.
+    """
     admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
     doomed = make_vendor(db_session, company_id=1)  # lowest id in the tenant
     _soft_delete_vendor(db_session, doomed, admin.id)
     part = _make_part(db_session, part_type="raw_material", reorder_quantity=25)
     rec = _po_recommendation(db_session, part.id)
 
-    applier = AIActionApplier(db_session, company_id=1, user=admin)
-    with pytest.raises(AIActionApplyError, match="No vendor available"):
-        applier.apply(rec)
+    with pytest.raises(AIActionApplyError, match="has no primary supplier"):
+        AIActionApplier(db_session, company_id=1, user=admin).apply(rec)
     db_session.rollback()
+    assert db_session.query(PurchaseOrder).count() == 0
 
-    # Positive control: with a live vendor present the fallback resolves -- to the LIVE one,
-    # even though the deleted vendor still sorts first by id.
-    live = make_vendor(db_session, company_id=1)
+    # Formerly the positive control: with a live vendor present the fallback resolved to
+    # it. There is no fallback any more, so it is refused the same way.
+    make_vendor(db_session, company_id=1)
     rec2 = _po_recommendation(db_session, part.id)
-    result = AIActionApplier(db_session, company_id=1, user=admin).apply(rec2)
-    db_session.commit()
-    po = db_session.query(PurchaseOrder).filter(PurchaseOrder.id == result["purchase_order_id"]).one()
-    assert po.vendor_id == live.id
+    with pytest.raises(AIActionApplyError, match="has no primary supplier"):
+        AIActionApplier(db_session, company_id=1, user=admin).apply(rec2)
+    db_session.rollback()
+    assert db_session.query(PurchaseOrder).count() == 0
 
 
 def test_ai_draft_po_explicit_vendor_skips_deleted_vendor(db_session: Session):
-    """The explicit branch reads ``action["vendor_id"] or part.primary_supplier_id`` -- and
-    that FK is stale by construction, since no vendor-delete path clears it. So this branch
+    """The Accept & apply plan reads the part's CURRENT ``primary_supplier_id`` -- and that
+    FK is stale by construction, since no vendor-delete path clears it. So this path
     reaches a removed supplier without anyone typing its id."""
     admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
     doomed = make_vendor(db_session, company_id=1)
@@ -521,8 +526,8 @@ def test_ai_draft_po_explicit_vendor_skips_deleted_vendor(db_session: Session):
     _soft_delete_vendor(db_session, doomed, admin.id)
     rec = _po_recommendation(db_session, part.id)
 
-    # The message matters as much as the refusal: ai_learning.py surfaces it verbatim as
-    # ``apply_error`` on the ActionInbox card, the recommendation fails identically on every
+    # The message matters as much as the refusal: the Accept & apply plan shows it verbatim
+    # as the card's blocked reason (and /apply returns it as the 409 detail), it recurs on every
     # retry, and "Vendor not found for this company" sends a buyer hunting a tenancy bug
     # instead of repointing the part's primary supplier.
     with pytest.raises(AIActionApplyError, match="has been removed"):

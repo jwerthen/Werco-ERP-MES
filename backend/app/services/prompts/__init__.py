@@ -9,11 +9,14 @@ Bump the ``version`` (semver) whenever prompt text changes and record the
 change in ``CHANGELOG.md`` in this package. Prompt text should be stable,
 deterministic content (no timestamps, no per-request values) — it forms the
 cacheable prefix for prompt caching.
+
+Retired ids stay reserved and are never reused, because historical
+``ai_usage_events`` / ``ai_interaction_events`` rows reference them:
+``auto_execute_decision`` (retired 2026-11-05, owner ruling 3 -- see CHANGELOG.md).
 """
 
 from typing import Dict
 
-from app.services.prompts.auto_execute import AUTO_EXECUTE_PROMPT
 from app.services.prompts.base import Prompt
 from app.services.prompts.copilot import COPILOT_CHAT_PROMPT, NL_SEARCH_INTENT_PROMPT
 from app.services.prompts.extraction import (
@@ -46,7 +49,6 @@ PROMPT_REGISTRY: Dict[str, Prompt] = {
         QMS_CLAUSE_EXTRACTION_PROMPT,
         COPILOT_CHAT_PROMPT,
         NL_SEARCH_INTENT_PROMPT,
-        AUTO_EXECUTE_PROMPT,
         HANK_INTAKE_PROMPT,
     )
 }
@@ -67,6 +69,5 @@ __all__ = [
     "QMS_CLAUSE_EXTRACTION_PROMPT",
     "COPILOT_CHAT_PROMPT",
     "NL_SEARCH_INTENT_PROMPT",
-    "AUTO_EXECUTE_PROMPT",
     "HANK_INTAKE_PROMPT",
 ]

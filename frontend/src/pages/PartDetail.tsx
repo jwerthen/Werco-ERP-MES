@@ -192,7 +192,7 @@ export default function PartDetail() {
         </Button>
       </div>
 
-      <ContextualAIStrip entityType="part" entityId={part.id} title="AI for this part" />
+      <ContextualAIStrip entityType="part" entityId={part.id} title="AI for this part" onApplied={() => loadPart()} />
 
       {/* Quick Stats */}
       <MiniStatStrip className="grid grid-cols-2 sm:grid-cols-4 gap-2">

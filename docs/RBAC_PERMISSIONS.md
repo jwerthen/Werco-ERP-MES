@@ -109,7 +109,12 @@ orders to land DRAFT, keep release an explicit separate call (the header-update 
 set an imported or hand-keyed nest package back to DRAFT with its operations pending, never mix
 manual nests with a package import, and refuse operation names that are file names — see
 [MCP.md → DRAFT guarantees](MCP.md#9-draft-guarantees). The two Excel-cutover loaders are not
-tools at all.
+tools at all, and neither is AI **Accept & apply** (`POST /ai/recommendations/{id}/apply`): under
+owner ruling 3 only a person signed in to the app runs an AI recommendation's action, so it is in
+`catalog.EXCLUDED_OPERATIONS`, and the route refuses API tokens besides. An agent on an API token
+also gets a 403 the same person would not get in the UI when it tries to mark an AI action card
+handled — see [Credential policy for judgment writes](#credential-policy-for-judgment-writes)
+and [AI recommendations (Action Inbox)](#ai-recommendations-action-inbox).
 
 Operationally: give agents a **dedicated user** (e.g. *Werco Assistant*, at the role the agent
 needs — the owner's assistant is an Admin; a Manager or a narrower role tightens what it can do) so
@@ -117,6 +122,29 @@ the audit trail attributes agent writes and the role can be changed without touc
 account — and hand it an **API token** (`POST /api-tokens/`, Admin only) rather than a 15-minute
 access token: same role, same audit attribution, revocable with a reason, and fenced from `/auth`
 and `/api-tokens` so it can never mint another credential.
+
+### Credential policy for judgment writes
+
+A few writes record a **person's judgment** — not just a permitted action — and the owner rulings
+of 2026-11-05 restrict which *credential* may carry them, on top of the role gate. The predicates
+live once, in `backend/app/core/credentials.py`, and read the credential `get_current_user`
+stamped on the request:
+
+| Predicate | Refuses | Allows |
+|---|---|---|
+| `is_interactive_person` | A long-lived **API token**, and any station- or badge-scoped (`kiosk`) token | A person signed in with their own access JWT |
+| `is_api_token_credential` (the write is refused when true) | A long-lived **API token** | An interactive session, and a crew-station badge token (a person standing at the kiosk) |
+
+Writes that apply them:
+
+| Write | Predicate | Refusal |
+|---|---|---|
+| AI **Accept & apply** — `POST /ai/recommendations/{id}/apply` (owner ruling 3) | `is_interactive_person` | **403**; also not an MCP tool |
+| **Mark handled** — record-only `POST /ai/recommendations/{id}/accept` on an AI action card (owner ruling 3) | `is_interactive_person` | **403** |
+
+The role gate still applies after the credential check: the person must hold a role that could
+apply the action. Dismiss, snooze and feedback on a recommendation stay open to any credential.
+`hank_task_service.py` and its siblings carry older inline copies of the stricter predicate.
 
 ## Permission Matrix
 
@@ -2582,6 +2610,67 @@ and writes an `EXPORT` audit row through `AuditService`:
 >
 > Empty result → nothing to do. Non-empty → repoint each row with `PUT /downtime/{id}` (Admin /
 > Manager / Supervisor) at a machine or job the owning company actually has.
+
+### AI recommendations (Action Inbox)
+
+| Permission | Admin | Manager | Supervisor | Operator | Quality | Shipping | Viewer |
+|------------|:-----:|:-------:|:----------:|:--------:|:-------:|:--------:|:------:|
+| List recommendations; dismiss, snooze, send feedback (`/ai/recommendations`, `…/dismiss`, `…/snooze`, `…/feedback`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Accept a **suggest-only** recommendation (record-only `…/accept`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **Accept & apply** (`…/apply`), or **Mark handled** (record-only `…/accept`), a priority / blocker / draft-PO action card | ✓ | ✓ | ✓ | | | | |
+| **Accept & apply**, or **Mark handled**, a draft-NCR action card | ✓ | ✓ | ✓ | | ✓ | | |
+| Create a recommendation (`POST /ai/recommendations`); run the aggregation (`POST /ai/aggregate`) | ✓ | ✓ | ✓ | | | | |
+| View governance (`GET /ai/governance`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+> **Owner ruling 3 (2026-11-05): nothing AI-driven executes without a named person clicking
+> Accept.** `POST /ai/recommendations/{id}/apply` is the only path that runs an AI recommendation's
+> action, and it runs it **as the person who clicked** — their role, their audit attribution, the
+> recommendation recorded in each audit row's `extra_data`. There is no system actor and no role
+> bypass; the nightly job and `POST /ai/aggregate` mint and sweep cards and never apply one.
+> Besides the role in the matrix, Accept & apply requires, in order: a pending card with an
+> allowlisted `apply_on_accept` action (409); a person in an interactive session — **API tokens
+> and kiosk/station tokens get 403** ([credential policy](#credential-policy-for-judgment-writes));
+> a non-read-only company context (403); and **company AI egress on** (`allow_ai_egress`, 403
+> while off). It is not an MCP tool. Superuser / Platform Admin pass the role check as everywhere.
+>
+> **Action cards are closed only by someone who could act on them.** Record-only Accept on an
+> action card ("Mark handled") needs the same role as Accept & apply and an interactive session,
+> but **not** AI egress, because nothing executes. A lower role or an API token gets 403 and the
+> card stays open for the people who can apply it; anyone can still snooze it or send feedback.
+> This exists because a blocker-triage card is minted once per blocker: an Operator or an agent
+> who accepted it used to retire it for good. Suggest-only cards remain acceptable by anyone.
+>
+> **Dismiss, snooze and feedback deliberately stay open to every authenticated user and every
+> credential**, including on action cards (a design decision for this release). They run
+> nothing, and gating them would leave an Operator unable to clear their own inbox. The gate
+> above is therefore partial: Dismiss retires a card as permanently as Mark handled does (and
+> also records a `rejected` learning signal). **The owner decided on 2026-11-07 that Dismiss on an
+> action card stays open to every role** — it does not take the `mark_handled_refusal` gate. That is a
+> decision, not an oversight.
+>
+> **The AI-egress gate on Accept & apply is a deliberate reading of ruling 3, confirmed by the
+> owner on 2026-11-07.** Accept & apply makes no LLM call — it is a deterministic, tenant-local write — so
+> the coupling is to the company's "AI actions" switch, not to data egress. While egress is off
+> (the default) no tenant gets Accept & apply; cards show the plan and anyone whose role could
+> apply it can Mark handled. Dropping the gate is one check in `apply_refusal` plus copy, and is an owner decision.
+>
+> **The AI door is never broader than the record's own route.** Draft PO and blocker writes match
+> their routes (Admin / Manager / Supervisor). Filing an NCR (`POST /quality/ncr`) is open to any
+> authenticated user — `quality_record_service.WRITE_ROLES` (Admin / Manager / Quality) governs
+> NCR *edits*, disposition, void and restore, not filing — so the Quality+ (incl. Supervisor) set
+> for the draft-NCR card is narrower than the direct route, not wider.
+>
+> **What the person reviews is what changes.** An action card whose action names a different work
+> order, part or blocker than the record its "Open record" link points at is refused (409, plan
+> blocked) rather than applied, and a blocker card on a missing, deleted or terminal job is a
+> closed target that is refused the same way.
+>
+> The role sets come from `ACTION_MIN_ROLE` in `backend/app/services/ai_action_applier.py`
+> (Supervisor and up for priority, blocker and PO actions; Quality, Supervisor, Manager and Admin
+> for NCR). The frontend reflects them through the server-computed `apply_action.can_apply` /
+> `can_mark_handled` flags rather than its own role map. See
+> [API.md → AI Recommendations](API.md#ai-recommendations-action-inbox) and
+> [AI_ALWAYS_ON.md](AI_ALWAYS_ON.md).
 
 <a id="werco-copilot-read-only-ai-chat"></a>
 

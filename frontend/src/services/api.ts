@@ -2505,22 +2505,32 @@ class ApiService {
     return response.data;
   }
 
-  async acceptAIRecommendation(
-    id: number,
-    reason?: string,
-    apply: boolean = false
-  ): Promise<AIRecommendationApplyResult> {
+  /**
+   * Record-only Accept ("Accept" on a suggest-only card, "Mark handled" on an action
+   * card). Nothing in the ERP changes; the server refuses `apply` here (422), so it is
+   * never sent. The single door that runs an action is applyAIRecommendation.
+   */
+  async acceptAIRecommendation(id: number, reason?: string): Promise<AIRecommendationApplyResult> {
     const response = await this.api.post<AIRecommendationApplyResult>(`/ai/recommendations/${id}/accept`, {
       reason,
-      apply,
     });
     return response.data;
   }
 
-  async applyAIRecommendation(id: number, reason?: string): Promise<AIRecommendationApplyResult> {
+  /**
+   * Accept & apply: the ONLY way an AI recommendation changes ERP records, and only on
+   * a person's click. `expectedFingerprint` is the list row's `apply_action.fingerprint`;
+   * the server answers 409 if the plan changed since the person loaded it, and 403/409
+   * for every other refusal, leaving the card pending. Server-gated: never optimistic.
+   */
+  async applyAIRecommendation(
+    id: number,
+    expectedFingerprint: string,
+    reason?: string
+  ): Promise<AIRecommendationApplyResult> {
     const response = await this.api.post<AIRecommendationApplyResult>(`/ai/recommendations/${id}/apply`, {
       reason,
-      apply: true,
+      expected_fingerprint: expectedFingerprint,
     });
     return response.data;
   }

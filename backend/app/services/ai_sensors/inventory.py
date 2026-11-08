@@ -89,10 +89,11 @@ def run_inventory_risk_sensor(db: Session, company_id: int) -> int:
                 "type": "create_draft_po",
                 "part_id": part.id,
                 "part_number": part.part_number,
-                "vendor_id": part.primary_supplier_id,
+                # No vendor here: Accept & apply resolves the part's CURRENT primary supplier
+                # at click time and shows it; a mint-time vendor id would only go stale.
                 "href": f"/inventory?part={part.part_number}",
                 "suggested_qty": float(part.reorder_quantity or shortage or 0),
-                "autonomy": "auto_execute",
+                "autonomy": "apply_on_accept",
                 "dedupe_key": f"inventory_risk:part:{part.id}",
             },
             evidence=[
@@ -103,6 +104,7 @@ def run_inventory_risk_sensor(db: Session, company_id: int) -> int:
                     "safety_stock": safety,
                     "reorder_quantity": float(part.reorder_quantity or 0),
                     "is_critical": bool(part.is_critical),
+                    "primary_supplier_id_at_mint": part.primary_supplier_id,
                 }
             ],
             impact={

@@ -1,10 +1,19 @@
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from app.models.ai_learning import CANONICAL_AUTONOMY_TIERS
 from app.schemas.base import UTCModel
+
+AUTONOMY_REFUSED_DETAIL = (
+    "suggested_action.autonomy must be suggest_only or apply_on_accept; there is no auto-execute tier."
+)
+APPLY_FLAG_REFUSED_DETAIL = (
+    "apply is not accepted here: Accept only records your decision. To run the action, a person uses "
+    "Accept & apply (POST /ai/recommendations/{id}/apply)."
+)
 
 
 class AIEventType(str, Enum):
@@ -114,6 +123,42 @@ class AIRecommendationCreate(BaseModel):
     model_version: Optional[str] = Field(None, max_length=120)
     expires_at: Optional[datetime] = None
 
+    @field_validator("suggested_action")
+    @classmethod
+    def _no_auto_tier(cls, value: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Owner ruling 3: an agent- or admin-authored card may never carry an auto tier."""
+        if value is not None:
+            autonomy = value.get("autonomy")
+            # isinstance first: an unhashable value (a list, a dict) would make the set
+            # lookup raise TypeError, which Pydantic does not turn into a 422.
+            if autonomy is not None and (not isinstance(autonomy, str) or autonomy not in CANONICAL_AUTONOMY_TIERS):
+                raise ValueError(AUTONOMY_REFUSED_DETAIL)
+        return value
+
+
+BlockedKind = Literal["credential", "read_only", "egress", "role", "target"]
+
+
+class AIRecommendationApplyAction(BaseModel):
+    """What a person's Accept & apply would do RIGHT NOW (list rows only, pending action cards).
+
+    ``summary`` and ``warnings`` are resolved server-side from live records -- never from the
+    stored action's labels. ``fingerprint`` must be sent back as ``expected_fingerprint`` on
+    ``POST /ai/recommendations/{id}/apply``; a 409 means the plan changed in between.
+    ``can_apply`` is true only when nothing blocks the apply. ``can_mark_handled`` says
+    whether this person may close the card with a record-only Accept ("Mark handled").
+    ``blocked_kind`` is the first refusal: credential | read_only | egress | role | target.
+    """
+
+    action_type: str
+    summary: str
+    warnings: List[str] = Field(default_factory=list)
+    fingerprint: str
+    can_apply: bool
+    can_mark_handled: bool
+    blocked_reason: Optional[str] = None
+    blocked_kind: Optional[BlockedKind] = None
+
 
 class AIRecommendationResponse(UTCModel):
     id: int
@@ -143,6 +188,10 @@ class AIRecommendationResponse(UTCModel):
     # Deterministic Action Inbox ranking score, computed at list time (never persisted).
     # Only populated by the list endpoint; None on single-recommendation responses.
     score: Optional[float] = None
+    # List endpoint only (None elsewhere): the resolved Accept & apply plan for a pending
+    # action card, and the server-computed link to the record the card is about.
+    apply_action: Optional[AIRecommendationApplyAction] = None
+    target_href: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -150,16 +199,42 @@ class AIRecommendationResponse(UTCModel):
 
 class AIRecommendationActionRequest(BaseModel):
     reason: Optional[str] = Field(None, max_length=2000)
-    # When true, run the allowlisted action applier after marking accepted (Phase 2).
-    apply: bool = False
+
+
+class AIRecommendationAcceptRequest(AIRecommendationActionRequest):
+    """Record-only Accept. ``apply=true`` is refused (422): applying is its own door."""
+
+    apply: bool = Field(
+        False,
+        description=(
+            "Must be false (true is refused with 422). Accept only records your decision; running the "
+            "action is a person's Accept & apply in the Werco app, which agents and API tokens cannot do."
+        ),
+    )
+
+    @field_validator("apply")
+    @classmethod
+    def _refuse_apply(cls, value: bool) -> bool:
+        if value:
+            raise ValueError(APPLY_FLAG_REFUSED_DETAIL)
+        return value
+
+
+class AIRecommendationApplyRequest(BaseModel):
+    """Accept & apply. ``expected_fingerprint`` is the list's ``apply_action.fingerprint``."""
+
+    reason: Optional[str] = Field(None, max_length=2000)
+    expected_fingerprint: str = Field(..., min_length=8, max_length=64)
 
 
 class AIRecommendationApplyResponse(UTCModel):
-    """Accept + optional apply result."""
+    """Accept (record-only, ``applied`` false) or Accept & apply (``applied`` true) result."""
 
     recommendation: AIRecommendationResponse
     applied: bool = False
     apply_result: Optional[Dict[str, Any]] = None
+    # Always null since ruling 3: a failed apply is a 403/409 that rolls the accept back,
+    # never a 200 that records "accepted" while nothing ran. Kept for client compatibility.
     apply_error: Optional[str] = None
 
 
@@ -215,5 +290,5 @@ class AIAggregationSummary(BaseModel):
     snoozed_recommendations_woken: int = 0
     sensor_recommendations_created: int = 0
     learner_recommendations_created: int = 0
-    auto_executed: int = 0
-    auto_execute_failed: int = 0
+    # Open cards retired because their blocker closed or their work order finished/was deleted.
+    closed_target_recommendations_staled: int = 0
