@@ -26,7 +26,6 @@ from app.core.credentials import is_api_token_credential
 from app.models.time_entry import TimeEntry
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.services.work_order_state_service import (
-    QTY_EPSILON,
     TERMINAL_WO_STATUSES,
     AccountingStrand,
     OperationAccounting,
@@ -115,6 +114,9 @@ MSG_DRAFT_CANNOT_BE_HELD = (
 # A crew-station badge token is a person (``_token_scope == "kiosk"``, no
 # ``_api_token_id``) and is never refused here. ``tests/api/test_api_token_scrap_refusal.py``
 # enumerates every scrap writer (ORM writes, request schemas, MCP tools): a new one fails CI.
+# Known residual, left open for an owner decision because closing it changes zero-scrap
+# behavior: a zero-scrap request that only re-labels a recorded scrap REASON (clock-out,
+# PUT /work-orders/{id}, force-complete) is not refused -- docs/API.md, "Known residual".
 API_TOKEN_SCRAP = (
     "Scrap must be reported by a person (at the kiosk, with a crew badge, or signed in at a desk), not an API "
     "token: a scrap count is quality evidence someone has to have seen. Record good pieces only, or leave the "
@@ -152,6 +154,14 @@ def api_token_declares_scrap(user: Any, scrap_delta: Optional[float]) -> bool:
     operation's) recorded scrap with NaN. Every other caller refuses a non-finite number for
     everyone before it asks (a 400 in the handler, a 422 in its schema) or, at the office
     close, never derives one, so only that hole changes.
+
+    ANY positive delta counts -- deliberately ``> 0``, not ``> QTY_EPSILON``. The writers
+    behind this predicate store scrap, overwrite its reason and file an NCR at ``> 0``
+    (clock-out, /production, the floor close, both PUTs' setattr, force-complete), so a
+    tolerance here was room for a token to slip a 5e-10 "declaration" past the refusal and
+    have it written -- an NCR in the bound user's name, a person's scrap reason replaced.
+    ``QTY_EPSILON`` is a comparison tolerance for counts, not a licence to write scrap.
+    Exact zero (a re-sent total minus the same stored float) still never counts.
     """
     if not is_api_token_credential(user):
         return False
@@ -163,7 +173,7 @@ def api_token_declares_scrap(user: Any, scrap_delta: Optional[float]) -> bool:
         return True
     if not math.isfinite(delta):
         return True
-    return delta > QTY_EPSILON
+    return delta > 0
 
 
 # The floor completion audit row is REQUIRED evidence on a short close or a scrap

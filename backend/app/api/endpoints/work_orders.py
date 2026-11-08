@@ -5740,12 +5740,12 @@ def update_operation(
     ]
     # Owner decision 2026-11-07: a standing API token may not declare scrap -- a rise of
     # quantity_scrapped (open or COMPLETE operation alike) is refused with the scrap text.
-    if (
-        "quantity_scrapped" in count_changes
-        and update_data["quantity_scrapped"] is not None
-        and api_token_declares_scrap(
-            current_user, float(update_data["quantity_scrapped"]) - float(operation.quantity_scrapped or 0)
-        )
+    # Judged on the raw value, NOT through count_changes: that list compares with
+    # QTY_EPSILON, so a sub-epsilon rise would skip this refusal (and the count-judgment one
+    # below) while the setattr loop still wrote it. For a person the predicate answers False
+    # before it looks at the delta, and a token re-sending the stored value is an exact zero.
+    if update_data.get("quantity_scrapped") is not None and api_token_declares_scrap(
+        current_user, float(update_data["quantity_scrapped"]) - float(operation.quantity_scrapped or 0)
     ):
         raise HTTPException(status_code=403, detail=API_TOKEN_SCRAP)
     # This PR's credential rule: hand-editing an operation's counts is a judgment about

@@ -2098,10 +2098,18 @@ company-scoped.
 >   | `PUT /work-orders/operations/{id}` | `quantity_scrapped` above the stored scrap, on an open or a COMPLETE operation | Right after the stale-version 409; any other count change keeps the count-judgment text below |
 >   | `PUT /work-orders/{id}` | `quantity_scrapped` above the header's recorded scrap | Right after the stale-version 409; before the status / due-date / `quantity_ordered` / sequencing refusals. Re-sending the recorded value, or omitting it, works (the `update_work_order` MCP tool calls this route) |
 >
->   A delta that is not a finite number counts as a declaration (the predicate fails closed: a
->   token's `quantity_scrapped: NaN` on clock-out is **403**); `null`, zero and a lowering never do.
->   A request that declares no new scrap — a good-only production report or clock-out, a full-count
->   close, re-sending the recorded scrap — is byte-identical to before.
+>   **Any** positive amount counts, however small: the predicate applies no tolerance (it does not
+>   use the `1e-9` quantity epsilon the count comparisons use), because every writer behind it
+>   stores scrap, its reason and an NCR at `> 0` — a token's `quantity_scrapped_delta: 5e-10` with
+>   `open_ncr: true` is **403** with no NCR, and on the office close a sub-epsilon rise (which that
+>   verb would not have written) is **403** too rather than a silent full-count close. On
+>   `PUT /work-orders/operations/{id}` the rise is judged on the raw value, not through the
+>   epsilon-compared list of changed counts. A delta that is not a finite number counts as a
+>   declaration (the predicate fails closed: a token's `quantity_scrapped: NaN` on clock-out is
+>   **403**); `null`, an exact zero and a lowering never do. A request that declares no new scrap —
+>   a good-only production report or clock-out, a full-count close, re-sending the recorded scrap
+>   exactly as read (float noise included: `0.30000000000000004` back is a zero delta) — is
+>   byte-identical to before.
 > - **Short close — the same decision.** The question was about closing work short by reporting the
 >   missing pieces as scrap, and the answer leaves a token only the full-count close. A short close
 >   by either operation verb whose scrap is already on record (the request declares none), and a
@@ -2120,6 +2128,20 @@ company-scoped.
 > session and is not refused. `tests/api/test_api_token_scrap_refusal.py` enumerates every scrap
 > writer three ways (ORM writes, request schemas, MCP tools), so a new one fails CI until it is
 > guarded or listed as exempt with a reason.
+>
+> **Known residual — a scrap REASON on a request with no new scrap (open; raised with the owner).**
+> The rule above refuses a token that adds scrap, and attaching a reason to new scrap with it; a
+> request whose scrap delta is zero is deliberately untouched. Three such requests can still change
+> the reason on scrap a person already recorded: `POST /shop-floor/clock-out/{id}` writes a sent
+> `scrap_reason` / `scrap_reason_code_id` onto the caller's own time entry even with
+> `quantity_scrapped: 0` (that entry may carry scrap the same user reported earlier from a badge);
+> `PUT /work-orders/{id}` applies `scrap_reason` through its setattr with no quantity change; and
+> `POST /work-orders/{id}/complete` re-sending the header's recorded `quantity_scrapped` replaces
+> the header's `scrap_reason` and `scrap_reason_code_id`. The scrap Pareto groups by
+> `TimeEntry.scrap_reason_code_id`, so these re-categorize scrap a person declared.
+> `PUT /work-orders/operations/{id}` is not one of them — it refuses a token's `scrap_reason` change
+> (the count-judgment **403** above). Closing the three would change zero-scrap behavior, which this
+> PR keeps byte-identical, so it waits on an owner decision.
 >
 > **Read models.** `WorkOrderOperationResponse` (every response built through
 > `_enrich_work_order_operations` — `GET /work-orders/{id}`, by-number, create, duplicate, both

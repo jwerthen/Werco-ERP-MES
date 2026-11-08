@@ -317,8 +317,12 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 >     `PUT /work-orders/{id}`. The question was about closing work short by reporting the missing
 >     pieces as scrap, and the answer leaves a token only the full-count close: a short close by
 >     either complete verb (also one whose scrap is already on record) and a force-complete below the
->     order are refused too. A request that declares no new scrap — a good-only production report or
->     clock-out, a full-count close, re-sending the recorded scrap value — works exactly as before.
+>     order are refused too. Any positive scrap counts, however small (no rounding tolerance). A
+>     request that declares no new scrap — a good-only production report or clock-out, a full-count
+>     close, re-sending the recorded scrap value — works exactly as before. Known residual (open,
+>     raised with the owner): such a zero-scrap request can still change the reason on scrap a person
+>     already recorded, through clock-out, `PUT /work-orders/{id}` and force-complete (`docs/API.md`
+>     → "Short count at completion" → "Known residual").
 >   - **The other count judgments (this PR's extension of the same rule, not part of the question
 >     the owner answered).** A token is also refused recording good above the floor's labor count
 >     (office verb, override reason or not, and force-complete), any other count edit through

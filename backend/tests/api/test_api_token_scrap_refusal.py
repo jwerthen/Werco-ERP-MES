@@ -213,7 +213,15 @@ class TestThePredicate:
         assert api_token_declares_scrap(self.TOKEN, 0.5) is True
         assert api_token_declares_scrap(self.TOKEN, Decimal("1.5")) is True, "the PUT schemas carry Decimal"
 
-    @pytest.mark.parametrize("delta", [0, 0.0, None, -1, 1e-12, Decimal("0"), Decimal("-2")])
+    @pytest.mark.parametrize("delta", [1e-12, 5e-10, 1e-9, Decimal("1E-12"), 5e-324])
+    def test_a_token_raising_scrap_by_less_than_the_quantity_tolerance_is_refused(self, delta):
+        """The writers behind the predicate store scrap, its reason and an NCR at ``> 0``, so the
+        predicate tolerates nothing they do not: ``QTY_EPSILON`` (1e-9) is a comparison tolerance
+        for counts, never room for a token to write a sub-epsilon scrap (see
+        ``TestSubEpsilonScrapFromAToken`` for what each route used to do with one)."""
+        assert api_token_declares_scrap(self.TOKEN, delta) is True
+
+    @pytest.mark.parametrize("delta", [0, 0.0, -0.0, None, -1, -1e-12, Decimal("0"), Decimal("-2")])
     def test_a_token_declaring_nothing_new_is_not(self, delta):
         assert api_token_declares_scrap(self.TOKEN, delta) is False
 
@@ -886,6 +894,194 @@ class TestNonFiniteScrapFromAToken:
         else:
             assert resp.status_code in (403, 422), resp.text
         assert _world(db_session) == before
+
+
+# --------------------------------------------------------------------------- #
+# A sub-epsilon scrap from a token is still a declaration
+# --------------------------------------------------------------------------- #
+SUB_EPSILON = 5e-10  # below QTY_EPSILON (1e-9), above zero
+PERSONS_REASON = "crack (person saw it)"
+
+
+def _person_scrapped_op(db: Session, user: User, *, status: OperationStatus = OPEN, good: float = 10):
+    """A 10-piece operation whose ``good`` and 1 scrap -- with a PERSON's reason -- are recorded on
+    a closed labor entry: the record a token's sub-epsilon "declaration" would relabel."""
+    wc = make_work_center(db)
+    wo, (op,) = make_routing(db, work_centers=[wc], statuses=[status])
+    add_entry(db, user, op, produced=good, scrapped=1)
+    set_op(db, op, quantity_complete=good, quantity_scrapped=1, scrap_reason=PERSONS_REASON)
+    return wc, wo, op
+
+
+class TestSubEpsilonScrapFromAToken:
+    """The predicate used to answer ``delta > QTY_EPSILON`` while every writer behind it stores
+    scrap, overwrites its reason and files an NCR at ``> 0``. A token sending 5e-10 therefore
+    passed the refusal and was written: /production filed an NCR in the bound user's name,
+    a full-count floor close replaced a person's recorded reason, clock-out raised the entry's and
+    the operation's scrap, and the two PUTs and force-complete wrote it through their setattr. Each
+    route below now refuses it 403 writing nothing; a request with no scrap rise is unchanged."""
+
+    def test_clock_out(self, client, db_session, admin_headers):
+        ann = make_user(db_session)
+        _, _, op, entry = _running_op(db_session, ann, good=4, scrapped=1)
+        headers = _token(client, admin_headers, ann)
+        before = _world(db_session)
+
+        resp = client.post(
+            CLOCK_OUT_URL.format(entry=entry.id),
+            json={"quantity_produced": 1, "quantity_scrapped": SUB_EPSILON, "scrap_reason": "token relabel"},
+            headers=headers,
+        )
+        _assert_refused_writing_nothing(db_session, resp, before)
+
+    def test_production_report_with_an_ncr(self, client, db_session, admin_headers):
+        ann = make_user(db_session)
+        _, _, op, _ = _running_op(db_session, ann, good=4, scrapped=1)
+        headers = _token(client, admin_headers, ann)
+        before = _world(db_session)
+
+        resp = client.post(
+            PRODUCTION_URL.format(op=op.id),
+            json={
+                "quantity_scrapped_delta": SUB_EPSILON,
+                "scrap_reason": "token relabel",
+                "open_ncr": True,
+                "request_id": str(uuid4()),
+            },
+            headers=headers,
+        )
+        _assert_refused_writing_nothing(db_session, resp, before)
+        assert before["ncrs"] == 0, "no NCR filed in the bound user's name"
+
+    def test_hank_production_task_at_preparation(self, client, db_session, admin_headers, test_user, hank_running):
+        op, _ = hank_running
+        headers = _token(client, admin_headers, test_user)
+        before = _world(db_session)
+
+        resp = propose(
+            client,
+            headers,
+            "report_production",
+            {"operation_id": op.id, "quantity_scrapped_delta": SUB_EPSILON, "scrap_reason": "token relabel"},
+        )
+        _assert_refused_writing_nothing(db_session, resp, before)
+
+    def test_floor_close_keeps_the_persons_reason(self, client, db_session, admin_headers):
+        ann = make_user(db_session)
+        _, _, op = _person_scrapped_op(db_session, ann)
+        headers = _token(client, admin_headers, ann)
+        before = _world(db_session)
+
+        resp = client.post(
+            COMPLETE_URL.format(op=op.id),
+            json={"quantity_scrapped": SUB_EPSILON, "scrap_reason": "token relabel"},
+            headers=headers,
+        )
+        _assert_refused_writing_nothing(db_session, resp, before)
+        assert fresh(db_session, WorkOrderOperation, op.id).scrap_reason == PERSONS_REASON
+
+    def test_the_same_floor_close_with_no_scrap_still_works(self, client, db_session, admin_headers):
+        ann = make_user(db_session)
+        _, _, op = _person_scrapped_op(db_session, ann)
+
+        resp = client.post(COMPLETE_URL.format(op=op.id), json={}, headers=_token(client, admin_headers, ann))
+        assert resp.status_code == 200, resp.text
+        row = fresh(db_session, WorkOrderOperation, op.id)
+        assert (row.status, float(row.quantity_scrapped), row.scrap_reason) == (DONE, 1, PERSONS_REASON)
+
+    def test_office_close(self, client, db_session, admin_headers, supervisor):
+        """Here a sub-epsilon rise was below the verb's own write threshold, so it used to close
+        silently at full count; it is now the scrap refusal, like every other route."""
+        _, _, op = _person_scrapped_op(db_session, make_user(db_session))
+        headers = _token(client, admin_headers, supervisor)
+        before = _world(db_session)
+
+        resp = client.post(
+            OFFICE_COMPLETE_URL.format(op=op.id),
+            params={"quantity_complete": 10, "quantity_scrapped": 1 + SUB_EPSILON, "scrap_reason": "token relabel"},
+            headers=headers,
+        )
+        _assert_refused_writing_nothing(db_session, resp, before)
+
+    def test_force_complete(self, client, db_session, admin_headers, supervisor):
+        _, wo, _ = _person_scrapped_op(db_session, make_user(db_session))
+        headers = _token(client, admin_headers, supervisor)
+        before = _world(db_session)
+
+        resp = client.post(
+            FORCE_COMPLETE_URL.format(wo=wo.id),
+            params={"quantity_complete": 10, "quantity_scrapped": SUB_EPSILON, "scrap_reason": "token relabel"},
+            headers=headers,
+        )
+        _assert_refused_writing_nothing(db_session, resp, before)
+
+    @pytest.mark.parametrize("status", [OPEN, DONE])
+    def test_operation_put(self, client, db_session, admin_headers, supervisor, status):
+        """The scrap refusal used to run only for a field in ``count_changes``, which compares with
+        ``QTY_EPSILON`` -- so a sub-epsilon rise skipped it (and the count-judgment refusal) and the
+        setattr loop wrote it."""
+        _, _, op = _person_scrapped_op(db_session, make_user(db_session), status=status)
+        headers = _token(client, admin_headers, supervisor)
+        before = _world(db_session)
+
+        resp = client.put(
+            OPERATION_PUT_URL.format(op=op.id),
+            json={
+                "version": op.version,
+                "quantity_scrapped": 1 + SUB_EPSILON,
+                "scrap_reason": PERSONS_REASON,
+                "name": "Renamed",
+            },
+            headers=headers,
+        )
+        _assert_refused_writing_nothing(db_session, resp, before)
+
+    def test_work_order_put(self, client, db_session, admin_headers, supervisor):
+        _, wo, _ = _person_scrapped_op(db_session, make_user(db_session))
+        headers = _token(client, admin_headers, supervisor)
+        before = _world(db_session)
+
+        resp = client.put(
+            WORK_ORDER_URL.format(wo=wo.id),
+            json={"version": wo.version, "quantity_scrapped": SUB_EPSILON, "scrap_reason": "token relabel"},
+            headers=headers,
+        )
+        _assert_refused_writing_nothing(db_session, resp, before)
+
+    def test_re_sending_a_float_noisy_recorded_scrap_exactly_is_no_rise(
+        self, client, db_session, admin_headers, supervisor
+    ):
+        """The other side of ``> 0``: a stored total carrying float noise (0.1 + 0.2), sent back
+        exactly as read, is a zero delta on both PUTs -- not a declaration."""
+        noisy = 0.1 + 0.2
+        assert noisy != 0.3
+        wc = make_work_center(db_session)
+        wo, (op,) = make_routing(db_session, work_centers=[wc], statuses=[OPEN])
+        set_op(db_session, op, quantity_complete=4, quantity_scrapped=noisy, scrap_reason=PERSONS_REASON)
+        wo.quantity_scrapped = noisy
+        wo.scrap_reason = PERSONS_REASON
+        db_session.commit()
+        headers = _token(client, admin_headers, supervisor)
+
+        op_resp = client.put(
+            OPERATION_PUT_URL.format(op=op.id),
+            json={"version": op.version, "quantity_scrapped": noisy, "scrap_reason": PERSONS_REASON, "name": "Renamed"},
+            headers=headers,
+        )
+        assert op_resp.status_code == 200, op_resp.text
+        wo_resp = client.put(
+            WORK_ORDER_URL.format(wo=wo.id),
+            json={
+                "version": fresh(db_session, WorkOrder, wo.id).version,
+                "quantity_scrapped": noisy,
+                "scrap_reason": PERSONS_REASON,
+                "notes": "n",
+            },
+            headers=headers,
+        )
+        assert wo_resp.status_code == 200, wo_resp.text
+        assert fresh(db_session, WorkOrderOperation, op.id).name == "Renamed"
+        assert fresh(db_session, WorkOrder, wo.id).notes == "n"
 
 
 # --------------------------------------------------------------------------- #

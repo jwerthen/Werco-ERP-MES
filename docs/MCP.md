@@ -304,9 +304,17 @@ token does not make these judgments; a person does:
   good pieces only, or leave the work open for that person."` and writes nothing: `clock_out`,
   `report_operation_production` (with or without `open_ncr`), `prepare_task` / `execute_task` for a
   `report_production` task, `shop_floor_complete_operation`, `work_orders_complete_operation`,
-  `work_orders_complete_work_order`, `work_orders_update_operation` and `update_work_order`. The same
-  call with no new scrap — a good-only report, a zero-scrap clock-out, a full-count close,
-  re-sending the recorded scrap value — works as before.
+  `work_orders_complete_work_order`, `work_orders_update_operation` and `update_work_order`. Any
+  positive scrap counts, however small — there is no rounding tolerance, so a `5e-10` is refused
+  like a `5`. The same call with no new scrap — a good-only report, a zero-scrap clock-out, a
+  full-count close, re-sending the recorded scrap value exactly as read — works as before.
+  **Known residual (open, raised with the owner):** a call that adds no scrap can still change the
+  *reason* on scrap a person already recorded — `clock_out` with a `scrap_reason` /
+  `scrap_reason_code_id` and zero scrap (onto the caller's own time entry), `update_work_order`
+  with only a `scrap_reason`, and `work_orders_complete_work_order` re-sending the recorded header
+  scrap with a new reason. `work_orders_update_operation` already refuses a token's reason edit.
+  Closing these would change zero-scrap behavior, which this rule keeps unchanged, so they wait on
+  an owner decision; see [API.md → Short count at completion](API.md).
 - **Nor close work short** (the same decision: a token keeps only the full-count close) —
   `shop_floor_complete_operation` / `work_orders_complete_operation` on a short close whose scrap is
   already on record, and `work_orders_complete_work_order` below the order, answer **403**
