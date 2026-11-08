@@ -460,10 +460,15 @@ a parity test holds it to the Python):
   crew station are people — a crew badge's scoped token is not an API token — so nothing here changes
   for them.
 - **Scrap found after a close.** A completed operation refuses a clock-out carrying pieces (clock
-  out with 0) and tells the operator to see a supervisor, who corrects the completed operation's
-  counts from the work order: scrap can be added there only into pieces still unaccounted, so good
-  pieces later found bad are corrected by lowering the good count (Correct count, reopening the
-  operation) and closing it again with the scrap.
+  out with 0) and tells the operator to tell a supervisor about the extra pieces. What the
+  supervisor can do depends on the case: scrap can be added to a completed operation only into
+  pieces still unaccounted, so on a live work order, good pieces later found bad are corrected by
+  lowering the good count (Correct count, reopening the operation — an operation nobody clocked in
+  to included) and closing it again with the scrap; on a complete / closed / cancelled work order
+  nothing at the operation can be corrected, and the bad pieces are recorded as a nonconformance
+  (NCR) instead. Scrap from extra runs nobody recorded before the close has no door once the
+  operation is complete — an open owner question (see `docs/API.md` → "Correcting a completed
+  operation").
 - **The desktop pages follow the same rules.** The desk Time Clock's **Clock Out** starts Quantity
   Produced at **0** — the pieces finished this session, like KEEP OPEN here — never at the remaining
   quantity, which was a full count that completed the operation (or a 400 above the good ceiling).

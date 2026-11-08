@@ -671,7 +671,7 @@ bot permission — the token is exactly as powerful as the user it belongs to, a
 > - **This PR's extension of that decision** (the owner was asked about scrap and short closes, not
 >   these): writing or changing a scrap reason or code; good above the floor's record; operation and
 >   work-order header count edits; every correction through either reduce-production verb; lowering an
->   order once work is recorded — **403**. See Work Orders → "Short count at completion" → "API tokens
+>   order, or a laser nest's planned runs, once work is recorded — **403**. See Work Orders → "Short count at completion" → "API tokens
 >   may not declare scrap or make count judgments".
 > - **Left open by the owner (2026-11-07).** **Resume Work Order** (`POST /work-orders/{id}/resume`):
 >   a token whose user holds Admin / Manager / Supervisor may lift a work-order hold, audited as that
@@ -1434,7 +1434,7 @@ company-scoped.
 | PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below). **409** if it sets `status` to COMPLETE on a not-yet-complete operation — completion goes through the completion endpoints (see "Terminal-state lock"). **409** with the start gate's text if it sets `status` to IN_PROGRESS on an operation of a draft, on-hold or complete / closed / cancelled work order, and **409** "release first" if it sets `status` to READY on a draft — both before any field is written; re-sending the operation's current status is not a transition (see "Draft and on-hold work orders refuse every start"). **On a COMPLETE operation, changing `quantity_complete` or `status`, or lowering `quantity_scrapped`, returns 409** — those are the completion record; correct the good count with `…/reduce-production`, which can reopen the operation (re-sending the stored values, and every other field, is still accepted; scrap found after the close may be **added** with a reason, as required audit evidence, but only into units still unaccounted — a rise past that is 409). On an open operation, raising `quantity_complete` above the good ceiling or the floor's labor record returns 409; an API token may not change the counts or the scrap reason (403 — a `quantity_scrapped` rise or a reason change gets the scrap text, owner decision 2026-11-07). See "Short count at completion" | Admin / Manager / Supervisor |
 | POST | `/work-orders/operations/{id}/start` | Start an operation (**office** verb — operators start work through `PUT /shop-floor/operations/{id}/start` and the kiosk, which stay operator-open). Refused before any write, in the shop-floor twin's order: **400** already complete / already in progress (it never re-opens or re-stamps one), **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **409** operation on hold (starting does not lift a hold), **400** predecessors | Admin / Manager / Supervisor / Quality |
 | POST | `/work-orders/operations/{id}/complete` | Record an operation's good and scrap **totals** from the office. It **closes only when good + scrap cover every unit that reached the operation**; otherwise it saves progress and stays open (a submit that changes nothing is a **200** "No change" that writes nothing). 409 if the parent WO is terminal; **409 for a READY operation on a draft or on-hold WO** — completing it would start it. Query params `quantity_scrapped` (a total that never lowers), `scrap_reason` / `scrap_reason_code_id`, `quantity_override_reason`, `acknowledge_open_entries` — see "Short count at completion" below. **403** for an API token raising the scrap total (owner decision 2026-11-07: only a person declares scrap). **Office** verb — the shop-floor twin is the operator path | Admin / Manager / Supervisor / Quality |
-| POST | `/work-orders/operations/{id}/reduce-production` | Supervisor/office over-count correction — walk back good-count across **any** operator's **unapproved** labor on the operation; **a COMPLETE operation is correctable here** (unlike the operator's twin), a terminal WO is not; no clock-in required. A correction that would leave a COMPLETE operation short is **409** unless the body sends `reopen_operation: true`, which returns it to in progress (see note below). A standing API token is **403** on every correction | Admin / Manager / Supervisor |
+| POST | `/work-orders/operations/{id}/reduce-production` | Supervisor/office over-count correction — walk back good-count across **any** operator's **unapproved** labor on the operation (an operation nobody ever clocked in to has its desk-entered good lowered directly, up to that count); **a COMPLETE operation is correctable here** (unlike the operator's twin), a terminal WO is not; no clock-in required. A correction that would leave a COMPLETE operation short is **409** unless the body sends `reopen_operation: true`, which returns it to in progress (see note below). A standing API token is **403** on every correction | Admin / Manager / Supervisor |
 | GET | `/work-orders/{id}/material-allocations` | List the work order's material ties (`include_inactive`, default `true`) | Yes |
 | POST | `/work-orders/{id}/material-allocations` | Tie a material part to the work order or one of its operations (**201**) | Admin / Manager / Supervisor |
 | PATCH | `/work-orders/{id}/material-allocations/{allocation_id}` | Edit an **open** tie's quantities, lot pin, or notes | Admin / Manager / Supervisor |
@@ -2065,16 +2065,36 @@ company-scoped.
 >   corrected; neither can make the operation short, and a COMPLETE operation has no other door for it
 >   (the clock-out refuses pieces there). Both are written as **required** audit evidence
 >   (`extra_data.transition = "completed_operation_scrap_correction"`, **503** with nothing saved when
->   it cannot be). A rise past the unaccounted remainder is refused **409** before any write: good +
->   scrap would exceed what reached the operation, and the whole-work-order consumption reconcile
->   would deplete tied material for runs that never happened (consumption never auto-reverses).
->   Pieces counted good and later found bad go through reduce-production with `reopen_operation`,
->   then a re-close with the scrap. Re-sending the stored values (compared numerically) and editing any other field are
->   still accepted. On an **open** operation it refuses **409** raising `quantity_complete` above the
+>   it cannot be). A rise past the unaccounted remainder is refused **409** before any write: it would
+>   count a piece the close already counted good as scrap too, and the whole-work-order consumption
+>   reconcile would deplete its tied material a second time (consumption never auto-reverses). The
+>   409's remedy depends on the work order. On a **live** one, pieces counted good and later found bad
+>   go through reduce-production with `reopen_operation`, then a re-close with the scrap — an operation
+>   nobody ever clocked in to included (see the next bullet). On a **COMPLETE / CLOSED / CANCELLED**
+>   work order reduce-production refuses every correction, so the 409 says so and names the record
+>   that still exists: a nonconformance (NCR) against the finished work or its lot, not a change to
+>   the operation. Re-sending the stored values (compared numerically) and editing any other field are
+>   still accepted.
+>
+>   This bounds the **after-close** door only, and it does not settle the model. While an operation is
+>   open, scrap past what reached it is still accepted on every door — clock-out, `/production`, this
+>   `PUT` and the office close (only the floor close bounds the scrap it declares at the close) — as
+>   replacement runs that consumed material (see `docs/KIOSK.md` → the COMPLETE overlay), so a reopen
+>   followed by a re-close can still record good + scrap above what reached the operation. Whether
+>   open-operation scrap should be bounded the same way, and where scrap from extra runs nobody
+>   recorded before the close goes once the operation is complete (the clock-out refuses pieces
+>   there and this `PUT` bounds them), are **open owner questions**; nothing here decides them. On an **open** operation it refuses **409** raising `quantity_complete` above the
 >   `ceiling`, or above the floor's labor record when anyone ever clocked in (that assertion goes
 >   through the office Complete's `quantity_override_reason`).
 > - **`POST /work-orders/operations/{id}/reduce-production`** (the office twin, body
->   `ProductionReductionRequest`) gains `reopen_operation` (default `false`). When lowering a
+>   `ProductionReductionRequest`) also corrects an operation **nobody ever clocked in to** (no
+>   `TimeEntry` at all, open, closed or approved — the office's labor-less close): there is no
+>   evidence to walk, so it lowers the good count the office entered directly, up to that count
+>   (**400** `Only {n} good piece(s) are recorded on Op N, which nobody clocked in to; the correction
+>   cannot exceed them.` above it), with every rule below unchanged; the audit row carries
+>   `extra_data.no_labor_recorded = true`, both facts are re-checked under the row locks (**409**
+>   `This operation was modified concurrently. Refresh and retry.`), and an operation with any labor
+>   keeps the evidence bound byte-for-byte. It gains `reopen_operation` (default `false`). When lowering a
 >   COMPLETE operation's count would leave it short, the correction is refused **409** before any
 >   write unless `reopen_operation: true` is sent. Then the operation returns to **IN_PROGRESS**
 >   (`actual_end`, `completed_by` and `quantity_short_declared` cleared, `current_operation_id`
@@ -2174,8 +2194,12 @@ company-scoped.
 >   `POST /shop-floor/operations/{id}/reduce-production` — a reopen erases a person's close and
 >   walks other operators' labor down, a plain lowering is the count edit the operation PUT refuses,
 >   and a re-stamp that would set a declared short gets the short-close text instead
->   (`production_reduction_service.api_token_reduction_refusal`); and lowering `quantity_ordered`
->   once any operation has recorded good, scrap or labor.
+>   (`production_reduction_service.api_token_reduction_refusal`); lowering `quantity_ordered`
+>   once any operation has recorded good, scrap or labor; and lowering a laser nest's `planned_runs`
+>   through `PATCH /laser-nests/{id}` once that nest's operation has recorded good, scrap, a start or
+>   any labor (`operation_action_gates.operation_has_recorded_work`) — its runs are the operation's
+>   target and the laser work order's order is derived from them, so the next read could otherwise
+>   complete the nest and the job at what was recorded.
 >
 > A crew-station badge token is a person and passes all three (it cannot reach `/work-orders` or
 > `/hank` at all). An interactive JWT — including one an MCP client carries — is the person's own
@@ -2212,10 +2236,10 @@ company-scoped.
 > | Clock-out, `/production`, Hank `report_production` task, both close verbs, force-complete, `PUT /work-orders/operations/{id}`, `PUT /work-orders/{id}` — an API token raising recorded scrap | 403 | `Scrap must be reported by a person (at the kiosk, with a crew badge, or signed in at a desk), not an API token: a scrap count is quality evidence someone has to have seen. Record good pieces only, or leave the work open for that person.` |
 > | Clock-out, force-complete, `PUT /work-orders/operations/{id}`, `PUT /work-orders/{id}` — an API token writing or changing a scrap reason or code | 403 | the same scrap text |
 > | Both close verbs, force-complete, office reduce-production (a re-stamp that would set a declared short) | 403 | `Closing work short must be done by a person signed in to the app, not an API token.` |
-> | Office verb, force-complete, `PUT /work-orders/operations/{id}`, `PUT /work-orders/{id}`, both reduce-production verbs | 403 | `Recording more good than the floor counted, editing an operation's counts, or lowering the order after work was recorded must be done by a person signed in to the app, not an API token.` |
+> | Office verb, force-complete, `PUT /work-orders/operations/{id}`, `PUT /work-orders/{id}`, both reduce-production verbs, `PATCH /laser-nests/{id}` (lowering `planned_runs` on a worked nest) | 403 | `Recording more good than the floor counted, editing an operation's counts, or lowering the order after work was recorded must be done by a person signed in to the app, not an API token.` |
 > | Floor close verb | 409 | `quantity_complete ({q}) exceeds the {good} good recorded on Op N; record the pieces through clock-out or Report production, or report the shortfall as scrap with a reason.` |
 > | Floor close verb | 409 | `Op N has only {u} unaccounted; declaring {d} scrap would over-state it. Refresh and re-enter; extra scrap belongs on clock-out or Report production.` |
-> | Clock-out | 409 | `Op N is already complete; clock out with 0 pieces and tell a supervisor about any extra pieces (a supervisor corrects a completed operation's counts from the work order).` |
+> | Clock-out | 409 | `Op N is already complete; clock out with 0 pieces and tell a supervisor about any extra pieces.` |
 > | Clock-out | 400 | `Quantity must be a valid number` (NaN / infinity, for everyone) |
 > | Office verb, clock-out, `/production` | 400 | `Quantity ({q}) exceeds the {ceiling} units that can reach Op N — {n} were closed short upstream.` (clock-out and `/production` keep their old text when nothing upstream was declared short) |
 > | Office verb | 422 | `quantity_override_reason is required to record more good than the {recorded} counted on the floor for Op N` |
@@ -2225,7 +2249,8 @@ company-scoped.
 > | Force-complete | 400 | `quantity_complete ({Q}) exceeds the {p} that can still be delivered; {n} were reported scrapped short` |
 > | Force-complete | 409 | `cannot complete work order: {short} of {ordered} unaccounted for ({Q} complete, {covered} scrapped); report the short as scrap with a reason, or leave the work order open` |
 > | `PUT /work-orders/operations/{id}` | 409 | `Op N is complete; its counts are the completion record. Correct the good count with reduce-production (it can reopen the operation).` |
-> | `PUT /work-orders/operations/{id}` (COMPLETE operation, scrap rise) | 409 | `Op N is complete with {good} good and {scrap} scrapped of the {received} that reached it, so only {u} more can be recorded as scrap. Pieces counted good and later found bad: lower the good count with reduce-production (reopen the operation), then complete it again with the scrap and a reason.` |
+> | `PUT /work-orders/operations/{id}` (COMPLETE operation, scrap rise) | 409 | `Op N is complete with {good} good and {scrap} scrapped of the {received} that reached it, so only {u} more can be recorded as scrap.` then, on a live work order, `Pieces counted good and later found bad: lower the good count with reduce-production (reopen the operation), then complete it again with the scrap and a reason.` — or, on a finished one, `This work order is {status}, so its recorded production can no longer be corrected: record pieces later found bad as a nonconformance (NCR) against the finished work or its lot, not on the operation.` |
+> | Office reduce (an operation nobody clocked in to) | 400 | `Only {n} good piece(s) are recorded on Op N, which nobody clocked in to; the correction cannot exceed them.` |
 > | `PATCH /laser-nests/{id}` (raising `planned_runs`) | 409 | `Nest N is already complete at {runs} runs; raising its planned runs would leave a completed operation short. Add a nest for the extra runs.` / `This laser work order is {status}; Nest N's planned runs can no longer be raised. Open a new work order for the extra runs.` |
 > | `PUT /work-orders/operations/{id}` (open operation) | 409 | `quantity_complete ({q}) exceeds the {ceiling} units that can reach Op N — {n} were closed short upstream.` / `quantity_complete ({q}) is more than the {recorded} counted on the floor for Op N. Record the pieces through clock-out or Report production, or record them from the office Complete with quantity_override_reason, which keeps the reason on the record.` |
 > | Office reduce | 409 | `Lowering Op N by {d} would leave it {n} short, and a completed operation cannot be short. Resubmit with reopen_operation to reopen it (it returns to in progress).` |
@@ -2237,10 +2262,11 @@ company-scoped.
 >
 > **Not changed:** the scanner's `complete_blockers` stay state-only (so `legal_actions` may list
 > `complete` for an operation whose close would be refused short); the material consumption formula
-> (it now reads honest counts); laser nest `PATCH` **lowering** `planned_runs` (below completed runs is
-> still allowed — RAISING it on a COMPLETE nest, or on a COMPLETE / CLOSED / CANCELLED laser work
-> order, is now refused **409** before any write, because the nest's planned runs are its operation's
-> target and a completed operation is never short); and the floor-requires-labor / office-exempt
+> (it now reads honest counts); laser nest `PATCH` **lowering** `planned_runs` by a person (below
+> completed runs is still allowed — RAISING it on a COMPLETE nest, or on a COMPLETE / CLOSED /
+> CANCELLED laser work order, is now refused **409** before any write, because the nest's planned runs
+> are its operation's target and a completed operation is never short; a standing API token lowering
+> it on a worked nest is **403**, above); and the floor-requires-labor / office-exempt
 > asymmetry. **Before deploying**, see
 > [`DEPLOYMENT_RUNBOOK.md` → Wave 2 rollout](DEPLOYMENT_RUNBOOK.md#wave-2-rollout) (migration `117`).
 >
@@ -2635,6 +2661,13 @@ company-scoped.
 >   immutability boundary, G5-A): to correct signed-off labor, unapprove it first via
 >   `POST /shop-floor/time-entries/{id}/unapprove` (the audited segregation-of-duties front door),
 >   then reduce.
+> - **An operation nobody ever clocked in to** (no `TimeEntry` at all — the office's labor-less
+>   close, which the owner kept) has no evidence to walk: its good count is the office's own entry
+>   and the read-path reconcile has nothing to re-raise it from, so the bound is that count and the
+>   correction lowers it directly (`reduced_time_entries` is empty; the audit row carries
+>   `extra_data.no_labor_recorded = true`). Without it, pieces later found bad on such an operation
+>   had no door once it completed. Any entry — open, closed, zero pieces or approved — keeps the
+>   evidence bound above.
 > - **`notes` goes on the audit row only** — deliberately **not** written onto another operator's
 >   labor record (the shop-floor verb appends it to the caller's own active entry).
 > - **`source`**: `import` is rejected **422** (loader-reserved), same as the shop-floor verb; no
@@ -3890,7 +3923,7 @@ mixed**:
 | POST | `/work-orders/laser-nest-packages/standalone/import` | Import a package into a **fresh standalone laser WO** — creates a released, part-less `laser_cutting` work order with the release recorded as the importer's (`released_by` / `released_at`) (no parent; quantity = total planned sheet runs; optional `due_date`, optional `sheet_match_provenance`) | Admin / Manager / Supervisor |
 | POST | `/laser-nests/extract` | Auto-extract nest fields (CNC #, material, size) from a single uploaded nest PDF. Stateless — no DB write, no audit | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/laser-nests/manual` | Manually add **one** nest to a work order (child laser WO of an assembly, or the addressed `laser_cutting` WO directly). Creates a clock-in-able `LASER` operation; sets the laser WO RELEASED the same way the import does (release recorded when it was a draft or unstamped; an **on-hold** laser WO stays on hold, so the new nest cannot be started until the hold is lifted) | Admin / Manager / Supervisor |
-| PATCH | `/laser-nests/{id}` | Edit a manual nest (all fields optional). Raising `planned_runs` on a COMPLETE nest or a finished laser work order is **409** | Admin / Manager / Supervisor |
+| PATCH | `/laser-nests/{id}` | Edit a manual nest (all fields optional). Raising `planned_runs` on a COMPLETE nest or a finished laser work order is **409**; a standing API token lowering it once work is recorded on the nest is **403** | Admin / Manager / Supervisor |
 | POST | `/laser-nests/{id}/attach-document` | Attach an already-uploaded PDF Document to the nest (PDF-only) | Admin / Manager / Supervisor |
 | DELETE | `/laser-nests/{id}/document` | Detach the PDF (clears the FK; the Document row is left intact) | Admin / Manager / Supervisor |
 | GET | `/laser-nests/{id}/document` | Serve the attached PDF **inline** for operator preview | Yes (any authenticated user) |
@@ -4481,8 +4514,14 @@ environment variable or deployment configuration change is needed.
 > planned runs would leave a completed operation short. Add a nest for the extra runs.`) or the laser
 > work order is COMPLETE / CLOSED / CANCELLED (`This laser work order is {status}; Nest N's planned
 > runs can no longer be raised. Open a new work order for the extra runs.`) — owner ruling 1: a
-> completed operation is never short. Every other field stays editable at any status, and re-sending
-> the current value is no change. `material` / `thickness` / `sheet_size` are
+> completed operation is never short. A standing API token **lowering** it is refused **403**
+> (`Recording more good than the floor counted, editing an operation's counts, or lowering the order
+> after work was recorded must be done by a person …`) before any write once the nest's operation
+> has recorded good, scrap, a start or any labor — lowering a worked nest's runs decides the missing
+> runs were never started, and the next read can complete the nest and the laser job at what was
+> recorded. That is this PR's extension of the owner's 2026-11-07 decision, not part of it; a
+> person, and a token lowering an untouched nest, are unchanged. Every other field stays editable at
+> any status, and re-sending the current value is no change. `material` / `thickness` / `sheet_size` are
 > **canonicalized on write** — see below.
 
 > **Sheet descriptors are canonicalized on every write (`services/laser_nest_text.py`).**
