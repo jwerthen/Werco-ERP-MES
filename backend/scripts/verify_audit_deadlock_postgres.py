@@ -19,7 +19,15 @@ that B's write landed, and that a retry succeeds on the same pool with its audit
 1. ``PUT /work-orders/{id}/priority`` and ``PUT /work-orders/{id}`` (UPDATEs, audited with
    ``log_update``).
 2. ``PUT /scheduling/work-centers/{id}/calendar`` (an INSERT, audited with ``log_create``).
-   In 1 and 2 the request must fail at the audit write itself, because ``AuditService.log``
+2b. ``POST /work-orders/`` (an INSERT whose creation audit commits in the same transaction as
+   the work order). The request holds a key-share lock on the part its new work order references
+   (the foreign-key check) while it waits on the chain lock, and B wants that part row. This pins
+   that the create is now ONE transaction, so the victim saves no work order and a retry is not a
+   duplicate. It does not reproduce the old defect: the route used to commit the work order first
+   (releasing that key-share lock) and audit it in a later transaction, so no cycle formed here
+   and the request answered 201. The old 409-for-a-saved-work-order shape is pinned on SQLite by
+   ``test_create_work_order_victim_answers_409_and_saves_no_work_order``.
+   In 1, 2 and 2b the request must fail at the audit write itself, because ``AuditService.log``
    re-raises the 40P01; the COMMIT guard must not have had to act.
 3. The COMMIT guard on its own: the same priority request with ``AuditService.log`` wrapped in
    a swallowing ``try/except`` (the shape of a legacy best-effort caller). Here only the guard in
@@ -87,6 +95,7 @@ def _verify(scratch_name: str) -> None:
     from app.db.mixins import STALE_WRITE_CONFLICT_DETAIL
     from app.main import app
     from app.models.company import Company
+    from app.models.part import Part
     from app.models.user import User, UserRole
     from app.models.work_center import WorkCenter
     from app.models.work_order import WorkOrder
@@ -150,6 +159,20 @@ def _verify(scratch_name: str) -> None:
             db.add(wc)
             db.commit()
             return wc.id
+
+    def new_part() -> int:
+        with SessionLocal() as db:
+            part = Part(
+                company_id=company_id,
+                part_number=f"DL-PART-{tag}-{next(counter)}",
+                name="Deadlock verify",
+                part_type="manufactured",
+                unit_of_measure="each",
+                is_active=True,
+            )
+            db.add(part)
+            db.commit()
+            return part.id
 
     def scalar(sql: str, **params):
         with engine.connect() as conn:
@@ -306,6 +329,32 @@ def _verify(scratch_name: str) -> None:
         assert scalar(calendars, i=wc_id) == 1, f"{label}: the retry's calendar row is missing"
         assert audit_rows("working_calendar") == 1, f"{label}: the retry has no audit row"
         print(f"{label}: victim answered 409, nothing saved; retry 200 with its audit row")
+
+        # -- 2b. POST /work-orders/ -------------------------------------------------------------
+        label = "2b work order create"
+        part_id = new_part()
+        # The request's INSERT takes FOR KEY SHARE on the part (the foreign-key check), which only
+        # FOR UPDATE conflicts with -- a plain UPDATE of a non-key column would not wait on it.
+        b = writer_b(
+            "WITH locked AS (SELECT id FROM parts WHERE id = :i FOR UPDATE) "
+            "UPDATE parts SET description = 'B' FROM locked WHERE parts.id = locked.id",
+            {"i": part_id},
+        )
+        body = {"part_id": part_id, "quantity_ordered": 3}
+        response = client.post("/api/v1/work-orders/", json=body, headers=headers)
+        finish_b(b, label)
+        expect_lost_race(label, response, at_commit=False)
+        created = "SELECT count(*) FROM work_orders WHERE part_id = :p"
+        assert scalar(created, p=part_id) == 0, f"{label}: the victim's work order was saved"
+        creates = "SELECT count(*) FROM audit_logs WHERE resource_type = 'work_order' AND action = 'CREATE'"
+        assert scalar(creates) == 0, f"{label}: a creation audit row exists for a rolled-back work order"
+        assert scalar("SELECT description FROM parts WHERE id = :i", i=part_id) == "B", f"{label}: B's write missing"
+        retry = client.post("/api/v1/work-orders/", json=body, headers=headers)
+        assert retry.status_code == 201, f"{label}: retry failed: {retry.status_code} {retry.text}"
+        assert scalar(created, p=part_id) == 1, f"{label}: the retry's work order is missing"
+        new_id = retry.json()["id"]
+        assert audit_rows("work_order", new_id) == 1, f"{label}: the retry has no creation audit row"
+        print(f"{label}: victim answered 409, no work order saved; retry 201 with its audit row")
 
         # -- 3. The COMMIT guard alone, behind a caller that swallows the audit error ----------
         label = "3 guard via HTTP"

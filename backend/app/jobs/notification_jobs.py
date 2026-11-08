@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 
 from app.core.queue import enqueue_job
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, reset_session_after_failure
 from app.models.company import Company
 from app.models.operational_event import OperationalEvent
 from app.services import notification_links as links
@@ -257,6 +257,8 @@ async def check_calibrations_task():
                 total_1day += len(calibrations_1day)
             except Exception as e:
                 logger.error(f"Calibration digest failed for company {cid}: {e}")
+                # Reset the shared session, or every later tenant inherits this one's failed transaction.
+                reset_session_after_failure(db, f"the calibration digest for company {cid}")
 
         logger.info(f"Checked calibrations: {total_7day} due in 7 days, {total_1day} due tomorrow")
         return {"calibrations_7day": total_7day, "calibrations_1day": total_1day}
@@ -325,6 +327,8 @@ async def check_late_work_orders_task():
                 total_late += len(late_wos)
             except Exception as e:
                 logger.error(f"Late work order digest failed for company {cid}: {e}")
+                # Reset the shared session, or every later tenant inherits this one's failed transaction.
+                reset_session_after_failure(db, f"the late work order digest for company {cid}")
 
         logger.info(f"Checked late work orders: {total_late} late")
         return {"late_work_orders": total_late}
@@ -383,6 +387,8 @@ async def check_low_stock_task():
                 total_low_stock += len(low_stock)
             except Exception as e:
                 logger.error(f"Low stock digest failed for company {cid}: {e}")
+                # Reset the shared session, or every later tenant inherits this one's failed transaction.
+                reset_session_after_failure(db, f"the low stock digest for company {cid}")
 
         logger.info(f"Low stock check: {total_low_stock} items")
         return {"low_stock_items": total_low_stock}
@@ -445,6 +451,8 @@ async def check_quote_expiring_task():
                 total_expiring += len(expiring_quotes)
             except Exception as e:
                 logger.error(f"Quote expiry digest failed for company {cid}: {e}")
+                # Reset the shared session, or every later tenant inherits this one's failed transaction.
+                reset_session_after_failure(db, f"the quote expiry digest for company {cid}")
 
         logger.info(f"Quote expiry check: {total_expiring} expiring soon")
         return {"expiring_quotes": total_expiring}

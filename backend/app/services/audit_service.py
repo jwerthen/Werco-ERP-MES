@@ -371,18 +371,22 @@ class AuditService:
     def acquire_chain_lock(self) -> None:
         """Take the global audit-chain lock now, as the caller's own statement, ahead of its audit rows.
 
-        ``log()`` takes this lock inside an ``except`` that swallows every error -- right for an
-        audit failure, wrong for a lost lock race: when Postgres rolls the caller back as a deadlock
-        victim (40P01) while it waits there, the error is eaten, the transaction stays aborted, and
-        the caller's next statement fails as something unrelated. A caller that holds row locks and
-        must answer a lost race as such (``app.db.locks.is_lost_lock_race``) takes the lock here
-        first, after its row locks (invariant 4) and before its first audit row; the error then
-        reaches it unchanged. The later ``log()`` calls stack on the lock -- a transaction-level
-        advisory lock is re-entrant -- and it is released when the transaction ends.
+        For lock ordering. ``log()`` takes this lock at the caller's first audit row, wherever that
+        row falls in the transaction; a caller whose lock order needs the chain at a fixed point --
+        after its row locks (invariant 4), before the writes that come between them and its first
+        audit row -- takes it here instead. The nest-package import does, once it holds the
+        operations it replaces: a writer holding the chain and waiting on one of those rows then
+        meets the import at this statement, before the wipe and rebuild, rather than at whichever
+        audit row the import happens to write first. A lost race here
+        (``app.db.locks.is_lost_lock_race``) reaches the caller unchanged, exactly as it would from
+        ``log()``, which re-raises every database error no savepoint contained (until 2026-11-08
+        ``log()`` swallowed it, which is why this method was first added). The later ``log()``
+        calls stack on the lock -- a transaction-level advisory lock is re-entrant -- and it is
+        released when the transaction ends.
 
         Exactly the lock ``log()`` would take: none while the hash chain is paused
         (``AUDIT_HASH_CHAIN_ENABLED`` false, the lock-free allocator), and a no-op off PostgreSQL.
-        Writes nothing. Not swallowed -- deliberately.
+        Writes nothing, and never swallows an error.
         """
         if settings.AUDIT_HASH_CHAIN_ENABLED:
             self._acquire_chain_lock()
@@ -528,18 +532,32 @@ class AuditService:
              best-effort contract (log + return ``None``) with the session left
              un-poisoned.
 
-        Best-effort, with one exception. A sequence collision the savepoint
-        retries past (or exhausts), the paused-mode ``nextval`` / resync failures
-        their own savepoints contain, and any failure that never reaches the
-        database are logged and return ``None``, and the caller's write proceeds.
-        Every other database error (``DBAPIError``) is RE-RAISED. On PostgreSQL an
-        error outside a savepoint has already aborted the caller's transaction, so
-        the caller's write cannot be saved whatever happens next, and swallowing
-        it would only hide that; the chain lock's deadlock victim (40P01) is the
-        case that matters. Any other failure of the audit INSERT itself (e.g. a
-        value too long) already left the session unusable before this was
-        re-raised, so the caller failed then too. See the ``except DBAPIError``
-        below and ``app.db.database``'s COMMIT guard.
+        Best-effort, with one exception. These failures are logged, return
+        ``None``, write no audit row, and leave the caller's transaction usable,
+        so the caller's write proceeds:
+
+        * a ``sequence_number`` collision the savepoint retries past (or exhausts);
+        * the paused-mode ``nextval`` / resync failures their own savepoints contain;
+        * a Python-side failure in the audit's own work, before or inside the
+          INSERT savepoint -- e.g. ``compute_audit_hash`` raising, or a value in
+          ``old_values`` / ``new_values`` / ``extra_data`` that the JSON columns'
+          ``json.dumps`` cannot bind (a Decimal, a date). Inside the savepoint it
+          is rolled back to the savepoint, which restores the caller's transaction.
+
+        Every database error (``DBAPIError``) that no savepoint here contained is
+        RE-RAISED. On PostgreSQL such an error has already aborted the caller's
+        transaction, so the caller's write cannot be saved whatever happens next,
+        and swallowing it would only hide that; the chain lock's deadlock victim
+        (40P01) is the case that matters. Any other database failure of the audit
+        INSERT itself (e.g. a value too long) is re-raised the same way. See the
+        ``except DBAPIError`` below and ``app.db.database``'s COMMIT guard.
+
+        Not the audit's failure: ``begin_nested()`` first flushes the CALLER's
+        pending rows. A ``DBAPIError`` there is re-raised (above); a Python-side
+        failure there (the caller's own unbindable value) is logged and returns
+        ``None``, but that flush ran in the caller's transaction, not a savepoint,
+        so the caller's next statement or commit raises ``PendingRollbackError``
+        -- exactly as the caller's own flush would have.
         """
         try:
             # Credential marker (API-token requests only) -- folded in here so
@@ -654,6 +672,24 @@ class AuditService:
                         # every remaining retry collides too and the row is lost.
                         self._resync_paused_sequence()
                     continue
+                except DBAPIError:
+                    # Any other database error: unchanged, re-raised by the outer
+                    # ``except DBAPIError`` below. Listed only so the next clause
+                    # cannot catch it.
+                    raise
+                except Exception:
+                    # A Python-side failure while the INSERT was being prepared --
+                    # typically binding a value the JSON columns' ``json.dumps``
+                    # cannot serialize (a Decimal or date in ``new_values``; the
+                    # integrity hash serializes with ``default=str`` and never
+                    # notices). Nothing reached the database, but the failed flush
+                    # deactivated this savepoint, and left so it would take the
+                    # caller's whole transaction with it (its commit raises
+                    # PendingRollbackError). Roll back ONLY the savepoint, which
+                    # restores the caller's transaction and discards the audit row,
+                    # then fall through to the best-effort ``except Exception``.
+                    nested.rollback()
+                    raise
 
             # Exhausted retries without inserting; fall through to best-effort.
             logger.error(
@@ -672,8 +708,9 @@ class AuditService:
             # a lost lock race becomes the app-wide 409 (``app.db.locks.is_lost_lock_race``) and
             # anything else becomes a 500. Either way the caller rolls back and nothing is reported
             # saved. Errors a savepoint does contain stay best-effort: the sequence collisions
-            # retried above, and the paused-mode ``nextval`` / resync. So do Python-side failures
-            # that never reach the database.
+            # retried above, and the paused-mode ``nextval`` / resync. So do the audit's own
+            # Python-side failures (the ``except Exception`` below), including one inside the
+            # INSERT savepoint, which is rolled back first.
             logger.error(f"Failed to create audit log; the database error aborts the transaction: {e}")
             raise
         except Exception as e:
@@ -689,8 +726,15 @@ class AuditService:
         it neither commits nor rolls back the caller's outer transaction itself.
 
         A database error that ``log()`` re-raises (it aborted the transaction) is
-        reported as ``AuditWriteError`` too, chained to that error. Every
-        ``log_required`` caller already turns this error into a rollback and a 503.
+        reported as ``AuditWriteError`` too, chained to that error. On an HTTP
+        request the answer is a 503 and the transaction is rolled back: a caller
+        that translates the error itself (``app.api.audit_guard.required_audit``
+        or its own ``except AuditWriteError``) rolls back and answers its own 503
+        text, and one that lets it escape gets ``app.main``'s app-wide handler,
+        which answers 503 "Unable to save audit record (reference: <id>)" after
+        ``get_db``'s teardown has rolled the session back. The exception is a caller that
+        absorbs it on purpose: the user CSV import records it as that row's error
+        and carries on. A non-HTTP caller (a job, a script) must roll back itself.
         """
         try:
             entry = self.log(action=action, resource_type=resource_type, **kwargs)

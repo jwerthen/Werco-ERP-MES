@@ -86,15 +86,20 @@ a system-wide serialization point on every audited request. The flag makes that 
 
 Because the lock is held to commit, an audited request can be a **deadlock victim**. It waits for the
 chain lock while the writer holding it waits for a row this request locked, and Postgres aborts one of
-them (SQLSTATE `40P01`). The victim saves nothing, neither its business write nor its audit row.
-`AuditService.log` is otherwise best-effort for legacy callers, but it **re-raises** a database error
-that no savepoint contained, because Postgres has already aborted the caller's transaction. The API
-answers **409** (`docs/API.md` → Conflict (409)), or **503** on a required-audit path. An
-engine-level COMMIT guard (`app/db/database.py`) also refuses to commit any transaction Postgres
-already aborted. Before 2026-11-08 the error was swallowed, and such a request could answer **200**
-for a write that was never saved and had no audit row. `scripts/verify_audit_deadlock_postgres.py`
-reproduces the cycle on real Postgres in `e2e.yml`. Paused, the chain lock is not taken, so this
-cycle cannot form.
+them (SQLSTATE `40P01`). The victim's transaction is rolled back, its business write and its audit
+row with it. Unless the route commits in stages (it may then have saved an earlier stage;
+`docs/API.md` → Conflict (409) names one), the victim saves nothing. `AuditService.log` is otherwise
+best-effort for legacy callers, but it **re-raises** a database error that no savepoint contained,
+because Postgres has already aborted the caller's transaction. The API answers **409**
+(`docs/API.md` → Conflict (409)), and the app-wide handler reports the race to Sentry, grouped by
+route and SQLSTATE, since it usually points at a lock-order defect. When the victim is a
+`log_required` write, the API answers **503** instead: the route's own text, or the app-wide
+`Unable to save audit record (reference: <correlation id>)` when the route does not translate the
+error (`docs/API.md` → Required audit record unavailable (503)). An engine-level COMMIT guard (`app/db/database.py`) also refuses
+to commit any transaction Postgres already aborted. Before 2026-11-08 the error was swallowed, and
+such a request could answer **200** for a write that was never saved and had no audit row.
+`scripts/verify_audit_deadlock_postgres.py` reproduces the cycle on real Postgres in `e2e.yml`.
+Paused, the chain lock is not taken, so this cycle cannot form.
 
 ### What changes when paused
 

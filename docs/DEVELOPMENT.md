@@ -666,7 +666,12 @@ After bootstrap, normal incremental `alembic upgrade head` is the standard path.
 >
 > No `postgresql` branch executes on SQLite. These statements run on real Postgres only in the
 > `scripts/verify_*_postgres.py` steps of the **non-blocking** `e2e.yml`, which also exercise the
-> trigger rule. That rule is still not a blocking gate. The steps run in this order:
+> trigger rule. That rule is still not a blocking gate. The steps run directly after `Install backend
+> dependencies`, ahead of Node, `npm ci` and the Playwright browser install, because they need only
+> the backend and the Postgres service. They used to run after `npx playwright install`, so when that
+> install broke on the runner image in November 2026 every run died first and silently skipped all
+> of them. `tests/test_ci_workflow_gates.py` (`TestE2EPostgresVerifiersRunFirst`) pins the order.
+> The steps run in this order:
 >
 > - **`verify_operations_postgres` and `verify_fabrication_quoting_postgres`** are per-migration.
 >   - They load selected migration modules and re-run `095`–`098`, `106` and `107` over their own
@@ -696,9 +701,11 @@ After bootstrap, normal incremental `alembic upgrade head` is the standard path.
 >   guards' **skip** branch.
 > - **`verify_audit_deadlock_postgres`** runs after it, also before the seed, in its own scratch
 >   database. It runs no migration. It builds a deadlock on the global audit-chain lock and checks
->   that the victim request answers the app-wide 409, saves nothing, and succeeds on retry. It covers
->   both `AuditService.log`'s re-raise and the COMMIT guard in `app/db/database.py`, neither of which
->   SQLite can reproduce. It refuses to run when `AUDIT_HASH_CHAIN_ENABLED` is off.
+>   that the victim request answers the app-wide 409, saves nothing, and succeeds on retry, on
+>   UPDATE routes, an INSERT route and `POST /work-orders/` (whose creation audit must roll back
+>   with the work order). It covers both `AuditService.log`'s re-raise and the COMMIT guard in
+>   `app/db/database.py`, neither of which SQLite can reproduce. It refuses to run when
+>   `AUDIT_HASH_CHAIN_ENABLED` is off.
 >
 > *2026-11-02:* `089`–`098`, `106` and `107` shipped unguarded, so this path failed at `089`
 > (`python -m scripts.reset_dev_db` included) until guards were retrofitted to those twelve

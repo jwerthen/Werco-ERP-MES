@@ -16,6 +16,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from app.api.audit_guard import REQUIRED_AUDIT_UNAVAILABLE_DETAIL, REQUIRED_AUDIT_UNAVAILABLE_STATUS
 from app.api.router import api_router
 from app.core.cache import cache, init_cache
 from app.core.config import settings
@@ -36,6 +37,7 @@ from app.middleware.logging_middleware import (
 # Import for side effects: attaches the transactional-outbox SQLAlchemy Session listeners
 # so operational events committed on the request path tee into the notification pipeline.
 from app.services import notification_outbox  # noqa: F401
+from app.services.audit_service import AuditWriteError
 
 # Configure structured logging with correlation IDs
 configure_logging()
@@ -885,15 +887,85 @@ async def stale_data_exception_handler(request: Request, exc: StaleDataError):
 # SQLSTATE that aborted the transaction (``app/db/database.py``). Every other database error is
 # re-raised untouched and takes the path it took before this handler existed: the global handler
 # above answers 500 with a correlation id.
+#
+# Every lost race is also reported to Sentry. Before this handler existed an uncaught 40P01 reached
+# the global handler, which reports it; a deadlock usually means two paths take the same locks in
+# different orders, which is a defect to fix, so a 409 must not make it invisible. The event is
+# grouped by route TEMPLATE and SQLSTATE (``_report_lost_lock_race``), so one lock-order bug is one
+# issue however many requests hit it. Reporting is best-effort: it can never change the 409.
 @app.exception_handler(DBAPIError)
 async def lost_lock_race_exception_handler(request: Request, exc: DBAPIError):
     if not db_locks.is_lost_lock_race(exc):
         raise exc
+    pgcode = getattr(exc.orig, "pgcode", None)
+    _report_lost_lock_race(request, exc, pgcode)
     logger.warning(
-        f"Lost lock race (SQLSTATE {getattr(exc.orig, 'pgcode', None)}) on {request.method} {request.url.path}; "
-        "the transaction was rolled back and nothing was saved"
+        f"Lost lock race (SQLSTATE {pgcode}) on {request.method} {request.url.path}; "
+        "the transaction that lost was rolled back"
     )
     response = JSONResponse(status_code=409, content={"detail": STALE_WRITE_CONFLICT_DETAIL})
+    return add_cors_headers(response, request.headers.get("origin"))
+
+
+def _report_lost_lock_race(request: Request, exc: DBAPIError, pgcode: Any) -> None:
+    """Send a lost lock race to Sentry, grouped by route template + SQLSTATE. Never raises.
+
+    The route TEMPLATE (``/api/v1/work-orders/{work_order_id}/priority``), not the concrete path,
+    goes into the fingerprint, so every request on one route that loses the same race is one
+    issue. The concrete path, method and the request's correlation id (when the middleware set
+    one) ride along as context to find the request in the logs.
+    """
+    try:
+        route = getattr(request.scope.get("route"), "path", None) or request.url.path
+        capture_exception_to_sentry(
+            exc,
+            context={
+                "lost_lock_race": True,
+                "pgcode": str(pgcode),
+                "method": request.method,
+                "route": route,
+                "path": request.url.path,
+                "correlation_id": getattr(request.state, "correlation_id", None),
+            },
+            fingerprint=["lost-lock-race", request.method, route, str(pgcode)],
+        )
+    except Exception:  # reporting must never change the answer
+        logger.debug("Could not report a lost lock race to Sentry", exc_info=True)
+
+
+# Required-audit handler. ``AuditService.log_required`` raises ``AuditWriteError`` when the evidence a
+# caller opted in to could not be written -- including a database error ``AuditService.log`` re-raised
+# (a lost lock race at the audit write among them). The mutation must not land without that row, and
+# the contract (CLAUDE.md invariant 2, ``log_required``'s docstring) is a 503. Most callers translate
+# it themselves (``app.api.audit_guard.required_audit`` or a hand-rolled ``except AuditWriteError``)
+# into an ``HTTPException`` with their own text, which never reaches this handler, so their answer
+# is unchanged. This is the net for every caller that lets it escape, which used to answer a generic
+# 500. Nothing commits: FastAPI exits the route's yield dependencies BEFORE it calls an exception
+# handler (``fastapi.routing.request_response`` closes both dependency exit stacks inside
+# ``wrap_app_handling_exceptions``), so ``get_db`` has already rolled the session back and closed it,
+# and this handler touches no session. Reported like the 500 it replaces, so audit loss stays visible,
+# and the body keeps the 500's quotable reference: the SPA shows ``detail`` verbatim, and the same id
+# is on the ``X-Correlation-ID`` header, the log line and the Sentry event.
+@app.exception_handler(AuditWriteError)
+async def required_audit_unavailable_handler(request: Request, exc: AuditWriteError):
+    correlation_id = _request_correlation_id(request)
+    capture_exception_to_sentry(exc, context={"correlation_id": correlation_id})
+    logger.error(
+        f"Required audit record could not be saved [correlation_id={correlation_id}] on {request.method} "
+        f"{request.url.path}; its transaction was rolled back and the request answered "
+        f"{REQUIRED_AUDIT_UNAVAILABLE_STATUS}: {exc}",
+        exc_info=True,
+    )
+    response = JSONResponse(
+        status_code=REQUIRED_AUDIT_UNAVAILABLE_STATUS,
+        content={
+            "detail": f"{REQUIRED_AUDIT_UNAVAILABLE_DETAIL} (reference: {correlation_id})",
+            "correlation_id": correlation_id,
+        },
+        # CorrelationIdMiddleware sets this same id on the way out (this handler runs inside it);
+        # set here too so body and header agree even on a request that never passed through it.
+        headers={CorrelationIdMiddleware.HEADER_NAME: correlation_id},
+    )
     return add_cors_headers(response, request.headers.get("origin"))
 
 

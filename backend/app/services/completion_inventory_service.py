@@ -3253,10 +3253,16 @@ def _record_backflush_component_failed(
     exactly the one that never fires. ``material.backflush_failed`` carries it.
 
     Safe on the post-``nested.rollback()`` outer transaction: ``AuditService.log`` opens
-    its OWN savepoint around the INSERT and swallows every failure (returns ``None``), so
-    it can neither propagate nor re-poison the session, and the emit is ``best_effort``.
-    Still wrapped defensively -- a reconcile-on-read GET must never 500 because the
-    failure record failed.
+    its OWN savepoint around the INSERT and swallows a sequence collision or a Python-side
+    failure of its own (logged, returns ``None``, session still usable), and the emit is
+    ``best_effort``. ``log`` does NOT swallow a database error that aborted the
+    transaction -- a lost chain-lock race (40P01) is the one that matters -- it re-raises
+    it. The defensive ``except`` around the call is what keeps that error from escaping
+    the audit call, so a failed record alone never breaks the caller. It cannot rescue
+    the transaction: on PostgreSQL that error has already aborted it, so every later
+    statement on the session fails (25P02) -- the best-effort event emit below just
+    returns ``None`` -- and ``app.db.database``'s COMMIT guard refuses any commit that
+    follows.
     """
     extra = {
         "work_order_id": work_order.id,

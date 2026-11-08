@@ -27,6 +27,10 @@ from sqlalchemy.orm import Session
 from app.services.audit_service import AuditWriteError
 
 REQUIRED_AUDIT_UNAVAILABLE_STATUS = 503
+# The text the most required-audit routes already answer with (auth registration, documents,
+# job costing, user provisioning, NCR/CAR, FAI). ``app.main`` answers it for every route that
+# lets ``AuditWriteError`` escape instead of translating it here.
+REQUIRED_AUDIT_UNAVAILABLE_DETAIL = "Unable to save audit record"
 
 
 @contextmanager

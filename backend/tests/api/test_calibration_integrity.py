@@ -258,6 +258,8 @@ class TestRecordCalibration:
         )
 
         assert response.status_code == 503
+        # The route's own text: app.main's app-wide AuditWriteError handler must not replace it.
+        assert response.json()["detail"] == "Unable to save audit record. No changes were committed."
         db_session.expire_all()
         assert record_count(db_session, gauge) == 0
         assert audit_count(db_session) == before

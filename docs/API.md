@@ -3987,7 +3987,7 @@ mixed**:
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | POST | `/work-orders/{id}/laser-nest-packages/preview` | Preview nests detected from a zipped package, a bare nest-report PDF (single- or multi-page), or a server folder (writes nothing). PDF uploads run AI extraction per sheet; every row carries an advisory `sheet_suggestion` | Admin / Manager / Supervisor |
-| POST | `/work-orders/{id}/laser-nest-packages/import` | Import a package — creates/rebuilds the child laser WO (or rebuilds the addressed WO directly when it is itself `laser_cutting`), one nest operation per CNC file (or per confirmed PDF row). Sets the laser WO RELEASED and records the release as the caller's when it was a draft or unstamped; an **on-hold** laser WO stays on hold (see "Package import replaces everything"). `child_work_order.status` can therefore come back `on_hold`. Optional `sheet_match_provenance`. **403** (`Re-importing a nest package replaces nests that already have recorded work …`) for a standing API token when any nest operation the import would replace has recorded good, scrap, a start or any labor, or the laser work order's header already carries good or scrap — before anything is unpacked or written (this PR's extension of the 2026-11-07 decision; see Work Orders → "Short count at completion"); a person's re-import is unchanged. **409** (`This record was modified by someone else. Refresh and try again.`, the app-wide optimistic-lock text) on a concurrent edit to the job (the laser work order saved by someone else mid-import), when another writer keeps the laser work order locked through the import's three tries, or when the import loses a lock race with another writer and Postgres rolls it back (deadlock `40P01`, serialization failure `40001`): nothing of the import commits, so refresh and retry. The import row-locks the operations it replaces before the work order, the same order the floor's completion and clock-out verbs lock in, and never waits for the work order while it holds them; in exchange, hold, shop-floor start, resume and a clock-in by an operator with no skill-matrix entry, which take the audit-chain lock first, can now meet the import at that lock, where Postgres rolls one side back (the import answers this 409, the floor verb a 500 with nothing committed; see "Package import replaces everything") | Admin / Manager / Supervisor |
+| POST | `/work-orders/{id}/laser-nest-packages/import` | Import a package — creates/rebuilds the child laser WO (or rebuilds the addressed WO directly when it is itself `laser_cutting`), one nest operation per CNC file (or per confirmed PDF row). Sets the laser WO RELEASED and records the release as the caller's when it was a draft or unstamped; an **on-hold** laser WO stays on hold (see "Package import replaces everything"). `child_work_order.status` can therefore come back `on_hold`. Optional `sheet_match_provenance`. **403** (`Re-importing a nest package replaces nests that already have recorded work …`) for a standing API token when any nest operation the import would replace has recorded good, scrap, a start or any labor, or the laser work order's header already carries good or scrap — before anything is unpacked or written (this PR's extension of the 2026-11-07 decision; see Work Orders → "Short count at completion"); a person's re-import is unchanged. **409** (`This record was modified by someone else. Refresh and try again.`, the app-wide optimistic-lock text) on a concurrent edit to the job (the laser work order saved by someone else mid-import), when another writer keeps the laser work order locked through the import's three tries, or when the import loses a lock race with another writer and Postgres rolls it back (deadlock `40P01`, serialization failure `40001`): nothing of the import commits, so refresh and retry. The import row-locks the operations it replaces before the work order, the same order the floor's completion and clock-out verbs lock in, and never waits for the work order while it holds them; in exchange, hold, shop-floor start, resume and a clock-in by an operator with no skill-matrix entry, which take the audit-chain lock first, can now meet the import at that lock, where Postgres rolls one side back (the side it rolls back commits nothing and answers the app-wide 409, or a floor verb's 503 if its loss lands inside a required audit write; see "Package import replaces everything") | Admin / Manager / Supervisor |
 | POST | `/work-orders/laser-nest-packages/standalone/preview` | Same preview with **no work order in the path** — used before a standalone import (same `sheet_suggestion` on every row) | Admin / Manager / Supervisor |
 | POST | `/work-orders/laser-nest-packages/standalone/import` | Import a package into a **fresh standalone laser WO** — creates a released, part-less `laser_cutting` work order with the release recorded as the importer's (`released_by` / `released_at`) (no parent; quantity = total planned sheet runs; optional `due_date`, optional `sheet_match_provenance`) | Admin / Manager / Supervisor |
 | POST | `/laser-nests/extract` | Auto-extract nest fields (CNC #, material, size) from a single uploaded nest PDF. Stateless — no DB write, no audit | Admin / Manager / Supervisor |
@@ -4054,8 +4054,10 @@ environment variable or deployment configuration change is needed.
 > replace leaves it to its first audit row — inside the rebuild from the first material-tied nest on,
 > otherwise after it. (On that last shape the import still holds the laser work order's row lock, so
 > a floor verb that takes the audit-chain lock first and then waits on that work order can meet the
-> import at its first audit row; the import's loss there answers the 400, not the 409, with nothing
-> committed. It needs a laser job with no nest operation that the floor is writing at that moment.)
+> import at its first audit row. The import's loss there answers the same **409**, with nothing
+> committed: `AuditService.log` re-raises the lost race rather than swallowing it, which until
+> 2026-11-08 turned this case into the 400. It needs a laser job with no nest operation that the
+> floor is writing at that moment.)
 > This order removes a deadlock that predates it: the import used to take the audit-chain
 > lock before the operations, so a nest completion, Report production or clock-out landing mid-import
 > could deadlock it. Such a writer now queues behind the import, and the import judges the operations
@@ -4068,8 +4070,9 @@ environment variable or deployment configuration change is needed.
 > The trade: a verb that writes its audit row before its row writes (hold, shop-floor start, resume, a
 > clock-in by an operator with no skill-matrix entry) takes the audit-chain lock first, and can now
 > meet the import there — under the old order the two simply queued, because the import took that
-> lock first too. Postgres rolls one side back: the import answers the 409; the floor verb answers a
-> 500 with nothing of it committed, so it can be retried.
+> lock first too. Postgres rolls one side back, and that side commits nothing: the import answers the
+> 409; the floor verb answers the same app-wide 409 (its 503 instead if the loss lands inside one of
+> its required audit writes), so it can be retried after a refresh.
 >
 > **The import records the release it performs, and keeps a hold.** Moving the laser WO into
 > RELEASED stamps `released_by` (the caller) and `released_at` when the WO was DRAFT or carried no
@@ -12114,15 +12117,46 @@ Any endpoint can return this body. It has two causes:
   waiting for the global audit-chain lock while the writer that holds it waits for a row this request
   locked (see [Why the flag exists](AUDIT_LOG_RETENTION_RUNBOOK.md#why-the-flag-exists)).
 
-In both cases nothing the request wrote was saved, its audit row included, so it is safe to retry
-after a refresh. A route that catches database errors itself keeps its own answer. A write whose
-audit row is required (`log_required` and the other required-audit paths) answers **503** instead,
-and saves nothing either.
+In both cases the transaction that hit the conflict was rolled back, its audit rows included. A
+route that writes in one transaction therefore saved nothing. A route that commits in stages may
+already have saved an earlier stage. `POST /document-deliveries/{id}/send` is one: it commits the
+delivery claim and hands the email to SMTP before the transaction that records the SMTP outcome, so
+a 409 from that last step can arrive for an email that was sent. That delivery stays `sending`, and
+the route refuses to send it again. So refresh before retrying, and retry only a write the refresh
+shows is absent. A route that catches database errors itself keeps its own answer.
+
+When the race is lost inside a required audit write (`AuditService.log_required`, including the
+caller's pending rows it flushes first), the request answers **503** instead and saves nothing from
+that transaction (see [Required audit record unavailable (503)](#required-audit-record-unavailable-503)).
+A lost race anywhere else in the same request is this 409.
+
+A lost lock race that reaches the app-wide handler is also reported to Sentry (when `SENTRY_DSN` is
+set), grouped by route template and SQLSTATE (`app/main.py`), because a deadlock usually means two
+paths take the same locks in different orders. Reporting never changes the 409. A version conflict
+(`StaleDataError`) is not reported.
 
 Until 2026-11-08 a lost lock race answered **500**. When the audit write was the victim, the error
 was swallowed and the request could answer **200** for a write that was never saved and had no
 audit row. An engine-level COMMIT guard (`app/db/database.py`) now refuses to commit a transaction
 PostgreSQL already aborted. When the abort was not a lost lock race, the request answers **500**.
+
+### Required audit record unavailable (503)
+```json
+{
+  "detail": "Unable to save audit record (reference: 3f9a1c2e)",
+  "correlation_id": "3f9a1c2e"
+}
+```
+
+A write whose audit row is required (`AuditService.log_required`) is rolled back when that row
+cannot be saved, a lost lock race inside the audit write included. Many such routes answer **503**
+with their own text: often just `"Unable to save audit record"`, and some add what was not changed
+(`"... No changes were committed."`). Any route that lets the failure escape gets this app-wide
+body, also **503** (`app/main.py`), reported to Sentry like the **500** those routes answered until
+2026-11-08. Like that 500, it carries the request's correlation id in `detail`, in
+`correlation_id` and in the `X-Correlation-ID` header, so the reference the user quotes finds the
+log line and the Sentry event. An import that reports failures per row, such as the user CSV
+import, records it as that row's error and carries on.
 
 ### Internal Server Error (500)
 ```json
@@ -12504,10 +12538,11 @@ declared with a `max_length` and a value over it is a **422** before the export 
 
 Each bound matches the column the filter compares against, so no request that could match a row is
 refused. (Auditing is best-effort in the usual repo-wide sense: `AuditService.log` swallows a failure
-that a savepoint contains or that never reaches the database, so such a chain-write failure lets the
-export stream unrecorded rather than failing the request. A database error that aborted the
-transaction is re-raised instead, and the request fails with no file streamed; see
-[Conflict (409)](#conflict-409).)
+that its savepoints contain (a `sequence_number` collision that outlasts the retries) and a
+Python-side failure in its own work, such as a value its JSON columns cannot serialize, which it rolls
+back to the audit INSERT's savepoint. Either lets the export stream unrecorded rather than failing
+the request. A database error that aborted the transaction is re-raised instead, and the request
+fails with no file streamed; see [Conflict (409)](#conflict-409).)
 
 `GET /consumables/checkouts/export.csv` also requires Admin/Manager. It records
 the `consumable_checkout` export with a required audit in its own transaction;
@@ -12687,13 +12722,13 @@ log. `unconfigured` means every enqueue will fail and no background job or cron 
 | 401 | Unauthorized |
 | 403 | Forbidden (also returned to a caller below `ADMIN` / `MANAGER` on any bulk-export endpoint — see [Access: bulk export is `ADMIN` / `MANAGER`](#access-bulk-export-is-admin--manager-and-every-export-is-audited)) |
 | 404 | Not Found |
-| 409 | Conflict — concurrent modification of an operation / work order / time entry on a completion or clock endpoint (the row was updated by another writer between read and commit; refresh and retry). Any endpoint also answers 409 when PostgreSQL rolled its transaction back to settle a lock conflict (deadlock or serialization failure); nothing was saved, so it is safe to retry. See [Conflict (409)](#conflict-409) |
+| 409 | Conflict — concurrent modification of an operation / work order / time entry on a completion or clock endpoint (the row was updated by another writer between read and commit; refresh and retry). Any endpoint also answers 409 when PostgreSQL rolled its transaction back to settle a lock conflict (deadlock or serialization failure). That transaction saved nothing, but a route that commits in stages may have saved an earlier stage, so refresh before retrying. See [Conflict (409)](#conflict-409) |
 | 413 | Content Too Large — a JSON body over `MAX_JSON_BODY_BYTES` (default 256 KB, rejected by middleware before the route runs), or a file upload over its endpoint's own cap (e.g. 50 MB `LASER_UPLOAD_MAX_BYTES`). See [Request Size Limits](#request-size-limits) |
 | 422 | Validation Error — including a paging or window parameter outside its range (`limit`, `skip`/`offset`, `days`, `max_levels`), and a free-text `/exports/*` filter over its `max_length` (`warehouse` 50, `customer` 255, `transaction_type` 40); see [Bounds on paging and window parameters](#bounds-on-paging-and-window-parameters) |
 | 429 | Too Many Requests |
 | 500 | Internal Server Error — the body (`correlation_id`, and inside `detail`) and the `X-Correlation-ID` header carry a reference to quote; see [Internal Server Error (500)](#internal-server-error-500) |
 | 502 | Bad Gateway — upstream AI-service failure on an AI endpoint (e.g. `/copilot/chat?stream=false`) |
-| 503 | Service Unavailable — an AI endpoint was called but the AI features are not configured (`ANTHROPIC_API_KEY` unset) |
+| 503 | Service Unavailable — an AI endpoint was called but the AI features are not configured (`ANTHROPIC_API_KEY` unset), or a required audit record could not be saved and the write was rolled back (see [Required audit record unavailable (503)](#required-audit-record-unavailable-503)) |
 
 ## MCP door (`/mcp`)
 

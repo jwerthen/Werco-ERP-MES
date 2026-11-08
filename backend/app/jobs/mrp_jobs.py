@@ -1,7 +1,7 @@
 import logging
 from typing import List, Optional
 
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, reset_session_after_failure
 from app.models.company import Company
 from app.services import notification_links as links
 from app.services.mrp_auto_service import MRPAutoMode, MRPAutoService
@@ -49,7 +49,8 @@ async def run_mrp_task(
                 logger.error(f"MRP job failed for company {cid}: {e}")
                 # Reset the shared session, or every later tenant inherits its failed
                 # transaction (a refused COMMIT leaves it "prepared"; a DB error, aborted).
-                db.rollback()
+                # Never raises, so a failed rollback cannot end the run either.
+                reset_session_after_failure(db, f"the MRP job for company {cid}")
                 # Continue with the remaining tenants; one tenant's failure must
                 # not abort planning for the others.
 

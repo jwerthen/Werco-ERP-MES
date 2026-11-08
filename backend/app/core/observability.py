@@ -131,12 +131,21 @@ def set_sentry_tags(**tags: Any) -> None:
         logger.debug("Failed to set Sentry tags", exc_info=True)
 
 
-def capture_exception_to_sentry(exc: BaseException, *, context: Optional[Mapping[str, Any]] = None) -> None:
+def capture_exception_to_sentry(
+    exc: BaseException,
+    *,
+    context: Optional[Mapping[str, Any]] = None,
+    fingerprint: Optional[Sequence[str]] = None,
+) -> None:
     """Report ``exc`` to Sentry with ``context`` attached. No-op without a DSN; never raises.
 
     Scalar context values (str/int/bool) become tags, so events can be filtered by them;
     every value is also attached as an extra, so list-valued context (a batch of ids) is
     still on the event without becoming a high-cardinality tag.
+
+    ``fingerprint`` overrides Sentry's stack-based grouping: events with the same
+    fingerprint are one issue. Pass it when the stack is not what identifies the problem
+    (a lost lock race groups by route and SQLSTATE, wherever in the request it surfaced).
     """
     sentry_sdk = _sentry_sdk_if_configured()
     if sentry_sdk is None:
@@ -147,8 +156,11 @@ def capture_exception_to_sentry(exc: BaseException, *, context: Optional[Mapping
         for key, value in context.items()
         if value is not None and isinstance(value, (str, int, bool))
     }
+    scope_kwargs: dict = {"tags": tags, "extras": context}
+    if fingerprint is not None:
+        scope_kwargs["fingerprint"] = [str(part) for part in fingerprint]
     try:
-        sentry_sdk.capture_exception(exc, tags=tags, extras=context)
+        sentry_sdk.capture_exception(exc, **scope_kwargs)
     except Exception:  # pragma: no cover - reporting must never be fatal
         logger.debug("Failed to report an exception to Sentry", exc_info=True)
 

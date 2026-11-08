@@ -105,14 +105,19 @@ The single `Playwright E2E` job boots the full stack inside the runner and runs 
 browser suite (`frontend/e2e/*.spec.ts`) against it:
 
 1. `postgres:15-alpine` service container
-2. `python -m scripts.seed_data` — creates the schema and seeds the default company,
+2. the `scripts/verify_*_postgres.py` verifiers (migrations, fresh bootstrap, the audit-deadlock
+   victim), run right after the backend install and **before** Node, `npm ci` and the Playwright
+   browser install, so a broken frontend or browser toolchain cannot skip them (order pinned by
+   `backend/tests/test_ci_workflow_gates.py`; see
+   [DEVELOPMENT.md](./DEVELOPMENT.md) → Database Migrations for what each covers)
+3. `python -m scripts.seed_data` — creates the schema and seeds the default company,
    users, work centers, parts, and work orders the specs expect
-3. uvicorn with `ENVIRONMENT=test` and `RATE_LIMIT_ENABLED=false` (load-bearing:
+4. uvicorn with `ENVIRONMENT=test` and `RATE_LIMIT_ENABLED=false` (load-bearing:
    `/api/v1/auth/login` is rate-limited to 5/min and nearly every spec logs in through
    the UI from one IP — with limits on, the suite 429s immediately)
-4. Vite dev server (`playwright.config.ts` leaves `webServer` undefined when `CI` is set;
+5. Vite dev server (`playwright.config.ts` leaves `webServer` undefined when `CI` is set;
    the workflow boots the app itself)
-5. `npx playwright test`
+6. `npx playwright test`
 
 **Credentials are not secrets.** The `E2E_*` env vars are set inline in the workflow to
 the throwaway dev-seed users (`admin@werco.com`/`admin123`, `jsmith@werco.com` and
